@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
-import { clearFinishedRuns, getHistoryPolicy, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
+import { clearFinishedRuns, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { runSummaryLine, slimRun } from "@/lib/coding-agent-slim";
+import { listCodingStarts } from "@/lib/coding-run-starts";
+import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +14,21 @@ export const dynamic = "force-dynamic";
  *                            or `wait` elapses (capped), so a caller can
  *                            block instead of polling every few seconds.
  *
+ * Every run carries `summaryLine` — the first sentence of its result, at
+ * most 160 characters — beside the record, for the chat's settled card.
+ *
+ * Beside `runs`, `starting`: the starts on their way (a run from its
+ * request until its record is written) and the runs and teams the box
+ * refused to start, for a while — src/lib/coding-start-phase.ts.
+ *
+ * GET ?slim=1              → the list with every SETTLED run's free text
+ *                            emptied (progress, result text, allow
+ *                            rules, denials) and `slim: true` on it — what the
+ *                            Coding Agent app's 5 s live poll reads, merged
+ *                            over the full records it holds
+ *                            (src/lib/coding-agent-slim.ts). A live run is
+ *                            always whole.
+ *
  * GET ?history=1[&offset=&limit=&project=]
  *                          → { runs, total, offset }: the OLDER runs a history
  *                            mode keeps past the live thirty (their own files,
@@ -19,8 +36,7 @@ export const dynamic = "force-dynamic";
  *                            optionally one project folder's. `?id=` already
  *                            finds one of them on its own.
  *
- * DELETE                   → forget the finished runs; { cleared: n }. Under
- *                            the archive mode they are archived instead.
+ * DELETE                   → forget the finished runs; { cleared: n }.
  *
  * GET is read-only, and middleware's cookie-or-bearer gate is the whole gate
  * for it. The 404 carries a JSON { error } body on purpose — the MCP
@@ -41,14 +57,14 @@ const MAX_HISTORY_LIMIT = 50;
 const MAX_PROJECT_CHARS = 4096;
 
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Clearing the coding run history needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },
     );
   }
   try {
-    return NextResponse.json({ cleared: clearFinishedRuns(await getHistoryPolicy()) });
+    return NextResponse.json({ cleared: clearFinishedRuns() });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not clear the coding runs" },
@@ -62,10 +78,13 @@ export async function DELETE(request: Request) {
  *  the evidence-folder listing. Opt-in because listing is a readdir + a stat
  *  per file on every run returned, and this route is polled every 5s by two
  *  UIs, only one of which renders artifacts. */
-function withDerived<T extends { id: string } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
+function withDerived<T extends { id: string; summary?: string | null; resultText?: string | null } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
   return {
     ...run,
     transcriptPath: transcriptPath(run),
+    // The result's first sentence, for the chat's settled card: worked out
+    // here so the card never parses the result text (a slim read has none).
+    summaryLine: runSummaryLine(run),
     ...(withArtifacts ? { artifacts: listArtifacts(run.id) } : {}),
   };
 }
@@ -74,6 +93,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const id = url.searchParams.get("id");
   const withArtifacts = url.searchParams.get("artifacts") === "1";
+  const slim = url.searchParams.get("slim") === "1";
 
   try {
     if (id) {
@@ -97,7 +117,13 @@ export async function GET(request: Request) {
     }
     const limitRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT)) : DEFAULT_LIMIT;
-    return NextResponse.json({ runs: listRuns(limit).map((run) => withDerived(run, withArtifacts)) });
+    return NextResponse.json({
+      runs: listRuns(limit).map((run) => withDerived(slim ? slimRun(run) : run, withArtifacts)),
+      // The starts on their way and the ones refused, beside the records and
+      // never among them (src/lib/coding-run-starts.ts): what the cards draw
+      // as "Starting…" — or the reason — before a record exists.
+      starting: listCodingStarts(),
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not read the coding runs" },

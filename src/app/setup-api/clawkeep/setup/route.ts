@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { getClawKeepSetupComplete, setClawKeepSetupComplete } from "@/lib/clawkeep";
 
@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
  * POST { setupComplete: boolean } → { setupComplete }.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Finishing ClawKeep setup needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

@@ -29,7 +29,9 @@ export async function POST(request: Request) {
   // Verifying a password has no first-boot role: CredentialsStep sets the
   // initial password, it never re-proves one. So no bootstrap carve-out — this
   // never answers an anonymous caller.
-  const unauthorized = await requireSession(request);
+  // The owner's account itself: never another ClawBox user's to change or
+  // wipe, whatever else of the desktop they share (src/lib/non-owner-scope.ts).
+  const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) {
     await padResponseTime(startedAt);
     return unauthorized;

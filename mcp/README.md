@@ -50,36 +50,46 @@ To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
 
 ### The server hangs up when it is idle
 
-A harness spawns one of these processes per **session key** and holds it for its
-own lifetime, so nothing reaped them: measured on a v4.0.0 box, three turns on
-three keys left three `bun run mcp/clawbox-mcp.ts` processes alive — still all
-there after 90 s of silence — and a ten-prompt run left nine of them resident at
-63–70 MB each, cleared only by restarting the gateway. So the server ends
-itself. Ten minutes after the last **inbound JSON-RPC message** — a request, or
-a bare notification; anything the harness sends puts the clock back — and only
-if no request is in flight, it writes one line to stderr —
+OpenClaw's gateway spawns one of these processes per **session key** and holds
+it for its own lifetime, so nothing reaped them: measured on a v4.0.0 box, three
+turns on three keys left three `bun run mcp/clawbox-mcp.ts` processes alive —
+still all there after 90 s of silence — and a ten-prompt run left nine of them
+resident at 63–70 MB each, cleared only by restarting the gateway. So the server
+ends itself. Ten minutes after the last **inbound JSON-RPC message** — a
+request, or a bare notification; anything the harness sends puts the clock back
+— and only if no request is in flight, it writes one line to stderr —
 `[clawbox-mcp] idle for 600s with no request in flight; exiting so the harness
-reconnects on the next call` — closes its transport and exits 0. Both harnesses
-treat that as an ordinary disconnect and reconnect on the next call (OpenClaw's
-gateway logs `[bundle-mcp] server "clawbox" closed;
-next request reconnects`); the reconnect costs 0.31–0.35 s to connect plus
-0.02 s to re-list the tools, paid once by whoever comes back after a long pause.
-The rule is edition-neutral — the same process, the same reconnect on Hermes —
-and it is not a timeout on your work: **a request still in flight defers the
-exit for as long as it runs**, so a `bash` command that sleeps for an hour is
-never cut off, and the clock only restarts once its result has gone back. A
-**background job defers it too** — `bash` with `run_in_background` answers at
-once but leaves a detached shell whose handle and output live in this process,
-so the period simply starts again, as often as it takes, until `job_status`
-would call that job finished. (`bash` exists only where
-`CLAWBOX_MCP_CODING_TOOLS=1` registered the coding family; on a device in its
-shipped state there is no job to defer for, and the period always runs out.) And
-so does a **cancelled call whose handler has not stopped**: the host is sent no
-answer and the server lets go of the request id, but the abort the SDK raises is
-never handed to the handler, so the write or the fetch it is in the middle of
-keeps the process here until it settles. Set
-`CLAWBOX_MCP_IDLE_EXIT_MS` to another number of milliseconds to move it, or to
-`0` to switch it off and keep every server for the life of the harness.
+reconnects on the next call` — closes its transport and exits 0. The gateway
+treats that as an ordinary disconnect and reconnects on the next call (it logs
+`[bundle-mcp] server "clawbox" closed; next request reconnects`); the reconnect
+costs 0.31–0.35 s to connect plus 0.02 s to re-list the tools, paid once by
+whoever comes back after a long pause. It is not a timeout on your work: **a
+request still in flight defers the exit for as long as it runs**, so a `bash`
+command that sleeps for an hour is never cut off, and the clock only restarts
+once its result has gone back. A **background job defers it too** — `bash` with
+`run_in_background` answers at once but leaves a detached shell whose handle and
+output live in this process, so the period simply starts again, as often as it
+takes, until `job_status` would call that job finished. (`bash` exists only
+where `CLAWBOX_MCP_CODING_TOOLS=1` registered the coding family; on a device in
+its shipped state there is no job to defer for, and the period always runs out.)
+And so does a **cancelled call whose handler has not stopped**: the host is sent
+no answer and the server lets go of the request id, but the abort the SDK raises
+is never handed to the handler, so the write or the fetch it is in the middle of
+keeps the process here until it settles. Set `CLAWBOX_MCP_IDLE_EXIT_MS` to
+another number of milliseconds to move it, or to `0` to switch it off and keep
+every server for the life of the harness.
+
+**Hermes gets no idle exit** unless that variable names a period (TASK-2189).
+Hermes does not reconnect the way the gateway does: it finds a server that hung
+up only once a call is already on its way, and then refuses to replay it,
+because a write may have landed. So the first tool call after every idle period
+failed — `MCP server 'clawbox' lost its stdio subprocess after the tool call
+began. The operation may have completed, so Hermes did not replay it` in
+`~/.hermes/logs/errors.log` — and the assistant had to check and call again. Nor
+is there anything to reap: Hermes holds one server per Hermes process (the
+dashboard's; a `hermes chat` turn's goes with that turn) and restarts it only on
+`reload.mcp`. The harness is the edition the server resolved at startup, the
+same answer that picks the tool set, and the startup line says `idle exit off`.
 
 ## The one thing to know: the tool set depends on the edition
 
@@ -123,8 +133,13 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding family (`bash`, `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search`) | **no** by default — `CLAWBOX_MCP_CODING_TOOLS=1` registers it | **no** by default — the same variable registers it. Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
-| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
+| Publishing to the ClawBox Store (`app_publish`) | when the owner switched the coding agent on | same |
+| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
+| The coding team's settings (`coding_settings_get`, `coding_settings_set`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
+| Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
+| Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
+| Memory Shard search (`memory_shard_search`) | **no** — the index is OpenClaw's, searched in its own turn | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -149,12 +164,64 @@ says how to hand work to the coding agent and then steer and check it — and
 - **"Why is my run waiting?" / before retrying an Anthropic run**:
   `anthropic_accounts` — how many of the owner's Anthropic accounts can answer,
   which one is in use, and when a limited one is back.
+- **Something on the box fails** — an update, the network, a login, the
+  assistant itself: `docs_search` the symptom first, then `docs_read` the hit
+  and follow `support/troubleshooting` in order (see "Docs" below).
 
 | Tool | What it does |
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
 | `clawbox_context` | The device field guide, the tool notes (what the short tool descriptions leave out, for the tools this server registered — see "Tool descriptions"), the webapp storage/styling rules, and whose screen the browser tools drive (`BROWSER_GUIDE` — the desktop's window while the owner's real-browser setting is on, an invisible one when it is off). The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
+| `docs_search` | Offline full-text search over the official docs **installed with this version** — `docs-site/**/*.mdx` (user guide, support/troubleshooting, recovery, updating, FAQ, technical reference) and `docs/agents/*.md`. `{ query, limit? }` → hits with `title`, `path`, `section`, `snippet`, title and heading matches first; `matches` and `pages` count every matching section and page, `not_shown` how many the limit (or the list cap) left out. |
+| `docs_read` | One page as plain text — frontmatter title, MDX components reduced to their titles and captions — or one `section` of it (heading text or anchor; `path#anchor` works too). `{ path, section? }`, with `path` exactly as `docs_search` returned it. A long page is cut at a line under the cap with a note naming its sections. |
+
+### Docs — the manual on the box (both editions, core profile)
+
+`mcp/tools/docs.ts`. The box that most needs the docs is the one whose update,
+network or gateway just failed, so the two tools read the pages that ship with
+the install rather than docs.clawbox.com: the checkout is a full git clone kept
+by `git fetch` + `git reset --hard` (install.sh, `src/lib/updater.ts`), and
+nothing in `.dockerignore` or the installers leaves `docs-site/` or
+`docs/agents/` out — `src/tests/unit/mcp-docs-tools.test.ts` holds that. The
+roots are resolved from the install folder the server already knows
+(`DEFAULT_CWD`, the same answer `Clawbox.md` is read from).
+
+- **Paths** are relative to the roots and spelled as the published site spells
+  them: `support/troubleshooting`, `guides/memory-shard`, `technical/networking`;
+  the engineering notes are `agents/<name>` (`agents/mcp`). `docs-site/…`,
+  `docs/agents/…` and a trailing `.mdx`/`.md` are accepted and normalised.
+- **The guard.** `..`, an absolute or `~` path, a URL, a backslash, a hidden or
+  `_build` segment → `BLOCKED_PATH`, judged on the typed path before anything is
+  resolved. Then the real path: the nearest folder on the way that exists is
+  resolved first, and if it is a link out of its root the answer is
+  `BLOCKED_PATH` whatever lies below it, existing or not — so a linked folder
+  cannot leak "no such page" about the far side at any depth; a page that is a
+  link out of the root, or a link to nothing, is `BLOCKED_PATH` too. Only
+  `.mdx` under docs-site and `.md` under docs/agents are ever opened — the
+  extension is appended by the tool, never taken from the caller — so `README`,
+  `llms.txt`, `docs.json` and every image are `NOT_FOUND`, and a misspelt page
+  comes back with up to five near paths. Inline code and fenced code are kept
+  as written when MDX is reduced, and a `docs/agents` note is plain Markdown:
+  only comments, `<img>` and `<br>` are touched there.
+- **Ranking** (one heading block is one unit): a term in the section heading 8,
+  in the page title 6, in the summary 2, in the body 1 per occurrence up to 2;
+  the whole phrase in the title 20, heading 12, body 6; coverage up to 4; the
+  block holding every term 2; and an area prior — support pages 4, the rest of
+  docs-site 2, docs/agents 0 — so a symptom finds the page whose steps to follow
+  before the developer note using the same words. At most three hits per page.
+  A light suffix stemmer is applied to both sides, so "update failed" finds
+  "Updates fail" and "updating".
+- **Caps.** `docs_search` answers under `LIST_MAX_CHARS` with whole hits only:
+  when the widest `limit` would not fit, the last hits move into `not_shown`
+  rather than the register cutting the JSON mid-string. `docs_read` answers
+  under `DOCS_READ_MAX_CHARS` (16,000): the note that says what was left out —
+  and which sections to ask for — is sized first and the body gives way to it,
+  cut at a line under 14,000 or lower, so header, body and note fit by
+  construction. The index is built on first use and re-checked against the
+  files' sizes and mtimes every 30 s (at once if the clock went backwards), so
+  an update that replaced the pages under a long-lived server is seen without
+  a restart.
 
 ### Hermes plugins (Hermes only)
 `hermes_plugins_reload`
@@ -367,6 +434,17 @@ with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 `app_uninstall` · `webapp_create` · `webapp_update` · `code_project_init` ·
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
+
+`ui_open_app` takes, for the `coding` app only, one of `run_id`, `team_id` or
+`project_id`: the desktop opens the Coding Agent ON that run's page, that
+team, or that project's page (the ring's `open_app` carries a `target`;
+page.tsx hands the id to the app the way the chat's cards do). "Show me the
+run" is one call. `ui_open_card({ card: "new_app", project_id?, team? })`
+opens the chat's "A new app for your desktop" card for the user to fill in —
+`project_id` is the project's absolute folder, `team: true` switches the card
+to a coding team — and the request arrives as their next message; use it when
+the user wants a new app or a change and has not said the details, instead of
+asking several questions.
 
 An app `webapp_create` or `code_project_build` puts on the desktop without an
 icon gets one drawn by ClawBox AI's image model when the box is linked — after
@@ -630,7 +708,8 @@ at — while the Coding Agent's real-browser setting is on
 `POST /setup-api/coding-agent/enable { realBrowser }` from the settings panel
 and from the Enable/Skip step of the app's first-run wizard), and an invisible
 Chromium of its own when the setting is off or that window cannot be used
-(another program holding CDP port 18800, a launch that failed). A screenshot
+(another program holding the desktop browser's CDP port — 18800 unless the
+owner configured their own browser — a launch that failed). A screenshot
 from the two is identical, so every reply carries
 `browser: "desktop" | "headless"` and the tools relay it in the header line:
 ONCE per session, and again when a fresh session lands on the other browser — a
@@ -645,7 +724,9 @@ owner's screen is a consent, and a tool that could turn it back on would make
 the owner's "no" temporary — the same reason `browser_auto_open` has none.
 
 **Inside a coding-agent run** (the runner spawns this server with
-`CLAWBOX_MCP_PROFILE=browser`, which registers ONLY the browser family): the
+`CLAWBOX_MCP_PROFILE=browser`, which registers ONLY the browser family — or
+`run-read`, the browser family plus every `readOnly: true` tool, when the
+run's project ticked "ClawBox read-only tools"): the
 run's model cannot see images, so every screenshot is archived into the run's
 evidence folder (`data/coding-agent-artifacts/<runId>/`,
 `CLAWBOX_RUN_ARTIFACTS_DIR`) and replaced in the reply by the backend's written
@@ -654,6 +735,16 @@ box's vision model — `src/lib/vision-describe.ts`). `browser_view_local` opens
 an HTML file from the run's working folder (`CLAWBOX_RUN_DIR`): the ONLY
 `file://` the browser route accepts, and only while that run is the active
 one, realpath-checked on both sides.
+
+A run's captures come only from the tab the run itself opened. With no live
+session `browser_view_local` launches straight into a new tab at the file;
+otherwise it navigates the run's own tab. A reply for any page but the
+requested file archives nothing and fails with `CONFLICT`. `browser_screenshot`
+with no tab open is refused (`NOT_FOUND`, open a page first) instead of
+launching a blank one. On the route side, a desktop session's tab is raised
+before every capture, and a tab that was closed answers 410 and drops the
+session. A request carrying `codingRunId` may only use a session launched
+with that same id.
 
 ### Media, inside a coding-agent run only
 `generate_image` · `generate_audio`
@@ -729,18 +820,31 @@ unnoticed is how a device ends up in a posture nobody chose.
 
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
 `coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
-`coding_project_status` · `coding_secret_list`
+`coding_project_status` · `coding_project_import` · `coding_secret_list` ·
+`coding_settings_get` · `coding_settings_set`
 
 | Tool | What it does |
 |---|---|
-| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once. |
+| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. `effort`: this run's level (`low`, `xhigh`, `max`, `ultracode`) in place of the owner's setting. |
 | `coding_agent_status` | One run in full — its summary, deliverable, pull request, deployment, plan — or, with no `run_id`, the recent ids. `wait_seconds` blocks up to two minutes. |
-| `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says whether the run has it now or gets it at its next step. |
-| `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`. Filter by `status` / `project`. |
+| `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says "Delivered" (the run has it, mid-turn after a tool call or as its next turn) or "Queued" and when — the end of the tool call under way, or its next start. |
+| `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
 | `coding_agent_resume` | The Resume button, for a `paused` or `gave_up` run the AGENT started — optionally telling it something first (`message`). |
-| `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. |
-| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs and pipeline default. |
+| `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. A queued run is not stopped: taking it out of the queue is the owner's. |
+| `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
+| `coding_project_import` | Bring an EXISTING project into the owner's project folder, only when the user asks: clone one of their GitHub repositories (`github_repo`, owner/name) or copy a folder on the box (`directory`, under the owner's home; `node_modules` left behind). Nothing is merged or overwritten; the reply ends `project_id: <id>`. The route's refusals come back typed — `exists`, `no_gh`/`not_connected` (connect GitHub in Settings), `refused` (outside the home, a credential store, the checkout), `too_big`/`no_space`. This replaced the app's Import panel on 2026-10-30; the app carries no inputs. |
+| `coding_settings_get` | The owner's coding-TEAM settings in one readable block, each with its valid choices beside it: effort (`effortLevels`), every role's stored provider/model/effort and what it resolves to right now (`roleModelMap`, with NOT READY and why), the review pass, auto PR and merge, the PR body mode, the dynamic team, runs at once and this box's range, history retention, media, the commit identity — and the connected providers with the models a role may be pinned to on each. Call it before `coding_settings_set`. |
+| `coding_settings_set` | Change any subset of those settings — one optional parameter per field; a role's halves as `planner_provider` / `planner_model` / `planner_effort`, `worker_*`, `reviewer_*`, where `auto` or `default` puts a half back to the role's default. Posts only the fields given to `POST /setup-api/coding-agent/settings` and answers what changed plus the final values. The description tells the assistant these are the owner's preferences and to CONFIRM before changing cost-bearing ones (effort, a model, runs at once) unless the user just asked for exactly that. A refused value comes back as BAD_ARGUMENT in the route's own sentence; a field the owner keeps (below) as CONFLICT naming the Settings page. |
+
+`app_publish` sits behind the same switch: it publishes one of the owner's
+projects that carries a `clawbox.json` to the ClawBox Store, through
+`POST /setup-api/apps/publish` and under the box's ClawBox account. The
+route's refusals come back typed — `coming_soon` (publishing is not open for
+that account yet: say so, never retry), `not_linked` / `token_rejected` (sign
+in to ClawBox AI in Settings), `slug_taken`, `package_too_large`,
+`no_manifest`, `store_unavailable` — with the route's own sentence as the
+message.
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
@@ -763,18 +867,35 @@ stable code, and the answer says which asset did not arrive. A file the OWNER
 wants a run to have goes in `data/coding-agent-inputs/shared/`, which every run
 may read with no permission rule at all.
 
-`coding_agent_run` takes an optional `provider` (`clawbox-ai` | `anthropic`)
-and, for `anthropic` only, a `model`. Omitted, they mean the owner's stored
+`coding_agent_run` takes an optional `provider` (`clawbox-ai` | `anthropic` |
+`openai`) and, for `anthropic` (`claude-*`) and `openai` (`gpt-*`), a `model`.
+An `openai` run is the Codex CLI (`codex exec`) rather than Claude Code, on the
+owner's own OpenAI API key or ChatGPT sign-in. Omitted, they mean the owner's stored
 default (Settings → Coding Agent), which this process does not know — so an
 omitted provider is NOT sent, and only a value the caller actually named
 travels. The pair is checked here before the request goes out, by the same
 resolver the route validates with (`src/lib/coding-provider.ts`): naming a
 model for `clawbox-ai` is refused, because the box's plan chooses its own and
 a run that silently answered on a different model is the failure the selector
-exists to prevent. `anthropic` works only where the owner has connected their
-own Anthropic access; `coding_agent_status` and the Coding Agent app say
+exists to prevent. `anthropic` and `openai` work only where the owner has
+connected their own access; `coding_agent_status` and the Coding Agent app say
 whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
+
+`coding_agent_run` and `coding_team_run` take an optional `effort` (2026-10-30):
+one of the levels the app offers — `low`, `xhigh`, `max`, `ultracode`
+(`OFFERED_EFFORT_LEVELS` in `src/lib/coding-effort.ts`, mirrored in the
+parameter's enum) — the per-request override of the owner's effort setting
+(Settings → Coding Agent). Omitted, it is NOT sent and the owner's setting
+stands; named, the route validates it (400 `invalid`, `code: "effort"`, which
+the tool turns into advice on that argument) and `startRun` applies it where
+the owner's effort is read — BEFORE the role caps and the read-only clamp, which
+still win: a planner or reviewer asked for `ultracode` runs at `xhigh`. On a
+team the level is kept on the board and handed to every member run. `ultracode`
+is xhigh plus Claude Code's own fan-out and costs far more tokens, so the
+description tells the assistant to pass it only when the user asked for the
+highest effort on this one — the Create card's Ultracode toggle writes exactly
+that sentence into its message.
 `coding_secret_list` answers the NAMES of the owner's stored secrets
 (`src/lib/project-secrets.ts`), their scope (`box` or a project id), whether
 each is handed to runs and whether this box can still decrypt it. There is no
@@ -784,7 +905,14 @@ everything a run then says is scrubbed of it before it reaches the run record
 (`src/lib/secret-redact.ts`). There is deliberately no tool for the master
 switch either, for the reason `browser_auto_open` has none: handing an
 unattended shell the owner's credentials is a consent, and a tool that could
-turn it back on would make their "no" temporary.
+turn it back on would make their "no" temporary. For the same reason there is
+no tool for "Import from assistant", which copies a key the assistant already
+holds into this store: its route (`/setup-api/coding-agent/secrets/import`)
+refuses the MCP bearer and answers names only, the copy arrives un-ticked, and
+`coding_secret_list` never lists the assistant's own keys. If a run needs one,
+ask the owner to copy it from the Coding Agent's settings. The owner may limit
+a copy to one run or to a last day; once it is spent or past that day,
+`coding_secret_list` reports it with `given_to_runs: false`.
 
 
 The run lives in the web server (`src/lib/coding-agent.ts`,
@@ -813,6 +941,28 @@ a live server. `POST /setup-api/coding-agent/enable` is the second route in
 the API that **refuses the MCP bearer** (`src/lib/owner-session.ts`): the
 agent must not be able to grant itself a delegated shell.
 
+**The coding team's settings** (`coding_settings_get`, `coding_settings_set`,
+2026-10-30) are the one controlled door beside that fence:
+`/setup-api/coding-agent/settings` admits the owner's session OR this
+process's bearer for the AGENT-SETTABLE set alone
+(`src/lib/coding-settings-patch.ts`, its field list in the pure
+`src/lib/coding-settings-shape.ts` so this server names the same fields):
+effort, each role's provider, model and effort (a role may be pinned only to
+a provider the owner CONNECTED), the review pass, auto PR and merge, the PR
+body mode, the dynamic team, runs at once, history retention, media and the
+commit identity — validated whole with the enable route's own validators
+and written through its own setters. EXCLUDED on purpose, refused by name
+(400 `owner_setting`, naming the Settings page, which the tool turns into
+CONFLICT / do-not-retry): `enabled`, `defaultDirectory`, `provider` and
+`providers`, `realBrowser`, `allowRules`, `injectSecrets` and the secret
+store, `setupComplete`, `clearHarnessFault` — the owner's consent surfaces,
+which stay on the fenced enable route (and the permission and secrets
+routes). There is deliberately no tool for any of them, for the reason
+`browser_auto_open` has none: a tool that could turn one back on makes the
+owner's "no" temporary. A signed-in non-owner user is answered 403
+`owner_only`: the settings are about the owner's agent and the owner's
+accounts.
+
 What a run may do is bounded to what the agent already has through its own
 shell tool, not less and not more:
 
@@ -833,7 +983,7 @@ shell tool, not less and not more:
   as a full writer on the tier model (measured: the first ultracode bench
   run typed none of its four agents). The writing stays with the main loop
   on the tier model. Under
-  ultracode (the default effort) the run also gets Claude Code's `Workflow`
+  ultracode (an opt-in effort since TASK-1749; xhigh is the default) the run also gets Claude Code's `Workflow`
   tool, listed AND pre-approved (`--allowedTools Workflow` — listed alone a
   headless run is refused with "Review dynamic workflow before running"),
   plus a brief paragraph on what to fan out; a fixed effort level is no
@@ -842,7 +992,7 @@ shell tool, not less and not more:
   stays with the main loop, whose edits are what the record, the review
   pass and the commit see. A workflow counts as one helper of type
   `workflow` on the run record, billed live from its task_progress totals
-  so the owner's token ceiling holds during a fan-out; the Agent tool's
+  so the record's spend is current during a fan-out; the Agent tool's
   helpers are background tasks too on the installed CLI (2.1.259), kept
   "active" until their task_notification rather than their launch receipt,
   and a refused launch is taken back out of the counts;
@@ -867,8 +1017,8 @@ shell tool, not less and not more:
   stored default project folder is used — the same fallback the run route
   documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
-  400 turns by default (10–2000), an optional token ceiling the device itself
-  enforces, an explicit environment (no session secret, no service tokens),
+  200 turns by default (10–2000), no token ceiling (the device-side one went
+  in SCA A2), an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it;
 - **`completed` means the DELIVERABLE exists** wherever a run HAS one, rather
@@ -881,13 +1031,13 @@ shell tool, not less and not more:
   where one was possible, so the implication steps aside when the box recorded
   that its own pull-request flow could not run (no repository to branch, or
   `pr.phase === "failed"`), since nudging the harness for a pull request the
-  DEVICE cannot open would spend every attempt on the one thing the harness
-  cannot fix. When the check fails
-  the device resumes the run IN ITS OWN SESSION with a nudge naming what is
-  missing, up to `coding_agent_completion_attempts` (default 3, the run's own
-  first turn counted as one), and then settles it as `gave_up` — a status of
-  its own, because the session is intact and Resume is what helps, where
-  `failed` means the harness could not finish at all. `coding_agent_status`
+  DEVICE cannot open would hold the run to the one thing the harness cannot
+  fix. When the check fails the device settles the run as `gave_up` — a
+  status of its own, because the session is intact and Resume is what helps,
+  where `failed` means the harness could not finish at all. The box never
+  spends a second go unasked (the automatic completion-attempt loop went in
+  SCA A2): the owner's Resume carries on IN THE RUN'S OWN SESSION with a
+  nudge naming what is missing. `coding_agent_status`
   reports the bar, the verdict and the attempts, and says plainly not to start
   a fresh run for a `gave_up` one. There is deliberately no `command`
   deliverable on this tool surface: that kind has the box RUN something, which
@@ -906,8 +1056,8 @@ status. What each row field means:
   reason>`, `merged into <base>`, `files removed; the work is kept on branch …`,
   or `removed with its branch — the run left nothing on it`. Bringing a branch
   home (`POST …/merge`) is the OWNER's button and refuses this bearer.
-- `attempts` — goes at the deliverable, the run's own first turn counted, out of
-  `coding_agent_completion_attempts`; `deliverable.met` is the device's verdict
+- `attempts` — goes at the deliverable, the run's own first turn counted, the
+  owner's Resumes after it; `deliverable.met` is the device's verdict
   and `missing` its reason — never a `command` deliverable's output, for the
   reason `coding_agent_status` withholds it.
 - `paused_because` — `paused on purpose`, or which allowance is used up and when
@@ -944,6 +1094,17 @@ gesture, and stopping already covers ending a run.
 
 `coding_team_run` · `coding_team_status` · `coding_team_stop`
 
+A team the assistant starts shows up in the user's chat as a CARD — live, then
+settled — and so does every `coding_agent_run`; the two start tools say so in
+their prose ("the chat shows this as a card … do not describe progress yourself
+and do not poll") and are the only two tools whose result carries MCP
+`structuredContent` (`{ kind: "coding_run" | "coding_team", id, projectId,
+directory, title, status: "running" | "queued", queuePosition? }`), so a chat
+client can draw its own card without parsing the sentence. `coding_team_status`
+without a `team_id` lists `phase`, `tasks_done`, `tasks_total` and `pr_number`
+beside the older fields; with one, its closing line says the chat shows the
+team's card and not to paste the task list unless asked.
+
 The multi-agent shape of the coding agent (`src/lib/coding-team.ts`): one
 GOAL, a **planner** (a read-only run on the tier model whose final message
 must be a JSON array of tasks), **workers** (one ordinary run per task, each
@@ -953,7 +1114,8 @@ team's branch, up to `MAX_TEAM_WORKERS` (3) while the box has the memory,
 each merged home as it settles; a merge git cannot do alone is aborted and
 the task offered once more from the merged state; a code project keeps one
 worker at a time, in place), a **reviewer** (the v0 rule first — a refused
-action or a stray file rejects without a model — then a read-only run on
+write rejects without a model; a file outside the task's hint is a note the
+reviewer is told of — then a read-only run on
 the merged work that answers `{verdict, notes}`; a reviewer that gives no
 verdict is an alert and an acceptance by rule, never a silent pass), all on
 a **shared blackboard**
@@ -961,38 +1123,131 @@ a **shared blackboard**
 may not send — only the planner posts tasks, only the assigned worker moves
 one or submits a result, only the reviewer rules, only the owner stops — and
 logs every accepted message and every refusal (the audit trail). A worker
-that hit a permission denial or strayed outside its files raises an ALERT;
-three alerts stop the team. A reviewer the box has no room for yet waits
+refused a WRITE raises an ALERT (a refused read, or a file beside the
+task's hinted files, is a note); three alerts stop the team. A live worker
+has no wall clock — its idle timeout and the owner's ceilings bound it; one
+paused for an hour with nobody resuming it is stopped and its task offered
+once more. A reviewer the box has no room for yet waits
 for room rather than being skipped; one that cannot start at all (another
 run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans
 several parts; `coding_agent_run` is still the tool for one focused change.
 `coding_team_status` answers the plan, each task's status, worker, reviewer
-and result, the alerts, the team's branch, `agents` (planner, workers,
-reviewers, total — who worked), and what to tell the user; `log: 1` adds the
-last lines of the audit log. Every agent is a coding run, so the sandbox and
+and result — and for a pending one what it is waiting for, or why it was
+held — the alerts, the team's branch, its pull request, `agents` (planner,
+workers, reviewers, total — who worked), and what to tell the user; `log: 1`
+adds the last lines of the audit log, and `wait_seconds` blocks until the
+team settles (up to two minutes, like `coding_agent_status`) for a user who
+asked to wait. Otherwise the assistant does NOT poll: the box tells the owner
+ONCE when a team settles — a desktop notice and the Telegram message, never
+one per member run — and on OpenClaw posts `[Coding team <id>] finished` into
+the main chat; a Hermes box has no way into its chat, so there the tool says
+to look again only when the user asks. A team the OWNER stopped gets no chat
+line — given one, the assistant started the team again on its own — and it
+stays stopped: `coding_team_status` says so (`stopped_by` in the list), and
+the box refuses the assistant's own `coding_team_run`, `coding_agent_run` or
+`coding_agent_resume` on that team's work — its folder and the worktrees in
+it, its goal, one of its runs — with 409 `owner_stopped`, unless the call
+passes `user_asked_again: true`: the user asked again in a new message. That
+start is what lifts the hold; time does not. A
+task starts only once every
+`depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
+reopened after a dependent started HOLDS the dependent — its worker stopped
+or its result set aside — said on the board, and it runs again on the new
+merged state. A team's runs never merge or push (`gh pr merge`, `gh api`,
+`git push` are refused to them); when the goal asks for a pull request (and
+never when it says not to: "do not open a PR" is honoured as "do not merge"
+is) the ORCHESTRATOR opens it once every task is accepted, the suite is green
+and the final review passed, re-offers the tasks a red CI points at (two rounds at
+most) and merges only when the goal asks and every check passes. A second
+team is QUEUED behind the one working (`queue_position` in the list; the
+owner alone cancels one) and starts by itself, after a restart too. Every agent is a coding run, so the sandbox and
 the ceilings above apply unchanged; the one-run-at-a-time rule is between
 STRANGERS — a team's own runs share the box, a run of anyone else waits.
+
+What a team COSTS is on its answer too. By default the planner (and the lead)
+runs on the provider's best model and the workers and reviewers on its middle
+one — `claude-fable-5-1` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
+`gpt-5.6-sol` on OpenAI, the plan's `deepseek-v4-flash` for every role on
+ClawBox AI; the planner and reviewers at no more than `xhigh` effort, workers
+at the owner's effort; the owner may pick
+the provider, the model and the effort per role
+in the Coding Agent settings (`coding_agent_role_models`,
+`src/lib/coding-role-models.ts`). The planner's
+plan carries a `repo_map` (files, entry points, test commands, gotchas) that
+goes on the board and into every worker's and reviewer's brief, so they do
+not re-explore. `coding_team_status` adds the tokens per role to its metrics,
+the repo map's size and test command, and the RUN-OR-TEAM advice: a plan of
+ONE task runs as one ordinary run (`singleRun`, no team branch, worktree or
+reviewer run — the run settles the owner's usual way), and a plan whose
+tasks' `files_hint` mostly overlap (60 % or more of the hinted files named by
+another task too) is said to have been cheaper as a single run; the list
+marks both (`single_run`, `advice`). `coding_team_run`'s description says
+when to prefer one `coding_agent_run`, and its answer that a one-task plan
+runs as one. On battery (the charger's sysfs `online` is 0) a team starts one
+worker at a time, said on its log.
+
+Every run, team or not, gets a CPU budget — `CLAWBOX_RUN_CPU_BUDGET`, half
+the box's logical CPUs shared between the writing runs going at once (a
+quarter on battery), and a sentence in its brief naming `--maxWorkers`, `-j`
+and the like — and its scope a lower share (`CPUWeight=20`, `IOWeight=20`,
+`--nice=10`) so the desktop and the box's web server stay responsive. And
+every run reads its project's RUN NOTES (`<project>/.clawbox/run-notes.md`,
+outside the worktrees and in `info/exclude`) in its system prompt; a writing
+run may propose up to five one-line lessons in
+`$CLAWBOX_RUN_ARTIFACTS_DIR/run-notes.json`, which the settle step merges —
+deduplicated, under a 4,000-character cap, never a credential, an injected
+secret, an e-mail address or a link off the box. The owner reads, edits and
+clears them on the project page; the bearer may read them
+(`coding-agent/run-notes`) but never write them.
 
 `coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
 polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`
 as an alias from its launch shape). `coding_run_message` is how a run that is
 still going is STEERED rather than stopped: the text is queued on the run's
 record (at most 20 waiting, 4,000 characters each, plain text) and delivered
-either as the harness's next user turn — the runs spawn with Claude Code's
-`--input-format stream-json` — or, on a box whose harness refuses that, folded
-into the continuation of its next attempt or the owner's Resume. The tool says
-which of the two happened. The owner's own input is on the run's page in the
+exactly one of three ways (`via` on the record, a line on the run's timeline):
+MID-TURN — every run spawns with a PostToolUse hook (`--settings`,
+`scripts/coding-run-hook.mjs`) that hands whatever is in the run's inbox
+(`data/coding-agent-inbox/<runId>`) to the model as `additionalContext` right
+after the tool call it is in, a reattached run included; as the NEXT TURN on
+stdin (`--input-format stream-json`) when the turn ended before a tool call
+took it; or folded into the continuation of its next attempt or the owner's
+Resume. The route waits up to 4 s for the hook, and the tool says "Delivered"
+or "Queued" with when.
+
+A run asked for while the box already runs `coding_agent_max_parallel_runs`
+is QUEUED, not refused: a record in status `queued` (persisted, so a restart
+keeps it) started by the box in the order asked, under the same id, when a
+run ends; `coding_run_list` shows its `queue_position`. The bearer may queue
+and read the queue; only the owner cancels (the stop route answers the bearer
+403 `owner_only` for a queued run). A run whose pull request went RED has the
+failed jobs' logs read (`gh run view --log-failed`, bounded), the failing
+tests and files named on the record (`ci`), and `coding_agent_status` says to
+OFFER a Fix CI run — `coding_agent_run` with `resume_run_id` and `fix_ci`; the
+box appends what failed to the task — at most two along the chain, one per
+failure. The owner's own input is on the run's page in the
 Coding Agent app; a run the OWNER started answers the MCP bearer 403 here, as
 it does for stop and resume, and a browser request from another site is
 refused 403 `cross_origin` (a header-less caller such as this server is not). The summary it returns is model-authored and labelled as information,
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
-to the approved senders (`src/lib/coding-agent-notify.ts`).
+to the approved senders (`src/lib/coding-agent-notify.ts`). A run the
+assistant started from one of the owner's ClawBox chats also puts one turn into
+THAT chat when it ends (`[Coding run <id>] finished …`, the same template),
+asking the assistant to read `coding_agent_status` and tell the user — so it
+reports without being asked. This tool sends nothing extra for that: the run
+route works out which chat asked from whichever of the owner's chats has a
+turn running when the call arrives (Hermes' live turns on the box, the
+OpenClaw gateway's busy sessions).
 
 ### Memory Shard
 
-`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only)
+`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only) ·
+`memory_shard_reindex`, `memory_shard_reindex_stop`, `memory_shard_sources_list`
+/ `_add` / `_remove`, `memory_shard_schedule_get` / `_set`,
+`memory_shard_provider_get` / `_set`, `memory_shard_enable`,
+`memory_shard_reset` (both editions)
 
 `memory_shard_status` reads `GET /setup-api/clawkeep/memory` — the same status
 the Memory Shard app draws: switched on, set up, the paid-plan gate, health,
@@ -1006,14 +1261,125 @@ index now (OpenClaw's own, or the one ClawBox keeps where there is no OpenClaw),
 so the tool is registered on both, with one description per edition: only the
 Hermes one points at `memory_shard_search`, which is Hermes-only because on
 OpenClaw the index is OpenClaw's and it searches it as part of a turn.
+`memory_shard_search` also answers from the Prime Radiant wiki, a built-in
+source once the vault exists: those passages carry `source: "prime-radiant"`,
+the vault-relative page `path`, the page or claim `id`, `kind`, the page `type`
+and `verified`, and a verified page or claim ranks first (on OpenClaw the
+memory-wiki plugin is what reaches the vault).
 
-**There is no reindex tool.** `POST /setup-api/clawkeep/memory/index` answers
-this bearer 403 `owner_only` on purpose — before that check the assistant could
-start a full re-embed of the owner's documents on its own, an hours-long pass
-that spends the embedding allowance. The status says so, and tells the agent to
-open the app (`ui_open_app("memory-shard")`) for the owner to press Reindex, and
-then to report progress from this tool — not to poll it in a loop. The switch,
-the folders, the provider and the schedule are owner-only for the same reason.
+The status also says WHY the index wants a pass (`reindex.reasons`, from
+`src/lib/memory-reindex-advice.ts`): nothing indexed yet, the embedder or the
+index format changed, a missing identity (all fixed only by a full pass), files
+waiting in the folders, files changed, a pass that was stopped (an incremental
+pass), or the size ceiling and a fallen-back provider (no pass fixes those).
+
+**Everything the Memory Shard app does is a tool**, through the app's own
+`clawkeep/memory/*` routes. Those routes ask again who is writing
+(`src/lib/memory-shard-writer.ts`): a signed-in person, or this server's bearer;
+anything else is 403 `owner_only`. The assistant starts an **incremental** pass
+on its own — it reads only new and changed files. A **full** pass (asked for, or
+the one an incremental ask would really run on a missing or disowned index, or
+the first build an armed schedule would start over an empty one — saving a
+schedule that is on, or switching Memory Shard on over one), a
+**provider move** (which re-embeds everything) and the **reset** answer this
+bearer 409 `confirm_required` until the body carries `confirm: true`: with the
+estimate (files, minutes, the embedding tokens and who pays) or the exact list
+of what a reset clears and keeps. The tools return that answer as-is and set
+`confirm: true` only once the owner said yes in chat. A stopped incremental
+pass is carried on by the next one; a stopped full pass is finished only by a
+new full one, and the stop says which. Adding a folder is held
+to the picker's rules (inside the Files root, never hidden, never a secret
+store) and answers how many files a pass would read from it. A pass is stopped
+with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to
+report progress from it, not to poll it in a loop.
+
+### Prime Radiant (both editions)
+
+`mcp/tools/prime-radiant.ts` — the owner's wiki, everything the desktop app does
+plus the edits it has no buttons for, through the **same**
+`/setup-api/prime-radiant/*` routes the app calls. The vault's lock, its lint,
+its one git commit per change and the owner checks are the routes' (and the
+library they call, `src/lib/prime-radiant/`); this module reads and writes
+nothing itself. Registered on both editions (the vault is ClawBox's, not a
+harness's) and on the full profile only: `memory_shard_search` already reads the
+wiki for a small model on the core profile.
+
+**Who.** `writerGuard` (`src/lib/prime-radiant/route-helpers.ts`) tells the
+owner's cookie (from our own page) from this server's bearer, which it checks
+again itself. A change made through the bearer is the assistant's: its commit is
+authored `ClawBox assistant <assistant@localhost>` (committed by Prime Radiant),
+so the owner sees it in **History** and can **Undo** it. A verification it
+gives — `prime_radiant_claim_verify` / `prime_radiant_review_resolve`, whose
+`confirm: true` says the user confirmed the fact in their own words, sent on to
+the route — is the owner's, through the assistant: stamped
+`verified: { by: owner, via: assistant }` (`verified_via` in the tools' claim
+output), the page `checked_by: human`, and it wins over a claim that disagrees
+with it exactly like one the owner made in the app; History and the page say
+"verified by the owner (via the assistant)". A route call from the bearer
+without `confirm: true` stays the assistant's own (`verified.by: assistant`,
+which wins nothing). Undo is the owner's: the bearer may revert only a commit
+whose author is the assistant (403 `owner_only` otherwise).
+
+**Stays the owner's, no tool:** `POST init` (it writes openclaw.json), the
+document drop (`ingest/upload` — the assistant names files by path,
+`POST ingest { files }`, staged through the same `stageUpload`), and the
+`reindex`, `rejudge-reviews` and `migrate-frontmatter` maintenance passes (the
+bearer may run `connect` only), and the settings' cost rates — what the
+nightly dollar caps (summaries, golden check) are measured in (a rate of 0 and
+a cap never trips). So is
+`verification.outbound`, whether the assistant may send the daily questions
+over chat at all: off by default, and `prime_radiant_daily_questions` says
+which way it is set — it never sends anything itself.
+
+**Destructive tools** (`destructiveHint`) carry `confirm: true` (`zConfirm`):
+`prime_radiant_page_delete`, `prime_radiant_page_merge`, `prime_radiant_claim_delete`, `prime_radiant_undo`,
+`prime_radiant_settings_update`, `prime_radiant_nightly_merge` (it moves the
+wiki's main branch) and `prime_radiant_golden_delete` — and so do the ones that give someone's word
+(`prime_radiant_claim_verify`, `prime_radiant_review_resolve`).
+
+**Imports and connect passes the assistant starts** commit as it, like its
+direct edits, so it can undo them too. The nightly pass stays Prime Radiant's
+whoever presses Run now: it is the box's own scheduled pass, held for the
+owner when it touches a verified page.
+
+| UI action | Route | Tool |
+|---|---|---|
+| Open the app (status, counts, wiring) | `GET status` | `prime_radiant_status` (+ `GET ingest`, `nightly`, `maintenance`, `review`) |
+| Pages: list, filter by domain / type / verification, title box | `GET pages?domain&type&owner&status&verified&q` | `prime_radiant_pages` |
+| Open a page (claims, confidence, sources, backlinks, links, checks, body) | `GET pages/<path>` | `prime_radiant_page` |
+| Search inside pages | `GET search` | `prime_radiant_search` |
+| Map (nodes, edges; card summary) | `GET graph`, `GET pages/<path>?view=summary` | `prime_radiant_map` |
+| Checks | `GET lint` | `prime_radiant_lint` |
+| Usage / token costs | `GET costs` | `prime_radiant_costs` |
+| Settings (read) | `GET settings` | `prime_radiant_settings` |
+| Review queue | `GET review` | `prime_radiant_review_list` |
+| History of a page / a commit's diff | `GET history/<path>`, `GET diff` | `prime_radiant_history`, `prime_radiant_diff` |
+| Import progress, recent jobs, failed files | `GET ingest`, `GET ingest/<id>` (the app also streams `ingest/<id>/events`) | `prime_radiant_ingest_status` |
+| — (no button) create a page | `POST pages` | `prime_radiant_page_create` |
+| — edit a page's summary, body or fields | `PATCH pages/<path>` | `prime_radiant_page_edit` |
+| — delete a page | `DELETE pages/<path>` | `prime_radiant_page_delete` |
+| — merge duplicate pages into one (claims, aliases, links; `dry_run` previews) | `POST pages/merge` | `prime_radiant_page_merge` |
+| — set domain, owner, privacy or status on 1–500 pages in one commit (refused pages listed, the rest change; `dry_run` previews) | `POST pages/bulk` | `prime_radiant_pages_bulk_edit` |
+| — add / edit / delete a claim | `POST claims`, `PATCH` / `DELETE claims/<id>` | `prime_radiant_claim_add` / `_edit` / `_delete` |
+| Review: pick / new answer (verifies); — verify a claim directly | `POST review/<id>/resolve`; `POST claims/verify` | `prime_radiant_review_resolve`, `prime_radiant_claim_verify` |
+| Review: later / dismiss | `POST review/<id>/resolve` | `prime_radiant_review_resolve` |
+| — raise a review item | `POST review` | `prime_radiant_review_raise` |
+| History: Undo (never a verification) | `POST revert` | `prime_radiant_undo` (own commits only; a verification is refused) |
+| Add: count a folder (preview) | `POST ingest/preview` | `prime_radiant_ingest_preview` |
+| Add: Start (folders) / drop files | `POST ingest { folders }` / `ingest/upload` + `POST ingest { upload }` | `prime_radiant_ingest_start` (folders, or files by path: `POST ingest { files }`) |
+| Add: Stop | `DELETE ingest/<id>` | `prime_radiant_ingest_stop` |
+| Add: Retry failed files | `POST ingest/<id>/retry` | `prime_radiant_ingest_retry` |
+| Questions: the golden questions, their last verdicts, the % correct and its trend | `GET golden` | `prime_radiant_golden_list` (whole rows to its reply cap, narrowed by `domain` / `owner`; the % correct also in `prime_radiant_status`) |
+| Questions: add / edit / delete a golden question | `POST golden`, `PATCH` / `DELETE golden/<id>` | `prime_radiant_golden_add` / `_edit` / `_delete` |
+| Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`; a review item with no claim to verify carries `fix_first`: the page is put right, then the item dismissed; a page still current is answered with the `recheck_after` its type gives it from today, or `by_type` for a type never re-checked) |
+| Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
+| — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
+| Settings: Save (schedule, contradictions, domains and owners, exclude list, parallel, skip code projects, nightly folders); Questions → Question settings (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
+
+The route refusals become instructions (`NEXT` in the module): `owner_only` says
+it is the owner's and not to retry, `not_initialised` sends the agent to
+`ui_open_app("prime-radiant")`, `lint_blocked` names the rules, `verified` points
+at `prime_radiant_claim_verify`, `busy` names the running job.
 
 ### Local AI (both editions)
 
@@ -1068,11 +1434,15 @@ providers → Anthropic accounts: every Anthropic account the owner connected fo
 coding runs — Claude Pro/Max sign-ins, API keys, this box's own `claude`
 sign-in — in the order the box uses them, each with its label, kind, whether it
 can answer now or is at its usage limit and when it is back, and which one a run
-starting now would use; then `can_answer` ("1 of 2"), `all_limited` and
+starting now would use; with them `can_answer` ("1 of 2"), `all_limited` and
 `next_reset`. When every account is limited it adds `advice` — wait until the
 reset; runs that were cut off resume by themselves then — because that is the
-moment a queue must stop spending attempts: `coding_agent_run` answers the
-same situation with a CONFLICT naming the reset time. Never a credential and
+moment a queue must stop spending attempts: `coding_agent_run` refuses a run
+in the same situation with a plain CONFLICT, which does not carry the reset
+time — this tool's `next_reset` does. The verdict, `advice`
+and `last_swap` come before `accounts`: the answer is capped at 3,000
+characters and cut from the end, so a full pool with its model weeks loses
+account detail first, never the advice (TASK-2141). Never a credential and
 never an email. Read-only: accounts are added, ordered and re-authenticated by
 the owner in Settings, and the route's writes refuse this bearer 403
 `owner_only`.
@@ -1087,12 +1457,11 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Owner's only | Route(s) | Why |
 |---|---|---|
 | Coding agent switch and settings, secrets, permissions, Anthropic/GitHub sign-in, reset | `coding-agent/enable`, `secrets`, `permissions`, `anthropic`, `github-login`, `reset` | consent to a delegated shell and to the owner's credentials |
-| Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
-| Bringing a run's branch home, the file tree's writes, project import/delete | `coding-agent/merge`, `PUT …/tree`, `projects/*` | the owner's repository and folders |
+| The file tree's writes, project import/delete | `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
-| Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |
 | MCP switch, background jobs | `harness/mcp`, `background-jobs` | consent |
+| Prime Radiant setup, the document drop, reindex / rejudge / migration, undoing a change the assistant did not make | `prime-radiant/init`, `…/ingest/upload`, `…/maintenance` (all but `connect`), `…/revert` of another author's commit | they write openclaw.json, re-embed the whole vault or reverse the owner's own work |
 
 ### Examples and refusal shapes
 
@@ -1262,7 +1631,7 @@ a 4-8B model. So since TASK-1080:
 ```
 mcp/clawbox-mcp.ts     entry: resolve app harness (one probe) → resolve edition → probe capabilities → register → connect
 mcp/check-tools.ts     surface check; run after any change here
-mcp/clawbox-cli.ts     shell-callable wrapper (clawbox webapp/app/notify/system/code/edition)
+mcp/clawbox-cli.ts     shell-callable wrapper (clawbox webapp/app/notify/system/code/edition/tokens/db-maintenance)
 mcp/lib/edition.ts     edition resolution (imports readEdition, never re-implements it)
 mcp/lib/register.ts    the tool() wrapper: gating, annotations, caps, error envelope, description ceilings
 mcp/lib/tool-notes.ts  the field guide's tool notes: what the short tool descriptions leave out
@@ -1293,10 +1662,10 @@ and it drags server-only Next.js code into this stdio process.
 |---|---|
 | `CLAWBOX_API_BASE` | Device API origin. Default `http://127.0.0.1:80`. |
 | `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. Read once at startup and deleted from the process environment, so a `bash` child's own `printenv` finds none (hygiene only — the server's `/proc/<pid>/environ` keeps the exec-time value; see "What `bash` guarantees"); the `clawbox` CLI a shell invokes reads the file. |
-| `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
+| `CLAWBOX_MCP_PROFILE` | `full` (default), `core`, `browser` or `run-read` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets; `run-read` = that plus every tool declaring `readOnly: true`, for a run whose project ticked "ClawBox read-only tools" — `src/lib/clawbox-run-read-tools.ts` is the list the runner approves, pinned equal by `src/tests/unit/mcp-run-read-profile.test.ts`); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` registers the coding family — `bash`, `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search` — on **every** edition. Unset (the shipped state) they are registered on none, because both harnesses already ship a shell and file tools and the duplicates cost ≈ 12.5 KB of `tools/list` for prompts that chose the built-ins six times out of six. `list_directory`, `glob` and `grep` are *not* behind it on OpenClaw — see "Coding family". Read at registration time by this process, so it belongs in the server's own `env` block (Settings → MCP, or the Harness page), followed by a harness restart; `scripts/gateway-pre-start.sh` does not set it. |
-| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no inbound JSON-RPC traffic and no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min); `0` disables it. A value that is not a non-negative number falls back to the default rather than to `0`, and anything past `2147483647` (24.8 days, the longest delay a timer can hold — both runtimes turn a larger one into 1 ms) is clamped to it, so a bigger number never means a shorter wait. See "The server hangs up when it is idle". |
+| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no inbound JSON-RPC traffic and no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min) on OpenClaw and **off on Hermes**, which fails the first call after an exit instead of reconnecting; `0` disables it, and a value that is set is obeyed on either harness. A value that is not a non-negative number falls back to the default rather than to `0`, and anything past `2147483647` (24.8 days, the longest delay a timer can hold — both runtimes turn a larger one into 1 ms) is clamped to it, so a bigger number never means a shorter wait. See "The server hangs up when it is idle". |
 
 ## Work owned by others
 

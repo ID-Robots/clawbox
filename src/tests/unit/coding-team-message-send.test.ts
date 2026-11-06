@@ -38,11 +38,14 @@ const runner = vi.hoisted(() => ({
   isCodingAgentEnabled: vi.fn(),
   queueRunMessage: vi.fn(),
   noteTeamMessageSent: vi.fn(),
+  teamRoleModelMap: vi.fn(),
 }));
 vi.mock("@/lib/coding-agent", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-agent")>();
   return { ...actual, ...runner };
 });
+/** Every role ready on the box's own provider — the team's pre-flight; the host's readiness probe is not the fixture. */
+const READY_ROLES = Object.fromEntries(["planner", "worker", "reviewer"].map((role) => [role, { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "high", auto: true, ready: true, problems: [], relativeCost: 1 }]));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
@@ -55,6 +58,13 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
     changedFiles: vi.fn(async () => []),
   };
 });
+// The notices, mocked: the finish notice is coding-agent-notify.test.ts's to
+// test, and a real one would reach the owner's own Telegram from a test.
+vi.mock("@/lib/coding-agent-notify", () => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn(async () => undefined),
+  announceAnthropicLimit: vi.fn(async () => undefined),
+}));
 const harness = vi.hoisted(() => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/harness")>()), ...harness }));
 // The gateway link, mocked: the one call the owner_agent path makes. The
@@ -80,6 +90,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   runner.isCodingAgentEnabled.mockResolvedValue(true);
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/shop", projectId: null });
+  runner.teamRoleModelMap.mockResolvedValue(READY_ROLES);
   runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
     seq += 1;
     const run = { id: `run-${String(seq).padStart(8, "0")}`, status: "running", team: input.team ?? null, summary: null, error: null, filesTouched: [], permissionDenials: 0, deniedActions: [] };
@@ -429,8 +440,9 @@ describe("how a worker learns whom it can reach", () => {
     }
     const retry = board.tasks[2];
     Object.assign(retry, { attempts: 1, review: { verdict: "rejected", notes: "The badge still counts removed items.", at: 1 } });
+    const { TEAM_TASK_CHARS } = await import("@/lib/coding-agent");
     const text = team.workerTask(board, retry);
-    expect(text.length).toBeLessThanOrEqual(4_000);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(text).toContain("A previous attempt was rejected: The badge still counts removed items.");
     expect(text).toContain("run-aaaaaaaa on t1");
   });

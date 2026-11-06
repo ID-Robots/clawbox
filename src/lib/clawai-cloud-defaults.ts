@@ -53,7 +53,7 @@ import { invalidateMemoryStatusCache, startMemoryIndex } from "@/lib/clawkeep-me
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { readEmbedderPin } from "@/lib/memory-embedder";
-import { readEmbeddingPlacement, switchToCloudEmbeddings } from "@/lib/memory-shard";
+import { readEmbeddingPlacement, refreshCloudEmbeddingsKey, switchToCloudEmbeddings } from "@/lib/memory-shard";
 import type { EmbeddingSource } from "@/lib/memory-shard-state";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { createSerialLock } from "@/lib/serial-lock";
@@ -281,7 +281,7 @@ const withApply = createSerialLock();
 
 export interface ApplyOptions {
   /** For the log line, so a boot apply and a link apply are tellable apart. */
-  trigger?: "boot" | "link" | "owner";
+  trigger?: "boot" | "link" | "owner" | "plan";
   /** The credential changed: anything learned about the last one is stale. */
   credentialChanged?: boolean;
 }
@@ -309,7 +309,23 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
     // A box with no credential can promote nothing, and this runs at every
     // boot: reading the whole state there would be a voice inventory and an
     // openclaw.json read bought for an answer that is already known.
-    if ((await resolveClawaiToken()) === null) return applied;
+    const token = await resolveClawaiToken();
+    if (token === null) return applied;
+    // Before any decision, and whatever the plan or an owner's pick says: an
+    // embedder ALREADY on ClawBox AI must carry the credential the box holds
+    // now, or the core cannot start it and searches by keywords alone. A
+    // promotion below writes the key with everything else; this is the box
+    // that needs no promotion and still had a stale key.
+    try {
+      if (await refreshCloudEmbeddingsKey(token)) {
+        invalidateMemoryStatusCache();
+        console.warn(
+          `[clawai-cloud-defaults] memory search's ClawBox AI embedder now uses the current credential (${options.trigger ?? "boot"})`,
+        );
+      }
+    } catch (err) {
+      console.warn("[clawai-cloud-defaults] could not update memory search's ClawBox AI credential:", message(err));
+    }
     let status: CloudDefaultsStatus;
     let voice: VoiceSnapshot;
     try {
@@ -428,11 +444,17 @@ async function promoteTts({ harness, status }: VoiceSnapshot): Promise<boolean> 
  * move it — voice and transcription flipped, memory did not (measured on three
  * rig boxes, 2026-09-15).
  *
- * With the switch off the rebuild below simply declines `disabled`, which is
- * already handled as the non-failure it is: there is no index to rebuild, and
- * the first pass the owner ever runs then builds under the cloud identity
- * instead of building under the local one and being invalidated at the next
- * boot.
+ * NOR IS THE REBUILD, ON OPENCLAW. There is always an index to rebuild there:
+ * the core's own, of the agent's memory files, which it keeps whatever the
+ * switch says — and on a new box the first-boot rebuild built it BEFORE any
+ * embedder was set, so it held text only. Declined `disabled`, that index
+ * stayed keyword-only (the core pauses vector search over it once an embedder
+ * is named, and re-embeds nothing by itself) until somebody switched Memory
+ * Shard on. So the rebuild is asked for as the embedder's (`embedderChanged`),
+ * which the switch does not govern on that arm. Where ClawBox is the indexer it
+ * still declines `disabled` with the switch off, which is handled as the
+ * non-failure it is: that index holds only the owner's folders, and the first
+ * pass the owner ever runs builds under the cloud identity.
  */
 async function promoteEmbeddings(): Promise<boolean> {
   // Already pointed off the box AND WRITTEN DOWN: nothing to write, and writing
@@ -464,10 +486,11 @@ async function promoteEmbeddings(): Promise<boolean> {
   // switch flipped underneath) is not a failed switch — the next scheduled pass
   // rebuilds, and the panel shows the mismatched fingerprint meanwhile.
   try {
-    const started = await startMemoryIndex("full", "manual");
-    // `disabled` is not worth a warning line: it is the expected answer on a box
-    // whose owner has not switched Memory Shard on, where there is no index to
-    // rebuild in the first place. `running` is the one worth saying out loud.
+    const started = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    // `disabled` is not worth a warning line: only the edition where ClawBox
+    // indexes answers it, on a box whose owner has not switched Memory Shard
+    // on, where there is no index to rebuild in the first place. `running` is
+    // the one worth saying out loud.
     if (!started.accepted && started.declined !== "disabled") {
       console.warn(`[clawai-cloud-defaults] memory reindex declined after the switch: ${started.declined}`);
     }

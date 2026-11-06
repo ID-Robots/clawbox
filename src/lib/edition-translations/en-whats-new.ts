@@ -1,9 +1,10 @@
 /**
- * English copy for the desktop's "What's new in 4.2" card (TASK-1059, TASK-1195).
+ * English copy for the desktop's "What's new in 4.3" card (TASK-1059, TASK-1195).
  *
- * The highlights are taken from RELEASE-NOTES-4.2.0.md, trimmed to fit a
- * 320 px card. They name only what the release shipped. When the release notes
- * change, change this too.
+ * The highlights are taken from RELEASE-NOTES-4.3.0.md. They name only what
+ * the release shipped. When the release notes change, change this too. Each
+ * has a full body (the /updating screen's panel) and a short summary (one
+ * slide of the desktop card).
  *
  * WHERE THE EDITIONS DIFFER: the plan section's edition-switch line. An
  * OpenClaw box can be switched to Hermes, and a Hermes box can be switched
@@ -11,33 +12,77 @@
  * picks between them. The catalogue never branches on the edition.
  */
 export const whatsNewEn: Record<string, string> = {
-  "whatsNew.title": "What's new in 4.2",
+  "whatsNew.title": "What's new in 4.3",
   "whatsNew.subtitle": "This box now runs ClawBox {version}.",
-  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.2",
+  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.3",
 
-  "whatsNew.multiUserTitle": "Several people, one ClawBox",
-  "whatsNew.multiUserBody":
-    "The owner adds users in Settings → Users. Each person signs in with their own name and password, and gets a desktop and a Terminal of their own. Settings and installed apps stay with the owner.",
-  "whatsNew.monitorModeTitle": "Monitor mode, with a drop-down terminal",
-  "whatsNew.monitorModeBody":
-    "With the ClawBox desktop session, one desktop spans a row of monitors, arranged in Settings → Monitors. Win+Down drops a terminal down from the top of the screen.",
-  "whatsNew.githubBackupTitle": "Back up project folders to GitHub",
-  "whatsNew.githubBackupBody":
-    "In Files → Projects, Back up copies a folder to a private GitHub repository, with a daily backup if you want one. Files that look like passwords or keys are left out, and you are told which.",
-  "whatsNew.kioskTitle": "Kiosk mode",
-  "whatsNew.kioskBody":
-    "When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field, so the desktop is always one click away.",
-  "whatsNew.editionChoiceTitle": "Choose OpenClaw or Hermes at setup",
-  "whatsNew.editionChoiceBody":
-    "During first setup, a new ClawBox asks which assistant it should run, and sets up the one you pick.",
-  "whatsNew.clawkeepTitle": "ClawKeep backups fixed",
-  "whatsNew.clawkeepBody":
-    "Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped and named instead of failing the backup, and a full account no longer turns auto-backup off for good.",
-  "whatsNew.hardwareFixesTitle": "Fixes from hardware testing",
-  "whatsNew.hardwareFixesBody":
-    "Testing 4.2 on real ClawBox hardware found and fixed problems with voice input, spoken replies, the ClawBox AI plugin's Retry, and updating a box left on an older build.",
+  "whatsNew.screenshotTitle": "Screenshots, built in",
+  "whatsNew.screenshotBody":
+    "The new Screenshot app captures the whole screen, an area or one window, and lets you mark the picture up before it is saved to the Screenshots folder in Files. Print Screen, Ctrl+Shift+S or the Screenshot button beside the clock takes one in a single step.",
+  "whatsNew.sharedBrowserTitle": "One browser for you and your assistant",
+  "whatsNew.sharedBrowserBody":
+    "The browser your assistant uses is now the one on the box's own desktop, shown in Agent Browser. Sign in to a site there once and the assistant can use it, and you can watch it work. It opens and closes only its own tabs.",
+  "whatsNew.publicLinksTitle": "Share an app with a public link",
+  "whatsNew.publicLinksBody":
+    "Right-click an app the Coding Agent built and choose Create public link. Visitors reach only that app, for a set time or until you disable the link, and you can ask them for a password.",
+  "whatsNew.grokTitle": "xAI Grok, and model changes without a restart",
+  "whatsNew.grokBody":
+    "On OpenClaw, xAI Grok can be set up with an API key or a SuperGrok or X Premium sign-in. Changing the model, or switching Local AI on or off, no longer restarts the assistant in most cases, so the chat carries on.",
+  "whatsNew.holdToTalkTitle": "Hold to talk",
+  "whatsNew.holdToTalkBody":
+    "Hold the chat's microphone button, or F8, while you speak, and let go to send. Spoken replies download several times smaller, and Settings → Voice can play every reply aloud, including replies to questions you typed.",
+  "whatsNew.agentChartTitle": "The Coding Agent, on a live chart",
+  "whatsNew.agentChartBody":
+    "The Coding Agent opens on a chart of its agents at work. You can message a run while it works, extra runs and teams wait in line instead of being refused, and Fix CI sends a pull request whose checks failed back to be fixed.",
+  "whatsNew.primeRadiantTitle": "Prime Radiant, a living wiki",
+  "whatsNew.primeRadiantBody":
+    "A new app that keeps a wiki for you. Point it at your documents and it writes a page for each one, listing the facts it found with where each came from and how sure it is. Every night it tidies the wiki, looks for facts that contradict each other, and asks you about anything it cannot settle alone.",
+  "whatsNew.runReportsTitle": "Coding runs report back in the chat",
+  "whatsNew.runReportsBody":
+    "When the assistant starts a coding run for you, the chat hears how it ended and the assistant tells you without being asked, including a deliverable that is missing or work still running. While it works, a run can send the assistant a question, a blocker or a milestone.",
+  "whatsNew.updateAsksTitle": "Updates that ask before they stop your agents",
+  "whatsNew.updateAsksBody":
+    "While coding runs or assistant tasks are working, Update asks first: Cancel waits for them, Update anyway goes ahead. The box reboots only when the update needs a boot, and the update screen shows what is new while you wait.",
+  "whatsNew.installQueueTitle": "Local AI installs wait in line",
+  "whatsNew.installQueueBody":
+    "Start a Local AI install while another one runs and it waits its turn instead of being refused. Its card says what it is waiting for, it starts by itself, and you can cancel it.",
+  "whatsNew.jobAlertsTitle": "Alerts for scheduled jobs",
+  "whatsNew.jobAlertsBody":
+    "When one of the assistant's scheduled jobs fails, keeps being skipped or does not run when it is due, the desktop tells you, and Telegram too when a bot is connected. Settings → Harness lists the jobs in trouble.",
 
-  "whatsNew.readMore": "Read what's new in 4.2",
+  // The card's slides: one highlight each, under a screenshot of it, so each
+  // gets a one- or two-line summary. The bodies above stay whole for the
+  // /updating screen's panel, which has the room.
+  "whatsNew.screenshotSummary": "Capture the whole screen, an area or a window. Print Screen or Ctrl+Shift+S.",
+  "whatsNew.sharedBrowserSummary":
+    "Your assistant now uses the browser on the box's own desktop. Sign in once in Agent Browser and watch it work.",
+  "whatsNew.publicLinksSummary":
+    "Right-click an app the Coding Agent built and choose Create public link, for a set time and with an optional password.",
+  "whatsNew.grokSummary":
+    "On OpenClaw, set up xAI Grok with an API key or a SuperGrok or X Premium sign-in. Most model changes no longer restart the assistant.",
+  "whatsNew.holdToTalkSummary": "Hold the chat's microphone button, or F8, while you speak, and let go to send.",
+  "whatsNew.agentChartSummary":
+    "Watch the Coding Agent's runs at work on a live chart, and message a run while it works.",
+  "whatsNew.primeRadiantSummary":
+    "A new app that turns your documents into a wiki of facts, each with its source, and tidies it every night.",
+  "whatsNew.runReportsSummary":
+    "The chat that asked for a coding run hears how it ended, and a run can send the assistant a question or a milestone.",
+  "whatsNew.updateAsksSummary": "Update asks first while agents are working, and the box reboots only when the update needs it.",
+  "whatsNew.installQueueSummary": "A second Local AI install waits its turn instead of being refused, and starts by itself.",
+  "whatsNew.jobAlertsSummary": "The box tells you when a scheduled job fails, keeps being skipped or does not run when it is due.",
+  // The carousel's controls. {current} and {total} are slide numbers.
+  "whatsNew.slideLabel": "{current} of {total}",
+  "whatsNew.goToSlide": "Show highlight {number}",
+  "whatsNew.back": "Back",
+  "whatsNew.next": "Next",
+  // The slide's screenshot, full screen. {title} is the highlight's title.
+  "whatsNew.openFullscreen": "View screenshot full screen",
+  "whatsNew.fullscreenLabel": "Screenshot: {title}",
+  "whatsNew.closeFullscreen": "Close full screen",
+  "whatsNew.previousScreenshot": "Previous screenshot",
+  "whatsNew.nextScreenshot": "Next screenshot",
+
+  "whatsNew.readMore": "Read what's new in 4.3",
 
   // The plan section: only the lines the box's plan does not cover yet.
   "whatsNew.planTitle": "Unlock with a ClawBox AI plan",
@@ -48,5 +93,5 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.seePlans": "See plans",
 
   "whatsNew.gotIt": "Got it",
-  "whatsNew.dismiss": "Dismiss What's new in 4.2",
+  "whatsNew.dismiss": "Dismiss What's new in 4.3",
 };

@@ -4,7 +4,12 @@
 // do not each pay for it, and one event so a pick in Settings reaches the
 // mascot without a page reload.
 
-import { normaliseRowMetrics, type PetRowMetrics } from "@/lib/pet-sheet-metrics";
+import {
+  framesPerRow,
+  normaliseRowMetrics,
+  normaliseSleepFrames,
+  type PetRowMetrics,
+} from "@/lib/pet-sheet-metrics";
 
 export interface PetDescriptor {
   slug: string;
@@ -30,6 +35,10 @@ export interface PetDescriptor {
    *  that predates the bundled pack, which reads correctly: everything such a
    *  server can send IS someone else's pet. */
   brand?: boolean;
+  /** The frames of the sleep row it may be drawn in while asleep — the pack's
+   *  `sleepFrames` (pet.json), eyes shut in every one. Absent: the mascot
+   *  holds the row's first frame, so no pet blinks in its sleep. */
+  sleepFrames?: number[];
 }
 
 export interface PetStatus {
@@ -73,6 +82,7 @@ function coerce(data: unknown): PetStatus {
       rows: Number(a.rows) || 9,
       framesPerState: Number(a.framesPerState) || 6,
     };
+    const sleepFrames = normaliseSleepFrames(a.sleepFrames, framesPerRow(grid));
     active = {
       ...grid,
       slug: a.slug,
@@ -85,6 +95,7 @@ function coerce(data: unknown): PetStatus {
       // wrote) simply has no metrics; `normaliseRowMetrics` answers with the
       // pre-measurement behaviour rather than dropping the pet.
       rowMetrics: normaliseRowMetrics(a.rowMetrics, grid),
+      ...(sleepFrames ? { sleepFrames } : {}),
     };
   }
   return {

@@ -110,8 +110,8 @@ describe("skill secrets (TASK-452)", () => {
   it("quotes a value that would otherwise be ambiguous, and round-trips it", async () => {
     const tricky = 'a value with spaces # and a "quote"';
     await post({ key: "WEIRD_KEY", value: tricky });
-    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
-    expect((await readHermesEnv()).get("WEIRD_KEY")).toBe(tricky);
+    const { readHermesEnv } = await import("@/lib/hermes-env");
+    expect((await readHermesEnv()).WEIRD_KEY).toBe(tricky);
   });
 
   it.each([
@@ -184,8 +184,8 @@ describe("skill secrets (TASK-452)", () => {
     // 0x20..0x7E, the whole allowed range in one value.
     const all = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)).join("");
     expect((await post({ key: "BRAVE_API_KEY", value: all })).status).toBe(200);
-    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
-    expect((await readHermesEnv()).get("BRAVE_API_KEY")).toBe(all);
+    const { readHermesEnv } = await import("@/lib/hermes-env");
+    expect((await readHermesEnv()).BRAVE_API_KEY).toBe(all);
   });
 
   it("refuses a value past the length cap and stores one at it", async () => {
@@ -198,7 +198,8 @@ describe("skill secrets (TASK-452)", () => {
   // ran against the path again. They now run against one open descriptor, and
   // the open is non-blocking so the regular-file check can still be reached.
   it("does not hang on a path that is not a regular file", async () => {
-    const { HermesEnvUnreadableError, readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    const { HermesEnvUnreadableError } = await import("@/lib/hermes-skill-secrets");
+    const { readHermesEnv } = await import("@/lib/hermes-env");
     try {
       execFileSync("mkfifo", [envPath()]);
       if (!(await fs.stat(envPath())).isFIFO()) return;
@@ -228,9 +229,9 @@ describe("skill secrets (TASK-452)", () => {
   // well be there, and a clear reports a key already gone that it never looked
   // for.
   it("raises rather than reporting an empty store when the path is a directory", async () => {
-    const { HermesEnvUnreadableError, readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    const { HermesEnvUnreadableError, hermesSecretsPresent } = await import("@/lib/hermes-skill-secrets");
     await fs.mkdir(envPath());
-    await expect(readHermesEnv()).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+    await expect(hermesSecretsPresent(["BRAVE_API_KEY"])).rejects.toBeInstanceOf(HermesEnvUnreadableError);
   });
 
   it("answers the presence GET 500 rather than reporting every key unset", async () => {
@@ -328,12 +329,12 @@ describe("skill secrets keep the rest of .env (TASK-452 round 2, gap 1)", () => 
     await fs.writeFile(envPath(), hermesTemplate(), { mode: 0o600 });
     await post({ key: "BRAVE_API_KEY", value: "brv_live" });
 
-    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    const { readHermesEnv } = await import("@/lib/hermes-env");
     const env = await readHermesEnv();
-    expect(env.get("TELEGRAM_BOT_TOKEN")).toBe("123:abc");
-    expect(env.get("ANTHROPIC_API_KEY")).toBe("sk-ant-live");
-    expect(env.get("OLLAMA_HOST")).toBe("127.0.0.1:11434");
-    expect(env.get("BRAVE_API_KEY")).toBe("brv_live");
+    expect(env.TELEGRAM_BOT_TOKEN).toBe("123:abc");
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-live");
+    expect(env.OLLAMA_HOST).toBe("127.0.0.1:11434");
+    expect(env.BRAVE_API_KEY).toBe("brv_live");
 
     const after = await fs.readFile(envPath(), "utf8");
     expect(after.indexOf("TELEGRAM_BOT_TOKEN")).toBeLessThan(after.indexOf("ANTHROPIC_API_KEY"));

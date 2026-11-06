@@ -6,7 +6,8 @@
  * Requirements (all satisfied by install.sh under CLAWBOX_TEST_MODE=1):
  *   - x11vnc + Xvfb + websockify installed, clawbox-vnc.service running
  *   - Playwright-managed Chromium in ~/.cache/ms-playwright
- *   - clawbox-browser.service unit installed (started on demand)
+ *   - clawbox-browser.service unit installed (started and kept running by
+ *     the web server: it is the one browser the owner and the assistant share)
  *
  * Timing note: under qemu arm64 emulation, Chromium cold start can take
  * ~20-30s — well beyond the default 30s action timeout. The individual
@@ -15,6 +16,7 @@
 import { test, expect } from "@playwright/test";
 import { dockerExec } from "./helpers/container";
 import {
+  HttpError,
   browserClose,
   browserLaunch,
   browserManage,
@@ -71,6 +73,53 @@ test.describe("browser + VNC happy path", () => {
     const state = await getBrowserManage();
     expect(state.browser.running).toBe(true);
     expect(state.browser.cdpReady).toBe(true);
+  });
+
+  /**
+   * `<pid> <profile dir>` per top-level browser process serving a DevTools
+   * port. The command line is read as ONE string: a running Chromium rewrites
+   * its children's into a single space-joined argument, so a per-argument
+   * match would miss their `--type=` and count every renderer.
+   */
+  async function devtoolsBrowsers(): Promise<string[]> {
+    const out = await dockerExec(
+      ["bash", "-c", `
+        for d in /proc/[0-9]*; do
+          [ -r "$d/cmdline" ] || continue
+          args=" $(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null)"
+          case "$args" in *" --remote-debugging-port="*) ;; *) continue ;; esac
+          case "$args" in *" --type="*) continue ;; esac
+          prof=$(grep -o -- '--user-data-dir=[^ ]*' <<<"$args" | head -n 1)
+          echo "\${d#/proc/} \${prof#--user-data-dir=}"
+        done`],
+      { user: "clawbox" },
+    );
+    return out.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
+  test("it is the box's one browser: one process, one profile, shared with the assistant", async () => {
+    const state = await getBrowserManage();
+    expect(state.sharedWithAssistant).toBe(true);
+    expect(state.browser.shared).toBe(true);
+
+    const browsers = await devtoolsBrowsers();
+    expect(browsers).toHaveLength(1);
+    expect(browsers[0].split(" ")[1]).toBe(state.profileDir);
+  });
+
+  test("Close is refused for the shared browser and it keeps running", async () => {
+    const before = await devtoolsBrowsers();
+    const refusal = await browserManage("close-browser").then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(refusal).toBeInstanceOf(HttpError);
+    expect((refusal as HttpError).status).toBe(409);
+    expect(String((refusal as HttpError).message)).toContain("shared_browser");
+
+    expect(await devtoolsBrowsers()).toEqual(before);
+    const state = await getBrowserManage();
+    expect(state.browser.running).toBe(true);
   });
 
   test("launch session and navigate to clawbox.com", async () => {

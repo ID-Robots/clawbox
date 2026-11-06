@@ -1,12 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { I18nProvider, useT } from "@/lib/i18n";
+import { useEffect, useState } from "react";
+import { I18nProvider } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
-import ReconnectStage from "@/components/ReconnectStage";
-import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
-import { updateWhatsNewPanel } from "@/lib/update-whats-new";
-import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
+import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
+import {
+  canResume,
+  runHeadline,
+  runStatus,
+  UpdateRunView,
+  useUpdateRun,
+  type RunNotice,
+  type VersionInfo,
+} from "@/components/UpdateRunView";
 
 /**
  * The screen the owner sees while an update owns the box.
@@ -17,200 +24,212 @@ import { useUpdateWhatsNew } from "@/lib/use-update-whats-new";
  * over the project, and an app left open on the desktop can write through
  * /setup-api into the tree being rewritten underneath it.
  *
- * It is drawn with ReconnectStage — the same crab, pulse rings, orbiting dots
- * and step checklist the setup wizard uses for its own restart overlay — rather
- * than a bespoke spinner. That component already IS the device's wait screen;
- * a second one styled by hand would be a second answer to a settled question,
- * and it would drift.
+ * It is drawn with the System Update app's own run view (UpdateRunView) and
+ * follows the run with the same hook. It used to be a separate wait screen,
+ * and the owner who started an update in Settings watched the run view for a
+ * few seconds before the desktop's notice poll and the middleware moved them
+ * here, onto the other screen, for the rest of the update (TASK-2111). One
+ * screen, from the click to the desktop coming back. The app no longer draws a
+ * live run at all: the click shows a short full-screen loader on this page's
+ * ground and comes straight here (UpdateHandover, TASK-2146).
  *
- * Three things it must get right, in order of how badly each one bites:
+ * Four things it must get right, in order of how badly each one bites:
  *
  *  1. FAIL CLOSED. Partway through, do_rebuild stops the web server and the box
  *     serves nothing for minutes. A poll failing is the NORMAL course of an
  *     update, not evidence it ended — so a failed poll must never take this
- *     screen down. It is the exact inverse of the usual rule.
+ *     screen down. It is the exact inverse of the usual rule. The first answer
+ *     after such an outage reloads the page onto the build the box now serves
+ *     (an "idle" answer does not: see the hook).
  *  2. NEVER TRAP THE OWNER. If the update dies, "no answer" would hold this
  *     screen for ever with no way back to Settings. After the rebuild's own
  *     budget plus a margin, it says so — and names the escape that actually
  *     works, which is a restart: at boot the updater finds no update to resume
  *     and releases the lock (resumeContinuation in src/lib/updater.ts). It does
  *     NOT offer a link to the desktop, because the middleware would redirect
- *     such a navigation straight back here.
- *  3. SAY WHAT IS TRUE. While the box answers, it names the step the server
+ *     such a navigation straight back here. The same hint replaces "returning
+ *     to the desktop" on a finished run whose lock is never released, and the
+ *     clock starts again for a run the owner resumes from here. A run that
+ *     stops says so with its step and reason, Resume where the box can resume
+ *     it, and Dismiss, which clears the verdict and goes back to the desktop —
+ *     or, when the box does not take it, keeps the verdict and says why.
+ *  3. LEAVE WHEN THE LOCK DOES. The lock is the middleware's to release, and
+ *     the middleware marks every /setup-api answer while it is set
+ *     (UPDATE_LOCK_HEADER). A finished run — or none — on an answer without
+ *     that mark is the desktop open again: "Update complete" for a moment,
+ *     then the desktop. While the mark is there the screen stays, so it never
+ *     bounces between here and a desktop the middleware sends straight back.
+ *  4. SAY WHAT IS TRUE. While the box answers, it names the step the server
  *     reports and the line that step last logged. While it does not, it says
  *     the device is restarting — and claims nothing about progress, because
  *     nothing is reporting.
  *
- * Beside the steps — after them on a phone — a "What's new" panel shows the
+ * Beside the steps — after them on a phone — the "What's new" panel shows the
  * highlights of the version being installed (TASK-1205). It is secondary in
  * every sense: asked for on its own timer rather than inside the status poll,
- * held in memory across the outage once it has arrived, and never empty when
- * it could not be read (see `updateWhatsNewPanel`).
+ * held in memory across the outage once it has arrived, asked again of the
+ * server that comes back, and never empty when it could not be read (see
+ * `updateWhatsNewPanel`).
+ *
+ * The page is a client component, so the server renders the view's first
+ * state — "System Update · Updating your device · Connecting…" and "Don't
+ * power off" — in English. The owner arrives here by a redirect at about the
+ * moment the update stops the web server, and a chunk request that loses that
+ * race still leaves them those words rather than a blank page.
  */
 
 /** The rebuild's own budget (REBUILD_TAKEOVER_TIMEOUT_MS) plus room to reboot. */
 const STUCK_AFTER_MS = 25 * 60 * 1000;
-const POLL_MS = 2000;
-
-interface Step { id: string; label: string; status: string }
-interface UpdateStatus {
-  phase?: string;
-  steps?: Step[];
-  currentStepIndex?: number;
-  error?: string;
-  /** The last line the running step logged, already redacted by the server. */
-  log?: string;
-}
-
-function clock(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
+/** How long "Update complete" stays up before the desktop replaces it. */
+const RETURN_AFTER_COMPLETE_MS = 3_000;
 
 function UpdatingScreen() {
-  const { t } = useT();
-  /**
-   * Translated when the catalogue is there, English when it is not — never the
-   * raw key.
-   *
-   * I18nProvider loads translations in an effect, through a dynamic import, so
-   * the server always renders keys and the client fills them in. Every other
-   * page can rely on that. This one cannot: it is the ONE screen guaranteed to
-   * be open while the box is offline, and i18n.tsx says so itself — "a chunk
-   * load can fail ... the device is offline mid-update ... keep whatever copy is
-   * already in state (English, or the raw keys on a first load)". Raw keys for
-   * the length of an outage is not an acceptable answer here.
-   */
-  const tr = (key: string, english: string) => {
-    const value = t(key);
-    return value === key ? english : value;
+  // Translated when the catalogue is there, English when it is not — never the
+  // raw key. I18nProvider loads translations in an effect, through a dynamic
+  // import, and this is the ONE screen guaranteed to be open while the box is
+  // offline: i18n.tsx says so itself — "a chunk load can fail ... the device is
+  // offline mid-update". Raw keys for the length of an outage is not an
+  // acceptable answer here.
+  const tr = useTr();
+  const run = useUpdateRun({ hold: true });
+  const [versions, setVersions] = useState<VersionInfo | null>(null);
+  const [channel, setChannel] = useState<string | null>(null);
+  // The run this page is timing: bumped when the owner starts one from here
+  // (Resume, or "Back up and update anyway"), so a verdict that sat on screen
+  // for half an hour does not greet the run after it with "restart it".
+  const [runEpoch, setRunEpoch] = useState(0);
+  const [stuckEpoch, setStuckEpoch] = useState<number | null>(null);
+  const stuck = stuckEpoch === runEpoch;
+
+  // Not Date.now() arithmetic across a reboot — this only ever measures how
+  // long THIS page has been open (or this run been going), in one process, on
+  // the viewer's device.
+  useEffect(() => {
+    const id = window.setTimeout(() => setStuckEpoch(runEpoch), STUCK_AFTER_MS);
+    return () => window.clearTimeout(id);
+  }, [runEpoch]);
+  const startRun = (allowDowngrade = false) => {
+    setRunEpoch((n) => n + 1);
+    void run.trigger(allowDowngrade);
   };
 
-  const [status, setStatus] = useState<UpdateStatus | null>(null);
-  const [offline, setOffline] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  // Bumped each time the box answers again after an outage, so the "What's
-  // new" panel is re-asked of the server that came back (see the hook).
-  const [reconnects, setReconnects] = useState(0);
-  const wasOffline = useRef(false);
-  const whatsNew = useUpdateWhatsNew(reconnects);
-  // Not Date.now() arithmetic across a reboot — this clock only ever measures
-  // how long THIS page has been open, in one process, on the viewer's device.
-  const openedAt = useRef(Date.now());
-
+  // The version row: what the box runs, what it is going to, and the channel.
+  // Asked once, and again after an outage only if the first ask got nothing;
+  // what arrived is kept, like the What's new panel, because the server that
+  // comes back reports the build it now runs.
+  const haveVersions = versions !== null;
   useEffect(() => {
-    const tick = window.setInterval(() => setElapsed(Date.now() - openedAt.current), 1000);
-    return () => window.clearInterval(tick);
-  }, []);
-
-  useEffect(() => {
+    if (haveVersions) return;
     let stop = false;
-    const poll = async () => {
-      try {
-        const res = await fetch("/setup-api/update/status", { cache: "no-store" });
-        if (!res.ok) throw new Error(String(res.status));
-        const data = (await res.json()) as UpdateStatus;
-        if (stop) return;
-        if (wasOffline.current) setReconnects((n) => n + 1);
-        wasOffline.current = false;
-        setOffline(false);
-        setStatus(data);
-        // The lock is the middleware's to release. Asking for the desktop again
-        // is what tests it: while the flag is still set we are simply sent
-        // back here, and the moment it clears the desktop loads.
-        if (data.phase && data.phase !== "running") window.location.replace("/");
-      } catch {
-        // Expected, and for minutes at a time: the rebuild stops the server.
-        // Hold the screen.
-        if (stop) return;
-        wasOffline.current = true;
-        setOffline(true);
-      }
-    };
-    void poll();
-    const id = window.setInterval(poll, POLL_MS);
-    return () => { stop = true; window.clearInterval(id); };
-  }, []);
+    void (async () => {
+      const read = async <T,>(url: string): Promise<T | null> => {
+        try {
+          const res = await fetch(url, { cache: "no-store" });
+          return res.ok ? ((await res.json()) as T) : null;
+        } catch {
+          return null;
+        }
+      };
+      const [v, b] = await Promise.all([
+        read<VersionInfo>("/setup-api/update/versions"),
+        read<{ branch?: unknown; effective?: { branch?: unknown } | null }>("/setup-api/system/update-branch"),
+      ]);
+      if (stop) return;
+      if (v?.clawbox) setVersions(v);
+      const followed = typeof b?.effective?.branch === "string" ? b.effective.branch : b?.branch;
+      if (typeof followed === "string" && followed) setChannel(followed);
+    })();
+    return () => { stop = true; };
+  }, [haveVersions, run.reconnects]);
 
-  const steps = status?.steps ?? [];
-  const labels = steps.map((s) => s.label);
-  // The server's own index when it has one. It sets -1 the moment a run ends,
-  // which must not be read as "step 0 is running".
-  const reported = status?.currentStepIndex ?? -1;
-  const running = steps.findIndex((s) => s.status === "running");
-  const done = steps.filter((s) => s.status === "completed").length;
-  const phaseIndex = running >= 0 ? running : (reported >= 0 ? reported : done);
-  const stuck = elapsed > STUCK_AFTER_MS;
+  const status = runStatus(run.state, run.error);
 
-  // The amber callout: the one thing the owner may need to ACT on.
-  const instruction = stuck
-    ? tr(
-        "update.stuckHint",
-        "This is taking longer than an update usually does. Nothing has been lost. "
-          + "If the device does not come back on its own, restart it — the desktop "
-          + "unlocks by itself on the next start.",
-      )
-    : offline
-      ? tr(
-          "update.offlineHint",
-          "The device is restarting and is not answering yet. This screen will return "
-            + "to the desktop on its own.",
-        )
-      : undefined;
+  // Leave when the lock does (3, above). "completed" stays up a moment so the
+  // owner sees how the run ended; "idle" is a run that is not this screen's
+  // to show, and goes at once.
+  const answer = run.answer;
+  const leave = answer && !answer.locked && (answer.phase === "completed" || answer.phase === "idle")
+    ? answer.phase
+    : null;
+  useEffect(() => {
+    if (!leave) return;
+    const id = window.setTimeout(
+      () => window.location.replace("/"),
+      leave === "completed" ? RETURN_AFTER_COMPLETE_MS : 0,
+    );
+    return () => window.clearTimeout(id);
+  }, [leave]);
 
-  // The muted callout underneath: what the running step is actually doing.
-  // Absent while offline, because nothing is reporting and a stale line would
-  // read as live.
-  const detail = !offline && status?.log ? status.log : undefined;
+  // The line across the bottom: the one thing the owner may need to ACT on.
+  // A finished run says it is going back to the desktop — unless its lock is
+  // still held past the budget, when that promise is the one thing not
+  // happening and the restart hint takes its place.
+  const notice: RunNotice | undefined = status === "failed"
+    ? undefined
+    : status === "completed" && (leave === "completed" || !stuck)
+      ? { icon: "task_alt", title: tr("update.returningToDesktop", "Update complete. Returning to the desktop…") }
+      : stuck
+        ? {
+            icon: "warning",
+            tone: "warn",
+            title: tr(
+              "update.stuckHint",
+              "This is taking longer than an update usually does. Nothing has been lost. "
+                + "If the device does not come back on its own, restart it — the desktop "
+                + "unlocks by itself on the next start.",
+            ),
+          }
+        : run.offline
+          ? {
+              icon: "power_settings_new",
+              title: tr("update.heroUpdatingSub", "Don't power off until this finishes."),
+              note: tr(
+                "update.offlineHint",
+                "ClawBox is restarting and is not answering yet. This screen will return "
+                  + "to the desktop on its own.",
+              ),
+            }
+          : undefined;
 
+  const { headline, subhead } = runHeadline(status, run.state, tr);
+
+  // On a computer's screen a live or finished run fills it, top to bottom
+  // (TASK-2137): `data-update-screen` (the run's status) and the frame's `us-*`
+  // marks are what the run view's own CSS lays out (UPDATE_SCREEN_CSS). A
+  // phone scrolls the stacked view, and a stopped run keeps the window's layout.
   return (
-    <>
-      {/*
-        A server-rendered floor, underneath the overlay.
-
-        ReconnectStage draws through createPortal and returns null when there is
-        no document, so on its own this page is BLANK until the client bundle
-        runs. Every other page can live with that. This one cannot: the owner
-        arrives here by a middleware redirect at the exact moment the update is
-        about to stop the web server, and a chunk request that loses that race
-        would leave them staring at nothing for the length of the outage — worse
-        than the plain screen this styling replaced.
-        So the same two sentences are emitted server-side, in the page's own
-        ground, and the portal (z-index max, fixed inset-0) covers them the
-        instant it mounts.
-      */}
-      <div
-        className="fixed inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
-        style={{ background: "var(--ground, #0a0f1a)" }}
-        data-testid="updating-ssr-floor"
-      >
-        <h1 className="text-xl font-semibold text-[var(--text-primary,#fff)]">
-          {tr("update.title", "System Update")}
-        </h1>
-        <p className="text-sm text-[var(--text-secondary,#9aa4b2)]">
-          {tr("update.updatingDescription", "Updating your ClawBox with the latest software...")}
-        </p>
-      </div>
-
-      <ReconnectStage
-      steps={labels.length ? labels : [tr("update.preparingUpdate", "Preparing update...")]}
-      phaseIndex={Math.max(0, phaseIndex)}
-      completed={false}
-      title={tr("update.title", "System Update")}
-      description={tr("update.updatingDescription", "Updating your ClawBox with the latest software...")}
-      instruction={instruction}
-      secondaryInstruction={
-        detail
-          ? `${detail}${labels.length ? ` · ${done}/${labels.length} · ${clock(elapsed)}` : ""}`
-          : labels.length
-            ? `${done}/${labels.length} · ${clock(elapsed)}`
-            : clock(elapsed)
-      }
-      // Not until the first ask has finished, so the panel does not flash
-      // its fallback on the way to the highlights.
-      aside={whatsNew.settled ? <UpdateWhatsNewPanel panel={updateWhatsNewPanel(whatsNew.answer)} /> : undefined}
-      />
-    </>
+    <div className="h-dvh w-full overflow-y-auto bg-[var(--ground,#0a0f1a)] text-gray-200" data-testid="updating-screen" data-update-screen={status}>
+      <main className="us-page min-h-full w-full flex items-start justify-center p-6 pt-8 bg-[var(--bg-deep,#111827)]">
+        <div className="us-frame w-full max-w-[1200px]">
+          <UpdateRunView
+            fill
+            status={status}
+            state={run.state}
+            error={run.error}
+            versions={versions}
+            channel={channel}
+            heading="h1"
+            headline={headline}
+            lede={subhead}
+            offline={run.offline}
+            reconnects={run.reconnects}
+            notice={notice}
+            dismissError={run.dismissError}
+            // Dismiss clears the verdict on the server and goes back to the
+            // desktop; a click the server did not take stays, and says so.
+            onDismiss={() => {
+              void run.dismiss().then((outcome) => {
+                if (outcome === "dismissed") window.location.replace("/");
+              });
+            }}
+            // Resume starts the fresh run that continues an interrupted one,
+            // and this screen follows it like the first.
+            onResume={canResume(run.state) ? () => startRun() : undefined}
+            onOverrideDowngrade={() => startRun(true)}
+          />
+        </div>
+      </main>
+    </div>
   );
 }
 
@@ -218,14 +237,21 @@ function UpdatingScreen() {
  * The provider is mounted HERE, not inherited.
  *
  * The root layout is a server component and mounts no I18nProvider, and
- * `useT()` without one returns a fallback that renders the KEY — this screen
- * would have shown a literal "update.title" to the owner. /login and
- * /app/[id] each mount their own for exactly this reason; this is the third.
+ * `useT()` without one returns a fallback that renders the KEY — the view's
+ * English floor would have been all the owner ever saw, in any language.
+ * /login and /app/[id] each mount their own for exactly this reason; this is
+ * the third.
  */
 export default function UpdatingPage() {
   // Signed-in page like the desktop: a sign-in or sign-out in another tab
   // reopens it on the session that now holds (TASK-1247).
   useFollowSessionSwitch();
+  // And to /login when the session runs out (src/lib/session-expiry.ts). The
+  // status poll reads any failure as the rebuild having stopped the server, so
+  // a session that ran out during a long update held this screen for ever. A
+  // stopped server is no sign-out: only the session gate's marked 401,
+  // confirmed by a probe, leaves.
+  useSessionExpiryGuard();
   return (
     <I18nProvider>
       <UpdatingScreen />

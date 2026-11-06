@@ -216,7 +216,7 @@ export default function ClawboxAiUsageCard() {
         </div>
       </section>
 
-      {/* The burst ceiling over it: smaller, because it is the short-term one. */}
+      {/* The short-term limit over it: a cap on how fast the weekly pool can be spent, not a reserve on top of it. */}
       {usage.burst && (
         <section className="mt-4 space-y-1.5" data-testid="clawai-usage-burst">
           <div className="flex items-baseline justify-between gap-3 text-xs">

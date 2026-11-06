@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { attachmentAcceptAttribute, partitionAttachments } from "@/lib/chat-attachments";
+import { attachmentAcceptAttribute, partitionAttachments, refusalReason } from "@/lib/chat-attachments";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 
 /**
  * What the composer accepts, decided by what the box can pass to the model.
  *
- * Two flags rather than one, because the honest answer on a Hermes box that can
- * see pictures is "pictures yes, documents no". A single canAttach would force
- * a choice between hiding a working feature and accepting a file that silently
- * never reaches the model — and both of those have shipped before.
+ * Two flags rather than one, because the two can differ: a Hermes box with no
+ * vision route reads documents (its file tools) but cannot look at a picture.
+ * A single canAttach would force a choice between hiding a working feature and
+ * accepting a file that silently never reaches the model — and both of those
+ * have shipped before. The pictures-only and nothing-at-all boxes below are
+ * the table's shapes, not an edition.
  */
 
 const file = (name: string, type: string) => new File([new Uint8Array([1])], name, { type });
@@ -24,6 +26,8 @@ const HERMES_WITH_IMAGES = capabilitiesFor("hermes", {
 });
 const HERMES_BARE = capabilitiesFor("hermes", { ...UNKNOWN_FACTS });
 const OPENCLAW = capabilitiesFor("openclaw", { ...UNKNOWN_FACTS, hasClawaiToken: true });
+const PICTURES_ONLY = { canAttachImages: true, canAttachDocuments: false };
+const NOTHING = { canAttachImages: false, canAttachDocuments: false };
 
 describe("partitionAttachments", () => {
   it("takes everything where everything can reach the model", () => {
@@ -33,13 +37,33 @@ describe("partitionAttachments", () => {
     expect(refused).toHaveLength(0);
   });
 
+  it("takes pictures and documents on a Hermes box that can see", () => {
+    // 2026-10-13 smoke test: the document was refused, the message went out
+    // without it, and the agent searched the disk for the file.
+    const { accepted, refused } = partitionAttachments(
+      [file("cat.png", "image/png"), file("notes.txt", "text/plain")],
+      HERMES_WITH_IMAGES,
+    );
+    expect(accepted.map((f) => f.name)).toEqual(["cat.png", "notes.txt"]);
+    expect(refused).toHaveLength(0);
+  });
+
+  it("takes the document and refuses the picture on a Hermes box with no vision route", () => {
+    const { accepted, refused } = partitionAttachments(
+      [file("cat.png", "image/png"), file("notes.txt", "text/plain")],
+      HERMES_BARE,
+    );
+    expect(accepted.map((f) => f.name)).toEqual(["notes.txt"]);
+    expect(refused.map((f) => f.name)).toEqual(["cat.png"]);
+    // …and says so in those words, not "pictures yes, documents no".
+    expect(refusalReason(refused[0])).toBe("noPictures");
+    expect(refusalReason(file("a.pdf", "application/pdf"))).toBe("imagesOnly");
+  });
+
   it("takes the picture and refuses the document where only pictures have a way in", () => {
-    // `hermes chat --image` is image-only, and the agent's own path-in-prompt
-    // resolver matches picture extensions by design — a PDF has no route to the
-    // model at all.
     const { accepted, refused } = partitionAttachments(
       [file("cat.png", "image/png"), file("invoice.pdf", "application/pdf")],
-      HERMES_WITH_IMAGES,
+      PICTURES_ONLY,
     );
     expect(accepted.map((f) => f.name)).toEqual(["cat.png"]);
     expect(refused.map((f) => f.name)).toEqual(["invoice.pdf"]);
@@ -48,7 +72,7 @@ describe("partitionAttachments", () => {
   it("refuses everything on a box whose agent takes no attachment at all", () => {
     const { accepted, refused } = partitionAttachments(
       [file("cat.png", "image/png"), file("notes.txt", "text/plain")],
-      HERMES_BARE,
+      NOTHING,
     );
     expect(accepted).toHaveLength(0);
     expect(refused).toHaveLength(2);
@@ -57,7 +81,7 @@ describe("partitionAttachments", () => {
   it("refuses a file with no MIME type where documents cannot get in", () => {
     // An unlabelled file is not a picture as far as this decision goes, and
     // guessing in the permissive direction is how one silently never arrives.
-    const { accepted } = partitionAttachments([file("mystery", "")], HERMES_WITH_IMAGES);
+    const { accepted } = partitionAttachments([file("mystery", "")], PICTURES_ONLY);
     expect(accepted).toHaveLength(0);
   });
 
@@ -65,7 +89,7 @@ describe("partitionAttachments", () => {
     // Nothing about this reaches the network: a document that got as far as the
     // box would be written to disk, counted against retention and named in a
     // turn nobody could read it from.
-    const { accepted, refused } = partitionAttachments([file("a.pdf", "application/pdf")], HERMES_WITH_IMAGES);
+    const { accepted, refused } = partitionAttachments([file("a.pdf", "application/pdf")], PICTURES_ONLY);
     expect(accepted).toEqual([]);
     expect(refused).toHaveLength(1);
   });
@@ -79,13 +103,13 @@ describe("attachmentAcceptAttribute", () => {
   });
 
   it("offers only pictures where only pictures work", () => {
-    const accept = attachmentAcceptAttribute(HERMES_WITH_IMAGES);
+    const accept = attachmentAcceptAttribute(PICTURES_ONLY);
     expect(accept).toBe("image/*");
   });
 
   it("offers nothing where nothing works", () => {
     // The button itself is hidden in this state; an empty filter is what the
     // attribute would mean if it were somehow rendered.
-    expect(attachmentAcceptAttribute(HERMES_BARE)).toBe("");
+    expect(attachmentAcceptAttribute(NOTHING)).toBe("");
   });
 });

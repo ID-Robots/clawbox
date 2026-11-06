@@ -64,6 +64,13 @@ export const DESKTOP_LAYERS = {
   mascot: 10_001,
   /** The mascot chat — ChatPopup's own value, recorded so others can be placed against it. */
   chat: 10_010,
+  /**
+   * Pop-out windows (PopoutWindow: a run's whole goal, the Create planner):
+   * real windows — dragged, resized, snapped, maximized — that open FROM an
+   * app or the chat and so must stand in front of both. They count up from
+   * here among themselves, below the overlays.
+   */
+  popout: 10_011,
   /** Modal surfaces that must cover the chat: the app launcher, the system tray. */
   overlay: 10_020,
   /** Top-right notice cards, the upload toast, the file-drop overlay. */

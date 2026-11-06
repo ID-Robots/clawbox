@@ -18,8 +18,16 @@ const {
   USERS_CONFIG_KEY,
   ownerUsername,
   parseUserRegistry,
-  sessionIdentityFromCookieHeader,
+  sessionFromCookieHeader,
 } = require("./scripts/session-cookie.js");
+const {
+  SESSION_EXPIRED_CLOSE_CODE,
+  SESSION_EXPIRED_CLOSE_REASON,
+  createUpgradeSessionWatch,
+  recheckMsFromEnv,
+} = require("./scripts/upgrade-session-watch.js");
+const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
+const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -42,24 +50,30 @@ const IS_DEV = process.env.NODE_ENV === "development";
 //
 //   /terminal-ws  → xterm/PTY WebSocket (scripts/terminal-server.mjs)
 //   /novnc-ws     → noVNC / websockify for the remote desktop app
+//   /user-chat-ws → the gateway, for a ClawBox user's OWN chat: always relayed
+//                   for a non-owner (see "A ClawBox user's chat" below)
 // `requireAuth` gates the raw single-service sockets (terminal PTY, noVNC) on a
 // valid ClawBox session cookie. WebSocket upgrades never pass through Next.js
 // middleware, so without this check any LAN client could reach the unauth PTY /
 // VNC services straight through the port-80 proxy (SEC-1). The gateway route
-// (default) is intentionally NOT gated here — it enforces its own auth token.
+// (the default, below) is gated the same way: the gateway's own token is not a
+// ClawBox session, and with only that check a chat kept working after the
+// session that opened the desktop had run out. Every gated socket is then
+// closed when its session ends (scripts/upgrade-session-watch.js).
 // `sanitizeClose` marks the one upstream that answers a code-less goodbye with
 // a status code no browser will accept — see createCloseFrameRewriter below.
 //
-// Multi-user ClawBox OS (TASK-1256): `ownerOnly` refuses a session of any
-// ClawBox user but the owner — the remote desktop IS the owner's screen. The
-// terminal is open to every signed-in user because it is scoped: `terminal`
-// marks the route that gets the per-boot TERMINAL_TOKEN (without it the PTY
-// server refuses the connection, so a local account cannot dial 127.0.0.1:3006
-// for the owner's shell) and, for a non-owner, the username the PTY server
-// starts the shell AS (scripts/terminal-server.mjs).
+// Multi-user ClawBox OS: every signed-in ClawBox user gets the owner's
+// desktop, the remote desktop included, so both sockets admit any of them.
+// `ownerOnly` stays supported for a route that ever needs it. The terminal is
+// scoped: `terminal` marks the route that gets the per-boot TERMINAL_TOKEN
+// (without it the PTY server refuses the connection, so a local account cannot
+// dial 127.0.0.1:3006 for the owner's shell) and, for a non-owner, the
+// username the PTY server starts the shell AS (scripts/terminal-server.mjs).
 const UPGRADE_ROUTES = [
   { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true, terminal: true },
-  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, ownerOnly: true, sanitizeClose: true },
+  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, sanitizeClose: true },
+  { prefix: USER_CHAT_WS_PATH, targetPort: GATEWAY_PORT, stripPrefix: true, requireAuth: true, gateway: true, userChat: true },
 ];
 
 // Headers this proxy alone may set on the way to the PTY server. Whatever a
@@ -86,63 +100,13 @@ function terminalHeadersFor(gate, identity) {
 // origin and carries no cookie — which is why, exactly as the proxy does,
 // the port's LISTENER must be the project's own (a process of this user
 // running from inside the project folder) before anything is forwarded.
-const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
-const APP_LISTENER_TTL_MS = 30_000;
-const appListenerVerdicts = new Map();
-function readJsonSync(file) {
-  try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
-}
-function isProxyablePort(port) {
-  return typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535;
-}
-function appListenerOwned(port, directory) {
-  const key = `${port}:${directory}`;
-  const cached = appListenerVerdicts.get(key);
-  if (cached && Date.now() - cached.at < (cached.owned ? APP_LISTENER_TTL_MS : 3000)) return cached.owned;
-  let owned = false;
-  try {
-    const out = require("child_process").execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
-    let real = directory;
-    try { real = fs.realpathSync(directory); } catch {}
-    // Only a row bound where 127.0.0.1 reaches it vouches for the port.
-    const reachable = out.split("\n").filter((row) => {
-      const local = row.trim().split(/\s+/)[3] || "";
-      const host = local.slice(0, local.lastIndexOf(":"));
-      return ["127.0.0.1", "0.0.0.0", "*", "[::]", "::", "[::1]"].includes(host);
-    }).join("\n");
-    for (const m of reachable.matchAll(/pid=(\d+)/g)) {
-      try {
-        const cwd = fs.readlinkSync(`/proc/${m[1]}/cwd`);
-        const rel = path.relative(real, cwd);
-        if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) { owned = true; break; }
-      } catch {}
-    }
-  } catch {
-    owned = false;
-  }
-  appListenerVerdicts.set(key, { owned, at: Date.now() });
-  return owned;
-}
+// The check itself lives in scripts/app-port.js, shared with the public app
+// links (scripts/public-app-links.js).
+const { resolveRegisteredApp } = require("./scripts/app-port.js");
 function resolveAppPort(reqUrl) {
   const m = /^\/apps\/([^/?]+)/.exec(reqUrl);
-  if (!m || !APP_ID_RE.test(m[1])) return null;
-  const id = m[1];
-  const root = process.env.CLAWBOX_ROOT || __dirname;
-  const meta = readJsonSync(path.join(root, "data", "webapps", id, "meta.json"));
-  if (!meta || !isProxyablePort(meta.port)) return null;
-  // The project folder: on the registration, or — for one that predates the
-  // field — the folder of that id under the owner's project folder or the
-  // code projects, the way src/lib/app-proxy.ts's projectFolderFor answers.
-  let directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : null;
-  if (!directory) {
-    const config = readJsonSync(path.join(root, "data", "config.json"));
-    const projects = config && typeof config.coding_agent_default_directory === "string" && path.isAbsolute(config.coding_agent_default_directory) ? config.coding_agent_default_directory : null;
-    for (const candidate of [...(projects ? [path.join(projects, id)] : []), path.join(root, "data", "code-projects", id)]) {
-      try { if (fs.statSync(candidate).isDirectory()) { directory = candidate; break; } } catch {}
-    }
-  }
-  if (!directory || !appListenerOwned(meta.port, directory)) return null;
-  return { port: meta.port, strip: meta.stripBasePath === true, id };
+  if (!m) return null;
+  return resolveRegisteredApp(process.env.CLAWBOX_ROOT || __dirname, m[1]);
 }
 
 function resolveUpgradeTarget(reqUrl) {
@@ -166,10 +130,12 @@ function resolveUpgradeTarget(reqUrl) {
         ownerOnly: !!r.ownerOnly,
         terminal: !!r.terminal,
         sanitizeClose: !!r.sanitizeClose,
+        gateway: !!r.gateway,
+        userChat: !!r.userChat,
       };
     }
   }
-  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
+  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: true, gateway: true };
 }
 
 // Current session generation and ClawBox users, read from data/config.json
@@ -198,11 +164,15 @@ function readSessionConfig() {
     const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;
-    const value = { gen, users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()) };
+    const value = {
+      gen,
+      users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()),
+      openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
+    };
     sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    const value = { gen: 0, users: new Map() };
+    const value = { gen: 0, users: new Map(), openclawShared: false };
     sessionConfigCache = { mtimeMs: -1, value };
     return value;
   }
@@ -211,12 +181,12 @@ function readSessionConfig() {
 // Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
 // src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
 // base64url payload carries { exp, gen, u?, sv? }) — and say WHO it speaks for
-// (scripts/session-cookie.js, TASK-1256). Mirrored in CJS because upgrades
-// bypass Next.js. Fails closed when the secret is absent.
-function upgradeSessionIdentity(req) {
+// (scripts/session-cookie.js, TASK-1256), and when it runs out. Mirrored in CJS
+// because upgrades bypass Next.js. Fails closed when the secret is absent.
+function upgradeSession(cookieHeader) {
   try {
     const { gen, users } = readSessionConfig();
-    return sessionIdentityFromCookieHeader(req.headers.cookie, {
+    return sessionFromCookieHeader(cookieHeader, {
       secret: process.env.SESSION_SECRET,
       sessionGen: gen,
       users,
@@ -233,10 +203,111 @@ function upgradeSessionIdentity(req) {
  */
 function authorizeUpgrade(gate, req) {
   if (!gate.requireAuth) return { ok: true, identity: null };
-  const identity = upgradeSessionIdentity(req);
+  const identity = upgradeSession(req.headers.cookie);
   if (!identity) return { ok: false, status: 401 };
   if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };
   return { ok: true, identity };
+}
+
+// ─── A gated socket outlives no session ───
+// Every socket the gate above admitted is re-judged on the same rule until it
+// closes: at its cookie's expiry and, for a revocation (a password change, a
+// removed ClawBox user), every few seconds. The browser then goes to /login
+// (src/lib/session-expiry.ts). CLAWBOX_WS_SESSION_RECHECK_MS exists for the
+// tests, which cannot wait the default out.
+const upgradeSessionWatch = createUpgradeSessionWatch({
+  verify: upgradeSession,
+  recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
+});
+
+// A non-owner's socket to the SHARED Control UI (see relayedChatUser) holds
+// for as long as the session AND the owner's sharing do: turning the switch
+// off closes it on the next recheck, as a revoked session would be.
+const sharedGatewayWatch = createUpgradeSessionWatch({
+  verify: (cookieHeader) => {
+    const session = upgradeSession(cookieHeader);
+    if (!session) return null;
+    return session.isOwner || readSessionConfig().openclawShared ? session : null;
+  },
+  recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
+});
+
+/** The watch an admitted socket is held to. */
+function sessionWatchFor(gate, identity) {
+  return gate.gateway && identity && !identity.isOwner ? sharedGatewayWatch : upgradeSessionWatch;
+}
+
+/**
+ * Watch a gated `ws` socket: end it with the session-expired close code, which
+ * the browser reads as "signed out", and drop it outright if the peer never
+ * answers the closing handshake. `onEnd` tears down what it is relayed to.
+ */
+function endWsWithSession(clientWs, req, identity, onEnd = () => {}, watcher = upgradeSessionWatch) {
+  if (!identity) return;
+  const unwatch = watcher.watch(req.headers.cookie, identity, () => {
+    // The browser's close first, so the code it reads is this one and not
+    // whatever the upstream's teardown would have closed it with.
+    try {
+      clientWs.close(SESSION_EXPIRED_CLOSE_CODE, SESSION_EXPIRED_CLOSE_REASON);
+    } catch {
+      // already closing
+    }
+    onEnd();
+    setTimeout(() => {
+      if (clientWs.readyState !== WebSocket.CLOSED) clientWs.terminate();
+    }, 2_000).unref();
+  });
+  clientWs.once("close", unwatch);
+}
+
+// ─── A ClawBox user's chat (not the owner's) ───
+// The owner's chat socket is piped to the gateway, which also checks its own
+// token. A cookie that names ANOTHER ClawBox user is different — their chat
+// must reach only their own sessions, and their browser is never given the
+// token — so that socket ends here and scripts/gateway-user-relay.js speaks to
+// the gateway for them.
+const OPENCLAW_CONFIG_PATH = `${
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || `${process.env.HOME || "/home/clawbox"}/.openclaw`
+}/openclaw.json`;
+const RELAY_IDENTITY_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", ".gateway-user-relay-device.json");
+let relayIdentity = null;
+const userChatWss = new WebSocket.Server({ noServer: true });
+
+/**
+ * The ClawBox user (never the owner) a gateway upgrade's session names, or null.
+ *
+ * Their own chat (`USER_CHAT_WS_PATH`, what ws-config hands them) is relayed
+ * always. The root path is the Control UI's, and is relayed too — unless the
+ * owner shares OpenClaw with every user (src/lib/non-owner-scope.ts): then the
+ * shared Control UI page carries the gateway token, and its socket is piped to
+ * the gateway exactly like the owner's, under `sharedGatewayWatch`.
+ */
+function relayedChatUser(gate, identity) {
+  if (!gate.gateway || !identity || identity.isOwner) return null;
+  if (!gate.userChat && readSessionConfig().openclawShared) return null;
+  return identity.username;
+}
+
+function relayUserChatUpgrade(req, socket, head, url, identity) {
+  userChatWss.handleUpgrade(req, socket, head, (clientWs) => {
+    if (!relayIdentity) relayIdentity = loadOrCreateRelayIdentity(RELAY_IDENTITY_PATH);
+    // The relay closes its gateway side when the browser's socket closes.
+    endWsWithSession(clientWs, req, identity);
+    relayUserChat({
+      clientWs,
+      username: identity.username,
+      token: readGatewayToken(OPENCLAW_CONFIG_PATH),
+      identity: relayIdentity,
+      connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
+        // Port-less to satisfy the gateway's strict origin allowlist, as the
+        // owner's pipe and the WSS proxy below send it.
+        headers: { origin: "http://127.0.0.1", host: `127.0.0.1:${GATEWAY_PORT}` },
+      }),
+      log: (message) => console.warn(`[user-chat-relay] ${message}`),
+    });
+  });
 }
 
 // An upgrade addressed to a name that is not this box's own (see
@@ -674,6 +745,9 @@ function attachUpgradeProxy(server) {
     if (!auth.ok) {
       return rejectUpgrade(socket, auth.status);
     }
+    if (relayedChatUser(gate, auth.identity)) {
+      return relayUserChatUpgrade(req, socket, head, url, auth.identity);
+    }
     const extraHeaders = terminalHeadersFor(gate, auth.identity);
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
       const hostHeader = `127.0.0.1:${targetPort}`;
@@ -706,6 +780,17 @@ function attachUpgradeProxy(server) {
     });
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
+    // A byte pipe has no frame boundary to put a close frame on, so a session
+    // that ends cuts both halves; the browser's reconnect then meets the 401s
+    // of the gate above and of /setup-api, and src/lib/session-expiry.ts
+    // takes it to /login.
+    if (auth.identity) {
+      const unwatch = sessionWatchFor(gate, auth.identity).watch(req.headers.cookie, auth.identity, () => {
+        upstream.destroy();
+        socket.destroy();
+      });
+      socket.once("close", unwatch);
+    }
   });
 }
 
@@ -745,6 +830,9 @@ function startHttpsServer(httpServer) {
       if (!auth.ok) {
         return rejectUpgrade(socket, auth.status);
       }
+      if (relayedChatUser(gate, auth.identity)) {
+        return relayUserChatUpgrade(req, socket, head, gate.url, auth.identity);
+      }
       wss.handleUpgrade(req, socket, head, (clientWs) => {
         const { targetPort, url } = gate;
         const upstreamUrl = `ws://127.0.0.1:${targetPort}${url}`;
@@ -756,6 +844,7 @@ function startHttpsServer(httpServer) {
             ...terminalHeadersFor(gate, auth.identity),
           },
         });
+        endWsWithSession(clientWs, req, auth.identity, () => upstream.terminate(), sessionWatchFor(gate, auth.identity));
 
         // Close clientWs if upstream fails before "open" — without these the
         // client would hang forever waiting for a relay that will never start.
@@ -1096,3 +1185,15 @@ require("./.next/standalone/server.js");
 // (scripts/process-title.js says why — a run's `pkill -f next-server` took
 // the box down on 2026-09-05).
 require("./scripts/process-title.js").guardProcessTitle();
+
+// Public app links (TASK-1478): one loopback listener and one quick tunnel per
+// app the owner published from the desktop, each serving that app and nothing
+// else. Best-effort: a failure here never takes the desktop down.
+try {
+  const publicLinks = require("./scripts/public-app-links.js").startPublicAppLinks({
+    root: process.env.CLAWBOX_ROOT || __dirname,
+  });
+  process.on("exit", () => publicLinks.stop());
+} catch (err) {
+  console.warn("[production-server] Public app links did not start:", err.message);
+}

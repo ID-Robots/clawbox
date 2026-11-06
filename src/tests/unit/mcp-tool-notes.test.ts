@@ -43,12 +43,14 @@ import { registerBrowserTools } from "../../../mcp/tools/browser";
 import { registerCodingTools } from "../../../mcp/tools/coding";
 import { registerCodingAgentTools, registerCodingTeamTools, registerTeamRunTools } from "../../../mcp/tools/coding-agent";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
+import { registerDocsTools } from "../../../mcp/tools/docs";
 import { registerEmailTools } from "../../../mcp/tools/email";
 import { registerHermesPluginTools } from "../../../mcp/tools/hermes-plugins";
 import { registerLocalAiTools } from "../../../mcp/tools/local-ai";
 import { registerMediaTools } from "../../../mcp/tools/media";
 import { registerMemoryTools } from "../../../mcp/tools/memory";
 import { registerOrientationTools } from "../../../mcp/tools/orientation";
+import { registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { registerSystemTools } from "../../../mcp/tools/system";
 import { saveEnv } from "../helpers/env";
@@ -113,9 +115,11 @@ function server(p: Posture): CaptureHarness {
   const c = ctx(p.edition, p.capable);
   try {
     registerOrientationTools(h.reg, c);
+    registerDocsTools(h.reg);
     registerSkillTools(h.reg);
     registerHermesPluginTools(h.reg);
     registerMemoryTools(h.reg);
+    registerPrimeRadiantTools(h.reg);
     registerAiTools(h.reg, c);
     registerLocalAiTools(h.reg);
     registerSystemTools(h.reg, c);
@@ -272,7 +276,6 @@ describe("the tool notes", () => {
       /output_mode "files_with_matches" first/,
       /old_text must match the file character for character/,
       /cannot open your media folder, so a path only mentioned in the task is never read/,
-      /this box cannot deploy, so the deploy and check stages are skipped/,
       /Set confirm only after a refusal AND the user's go-ahead/,
       /The typed text is never echoed back/,
     ]) {

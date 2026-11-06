@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   assignSlots,
+  slotAt,
   isDense,
   layoutIcons,
   layoutsEqual,
@@ -372,5 +373,19 @@ describe("layoutsEqual", () => {
     expect(layoutsEqual({ a: { row: 1, col: 2 } }, { a: { row: 2, col: 1 } })).toBe(false);
     expect(layoutsEqual({ a: { row: 0, col: 0 } }, {})).toBe(false);
     expect(layoutsEqual({}, { a: { row: 0, col: 0 } })).toBe(false);
+  });
+});
+
+describe("slotAt — the desktop's + tile", () => {
+  it("is the cell assignSlots gives the icon after the last one, in both flows", () => {
+    for (const geometry of [
+      { flow: "column" as const, cols: 4, rowsPerColumn: 3 },
+      { flow: "row" as const, cols: 4, rowsPerColumn: 3 },
+    ]) {
+      const ids = Array.from({ length: 8 }, (_, i) => `i${i}`);
+      const withTile = assignSlots([...ids, "tile"], geometry);
+      expect(slotAt(ids.length, geometry)).toEqual(withTile.tile);
+    }
+    expect(slotAt(0, { flow: "column", cols: 1, rowsPerColumn: 6 })).toEqual({ row: 0, col: 0 });
   });
 });

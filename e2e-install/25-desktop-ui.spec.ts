@@ -16,6 +16,7 @@
 import { test, expect } from "@playwright/test";
 import { BASE_URL } from "./helpers/container";
 import { getStatus } from "./helpers/setup-api";
+import { dismissWhatsNew, watchWhatsNew } from "./helpers/whats-new";
 
 const SETUP_PASSWORD = "clawbox-e2e-pass";
 
@@ -47,6 +48,7 @@ test.describe("desktop UI happy path", () => {
   });
 
   test("launcher opens and shows installed apps", async ({ page }) => {
+    const whatsNew = watchWhatsNew(page);
     await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
     if (page.url().includes("/login")) {
       await page.fill('input[type="password"]', SETUP_PASSWORD);
@@ -55,6 +57,8 @@ test.describe("desktop UI happy path", () => {
         timeout: 15_000,
       });
     }
+    // "What's new in 4.3" covers the desktop until it is closed (helpers/whats-new.ts).
+    await dismissWhatsNew(page, whatsNew);
     // Click the shelf launcher button. Selector mirrors what e2e/desktop-smoke
     // uses against the same component tree.
     // ChromeShelf renders a mobile + a desktop variant of the launcher
@@ -72,12 +76,14 @@ test.describe("desktop UI happy path", () => {
   });
 
   test("opening Files, Settings, and Terminal from the launcher renders each window", async ({ page }) => {
+    const whatsNew = watchWhatsNew(page);
     await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
     if (page.url().includes("/login")) {
       await page.fill('input[type="password"]', SETUP_PASSWORD);
       await page.click('button[type="submit"]');
       await page.waitForURL((url) => !url.pathname.startsWith("/login"));
     }
+    await dismissWhatsNew(page, whatsNew);
 
     // A prior install flow can leave its contextual chat prompt open above
     // the desktop. Close it through the visible control before exercising
@@ -112,12 +118,14 @@ test.describe("desktop UI happy path", () => {
   test("system tray opens and closes via the shelf power button", async ({
     page,
   }) => {
+    const whatsNew = watchWhatsNew(page);
     await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
     if (page.url().includes("/login")) {
       await page.fill('input[type="password"]', SETUP_PASSWORD);
       await page.click('button[type="submit"]');
       await page.waitForURL((url) => !url.pathname.startsWith("/login"));
     }
+    await dismissWhatsNew(page, whatsNew);
     const trayToggle = page
       .locator('[data-testid="shelf-power-button"]')
       .filter({ visible: true });

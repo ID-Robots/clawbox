@@ -174,6 +174,7 @@ describe("the ClawKeep backup scheduler", () => {
   function mockClawkeep(
     runBackup: ReturnType<typeof vi.fn>,
     snapshot: { schedule: ClawKeepSchedule; armedAtMs: number; unreadable: boolean },
+    backupRefusalFor: ReturnType<typeof vi.fn> = vi.fn(async () => null),
   ) {
     vi.doMock("@/lib/clawkeep", async () => {
       const actual = await vi.importActual<typeof import("@/lib/clawkeep")>("@/lib/clawkeep");
@@ -181,16 +182,87 @@ describe("the ClawKeep backup scheduler", () => {
         ...actual,
         runBackup,
         readScheduleSnapshot: vi.fn(async () => snapshot),
+        // Stubbed for the same reason: it reads state.json in the data dir.
+        backupRefusalFor,
       };
     });
   }
 
-  async function armWith(runBackup: ReturnType<typeof vi.fn>) {
-    mockClawkeep(runBackup, { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false });
+  async function armWith(
+    runBackup: ReturnType<typeof vi.fn>,
+    backupRefusalFor?: ReturnType<typeof vi.fn>,
+  ) {
+    mockClawkeep(
+      runBackup, { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false }, backupRefusalFor,
+    );
     const sched = await import("@/lib/clawkeep-scheduler");
     await sched.start();
     return sched;
   }
+
+  it("does not call a slot a failure when another backup already had the box", async () => {
+    // A "Back up now" started late in the evening is still uploading when the
+    // nightly slot fires. The daemon's run lock turns the second run away
+    // (exit 14) with nothing touched: the backup this slot wanted is running.
+    const runBackup = vi.fn(async () => ({
+      exitCode: 14,
+      stdout: "",
+      stderr: "another backup is already running on this device",
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const sched = await armWith(runBackup);
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+
+    expect(runBackup).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("skipped this slot"));
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("auto-backup failed"),
+      expect.anything(),
+    );
+    // Tomorrow's slot is armed as after any other run.
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+    warn.mockRestore();
+  });
+
+  it("logs what a refused backup needed, in the sizes the panel shows", async () => {
+    const runBackup = vi.fn(async () => ({ exitCode: 2, stdout: "", stderr: "quota full: …" }));
+    const refusal = vi.fn(async () => ({
+      kind: "quota_full",
+      atMs: Date.now(),
+      neededBytes: 1_288_490_189,
+      usedBytes: 5_046_586_573,
+      quotaBytes: 5_368_709_120,
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await armWith(runBackup, refusal);
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+
+    // Asked about THIS run: its exit code, and nothing recorded before it began.
+    expect(refusal).toHaveBeenCalledWith(2, new Date("2026-08-22T06:00:00").getTime());
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-backup failed"),
+      expect.stringMatching(/quota_full: This backup needs 1\.2 GB, but only 307 MB of the 5\.0 GB/),
+    );
+    warn.mockRestore();
+  });
+
+  it("arms the next slot without waiting to find out why this one failed", async () => {
+    // The reason is read from state.json; a read that hangs must not leave
+    // the box with no slot armed.
+    const runBackup = vi.fn(async () => ({ exitCode: 6, stdout: "", stderr: "" }));
+    const neverAnswers = vi.fn(() => new Promise<null>(() => {}));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const sched = await armWith(runBackup, neverAnswers);
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+
+    expect(runBackup).toHaveBeenCalledTimes(1);
+    expect(neverAnswers).toHaveBeenCalledTimes(1);
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+    warn.mockRestore();
+  });
 
   it("logs a scheduled backup the daemon failed, instead of letting it pass as done", async () => {
     // `clawkeepd` gone from PATH — a pipx/venv reinstall, or install.sh's pip
@@ -491,6 +563,8 @@ describe("the ClawKeep backup scheduler through a full account", () => {
         runBackup,
         readScheduleSnapshot: vi.fn(async () => opts.snapshot),
         releaseQuotaHoldIfCredentialsWork: release,
+        // Reads state.json in the data dir — not the developer's, in a test.
+        backupRefusalFor: vi.fn(async () => null),
       };
     });
     return { runBackup, release };

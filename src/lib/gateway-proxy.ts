@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { hasOwnerSession } from "./owner-session";
+import { hasOwnerSession, personSession } from "./owner-session";
+import { mayUseChatKey } from "./chat-scope";
+import { mayHaveGatewayToken } from "./openclaw-sharing";
 import fs from "fs/promises";
 import os from "os";
 import net from "net";
@@ -12,6 +14,7 @@ import {
   resolveOriginsPath,
 } from "./control-ui-origins";
 import { controlUiEmailDirectiveScript, controlUiLocale } from "./control-ui-email-directives";
+import { controlUiSessionGuardScript, injectAtHeadStart } from "./control-ui-session-guard";
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 const OPENCLAW_CONFIG_PATH = `${
@@ -236,6 +239,16 @@ export async function getOrGenerateGatewayToken(): Promise<string | null> {
 }
 
 /**
+ * The token a Control UI page may carry for this request: the owner's session,
+ * or another ClawBox user's while the owner shares OpenClaw
+ * (src/lib/openclaw-sharing.ts) — otherwise none at all.
+ */
+async function gatewayTokenFor(request: NextRequest): Promise<string> {
+  if (await hasOwnerSession(request)) return await getGatewayToken();
+  return (await mayHaveGatewayToken(await personSession(request))) ? await getGatewayToken() : "";
+}
+
+/**
  * Fetches the gateway SPA HTML and injects the ClawBox bar, the auth token and
  * the `EMAIL:` directive handling. Its one caller is the catch-all gateway
  * route (`src/app/[...gateway]/route.ts`), which reaches it only for a
@@ -245,7 +258,9 @@ export async function serveGatewayHTML(
   request: NextRequest
 ): Promise<NextResponse> {
   try {
-    // The token is injected ONLY for a caller who proved they are the owner.
+    // The token is injected ONLY for a caller who proved they are the owner —
+    // or, while the owner shares OpenClaw, another signed-in ClawBox user
+    // (`gatewayTokenFor`). A cookie is required either way.
     //
     // This page is the one place a gateway credential leaves the device, and
     // it used to be handed to anyone who could reach a path that landed here.
@@ -266,7 +281,7 @@ export async function serveGatewayHTML(
         cache: "no-store",
         signal: AbortSignal.timeout(3000),
       }),
-      hasOwnerSession(request).then((owner) => (owner ? getGatewayToken() : "")),
+      gatewayTokenFor(request),
     ]);
     if (!res.ok) {
       return redirectToSetup(request);
@@ -324,6 +339,10 @@ export async function serveGatewayHTML(
       /<body\b[^>]*>/i,
       (match) => `${match}${CLAWBOX_BAR}${wsScript}${emailDirectives}`,
     );
+    // A lapsed session takes this chat to /login like every other page of the
+    // box (src/lib/control-ui-session-guard.ts). First thing in <head>, ahead
+    // of the UI's own scripts, so the socket it opens is one the guard sees.
+    html = injectAtHeadStart(html, controlUiSessionGuardScript());
     return new NextResponse(html, {
       status: 200,
       headers: {
@@ -415,10 +434,12 @@ export function gatewayProxyHeaders(source: Headers): Headers {
 //     segment so no dot-segment, encoded separator or empty segment can point
 //     the credential at any other gateway endpoint;
 //   - the caller holds the OWNER's session (hasOwnerSession — the same check
-//     that guards the token in serveGatewayHTML). Middleware already refuses a
-//     caller with no session, and refuses a non-owner user (TASK-1256) the
-//     whole /api tree; this check stands on its own anyway, because this
-//     function owns the secret and must not depend on a gate upstream.
+//     that guards the token in serveGatewayHTML), or another ClawBox user's
+//     and the file is filed under one of their own chat sessions
+//     (`mayFetchChatMedia`). Middleware already refuses a caller with no
+//     session, and lets a non-owner user into no other part of the /api tree;
+//     this check stands on its own anyway, because this function owns the
+//     secret and must not depend on a gate upstream.
 // Every other /api path is proxied exactly as before, without a bearer.
 const CHAT_MEDIA_OUTGOING_PREFIX = "/api/chat/media/outgoing/";
 const CHAT_MEDIA_SEGMENT_RE = /^[A-Za-z0-9._~%:@-]+$/;
@@ -448,6 +469,34 @@ export function isChatMediaOutgoingPath(pathname: string): boolean {
 }
 
 /**
+ * The session a chat-media path is filed under — its first segment after the
+ * prefix, decoded (`agent%3Amain%3Amain` → `agent:main:main`) — or null.
+ */
+export function chatMediaSessionKey(pathname: string): string | null {
+  if (!isChatMediaOutgoingPath(pathname)) return null;
+  try {
+    return decodeURIComponent(pathname.slice(CHAT_MEDIA_OUTGOING_PREFIX.length).split("/")[0]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * May this request have the gateway's bearer attached to a chat-media read?
+ * The owner's browser, for any of the owner's conversations; another ClawBox
+ * user's, only for a file filed under one of THEIR sessions
+ * (src/lib/chat-scope.ts) — the pictures the agent sent in their own chat.
+ */
+async function mayFetchChatMedia(request: NextRequest): Promise<boolean> {
+  if (await hasOwnerSession(request)) return true;
+  const person = await personSession(request);
+  if (!person || person.isOwner) return false;
+  if (mayUseChatKey(person, chatMediaSessionKey(request.nextUrl.pathname))) return true;
+  // A shared Control UI lists every conversation, and its pictures with them.
+  return await mayHaveGatewayToken(person);
+}
+
+/**
  * Reverse-proxy one request to the OpenClaw gateway with client attribution
  * stripped. Path and query come from the request itself, so the caller does not
  * have to reassemble a catch-all segment.
@@ -466,7 +515,7 @@ export async function proxyGatewayRequest(request: NextRequest): Promise<NextRes
     // Never pass on a credential the browser chose: the owner's request gets
     // the gateway's own token, anyone else's gets none at all.
     upstreamHeaders.delete("authorization");
-    const token = (await hasOwnerSession(request)) ? await getGatewayToken() : "";
+    const token = (await mayFetchChatMedia(request)) ? await getGatewayToken() : "";
     if (token) upstreamHeaders.set("authorization", `Bearer ${token}`);
   }
 

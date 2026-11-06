@@ -8,8 +8,10 @@ schedule the next run.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import shutil
 import tempfile
 import threading
 import time
@@ -45,6 +47,10 @@ EXIT_ENCRYPTION_FAILED = 10  # openssl enc returned non-zero (corrupt openssl, d
 EXIT_ARCHIVE_BUSY = 11        # files kept changing through every bounded rebuild
 EXIT_ARCHIVE_DB_DAMAGED = 12  # a database failed the integrity gate; left untouched
 EXIT_ARCHIVE_CONFLICT = 13    # two sources claim one archive path, or a link out of it
+# Not a failed backup: another run on this box holds the run lock, so this one
+# left before it read or wrote anything. Its own code, because "it did not
+# work" (1) is also what a crash answers and the bridge must tell them apart.
+EXIT_ALREADY_RUNNING = 14
 EXIT_UNKNOWN = 99
 
 # Backup phase identifiers — kept in lockstep with `STEP_LABELS` in
@@ -58,6 +64,31 @@ STEP_CHECKING_STATS = "checking-stats"
 
 ARCHIVE_RACE_ATTEMPTS = 4
 ARCHIVE_RACE_DELAYS = (1.0, 5.0, 15.0)
+
+#: The lock one whole backup run holds, in the device data dir. Not
+#: `backup_guard.LOCK_NAME`: that one covers the archive build alone and is
+#: waited for; this one covers the run from its first state write to its last
+#: and is never waited for.
+RUN_LOCK_NAME = "backup-run.lock"
+
+# The listing the admission check decides on is tried this many times, this
+# far apart, before the run fails closed. By then the box has spent minutes to
+# hours building and encrypting the archive, so one failed LIST must not throw
+# that away; botocore's own retries (`s3.LIST_MAX_ATTEMPTS`) already sit inside
+# each attempt, so three spaced attempts ride out a link that drops for a
+# moment without holding a broken run open for long (ADMISSION_LIST_DEADLINE).
+ADMISSION_LIST_ATTEMPTS = 3
+ADMISSION_LIST_DELAYS = (5.0, 30.0)
+
+# A store that takes the connection and never answers a LIST must not hold the
+# run — and with it the run lock, so every "Back up now" and scheduled slot —
+# for long: one such LIST used to cost botocore's retries about 19 minutes, and
+# a run asked four times. So a usage recount may take this long, and the
+# admission check this long in all, its attempts and the waits between them,
+# before the listing counts as failed. Both leave room for one full
+# `s3.READ_TIMEOUT`, so a slow store that does answer is still counted.
+USAGE_RECOUNT_DEADLINE = 150.0
+ADMISSION_LIST_DEADLINE = 240.0
 
 
 def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Archive:
@@ -196,16 +227,219 @@ def _recompute_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats |
 
     Best-effort by design: a failed LIST leaves `st` and the caller's payload
     untouched, so a transient network error can't clobber the portal's
-    last-known usage with a zero. Callers persist `st` themselves.
+    last-known usage with a zero. One that has not ended within
+    USAGE_RECOUNT_DEADLINE has failed. Callers persist `st` themselves.
     """
     try:
-        cloud = s3.stats(creds)
+        cloud = s3.stats(creds, timeout=USAGE_RECOUNT_DEADLINE)
     except s3.S3Error as e:
         log.warning("cloud usage recompute failed (continuing): %s", e)
         return None
     st.last_cloud_bytes = cloud.cloud_bytes
     st.last_snapshot_count = cloud.snapshot_count
     return cloud
+
+
+def _human_bytes(n: int) -> str:
+    """`n` bytes the way the app prints them (`formatBytes` in
+    src/lib/format-bytes.ts): binary steps, one decimal below 100. For the
+    sentences an owner or the portal may read; exact counts go to the log."""
+    value = float(max(0, n))
+    units = ("B", "KB", "MB", "GB", "TB")
+    unit = 0
+    while value >= 1024 and unit < len(units) - 1:
+        value /= 1024
+        unit += 1
+    if unit == 0 or value >= 100:
+        return f"{value:.0f} {units[unit]}"
+    return f"{value:.1f} {units[unit]}"
+
+
+def _human_bytes_apart(a: int, b: int) -> tuple[str, str]:
+    """Two sizes one sentence sets against each other — "needs X but only Y is
+    free" — as figures that differ whenever the sizes do (`formatBytesApart` in
+    src/lib/format-bytes.ts, which the app's own sentences use).
+
+    Each is what `_human_bytes` prints, unless both round to the same figure
+    while being different amounts: 1.24 GB against 1.21 GB read "needs 1.2 GB,
+    but only 1.2 GB is free". Both then gain decimals, up to three, until they
+    part. Amounts closer than that keep the shared figure rather than fall
+    back to a byte count."""
+    first, second = _human_bytes(a), _human_bytes(b)
+    if first != second or max(a, 0) == max(b, 0):
+        return first, second
+    units = ("B", "KB", "MB", "GB", "TB")
+    unit, scale = 0, 1
+    while a / scale >= 1024 and unit < len(units) - 1:
+        scale *= 1024
+        unit += 1
+    for digits in (1, 2, 3):
+        x, y = (f"{n / scale:.{digits}f} {units[unit]}" for n in (a, b))
+        if x != y:
+            return x, y
+    return first, second
+
+
+def _admission_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats | None:
+    """What the prefix holds right now, for the admission check — or None when
+    that cannot be established.
+
+    Unlike the opening and closing recounts this one decides something: None
+    refuses the upload. So it is retried (ADMISSION_LIST_ATTEMPTS), and it
+    takes `s3.stats`' word for "complete": a listing that failed part-way or
+    stopped early is an error there, never a smaller total. All of it, waits
+    included, ends by ADMISSION_LIST_DEADLINE: each attempt gets what is left
+    of it, and a wait that would use the rest up is not started. A count that
+    succeeds is recorded on `st` like any other; a failed one leaves `st`
+    alone. Callers persist `st` themselves.
+    """
+    deadline = time.monotonic() + ADMISSION_LIST_DEADLINE
+    for attempt in range(ADMISSION_LIST_ATTEMPTS):
+        try:
+            cloud = s3.stats(creds, timeout=deadline - time.monotonic())
+        except s3.S3Error as e:
+            delay: float | None = None
+            if attempt + 1 < ADMISSION_LIST_ATTEMPTS:
+                delay = ADMISSION_LIST_DELAYS[attempt]
+                if delay >= deadline - time.monotonic():
+                    delay = None
+            log.warning(
+                "could not list cloud usage before the upload (attempt %d/%d)%s: %s",
+                attempt + 1,
+                ADMISSION_LIST_ATTEMPTS,
+                "" if delay is None else f"; trying again in {delay:.0f}s",
+                e,
+            )
+            if delay is None:
+                return None
+            time.sleep(delay)
+            continue
+        st.last_cloud_bytes = cloud.cloud_bytes
+        st.last_snapshot_count = cloud.snapshot_count
+        return cloud
+    return None
+
+
+def _clear_refusal(st: state.State) -> None:
+    """Forget the last run's refusal; this run has its own outcome to write."""
+    st.last_refusal = ""
+    st.last_refusal_at_ms = 0
+    st.last_refusal_needed_bytes = 0
+    st.last_refusal_used_bytes = 0
+    st.last_refusal_quota_bytes = 0
+
+
+def _note_refusal(st: state.State, kind: str, *, needed: int, used: int, quota: int) -> None:
+    """Record why this run would not upload, with the sizes it decided on, for
+    the app to put into words (`state.State.last_refusal`). Callers persist
+    `st` themselves."""
+    st.last_refusal = kind
+    st.last_refusal_at_ms = api.now_ms()
+    st.last_refusal_needed_bytes = max(0, int(needed))
+    st.last_refusal_used_bytes = max(0, int(used))
+    st.last_refusal_quota_bytes = max(0, int(quota))
+
+
+def _quota_refusal_message(needed: int, used: int, quota: int) -> str:
+    """The sentence for a backup that does not fit, in the three shapes the
+    remedy differs for. Sizes in readable units: the portal shows this text."""
+    kept = "Nothing was uploaded or removed"
+    if quota <= 0:
+        return (
+            f"quota full: the account has no cloud storage to back up into, so this "
+            f"backup ({_human_bytes(needed)} encrypted) was not uploaded. Check the plan "
+            f"in the portal, then retry. {kept}."
+        )
+    if needed > quota:
+        backup, plan = _human_bytes_apart(needed, quota)
+        return (
+            f"quota full: this backup is {backup} encrypted, larger than the "
+            f"account's whole storage ({plan}). Removing snapshots cannot "
+            f"make room for it; increase storage, then retry. {kept}."
+        )
+    backup, free = _human_bytes_apart(needed, max(0, quota - used))
+    return (
+        f"quota full: this backup needs {backup} encrypted, but only "
+        f"{free} of {_human_bytes(quota)} is free "
+        f"({_human_bytes(used)} used). Increase storage or review and remove unneeded "
+        f"snapshots, then retry. {kept}; retention runs only after a successful backup."
+    )
+
+
+#: When one failure incident — from the first failed run to the next one that
+#: succeeds — is told to the portal, which emails the owner "ClawKeep backup
+#: needs attention" for an `error` heartbeat: at once, then these long after the
+#: report before (1 day, 3 days, 7 days, then every 7 days). A box that fails
+#: the same way every night costs its owner one email, then a reminder or three,
+#: not one a night. Between those points the failure is logged and kept in
+#: state.json, the app shows it as always, and the portal keeps showing the
+#: failure it was told; the run that succeeds closes the incident.
+ALERT_BACKOFF_MS = (1 * 86_400_000, 3 * 86_400_000, 7 * 86_400_000)
+
+
+def _incident_quiet(st: state.State, now: int) -> bool:
+    """Is a failure incident open whose next report to the portal is not due?"""
+    return bool(st.alert_incident_since_ms) and now < st.alert_next_report_at_ms
+
+
+def _report_error(server: str, token: str, st: state.State, **kwargs: object) -> bool:
+    """The `error` heartbeat of a failed run, when its incident is due one.
+
+    Returns what `_stamp_heartbeat` takes: False only when a heartbeat was
+    posted and failed. A failure inside the quiet period posts nothing and
+    returns True — the portal already holds this incident's error — and a
+    heartbeat that did not land is not counted, so the next run reports it."""
+    now = api.now_ms()
+    if not st.alert_incident_since_ms:
+        st.alert_incident_since_ms = now
+        st.alert_reports = 0
+        st.alert_next_report_at_ms = 0
+    if _incident_quiet(st, now):
+        log.warning(
+            "backup failed again (%s); not reporting it to the portal yet: this failure incident "
+            "began %d s ago and was reported %d time(s), the next report is due in %d s",
+            kwargs.get("error", "error"), (now - st.alert_incident_since_ms) // 1000,
+            st.alert_reports, (st.alert_next_report_at_ms - now) // 1000,
+        )
+        return True
+    ok = _heartbeat_safe(server, token, status="error", **kwargs)
+    if ok:
+        st.alert_reports += 1
+        step = ALERT_BACKOFF_MS[min(st.alert_reports, len(ALERT_BACKOFF_MS)) - 1]
+        st.alert_next_report_at_ms = now + step
+    return ok
+
+
+def _close_incident(st: state.State) -> None:
+    """A run succeeded: the next failure is a new incident, reported at once."""
+    st.alert_incident_since_ms = 0
+    st.alert_reports = 0
+    st.alert_next_report_at_ms = 0
+
+
+#: What the staging disk keeps free while the archive is encrypted beside itself.
+ENCRYPT_DISK_RESERVE_BYTES = 256 * 1024 * 1024
+#: openssl's salted header and padding, generously.
+_ENCRYPT_OVERHEAD_BYTES = 64 * 1024
+
+
+def _encryption_room(archive_path: Path, size_bytes: int) -> tuple[int, int] | None:
+    """None when the staging disk can take the ciphertext of an archive this
+    big and keep its reserve; else (bytes needed, bytes free). A disk that
+    cannot be measured is not refused for it."""
+    try:
+        free = shutil.disk_usage(archive_path.parent).free
+    except OSError as e:
+        log.warning("could not measure the free disk beside %s: %s", archive_path, e)
+        return None
+    needed = size_bytes + _ENCRYPT_OVERHEAD_BYTES + ENCRYPT_DISK_RESERVE_BYTES
+    return None if free >= needed else (needed, free)
+
+
+def _run_lock_path() -> Path:
+    # A function of its own because `run_once` takes a `token` argument that
+    # hides the `token` module there.
+    return token.data_dir() / RUN_LOCK_NAME
 
 
 def _stamp_heartbeat(
@@ -314,6 +548,49 @@ def apply_retention(creds: api.Credentials, keep_last: int) -> list[str]:
 
 
 def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
+    """One backup run — or none, when another already has this data dir.
+
+    The whole run is one critical section: state.json, the heartbeats, the
+    admission check, the upload, retention. The scheduled run and a "Back up
+    now" share the data dir, so the second to start finds the lock held and
+    leaves with EXIT_ALREADY_RUNNING before it has read or written anything —
+    the active run's state and heartbeat stay its own.
+
+    The lock is a `flock` on RUN_LOCK_NAME, so it belongs to the process and
+    not to the file: a run that crashes or is killed lets go of it as it dies,
+    and the file it leaves behind holds nothing. The descriptor is not passed
+    to the archiver or to openssl, so a child that outlives a killed run does
+    not keep the lock either. Never waited for — a run that queued behind a
+    four-hour upload would only back the same box up twice.
+
+    A lock that cannot be taken AT ALL (the data dir is read-only, or the lock
+    file belongs to another user) starts nothing either: a run nothing keeps
+    from overlapping another is the very thing this exists to prevent.
+
+    This is one device's lock. Other devices on the account, and clients that
+    predate it, still need a server-side reservation.
+    """
+    lock_path = _run_lock_path()
+    with contextlib.ExitStack() as held:
+        try:
+            acquired = held.enter_context(backup_guard.exclusive(lock_path, wait=False))
+        except OSError as e:
+            log.error(
+                "could not take the backup lock %s (%s); no backup was started. Check that "
+                "the ClawKeep data directory is writable by this user.",
+                lock_path, e,
+            )
+            return EXIT_BACKUP_FAILED
+        if not acquired:
+            log.error(
+                "another backup is already running on this device; this one did not "
+                "start and changed nothing. Wait for it to finish, then retry.",
+            )
+            return EXIT_ALREADY_RUNNING
+        return _run_once_locked(cfg, token, label=label)
+
+
+def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> int:
     """One full backup cycle. Returns a process exit code.
 
     `label` optionally names the resulting snapshot — it's recorded in the
@@ -321,6 +598,11 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
     through from the UI's "Name this backup" field.
     """
     st = state.load()
+    # Whatever the last run was refused for, this run answers for itself: every
+    # branch below that saves `st` saves it without the old refusal, and the
+    # one branch that saves nothing else (a revoked pairing) saves that.
+    had_refusal = bool(st.last_refusal)
+    _clear_refusal(st)
 
     # Encryption gate — refuse to run if no passphrase is set. The user-
     # supplied passphrase is what makes backups opaque to the portal
@@ -329,8 +611,8 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
     # and prompts for a passphrase before retrying.
     if not passphrase.is_set():
         log.error("encryption passphrase not set — refusing to back up")
-        ok = _heartbeat_safe(
-            cfg.server, token, status="error",
+        ok = _report_error(
+            cfg.server, token, st,
             error="encryption passphrase not set on device",
         )
         # Use a distinct heartbeat status so the UI can distinguish
@@ -352,12 +634,17 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
     except ApiError as e:
         if e.kind == "auth":
             log.error("auth failed: %s — token may be revoked, run 'clawkeep pair' again", e)
-            # No portal exchange happened — don't heartbeat or stamp state.
+            # No portal exchange happened — don't heartbeat or stamp state. The
+            # last run's refusal is not this run's, though: left on disk, the
+            # app went on quoting the sizes of a backup that was not even
+            # attempted this time. Only that is written, and only if it was there.
+            if had_refusal:
+                state.save(st)
             return EXIT_AUTH_REVOKED
         msg_prefix = {"quota_full": "quota full", "tier": "tier", "server": "server"}.get(e.kind)
         prefixed = f"{msg_prefix}: {e}" if msg_prefix else str(e)
         log.error("%s: %s", e.kind, e)
-        ok = _heartbeat_safe(cfg.server, token, status="error", error=prefixed)
+        ok = _report_error(cfg.server, token, st, error=prefixed)
         _stamp_heartbeat(st, ok, "error")
         _note_credentials(st, e.kind)
         state.save(st)
@@ -379,13 +666,19 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
     # fail in openclaw, in openssl or in the upload, which is exactly the shape
     # of run a nearly-full account produces.
     opening = _recompute_usage(st, creds)
-    running_ok = _heartbeat_safe(
-        cfg.server,
-        token,
-        status="running",
-        cloud_bytes=opening.cloud_bytes if opening is not None else None,
-        snapshot_count=opening.snapshot_count if opening is not None else None,
-    )
+    if _incident_quiet(st, api.now_ms()):
+        # Not "running" either: were this run to fail too, its error would not
+        # be posted, and the portal would be left saying "running" for days.
+        # It hears from this run when the run succeeds, or when a report is due.
+        running_ok = True
+    else:
+        running_ok = _heartbeat_safe(
+            cfg.server,
+            token,
+            status="running",
+            cloud_bytes=opening.cloud_bytes if opening is not None else None,
+            snapshot_count=opening.snapshot_count if opening is not None else None,
+        )
     _stamp_heartbeat(st, running_ok, "running")
     _stamp_step(st, STEP_STARTING)
 
@@ -402,8 +695,8 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         except agent.ARCHIVE_ERRORS as e:
             which = agent.device_agent()
             log.error("%s backup create failed: %s", which, e)
-            ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=f"{which}: {e}"[:500],
+            ok = _report_error(
+                cfg.server, token, st, error=f"{which}: {e}"[:500],
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
@@ -435,6 +728,23 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         encrypted_path = archive.path.with_suffix(
             archive.path.suffix + crypto.ENCRYPTED_SUFFIX,
         )
+        # The ciphertext is written BESIDE the plaintext, so for a moment the
+        # staging disk holds the archive twice. That disk is the box's own —
+        # its databases and logs are on it — and an encryption that runs it to
+        # the last byte costs the gateway its writes before it fails. Measured
+        # first, with a reserve left over; a refusal says how much is missing.
+        room = _encryption_room(archive.path, archive.size_bytes)
+        if room is not None:
+            needed, free = room
+            message = (
+                f"encrypt: not enough free disk beside the archive to encrypt it: needs "
+                f"{_human_bytes(needed)}, {_human_bytes(free)} free"
+            )
+            log.error("%s (staging %s)", message, archive.path.parent)
+            ok = _report_error(cfg.server, token, st, error=message)
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_ENCRYPTION_FAILED
         try:
             crypto.encrypt_file(
                 plaintext_path=archive.path,
@@ -443,8 +753,8 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             )
         except crypto.CryptoError as e:
             log.error("clawkeep encryption failed: %s", e)
-            ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=f"encrypt: {e}"[:500],
+            ok = _report_error(
+                cfg.server, token, st, error=f"encrypt: {e}"[:500],
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
@@ -464,7 +774,69 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         try:
             encrypted_size = encrypted_path.stat().st_size
         except OSError as e:
-            raise s3.S3Error(f"could not stat encrypted archive: {e}") from e
+            # openssl said it wrote the file and it cannot be measured: there
+            # is nothing to admit or upload. Ended like any failed encryption
+            # rather than raised, so the run still says so — an exception from
+            # here left state.json reading "encrypting" with no heartbeat.
+            log.error("could not stat the encrypted archive: %s", e)
+            ok = _report_error(
+                cfg.server, token, st,
+                error="encrypt: the encrypted archive could not be read back",
+            )
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_ENCRYPTION_FAILED
+
+        # Admission uses the actual ciphertext size and a fresh remote listing,
+        # not the portal's possibly stale heartbeat counter. Never assume that
+        # post-upload retention will free space: doing so would exceed quota
+        # temporarily, and pruning first could destroy the last good backup.
+        # This is not a cross-device reservation; simultaneous writers still
+        # require an atomic server-side admission protocol.
+        #
+        # Both refusals below record themselves in `last_refusal` and leave
+        # `quota_full_since_ms` alone. That field says the PORTAL is refusing
+        # credentials, and the bridge ends a quota pause the first time they
+        # mint again — which, for a refusal made here, is immediately: a pause
+        # recorded from this branch was undone within the hour while the
+        # backup still did not fit.
+        admission = _admission_usage(st, creds)
+        if admission is None:
+            message = (
+                "quota check unavailable: could not verify cloud usage within "
+                f"{ADMISSION_LIST_ATTEMPTS} attempts and {ADMISSION_LIST_DEADLINE:.0f}s, so "
+                f"this backup ({_human_bytes(encrypted_size)} encrypted) was not uploaded. "
+                "Nothing was uploaded or removed. Check connectivity and retry."
+            )
+            log.error(message)
+            ok = _report_error(cfg.server, token, st, error=message)
+            _stamp_heartbeat(st, ok, "error")
+            _note_refusal(
+                st, state.REFUSAL_USAGE_UNVERIFIED,
+                needed=encrypted_size, used=0, quota=creds.quotaBytes,
+            )
+            state.save(st)
+            return EXIT_NETWORK
+        if admission.cloud_bytes + encrypted_size > creds.quotaBytes:
+            message = _quota_refusal_message(
+                encrypted_size, admission.cloud_bytes, creds.quotaBytes,
+            )
+            log.error(
+                "%s (needs %d bytes; %d of %d bytes used)",
+                message, encrypted_size, admission.cloud_bytes, creds.quotaBytes,
+            )
+            ok = _report_error(
+                cfg.server, token, st, error=message,
+                cloud_bytes=admission.cloud_bytes,
+                snapshot_count=admission.snapshot_count,
+            )
+            _stamp_heartbeat(st, ok, "error")
+            _note_refusal(
+                st, state.REFUSAL_QUOTA_FULL,
+                needed=encrypted_size, used=admission.cloud_bytes, quota=creds.quotaBytes,
+            )
+            state.save(st)
+            return EXIT_QUOTA_FULL
 
         _stamp_step(st, STEP_UPLOADING)
         # Seed live upload-progress fields so the UI immediately switches from
@@ -526,7 +898,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             st.upload_bytes_total = 0
             st.upload_bytes_done = 0
             st.upload_started_at_ms = 0
-            ok = _heartbeat_safe(cfg.server, token, status="error", error=f"upload: {e}"[:500])
+            ok = _report_error(cfg.server, token, st, error=f"upload: {e}"[:500])
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
             return EXIT_UPLOAD
@@ -585,6 +957,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         # list-objects can't show "0 B" in the UI.
         _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
         st.last_backup_at_ms = now
+        _close_incident(st)
         state.save(st)
 
         log.info(
@@ -648,6 +1021,26 @@ def run_idle(cfg: Config, token: str) -> int:
     except Exception as e:  # noqa: BLE001 — best effort, logged
         log.warning("could not put back what an interrupted backup set aside: %s", e)
 
+    # Under the run's own lock, never beside a run: the tick reads state.json,
+    # spends up to minutes minting credentials and recounting, then writes it
+    # back — a run that ended in between had its error, its refusal and its
+    # incident record overwritten by the tick's stale copy. A run in progress
+    # heartbeats for itself, so the tick has nothing to add and leaves.
+    with contextlib.ExitStack() as held:
+        try:
+            acquired = held.enter_context(backup_guard.exclusive(_run_lock_path(), wait=False))
+        except OSError as e:
+            # A lock that cannot be taken at all starts no backup either; the
+            # heartbeat is still owed, as it always was.
+            log.warning("idle tick without the backup lock (%s): %s", _run_lock_path(), e)
+            acquired = True
+        if not acquired:
+            log.info("a backup is running; it reports for itself, skipping idle")
+            return EXIT_OK
+        return _run_idle_locked(cfg, token)
+
+
+def _run_idle_locked(cfg: Config, token: str) -> int:
     st = state.load()
     interval_ms = cfg.heartbeat.idle_interval_hours * 3600 * 1000
     now = api.now_ms()

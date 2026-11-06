@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasValidSession } from "@/lib/route-auth";
 import { listSecrets, SecretStoreError } from "@/lib/project-secrets";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 export const dynamic = "force-dynamic";
 
@@ -20,12 +21,12 @@ export const dynamic = "force-dynamic";
  * no verb anywhere that does — see the store's header.
  *
  * The MCP bearer is ADMITTED here, which is the whole point, so `hasValidSession`
- * (cookie OR bearer) is the right gate and `hasOwnerSession` would be the wrong
+ * (cookie OR bearer) is the right gate and `hasPersonSession` would be the wrong
  * one. It is read-only, so it carries no origin check: nothing here changes.
  */
 export async function GET(request: Request) {
   if (!(await hasValidSession(request))) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
   }
   try {
     const secrets = await listSecrets();
@@ -33,8 +34,10 @@ export async function GET(request: Request) {
       // `inject` and `readable` travel with each name because both change what
       // a run will actually find: an un-ticked entry is stored and not handed
       // over, and an unreadable one cannot be handed over at all. An agent told
-      // only the name would promise a credential that never arrives.
-      names: secrets.map((s) => ({ name: s.name, scope: s.scope, inject: s.inject, readable: s.readable })),
+      // only the name would promise a credential that never arrives. For the
+      // same reason a copy past its expiry, or a one-run copy its run already
+      // has, reads as not given: ticked, and still reaching no new run.
+      names: secrets.map((s) => ({ name: s.name, scope: s.scope, inject: s.inject && s.expired !== true, readable: s.readable })),
     });
   } catch (err) {
     if (err instanceof SecretStoreError) {

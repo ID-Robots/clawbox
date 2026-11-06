@@ -147,6 +147,11 @@ export type KeyVerdict = "ok" | "rejected" | "unreachable";
  * portal. Only a definite 401/403 — Anthropic saying the credential is no
  * good — stops the save, because storing one of those buys a run that fails
  * minutes later with a message the owner cannot act on.
+ *
+ * Said in Anthropic's own words: its API answers every refusal as JSON. A 403
+ * page from a proxy or a CDN in its place says nothing about the key — and the
+ * account pool asks this same question to decide whether to take a key out
+ * (probeAccountCredential), so a block page must not read as a refusal there.
  */
 export async function verifyAnthropicKey(key: string): Promise<KeyVerdict> {
   try {
@@ -158,10 +163,19 @@ export async function verifyAnthropicKey(key: string): Promise<KeyVerdict> {
       },
       signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
     });
-    if (res.status === 401 || res.status === 403) return "rejected";
+    if (res.status === 401 || res.status === 403) return await answeredInJson(res) ? "rejected" : "unreachable";
     if (!res.ok) return "unreachable";
     return "ok";
   } catch {
     return "unreachable";
+  }
+}
+
+async function answeredInJson(res: Response): Promise<boolean> {
+  try {
+    JSON.parse(await res.text());
+    return true;
+  } catch {
+    return false;
   }
 }

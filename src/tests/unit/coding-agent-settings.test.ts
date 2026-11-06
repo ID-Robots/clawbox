@@ -37,6 +37,7 @@ import {
   buildRunEnv,
   CODING_AGENT_EFFORT_CONFIG_KEY,
   DEFAULT_EFFORT,
+  OFFERED_EFFORT_LEVELS,
   EFFORT_LEVELS,
   getEffort,
   setEffort,
@@ -55,14 +56,20 @@ describe("effort", () => {
     // `claude --effort bogus` names these five and ignores anything else;
     // ultracode is the CLI's xhigh-plus-workflows mode on top of them.
     expect([...EFFORT_LEVELS]).toEqual(["low", "medium", "high", "xhigh", "max", "ultracode"]);
-    expect(DEFAULT_EFFORT).toBe("ultracode");
+    // xhigh since TASK-1749: ultracode's standing fan-out multiplied every
+    // run's tokens; it stays on offer, never the default.
+    expect(DEFAULT_EFFORT).toBe("xhigh");
+    expect(OFFERED_EFFORT_LEVELS).toContain("ultracode");
   });
 
-  it("defaults to ultracode when unset, and when the stored value is junk", async () => {
-    expect(await getEffort()).toBe("ultracode");
+  it("defaults to xhigh when unset, and when the stored value is junk", async () => {
+    expect(await getEffort()).toBe("xhigh");
     configGet.mockResolvedValue("turbo");
-    expect(await getEffort()).toBe("ultracode");
+    expect(await getEffort()).toBe("xhigh");
     configGet.mockResolvedValue(7);
+    expect(await getEffort()).toBe("xhigh");
+    // An owner who chose ultracode keeps it.
+    configGet.mockResolvedValue("ultracode");
     expect(await getEffort()).toBe("ultracode");
   });
 
@@ -108,42 +115,41 @@ describe("effort", () => {
 
 
 describe("steps and tokens", () => {
-  it("defaults to the shipped step count and accepts a new one", async () => {
+  it("gives a writing run the safety net, and offers no setter for it", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(await lib.getMaxTurns()).toBe(lib.DEFAULT_MAX_TURNS);
-    // The number itself, so a change to the default is a deliberate edit here too.
-    expect(lib.DEFAULT_MAX_TURNS).toBe(400);
-    expect(await lib.setMaxTurns(500)).toBe(500);
-    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_TURNS_CONFIG_KEY, 500);
-  });
-
-  it("refuses a step count outside the range the CLI can use", async () => {
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.setMaxTurns(1)).rejects.toBeInstanceOf(lib.CodingAgentError);
-    await expect(lib.setMaxTurns(999_999)).rejects.toBeInstanceOf(lib.CodingAgentError);
-    await expect(lib.setMaxTurns("many" as unknown as number)).rejects.toBeInstanceOf(lib.CodingAgentError);
+    // The number itself, so a change to the net is a deliberate edit here
+    // too. 2,000 (SCA3) is a SAFETY NET, not a setting: the control left the
+    // panel and the route, and the figure is the one a runaway cannot pass
+    // rather than the one a task should fit under — the longest legitimate
+    // run on this box was 383 turns, which the measured 200 of TASK-1749
+    // would have failed. It equals MAX_MAX_TURNS, so a stored value can
+    // only lower it.
+    expect(lib.DEFAULT_MAX_TURNS).toBe(2000);
+    expect(lib.DEFAULT_MAX_TURNS).toBe(lib.MAX_MAX_TURNS);
+    expect("setMaxTurns" in lib).toBe(false);
     expect(configSet).not.toHaveBeenCalled();
   });
 
-  it("clamps a stored value rather than handing the CLI something it rejects", async () => {
+  it("keeps a reading role under its own cap of 100", async () => {
+    const { roleMaxTurns } = await import("@/lib/coding-role-models");
     const lib = await import("@/lib/coding-agent");
+    expect(roleMaxTurns("worker", lib.DEFAULT_MAX_TURNS)).toBe(2000);
+    expect(roleMaxTurns("planner", lib.DEFAULT_MAX_TURNS)).toBe(100);
+    expect(roleMaxTurns("reviewer", lib.DEFAULT_MAX_TURNS)).toBe(100);
+  });
+
+  it("honours a stored ceiling from before SCA3, clamped to what the CLI accepts", async () => {
+    // A box that set `coding_agent_max_turns` while the control existed keeps
+    // its value on read (Start over clears it: CODING_AGENT_RESET_KEYS).
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.CODING_AGENT_RESET_KEYS).toContain(lib.CODING_AGENT_TURNS_CONFIG_KEY);
+    configGet.mockResolvedValue(300);
+    expect(await lib.getMaxTurns()).toBe(300);
     configGet.mockResolvedValue(50_000);
     expect(await lib.getMaxTurns()).toBe(lib.MAX_MAX_TURNS);
     configGet.mockResolvedValue(1);
     expect(await lib.getMaxTurns()).toBe(lib.MIN_MAX_TURNS);
-  });
-
-  it("has no token ceiling unless the owner sets one", async () => {
-    const lib = await import("@/lib/coding-agent");
-    expect(await lib.getTokenLimit()).toBeNull();
-    expect(await lib.setTokenLimit(250_000)).toBe(250_000);
-    expect(await lib.setTokenLimit(null)).toBeNull();
-    expect(configSet).toHaveBeenLastCalledWith(lib.CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
-  });
-
-  it("refuses a ceiling so low every run would die on its first turn", async () => {
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.setTokenLimit(100)).rejects.toBeInstanceOf(lib.CodingAgentError);
   });
 
   it("puts the owner's step count on the command line, and no price flag", async () => {
@@ -163,18 +169,20 @@ describe("what a run is told about the shell", () => {
     // IS shipped (BASH_KILL_DENYLIST) is what the brief names now.
     const lib = await import("@/lib/coding-agent");
     expect(lib.HEADLESS_BRIEF).not.toMatch(/ONE command per Bash call/i);
-    expect(lib.HEADLESS_BRIEF).toMatch(/You may chain commands with && or ;, pipe, redirect/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/End anything you started by its PID: pkill, killall and fuser are refused/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Bash may chain, pipe and background/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/end what you started by PID \(pkill, killall and fuser are refused\)/);
   });
 
   it("hands a merge the task asked for to GitHub's auto-merge — never into main, over hold, or on a draft", async () => {
     // Measured on ClawBox's own repository: green pull requests waited ten to
-    // sixteen hours for a merge. Every writing run hears this, whatever its
-    // review shape; a read-only run opens nothing and hears none of it.
+    // sixteen hours for a merge. Every writing run with a pull request in
+    // sight hears this, whatever its review shape; a run with none in sight,
+    // and a read-only run, which opens nothing, hear none of it.
     const lib = await import("@/lib/coding-agent");
-    for (const brief of [lib.HEADLESS_BRIEF, lib.headlessBrief({ reviewedSeparately: true })]) {
+    for (const brief of [lib.headlessBrief({ reviewedSeparately: false, pullRequest: true }), lib.headlessBrief({ reviewedSeparately: true, pullRequest: true })]) {
       expect(brief).toContain(lib.PR_AUTO_MERGE_BRIEF);
     }
+    expect(lib.HEADLESS_BRIEF).not.toContain(lib.PR_AUTO_MERGE_BRIEF);
     expect(lib.PR_AUTO_MERGE_BRIEF).toContain("`gh pr merge <number> --auto --merge`");
     expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/wants it merged/);
     expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/Never do that for a pull request into main or one labelled hold or do-not-merge/);
@@ -189,16 +197,19 @@ describe("what a run is told about the shell", () => {
     // ("no defects") the pass then re-derived with Bash in hand. One diff,
     // one review — the helper sentence is swapped for the reason.
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/before your final report, send the reviewer over your changes/);
-    expect(lib.HEADLESS_BRIEF).not.toContain("{{REVIEWER_CLAUSE}}");
+    expect(lib.HEADLESS_BRIEF).toContain(lib.leanHelpersBrief(false));
+    expect(lib.HEADLESS_BRIEF).toMatch(/send the reviewer exactly once/);
     const reviewed = lib.headlessBrief({ reviewedSeparately: true });
-    expect(reviewed).toMatch(/your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper/);
-    expect(reviewed).not.toMatch(/before your final report, send the reviewer/);
-    expect(reviewed).not.toContain("{{REVIEWER_CLAUSE}}");
-    // The explorer and tester steps stay whatever the review shape is — the
-    // comment above the sentence records what softer wording did.
-    expect(reviewed).toMatch(/send the explorer to map it/);
-    expect(reviewed).toMatch(/send the tester to run whatever check exists/);
+    expect(reviewed).toContain(lib.leanHelpersBrief(true));
+    expect(reviewed).toMatch(/Do not send the reviewer: a separate review on this device reads your diff/);
+    expect(reviewed).not.toMatch(/send the reviewer exactly once/);
+    // The shell-first checks and the explorer rule stay whatever the review
+    // shape is — the comment above leanHelpersBrief records why.
+    for (const brief of [lib.HEADLESS_BRIEF, reviewed]) {
+      expect(brief).toMatch(/Run the project's tests and builds yourself in your shell/);
+      expect(brief).toMatch(/Use the explorer only for a codebase too large to read directly/);
+      expect(brief).toMatch(/Helpers never edit/);
+    }
     expect(lib.headlessBrief({ reviewedSeparately: false })).toBe(lib.HEADLESS_BRIEF);
 
     const brief = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
@@ -210,12 +221,13 @@ describe("what a run is told about the shell", () => {
   it("tells a run whose pull request the box will watch to open it as a draft, and nobody else", async () => {
     // CodeRabbit reviews a pull request once, when it becomes ready, and the
     // watcher readies it once the checks pass. A draft nothing watches would
-    // never be readied, so only the auto-PR run hears this.
+    // never be readied, so only the auto-PR run hears this — and, with a pull
+    // request in sight, the auto-merge sentence with it.
     const lib = await import("@/lib/coding-agent");
     const brief = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
     expect(lib.PR_DRAFT_BRIEF).toContain("gh pr create --draft");
     expect(lib.PR_DRAFT_BRIEF).toMatch(/Do not mark it ready, ask for a review or merge it yourself/);
-    expect(brief(lib.buildRunArgs({ draftPullRequests: true }))).toBe(`${lib.HEADLESS_BRIEF} ${lib.PR_DRAFT_BRIEF}`);
+    expect(brief(lib.buildRunArgs({ draftPullRequests: true }))).toBe(`${lib.headlessBrief({ reviewedSeparately: false, pullRequest: true })} ${lib.PR_DRAFT_BRIEF}`);
     expect(brief(lib.buildRunArgs({}))).not.toContain(lib.PR_DRAFT_BRIEF);
     expect(brief(lib.buildRunArgs({ draftPullRequests: true, readOnly: true }))).not.toContain(lib.PR_DRAFT_BRIEF);
   });
@@ -227,41 +239,30 @@ describe("what a run is told about the shell", () => {
     // with nothing on disk. m-04's assumptions section came from the bench
     // folder's NAME, not from anything the brief asked for.
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/The one exception is your own evidence folder \(CLAWBOX_RUN_ARTIFACTS_DIR\), which lives under data\//);
-    expect(lib.HEADLESS_BRIEF).toMatch(/The folders beside yours under the project root are the owner's other projects: never list, search or read them/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/Do the parts you are sure of and that are inside this folder FIRST/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/try that step once with Edit or Write — never through Bash — so the device's refusal is on the record/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/every assumption you made where the task left a choice open — name the convention or default you picked and why/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/its data\/ folder, your run record and session files are off limits, except your evidence folder \(\$CLAWBOX_RUN_ARTIFACTS_DIR\)/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Folders beside yours are the owner's other projects: never list, search or read them/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Make the in-folder edits you are sure of FIRST/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/try it once with Edit or Write, never Bash, then carry on/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/every assumption you made where the task left a choice open, and why/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/Decide the shape once and do not re-argue whether the ultracode reminder applies/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/a Workflow is for a fan-out of many, never for a folder of two files/);
   });
 
-  it("tells the run to fix obviously garbled copy rather than ship it", async () => {
-    // Seen on a real run: the brief carried scraped artifacts — a step timed
-    // "260 sec" and one labelled "3 instant" — and the run reproduced them
-    // verbatim onto a marketing page. Faithful, and wrong: nobody wants
-    // nonsense strings shipped because the task had a paste error.
-    const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/copy-paste artifacts/i);
-    expect(lib.HEADLESS_BRIEF).toMatch(/note it in your final report/i);
-  });
-
   // Bench run run-g6vwqr9y: the Edit on an outside path was denied, so the
   // run made the same change with `sed -i` through Bash and reported success.
-  // The brief now names that move and forbids it; this pins the sentence.
+  // The brief names that move and forbids it; this pins the sentence.
   it("tells the run a denial is a decision, not a puzzle for Bash", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect(lib.HEADLESS_BRIEF).toMatch(/denied file action is a DECISION/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/A refused Read, Write or Edit is a decision/);
     // Bench cycle 1 (2026-09-05): finish after ONE verification pass, ship
     // exactly the files named, never search the disk for a missing one.
-    expect(lib.HEADLESS_BRIEF).toMatch(/Finish decisively: once the work is done and ONE verification pass/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/Do not review verified work a second time/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/produce exactly those — no extra assets, pictures, notes or scripts/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/never search the disk for it/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Finish decisively: once ONE verification pass/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/exactly the files the task names, nothing beside them/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/never search the disk/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/a task of one to three files needs no workflow at all/);
     expect(lib.ULTRACODE_BRIEF).toMatch(/at most ONE/);
     expect(lib.HEADLESS_BRIEF).toMatch(/no sed, tee, redirection or scripts through Bash/);
-    expect(lib.HEADLESS_BRIEF).toMatch(/report plainly which part was refused/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/report it undone/);
   });
 
   it("allows the read-only git queries a real run reached for", async () => {
@@ -302,14 +303,26 @@ describe("the effort picker", () => {
 });
 
 describe("the folder the device proposes", () => {
-  it("suggests ~/Projects, and says so in the status", async () => {
+  it("has ~/Projects in force until the owner chooses, and says so in the status", async () => {
     configGetAll.mockResolvedValue({});
     const lib = await import("@/lib/coding-agent");
     const status = await lib.getCodingAgentStatus();
     expect(status.suggestedDirectory).toBe(lib.suggestedDefaultDirectory());
     expect(status.suggestedDirectory.endsWith("/Projects")).toBe(true);
-    // A suggestion, not a default in force: nothing is chosen until saved.
-    expect(status.defaultDirectory).toBeNull();
+    // A default in force, not only a suggestion: a fresh or factory-reset box
+    // installs a Store server app without anyone opening these settings, and
+    // Settings shows the folder that is actually used.
+    expect(status.defaultDirectory).toBe(status.suggestedDirectory);
+  });
+
+  it("keeps the folder the owner chose over the default", async () => {
+    configGetAll.mockResolvedValue({ coding_agent_default_directory: "/srv/work" });
+    configGet.mockImplementation(async (k: string) => (k === "coding_agent_default_directory" ? "/srv/work" : undefined));
+    const lib = await import("@/lib/coding-agent");
+    expect((await lib.getCodingAgentStatus()).defaultDirectory).toBe("/srv/work");
+    expect(await lib.getDefaultDirectory()).toBe("/srv/work");
+    expect(await lib.getChosenDirectory()).toBe("/srv/work");
+    expect(await lib.ensureProjectFolder()).toBe("/srv/work");
   });
 
   it("creates the folder when the owner saves one inside their home", async () => {
@@ -380,6 +393,19 @@ describe("the folder the device proposes", () => {
       fs.rmSync(home, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the switch is ON by default (TASK-1639)", () => {
+  it("is on when the key was never written, off only on an explicit false", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.codingAgentEnabledFrom(undefined)).toBe(true);
+    expect(lib.codingAgentEnabledFrom(true)).toBe(true);
+    expect(lib.codingAgentEnabledFrom(false)).toBe(false);
+    configGetAll.mockResolvedValue({});
+    expect((await lib.getCodingAgentStatus()).enabled).toBe(true);
+    configGetAll.mockResolvedValue({ coding_agent_enabled: false });
+    expect((await lib.getCodingAgentStatus()).enabled).toBe(false);
   });
 });
 
@@ -572,11 +598,27 @@ describe("working in a folder the owner already has", () => {
     }
   });
 
-  it("says so plainly when there is no default to resolve against", async () => {
+  it("resolves a bare name against ~/Projects when the owner never chose a folder", async () => {
     configGet.mockResolvedValue(undefined);
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.resolveWorkingDirectory({ directory: "some-folder" }))
-      .rejects.toThrow(/absolute path, or a folder name/i);
+    const home = fsSync.mkdtempSync(pathMod.join(osMod.tmpdir(), "bare-name-home-"));
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const lib = await import("@/lib/coding-agent");
+      const app = pathMod.join(home, "Projects", "my-app");
+      await expect(lib.resolveWorkingDirectory({ directory: "my-app" })).rejects.toThrow(/does not exist/i);
+      fsSync.mkdirSync(app, { recursive: true });
+      expect((await lib.resolveWorkingDirectory({ directory: "my-app" })).directory).toBe(fsSync.realpathSync(app));
+      // The default is where things go, not a new fence: a box that never
+      // chose a folder keeps working in any other folder of its home.
+      const elsewhere = pathMod.join(home, "elsewhere");
+      fsSync.mkdirSync(elsewhere);
+      expect((await lib.resolveWorkingDirectory({ directory: elsewhere })).directory).toBe(fsSync.realpathSync(elsewhere));
+    } finally {
+      if (prev === undefined) delete process.env.HOME;
+      else process.env.HOME = prev;
+      fsSync.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("takes only an absolute path for the default folder itself", async () => {
@@ -682,6 +724,46 @@ describe("the commit author the box signs the owner's work as", () => {
     const lib = await import("@/lib/coding-agent");
     expect(lib.CODING_AGENT_RESET_KEYS).toContain(lib.CODING_AGENT_GIT_NAME_CONFIG_KEY);
     expect(lib.CODING_AGENT_RESET_KEYS).toContain(lib.CODING_AGENT_GIT_EMAIL_CONFIG_KEY);
+  });
+});
+
+describe("the knobs SCA C3 took off the settings page", () => {
+  // The review rounds, the attempts at a deliverable, the extended history's
+  // N and the second media switch are gone from the status (and the route):
+  // a run gets the constants the code always fell back to. The config keys
+  // still READ — an older box's stored value still applies — stay on the
+  // reset list, where Start over puts them back to the default. The attempt
+  // budget and the token ceiling (SCA A2) are read by nothing, so their keys
+  // are off the list too.
+  it("are no longer on the status, which carries one media switch instead", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus() as unknown as Record<string, unknown>;
+    // The extended history's N itself went with its mode (SCA2 C1); the token ceiling went in SCA A2.
+    for (const gone of ["reviewRounds", "minReviewRounds", "maxReviewRounds", "completionAttempts", "minCompletionAttempts", "maxCompletionAttempts", "historyLimits", "historyLimit", "generateImages", "generateAudio", "tokenLimit", "minTokenLimit"]) {
+      expect(status[gone], gone).toBeUndefined();
+    }
+    expect(status.generateMedia).toBe(true);
+    expect(status.historyRetention).toBe("standard");
+  });
+
+  it("read as one switch that is on only when both keys are", async () => {
+    const lib = await import("@/lib/coding-agent");
+    configGetAll.mockResolvedValue({ [lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY]: false });
+    expect((await lib.getCodingAgentStatus()).generateMedia).toBe(false);
+    configGetAll.mockResolvedValue({ [lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]: false });
+    expect((await lib.getCodingAgentStatus()).generateMedia).toBe(false);
+  });
+
+  it("keep their keys on the reset list, since the code still reads them", async () => {
+    const lib = await import("@/lib/coding-agent");
+    for (const key of [lib.CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, lib.CODING_AGENT_GEN_IMAGES_CONFIG_KEY, lib.CODING_AGENT_GEN_AUDIO_CONFIG_KEY]) {
+      expect(lib.CODING_AGENT_RESET_KEYS).toContain(key);
+    }
+    // Read by nothing since SCA A2 (attempts, token ceiling) and SCA2 C1 (the
+    // extended history's N, cleared by the one-time rewrite of a retired mode).
+    for (const dead of ["coding_agent_completion_attempts", "coding_agent_token_limit", "coding_agent_history_limit"]) {
+      expect(lib.CODING_AGENT_RESET_KEYS).not.toContain(dead);
+    }
   });
 });
 

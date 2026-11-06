@@ -108,6 +108,27 @@ export interface ErrorRule {
   code: ToolErrorCode;
   message: string;
   next: string;
+  /**
+   * Add the route's own sentence (its JSON `error`) to `message`. For a
+   * refusal whose generic wording hides WHICH thing is in the way — "a run is
+   * already in progress" when the route named the run that holds the slot or
+   * the session being resumed.
+   */
+  withRouteDetail?: boolean;
+}
+
+/** The route's own `{ "error": "..." }` sentence, one line and bounded; null when there is none. */
+export function routeErrorSentence(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (typeof parsed?.error !== "string") return null;
+    const line = parsed.error.replace(/\s+/g, " ").trim();
+    // A bare code word ("busy") is not a sentence the caller can act on.
+    if (!line.includes(" ")) return null;
+    return line.length > 300 ? `${line.slice(0, 299)}…` : line;
+  } catch {
+    return null;
+  }
 }
 
 /** Apply the caller's rules to an ApiError; returns null when none matched. */
@@ -116,7 +137,8 @@ export function matchRule(err: ApiError, rules: ErrorRule[] | undefined): ToolEr
   for (const rule of rules) {
     if (rule.status !== undefined && rule.status !== err.status) continue;
     if (rule.match && !rule.match.test(err.body)) continue;
-    return new ToolError(rule.code, rule.message, rule.next);
+    const detail = rule.withRouteDetail ? routeErrorSentence(err.body) : null;
+    return new ToolError(rule.code, detail && detail !== rule.message ? `${rule.message} ${detail}` : rule.message, rule.next);
   }
   return null;
 }

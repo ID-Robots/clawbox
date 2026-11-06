@@ -13,6 +13,11 @@ vi.mock("child_process", () => ({
 
 vi.mock("fs/promises", () => ({
   default: {
+    // Whether the ClawBox AI provider plugin is on disk
+    // (`deepseekPluginOnDisk`). Not there unless a test says so — the box the
+    // TASK-1302 cases describe — which also makes a ClawBox AI save one of the
+    // few that still restart the gateway (TASK-1535).
+    access: vi.fn(),
     readFile: vi.fn(),
     writeFile: vi.fn(),
     rename: vi.fn(),
@@ -27,9 +32,10 @@ vi.mock("fs/promises", () => ({
 const readSetupGateFacts = vi.fn<() => { setupComplete: boolean; passwordConfigured: boolean }>();
 
 // PARTIAL mock — only the setup-gate read is replaceable. The configure route
-// asks it whether the first-run wizard is still driving the box, which decides
-// whether step 9 waits for the gateway to bind; everything else in route-auth
-// (session checks other modules in this graph import) keeps its real behaviour.
+// no longer asks it (since TASK-1535 step 9 never waits for a restarted
+// gateway to bind, wizard or not); it stays replaceable so a case can pin
+// either shape of box. Everything else in route-auth (session checks other
+// modules in this graph import) keeps its real behaviour.
 vi.mock("@/lib/route-auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
   return { ...actual, readSetupGateFacts: () => readSetupGateFacts() };
@@ -48,6 +54,9 @@ vi.mock("@/lib/config-store", () => ({
   // this file goes on passing over a gate that never ran.
   get: vi.fn(async () => undefined),
   set: vi.fn(async () => {}),
+  // Where Settings' background save keeps its task record (TASK-2148): the
+  // test root the vitest config points CLAWBOX_ROOT at.
+  resolveConfigRoot: () => process.env.CLAWBOX_ROOT || "/tmp",
 }));
 
 vi.mock("@/lib/clawkeep", () => ({
@@ -127,7 +136,41 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({
   GatewayRpcError: class GatewayRpcError extends Error {},
 }));
 
-vi.mock("@/lib/openclaw-config", () => ({
+// Every key paste runs unless a test says the store already holds the key
+// (TASK-1535) — the predicate itself is `openclaw-api-key-paste.test.ts`'s.
+vi.mock("@/lib/openclaw-api-key-paste", () => ({ apiKeyPasteChangesNothing: vi.fn(() => false) }));
+
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
+// Settings' background save (TASK-2148) reads the provider's row back once it
+// is done; the route itself uses only this module's pure helpers.
+vi.mock("@/lib/provider-status", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/provider-status")>()),
+  readProviderStatus: vi.fn(async () => ({
+    harness: "openclaw",
+    providers: [{ id: "anthropic", label: "Anthropic", state: "connected", isDefault: false, enabled: true, section: "ai" }],
+    defaultProvider: null,
+    unrunnable: [],
+    degraded: false,
+  })),
+}));
+vi.mock("@/lib/openclaw-config", async () => ({
+  ...(await import("./config-write-passthrough")).configWritePassthrough,
+  // Spies over the passthrough, for "one openclaw.json write per save" below:
+  // where the route opens its transaction, commits it, and flushes it.
+  withConfigWriteScope: vi.fn(async <T>(body: () => Promise<T>): Promise<T> => body()),
+  beginConfigWriteTransaction: vi.fn((label: string) => ({
+    label,
+    isOpen: false,
+    pending: 0,
+    committedAs: null as string | null,
+    commit: vi.fn(async () => {}),
+    flush: vi.fn(async () => {}),
+    abandon: vi.fn(),
+  })),
+  flushConfigWrites: vi.fn(async () => {}),
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   // Pure helper — mirror the real implementation (unit-tested in
   // openclaw-config.test.ts) so the configure route computes a real reserve.
@@ -190,6 +233,9 @@ vi.mock("@/lib/llamacpp", () => ({
   // Real impl defaults to `getLlamaCppContextWindow()` when the env var is unset.
   getLlamaCppMaxTokens: vi.fn().mockReturnValue(131072),
   getLlamaCppProxyBaseUrl: vi.fn().mockReturnValue(LLAMACPP_PROXY_BASE_URL),
+  // The real declaration: the row a 2026.10+ core gets (src/lib/llamacpp.ts).
+  LLAMACPP_REASONING_COMPAT: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+  llamaCppThinkingDefaultOp: (ref: string) => [`agents.defaults.models[${JSON.stringify(ref)}].params.thinking`, "off"],
 }));
 
 vi.mock("@/lib/local-ai-runtime", () => ({
@@ -210,6 +256,17 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 // generation is stated rather than inherited from wherever the suite runs.
 vi.mock("@/lib/openclaw-core-generation", () => ({
   installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+  installedOpenclawCoreAtLeast: vi.fn(async () => true),
+}));
+
+// The gateway's own auth store, which a Claude sign-in reads back after a
+// COMPLETED doctor and rewrites when the migration kept what was there. Never
+// the real module in a route test: what the store holds is each case's to say.
+// Unseeded on purpose — every case that leaves the doctor mock at `undefined`
+// must never reach it, and one that does by accident fails on the first read.
+vi.mock("@/lib/openclaw-auth-store", () => ({
+  readGatewayAuthProfile: vi.fn(),
+  putGatewayOAuthProfile: vi.fn(),
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({
@@ -222,7 +279,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, getKnown, setMany } from "@/lib/config-store";
+import { getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   setPrimaryModelWithoutCatalogValidation,
@@ -230,13 +287,24 @@ import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway
   spawnOpenclawCli,
   setProviderPlugins,
   GatewayNotReadyError,
+  beginConfigWriteTransaction,
+  flushConfigWrites,
+  withConfigWriteScope,
 } from "@/lib/openclaw-config";
+import { apiKeyPasteChangesNothing } from "@/lib/openclaw-api-key-paste";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
+import {
+  putGatewayOAuthProfile,
+  readGatewayAuthProfile,
+  type GatewayAuthProfileRead,
+  type GatewayOAuthBundle,
+} from "@/lib/openclaw-auth-store";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -316,6 +384,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
+    mockFs.access.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();
@@ -447,6 +516,86 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
   });
 
+  // Settings asks for its save as a background task of the box (TASK-2148):
+  // the same save, answered 202 at once, its ending the task's.
+  describe("background: true", () => {
+    async function settled(taskId: string) {
+      const { getBackgroundTask } = await import("@/lib/background-tasks");
+      await vi.waitFor(() => expect(getBackgroundTask(taskId)?.state).not.toBe("running"));
+      return getBackgroundTask(taskId)!;
+    }
+
+    beforeEach(async () => {
+      (await import("@/lib/background-tasks")).resetBackgroundTasksForTests();
+    });
+
+    it("runs the save as the box's provider sign-in task: 202 at once, the route's own answer at its end", async () => {
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }));
+      expect(res.status).toBe(202);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        started: true,
+        task: { kind: "provider-sign-in", group: "provider-auth", meta: { subject: "anthropic", action: "sign-in" } },
+      });
+      const task = await settled(body.taskId);
+      expect(task.state).toBe("succeeded");
+      expect(task.result).toMatchObject({ success: true, gatewayRestarting: false, verified: true });
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ ai_model_configured: true, ai_model_provider: "anthropic" }));
+    });
+
+    it("ends the task failed with the route's own sentence and status when the save is refused", async () => {
+      const res = await configurePost(jsonRequest({ provider: "unknown-provider", apiKey: "test", background: true }));
+      expect(res.status).toBe(202);
+      const task = await settled((await res.json()).taskId);
+      expect(task.state).toBe("failed");
+      expect(task.error).toContain("Unknown provider");
+      expect(task.result).toMatchObject({ httpStatus: 400 });
+    });
+
+    it("answers a second save of the same provider with the task already running", async () => {
+      let release!: () => void;
+      mockSetMany.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+      const first = await (await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }))).json();
+      const again = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }));
+      expect(again.status).toBe(202);
+      expect(await again.json()).toMatchObject({ taskId: first.taskId, started: false });
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      release();
+      expect((await settled(first.taskId)).state).toBe("succeeded");
+    });
+
+    it("refuses a different save of the SAME provider while one runs, rather than reporting the first as its own", async () => {
+      let release!: () => void;
+      mockSetMany.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+      const first = await (await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }))).json();
+      const other = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-another-key", background: true }));
+      expect(other.status).toBe(409);
+      expect(await other.json()).toMatchObject({ code: "provider_change_running", taskId: first.taskId });
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      release();
+      await settled(first.taskId);
+    });
+
+    it("refuses a save of another provider while one runs", async () => {
+      let release!: () => void;
+      mockSetMany.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+      const first = await (await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test-key", background: true }))).json();
+      const other = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key", background: true }));
+      expect(other.status).toBe(409);
+      expect(await other.json()).toMatchObject({ code: "provider_change_running", taskId: first.taskId });
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      release();
+      await settled(first.taskId);
+    });
+
+    it("saves an on-device model in the request, as before — it is no sign-in", async () => {
+      const res = await configurePost(jsonRequest({ provider: "ollama", apiKey: "llama3.2:3b", authMode: "local", background: true }));
+      expect(res.status).not.toBe(202);
+      const { listBackgroundTasks } = await import("@/lib/background-tasks");
+      expect(listBackgroundTasks({ group: "provider-auth" }).filter((task) => task.meta?.subject === "ollama")).toEqual([]);
+    });
+  });
+
   // The one thing this file DOES assert about the out-of-band refresh (see the
   // mock's note above): that step 8c COUNTS the change server-side. It runs one
   // statement after the plugin is switched on and the credential written, i.e.
@@ -504,6 +653,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       { provider: "openai", apiKey: "sk-openai-test" },
       { provider: "google", apiKey: "AIza-test" },
       { provider: "openrouter", apiKey: "sk-or-test" },
+      { provider: "xai", apiKey: "xai-test" },
     ];
 
     it.each(coldStarts)(
@@ -568,6 +718,87 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.error).toBe("ClawBox AI token is required");
   });
 
+  it("restarts for the provider plugin a first ClawBox AI save installs, and only then", async () => {
+    // The cloud defaults follow the restarted gateway on a detached chain; it
+    // is waited out here so it cannot land in the next case's mock.
+    const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
+    vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
+    try {
+      const hot = await import("@/lib/gateway-hot-apply");
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).gatewayRestarting).toBe(true);
+      // Plugin code arriving on disk is the one plugin change still restarted for.
+      expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+      expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+      expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+      await vi.waitFor(() => expect(apply).toHaveBeenCalled());
+    } finally {
+      vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
+  it("applies the ClawBox AI cloud defaults only once a restarted gateway answers", async () => {
+    // The applier writes openclaw.json; landing that under a gateway that is
+    // still starting makes it exit EX_CONFIG and stay down. The save is
+    // answered before the restart is over (TASK-1535), so the applier follows
+    // the restarted gateway answering, not the answer.
+    const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
+    vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
+    let back!: (value: boolean) => void;
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockResolvedValueOnce({
+      back: new Promise<boolean>((resolve) => { back = resolve; }),
+    });
+    try {
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).gatewayRestarting).toBe(true);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(apply).not.toHaveBeenCalled();
+      back(true);
+      await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(expect.objectContaining({ trigger: "link" })));
+    } finally {
+      vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
+  it("applies the ClawBox AI cloud defaults at once when the gateway took the save live", async () => {
+    const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
+    vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
+    // The provider plugin is already on disk, so nothing is installed and the
+    // save applies live.
+    mockFs.access.mockResolvedValue(undefined);
+    try {
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(expect.objectContaining({ trigger: "link" })));
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
+  it("hands an older core no contextTokens, which its strict schema may refuse", async () => {
+    // The cap is verified on 2026.10; the boot script adds it once the core is.
+    const { installedOpenclawCoreAtLeast } = await import("@/lib/openclaw-core-generation");
+    vi.mocked(installedOpenclawCoreAtLeast).mockResolvedValueOnce(false);
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+    expect(res.status).toBe(200);
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
+    const chatTiers = providerDef.models.filter(
+      (m: { id: string }) => m.id === "deepseek-v4-flash" || m.id === "deepseek-v4-pro",
+    );
+    expect(chatTiers).toHaveLength(2);
+    for (const model of chatTiers) {
+      expect(model.contextWindow).toBe(1_000_000);
+      expect(model.contextTokens).toBeUndefined();
+    }
+  });
+
   it("uses a user-supplied ClawBox AI token when provided", async () => {
     const res = await configurePost(jsonRequest({
       provider: "clawai",
@@ -606,7 +837,13 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(model.contextWindow).toBe(1_000_000);
       expect(model.maxTokens).toBe(393_216);
       expect(model.input).toEqual(["text"]);
+      // The active-input cap: compaction follows it, so a long session is
+      // trimmed near 128K instead of growing toward the full 1M window.
+      expect(model.contextTokens).toBe(131_072);
     }
+    // The vision entry is a one-shot describe, never a session: no cap.
+    const vision = providerDef.models.find((m: { id: string }) => m.id === "deepseek-v4-flash-vision-exp");
+    expect(vision?.contextTokens).toBeUndefined();
 
     expect(mockSetMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -986,6 +1223,112 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
   });
 
+  describe("the on-device model's thinking: per request, off unless asked", () => {
+    const THINKING_DEFAULT = 'agents.defaults.models["llamacpp/gemma4-e2b-it-q4_0"].params.thinking';
+    const localRow = () => {
+      const call = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.llamacpp");
+      return JSON.parse(call?.value || "{}").models?.[0] ?? {};
+    };
+
+    it("declares binary reasoning on the row and makes off the model's own default", async () => {
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      expect(localRow()).toMatchObject({
+        reasoning: true,
+        compat: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+      });
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+        .map((call) => call[0] as string[][])
+        .find((ops) => ops.some((op) => op[0] === "models.providers.llamacpp"));
+      expect(batch).toContainEqual([THINKING_DEFAULT, "off"]);
+    });
+
+    it("keeps a default the owner already chose", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({
+        agents: { defaults: { models: { "llamacpp/gemma4-e2b-it-q4_0": { params: { thinking: "high" } } } } },
+      } as never);
+      await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), THINKING_DEFAULT)).toBeUndefined();
+      expect(localRow().reasoning).toBe(true);
+    });
+
+    it("hands an older core the row it knows, and no default for a level it cannot take", async () => {
+      const { installedOpenclawCoreAtLeast } = await import("@/lib/openclaw-core-generation");
+      vi.mocked(installedOpenclawCoreAtLeast).mockResolvedValue(false);
+      try {
+        await configurePost(jsonRequest({ provider: "llamacpp" }));
+        expect(localRow().reasoning).toBe(false);
+        expect(localRow().compat).toBeUndefined();
+        expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), THINKING_DEFAULT)).toBeUndefined();
+      } finally {
+        vi.mocked(installedOpenclawCoreAtLeast).mockResolvedValue(true);
+      }
+    });
+  });
+
+  describe("OpenClaw's Tool Search follows the on-device primary", () => {
+    it("turns it off in the batch that makes the on-device model the primary", async () => {
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+        .map((call) => call[0] as string[][])
+        .find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      expect(batch).toContainEqual(["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(batch).toContainEqual(["tools.toolSearch", JSON.stringify({ enabled: false }), "--json"]);
+      expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalledWith("tools.toolSearch");
+    });
+
+    it("gives a cloud primary OpenClaw's default back when ClawBox had turned it off", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({ tools: { toolSearch: { enabled: false } } });
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith("tools.toolSearch");
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "tools.toolSearch")).toBeUndefined();
+    });
+
+    it("writes nothing for a local save that leaves the cloud primary in place", async () => {
+      mockGetAll.mockResolvedValue({ ai_model_configured: true, ai_model_provider: "openai" });
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", scope: "local" }));
+
+      expect(res.status).toBe(200);
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "tools.toolSearch")).toBeUndefined();
+      expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalledWith("tools.toolSearch");
+    });
+  });
+
+  describe("OpenClaw's compaction runs on the cloud model while the primary is on the box (TASK-2127)", () => {
+    const COMPACTION = "agents.defaults.compaction.model";
+
+    it("names the cloud primary being left in the batch that makes the on-device model the primary", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } } });
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls
+        .map((call) => call[0] as string[][])
+        .find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      expect(batch).toContainEqual(["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(batch).toContainEqual([COMPACTION, "deepseek/deepseek-v4-flash"]);
+    });
+
+    it("writes nothing for a local save that leaves the cloud primary in place", async () => {
+      mockGetAll.mockResolvedValue({ ai_model_configured: true, ai_model_provider: "openai" });
+      mockReadOpenClawConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "openai/gpt-5.5" } } } });
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", scope: "local" }));
+
+      expect(res.status).toBe(200);
+      expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), COMPACTION)).toBeUndefined();
+      expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalledWith(COMPACTION);
+    });
+  });
+
   it("keeps local AI as fallback-only when a primary AI provider is already configured", async () => {
     mockGetAll.mockResolvedValue({
       ai_model_configured: true,
@@ -1013,14 +1356,19 @@ describe("POST /setup-api/ai-models/configure", () => {
    * that window, hit "Gateway not reachable (ECONNREFUSED)" and be swallowed
    * as non-fatal — on a box (2026-09-18) the main session kept its ClawBox AI
    * pin while the box default became GPT-6 Astra. The sweep must follow the
-   * restart AND the gateway answering RPC, and a sweep that still could not
-   * run must be said in the answer.
+   * restart AND the gateway answering RPC. Since TASK-1535 the answer goes out
+   * once the restart is underway, and the sweep follows the gateway on its own.
    */
   it("re-points open chats only after the gateway it stopped answers again", async () => {
     const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    const hot = await import("@/lib/gateway-hot-apply");
     const order: string[] = [];
     vi.mocked(restartGateway).mockImplementation(async () => { order.push("restart"); });
     vi.mocked(waitForGatewayRpcReady).mockImplementation(async () => { order.push("ready"); return true; });
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockImplementationOnce(async () => {
+      await restartGateway({ awaitReady: false });
+      return { back: waitForGatewayRpcReady(60_000) };
+    });
     mockApplyModelOverrideToAllAgentSessions.mockImplementation(async () => { order.push("sweep"); return { filesUpdated: 1, sessionsUpdated: 1, refused: [] } as unknown as Awaited<ReturnType<typeof applyModelOverrideToAllAgentSessions>>; });
 
     const res = await configurePost(jsonRequest({
@@ -1034,19 +1382,23 @@ describe("POST /setup-api/ai-models/configure", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
+    expect(body.gatewayRestarting).toBe(true);
     expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+    // The credential migration stopped the gateway: no hot apply is waited for.
+    expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(order).toEqual(["restart", "ready", "sweep"]));
     expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "openai", modelId: "gpt-5.5", source: "user" }),
     );
-    expect(order).toEqual(["restart", "ready", "sweep"]);
   });
 
-  it("still owes the deferred sweep its attempt and its warning when the port never came back", async () => {
-    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
-    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
-    vi.mocked(restartGateway).mockRejectedValueOnce(new GatewayNotReadyError());
-    let resolveReady: (ready: boolean) => void = () => {};
-    vi.mocked(waitForGatewayRpcReady).mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveReady = resolve; }));
+  it("answers before the restarted gateway is back, and sweeps once it answers", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    let back: (ready: boolean) => void = () => {};
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockImplementationOnce(async () => {
+      await restartGateway({ awaitReady: false });
+      return { back: new Promise<boolean>((resolve) => { back = resolve; }) };
+    });
 
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -1058,20 +1410,23 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     const body = await res.json();
 
-    // Answered at once, with both facts: the gateway is not back, and the open
-    // chats keep their model for now.
+    // Answered at once, and not as a failure: nothing failed, the gateway is
+    // coming back. The page follows it (`gatewayRestarting`).
     expect(res.status).toBe(200);
-    expect(body.warning).toMatch(/has not finished restarting/);
-    expect(body.warning).toMatch(/keeps its previous model/);
+    expect(body.gatewayRestarting).toBe(true);
+    expect(body.warning ?? "").not.toMatch(/has not finished restarting|keeps its previous model/);
     expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
     // …and the sweep still follows the gateway when it does come back.
-    resolveReady(true);
+    back(true);
     await vi.waitFor(() => expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledTimes(1));
   });
 
-  it("says so when the open chats could not be re-pointed after the restart", async () => {
-    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
-    vi.mocked(waitForGatewayRpcReady).mockResolvedValueOnce(false);
+  it("does not sweep against a restarted gateway that never answered", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockImplementationOnce(async () => {
+      await restartGateway({ awaitReady: false });
+      return { back: Promise.resolve(false) };
+    });
 
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -1081,18 +1436,87 @@ describe("POST /setup-api/ai-models/configure", () => {
       refreshToken: "refresh-token",
       expiresIn: 3600,
     }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+  });
+
+  it("re-points open chats only after the gateway confirmed a live apply", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    const order: string[] = [];
+    vi.mocked(hot.awaitGatewayHotApply).mockImplementationOnce(async () => {
+      order.push("applied");
+      return { applied: true, how: "hot-reload" };
+    });
+    mockApplyModelOverrideToAllAgentSessions.mockImplementation(async () => {
+      order.push("sweep");
+      return { filesUpdated: 0, sessionsUpdated: 1, sessionsSkipped: 0 };
+    });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+
+    expect(res.status).toBe(200);
+    // Awaited inside the request: a sweep that could not run is said in it.
+    expect(order).toEqual(["applied", "sweep"]);
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+  });
+
+  it("follows a gateway that restarts by itself instead of adding a restart of its own", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "gateway-restarting" });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/keeps its previous model/);
-    // The wait a PERSON pays is the port budget and no more — the tunnel in
-    // front of this box gives up at ~100 s, and a save that landed reported as
-    // a failure is the worse answer. Past it the sentence goes out and the
-    // sweep still follows the gateway: the budget expiring means "slow", not
-    // "never".
-    expect(vi.mocked(waitForGatewayRpcReady).mock.calls[0][0]).toBe(30000);
+    expect(body.gatewayRestarting).toBe(true);
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+    expect(waitForGatewayRpcReady).toHaveBeenCalledWith(60000);
     await vi.waitFor(() => expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledTimes(1));
+  });
+
+  it("restarts for a rotated gateway token, which only a restart applies", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    // openclaw.json before the save holds a weak token; the route rotates it.
+    let written = false;
+    vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async () => { written = true; });
+    mockReadOpenClawConfig.mockImplementation(async () => (written
+      ? { gateway: { auth: { mode: "token", token: "b".repeat(64) } } }
+      : { gateway: { auth: { mode: "token", token: "clawbox" } } }));
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).gatewayRestarting).toBe(true);
+    expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+    expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart when the only differences are ones the gateway hot-applies", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    let written = false;
+    vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async () => { written = true; });
+    mockReadOpenClawConfig.mockImplementation(async () => {
+      const profiles: Record<string, { provider: string; mode: string }> = written
+        ? { "openai:default": { provider: "openai", mode: "api_key" } }
+        : {};
+      return {
+        gateway: { auth: { mode: "token", token: "b".repeat(64) } },
+        agents: { defaults: { model: { primary: written ? "openai/gpt-5.5" : "deepseek/deepseek-v4-flash" } } },
+        auth: { profiles },
+        meta: { lastTouchedAt: written ? "later" : "earlier" },
+      };
+    });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+
+    expect(res.status).toBe(200);
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+    expect(hot.awaitGatewayHotApply).toHaveBeenCalledWith(expect.objectContaining({ configChanged: true }));
   });
 
   /**
@@ -1544,8 +1968,13 @@ describe("POST /setup-api/ai-models/configure", () => {
    * a box that needed ten more seconds. A restart that was REFUSED is a
    * different fact and keeps the 502 below.
    */
-  it("keeps a configure that landed when only the gateway has not come back yet", async () => {
-    mockRestartGateway.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+  it("answers a save whose restart is underway without waiting for the gateway", async () => {
+    // TASK-1535: a Settings save held through the stop, the pre-start and the
+    // core start-up took 125 s on a board and was reported as a gateway that
+    // "did not come back". A restart that systemd TOOK is answered at once; the
+    // page follows the gateway itself.
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
 
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
@@ -1555,36 +1984,50 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/gateway/i);
-  });
-
-  it("waits for the gateway to come back on a box past the wizard", async () => {
-    // Settings renders the "has not finished restarting" notice, so there the
-    // readiness answer has a reader and is worth the budget.
-    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
-
-    expect(res.status).toBe(200);
-    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: true });
-  });
-
-  it("does not wait for the gateway during the first-run wizard", async () => {
-    // TASK-608 / M2. `setup_complete` is written at the end of the wizard, so
-    // its absence is the first-run path — the one AIModelsStep discards the
-    // warning on, and the one e2e-install measured at 52.9 s (23 s of writes,
-    // then the whole 30 s budget, expired). Waiting there buys latency only.
-    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
-
-    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
-
-    expect(res.status).toBe(200);
-    expect((await res.json()).success).toBe(true);
+    expect(body.gatewayRestarting).toBe(true);
+    expect(body.restartingNotice).toMatch(/restarting/i);
+    expect(body.warning ?? "").not.toMatch(/has not finished restarting|did not come back/);
+    expect(hot.restartGatewayAnsweringEarly).toHaveBeenCalledTimes(1);
+    // The fallback restart never waits for the port inside the request.
     expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
-  it("still reports a refused restart during the first-run wizard", async () => {
-    // Skipping the poll must not swallow the fact that nothing is coming: the
-    // exec failure is still a 502, wizard or not.
-    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
+  it("applies a save the gateway hot-reloads without restarting it", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.gatewayRestarting).toBeUndefined();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
+    // Waited for with the baseline taken before any write, and with the auth
+    // state refreshed: the paste wrote the credential store from outside the
+    // gateway.
+    expect(hot.awaitGatewayHotApply).toHaveBeenCalledWith(expect.objectContaining({
+      baseline: { hash: "baseline-hash" },
+      credentialsWritten: true,
+    }));
+  });
+
+  it("restarts only once the gateway could not confirm the save, and says it is restarting", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "gateway-down" });
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).gatewayRestarting).toBe(true);
+    expect(vi.mocked(hot.awaitGatewayHotApply).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(hot.restartGatewayAnsweringEarly).mock.invocationCallOrder[0]);
+  });
+
+  it("still reports a refused restart", async () => {
+    // Answering early must not swallow the fact that nothing is coming: a
+    // restart systemd refused (a unit masked by an update) is still a 502.
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
     mockRestartGateway.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
 
     const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
@@ -1594,6 +2037,8 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   it("returns 502 when gateway restart fails", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
     mockRestartGateway.mockRejectedValue(new Error("Gateway restart failed"));
 
     const res = await configurePost(jsonRequest({
@@ -1867,13 +2312,80 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(providerDef.apiKey).toBe("stored-portal-token");
   });
 
-  it("restarts gateway after configuration", async () => {
+  /**
+   * The cloud voice's credential used to reach its entry only through the
+   * restart that ended every save (the boot script arms the entry with the
+   * portal token). A save the gateway applies live has to carry the new token
+   * over itself — on the entry provably ours, and on nothing else (TASK-1535).
+   */
+  describe("the ClawBox AI cloud voice's credential", () => {
+    const voice = (apiKey: string, stamped = true) => ({
+      baseUrl: "https://clawbox.com/api/ai",
+      model: "speech",
+      apiKey,
+      ...(stamped ? { clawboxManaged: true } : {}),
+    });
+    const keyWrite = (home: string) =>
+      findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), `${home}.providers.openai.apiKey`);
+
+    it("moves the voice entry it armed to the new portal token", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("old-portal-token") } } });
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(res.status).toBe(200);
+      expect(keyWrite("tts")?.value).toBe("new-portal-token");
+      expect(keyWrite("messages.tts")).toBeUndefined();
+    });
+
+    it("moves the pre-OpenClaw-2 home the same way", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ messages: { tts: { providers: { openai: voice("old-portal-token") } } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("messages.tts")?.value).toBe("new-portal-token");
+    });
+
+    it("leaves a speech key that is not the one this box stored alone, stamp or not", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("sk-owner-key") } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("tts")).toBeUndefined();
+    });
+
+    it("leaves an unstamped entry alone even when it holds our old token", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("old-portal-token", false) } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("tts")).toBeUndefined();
+    });
+
+    it("writes nothing when the token did not change", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "same-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("same-portal-token") } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "same-portal-token" }));
+
+      expect(keyWrite("tts")).toBeUndefined();
+    });
+  });
+
+  it("does not restart the gateway after a configuration it applied live", async () => {
     await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-test",
     }));
 
-    expect(mockRestartGateway).toHaveBeenCalled();
+    // TASK-1535: auth.profiles, models.*, agents.defaults.model.* and
+    // plugins.entries.* all hot-apply; the restart this used to pin cost every
+    // save 50-60 s of dead chat.
+    expect(mockRestartGateway).not.toHaveBeenCalled();
   });
 
   it("configures llama.cpp provider definition in openclaw", async () => {
@@ -2156,6 +2668,187 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     // ...and the managed auth profile is api_key with the inline key.
     expect(pasteStdin("google:default")).toContain("AIzaTestKey123");
+  });
+
+  // xAI (Grok) is the one API-key cloud provider besides OpenAI that is NOT
+  // routed through an openai-compat override: the core bundles an `xai` plugin
+  // (enabled by default, `openai-responses` on api.x.ai), which reads the key
+  // from the agent auth store `models auth paste-api-key` writes. An override
+  // would pin it to openai-completions with the key frozen inline and shadow
+  // the plugin's own catalogue. The key below is an obvious fake.
+  it("configures xai through the bundled plugin: key pasted, no provider override", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.7");
+    expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
+    // No `models.providers.xai` at all — routing is the plugin's.
+    expect(commands.some((command) => command.includes("models.providers.xai"))).toBe(false);
+    expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.xai")).toBeUndefined();
+
+    // The credential rides stdin into the CLI's own store, under the provider
+    // id the plugin registers.
+    const paste = pasteCallFor("xai:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--provider", "xai"]));
+    expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
+    // ...and never appears in a config write.
+    expect(commands.some((command) => command.includes("xai-test-key-not-real"))).toBe(false);
+
+    expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+      ai_model_configured: true,
+      ai_model_provider: "xai",
+    }));
+    // Applied live: the bundled plugin reads the pasted key once the gateway
+    // refreshes its auth state, no restart (TASK-1535).
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+  });
+
+  it("honors an xai model picked by the user", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+      model: "grok-4.5",
+    }));
+
+    expect(res.status).toBe(200);
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.5");
+  });
+
+  it("rejects a malformed xai model id before any write", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+      model: "x-ai/grok 4",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toMatch(/Invalid xai model ID/);
+    expect(pasteCallFor("xai:default")).toBeUndefined();
+  });
+
+  it("refuses a ClawBox AI key pasted into the xai provider", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "claw_not-a-real-token",
+    }));
+
+    expect(res.status).toBe(400);
+    expect(pasteCallFor("xai:default")).toBeUndefined();
+  });
+
+  // The xAI SIGN-IN (SuperGrok / X Premium). The credential never reaches this
+  // route: the core's xai plugin stored it during `openclaw models auth login`,
+  // which /setup-api/ai-models/xai-login drives. This save is everything after
+  // the credential write — and it proves the sign-in is in the store first.
+  describe("the xAI sign-in", () => {
+    const storeAnswer = (profiles: unknown[]) => JSON.stringify({ profiles });
+
+    it("finishes a sign-in the store holds: oauth profile metadata, primary, applied live — and no paste", async () => {
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
+        storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
+      );
+
+      const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+
+      // The store was asked, with the store's own reader.
+      expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
+        ([args]) => Array.isArray(args) && args.join(" ") === "models auth list --json",
+      )).toBe(true);
+      // Nothing was pasted and no legacy OAuth file was written: there is no
+      // credential in this request to store.
+      expect(pasteCallFor("xai:default")).toBeUndefined();
+
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"oauth"} --json');
+      expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.7");
+      expect(commands.some((command) => command.includes("models.providers.xai"))).toBe(false);
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+        ai_model_configured: true,
+        ai_model_provider: "xai",
+      }));
+      // The xAI sign-in is not migrated by `doctor --fix` (the core wrote it to
+      // its own store), so nothing stops the gateway and nothing restarts it.
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    });
+
+    it("writes the model the owner picked", async () => {
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
+        storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
+      );
+
+      const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription", model: "grok-4.5" }));
+
+      expect(res.status).toBe(200);
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.5");
+    });
+
+    it("refuses, before any write, when the store answers and holds no xAI sign-in", async () => {
+      // An API key at the id is not a sign-in: the login did not land.
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
+        storeAnswer([{ id: "xai:default", provider: "xai", type: "api_key" }]),
+      );
+
+      const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.code).toBe("xai_sign_in_missing");
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands.some((command) => command.includes("agents.defaults.model.primary"))).toBe(false);
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    });
+
+    it("saves anyway when the store cannot be read — unknown is not a refusal", async () => {
+      vi.mocked(spawnOpenclawCli).mockRejectedValueOnce(new Error("store busy"));
+
+      const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
+
+      expect(res.status).toBe(200);
+    });
+
+    it("lets an API key replace the sign-in: no guard read, the paste goes ahead", async () => {
+      // Both modes live at `xai:default`, and picking the API Key tab is the
+      // owner switching. The guard that protects a Claude sign-in would make
+      // that switch impossible from the UI, so xAI does not ask it.
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
+        Array.isArray(args) && args.includes("list")
+          ? storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }])
+          : "");
+      try {
+        const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
+
+        expect(res.status).toBe(200);
+        expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
+          ([args]) => Array.isArray(args) && args.includes("list"),
+        )).toBe(false);
+        expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
+        const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+        expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
+      } finally {
+        vi.mocked(spawnOpenclawCli).mockReset().mockResolvedValue("");
+      }
+    });
+
+    it("still requires a key for an xai API-key save", async () => {
+      const res = await configurePost(jsonRequest({ provider: "xai" }));
+
+      expect(res.status).toBe(400);
+    });
   });
 
   it("configures anthropic as an openai-compat provider with the key inline", async () => {
@@ -2881,6 +3574,38 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
     });
 
+    describe("a token the portal itself refuses (TASK-1601)", () => {
+      const refused = () => deviceInfo({ error: { code: "invalid_token" } }, 401);
+
+      it("clears only the stored ClawBox AI token and asks for a new sign-in", async () => {
+        vi.stubGlobal("fetch", refused());
+        mockGetAll.mockResolvedValue({ clawai_token: "claw_revoked_stored", ai_model_provider: "clawai" });
+        const mockSet = vi.mocked(setConfigKey);
+        mockSet.mockClear();
+
+        const res = await configurePost(jsonRequest({ provider: "clawai", clawaiTier: "pro" }));
+
+        expect(res.status).toBe(401);
+        expect(await res.json()).toMatchObject({ code: "clawai_token_rejected" });
+        expect(mockSet).toHaveBeenCalledWith("clawai_token", undefined);
+        expect(mockSet.mock.calls.filter(([key]) => key !== "clawai_token" && key !== "clawai_credential_refusal")).toEqual([]);
+        expect(mockSetMany).not.toHaveBeenCalled();
+        expect(primaryModelWritten()).toBeUndefined();
+      });
+
+      it("refuses a rejected NEW token without touching the stored one", async () => {
+        vi.stubGlobal("fetch", refused());
+        mockGetAll.mockResolvedValue({ clawai_token: "claw_other_stored" });
+        const mockSet = vi.mocked(setConfigKey);
+        mockSet.mockClear();
+
+        const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_revoked_new" }));
+
+        expect(res.status).toBe(401);
+        expect(mockSet).not.toHaveBeenCalledWith("clawai_token", undefined);
+      });
+    });
+
     it("keeps the picker's choice when the portal reports an unpaid account", async () => {
       // mapPortalTier returns null for Free. Null is "no paid entitlement to
       // reconcile against", not "downgrade them", so the existing chain wins.
@@ -2894,6 +3619,24 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(res.status).toBe(200);
       expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+    });
+
+    it("runs Flash for a Free pick, not the badge a previous account left behind", async () => {
+      // An unpaired box pre-selects Free, and Free runs DeepSeek V4 Flash. A
+      // refused token is cleared without its badge, so a box that once ran Max
+      // can be unpaired with "pro" still stored; read as "no pick", Free let
+      // that badge choose the frontier model for an account that has no Max.
+      mockGetAll.mockResolvedValue({ clawai_tier: "pro" });
+      vi.stubGlobal("fetch", deviceInfo({ tier: "free" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_free_account",
+        clawaiTier: "free",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
     });
 
     it("reaches the primary model from the portal alone when the request omits clawaiTier", async () => {
@@ -2930,6 +3673,133 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(res.status).toBe(200);
       expect(fetchMock.mock.calls.some(([url]) =>
         String(url).includes("/api/clawbox-ai/device-info"))).toBe(false);
+    });
+
+    // The stale profile: a box linked to a Max account signs in to a DIFFERENT,
+    // Free account, and the desktop goes on showing the Max account. The status
+    // poll reads the token from openclaw.json, which this save commits LAST,
+    // while the badge and the plan used to be written to the store long before
+    // that. A poll in between asked the portal about the OLD token and wrote
+    // its tier and plan back over the new account's, and every later poll that
+    // could not reach the portal served them as this account's profile.
+    describe("a status poll that lands in the middle of a sign-in to a different account", () => {
+      const OLD = "claw_old_max_account";
+      const NEW = "claw_new_free_account";
+      const signIn = () => jsonRequest({
+        provider: "clawai",
+        apiKey: NEW,
+        authMode: "subscription",
+        clawaiTier: "flash",
+      });
+
+      let store: Record<string, unknown>;
+      let portalUp: boolean;
+      let commitFails: boolean;
+      let statusGet: () => Promise<Response>;
+      // Implementations this block replaces on mocks the whole file shares.
+      // `vi.clearAllMocks` in the outer hooks clears calls, not implementations,
+      // so they are put back below rather than left to the next case.
+      let realTransaction: ((label: string) => ReturnType<typeof beginConfigWriteTransaction>) | undefined;
+
+      beforeEach(async () => {
+        const configStore = await import("@/lib/config-store");
+        store = { clawai_token: OLD, clawai_tier: "pro", clawai_plan_tier: "pro" };
+        const put = (key: string, value: unknown) => {
+          if (value === undefined) delete store[key];
+          else store[key] = value;
+        };
+        mockGetAll.mockImplementation(async () => ({ ...store }));
+        vi.mocked(configStore.get).mockImplementation(async (key: string) => store[key]);
+        vi.mocked(configStore.set).mockImplementation(async (key: string, value: unknown) => put(key, value));
+        mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+          for (const [key, value] of Object.entries(entries)) put(key, value);
+        });
+
+        // openclaw.json as the status route reads it: the old token until this
+        // save's one write lands.
+        const linkedTo = (token: string) => ({
+          models: { providers: { deepseek: { apiKey: token } } },
+          auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        });
+        let openclawJson = linkedTo(OLD);
+        mockReadOpenClawConfig.mockImplementation(async () => openclawJson as never);
+        // The status route reads the same file strictly (a failed read is "not
+        // known", never the Free plan).
+        mockReadOpenClawConfigStrict.mockImplementation(async () => openclawJson as never);
+        commitFails = false;
+        realTransaction = vi.mocked(beginConfigWriteTransaction).getMockImplementation();
+        vi.mocked(beginConfigWriteTransaction).mockImplementation((label: string) => {
+          const tx = realTransaction!(label);
+          tx.commit = vi.fn(async () => {
+            if (commitFails) throw new Error("config.patch refused");
+            openclawJson = linkedTo(NEW);
+          });
+          return tx;
+        });
+
+        portalUp = true;
+        vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+          if (!String(input).includes("/api/clawbox-ai/device-info")) throw new Error("network disabled in tests");
+          if (!portalUp) throw new Error("portal unreachable");
+          const auth = new Headers(init?.headers).get("authorization");
+          const body = auth === `Bearer ${OLD}` ? { tier: "max" } : { tier: "free" };
+          return new Response(JSON.stringify(body), { status: 200 });
+        }));
+
+        statusGet = (await import("@/app/setup-api/ai-models/status/route")).GET;
+      });
+
+      afterEach(async () => {
+        const configStore = await import("@/lib/config-store");
+        vi.mocked(configStore.get).mockImplementation(async () => undefined);
+        vi.mocked(configStore.set).mockImplementation(async () => {});
+        vi.mocked(spawnOpenclawCli).mockResolvedValue("");
+        if (realTransaction) vi.mocked(beginConfigWriteTransaction).mockImplementation(realTransaction);
+      });
+
+      it("leaves the new account's badge and plan on record, not the old account's", async () => {
+        // The owner's desktop polls while the save runs: here, while the new
+        // credential is being pasted into the auth store.
+        let midSave: Record<string, unknown> | null = null;
+        vi.mocked(spawnOpenclawCli).mockImplementation(async (args: readonly string[]) => {
+          if (!midSave && args.includes("paste-api-key")) midSave = await (await statusGet()).json();
+          return "";
+        });
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        // The poll really did run mid-save, about the old token.
+        expect(midSave).toMatchObject({ clawaiConfigured: true, clawaiPlan: "pro" });
+        // The new account's facts, not the ones that poll brought back.
+        expect(store).toMatchObject({ clawai_token: NEW, clawai_tier: "flash", clawai_plan_tier: "free" });
+
+        // And what the desktop is shown next when the portal cannot be asked:
+        // the stored profile, which must be the account the box now holds.
+        (await import("@/lib/clawbox-ai-portal-tier"))._resetPortalTierCache();
+        portalUp = false;
+        const after = await (await statusGet()).json();
+        expect(after).toMatchObject({ clawaiConfigured: true, clawaiAccountTier: "flash", clawaiPlan: "free" });
+      });
+
+      it("retires the old account's plan on the retry of a sign-in whose openclaw.json write failed", async () => {
+        // The first attempt stores the new token (step 6) and then fails at the
+        // commit, so openclaw.json still runs the old account. The retry finds
+        // the new token already on record — and if it took that for "the same
+        // account", a portal outage would leave the old Max plan standing as
+        // the new account's profile.
+        portalUp = false;
+        commitFails = true;
+        expect((await configurePost(signIn())).status).not.toBe(200);
+        expect(store).toMatchObject({ clawai_token: NEW, clawai_plan_tier: "pro" });
+
+        commitFails = false;
+        expect((await configurePost(signIn())).status).toBe(200);
+
+        expect(store.clawai_plan_tier).toBeUndefined();
+        const after = await (await statusGet()).json();
+        expect(after).toMatchObject({ clawaiConfigured: true, clawaiAccountTier: "flash", clawaiPlan: null });
+      });
     });
   });
   // TASK-483: the last wizard step sat on "Almost ready" for about three
@@ -3107,6 +3977,43 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(paste?.[0]).not.toContain("claw_token_abc");
       expect((paste?.[1] as { stdinData?: string })?.stdinData).toContain("claw_token_abc");
       expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
+    });
+
+    it("stores the device login's portal token the same way, and switches the running gateway without a stop", async () => {
+      // `clawai/poll` posts the device login as `authMode: "subscription"`, but
+      // what it hands over is the portal's API token. It used to take the OAuth
+      // lane: a legacy auth-profiles.json, `doctor --fix` with the gateway
+      // STOPPED, and the restart after it — a minute or two of "Connecting…"
+      // for a profile the CLI paste replaced with the API key anyway.
+      const hot = await import("@/lib/gateway-hot-apply");
+      // The provider plugin is already on disk, so no plugin code arrives and
+      // nothing in this save needs a restart.
+      mockFs.access.mockResolvedValue(undefined);
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+        authMode: "subscription",
+        clawaiTier: "flash",
+      }));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).gatewayRestarting).toBeFalsy();
+      const paste = vi.mocked(spawnOpenclawCli).mock.calls.find(
+        (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key"),
+      );
+      expect((paste?.[1] as { stdinData?: string })?.stdinData).toContain("claw_token_abc");
+      // No OAuth bundle, no doctor, so no stop of the gateway.
+      expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
+      expect(mockFs.writeFile.mock.calls.some(([file]) => String(file).includes("auth-profiles.json"))).toBe(false);
+      // The metadata says what the store holds: an API key, never `oauth`.
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands.filter((c) => c.startsWith("config set auth.profiles.deepseek:default "))).toEqual(
+        expect.not.arrayContaining([expect.stringContaining('"mode":"oauth"')]),
+      );
+      expect(commands).toContain('config set auth.profiles.deepseek:default {"provider":"deepseek","mode":"api_key"} --json');
+      // Applied to the running gateway: confirmed live, never restarted.
+      expect(hot.awaitGatewayHotApply).toHaveBeenCalledTimes(1);
+      expect(mockRestartGateway).not.toHaveBeenCalled();
     });
 
     it("fails closed when OpenClaw 2 doctor rejects before creating a migrated sibling", async () => {
@@ -3315,6 +4222,78 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(res.status).toBe(502);
       expect(body.error).toMatch(/run 'openclaw doctor --fix' from the Terminal/i);
       expect(body.error).not.toMatch(/exec-approvals/i);
+    });
+
+    const subscriptionSignIn = () => jsonRequest({
+      provider: "anthropic",
+      apiKey: ANTHROPIC_OAUTH_ACCESS,
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    });
+
+    it.each(["gateway-not-stopped", "gateway-still-stopping"] as const)(
+      "says the assistant was busy, and gives no Terminal advice, when doctor answers %s",
+      async (outcome) => {
+        // Doctor refused to run beside a gateway that was not down (another
+        // surface restarted it, or its stop was still draining). The migration
+        // did not happen, so the sign-in still rolls back; "run doctor from the
+        // Terminal" is advice for a command that was deliberately not run.
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(outcome);
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+        mockFs.readdir.mockResolvedValueOnce([]);
+
+        const res = await configurePost(subscriptionSignIn());
+        const body = await res.json();
+
+        expect(res.status).toBe(502);
+        expect(body.error).toMatch(/busy restarting/i);
+        expect(body.error).toMatch(/sign in again in a few minutes/i);
+        expect(body.error).not.toMatch(/Terminal/i);
+        expect(mockFs.rename).toHaveBeenCalledWith(
+          expect.stringMatching(/auth-profiles\.json$/),
+          expect.stringMatching(/auth-profiles\.json\.failed-/),
+        );
+      },
+    );
+
+    it.each(["gateway-still-stopping", "gateway-not-stopped"] as const)(
+      "only asks for the restore when doctor answered %s",
+      async (outcome) => {
+        // systemd queues the restart behind the job still running (a drain,
+        // another surface's restart); waiting that job out with the usual
+        // 60 s client would answer past the tunnel's cut.
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(outcome);
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+        mockFs.readdir.mockResolvedValueOnce([]);
+
+        await configurePost(subscriptionSignIn());
+
+        expect(mockRestartGateway).toHaveBeenCalledWith(
+          expect.objectContaining({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }),
+        );
+      },
+    );
+
+    it("does not send the owner to press Restart over a restart systemd already holds", async () => {
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("gateway-still-stopping");
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+      // What restartGateway throws for a restart still in flight (the real
+      // class's name; this suite's factory does not carry the class).
+      mockRestartGateway.mockRejectedValueOnce(Object.assign(
+        new Error("the gateway is still restarting (clawbox-gateway.service has not finished after 0s more)"),
+        { name: "GatewayNotReadyError" },
+      ));
+      const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(subscriptionSignIn());
+      const body = await res.json();
+      quiet.mockRestore();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/busy restarting/i);
+      expect(body.error).not.toMatch(/offline until the gateway restarts/);
     });
 
     it("keeps the legacy best-effort doctor behavior on an explicit OpenClaw 1 binary", async () => {
@@ -3540,13 +4519,18 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => isEnable(args))).toBe(false);
 
       // The OFF half of the gate stays after the write (a no-op for Anthropic,
-      // but its place is what keeps a live primary's plugin on), and a plugin
-      // enabled by the batch loads on the next gateway start, so the restart
-      // that already ends the save has to stay after all of it.
+      // but its place is what keeps a live primary's plugin on), and what makes
+      // the gateway serve the save — the hot-apply wait, or the restart a
+      // subscription sign-in's credential migration still needs — has to come
+      // after all of it.
       const writtenAt = orderOf(vi.mocked(runOpenclawConfigSetBatch), (args) => (args[0] as string[][]).some(carriesAnthropicPrimary));
       const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "anthropic");
       expect(writtenAt).toBeLessThan(gatedAt);
-      expect(gatedAt).toBeLessThan(orderOf(mockRestartGateway));
+      const hot = await import("@/lib/gateway-hot-apply");
+      const settledAt = "authMode" in body
+        ? orderOf(mockRestartGateway)
+        : orderOf(vi.mocked(hot.awaitGatewayHotApply));
+      expect(gatedAt).toBeLessThan(settledAt);
     });
 
     it("re-lands the enable with the rest of the batch when the catalog refuses the primary", async () => {
@@ -3657,6 +4641,766 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(warn.mock.calls.some(([first]) => String(first).includes("deepseek provider plugin install did not complete")))
         .toBe(true);
       warn.mockRestore();
+    });
+  });
+
+  /**
+   * The Claude sign-in incident of 2026-10-10. `doctor --fix` answered
+   * "completed" over a migration that only ADDS profile ids: for an id the
+   * store already held it kept the stored profile — on that box a failed OAuth
+   * refresh fence — and archived the file this route had written. "completed"
+   * was the route's only proof, so it answered 200 to 7 of 8 sign-ins while
+   * every chat turn died with "No API key found for provider anthropic".
+   *
+   * The route now asks the gateway's own store what it holds, replaces it in
+   * place when that is not the sign-in, and refuses when it still is not.
+   */
+  describe("a Claude sign-in and what the gateway's auth store holds afterwards", () => {
+    // Placeholders in the real ones' shape — this repository is public.
+    const ACCESS = "sk-ant-oat01-FAKE-access-token-for-tests";
+    const REFRESH = "sk-ant-ort01-FAKE-refresh-token-for-tests";
+    const PROFILE = "anthropic:default";
+    // ONE sentence for every refusal, and it claims nothing about what the
+    // store was left holding: a replace that committed and could not be read
+    // back stays committed, so "nothing was changed" was false on that exit.
+    const NOT_STORED = "The sign-in was accepted, but this device could not confirm that its assistant stored it,"
+      + " so the setup was not finished. Sign in again; if it is refused again, restart the device and retry.";
+
+    type Held = Extract<GatewayAuthProfileRead, { kind: "present" }>;
+    /** What the box of the incident held: core's inert markers, `expires: 1`, made terminal. */
+    const FENCE: Partial<Held> = { fingerprint: null, refreshFingerprint: null, expires: 1, fenced: true, fence: "failed" };
+    /** The same markers while a renewal is in flight — no sign-in either, with the gateway stopped. */
+    const PENDING_FENCE: Partial<Held> = { ...FENCE, fence: "pending" };
+    /** An earlier sign-in, or another account's. */
+    const ANOTHER: Partial<Held> = {
+      fingerprint: "0123456789abcdef",
+      refreshFingerprint: "fedcba9876543210",
+      expires: 1_790_000_000_000,
+    };
+
+    const mockRead = vi.mocked(readGatewayAuthProfile);
+    const mockPut = vi.mocked(putGatewayOAuthProfile);
+
+    beforeEach(() => {
+      // For this block only: vitest.config's `mockReset` hands every other
+      // case in the file its inert `undefined` back.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValue("completed");
+    });
+
+    function signIn(body: Record<string, unknown> = {}) {
+      return jsonRequest({
+        provider: "anthropic",
+        apiKey: ACCESS,
+        authMode: "subscription",
+        refreshToken: REFRESH,
+        expiresIn: 3600,
+        ...body,
+      });
+    }
+
+    /** The bundle this request wrote to auth-profiles.json: what the migration was handed. */
+    function fileBundle(): GatewayOAuthBundle {
+      const write = mockFs.writeFile.mock.calls.find(([file]) => String(file).includes("auth-profiles.json"));
+      return JSON.parse(write?.[1] as string).profiles[PROFILE];
+    }
+
+    /**
+     * The store holding exactly that bundle, or `instead` of it. Built from
+     * the file at the moment the route ASKS, because `expires` is this
+     * request's own clock and no fixture can know it beforehand.
+     */
+    function holding(instead: Partial<Held> = {}): GatewayAuthProfileRead {
+      const bundle = fileBundle();
+      return {
+        kind: "present",
+        store: "shared",
+        type: "oauth",
+        fingerprint: tokenFingerprint(bundle.access),
+        refreshFingerprint: tokenFingerprint(bundle.refresh),
+        expires: bundle.expires,
+        fenced: false,
+        fence: null,
+        storeUpdatedAtMs: Date.now(),
+        ...instead,
+      };
+    }
+
+    /** One COPY of a profile, as `sharedCopy` carries the shared row's: this sign-in, or `instead` of it. */
+    function copy(instead: Partial<Held> = {}): NonNullable<Held["sharedCopy"]> {
+      const { type, fingerprint, refreshFingerprint, expires, fenced, fence } = holding(instead) as Held;
+      return { type, fingerprint, refreshFingerprint, expires, fenced, fence };
+    }
+
+    /** Every line the request logged at `level`, one string per call. */
+    function logged(spy: { mock: { calls: unknown[][] } }): string[] {
+      return spy.mock.calls.map((args) => args.map(String).join(" "));
+    }
+
+    /** Every `[configure]` warning of the request, one string per line. */
+    function warnings(warn: { mock: { calls: unknown[][] } }): string[] {
+      return warn.mock.calls.map((args) => args.map(String).join(" "));
+    }
+
+    function primaryWasWritten(): boolean {
+      return configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .some((command) => command.startsWith("config set agents.defaults.model.primary anthropic/"));
+    }
+
+    it("writes nothing to the store when the migration imported the sign-in", async () => {
+      mockRead.mockImplementation(() => holding());
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockRead).toHaveBeenCalledTimes(1);
+      // No `paths`: the module resolves the store itself, at call time.
+      expect(mockRead).toHaveBeenCalledWith(PROFILE);
+      expect(mockPut).not.toHaveBeenCalled();
+      expect(primaryWasWritten()).toBe(true);
+    });
+
+    it.each([
+      ["a failed refresh fence", FENCE, /an OAuth refresh fence \(failed\)/],
+      // With the gateway stopped, a renewal still "in flight" is nobody's: it is replaced like the failed one.
+      ["a pending refresh fence", PENDING_FENCE, /an OAuth refresh fence \(pending\)/],
+      ["another sign-in", ANOTHER, /left as it was: present\)/],
+    ])("replaces %s the migration kept, and says so once", async (_what, kept, said) => {
+      mockRead.mockImplementationOnce(() => holding(kept)).mockImplementation(() => holding());
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+      // The SAME bundle the legacy file got: one `expires` for both, or the
+      // read-back below could never match what was just written.
+      expect(mockPut).toHaveBeenCalledWith(PROFILE, fileBundle());
+      expect(fileBundle()).toEqual({
+        type: "oauth",
+        provider: "anthropic",
+        access: ACCESS,
+        refresh: REFRESH,
+        expires: expect.any(Number),
+      });
+      // Read, replaced, read again — and only then the rest of the save.
+      expect(mockRead).toHaveBeenCalledTimes(2);
+      expect(mockRead.mock.invocationCallOrder[1]).toBeGreaterThan(mockPut.mock.invocationCallOrder[0]);
+      expect(primaryWasWritten()).toBe(true);
+
+      const lines = warnings(warn);
+      const replaced = lines.filter((line) => line.includes("ClawBox replaced it in place"));
+      expect(replaced).toHaveLength(1);
+      expect(replaced[0]).toMatch(said);
+      expect(replaced[0]).not.toContain("the main agent's own copy");
+      // What was held, never the credential or the fingerprint that stands in for it.
+      for (const secret of [ACCESS, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH)]) {
+        expect(lines.join("\n")).not.toContain(secret);
+      }
+      warn.mockRestore();
+    });
+
+    it("writes the sign-in where the migration stored nothing at that id", async () => {
+      mockRead.mockImplementationOnce(() => ({ kind: "absent", store: "agent" })).mockImplementation(() => holding());
+      mockPut.mockReturnValue({ ok: true, store: "agent" });
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledWith(PROFILE, fileBundle());
+      expect(mockRead).toHaveBeenCalledTimes(2);
+    });
+
+    // "It landed" is five facts at once. Each row breaks exactly one of them
+    // over a store that is otherwise this very sign-in.
+    it.each<[string, Partial<Held>]>([
+      ["another access token", { fingerprint: "0123456789abcdef" }],
+      ["another expiry", { expires: 1_790_000_000_000 }],
+      ["a profile that is not a sign-in", { type: "api_key" }],
+      ["a profile core reads as a fence", { fenced: true }],
+      ["no credential at all", { fingerprint: null }],
+    ])("does not take %s for the sign-in", async (_what, instead) => {
+      mockRead.mockImplementationOnce(() => holding(instead)).mockImplementation(() => holding());
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+    });
+
+    // The main agent's own copy of the id (openclaw-auth-store.ts): core
+    // resolves it over the shared row, and hands out the shared one instead
+    // when that is usable and expires later. Proven against 2026.9.4 — a gate
+    // that judged the shared row alone answered 200 over a chat that stayed
+    // dead. The read answers the agent's copy and carries the shared row's
+    // beside it; stored means BOTH are this sign-in.
+    describe("on a box whose main agent holds its own copy of the profile", () => {
+      it.each<[string, () => GatewayAuthProfileRead]>([
+        ["the agent's copy is a fence over a shared row that took the sign-in", () => holding({ ...FENCE, sharedCopy: copy() })],
+        ["the agent's copy is the sign-in over a shared row that kept another", () => holding({ sharedCopy: copy(ANOTHER) })],
+        ["the agent's copy is the sign-in over a shared row holding nothing at the id", () => holding({ sharedCopy: null })],
+        ["neither copy is the sign-in", () => holding({ ...ANOTHER, sharedCopy: copy(FENCE) })],
+      ])("replaces when %s", async (_what, first) => {
+        mockRead.mockImplementationOnce(first).mockImplementation(() => holding({ sharedCopy: copy() }));
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).toHaveBeenCalledTimes(1);
+        expect(mockPut).toHaveBeenCalledWith(PROFILE, fileBundle());
+        expect(mockRead).toHaveBeenCalledTimes(2);
+        expect(primaryWasWritten()).toBe(true);
+        // No such box is known in the field; the journal is how the first would be recognised.
+        const replaced = warnings(warn).filter((line) => line.includes("ClawBox replaced it in place"));
+        expect(replaced).toHaveLength(1);
+        expect(replaced[0]).toContain("in the main agent's own copy");
+        warn.mockRestore();
+      });
+
+      it("writes nothing when both copies already are the sign-in", async () => {
+        mockRead.mockImplementation(() => holding({ sharedCopy: copy() }));
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).not.toHaveBeenCalled();
+      });
+
+      it.each<[string, () => GatewayAuthProfileRead]>([
+        // What the store module answers when the agent's database refused the write the shared row took.
+        ["the agent's copy is still the fence", () => holding({ ...FENCE, sharedCopy: copy() })],
+        ["the shared row still is not the sign-in", () => holding({ sharedCopy: copy(ANOTHER) })],
+      ])("refuses when, after the replace, %s", async (_what, after) => {
+        mockRead.mockImplementation(after);
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(502);
+        await expect(res.json()).resolves.toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+        expect(primaryWasWritten()).toBe(false);
+        error.mockRestore();
+      });
+    });
+
+    it("refuses, with nothing else changed, when the store still does not hold the sign-in", async () => {
+      // Through the server-side handoff, so the file a retry needs is in play.
+      mockFs.readFile.mockImplementation(async (file) =>
+        String(file).endsWith("oauth-device-tokens.json")
+          ? JSON.stringify({
+              provider: "anthropic",
+              access_token: ACCESS,
+              refresh_token: REFRESH,
+              expires_in: 3600,
+              createdAt: Date.now(),
+            })
+          : JSON.stringify({ version: 1, profiles: {} }),
+      );
+      // The write reported success and the store answers the fence all the same.
+      mockRead.mockImplementation(() => holding(FENCE));
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        authMode: "subscription",
+        oauthHandoff: true,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body).toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+      // A replace DID commit on this exit, so the sentence may not say otherwise.
+      expect(body.error).not.toMatch(/nothing was changed|kept its previous/i);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+      expect(mockRead).toHaveBeenCalledTimes(2);
+      // The journal says which refusal this was: the profile, what was held,
+      // that the replace committed, and what was held afterwards. This exit
+      // used to log nothing at all.
+      const refusals = logged(error).filter((line) => line.includes("is not in the gateway's auth store"));
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).toContain(PROFILE);
+      expect(refusals[0]).toMatch(/the store answered present, an OAuth refresh fence \(failed\) before/);
+      expect(refusals[0]).toMatch(/the replace committed/);
+      expect(refusals[0]).toMatch(/the store answered present, an OAuth refresh fence \(failed\) afterwards/);
+      for (const secret of [ACCESS, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH)]) {
+        expect(logged(error).join("\n")).not.toContain(secret);
+      }
+      error.mockRestore();
+      // Everything a landed save writes comes after the gate, and none of it ran.
+      expect(vi.mocked(runOpenclawConfigSetBatch)).not.toHaveBeenCalled();
+      expect(vi.mocked(runOpenclawConfigSet)).not.toHaveBeenCalled();
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).not.toHaveBeenCalled();
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      // The handoff tokens stay for the retry the sentence asks for…
+      expect(mockFs.unlink).not.toHaveBeenCalled();
+      // …and this is not the failed-migration rollback: doctor DID complete,
+      // so there is no legacy file left to move aside.
+      expect(mockFs.rename).not.toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+      // The gateway doctor stopped comes back once, on the credential it had,
+      // and nobody waits on its port for an answer that has already failed.
+      expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+      expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+    });
+
+    it.each(["write-failed", "unreadable"] as const)(
+      "refuses when the replace itself answered %s",
+      async (reason) => {
+        mockRead.mockImplementation(() => holding(ANOTHER));
+        mockPut.mockReturnValue({ ok: false, reason });
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        const body = await res.json();
+
+        expect(res.status).toBe(502);
+        expect(body).toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+        expect(mockPut).toHaveBeenCalledTimes(1);
+        // No second look: a replace that did not commit left nothing new to find.
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(runOpenclawConfigSetBatch)).not.toHaveBeenCalled();
+        expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+        // One line, naming the profile and the store module's own reason.
+        const refusals = logged(error).filter((line) => line.includes("is not in the gateway's auth store"));
+        expect(refusals).toHaveLength(1);
+        expect(refusals[0]).toContain(PROFILE);
+        expect(refusals[0]).toContain(`the replace answered ${reason}`);
+        expect(refusals[0]).toMatch(/the store answered present before/);
+        expect(refusals[0]).toMatch(/the store was not read afterwards/);
+        for (const secret of [ACCESS, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH), String(ANOTHER.fingerprint)]) {
+          expect(logged(error).join("\n")).not.toContain(secret);
+        }
+        error.mockRestore();
+      },
+    );
+
+    it("refuses, without claiming nothing changed, when the replace committed and the store then cannot be read", async () => {
+      mockRead.mockImplementationOnce(() => holding(ANOTHER)).mockImplementation(() => ({ kind: "unreadable", cause: "disk I/O error" }));
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body).toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+      expect(body.error).not.toMatch(/nothing was changed|kept its previous/i);
+      const refusals = logged(error).filter((line) => line.includes("is not in the gateway's auth store"));
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).toMatch(/the replace committed, and the store answered unreadable afterwards/);
+      error.mockRestore();
+    });
+
+    it("keeps the code when the gateway cannot be restarted after the refusal", async () => {
+      // An update holds a runtime mask on the unit. The offline hint is added
+      // to the sentence; the code a client branches on must survive it.
+      mockRead.mockImplementation(() => holding(FENCE));
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      mockRestartGateway.mockRejectedValueOnce(new Error("Unit clawbox-gateway.service is masked."));
+
+      const res = await configurePost(signIn());
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.code).toBe("credential_not_stored");
+      expect(body.error).toContain(NOT_STORED);
+      expect(body.error).toMatch(/offline until the gateway restarts/);
+    });
+
+    // "Cannot look" is not "looked, and it is not there": a v1 box's store IS
+    // the legacy file, and a core generation this code has not met must not
+    // lock its owner out of signing in.
+    it.each(["no-store", "unreadable"] as const)(
+      "carries on, and says which, when the store answers %s",
+      async (kind) => {
+        mockRead.mockReturnValue({ kind });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(primaryWasWritten()).toBe(true);
+        const unverified = warnings(warn).filter((line) => line.includes("could not verify"));
+        expect(unverified).toHaveLength(1);
+        expect(unverified[0]).toContain(`(${kind})`);
+        warn.mockRestore();
+      },
+    );
+
+    it("says WHY the store could not be read — a build that cannot load sqlite makes this gate inert, and nothing else would show it", async () => {
+      mockRead.mockReturnValue({ kind: "unreadable", cause: "Cannot find module 'node:sqlite'\nRequire stack: forged line" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      const unverified = warnings(warn).filter((line) => line.includes("could not verify"));
+      expect(unverified).toHaveLength(1);
+      expect(unverified[0]).toContain("(unreadable)");
+      expect(unverified[0]).toContain("Cannot find module 'node:sqlite'");
+      // On one line: the cause is another module's text.
+      expect(unverified[0]).not.toContain("\n");
+      warn.mockRestore();
+    });
+
+    it("carries on when the store went away between the read and the write", async () => {
+      mockRead.mockImplementation(() => holding(ANOTHER));
+      mockPut.mockReturnValue({ ok: false, reason: "no-store" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+      expect(warnings(warn).filter((line) => line.includes("could not verify"))).toHaveLength(1);
+      warn.mockRestore();
+    });
+
+    // The gate runs on an explicit "completed" and nothing else. `undefined`
+    // is the load-bearing one: it is what the hand-written openclaw-config
+    // factories across the suite answer, and that inertness is also what keeps
+    // every one of those suites from ever reaching a store.
+    it.each<[string, () => void]>([
+      ["answers nothing (the suite-wide mock default)", () => {
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValue(undefined as never);
+      }],
+      ["throws on a pre-SQLite core, whose legacy file is the store", () => {
+        vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("v1 doctor unavailable"));
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+      }],
+      ["is blocked on a pre-SQLite core", () => {
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValue("blocked-by-service-ownership");
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+      }],
+    ])("never asks the store when doctor %s", async (_what, arm) => {
+      arm();
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockRead).not.toHaveBeenCalled();
+      expect(mockPut).not.toHaveBeenCalled();
+    });
+
+    // Claude's sign-in only. (The ClawBox AI device login, which `clawai/poll`
+    // posts as `authMode: "subscription"`, no longer reaches this doctor at all:
+    // its portal token is pasted — see "the device login's portal token" above.)
+    it.each<[string, Record<string, unknown>]>([
+      ["the ChatGPT sign-in", {
+        provider: "openai",
+        apiKey: "access.token.jwt",
+        idToken: "id.token.jwt",
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }],
+      ["the Google sign-in", {
+        provider: "google",
+        apiKey: "access-token",
+        authMode: "subscription",
+        projectId: "my-project-id",
+      }],
+    ])("never asks the store for %s", async (_what, body) => {
+      const res = await configurePost(jsonRequest(body));
+
+      expect(res.status).toBe(200);
+      // The lane the gate sits on WAS reached, with a completed doctor…
+      expect(vi.mocked(runOpenclawDoctorFix)).toHaveBeenCalledTimes(1);
+      // …and the store was left alone.
+      expect(mockRead).not.toHaveBeenCalled();
+      expect(mockPut).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * ONE openclaw.json write per save (TASK-1535). A ClawBox AI re-save was
+   * measured at 50 s on a board: four rounds of CLI writes (a key paste, a
+   * batch, the same paste again, another batch), each a 5-14 s CLI start and
+   * a gateway reload. The route now stages steps 3-8b in the request's config
+   * write transaction and commits it once; what the commit does with the
+   * staged writes is `openclaw-config-write-transaction.test.ts`'s. Here: that
+   * the route opens it, commits it after its LAST write and before it asks the
+   * gateway to apply the save, announces catalogue changes only after it, and
+   * leaves out a key paste that would change nothing.
+   */
+  describe("one openclaw.json write per save (TASK-1535)", () => {
+    const orderOf = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder;
+
+    it("commits the request's transaction once, after its last config write and before the gateway applies it", async () => {
+      // The provider plugin is on disk: nothing is installed, the save is applied live.
+      mockFs.access.mockResolvedValue(undefined);
+      vi.mocked(setProviderPlugins).mockResolvedValue("anthropic");
+      const hot = await import("@/lib/gateway-hot-apply");
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+
+      expect(vi.mocked(withConfigWriteScope)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(beginConfigWriteTransaction)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(beginConfigWriteTransaction)).toHaveBeenCalledWith("configure");
+      const tx = vi.mocked(beginConfigWriteTransaction).mock.results[0].value as unknown as {
+        commit: { mock: { invocationCallOrder: number[] } };
+      };
+      expect(orderOf(tx.commit)).toHaveLength(1);
+      const committedAt = orderOf(tx.commit)[0];
+
+      const writes = [
+        ...orderOf(vi.mocked(runOpenclawConfigSet)),
+        ...orderOf(vi.mocked(runOpenclawConfigSetBatch)),
+        ...orderOf(vi.mocked(runOpenclawConfigUnset)),
+        ...orderOf(vi.mocked(setProviderPlugins)),
+      ];
+      expect(writes.length).toBeGreaterThan(1);
+      expect(Math.max(...writes)).toBeLessThan(committedAt);
+      expect(orderOf(vi.mocked(hot.awaitGatewayHotApply))[0]).toBeGreaterThan(committedAt);
+      // The plugin flip and the provider's own catalogue are announced once
+      // they are in the file, not while they are staged.
+      expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+      expect(Math.min(...orderOf(vi.mocked(notifyProviderSetChanged)))).toBeGreaterThan(committedAt);
+    });
+
+    it("leaves out a key paste that would change nothing — both of a ClawBox AI re-save's", async () => {
+      vi.mocked(apiKeyPasteChangesNothing).mockReturnValue(true);
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      expect(vi.mocked(apiKeyPasteChangesNothing)).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "deepseek", profileId: "deepseek:default", key: "portal-token-123" }),
+      );
+      expect(pasteCallFor("deepseek:default")).toBeUndefined();
+    });
+
+    it("skips the sign-in guard's CLI start for a key the store already holds: there is no sign-in at that id to lose", async () => {
+      vi.mocked(apiKeyPasteChangesNothing).mockReturnValue(true);
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-api03-test" }));
+      expect(res.status).toBe(200);
+      const listed = vi.mocked(spawnOpenclawCli).mock.calls.some(
+        (call) => Array.isArray(call[0]) && call[0].join(" ").includes("models auth list"),
+      );
+      expect(listed).toBe(false);
+      expect(pasteCallFor("anthropic:default")).toBeUndefined();
+    });
+
+    it("still asks the sign-in guard before a paste that would change something", async () => {
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-api03-test" }));
+      expect(res.status).toBe(200);
+      const listed = vi.mocked(spawnOpenclawCli).mock.calls.some(
+        (call) => Array.isArray(call[0]) && call[0].join(" ").includes("models auth list"),
+      );
+      expect(listed).toBe(true);
+      expect(pasteCallFor("anthropic:default")).toBeDefined();
+    });
+
+    it("pastes a key the store does not hold, landing what the save staged before it first", async () => {
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      const paste = vi.mocked(spawnOpenclawCli).mock.calls.findIndex(
+        (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key"),
+      );
+      expect(paste).toBeGreaterThan(-1);
+      expect(pasteStdin("deepseek:default")).toContain("portal-token-123");
+      const pastedAt = vi.mocked(spawnOpenclawCli).mock.invocationCallOrder[paste];
+      expect(orderOf(vi.mocked(flushConfigWrites)).some((at) => at < pastedAt)).toBe(true);
+    });
+
+    function committingAs(committedAs: string) {
+      vi.mocked(beginConfigWriteTransaction).mockImplementationOnce((label: string) => ({
+        label,
+        isOpen: false,
+        pending: 0,
+        committedAs,
+        commit: vi.fn(async () => {}),
+        flush: vi.fn(async () => {}),
+        abandon: vi.fn(),
+      }) as unknown as ReturnType<typeof beginConfigWriteTransaction>);
+    }
+
+    it("names a changed primary that is in no model list when the save went through the gateway, which does not check model ids", async () => {
+      committingAs("gateway");
+      const res = await configurePost(jsonRequest({
+        provider: "openrouter",
+        apiKey: "sk-or-v1-test",
+        model: "acme/no-such-model",
+      }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.warning).toContain("openrouter/acme/no-such-model is in no model list this box has for openrouter");
+      // It does not claim a refusal that never happened.
+      expect(body.warning).not.toContain("refused");
+    });
+
+    it.each(["unchanged", "one-by-one"])("says nothing of the kind when the commit was %s", async (how) => {
+      committingAs(how);
+      const res = await configurePost(jsonRequest({
+        provider: "openrouter",
+        apiKey: "sk-or-v1-test",
+        model: "acme/no-such-model",
+      }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).warning ?? "").not.toContain("is in no model list");
+    });
+
+    it("says nothing for a primary the lists know", async () => {
+      committingAs("gateway");
+      const res = await configurePost(jsonRequest({ provider: "openrouter", apiKey: "sk-or-v1-test" }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).warning ?? "").not.toContain("is in no model list");
+    });
+  });
+
+  // An older ClawBox stored the device login as an OAuth bundle at ClawBox
+  // AI's own id, and the pinned core refuses to paste an API key over a
+  // sign-in: "The API-key profile belongs to another sign-in". Every later
+  // ClawBox AI connect then failed, from the wizard and from Settings. The slot
+  // is this route's alone, so it is taken over with the core's own logout —
+  // and a slot that still holds the sign-in is never answered as a success.
+  describe("a stale sign-in in ClawBox AI's credential slot", () => {
+    const SLOT = "deepseek:default";
+    const REFUSAL = "The API-key profile belongs to another sign-in.";
+    const oauthRow = {
+      kind: "present", store: "shared", type: "oauth", fingerprint: null, refreshFingerprint: null,
+      expires: 1, fenced: false, fence: null, storeUpdatedAtMs: 1,
+    } as GatewayAuthProfileRead;
+    const keyRow = { ...oauthRow, type: "api_key" } as GatewayAuthProfileRead;
+
+    const cliCalls = () => vi.mocked(spawnOpenclawCli).mock.calls.map(([args]) => (args as string[]).join(" "));
+    const logoutCalls = () => cliCalls().filter((call) => call.startsWith(`models auth logout ${SLOT}`));
+    const pasteCalls = () => cliCalls().filter((call) => call.includes("paste-api-key") && call.includes(SLOT));
+
+    /**
+     * The pinned core, as far as this slot goes: the paste refuses while the
+     * store holds a sign-in at the id, and logout empties it. `heldBy` is what
+     * the store holds before the save; `readerSees` is whether the in-process
+     * reader can see it (a roster agent's store is invisible to it).
+     */
+    function seedCore({ readerSees = true, logoutWorks = true, configSays = true } = {}) {
+      let signedIn = true;
+      vi.mocked(readGatewayAuthProfile).mockImplementation(() =>
+        (readerSees && signedIn ? oauthRow : keyRow));
+      // The openclaw.json half of the stale sign-in, as the box carries it
+      // until logout drops it and the paste rewrites it.
+      mockReadOpenClawConfig.mockImplementation(async () => (configSays
+        ? { auth: { profiles: { [SLOT]: { provider: "deepseek", mode: signedIn ? "oauth" : "api_key" } } } }
+        : {}));
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[]) => {
+        const call = args.join(" ");
+        if (call.startsWith(`models auth logout ${SLOT}`)) {
+          if (logoutWorks) signedIn = false;
+          return "";
+        }
+        if (call.includes("paste-api-key") && call.includes(SLOT) && signedIn) throw new Error(REFUSAL);
+        return "";
+      });
+    }
+
+    afterEach(() => {
+      vi.mocked(readGatewayAuthProfile).mockReset();
+      vi.mocked(spawnOpenclawCli).mockReset().mockResolvedValue("");
+    });
+
+    it("takes the slot over natively and connects the device login", async () => {
+      seedCore();
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+        authMode: "subscription",
+        clawaiTier: "flash",
+      }));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).success).toBe(true);
+      expect(logoutCalls()).toEqual([`models auth logout ${SLOT} --yes`]);
+      // Logout first, then the paste that now lands.
+      const calls = cliCalls();
+      expect(calls.indexOf(logoutCalls()[0])).toBeLessThan(calls.indexOf(pasteCalls()[0]));
+      expect(pasteStdin(SLOT)).toContain("claw_token_abc");
+      // And the metadata is stamped as the API key it now is.
+      expect(findConfigSet(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        `auth.profiles.${SLOT}`,
+      )?.value).toBe(JSON.stringify({ provider: "deepseek", mode: "api_key" }));
+    });
+
+    it("takes it over from the pasted-token lane too", async () => {
+      seedCore();
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc" }));
+
+      expect(res.status).toBe(200);
+      expect(logoutCalls()).toHaveLength(1);
+    });
+
+    it("takes it over when only the paste's refusal names the sign-in", async () => {
+      // The store the paste writes is one the in-process reader cannot see,
+      // and openclaw.json carries nothing either: the refusal is the evidence.
+      seedCore({ readerSees: false, configSays: false });
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+
+      expect(res.status).toBe(200);
+      expect(logoutCalls()).toHaveLength(1);
+      expect(pasteCalls().length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("answers a sentence, never success, when the sign-in cannot be removed", async () => {
+      seedCore({ logoutWorks: false });
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.success).toBeUndefined();
+      expect(body.code).toBe("clawai_slot_held");
+      expect(body.error).toContain(`openclaw models auth logout ${SLOT}`);
+      expect(body.error).not.toContain("check your credentials");
+      expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ ai_model_configured: true }));
+    });
+
+    it("never answers success over a paste that exited 0 and left the sign-in", async () => {
+      // A refusal printed on stderr with exit 0 reads as a landed paste; the
+      // store read after it is what tells the two apart. The reader is blind
+      // until then, so nothing is taken over before the paste.
+      let reads = 0;
+      vi.mocked(readGatewayAuthProfile).mockImplementation(() => (reads++ === 0 ? keyRow : oauthRow));
+      vi.mocked(spawnOpenclawCli).mockResolvedValue("");
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("clawai_slot_held");
+    });
+
+    it("leaves a slot that already holds an API key alone", async () => {
+      mockReadOpenClawConfig.mockResolvedValue({
+        auth: { profiles: { [SLOT]: { provider: "deepseek", mode: "api_key" } } },
+      });
+      vi.mocked(readGatewayAuthProfile).mockReturnValue(keyRow);
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc", authMode: "subscription" }));
+
+      expect(res.status).toBe(200);
+      expect(logoutCalls()).toEqual([]);
+    });
+
+    it("never takes over another provider's sign-in", async () => {
+      // Anthropic keeps its guard: a key over its sign-in is refused, not
+      // logged out (the sign-in is the owner's, not ClawBox's).
+      mockReadOpenClawConfig.mockResolvedValue({});
+      vi.mocked(readGatewayAuthProfile).mockReturnValue(oauthRow);
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[]) =>
+        (args.join(" ") === "models auth list --json"
+          ? JSON.stringify({ profiles: [{ id: "anthropic:default", provider: "anthropic", type: "oauth" }] })
+          : ""));
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+
+      expect(res.status).toBe(409);
+      expect(cliCalls().some((call) => call.startsWith("models auth logout"))).toBe(false);
     });
   });
 });

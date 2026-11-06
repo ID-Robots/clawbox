@@ -12,7 +12,7 @@ import nodePath from "node:path";
  * DERIVED, not typed: `fs/promises` is mocked in this suite, so the updater never
  * reads a pin file and falls back to its compiled `OPENCLAW_VERSION_FALLBACK`,
  * which must equal `config/openclaw-target.txt` (guarded by
- * install-node-engine-table.test.ts). Sixteen literal `@2026.8.1` expectations
+ * harness-pins.test.ts). Sixteen literal `@2026.8.1` expectations
  * here had to be hand-edited at the last pin bump and would again at the next —
  * and a suite that needs hand-editing to follow a pin is a suite that can be
  * left behind by one.
@@ -31,6 +31,20 @@ vi.mock("child_process", () => ({
   execFile: vi.fn(),
   spawn: vi.fn(),
 }));
+
+// The real maintenance retry, with no window: a case here that feeds the core's
+// "retry when it finishes" is about what the updater makes of the answer that
+// is left, and must not wait out 25 s of asks to get there.
+vi.mock("@/lib/openclaw-maintenance", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/openclaw-maintenance")>();
+  return {
+    ...actual,
+    withOpenclawMaintenanceRetry: <T,>(
+      attempt: (timeoutMs: number) => Promise<T>,
+      options: Parameters<typeof actual.withOpenclawMaintenanceRetry>[1],
+    ) => actual.withOpenclawMaintenanceRetry(attempt, { ...options, windowMs: 0 }),
+  };
+});
 
 // `realpath` beside `readFile`: readBuildId follows `.next/standalone/server.js`
 // through the link `postbuild` writes for the NESTED standalone layout, so a
@@ -82,8 +96,29 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 // is the seam: nothing in these tests may spawn a real `hermes`.
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
-const { mockX64Integration } = vi.hoisted(() => ({ mockX64Integration: vi.fn(() => false) }));
-vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: mockX64Integration }));
+const { mockX64Integration, mockX64Install } = vi.hoisted(() => ({
+  mockX64Integration: vi.fn(() => false),
+  mockX64Install: vi.fn(() => false),
+}));
+vi.mock("@/lib/x64-integration", () => ({
+  hasX64DesktopIntegration: mockX64Integration,
+  hasX64Install: mockX64Install,
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000, X64_DESKTOP_GATEWAY_READY_WAIT_MS: 240_000,
+}));
+// The owner's rebuild and the UI restart on an install-x64.sh PC: both act on
+// THIS process and the real checkout, so they are seams here and are tested on
+// their own (x64-install-update.test.ts). Everything else in that module is real.
+const { mockRebuildAsOwner, mockRestartUiProcess } = vi.hoisted(() => ({
+  mockRebuildAsOwner: vi.fn<(projectDir: string, options?: { onProgress?: (detail: string) => void }) => Promise<void>>(
+    async () => {},
+  ),
+  mockRestartUiProcess: vi.fn((): Promise<never> => new Promise<never>(() => {})),
+}));
+vi.mock("@/lib/x64-install-update", async (orig) => ({
+  ...(await orig<typeof import("@/lib/x64-install-update")>()),
+  rebuildAsOwner: mockRebuildAsOwner,
+  restartUiProcess: mockRestartUiProcess,
+}));
 
 // The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
 // `readPluginRepairs` answers `{}`, which is what the real one answers under
@@ -140,7 +175,50 @@ vi.mock("@/lib/plugin-repair-after-update", () => ({
   retryPluginRepairsAfterCoreUpdate: mockRetryAfterCoreUpdate,
 }));
 
+// What the agent databases weigh, which sizes the verify's `doctor --fix`.
+// 0 by default — what the real reader answers under this file's mocked
+// `fs/promises` — so only the cases about a large box move.
+// The migration status the pre-start wrote: none by default, which is what the
+// real reader answers under the mocked `fs/promises`.
+const { mockOpenclawDatabaseBytes, mockReadMigrationStatus } = vi.hoisted(() => ({
+  mockOpenclawDatabaseBytes: vi.fn<(stateDir: string) => Promise<number>>(async () => 0),
+  mockReadMigrationStatus: vi.fn<() => Promise<import("@/lib/openclaw-migration-status").OpenclawMigrationStatus | null>>(
+    async () => null,
+  ),
+}));
+vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
+  openclawDatabaseBytes: mockOpenclawDatabaseBytes,
+  readOpenclawMigrationStatus: mockReadMigrationStatus,
+}));
+
+// The session check's one network call (TASK-2153): the `chat.history` the
+// verify asks the gateway once it listens. Healthy by default — a gateway that
+// answers — so only the cases about one that cannot serve sessions move; the
+// policy and the restart around it are the real ones.
+const { mockMainChatHistory } = vi.hoisted(() => ({
+  mockMainChatHistory: vi.fn(async (): Promise<{ sessionKey: string }> => ({ sessionKey: "main" })),
+}));
+vi.mock("@/lib/openclaw-gateway-ws", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-gateway-ws")>()),
+  gatewayWsMainChatHistory: mockMainChatHistory,
+}));
+
+// The wait that lets a gateway still starting finish before a planned stop;
+// its rule is gateway-start-guard.test.ts's. "Not starting" by default, so
+// only the case about it moves; the rest of that module is the real one.
+const { mockWaitForGatewayStart } = vi.hoisted(() => ({
+  mockWaitForGatewayStart: vi.fn<() => Promise<"not-starting" | "settled" | "timed-out">>(
+    async () => "not-starting",
+  ),
+}));
+vi.mock("@/lib/gateway-start-guard", async (orig) => ({
+  ...(await orig<typeof import("@/lib/gateway-start-guard")>()),
+  waitForGatewayStartBeforeStop: mockWaitForGatewayStart,
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
+import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
 
@@ -288,6 +366,33 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
   }) as unknown as typeof childProcess.execFile);
 }
 
+/** `systemctl show` output for the gateway unit, as the start wait asks for it. */
+function unitShow(fields: { ActiveState: string; SubState: string; Result?: string; Job?: string; NRestarts?: number }): string {
+  const { Result = "success", Job = "", NRestarts = 0, ...rest } = fields;
+  return Object.entries({ ...rest, Result, Job, NRestarts }).map(([key, value]) => `${key}=${value}`).join("\n") + "\n";
+}
+
+/**
+ * Answer the gateway start wait's `systemctl show … -p NRestarts` with
+ * `stateAt(read)` (read counts from 0), and every other command the way the
+ * execFile mock already in place does.
+ */
+function answerGatewayStartState(stateAt: (read: number) => string): { reads: () => number } {
+  const base = mockExecFile.getMockImplementation() as ((...call: unknown[]) => unknown) | undefined;
+  let reads = 0;
+  mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+    if (Array.isArray(args) && args.includes("NRestarts")) {
+      const callback = rest.find((part) => typeof part === "function") as
+        | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+        | undefined;
+      callback?.(null, { stdout: stateAt(reads++), stderr: "" });
+      return {};
+    }
+    return base?.(cmd, args, ...rest);
+  }) as unknown as typeof childProcess.execFile);
+  return { reads: () => reads };
+}
+
 describe("updater", () => {
   let updater: typeof import("@/lib/updater");
 
@@ -295,9 +400,22 @@ describe("updater", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockX64Integration.mockReturnValue(false);
+    mockX64Install.mockReturnValue(false);
+    mockRebuildAsOwner.mockImplementation(async () => {});
+    mockRestartUiProcess.mockImplementation(() => new Promise<never>(() => {}));
     process.env.GATEWAY_HEALTH_WAIT_MS = "1";
     process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
     process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+    process.env.GATEWAY_START_LIMIT_MS = "1";
+    process.env.GATEWAY_START_POLL_MS = "1";
+    process.env.GATEWAY_START_POLL_MAX_MS = "1";
+    process.env.GATEWAY_SESSION_WINDOW_MS = "1";
+    process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS = "1";
+    process.env.GATEWAY_SESSION_POLL_MS = "1";
+    mockMainChatHistory.mockReset();
+    mockMainChatHistory.mockResolvedValue({ sessionKey: "main" });
+    mockReadMigrationStatus.mockReset();
+    mockReadMigrationStatus.mockResolvedValue(null);
     // Pin the SKU: the step list is edition-dependent, so without this the
     // expectations below that look for `gateway_verify` would fail on a Hermes
     // box, where it is (correctly) filtered out. Only the edition VALUE is set
@@ -342,6 +460,12 @@ describe("updater", () => {
     delete process.env.GATEWAY_HEALTH_WAIT_MS;
     delete process.env.GATEWAY_RECOVERY_WAIT_MS;
     delete process.env.GATEWAY_WAIT_INTERVAL_MS;
+    delete process.env.GATEWAY_START_LIMIT_MS;
+    delete process.env.GATEWAY_START_POLL_MS;
+    delete process.env.GATEWAY_START_POLL_MAX_MS;
+    delete process.env.GATEWAY_SESSION_WINDOW_MS;
+    delete process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS;
+    delete process.env.GATEWAY_SESSION_POLL_MS;
     // NOT CLAWBOX_EDITION_FILE — that is a suite-wide guarantee from
     // vitest.config.ts, and deleting it here would leave later files in this
     // worker reading the real /etc/clawbox/edition.env.
@@ -957,6 +1081,123 @@ describe("updater", () => {
       expect(aptStep?.error).not.toBe("Running bun build...");
     });
 
+    it("names the fixup that failed when post_update fails on what it recorded", async () => {
+      // Hermes box, 2026-10-13: post_update's `openclaw_tts` recorded a failure
+      // and the update failed — but the owner was shown a fixup's success line,
+      // not `openclaw_tts`. The sub-step's own ERROR is printed long before the
+      // step ends, the reason is read from the unit's last 40 journal lines,
+      // and nothing at the end said which fixup it was. Fed with what the REAL
+      // `--step` dispatch block prints, so the test cannot agree with itself.
+      const { spawnSync } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      const installSh = readFileSync(nodePath.join(process.cwd(), "install.sh"), "utf-8");
+      const fn = (name: string) => {
+        const at = installSh.indexOf(`${name}() {`);
+        return installSh.slice(at, installSh.indexOf("\n}", at) + 2);
+      };
+      const at = installSh.indexOf('if [ "${1:-}" = "--step" ]; then');
+      const program = [
+        "exec 2>&1",
+        "set -euo pipefail",
+        'PROJECT_DIR="/home/clawbox/clawbox"',
+        "PROVISION_FAILURES=()",
+        'PROVISION_RUN_ID="test-run"',
+        fn("record_provision_failure"),
+        fn("provision_repair_step"),
+        "write_provision_status() { :; }",
+        "DISPATCH_STEPS=(post_update)",
+        "step_post_update() {",
+        '  echo "  ERROR: the on-device voice was NOT registered with Hermes — could not write the clawbox-local provider definition"',
+        "  record_provision_failure openclaw_tts",
+        // The fixups after it: gateway setup, embeddings, the model, smokes.
+        '  local i; for i in $(seq 1 45); do echo "  Fixup $i: done"; done',
+        "}",
+        installSh.slice(at, installSh.indexOf("\nfi\n", at) + 4),
+      ].join("\n");
+      const dispatched = spawnSync("bash", ["-c", program, "bash", "--step", "post_update"], { encoding: "utf-8" });
+      expect(dispatched.status, dispatched.stdout).not.toBe(0);
+      // What `journalctl -u … -n 40` hands the reader: the step's tail and
+      // systemd's epilogue, newest last.
+      const journal = [
+        ...dispatched.stdout.split("\n").filter(Boolean),
+        "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
+        "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
+        "clawbox-root-update@post_update.service: Consumed 9min 3.112s CPU time.",
+      ].slice(-40).join("\n");
+
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
+        "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": { stdout: `${journal}\n`, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.status).toBe("failed");
+      expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal}`).toMatch(/^Error: .*openclaw_tts/);
+      // The owner reads this line: the step, not an operator's command or path.
+      expect(postStep?.error).not.toMatch(/sudo|\/home\//);
+    });
+
+    it("never hands the owner the dispatch verdict's banner or run id as the reason", async () => {
+      // A step that recorded a fixup's failure and then died on its own without
+      // an `Error:` line ends its journal with the dispatch trap's banner and
+      // `[provision-…]` markers. root-step-follow.ts never treated those as a
+      // reason; this reader took the last of them, the run id.
+      const journal = [
+        "  Polkit rules installed (NetworkManager only; root steps go through sudo)",
+        "  Copying the voice units",
+        "  ############################################################",
+        "  # PROVISIONING INCOMPLETE — step post_update reported errors.",
+        "  # Steps that failed: openclaw_tts",
+        "  # Re-run:  sudo bash /home/clawbox/clawbox/install.sh --step openclaw_tts",
+        "  ############################################################",
+        "[provision-status] INCOMPLETE (openclaw_tts)",
+        "[provision-run] 20261013T183500Z-4242",
+        "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
+        "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
+        "",
+      ].join("\n");
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
+        "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": { stdout: journal, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.error).toBe("Copying the voice units");
+    });
+
     it("does NOT claim memory for a SIGKILL the journal does not attribute", async () => {
       // A stop timeout, `systemctl kill`, a watchdog and an operator all land
       // as signal 9 / exit 137. Reporting "the device ran out of memory" over
@@ -1413,6 +1654,41 @@ describe("updater", () => {
       expect(subStateQueries.filter((index) => index < firstStop).length).toBeGreaterThanOrEqual(2);
     });
 
+    it("does not stop the gateway while it is still starting, nor in the moment after", async () => {
+      // Out of its pre-start is not started: Type=simple goes straight to
+      // `running`, and the core runs its startup sidecars and channels for
+      // half a minute after. A stop in that window waits out the unit's whole
+      // TimeoutStopSec (the core's Telegram provider starts after the SIGTERM
+      // and holds shutdown to its deadline), so the quiesce lets the start
+      // finish first, masked, so nothing can start the unit behind the wait.
+      setupExecFileMock({
+        "show clawbox-gateway.service -p SubState": { stdout: "running\n", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const start = deferred<"settled">();
+      mockWaitForGatewayStart.mockImplementationOnce(() => start.promise);
+      const calls = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(mockWaitForGatewayStart).toHaveBeenCalled());
+      const masked = calls().findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
+      expect(masked).toBeGreaterThan(-1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(calls().some((call) => call.includes("systemctl stop clawbox-gateway.service"))).toBe(false);
+
+      start.resolve("settled");
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+      const stop = calls().findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      expect(stop).toBeGreaterThan(masked);
+    });
+
     it("keeps waiting when the pre-start state cannot be read", async () => {
       // A `systemctl show` that times out under a cold box's load says
       // nothing about the pre-start. Treating "unanswered" as "finished"
@@ -1461,6 +1737,51 @@ describe("updater", () => {
       expect(firstStop).toBeGreaterThan(-1);
       // Unanswered, then start-pre, then running — and only then stopped.
       expect(subStateQueriesBeforeStop.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("keeps waiting for the pre-start across a forward step of the wall clock", async () => {
+      // The box has no battery-backed RTC: after a cold boot it runs on the
+      // clock it saved at shutdown until timesyncd steps it forward — half a
+      // day after a night off — while the gateway's pre-start is still going.
+      // On the wall clock that step spent the whole 600 s at once and failed
+      // a healthy update with "did not leave its pre-start". Only `Date` moves
+      // here, as only the wall clock moves on the box.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const preStart = { stdout: "start-pre\n", stderr: "" };
+        setupExecFileMock({
+          "show clawbox-gateway.service -p SubState": preStart,
+          "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        const answer = mockExecFile.getMockImplementation()!;
+        let preStartQueries = 0;
+        mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+          if (args.join(" ").includes("clawbox-gateway.service -p SubState")) {
+            preStartQueries += 1;
+            // The step lands while the first answer is still `start-pre`.
+            if (preStartQueries === 1) vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+            else preStart.stdout = "running\n";
+          }
+          return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+        }) as unknown as typeof childProcess.execFile);
+
+        updater.resetUpdateState();
+        mockGet.mockResolvedValue(true);
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => {
+          expect(["completed", "failed"]).toContain(updater.getUpdateState().phase);
+        });
+
+        const state = updater.getUpdateState();
+        expect(state.steps.find((step) => step.status === "failed")?.error).toBeUndefined();
+        expect(state.phase).toBe("completed");
+        expect(preStartQueries).toBeGreaterThanOrEqual(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("fails when an overrun post_update later settles with a systemd error result", async () => {
@@ -1513,6 +1834,66 @@ describe("updater", () => {
       );
     });
 
+    it("waits an overrun root step out across a forward step of the wall clock before lifting the gateway's mask", async () => {
+      // The settle wait mirrors the root unit's own ceiling and keeps the
+      // gateway masked while the unit still writes OpenClaw's state. A clock
+      // stepped forward while it polls (no RTC, timesyncd after a cold boot)
+      // must not end it after one look at a unit that is still running.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
+        const activeState = { stdout: "activating\n", stderr: "" };
+        setupExecFileMock({
+          "clawbox-run-root-step.sh post_update": timeoutErr,
+          "show clawbox-root-update@post_update.service -p ActiveState": activeState,
+          "show clawbox-root-update@post_update.service -p Result": { stdout: "exit-code\n", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-root-update@post_update.service": {
+            stdout: "post_update exited with status 1\n",
+            stderr: "",
+          },
+          "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: "", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        const answer = mockExecFile.getMockImplementation()!;
+        let settleQueries = 0;
+        mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+          if (args.join(" ").includes("clawbox-root-update@post_update.service -p ActiveState")) {
+            settleQueries += 1;
+            // Still running at the first look, and the clock steps meanwhile.
+            if (settleQueries === 1) vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+            else activeState.stdout = "failed\n";
+          }
+          return (answer as (...a: unknown[]) => unknown)(cmd, args, ...rest);
+        }) as unknown as typeof childProcess.execFile);
+
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockRebuiltBox();
+        updater = await import("@/lib/updater");
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(
+          () => expect(updater.getUpdateState().phase).toBe("failed"),
+          { timeout: 10_000 },
+        );
+
+        const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+        expect(postStep?.error).toBe("post_update exited with status 1");
+        // The mask stayed on until the unit was seen out of `activating`.
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+        const settleAt = calls
+          .map((call, index) => (call.includes("clawbox-root-update@post_update.service -p ActiveState") ? index : -1))
+          .filter((index) => index >= 0);
+        const firstLeave = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh leave"));
+        expect(settleAt.length).toBeGreaterThanOrEqual(2);
+        expect(firstLeave).toBeGreaterThan(settleAt[1]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
@@ -1541,6 +1922,146 @@ describe("updater", () => {
         const state = updater.getUpdateState();
         expect(state.phase).toBe("failed");
         expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
+      });
+    });
+
+    describe("a gateway that is slow to start after the recovery restart", () => {
+      // A box with a large memory database: the restarted gateway's pre-start
+      // and then its load outlast the 45 s the update used to give it, and the
+      // owner got "not listening on port 18789" over a gateway that was up a
+      // few minutes later. The wait follows the unit now.
+      async function continueWith(
+        stateAt: (read: number) => string,
+        listening: (reads: number) => boolean,
+        limitMs = "60000",
+      ) {
+        process.env.GATEWAY_START_LIMIT_MS = limitMs;
+        setupExecFileMock({
+          "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: "gateway: loading memory index\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        const unit = answerGatewayStartState(stateAt);
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockRebuiltBox();
+        const details: string[] = [];
+        mockGatewayUp.mockImplementation(async () => {
+          const detail = updater.getUpdateState().steps.find((step) => step.id === "gateway_verify")?.detail;
+          if (detail) details.push(detail);
+          return listening(unit.reads());
+        });
+        updater = await import("@/lib/updater");
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"), { timeout: 5_000 });
+        const restarts = mockExecFile.mock.calls
+          .map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`)
+          .filter((call) => call.includes("systemctl restart clawbox-gateway.service"));
+        return { state: updater.getUpdateState(), details, reads: unit.reads(), restarts };
+      }
+
+      it("waits for it while systemd says it is starting, saying so, and completes the update", async () => {
+        const run = await continueWith(
+          (read) => read < 2
+            ? unitShow({ ActiveState: "activating", SubState: "start-pre" })
+            : unitShow({ ActiveState: "active", SubState: "running" }),
+          (reads) => reads >= 4,
+        );
+        expect(run.state.phase).toBe("completed");
+        expect(run.state.error).toBeUndefined();
+        const verify = run.state.steps.find((step) => step.id === "gateway_verify");
+        expect(verify?.status).toBe("completed");
+        // A "still starting" state on screen while it waited, gone once it ended.
+        expect(run.details.some((detail) => detail.startsWith("Gateway still starting: running its start-up checks"))).toBe(true);
+        expect(run.details.some((detail) => detail.startsWith("Gateway still starting: loading its data"))).toBe(true);
+        expect(verify?.detail).toBeUndefined();
+        // Waited for, never restarted again over its own slow start.
+        expect(run.restarts).toHaveLength(1);
+      });
+
+      it("fails at once, naming the unit's state, when the unit failed", async () => {
+        const run = await continueWith(
+          () => unitShow({ ActiveState: "failed", SubState: "failed", Result: "exit-code" }),
+          () => false,
+          "600000",
+        );
+        expect(run.state.phase).toBe("failed");
+        expect(run.state.error).toContain(
+          "OpenClaw gateway is not listening on port 18789 (clawbox-gateway.service is failed (failed, exit-code))",
+        );
+        expect(run.state.error).toContain("gateway: loading memory index");
+        // Two reads to confirm it, not ten minutes of them.
+        expect(run.reads).toBe(2);
+        expect(run.details).toHaveLength(0);
+      });
+
+      it("fails a crash loop without waiting out the limit", async () => {
+        const run = await continueWith(
+          (read) => unitShow({ ActiveState: "activating", SubState: "auto-restart", NRestarts: read }),
+          () => false,
+          "600000",
+        );
+        expect(run.state.phase).toBe("failed");
+        expect(run.state.error).toContain("clawbox-gateway.service restarted 3 times while starting");
+        expect(run.reads).toBe(4);
+      });
+
+      it("follows a restart whose pre-start outlives the restart's own settle budget", async () => {
+        // The pre-start's database housekeeping may run most of the unit's 600 s,
+        // past the 60 s client and 360 s settle the restart waits: that restart is
+        // still going, and the update used to fail it as "still restarting".
+        // `performance` too: the settle budget is counted on the monotonic clock.
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+        try {
+          process.env.GATEWAY_START_LIMIT_MS = "60000";
+          setupExecFileMock({
+            "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+            "systemctl restart clawbox-gateway.service": Object.assign(new Error("Command failed"), {
+              killed: true,
+              signal: "SIGTERM",
+            }),
+            "show clawbox-gateway.service -p Job": {
+              stdout: "Job=77\nActiveState=activating\nSubState=start-pre\nResult=success\n",
+              stderr: "",
+            },
+            ping: { stdout: "", stderr: "" },
+            systemctl: { stdout: "", stderr: "" },
+            openclaw: { stdout: "1.0.0", stderr: "" },
+          });
+          const unit = answerGatewayStartState((read) => read < 1
+            ? unitShow({ ActiveState: "activating", SubState: "start-pre", Job: "77" })
+            : unitShow({ ActiveState: "active", SubState: "running" }));
+          vi.resetModules();
+          mockGet.mockResolvedValue(true);
+          mockRebuiltBox();
+          mockGatewayUp.mockImplementation(async () => unit.reads() >= 2);
+          updater = await import("@/lib/updater");
+          updater.resetUpdateState();
+          expect(await updater.checkContinuation()).toBe(true);
+          for (let tick = 0; tick < 2_000 && updater.getUpdateState().phase === "running"; tick++) {
+            await vi.advanceTimersByTimeAsync(1_000);
+          }
+          const state = updater.getUpdateState();
+          expect(state.error).toBeUndefined();
+          expect(state.phase).toBe("completed");
+          expect(unit.reads()).toBe(2);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("fails at the limit, saying it was still starting and where the unit stood", async () => {
+        const run = await continueWith(
+          () => unitShow({ ActiveState: "active", SubState: "running" }),
+          () => false,
+          "40",
+        );
+        expect(run.state.phase).toBe("failed");
+        expect(run.state.error).toContain("OpenClaw gateway is not listening on port 18789 after");
+        expect(run.state.error).toContain("of waiting for it to start (clawbox-gateway.service is active (running))");
       });
     });
 
@@ -2600,6 +3121,13 @@ describe("updater", () => {
       // A first CLI installation must outlive the installer's five-minute
       // download allowance instead of inheriting a three-minute fetch budget.
       expect(bootstrap?.[2]).toEqual(expect.objectContaining({ timeout: 930_000 }));
+      // The desktop's core step replaces the core behind a verified archive
+      // and a migration of multi-GB agent databases: its wait is the desktop's
+      // own 110 minutes, not the appliance's five (plus the runner's 30 s).
+      const install = mockExecFile.mock.calls.find(([, args]) =>
+        (args as string[]).includes("openclaw_install"),
+      );
+      expect(install?.[2]).toEqual(expect.objectContaining({ timeout: 6_630_000 }));
       const calls = commands();
       const harnessIndex = calls.findIndex((call) => call.includes("/usr/bin/setpriv"));
       expect(harnessIndex).toBeGreaterThan(calls.findIndex((call) => call.includes("clawbox-run-root-step.sh apt_update")));
@@ -2650,6 +3178,18 @@ describe("updater", () => {
       expectNoApplianceMaintenance();
     });
 
+    it("gives a slow-booting desktop gateway the desktop's window before and after restarting it", async () => {
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockResolvedValue(false);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      // A 75 s boot outlived the appliance's 30 s + 45 s: the restart in
+      // between threw the first boot away and the second wait ran out first.
+      const waits = mockGatewayUp.mock.calls.map(([, , options]) => options?.timeoutMs);
+      expect(waits.length).toBeGreaterThanOrEqual(2);
+      expect(waits.every((timeoutMs) => timeoutMs === 240_000)).toBe(true);
+    });
+
     it("reports a rolled-back rebuild without stopping the restored gateway", async () => {
       mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "same-build" : undefined);
       mockRebuiltBox("same-build");
@@ -2657,6 +3197,363 @@ describe("updater", () => {
       expect(updater.getUpdateState().phase).toBe("failed");
       expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
       expectNoApplianceMaintenance();
+    });
+  });
+
+  /**
+   * A PC installed with install-x64.sh and no integration package. Its root
+   * helper (scripts/x64-migration/clawbox-x64-root-step.sh) has no
+   * bootstrap_updater and no rebuild_reboot, so on the appliance path step 1
+   * exited 64 and every update failed there; the helpers it shipped with also
+   * lacked gateway_setup and post_update, and ran every forwarded installer
+   * step without the user it installs for.
+   */
+  describe("PCs installed with install-x64.sh", () => {
+    beforeEach(() => {
+      // The run state is process-global and a run that reached the restart
+      // waits on it for good, the way a real one waits to be replaced.
+      updater.resetUpdateState();
+      mockX64Install.mockReturnValue(true);
+    });
+
+    function commands() {
+      return mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    }
+    const rootStep = (step: string) => (call: string) => call.includes(`clawbox-run-root-step.sh ${step}`)
+      || call.includes(`clawbox-run-root-step.sh --no-block ${step}`);
+    /** Nothing the appliance's root contract or Jetson gateway helpers own. */
+    function expectNoApplianceOnlyWork() {
+      const calls = commands();
+      for (const step of ["bootstrap_updater", "fix_git_perms", "rebuild_reboot"]) {
+        expect(calls.some(rootStep(step)), step).toBe(false);
+      }
+      expect(calls.some((call) => call.includes("clawbox-gateway-maintenance.sh")
+        || call.includes("scripts/gateway-pre-start.sh")
+        || call.includes("doctor --fix")
+        || /systemctl\b.*\b(reboot|poweroff)\b/.test(call))).toBe(false);
+    }
+
+    it("syncs and rebuilds as the owner, asks root only for system steps, and restarts only the UI", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+
+      const calls = commands();
+      const ownerFetch = calls.findIndex((call) => call.startsWith("git ")
+        && call.includes("fetch --quiet origin +refs/heads/main:refs/remotes/origin/main"));
+      expect(ownerFetch).toBeGreaterThanOrEqual(0);
+      // Step 1 moves the tree BEFORE the OpenClaw step reads its pin.
+      const ownerReset = calls.findIndex((call) => call.startsWith("git ") && call.endsWith("reset --hard origin/main"));
+      expect(ownerReset).toBeGreaterThan(ownerFetch);
+      expect(ownerReset).toBeLessThan(calls.findIndex(rootStep("openclaw_install")));
+      for (const step of ["apt_update", "chromium_install", "vnc_install", "openclaw_install", "openclaw_patch", "gateway_setup"]) {
+        expect(calls.some(rootStep(step)), step).toBe(true);
+      }
+      expectNoApplianceOnlyWork();
+
+      // The continuation flag carries the serving build, like the appliance's.
+      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", "rebuilt-build-id");
+      expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
+      expect(mockRebuildAsOwner.mock.calls[0][0]).toBe(process.env.CLAWBOX_ROOT);
+      const state = updater.getUpdateState();
+      expect(state.steps.find((s) => s.id === "bootstrap_updater")?.status).toBe("completed");
+      expect(state.steps.find((s) => s.id === "gateway_setup")?.status).toBe("completed");
+      expect(state.steps.find((s) => s.id === "restart")?.status).toBe("running");
+      expect(state.warnings?.some((w) => w.code.startsWith("x64-root-steps-skipped"))).toBe(false);
+    });
+
+    it("skips what the installed root helper cannot run, on ONE card that names the repair", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("Job for clawbox-root-update@apt_update.service failed"),
+        "clawbox-run-root-step.sh gateway_setup": new Error("Job for clawbox-root-update@gateway_setup.service failed"),
+        "-u clawbox-root-update@apt_update.service": {
+          stdout: "Error: could not resolve an unprivileged install user. Set CLAWBOX_USER=<user>.\n",
+          stderr: "",
+        },
+        "-u clawbox-root-update@gateway_setup.service": {
+          stdout: "clawbox-root-step: step 'gateway_setup' has no implementation on the x64 install\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+
+      const state = updater.getUpdateState();
+      expect(state.steps.find((s) => s.id === "apt_update")?.status).toBe("completed");
+      expect(state.steps.find((s) => s.id === "gateway_setup")?.status).toBe("completed");
+      // gateway_setup is failFast on the appliance; here the run went on.
+      expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
+      const cards = (state.warnings ?? []).filter((w) => w.code.startsWith("x64-root-steps-skipped"));
+      expect(cards).toHaveLength(1);
+      expect(cards[0].code).toBe("x64-root-steps-skipped");
+      expect(cards[0].message).toContain("“Updating system packages”, “Configuring gateway service”");
+      expect(cards[0].message).toContain(`sudo bash ${process.env.CLAWBOX_ROOT}/install-x64.sh --step root_step_contract`);
+      // Persisted, so the half after the restart still shows it.
+      expect(mockSet).toHaveBeenCalledWith("update_warnings", expect.stringContaining("x64-root-steps-skipped"));
+      expectNoApplianceOnlyWork();
+    });
+
+    it("still fails a root step that RAN and failed", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh openclaw_install": new Error("Job for clawbox-root-update@openclaw_install.service failed"),
+        "show clawbox-root-update@openclaw_install.service -p Result": { stdout: "exit-code\n", stderr: "" },
+        "-u clawbox-root-update@openclaw_install.service": {
+          stdout: "Installed: none, Target: 2026.9.4\nError: OpenClaw installation failed — /home/clawbox/.npm-global/bin/openclaw not found\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const state = updater.getUpdateState();
+      expect(state.steps.find((s) => s.id === "openclaw_install")?.status).toBe("failed");
+      expect(state.error).toContain("Error: OpenClaw installation failed");
+      expect(state.steps.find((s) => s.id === "restart")?.status).toBe("pending");
+      expect(mockRebuildAsOwner).not.toHaveBeenCalled();
+      expect(state.warnings?.some((w) => w.code.startsWith("x64-root-steps-skipped"))).toBe(false);
+    });
+
+    it("fails the restart step on a failed rebuild, clears the continuation and never restarts", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      mockRebuildAsOwner.mockRejectedValue(new Error(
+        "bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
+      ));
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const restart = updater.getUpdateState().steps.find((s) => s.id === "restart");
+      expect(restart?.status).toBe("failed");
+      expect(restart?.error).toBe(
+        "Rebuild failed: bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
+      );
+      const flagWrites = mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation").map(([, v]) => v);
+      expect(flagWrites).toEqual(["rebuilt-build-id", undefined]);
+      expect(mockRestartUiProcess).not.toHaveBeenCalled();
+      expectNoApplianceOnlyWork();
+    });
+
+    it("resumes after the UI restart on a new build, whatever an older updater left in the rebuild unit", async () => {
+      // A pre-fix updater dispatched clawbox-root-update@rebuild_reboot on this
+      // PC and it failed (exit 64). That unit is not what built this time.
+      setupExecFileMock({
+        "show clawbox-root-update@rebuild_reboot.service -p Result": { stdout: "failed\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "old-build" : undefined);
+      mockRebuiltBox("new-build");
+
+      // `true` is the verdict itself: the stale Result was not read as a
+      // failed rebuild (which answers `false` and paints the restart red).
+      expect(await updater.checkContinuation()).toBe(true);
+      // Completion is read from what the run WROTE, not from the process-global
+      // state: earlier cases in this file leave appliance runs polling this
+      // very Result query, and the "failed" answered here ends one of them
+      // into that shared state at whatever moment its 5 s poll lands.
+      await vi.waitFor(() => expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_completed: true })));
+      const calls = commands();
+      expect(calls.some(rootStep("post_update"))).toBe(true);
+      // A healthy gateway is left alone, and the appliance's plugin retry —
+      // which needs the maintenance helper — is not run.
+      expect(calls.some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
+      expect(mockRetryAfterCoreUpdate).not.toHaveBeenCalled();
+      expectNoApplianceOnlyWork();
+    });
+
+    it("still reports a restart that brought no new build back", async () => {
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "same-build" : undefined);
+      mockRebuiltBox("same-build");
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("ClawBox restarted without producing a new build — see the clawbox-setup service log");
+    });
+
+    it("restarts a stopped gateway through its granted unit restart, and diagnoses one that stays down", async () => {
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockImplementation(async () => commands().some((call) => call.includes("restart clawbox-gateway")));
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().filter((call) => call.includes("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"))).toHaveLength(1);
+      expectNoApplianceOnlyWork();
+
+      vi.clearAllMocks();
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockResolvedValue(false);
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(updater.getUpdateState().error).toContain("OpenClaw gateway is not listening");
+      expectNoApplianceOnlyWork();
+    });
+
+    it("waits for a gateway still starting instead of restarting it over its slow start", async () => {
+      process.env.GATEWAY_START_LIMIT_MS = "60000";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      const unit = answerGatewayStartState((read) => read < 2
+        ? unitShow({ ActiveState: "activating", SubState: "start-pre" })
+        : unitShow({ ActiveState: "active", SubState: "running" }));
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockImplementation(async () => unit.reads() >= 3);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
+      expectNoApplianceOnlyWork();
+    });
+
+    it("runs the OpenClaw-only update without the appliance's gateway mask", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      const calls = commands();
+      expect(calls.some(rootStep("openclaw_install"))).toBe(true);
+      expect(calls.filter((call) => call.includes("systemctl restart clawbox-gateway.service"))).toHaveLength(1);
+      expectNoApplianceOnlyWork();
+    });
+
+    it("leaves a PC with the integration package on that package's contract", async () => {
+      mockX64Integration.mockReturnValue(true);
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(commands().some(rootStep("bootstrap_updater"))).toBe(true));
+      expect(mockRebuildAsOwner).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the appliance path is unchanged", () => {
+    beforeEach(() => { updater.resetUpdateState(); });
+
+    it("asks root for bootstrap_updater, fix_git_perms and the rebuild_reboot unit — never the owner's rebuild", async () => {
+      setupExecFileMock({
+        // Refused at the dispatch, so the run settles instead of waiting for a
+        // reboot that a test cannot provide.
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh bootstrap_updater"))).toBe(true);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh fix_git_perms"))).toBe(true);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh --no-block rebuild_reboot"))).toBe(true);
+      expect(calls.some((call) => call.includes("fetch --quiet origin +refs/heads/"))).toBe(false);
+      expect(mockRebuildAsOwner).not.toHaveBeenCalled();
+      expect(mockRestartUiProcess).not.toHaveBeenCalled();
+      expect(mockX64Install).toHaveBeenCalled();
+    });
+  });
+
+  describe("the OpenClaw step's fast path", () => {
+    beforeEach(() => { updater.resetUpdateState(); });
+
+    const FAST_STEP = "clawbox-run-root-step.sh openclaw_install_fast";
+    /** The full step's own dispatch — never the `_fast` one, whose name it prefixes. */
+    const isFullStep = (call: string) => /clawbox-run-root-step\.sh openclaw_install$/.test(call);
+    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+
+    /** A full update that ends at the rebuild dispatch, refused so the run settles. */
+    function runUpdate(results: Record<string, { stdout: string; stderr: string } | Error>) {
+      setupExecFileMock({
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ...results,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+    }
+
+    it("skips the quiesced step when install.sh took the fast path with the gateway running", async () => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  Installed: OpenClaw 2026.10.7 (abc1234), Target: 2026.10.7\n"
+            + "  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at 2026.10.7, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall\n",
+          stderr: "",
+        },
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = commands();
+      expect(calls.some((call) => call.includes(FAST_STEP))).toBe(true);
+      expect(calls.some(isFullStep)).toBe(false);
+      // The gateway was never masked or stopped for it.
+      expect(calls.some((call) => call.includes("clawbox-gateway-maintenance.sh enter"))).toBe(false);
+      expect(calls.some((call) => call.includes("systemctl stop clawbox-gateway.service"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      // …and the steps after it still ran.
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh openclaw_patch"))).toBe(true);
+    });
+
+    it("runs the full step, quiesced, after install.sh says the full path is needed", async () => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  OpenClaw refresh: full path needed (no full refresh has finished for 2026.10.7; the last on record is none) — nothing changed here; the updater runs it with the gateway quiesced\n",
+          stderr: "",
+        },
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = commands();
+      const fast = calls.findIndex((call) => call.includes(FAST_STEP));
+      const mask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
+      const stop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const full = calls.findIndex(isFullStep);
+      const unmask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh leave"));
+      expect(fast).toBeGreaterThanOrEqual(0);
+      expect(fast).toBeLessThan(mask);
+      expect(mask).toBeLessThan(stop);
+      expect(stop).toBeLessThan(full);
+      expect(full).toBeLessThan(unmask);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+    });
+
+    it("does not read a line that only QUOTES the fast path as the box taking it", async () => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: "  doctor: earlier run said 'OpenClaw refresh: fast path (…)'\n",
+          stderr: "",
+        },
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(isFullStep)).toBe(true);
+    });
+
+    it("runs the full step when the fast step cannot run — a runner that does not know it, say", async () => {
+      runUpdate({
+        [FAST_STEP]: Object.assign(new Error("clawbox-run-root-step: refusing step not on the web list: openclaw_install_fast"), {
+          stderr: "clawbox-run-root-step: refusing step not on the web list: openclaw_install_fast\n",
+        }),
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = commands();
+      const mask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
+      const full = calls.findIndex(isFullStep);
+      expect(full).toBeGreaterThan(mask);
+      expect(mask).toBeGreaterThan(calls.findIndex((call) => call.includes(FAST_STEP)));
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+    });
+
+    it("never asks it on the OpenClaw-only update, the owner's repair", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      const calls = commands();
+      expect(calls.some((call) => call.includes(FAST_STEP))).toBe(false);
+      expect(calls.some(isFullStep)).toBe(true);
     });
   });
 
@@ -2709,6 +3606,430 @@ describe("updater", () => {
     });
   });
 
+  /**
+   * TASK-2153: a gateway that listens and answers /healthz can still refuse
+   * every session call, and a box did for 22 minutes after this step passed.
+   * The verify now asks it one chat.history. Only that call is mocked: the
+   * restart is the update's own (`systemctl restart` through the mocked
+   * execFile), and the step's verdict is the real runner's.
+   */
+  describe("the session check after the gateway listens (TASK-2153)", () => {
+    const reclaimFailure = () => new GatewayRpcError("SQLite session reclamation commit checkpoint expired", "UNAVAILABLE");
+
+    /** The gateway restarts issued after the session check first asked. */
+    function restartsAfterFirstAsk(): number[] {
+      const firstAsk = mockMainChatHistory.mock.invocationCallOrder[0];
+      return mockExecFile.mock.calls
+        .map(([, args], index) => ({ args: (args as string[]).join(" "), order: mockExecFile.mock.invocationCallOrder[index] }))
+        .filter(({ args, order }) => args.includes("systemctl restart clawbox-gateway.service") && order > firstAsk)
+        .map(({ order }) => order);
+    }
+
+    /** The second half of an update — post_update, then gateway_verify — to its end. */
+    async function runVerify(): Promise<ReturnType<typeof updater.getUpdateState>> {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+      return updater.getUpdateState();
+    }
+
+    it("passes a gateway that answers chat.history, and restarts nothing for it", async () => {
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(1);
+      expect(restartsAfterFirstAsk()).toEqual([]);
+    });
+
+    it("restarts the gateway once when it answers UNAVAILABLE, and passes when the restarted one answers", async () => {
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      const restarts = restartsAfterFirstAsk();
+      expect(restarts).toHaveLength(1);
+      // Asked again only after that restart, and once was enough.
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restarts[0]).toBeLessThan(mockMainChatHistory.mock.invocationCallOrder[1]);
+    });
+
+    it("lets a gateway that has just started finish before that restart", async () => {
+      // The store failure is answered on the first ask, moments after the
+      // gateway began answering: a restart then lands before its channel
+      // providers have started and waits out the unit's whole stop timeout.
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      await runVerify();
+      const firstAsk = mockMainChatHistory.mock.invocationCallOrder[0];
+      const [restart] = restartsAfterFirstAsk();
+      expect(restart).toBeGreaterThan(firstAsk);
+      expect(
+        mockWaitForGatewayStart.mock.invocationCallOrder.some((order) => order > firstAsk && order < restart),
+      ).toBe(true);
+    });
+
+    it("fails the step, in words the owner can act on, when the gateway still answers UNAVAILABLE after that restart", async () => {
+      mockMainChatHistory.mockRejectedValue(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("failed");
+      const verify = state.steps.find((step) => step.id === "gateway_verify");
+      expect(verify?.status).toBe("failed");
+      expect(verify?.error).toContain("cannot open chat sessions (UNAVAILABLE: SQLite session reclamation commit checkpoint expired)");
+      expect(verify?.error).toContain("restarting it once did not fix that");
+      expect(state.error).toBe(verify?.error);
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+    });
+
+    it("asks a gateway still rebuilding its history again rather than restarting it", async () => {
+      // The core's own retryable UNAVAILABLE (respondChatHistoryUnavailable),
+      // as right after a core upgrade. A window long enough for a second ask.
+      process.env.GATEWAY_SESSION_WINDOW_MS = "5000";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restartsAfterFirstAsk()).toEqual([]);
+      expect(state.warnings ?? []).toEqual([]);
+    });
+
+    it("never fails the update over a restart earned by 'not yet' alone — a slow box gets a warning", async () => {
+      // The core's "not yet" for the whole (1 ms) window earns the restart; the
+      // restarted gateway is still starting when its window ends. The store
+      // failure was never named, so this is a slow box, not a dead chat.
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("gateway starting; retry shortly"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("gateway starting; retry shortly");
+    });
+
+    it("warns, never passes silently, when the restarted gateway's token cannot be read at the end", async () => {
+      // Windows of 0: one ask each side. "Not yet" earns the restart; after it
+      // the token is unreadable. Before a restart that would mean nothing was
+      // asked (no warning); after one, the gateway was asked before, so it counts.
+      process.env.GATEWAY_SESSION_WINDOW_MS = "0";
+      process.env.GATEWAY_SESSION_RECOVERY_WINDOW_MS = "0";
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      mockMainChatHistory.mockRejectedValueOnce(new GatewayRpcError("session history is rebuilding; retry shortly", "UNAVAILABLE"));
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("no gateway token"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("no gateway token");
+    });
+
+    it("keeps the degraded-agents warning when the session check fails the step", async () => {
+      mockReadMigrationStatus.mockResolvedValue({
+        state: "degraded",
+        reason: "migration-incomplete",
+        requiredBytes: null,
+        freeBytes: null,
+        updatedAt: null,
+      } as import("@/lib/openclaw-migration-status").OpenclawMigrationStatus);
+      mockMainChatHistory.mockRejectedValue(reclaimFailure());
+      const state = await runVerify();
+      expect(state.phase).toBe("failed");
+      expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("failed");
+      expect(state.warnings?.map((w) => w.code)).toContain("openclaw-migration-degraded");
+    });
+
+    it("runs in the OpenClaw-only update too, which ends on a running gateway the same way", async () => {
+      mockMainChatHistory.mockRejectedValueOnce(reclaimFailure());
+      updater.resetUpdateState();
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(2);
+      expect(restartsAfterFirstAsk()).toHaveLength(1);
+    });
+
+    it("passes, with a word to the owner, a gateway that never answered the chat's request in the window", async () => {
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("gateway starting; retry shortly"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(restartsAfterFirstAsk()).toEqual([]);
+      const warning = state.warnings?.filter((w) => w.code === "gateway-sessions-unconfirmed");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain("could not confirm the chat answers");
+      expect(warning?.[0].message).toContain("gateway starting; retry shortly");
+    });
+
+    it("says nothing when there is no gateway token to ask with — nothing was asked", async () => {
+      mockMainChatHistory.mockRejectedValue(new GatewayWsUnavailableError("no gateway token"));
+      const state = await runVerify();
+      expect(state.phase).toBe("completed");
+      expect(mockMainChatHistory).toHaveBeenCalledTimes(1);
+      expect(state.warnings?.some((w) => w.code === "gateway-sessions-unconfirmed")).toBeFalsy();
+    });
+
+    it("asks nothing on the Hermes edition, where there is no OpenClaw gateway", async () => {
+      vi.resetModules();
+      process.env.CLAWBOX_EDITION = "hermes";
+      updater = await import("@/lib/updater");
+      const state = await runVerify();
+      expect(state.steps.map((step) => step.id)).not.toContain("gateway_verify");
+      expect(mockMainChatHistory).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * The old gateway on the field box exited 1 when the update stopped it, and
+   * that was only ever in the journal. Said on the update's own result now.
+   */
+  describe("a gateway stop that did not go cleanly (TASK-2153)", () => {
+    /**
+     * Answer the unit-state reads: running until stopped, then `afterStop`.
+     * `stopTimesOut`: the stop's client is killed by its deadline, as Node
+     * kills it, so the update waits for systemd to finish the job.
+     */
+    function gatewayUnit(
+      afterStop: string,
+      before = "ActiveState=active\nSubState=running\nResult=success\nJob=\n",
+      options: { stopTimesOut?: boolean } = {},
+    ): void {
+      const base = mockExecFile.getMockImplementation() as ((...call: unknown[]) => unknown) | undefined;
+      let current = before;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        const argv = Array.isArray(args) ? args.join(" ") : "";
+        if (argv.includes("systemctl stop clawbox-gateway.service")) {
+          current = afterStop;
+          if (options.stopTimesOut) {
+            const callback = rest.find((part) => typeof part === "function") as
+              | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+              | undefined;
+            callback?.(Object.assign(new Error("Command failed: systemctl stop"), { killed: true, signal: "SIGTERM" }), { stdout: "", stderr: "" });
+            return {};
+          }
+        }
+        if (argv.includes("systemctl restart clawbox-gateway.service")) current = before;
+        // The unit-state read (`readUnitState`), not the start wait's, which asks for NRestarts too.
+        if (argv.startsWith("show clawbox-gateway.service") && argv.includes("-p Result") && !argv.includes("NRestarts")) {
+          const callback = rest.find((part) => typeof part === "function") as
+            | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+            | undefined;
+          callback?.(null, { stdout: current, stderr: "" });
+          return {};
+        }
+        return base?.(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+    }
+
+    async function runSecondHalf(): Promise<ReturnType<typeof updater.getUpdateState>> {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+      return updater.getUpdateState();
+    }
+
+    it("warns the owner when the running gateway ended failed on the update's stop, and carries on", async () => {
+      gatewayUnit("ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n");
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      const warning = state.warnings?.filter((w) => w.code === "gateway-stop-unclean");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toContain(
+        "did not shut down cleanly when the update stopped it (clawbox-gateway.service ended failed (failed, exit-code))",
+      );
+      // Persisted, like every warning that must outlive the web server's restart.
+      expect(mockSet).toHaveBeenCalledWith("update_warnings", expect.stringContaining("gateway-stop-unclean"));
+    });
+
+    it("says nothing about a clean drain that outlived the 30 s client — the unit allows 330 s", async () => {
+      // TimeoutStopSec=330 (config/clawbox-gateway.service): OpenClaw sizes its
+      // drain from it, so a stop past the client's 30 s that ends clean is a
+      // healthy one, and a warning over it would send the owner after nothing.
+      gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n", undefined, { stopTimesOut: true });
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      expect(state.warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+    });
+
+    it("warns the owner when systemd had to kill the stop, and says how long it took", async () => {
+      gatewayUnit("ActiveState=failed\nSubState=failed\nResult=timeout\nJob=\n", undefined, { stopTimesOut: true });
+      const state = await runSecondHalf();
+      expect(state.phase).toBe("completed");
+      const warning = state.warnings?.filter((w) => w.code === "gateway-stop-unclean");
+      expect(warning).toHaveLength(1);
+      expect(warning?.[0].message).toMatch(
+        /did not shut down cleanly when the update stopped it after about \d+s \(clawbox-gateway\.service ended failed \(failed, timeout\)\)/,
+      );
+    });
+
+    it("says nothing about a clean stop, or about a gateway that had already failed before it", async () => {
+      gatewayUnit("ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n");
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      gatewayUnit(
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+      );
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+
+      // Crash-looping: between two starts it carries the last crash's result.
+      vi.resetModules();
+      updater = await import("@/lib/updater");
+      gatewayUnit(
+        "ActiveState=failed\nSubState=failed\nResult=exit-code\nJob=\n",
+        "ActiveState=activating\nSubState=auto-restart\nResult=exit-code\nJob=\n",
+      );
+      expect((await runSecondHalf()).warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+    });
+  });
+
+  /**
+   * A start or restart queued while the update's stop ran took the stop's
+   * place, and `systemctl stop` said "Job for clawbox-gateway.service
+   * canceled." — on a box whose gateway was down a moment later all the same.
+   * That sentence ended "Applying system fixups" before a single fixup ran
+   * (an update from an old beta, 2026-11).
+   */
+  describe("a gateway stop another job replaced (TASK-2200)", () => {
+    const RUNNING = "ActiveState=active\nSubState=running\nResult=success\nJob=\n";
+    const DOWN = "ActiveState=inactive\nSubState=dead\nResult=success\nJob=\n";
+    const CANCELED = "Job for clawbox-gateway.service canceled.\n";
+
+    type Callback = (error: Error | null, result: { stdout: string; stderr: string }) => void;
+
+    /**
+     * The gateway as the update stops it. Stop n (from 0) is replaced by
+     * another job when `afterCancel[n]` is given — the client is answered as
+     * systemctl answers it, and `afterCancel[n]` is the unit once that job has
+     * finished, which takes `pending` more reads; a stop past the list stops
+     * the unit. `failure` answers every stop with that error instead.
+     */
+    function racedGateway(afterCancel: string[], options: { pending?: number; failure?: Error } = {}) {
+      const base = mockExecFile.getMockImplementation() as ((...call: unknown[]) => unknown) | undefined;
+      let current = RUNNING;
+      let stops = 0;
+      let pending = 0;
+      mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+        const argv = Array.isArray(args) ? args.join(" ") : "";
+        const callback = rest.find((part) => typeof part === "function") as Callback | undefined;
+        if (argv.includes("systemctl stop clawbox-gateway.service")) {
+          const n = stops++;
+          if (options.failure) {
+            callback?.(options.failure, { stdout: "", stderr: "" });
+            return {};
+          }
+          if (n < afterCancel.length) {
+            current = afterCancel[n];
+            pending = options.pending ?? 0;
+            const canceled = Object.assign(
+              new Error(`Command failed: /usr/bin/sudo -n /usr/bin/systemctl stop clawbox-gateway.service\n${CANCELED}`),
+              { code: 1, stdout: "", stderr: CANCELED },
+            );
+            callback?.(canceled, { stdout: "", stderr: CANCELED });
+            return {};
+          }
+          current = DOWN;
+        }
+        if (argv.includes("systemctl restart clawbox-gateway.service")) current = RUNNING;
+        // The unit-state read (`readUnitState`), not the start wait's, which asks for NRestarts too.
+        if (argv.startsWith("show clawbox-gateway.service") && argv.includes("-p Result") && !argv.includes("NRestarts")) {
+          const shown = pending > 0 ? current.replace("Job=\n", "Job=4242\n") : current;
+          if (pending > 0) pending--;
+          callback?.(null, { stdout: shown, stderr: "" });
+          return {};
+        }
+        return base?.(cmd, args, ...rest);
+      }) as unknown as typeof childProcess.execFile);
+      return { stops: () => stops };
+    }
+
+    async function runSecondHalf(): Promise<ReturnType<typeof updater.getUpdateState>> {
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+      return updater.getUpdateState();
+    }
+
+    const calls = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    const fixupsRan = () => calls().some((call) => call.includes("clawbox-run-root-step.sh post_update"));
+    const fixups = (state: ReturnType<typeof updater.getUpdateState>) =>
+      state.steps.find((step) => step.id === "post_update");
+    // The stops the quiesce asked for before the fixups ran. gateway_verify can
+    // stop the gateway again afterwards, which is not this race.
+    const stopsBeforeFixups = () => {
+      const all = calls();
+      const at = all.findIndex((call) => call.includes("clawbox-run-root-step.sh post_update"));
+      return (at < 0 ? all : all.slice(0, at)).filter((call) => call.includes("systemctl stop clawbox-gateway.service")).length;
+    };
+
+    it("runs the fixups when the job that replaced the stop left the gateway down", async () => {
+      // The maintenance guard is up before the stop: a start that wins waits
+      // for the drain and is then skipped by its condition. Down is what the
+      // stop was for, however the client's exit code reads.
+      racedGateway([DOWN], { pending: 2 });
+      const state = await runSecondHalf();
+      expect(fixups(state)?.status).toBe("completed");
+      expect(fixups(state)?.error).toBeUndefined();
+      expect(fixupsRan()).toBe(true);
+      expect(stopsBeforeFixups()).toBe(1);
+      expect(state.phase).toBe("completed");
+      expect(state.warnings?.some((w) => w.code === "gateway-stop-unclean")).toBeFalsy();
+    });
+
+    it("waits for the job that replaced the stop before it judges the unit", async () => {
+      racedGateway([DOWN], { pending: 3 });
+      await runSecondHalf();
+      const all = calls();
+      const stop = all.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
+      const fixupsAt = all.findIndex((call) => call.includes("clawbox-run-root-step.sh post_update"));
+      // Every unit read between the stop and the fixups: the job, still queued,
+      // was read until it was gone.
+      const reads = all.slice(stop, fixupsAt).filter((call) => call.includes("show clawbox-gateway.service -p Job"));
+      expect(reads.length).toBeGreaterThanOrEqual(4);
+    });
+
+    it("stops it again when the gateway is still up after the job that replaced the stop", async () => {
+      // A start queued before the stop began draining finds the unit active:
+      // nothing to skip, so it stays up, and the stop is asked for again.
+      racedGateway([RUNNING]);
+      const state = await runSecondHalf();
+      expect(stopsBeforeFixups()).toBe(2);
+      expect(fixups(state)?.status).toBe("completed");
+      expect(fixupsRan()).toBe(true);
+    });
+
+    it("still fails the step, and runs no fixup beside a live gateway, when every stop is replaced and it stays up", async () => {
+      const gateway = racedGateway([RUNNING, RUNNING, RUNNING]);
+      const state = await runSecondHalf();
+      expect(gateway.stops()).toBe(3);
+      expect(fixups(state)?.status).toBe("failed");
+      expect(fixups(state)?.error).toMatch(
+        /clawbox-gateway did not stop: another start or restart of the unit canceled the update's stop 3 times, and it is active \(running\)/,
+      );
+      expect(fixupsRan()).toBe(false);
+      // The guard is lifted on the way out, as on every failure.
+      expect(calls().some((call) => call.includes("clawbox-gateway-maintenance.sh leave"))).toBe(true);
+    });
+
+    it("throws any other failure of the stop at once, as it was", async () => {
+      const refused = Object.assign(
+        new Error("Command failed: /usr/bin/sudo -n /usr/bin/systemctl stop clawbox-gateway.service\nFailed to stop clawbox-gateway.service: Access denied\n"),
+        { code: 1, stdout: "", stderr: "Failed to stop clawbox-gateway.service: Access denied\n" },
+      );
+      const gateway = racedGateway([], { failure: refused });
+      const state = await runSecondHalf();
+      expect(gateway.stops()).toBe(1);
+      expect(fixups(state)?.status).toBe("failed");
+      expect(fixups(state)?.error).toContain("Access denied");
+      expect(fixupsRan()).toBe(false);
+    });
+  });
+
   describe("checkContinuation", () => {
     it("returns false when already running", async () => {
       updater.resetUpdateState();
@@ -2736,6 +4057,9 @@ describe("updater", () => {
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_needs_continuation: undefined }),
       );
+      // Let the continuation it started finish here: left running, it reached
+      // the next case's mocks and was counted there.
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("retries the plugin repairs an older core left, once the gateway is known healthy (TASK-1088)", async () => {
@@ -3268,6 +4592,7 @@ describe("updater", () => {
         "restart",
         "post_update",
         "hermes_edition",
+        "llamacpp_runtime",
       ]);
     });
 
@@ -3288,6 +4613,8 @@ describe("updater", () => {
           || call.includes("systemctl stop clawbox-gateway.service")
           || call.includes("scripts/gateway-pre-start.sh"),
       )).toBe(false);
+      // Nor waits on a gateway start: there is no OpenClaw gateway to follow.
+      expect(calls.some((call) => call.includes("show clawbox-gateway.service") && call.includes("NRestarts"))).toBe(false);
     });
 
     it("leaves the openclaw edition unchanged apart from having no hermes step", async () => {
@@ -3304,8 +4631,20 @@ describe("updater", () => {
         "restart",
         "post_update",
         "gateway_verify",
+        "llamacpp_runtime",
       ]);
       expect(ids).not.toContain("hermes_edition");
+    });
+
+    // A box kept the llama-server it was born with through every move of the
+    // llama.cpp pin, because no update ever asked (TASK-2166). The step that
+    // asks is on every edition — both run Gemma and the memory embedder on
+    // that binary — and last, after the gateway is verified.
+    it("brings llama-server onto the pinned llama.cpp last, on every edition", async () => {
+      for (const edition of ["openclaw", "hermes", "dual", undefined]) {
+        const ids = await stepIdsFor(edition);
+        expect(ids.at(-1), `llamacpp_runtime closes the update on ${edition ?? "default"}`).toBe("llamacpp_runtime");
+      }
     });
 
     // CUDA/JetPack is laid down once, by the image or the first install.sh run.
@@ -3412,6 +4751,119 @@ describe("updater", () => {
    *                   which is how a config refusal reads as "the gateway is
    *                   not listening".
    */
+  /**
+   * The verify's `doctor --fix` on a box with gigabytes of agent databases.
+   *
+   * A flat 90 s stopped it on every ~3 GB box, so the repairs it makes in the
+   * verify never landed there and every such update ended with "doctor --fix
+   * did not complete". The doctor below behaves like node's `execFile` bound: it
+   * needs time in proportion to the databases, and one given less is killed.
+   */
+  describe("a doctor sized to the agent databases", () => {
+    const GiB = 1024 ** 3;
+    // Slower than the verify's old flat bound allows for three of them.
+    const DOCTOR_MS_PER_GIB = 45_000;
+    const killedWarning = () => updater.getUpdateState().warnings?.find((w) => w.code === "openclaw-doctor-fix-failed");
+
+    let doctorTimeouts: number[];
+
+    /** Every answer as before, and a doctor that takes `bytes`' worth of time. */
+    function doctorTakesTimeFor(bytes: number) {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      const answer = mockExecFile.getMockImplementation()!;
+      doctorTimeouts = [];
+      mockExecFile.mockImplementation(((cmd: string, args: string[], opts: { timeout?: number }, cb?: (err: Error | null, out: { stdout: string; stderr: string }) => void) => {
+        if (!(args.includes("doctor") && args.includes("--fix"))) {
+          return (answer as unknown as (...a: unknown[]) => unknown)(cmd, args, opts, cb);
+        }
+        const timeout = opts?.timeout ?? 0;
+        doctorTimeouts.push(timeout);
+        const needsMs = Math.ceil(bytes / GiB) * DOCTOR_MS_PER_GIB;
+        // The gateway comes back once doctor has had its turn, however it ended.
+        mockGatewayUp.mockResolvedValue(true);
+        if (timeout > 0 && needsMs > timeout) {
+          cb?.(Object.assign(new Error("Command failed: openclaw doctor --fix --yes --non-interactive"), {
+            killed: true, signal: "SIGTERM", stdout: "Checking agent databases...\n", stderr: "",
+          }), { stdout: "", stderr: "" });
+        } else {
+          cb?.(null, { stdout: "Doctor complete.\n", stderr: "" });
+        }
+        return undefined as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
+    }
+
+    async function verifyOnBoxWith(bytes: number) {
+      vi.resetModules();
+      mockOpenclawDatabaseBytes.mockResolvedValue(bytes);
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      doctorTakesTimeFor(bytes);
+      // Down until doctor has run: the verify's recovery is what runs it.
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+    }
+
+    afterEach(() => {
+      mockOpenclawDatabaseBytes.mockResolvedValue(0);
+    });
+
+    it("lets doctor finish on a box with ~3 GB of agent databases", async () => {
+      const logged = vi.spyOn(console, "log");
+      await verifyOnBoxWith(3e9);
+
+      // The bound is in the update's log, with the size it was scaled by.
+      expect(logged.mock.calls.map((c) => String(c[0]))).toContain(
+        "[Updater] openclaw doctor --fix: bound 450s for 2.79 GiB of OpenClaw databases",
+      );
+      logged.mockRestore();
+
+      expect(doctorTimeouts.length).toBeGreaterThan(0);
+      // Not cut off, so the update says nothing about it...
+      expect(killedWarning()?.message).toBeUndefined();
+      expect(updater.getUpdateState().phase).toBe("completed");
+      // ...because its bound grew with the databases instead of the flat 90 s:
+      // three started GiB at two minutes each on top.
+      expect(Math.min(...doctorTimeouts)).toBeGreaterThan(90_000);
+      expect(doctorTimeouts.every((t) => t === 450_000)).toBe(true);
+      expect(updater.doctorFixTimeoutFor(3e9)).toBe(450_000);
+      expect(mockOpenclawDatabaseBytes).toHaveBeenCalled();
+    });
+
+    it("keeps the old 90 s for a box with no databases to read", async () => {
+      const logged = vi.spyOn(console, "log");
+      await verifyOnBoxWith(0);
+
+      expect(logged.mock.calls.map((c) => String(c[0]))).toContain(
+        "[Updater] openclaw doctor --fix: bound 90s for 0.00 GiB of OpenClaw databases",
+      );
+      logged.mockRestore();
+      expect(doctorTimeouts.length).toBeGreaterThan(0);
+      expect(doctorTimeouts.every((t) => t === 90_000)).toBe(true);
+      expect(killedWarning()).toBeUndefined();
+    });
+
+    it("still stops at the cap, and names the bound it was actually given", async () => {
+      // Fifty GiB of databases: doctor would need over half an hour, and the
+      // gateway is stopped for all of it — the cap is what keeps a verify sane.
+      await verifyOnBoxWith(50 * GiB);
+
+      expect(doctorTimeouts.every((t) => t === 1_200_000)).toBe(true);
+      expect(killedWarning()?.message).toContain("it was still running after 1200s and was stopped");
+      // A doctor that could not finish is a warning, not a failed update: the
+      // restart and the port probe after it are the verdict.
+      expect(updater.getUpdateState().phase).toBe("completed");
+    });
+  });
+
   describe("a core the config no longer suits", () => {
     // The mock matches on `key.includes(k) || k.includes(cmd)`, and `cmd` is
     // whatever `findOpenclawBin()` resolved — the bare string `openclaw` on a
@@ -3590,6 +5042,42 @@ describe("updater", () => {
       const state = await runContinuation();
 
       expect(state.error).not.toContain("refuses this device's configuration");
+      expect(state.error).toContain("gateway crashed for an unrelated reason");
+    });
+
+    it("says nothing when the validator was refused for the core's own maintenance", async () => {
+      // F4, 2026-10-15: while a gateway start or a doctor run holds the state,
+      // the pinned core answers `config validate --json` with exit 1 and
+      // `valid:false` on `<root>` — "read failed … undergoing offline
+      // maintenance; retry when it finishes". That is about who holds the state,
+      // not about the config, and is no verdict at all.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: Object.assign(new Error("Command failed"), {
+          stdout: JSON.stringify({
+            ok: false,
+            valid: false,
+            issues: [{
+              path: "<root>",
+              message: "read failed at /home/clawbox/.openclaw/openclaw.json: Error: OpenClaw state at /home/clawbox/.openclaw/state/openclaw.sqlite is undergoing offline maintenance; retry when it finishes.",
+            }],
+          }),
+          stderr: "",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).not.toContain("refuses this device's configuration");
+      expect(state.error).not.toContain("offline maintenance");
       expect(state.error).toContain("gateway crashed for an unrelated reason");
     });
 
@@ -4184,4 +5672,118 @@ describe("getVersionInfo harness reporting", () => {
 
     expect(mockRunHermesCli).toHaveBeenCalledTimes(1);
   });
+});
+
+/**
+ * The update and the "Update available" check must agree on which OpenClaw is
+ * in scope.
+ *
+ * A Hermes box that a Settings → Harness swap had made out of an OpenClaw box
+ * still carried the old core on its disk. The full update rightly left that
+ * core alone (`openclaw_install` does not apply on the Hermes edition), but
+ * getVersionInfo read the core's package.json, compared it with the pin, and
+ * every desktop start offered "OpenClaw 2026.10.7 → 2026.10.9" — an update the
+ * updater never performs, so the card came back after every update.
+ *
+ * On `dual` the opposite holds, whichever harness is answering: both are the
+ * box's, the full update keeps both at their pins, and a later switch back must
+ * never land on a stale, un-doctored core. The updater reads no active
+ * harness at all — the store says Hermes in every case below unless a case
+ * says otherwise, so that if anything here ever started to, these cases would
+ * see a Hermes-active box.
+ */
+describe("OpenClaw update scope: offered exactly where the full update installs it", () => {
+  const STALE = "2026.10.7";
+  const PIN = "2026.10.9";
+  const STALE_BANNER = `OpenClaw ${STALE} (aaaaaaa)`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The pin, and a stale core on disk — readable both ways getVersionInfo
+    // could ask it: the CLI, and the package.json beside it.
+    mockReadFile.mockImplementation(async (file) => {
+      const f = String(file);
+      if (f.endsWith("/config/openclaw-target.txt")) return `${PIN}\n`;
+      if (f.endsWith("/node_modules/openclaw/package.json")) return JSON.stringify({ name: "openclaw", version: STALE });
+      throw new Error("ENOENT");
+    });
+    mockGet.mockImplementation(async (key: string) => (key === "active_harness" ? "hermes" : undefined));
+    setupExecMock({ "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\n", stderr: "" } });
+    setupExecFileMock({ openclaw: { stdout: STALE_BANNER, stderr: "" } });
+    mockRunHermesCli.mockResolvedValue({ code: 0, stdout: "Hermes Agent v0.21.1 (2026.9.7)", stderr: "" });
+  });
+
+  afterEach(() => {
+    delete process.env.CLAWBOX_EDITION;
+  });
+
+  /** The step list a full update would run, and what the desktop is told, on one box. */
+  async function boxFor(edition: string) {
+    vi.resetModules();
+    process.env.CLAWBOX_EDITION = edition;
+    const fresh = await import("@/lib/updater");
+    fresh.resetUpdateState();
+    const steps = fresh.getUpdateState().steps.map((s) => s.id);
+    return { steps, info: await fresh.getVersionInfo() };
+  }
+
+  it("dual with Hermes active: the full update installs the pinned OpenClaw, and the stale core is offered for it", async () => {
+    const { steps, info } = await boxFor("dual");
+
+    for (const id of ["openclaw_install", "openclaw_patch", "gateway_setup", "post_update", "hermes_edition", "gateway_verify"]) {
+      expect(steps, `${id} runs on a dual box while Hermes is active`).toContain(id);
+    }
+    expect(info.openclaw).toEqual({ current: STALE_BANNER, target: PIN, updateAvailable: true });
+  });
+
+  it("dual with OpenClaw active: Hermes is kept current too", async () => {
+    mockGet.mockImplementation(async (key: string) => (key === "active_harness" ? "openclaw" : undefined));
+
+    const { steps, info } = await boxFor("dual");
+
+    // post_update re-checks the Hermes pin (step_hermes_install, which applies on
+    // dual), and hermes_edition re-provisions it after the rebuild.
+    expect(steps).toContain("post_update");
+    expect(steps).toContain("hermes_edition");
+    expect(steps.indexOf("hermes_edition")).toBeGreaterThan(steps.indexOf("post_update"));
+    expect(info.hermes?.current).toBe("v0.21.1");
+    // And the answer about OpenClaw is the same one the Hermes-active box got.
+    expect(steps).toContain("openclaw_install");
+    expect(info.openclaw).toEqual({ current: STALE_BANNER, target: PIN, updateAvailable: true });
+  });
+
+  it("answers for the edition the box is now, not the one it was swapped from", async () => {
+    // The swap re-bakes the lock under a web server that keeps running, and a
+    // reachable check is cached for 30 minutes: the pre-swap payload, OpenClaw
+    // offer and all, must not be what the reloaded desktop is told.
+    const { info: before } = await boxFor("openclaw");
+    expect(before.openclaw.updateAvailable).toBe(true);
+
+    process.env.CLAWBOX_EDITION = "hermes";
+    const { getVersionInfo } = await import("@/lib/updater");
+    const after = await getVersionInfo();
+
+    expect(after.edition).toBe("hermes");
+    expect(after.openclaw).toEqual({ current: null, target: null, updateAvailable: false });
+    expect(after.hermes?.current).toBe("v0.21.1");
+  });
+
+  it("hermes with a core a swap left on disk: no OpenClaw update is offered, because none is run", async () => {
+    const { steps, info } = await boxFor("hermes");
+
+    expect(steps).not.toContain("openclaw_install");
+    expect(info.openclaw).toEqual({ current: null, target: null, updateAvailable: false });
+    // Nothing was asked of that core either.
+    expect(mockExecFile.mock.calls.some(([cmd]) => String(cmd).endsWith("openclaw"))).toBe(false);
+    expect(mockReadFile.mock.calls.some(([f]) => String(f).endsWith("/node_modules/openclaw/package.json"))).toBe(false);
+  });
+
+  it.each(["openclaw", "dual", "hermes"])(
+    "%s: an OpenClaw update is offered exactly when the update's step list installs one",
+    async (edition) => {
+      const { steps, info } = await boxFor(edition);
+
+      expect(info.openclaw.updateAvailable).toBe(steps.includes("openclaw_install"));
+    },
+  );
 });

@@ -1,0 +1,16 @@
+{
+  "id": "kanban-app",
+  "tier": "long",
+  "project": "kanban-app",
+  "task": "I want to turn this repo into our team's kanban board. Right now it's just a scaffold: package.json (Express, plus supertest for tests), a README and SPEC.md. SPEC.md is the full product spec and it is precise on purpose: users with API keys, boards and members, columns, cards with labels/due dates/assignees, moving and reordering cards, comments, an activity log, search and filters, pagination, CSV export, JSON-file persistence that survives a restart, consistent error JSON, and a small browser UI at /. Other tools will be built against this API, so please follow the request and response shapes, status codes and error fields in SPEC.md exactly, including `src/app.js` exporting `createApp` and `npm start` honouring PORT and DATA_FILE.\n\nPlease build the whole thing, API and UI. There are no tests yet, so write a real test suite with node:test and supertest (at least a few dozen cases covering the endpoints, validation, permissions, moves, search, persistence and the CSV) and make `npm test` pass. Keep express as the only runtime dependency. When you're done, start the server, check GET /api/health and click through the UI flow if you can, and give me a short summary of anything in the spec you found ambiguous and how you resolved it. Commit nothing yourself.",
+  "source": { "kind": "seed" },
+  "setup": "npm ci --no-audit --no-fund",
+  "accept": [
+    { "name": "own tests (npm test)", "cmd": "npm test", "timeoutSec": 300 },
+    { "name": "own suite has >= 20 passing cases", "cmd": "node __acceptance__/own_tests.js 20", "timeoutSec": 300 },
+    { "name": "hidden: API contract + UI (69 cases)", "cmd": "node --test --test-concurrency=1 __acceptance__/*.accept.js", "timeoutSec": 300 },
+    { "name": "no new runtime dependencies", "cmd": "node __acceptance__/deps_check.js", "timeoutSec": 30 }
+  ],
+  "probe": { "start": "DATA_FILE=\"$(mktemp -d)/kanban.json\" npm start", "url": "http://127.0.0.1:{port}/api/health", "expectStatus": 200, "expectBodyIncludes": "ok" },
+  "rubric": "Check the code is split into cohesive modules (store/persistence, validation, auth, per-resource routes, CSV) rather than one giant file, with one error helper producing the exact error shape and one place computing positions (insert/move/delete all renumber the same way). Look for subtle contract bugs the hidden tests may only partly catch: order of checks (401, 404, 403, 400, 409), owner-only vs member actions, unassigning cards on member removal, activity entries for every mutation, inclusive dueBefore, never-reused ids after restart, API keys stored only as hashes, atomic temp+rename writes in the data file's own directory. The UI should be usable (list boards, show columns/cards in order, create and move a card, show API errors) without a framework. The agent's own tests should be meaningful (not just status-code smoke tests), and its summary should name real ambiguities rather than claim there were none."
+}

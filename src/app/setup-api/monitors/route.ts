@@ -2,12 +2,11 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   MonitorError,
   applyMonitorLayout,
-  desktopViewOf,
   getMonitorStatus,
   keepMonitorLayout,
   readMonitorOutputs,
@@ -24,13 +23,11 @@ import { readLayoutRequest } from "@/lib/monitors-layout";
  * Monitor mode's Settings tab (src/lib/monitors.ts). The GET is the desktop's
  * too — it lays its shelf and windows out over the monitors it describes — and
  * answers `{ available: false }` with a 200 on a box with no monitor session,
- * which is every box without a kiosk: there it runs nothing at all. Another
- * ClawBox user signed in on the monitor-mode window gets it as well, cut down
- * to what a desktop lays itself out with (`desktopViewOf`); middleware has to
- * admit that read (src/lib/non-owner-scope.ts).
+ * which is every box without a kiosk: there it runs nothing at all. Every
+ * signed-in ClawBox user gets the whole answer: they get the owner's Settings.
  *
- * The POSTs are the OWNER's (cookie, never the MCP bearer) and OUR PAGE's
- * (same origin): they change what the owner's screens show, and a cross-site
+ * The POSTs are a PERSON's (cookie, never the MCP bearer) and OUR PAGE's
+ * (same origin): they change what the box's screens show, and a cross-site
  * POST riding the cookie could switch every monitor off. An applied layout is
  * undone on its own unless Keep arrives — a resolution a monitor cannot show
  * must not strand the owner in front of a black screen.
@@ -55,17 +52,15 @@ function refuse(error: string, code: string, status: number) {
 const FAILED: Record<Action, string> = { apply: "apply_failed", keep: "save_failed", revert: "revert_failed" };
 
 export async function GET(req: Request) {
-  const unauthorized = await requireSession(req, { allowNonOwner: true });
+  const unauthorized = await requireSession(req);
   if (unauthorized) return unauthorized;
-  const status = await getMonitorStatus();
-  // The owner (and the device's own bearer) get everything; anyone else only
-  // the geometry of the monitors in front of them.
-  const whole = (await requireSession(req)) === null;
-  return NextResponse.json(whole ? status : desktopViewOf(status), { headers: NO_STORE });
+  // Every signed-in ClawBox user gets the owner's Settings, the monitors panel
+  // with it, so everyone is answered the whole status.
+  return NextResponse.json(await getMonitorStatus(), { headers: NO_STORE });
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse("Only the owner's own session may change the monitors", "owner_only", 403);
   }
   if (!isSameOriginRequest(req)) {

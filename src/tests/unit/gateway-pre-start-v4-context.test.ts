@@ -48,13 +48,14 @@ type MigratedModel = {
 };
 
 /** Run the extracted block over a model list and return the migrated models. */
-function migrate(models: Record<string, unknown>[]): MigratedModel[] {
+function migrate(models: Record<string, unknown>[], opts: { core2026_10?: boolean } = {}): MigratedModel[] {
   const file = path.join(dir, "models.json");
   writeFileSync(file, JSON.stringify(models));
   const program = [
     "import json, sys",
     "ds_models = json.load(open(sys.argv[1]))",
     "changed = False",
+    `CLAWBOX_OPENCLAW_2026_10 = ${opts.core2026_10 === false ? "False" : "True"}`,
     POLICY,
     "print(json.dumps({'models': ds_models, 'changed': changed}))",
   ].join("\n");
@@ -70,6 +71,7 @@ function migrateChanged(models: Record<string, unknown>[]): boolean {
     "import json, sys",
     "ds_models = json.load(open(sys.argv[1]))",
     "changed = False",
+    "CLAWBOX_OPENCLAW_2026_10 = True",
     POLICY,
     "print(json.dumps({'changed': changed}))",
   ].join("\n");
@@ -147,5 +149,53 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
   it("replaces an input that is present but not a usable list", () => {
     const [m] = migrate([{ id: "deepseek-v4-flash", input: [] }]);
     expect(m.input).toEqual(["text"]);
+  });
+
+  // Long sessions on the 1M window were never compacted early: OpenClaw
+  // compacts at the ACTIVE window minus its reserve, so with only
+  // `contextWindow: 1000000` a session grew to 0.7M–1.4M input tokens per
+  // request before anything trimmed it. `contextTokens` is the native
+  // active-input cap (explicit wins over the catalog), and the compaction
+  // threshold follows it.
+  it.each(V4_IDS)("caps the active input of %s at 131,072 tokens and keeps the native 1M window", (id) => {
+    const [m] = migrate([{ id, contextWindow: 1_000_000 }]);
+    expect(m.contextTokens).toBe(131_072);
+    expect(m.contextWindow).toBe(1_000_000);
+  });
+
+  it("adds the cap in the same pass that repairs an old 128K window", () => {
+    const [m] = migrate([{ id: "deepseek-v4-pro", contextWindow: 128000 }]);
+    expect(m.contextWindow).toBe(1_000_000);
+    expect(m.contextTokens).toBe(131_072);
+  });
+
+  it("keeps a cap the owner set, larger or smaller", () => {
+    const models = migrate([
+      { id: "deepseek-v4-flash", contextWindow: 1_000_000, contextTokens: 400_000 },
+      { id: "deepseek-v4-pro", contextWindow: 1_000_000, contextTokens: 64_000 },
+    ]);
+    expect(models.map((m) => m.contextTokens)).toEqual([400_000, 64_000]);
+  });
+
+  it("reports no change once the cap is in place", () => {
+    const once = migrate([{ id: "deepseek-v4-flash" }]);
+    expect(once[0].contextTokens).toBe(131_072);
+    expect(migrateChanged(once)).toBe(false);
+  });
+
+  it("hands a core older than 2026.10 no cap, and still repairs its window", () => {
+    // The cap is verified on 2026.10; an older core's strict schema may refuse
+    // an unknown key, and a refused config is a gateway that will not start.
+    const [m] = migrate([{ id: "deepseek-v4-flash", contextWindow: 128000 }], { core2026_10: false });
+    expect(m.contextTokens).toBeUndefined();
+    expect(m.contextWindow).toBe(1_000_000);
+  });
+
+  it("never caps the vision entry or another deepseek id", () => {
+    const models = migrate([
+      { id: "deepseek-v4-flash-vision-exp", contextWindow: 128000 },
+      { id: "deepseek-chat", contextWindow: 65536 },
+    ]);
+    expect(models.map((m) => m.contextTokens)).toEqual([undefined, undefined]);
   });
 });

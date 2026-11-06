@@ -62,6 +62,10 @@ APP_ID="${CLAWBOX_DESKTOP_APP_ID:-chrome-localhost__-Default}"
 LOG="${CLAWBOX_KIOSK_LOG:-$HOME/.cache/clawbox-kiosk.log}"
 NODE="${CLAWBOX_KIOSK_NODE:-/opt/clawbox/node/bin/node}"
 SPAN="${CLAWBOX_DESKTOP_SPAN:-/usr/local/lib/clawbox/clawbox-desktop-span.mjs}"
+# The clean-start rule every launcher of the browser shares
+# (scripts/lib/browser-clean-start.sh): no restored session, no "Restore
+# pages?" bubble.
+CLEAN_START="${CLAWBOX_BROWSER_CLEAN_START:-/usr/local/lib/clawbox/browser-clean-start.sh}"
 MONITORS_FILE="${CLAWBOX_MONITORS_FILE:-}"
 TEMPLATE="${CLAWBOX_LABWC_TEMPLATE:-/etc/clawbox/labwc/rc.xml.in}"
 CONF="${CLAWBOX_LABWC_CONF:-${XDG_RUNTIME_DIR:-/tmp}/clawbox-labwc}"
@@ -269,6 +273,14 @@ FLAGS=(
   --enable-features=WebUIDarkMode
 )
 [ -n "$EXT" ] && [ -f "$EXT/manifest.json" ] && FLAGS+=(--load-extension="$EXT" --disable-extensions-except="$EXT")
+if [ -r "$CLEAN_START" ]; then
+  # shellcheck source=scripts/lib/browser-clean-start.sh
+  . "$CLEAN_START"
+  FLAGS+=("${BROWSER_CLEAN_START_FLAGS[@]}")
+else
+  echo "$(date -Is) $CLEAN_START not found; Chrome may restore its last session"
+  browser_reset_session_prefs() { echo "the clean-start rule is not installed"; }
+fi
 
 desktop_window_up() { wlrctl toplevel find "app_id:$APP_ID" >/dev/null 2>&1; }
 # The desktop window spans the row of monitors, whatever Chrome restored it
@@ -369,9 +381,10 @@ take_over_profile() {
 quick_crashes=0
 while :; do
   compositor_alive || session_over
-  # never offer "restore pages?" over the desktop after a crash or power loss
-  sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' \
-    "$PROFILE/Default/Preferences" 2>/dev/null
+  # Never the last session's windows, nor "restore pages?" over the desktop,
+  # after a crash or power loss: the shared clean-start rule, which leaves a
+  # profile a running Chrome holds to that Chrome.
+  echo "$(date -Is) session: $(browser_reset_session_prefs "$PROFILE")"
   started=$SECONDS
   "$CHROME" "${FLAGS[@]}" --app="$URL" &
   chrome_pid=$!

@@ -46,6 +46,12 @@ Web chat is built into the ClawBox desktop and needs no setup — see [Chat](/gu
   </Step>
 </Steps>
 
+The Telegram card says **Telegram channel active** only while the bot is really receiving
+messages. A bot that is set up but not getting them — for example after Telegram rejected
+its token — reads **Set up, but not receiving**: create a new token with BotFather and paste
+it again. If saving says Telegram's messaging service did not become ready in time, save again
+once the assistant has finished starting.
+
 Group behaviour depends on your bot's privacy settings. Start with one-to-one pairing,
 then test a group deliberately.
 
@@ -104,7 +110,7 @@ assistant may do with this mailbox*:
 <Warning>
 Whether the assistant may put a message on the wire by itself is one switch: **Ask me
 before sending**, on by default. While it is on, every message the assistant writes waits
-as a draft in **Settings → Email** and in the chat, where you read it and choose **Send
+as a draft in **Settings → Channels → Email** and in the chat, where you read it and choose **Send
 it** or **Delete it without sending**. You can also have every waiting draft posted to a
 second Telegram bot with an Approve button, so you can send it without opening the page. Turn the switch off and the assistant
 sends on its own — the panel says so under the switch.
@@ -132,7 +138,13 @@ Microsoft Teams, Google Chat and iMessage among them. Treat those as advanced
 configuration: they work where your installed OpenClaw version and its channel plugins
 support them, and they have no guided setup in the ClawBox UI.
 
+## Saving runs in the background
+
+Setting a channel up can take the assistant a while to apply. It runs as a task of the box,
+with a card in the desktop's corner, so closing Settings does not stop it, and a task that
+fails ends with a sentence saying what went wrong rather than a bare error code.
+
 ## Troubleshooting
 
 If a channel will not link or stops replying, start with its own status card — it names
-the state — then see [Troubleshooting](/support/troubleshooting).
+the state — then see [Troubleshooting → Telegram and other channels](/support/troubleshooting#telegram-and-other-channels).

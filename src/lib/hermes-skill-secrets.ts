@@ -32,7 +32,7 @@ import {
   HermesEnvUnreadableError,
   clearHermesEnvValues,
   hermesEnvPath,
-  readHermesEnv as readHermesEnvRecord,
+  readHermesEnv,
   setHermesEnvValues,
 } from '@/lib/hermes-env';
 import fs from 'fs/promises';
@@ -68,7 +68,9 @@ export function isValidEnvValue(value: string): boolean {
 }
 
 /**
- * Every live assignment in ~/.hermes/.env, for lookup only.
+ * Every live assignment in ~/.hermes/.env, for this module's lookups only —
+ * through the box's ONE reader and parser of that file (`readHermesEnv` in
+ * src/lib/hermes-env.ts), never a second one.
  *
  * An ABSENT file is an empty map — that is a box with nothing configured yet,
  * and the shared reader already answers it that way. Anything else is a fault
@@ -76,9 +78,9 @@ export function isValidEnvValue(value: string): boolean {
  * has the customer retype a credential into a file nothing could read, and it
  * makes `clearHermesSecret` report a key as already gone when it never looked.
  */
-export async function readHermesEnv(): Promise<Map<string, string>> {
+async function readEnvMap(): Promise<Map<string, string>> {
   try {
-    return new Map(Object.entries(await readHermesEnvRecord()));
+    return new Map(Object.entries(await readHermesEnv()));
   } catch (err) {
     throw err instanceof HermesEnvUnreadableError ? err : new HermesEnvUnreadableError('unreadable');
   }
@@ -107,7 +109,7 @@ export async function setHermesSecret(key: string, value: string): Promise<boole
 /** Clear one skill secret. Returns true when it existed and is now gone. */
 export async function clearHermesSecret(key: string): Promise<boolean> {
   if (!isValidEnvKey(key)) return false;
-  if (!(await readHermesEnv()).has(key)) return false;
+  if (!(await readEnvMap()).has(key)) return false;
   await clearHermesEnvValues([key]);
   return true;
 }
@@ -137,7 +139,7 @@ async function tightenEnvMode(): Promise<void> {
  * because nothing in the product needs one.
  */
 export async function hermesSecretsPresent(keys: string[]): Promise<Record<string, boolean>> {
-  const env = await readHermesEnv();
+  const env = await readEnvMap();
   const out: Record<string, boolean> = {};
   for (const key of keys.slice(0, 24)) {
     if (!isValidEnvKey(key)) continue;

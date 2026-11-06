@@ -4,9 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { TIME_OF_DAY } from "@/lib/memory-shard-state";
 import { onMemoryShardChanged } from "@/lib/ui-events";
+import { noteBoxClock } from "@/lib/box-clock";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
 import MemoryShardSettingsPanel, { type MemoryShardSettingsState } from "./MemoryShardSettingsPanel";
+import PrimeRadiantShardSource from "./PrimeRadiantShardSource";
 import { isPlanGate } from "@/lib/paid-plan-gate";
 import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import type {
@@ -230,7 +232,12 @@ function MemoryIndexCard({ initial, onError }: {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
     try {
-      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
+      const sentAt = Date.now();
+      const res = await fetch("/setup-api/clawkeep/memory");
+      // The "finished N ago" below is held to the box's clock, read off this
+      // poll on a page that has no other (src/lib/box-clock.ts).
+      noteBoxClock(res, sentAt);
+      const body = await jsonOrError<unknown>(res);
       // Anything that is not a memory status is ignored outright rather than
       // rendered. The panel keeps its last good reading, or stays on its
       // loading line, and the rest of the window is untouched.
@@ -659,7 +666,10 @@ export default function MemoryShardApp() {
 
   const loadState = useCallback(async (signal?: AbortSignal) => {
     try {
+      const sentAt = Date.now();
       const res = await fetch("/setup-api/clawkeep/memory", { cache: "no-store", signal });
+      // The panel paints its first "finished N ago" from this answer.
+      noteBoxClock(res, sentAt);
       if (!res.ok) throw new Error("status");
       const status = await res.json() as { enabled?: boolean; setupComplete?: boolean; planGate?: unknown };
       if (signal?.aborted) return;
@@ -846,7 +856,11 @@ export default function MemoryShardApp() {
         {view === "wizard" && <MemoryShardWizard onDone={() => { void loadState(); }} />}
 
         {view === "home" && (
-          <div className="mt-4"><MemoryIndexCard initial={firstStatus} onError={setError} /></div>
+          <div className="mt-4">
+            <MemoryIndexCard initial={firstStatus} onError={setError} />
+            {/* The vault is a built-in source of this index; say so, and lead to it. */}
+            <PrimeRadiantShardSource />
+          </div>
         )}
       </div>
     </div>

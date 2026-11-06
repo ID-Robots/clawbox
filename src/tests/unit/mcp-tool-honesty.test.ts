@@ -519,6 +519,52 @@ describe("browser_open — a refused address is not a dead browser", () => {
     expect(out.error.next).not.toMatch(/call browser_open/i);
   });
 
+  /**
+   * Inside a run the route opens a loopback port only when the run serves it.
+   * "Private network, ask for a public address" sent the run looking for a URL
+   * it could never get; the answer is to serve the project with the helper the
+   * run is given and open what it prints.
+   */
+  it("sends a run refused an unowned loopback port to the preview helper", async () => {
+    vi.stubEnv("CLAWBOX_RUN_DIR", HOME);
+    vi.stubEnv("CLAWBOX_RUN_ARTIFACTS_DIR", path.join(HOME, "run-aaaaaaaa"));
+    try {
+      apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked loopback address (not served by this run)" })));
+      const out = await browser().call("browser_open", { url: "http://127.0.0.1:3000/" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("BAD_ARGUMENT");
+      expect(out.error.message).toMatch(/loopback/i);
+      expect(out.error.next).toContain('node "$CLAWBOX_PREVIEW" --ttl 900');
+      expect(out.error.next).toMatch(/PREVIEW_URL/);
+      expect(out.error.next).not.toMatch(/call browser_open/i);
+
+      // The private-network rule is untouched inside a run.
+      apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked internal address" })));
+      const lan = await browser().call("browser_open", { url: "http://10.0.0.1:3000/" }); // public-hygiene: allow synthetic private address the route must refuse, not a real host
+      if (!lan.isError) throw new Error("expected a refusal");
+      expect(lan.error.message).toMatch(/private network/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("never names the run-only preview helper to the assistant", async () => {
+    vi.stubEnv("CLAWBOX_RUN_DIR", "");
+    vi.stubEnv("CLAWBOX_RUN_ARTIFACTS_DIR", "");
+    try {
+      apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked loopback address (not served by this run)" })));
+      const out = await browser().call("browser_open", { url: "http://127.0.0.1:3000/" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("BAD_ARGUMENT");
+      expect(out.error.next).not.toMatch(/CLAWBOX_PREVIEW|PREVIEW_URL/);
+      expect(out.error.next).not.toMatch(/call browser_open/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("still reports a genuinely dead browser as ENDPOINT_DOWN", async () => {
     apiPost.mockRejectedValue(new Error("fetch failed"));
 
@@ -530,6 +576,19 @@ describe("browser_open — a refused address is not a dead browser", () => {
     expect(out.error.next).toMatch(/do not call browser_open again/i);
   });
 
+  it("reports a tab that closed while it loaded as closed, not as a dead browser", async () => {
+    // The route's 410: the owner, or the page's own window.close(), shut the
+    // new tab. The browser is up — "open the Agent Browser app" would be false.
+    apiPost.mockRejectedValue(new ApiError(410, JSON.stringify({ error: "Browser tab was closed" })));
+
+    const out = await browser().call("browser_open", { url: "https://example.com" });
+    if (!out.isError) throw new Error("expected a refusal");
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/closed/i);
+    expect(out.error.message).not.toMatch(/not running/i);
+    expect(out.error.next).not.toMatch(/agent browser app|call browser_open/i);
+  });
+
   it("keeps telling the OTHER browser tools to open the browser first", async () => {
     apiPost.mockRejectedValue(new Error("fetch failed"));
 
@@ -537,6 +596,37 @@ describe("browser_open — a refused address is not a dead browser", () => {
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.next).toMatch(/browser_open/);
+  });
+
+  it("gives browser_navigate the same address refusals, and only those", async () => {
+    vi.stubEnv("CLAWBOX_RUN_DIR", HOME);
+    vi.stubEnv("CLAWBOX_RUN_ARTIFACTS_DIR", path.join(HOME, "run-aaaaaaaa"));
+    const refusing = (error: string) => async (_route: string, body: { action: string }) => {
+      if (body.action === "launch") return { sessionId: "browser-1" };
+      if (body.action === "navigate") throw new ApiError(400, JSON.stringify({ error }));
+      return {};
+    };
+    try {
+      apiPost.mockImplementation(refusing("Blocked loopback address (not served by this run)"));
+      const out = await browser().call("browser_navigate", { url: "http://127.0.0.1:3000/" });
+      if (!out.isError) throw new Error("expected a refusal");
+      expect(out.error.code).toBe("BAD_ARGUMENT");
+      expect(out.error.message).toMatch(/loopback/i);
+      expect(out.error.next).toContain('node "$CLAWBOX_PREVIEW" --ttl 900');
+
+      apiPost.mockImplementation(refusing("Blocked internal address"));
+      const lan = await browser().call("browser_navigate", { url: "http://10.0.0.1:3000/" }); // public-hygiene: allow synthetic private address the route must refuse, not a real host
+      if (!lan.isError) throw new Error("expected a refusal");
+      expect(lan.error.message).toMatch(/private network/i);
+
+      // The navigate route's other 400s are not about the address.
+      apiPost.mockImplementation(refusing("URL required"));
+      const other = await browser().call("browser_navigate", { url: "https://example.com/" });
+      if (!other.isError) throw new Error("expected a refusal");
+      expect(other.error.message).not.toMatch(/refused that address|loopback|private network/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -966,6 +1056,112 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     if (!out.isError) return;
     expect(out.error.message).toMatch(/out of space/i);
     expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("does not call a box unpaired because a backup is already running", async () => {
+    // 409 `already_running` is the daemon's run lock turning a second run
+    // away. The bare 409 rule below it says "not set up — pair it in
+    // Settings", which would send the owner to re-pair a box that is, at that
+    // moment, backing itself up. Order in BACKUP_RULES is the contract.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({
+          error: "Another backup is already running — wait for it to finish, then try again",
+          code: "already_running",
+          exitCode: 14,
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/already running/i);
+    expect(out.error.message).not.toMatch(/not set up/i);
+    expect(out.error.next).toMatch(/do not start another one/i);
+    expect(out.error.next).not.toMatch(/pair/i);
+  });
+
+  it("says usage could not be checked rather than retrying into it", async () => {
+    // 503 had only `daemon_missing` and `archive_busy`; unmatched, this fell to
+    // the catch-all's "retry once" — a second archive built to be refused.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        503,
+        JSON.stringify({
+          error: "ClawKeep could not check how much cloud storage is in use, so the backup was not uploaded",
+          code: "usage_unverified",
+          refusal: { kind: "usage_unverified", neededBytes: 1_288_490_189, usedBytes: 0, quotaBytes: 5_368_709_120 },
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/could not check how much cloud storage is in use/i);
+    expect(out.error.message).toMatch(/nothing was changed/i);
+    expect(out.error.next).toMatch(/do not start another one/i);
+    expect(out.error.next).toMatch(/internet connection/i);
+  });
+
+  it("points the agent at the sizes when a backup does not fit", async () => {
+    apiPost.mockRejectedValue(
+      new ApiError(
+        507,
+        JSON.stringify({
+          error: "This backup needs 1.2 GB, but only 307 MB of the 5.0 GB of ClawKeep storage is free",
+          code: "quota_full",
+          refusal: { kind: "quota_full", neededBytes: 1_288_490_189, usedBytes: 5_046_586_573, quotaBytes: 5_368_709_120 },
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.next).toMatch(/backup_status/);
+    expect(out.error.next).toMatch(/lastRefusal/);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("backup_status says why the last run was refused, and how to read its sizes", async () => {
+    const refused = {
+      paired: true, supportedOnEdition: true, lastBackupAtMs: Date.now() - 3_600_000,
+      lastHeartbeatStatus: "error",
+      schedule: { enabled: true, frequency: "daily" },
+      lastRefusal: { kind: "quota_full", atMs: Date.now(), neededBytes: 1_288_490_189, usedBytes: 5_046_586_573, quotaBytes: 5_368_709_120 },
+    };
+    apiGet.mockResolvedValue(refused);
+    const full = await system("openclaw").call("backup_status", {});
+    if (full.isError) throw new Error("backup_status failed");
+    const parsed = JSON.parse(full.text) as { notes: string[]; lastRefusal: unknown; protection: unknown };
+    expect(parsed.protection).toEqual({ state: "lapsed", reason: "error" });
+    // The numbers travel as data; the note says what they are and what helps.
+    expect(parsed.lastRefusal).toEqual(refused.lastRefusal);
+    const note = parsed.notes.find((n) => n.startsWith("lastRefusal:"));
+    expect(note).toMatch(/does not fit in the account/);
+    expect(note).toMatch(/in bytes/);
+    expect(note).toMatch(/only a larger plan helps/);
+    expect(note).not.toMatch(/\d{7,}/);
+
+    apiGet.mockResolvedValue({
+      ...refused,
+      lastRefusal: { kind: "usage_unverified", atMs: Date.now(), neededBytes: 9, usedBytes: 0, quotaBytes: 10 },
+    });
+    const unverified = await system("openclaw").call("backup_status", {});
+    if (unverified.isError) throw new Error("backup_status failed");
+    expect((JSON.parse(unverified.text).notes as string[]).join("\n")).toMatch(
+      /could not check how much cloud storage is in use/,
+    );
+
+    // A refusal the box has since moved on from explains nothing current.
+    apiGet.mockResolvedValue({ ...refused, lastHeartbeatStatus: "ok" });
+    const moved = await system("openclaw").call("backup_status", {});
+    if (moved.isError) throw new Error("backup_status failed");
+    expect((JSON.parse(moved.text).notes as string[]).join("\n")).not.toMatch(/lastRefusal/);
   });
 
   it("tells the agent to get the box paired when backup_now hits an unpaired one", async () => {

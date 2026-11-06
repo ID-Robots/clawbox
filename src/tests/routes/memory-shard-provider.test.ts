@@ -31,7 +31,7 @@ const h = vi.hoisted(() => ({
   facts: vi.fn(),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => h.owner }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => h.owner }));
 vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
   openclawIsAbsent: () => h.absent,
@@ -54,6 +54,7 @@ vi.mock("@/lib/clawai-cloud-embeddings", () => ({
   cloudEmbeddingsUrl: () => "https://ai.clawbox.com/v1/embeddings",
   CLOUD_EMBEDDING_PROVIDER: "openai-compatible",
   CLOUD_EMBEDDING_MODEL: "text-embedding-3-large",
+  OPENCLAW_CLOUD_EMBEDDING_MODEL: "text-embedding-3-small",
   CLOUD_EMBEDDING_ENGINE: "ClawBox AI",
 }));
 
@@ -165,7 +166,9 @@ describe("GET", () => {
 });
 
 describe("POST — who may switch", () => {
-  it("refuses the MCP bearer before anything is written", async () => {
+  // The assistant's bearer is admitted, behind a confirm gate of its own
+  // (memory-shard-assistant.test.ts); a caller with neither credential is not.
+  it("refuses a caller that is neither a signed-in person nor the assistant before anything is written", async () => {
     h.owner = false;
     const res = await (await route()).POST(post({ source: "cloud" }));
     expect(res.status).toBe(403);
@@ -211,8 +214,10 @@ describe("POST — the ClawBox AI cloud", () => {
   it("points the index at the cloud embedder with the box's own credential, pinned as the owner's pick", async () => {
     const res = await (await route()).POST(post({ source: "cloud" }));
     expect(res.status).toBe(200);
+    // OpenClaw's index lives in the agent databases, and on the cloud it is
+    // embedded with the small model: the answer names what was written.
     expect(await res.json()).toEqual({
-      source: "cloud", provider: "openai-compatible", model: "text-embedding-3-large", engine: "ClawBox AI",
+      source: "cloud", provider: "openai-compatible", model: "text-embedding-3-small", engine: "ClawBox AI",
     });
     expect(h.switchCloud).toHaveBeenCalledWith("https://ai.clawbox.com/v1/embeddings", "claw_test_token");
     expect(h.note).toHaveBeenCalledWith("embeddings");

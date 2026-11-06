@@ -1,5 +1,7 @@
 import type { ChatMessage, ChatToolSummary } from "@/lib/chat-history-cache";
 import type { SlashCommand } from "@/lib/chat-slash-commands";
+import type { ChatFailureWords } from "@/lib/chat-error-text";
+import type { ConversationSize } from "@/lib/chat-local-fit";
 
 /**
  * The one contract the chat surface talks to.
@@ -311,6 +313,12 @@ export type TurnEvent =
    */
   | { kind: "status"; text: string }
   /**
+   * The harness is compacting the conversation — Hermes' "compacting" status —
+   * from `start` to `end` (TASK-2127). The surface says "Shortening the
+   * conversation…" while it lasts; a surface that ignores it loses nothing.
+   */
+  | { kind: "compaction"; phase: "start" | "end" }
+  /**
    * The agent has STOPPED and is waiting for the customer to answer.
    *
    * An event rather than a delta because it is not part of the answer: a delta
@@ -366,6 +374,15 @@ export interface TurnResult {
 }
 
 /**
+ * The model a conversation's session answers on, as its turns recorded it —
+ * `TurnResult.model`/`provider`, never what the header asked for.
+ */
+export interface ConversationModel {
+  readonly model: string;
+  readonly provider?: string;
+}
+
+/**
  * One replayed transcript row.
  *
  * Deliberately the chat's own `ChatMessage` rather than a narrower parallel
@@ -374,7 +391,7 @@ export interface TurnResult {
  * eventually drops a field — the attachments, the spoken audio, or the
  * idempotency key that lets a reconcile recognise an in-flight turn.
  */
-export type HistoryMessage = ChatMessage & { variant?: "success" | "error" };
+export type HistoryMessage = ChatMessage & { variant?: "success" | "error" | "stopped" | "notice" };
 
 export interface HistoryOptions {
   /** Newest-last, capped here. Defaults to 50 — today's gateway limit. */
@@ -388,6 +405,12 @@ export interface HistoryOptions {
    * started with the banner never showing.
    */
   readonly imageWaitFrom?: number | null;
+  /**
+   * The chat's translator and clock, for the failure notes a read restores
+   * from the box's own record of a failed run — so a restored line reads as
+   * the live one did. English when absent.
+   */
+  readonly failureWords?: ChatFailureWords;
 }
 
 export interface HistoryPage {
@@ -399,6 +422,13 @@ export interface HistoryPage {
    * until it timed out.
    */
   readonly imageGenerationFailed: boolean;
+  /**
+   * True when the box is still running a turn for this conversation — the page
+   * was reloaded mid-answer, or opened somewhere else while one ran. The caller
+   * follows it through `attachLiveTurn`. Absent on a harness whose turns reach
+   * a reloaded page on their own (OpenClaw's gateway socket).
+   */
+  readonly liveTurn?: boolean;
 }
 
 export type HarnessStatus = "idle" | "connecting" | "connected" | "error";
@@ -432,6 +462,19 @@ export interface HarnessAdapter {
   sendTurn(req: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResult>;
 
   /**
+   * Follow a turn the box is ALREADY running for the current conversation, as
+   * though this page had sent it: what it has said so far, then the rest live,
+   * then the same result `sendTurn` resolves with. Resolves null when nothing
+   * is running. Rejects `HarnessError('aborted')` on a Stop, from this page
+   * (`abortTurn`) or any other.
+   *
+   * Optional, because only a harness whose turns are tied to one HTTP request
+   * needs it: Hermes (TASK-2117). OpenClaw's gateway hands a reloaded page the
+   * rest of a run on its own socket.
+   */
+  attachLiveTurn?(onEvent?: (event: TurnEvent) => void): Promise<TurnResult | null>;
+
+  /**
    * Kill the in-flight turn. Resolves (no-op) when nothing is running.
    * Precondition: `capabilities.canAbortTurn`.
    */
@@ -444,6 +487,37 @@ export interface HarnessAdapter {
    * MUST be idempotent: the (+) button is double-clickable.
    */
   resetSession(): Promise<void>;
+
+  /**
+   * The model the conversation on `sessionKey` is held to: its next turn
+   * resumes a session that answers on this model whatever the header now asks
+   * for. Hermes from v0.22.4 — a resumed session keeps its frozen launch, so a
+   * model picked mid-conversation applies to the next new chat. Null when the
+   * next turn opens a fresh session (none threaded yet, a reset, a reloaded
+   * page) or no turn recorded which model answered. A harness that holds no
+   * conversation to a model leaves this out.
+   */
+  conversationModel?(sessionKey: string): ConversationModel | null;
+
+  /**
+   * How large the conversation on `sessionKey` is (TASK-2127): the tokens its
+   * next prompt carries as the harness last measured or estimated them, and,
+   * when the harness knows it, the count above which it would compact before a
+   * Local AI reply. Null when nothing can be said — no turn yet, a socket that
+   * is down. Never rejects: the answer only decides whether the chat offers a
+   * new chat before sending. A harness that cannot tell leaves this out, and
+   * its chat sends as it always did.
+   */
+  conversationSize?(sessionKey: string): Promise<ConversationSize | null>;
+
+  /**
+   * Shorten the conversation on `sessionKey` now, with the harness's own
+   * compaction (OpenClaw `sessions.compact`, Hermes `/compress`) — the "Shorten
+   * this conversation first" of a long chat on Local AI. Resolves with the
+   * token counts the harness reported, when it did; rejects when nothing was
+   * shortened.
+   */
+  compactConversation?(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }>;
 
   /**
    * A fresh session key beside `mainSessionKey`, for a second conversation

@@ -10,8 +10,15 @@ import {
   proxyRefusedClawaiCredential,
   resolveClawaiToken,
 } from "@/lib/harness/credentials";
+import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
-import { getSttPrimary, sttEngineOrder, TRANSCRIBE_MODEL, type SttEngine } from "@/lib/stt-preference";
+import {
+  cloudTranscribeProblem,
+  getSttPrimary,
+  sttEngineOrder,
+  TRANSCRIBE_MODEL,
+  type SttEngine,
+} from "@/lib/stt-preference";
 import { audioForCloud } from "@/lib/stt-remux";
 
 export const dynamic = "force-dynamic";
@@ -292,12 +299,25 @@ type Transcript = { text: string };
 /** The cloud engine: the recording goes to the ClawBox AI proxy. */
 async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transcript | Failure> {
   const token = await resolveClawaiToken();
-  if (!token) {
+  // The rule the channel row is written by (`cloudTranscribeProblem`), so the
+  // microphone and a Telegram voice note agree on whether ClawBox AI can
+  // transcribe here. Asked before anything is uploaded: a DeepSeek key of the
+  // owner's is not sent to the proxy, and a ClawBox AI sign-in whose profile
+  // is a stale OAuth row is repaired by signing in again, not by retrying.
+  const problem = token ? cloudTranscribeProblem(token, openclawIsAbsent() ? null : await readConfig()) : "not_linked";
+  if (!token || problem === "not_linked") {
     // Actionable on purpose: this is the one failure the user can actually do
     // something about, and "transcription failed" would send them nowhere.
     return {
       status: 503,
       error: "This ClawBox is not linked to ClawBox AI yet, so it cannot transcribe audio.",
+    };
+  }
+  if (problem !== null) {
+    return {
+      status: 503,
+      error: "This ClawBox's ClawBox AI sign-in is out of date, so it cannot transcribe audio. Sign in to ClawBox AI again in Settings.",
+      detail: `cloud credential unusable (${problem}), nothing uploaded`,
     };
   }
 

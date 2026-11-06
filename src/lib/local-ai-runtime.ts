@@ -6,10 +6,12 @@ import { terminateByArgv } from "@/lib/process-match";
 import { isOllamaExecutable } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
+import { getActiveHarnessSource } from "@/lib/harness";
 import {
   getLlamaCppLaunchSpec,
   getLlamaCppProvisioningStatus,
   queryLlamaCppModels,
+  queryLlamaCppServedContext,
   resolveConfiguredLlamaCppAlias,
 } from "@/lib/llamacpp-server";
 import {
@@ -338,8 +340,50 @@ async function startOllamaIfNeeded(): Promise<void> {
   await startOllamaService();
 }
 
+/** How long a retired llama-server may take to stop answering before the start goes ahead anyway. */
+const RETIRE_SETTLE_MS = 5_000;
+
+/**
+ * Put a running llama-server whose window is not the one the active runtime
+ * launches back to standby, so the start that follows brings it up sized for
+ * that runtime (getLlamaCppServerContextSize).
+ *
+ * The window follows the runtime — Hermes refuses one under its 64k floor —
+ * and neither the runtime switch nor the edition swap restarts the web server
+ * llama-server is a child of. So a server started under OpenClaw keeps its 32k
+ * window when the box moves to Hermes, which then refuses every turn on it;
+ * and one started under Hermes keeps 64k when the box moves back, holding
+ * memory OpenClaw never uses. Every wake passes through here, so this is where
+ * either is caught.
+ *
+ * Left alone when this cannot be decided or would cost a request: a window the
+ * server does not report, a runtime answered only by default (the edition lock
+ * mid-rewrite, an unreadable store — not proof of which runtime runs), and a
+ * server another request is still streaming from (the proxy counts a request
+ * only after this, so these are the others; the next wake repairs it). The
+ * stop is followed until the old server has stopped answering, so the start
+ * does not find it still up and take it for the new one.
+ */
+async function retireMisfitLlamaCpp(alias: string): Promise<void> {
+  if (runtimeStates.llamacpp.activeRequests > 0) return;
+  const { active: harness, defaulted } = await getActiveHarnessSource();
+  if (defaulted) return;
+  const spec = getLlamaCppLaunchSpec(alias, harness);
+  const served = await queryLlamaCppServedContext(spec.baseUrl);
+  if (served === null || served === spec.contextWindow) return;
+  console.log(
+    `[local-ai] llama.cpp serves a ${served}-token window and ${harness} runs it at ${spec.contextWindow}; restarting it`,
+  );
+  await stopLlamaCppServer();
+  const deadline = Date.now() + RETIRE_SETTLE_MS;
+  while (Date.now() < deadline && (await queryLlamaCppServedContext(spec.baseUrl)) !== null) {
+    await sleep(250);
+  }
+}
+
 async function startLlamaCppAndWait(): Promise<void> {
   const alias = await getConfiguredLlamaCppAlias();
+  await retireMisfitLlamaCpp(alias);
   // Pass the alias explicitly: reaching this function means a caller asked
   // for the local runtime, so the launcher must not re-derive whether it is
   // "configured" from a config file that belongs to another harness.

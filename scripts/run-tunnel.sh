@@ -8,14 +8,15 @@
 #   NAMED  When the portal has provisioned this box, the heartbeat stored a
 #          credential in data/cloudflared/named-tunnel (hostname + run token,
 #          0600, see src/lib/named-tunnel.ts). We run
-#            TUNNEL_TOKEN=<token> cloudflared tunnel --no-autoupdate run --url <local>
+#            TUNNEL_TOKEN=<token> cloudflared tunnel --no-autoupdate \
+#              --config <empty map> run --url <local>
 #          and publish https://<boxHandle>.clawbox.tech — a URL that never
 #          changes. The token is passed in the environment, never on argv
 #          (`ps` shows argv to every local user), and is scrubbed from every
 #          line of cloudflared's output before it reaches the journal.
 #   QUICK  Otherwise — or when the named run is refused, or dies within its
-#          first NAMED_EARLY_EXIT_SECS seconds — the quick tunnel exactly as it
-#          always ran: cloudflared prints a fresh *.trycloudflare.com URL to
+#          first NAMED_EARLY_EXIT_SECS seconds — the quick tunnel, on the same
+#          isolated --config: cloudflared prints a fresh *.trycloudflare.com URL to
 #          stderr once on startup and we capture it. This fallback is what keeps
 #          a box that fails to provision from losing remote access.
 #
@@ -69,12 +70,28 @@ NAMED_HOST_LABEL_MAX=63
 NAMED_TOKEN_RE='^[A-Za-z0-9+/_=-]+$'
 NAMED_TOKEN_MIN=32
 NAMED_TOKEN_MAX=4096
+# The only config cloudflared may read. Given no --config, cloudflared loads the
+# first config.yml it finds in ~/.cloudflared, /etc/cloudflared and friends, and
+# that file's `ingress:` rules WIN over --url: a box whose owner once set up a
+# tunnel of their own — the usual file ends in a catch-all
+# `- service: http_status:404` — published a tunnel that answered 404 to every
+# request, quick and named alike. Measured with cloudflared 2026.1.2 and such a
+# file in $HOME: the running tunnel's ingress (metrics /config) was the file's
+# [..., http_status:404]; with --config pointing at an empty map it is exactly
+# [--url]. An empty map rather than /dev/null, which isolates just as well, but
+# makes cloudflared log `ERR Configuration file /dev/null was empty` on every
+# start — into the journal the Remote Access panel sends people to. And the flag
+# goes BEFORE `run`: after it, cloudflared rejects it and prints its usage.
+ISOLATED_CONFIG="$TUNNEL_DIR/isolated-config.yml"
 
 # Nothing inherited may pose as the credential; the named run sets its own.
 unset TUNNEL_TOKEN
 
 mkdir -p "$TUNNEL_DIR"
 rm -f "$TUNNEL_URL_FILE" "$TUNNEL_MODE_FILE" "$NAMED_REFUSAL_SEEN"
+# Rewritten on every start, so nothing left in it can steer the tunnel. Should
+# the write fail, /dev/null keeps the isolation at the cost of that ERR line.
+printf '{}\n' > "$ISOLATED_CONFIG" 2>/dev/null || ISOLATED_CONFIG=/dev/null
 
 cleanup() {
   rm -f "$TUNNEL_URL_FILE" "$TUNNEL_MODE_FILE" "$NAMED_REFUSAL_SEEN"
@@ -159,7 +176,8 @@ if read_named_credential; then
   STARTED_AT=$SECONDS
   # The token reaches cloudflared through its environment only. Every line is
   # scrubbed of it before it is forwarded, whatever cloudflared decides to log.
-  TUNNEL_TOKEN="$NAMED_TOKEN" "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --url "$LOCAL_SERVICE_URL" 2>&1 | \
+  TUNNEL_TOKEN="$NAMED_TOKEN" "$CLOUDFLARED_BIN" tunnel --no-autoupdate --config "$ISOLATED_CONFIG" \
+    run --url "$LOCAL_SERVICE_URL" 2>&1 | \
   while IFS= read -r line; do
     line="${line//"$NAMED_TOKEN"/[redacted]}"
     printf '%s\n' "$line"
@@ -203,7 +221,7 @@ echo "[run-tunnel] forwarding tunnel -> $LOCAL_SERVICE_URL"
 # Combine stdout+stderr, pipe through the URL extractor. `exec` swaps the
 # shell for cloudflared so signals (SIGTERM from systemd) reach it directly.
 # But we need the pipe, so run it as a subprocess and wait.
-"$CLOUDFLARED_BIN" tunnel --no-autoupdate --url "$LOCAL_SERVICE_URL" 2>&1 | \
+"$CLOUDFLARED_BIN" tunnel --no-autoupdate --config "$ISOLATED_CONFIG" --url "$LOCAL_SERVICE_URL" 2>&1 | \
 while IFS= read -r line; do
   # Forward to stdout so systemd journals it.
   printf '%s\n' "$line"

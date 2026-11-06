@@ -6,12 +6,20 @@ import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
+  CLAWAI_CONFIGURING_TIMEOUT_MS,
   type ClawAiConnectSession,
   clearClawAiSession,
   isClawAiSessionExpired,
   readClawAiSession,
   writeClawAiSession,
 } from "@/lib/clawai-connect";
+import { getBackgroundTask } from "@/lib/background-tasks";
+import {
+  providerAuthBusyMessage,
+  startProviderSignInTask,
+  type ProviderSaveOutcome,
+  type ProviderSignInEnd,
+} from "@/lib/provider-auth-tasks";
 
 export const dynamic = "force-dynamic";
 
@@ -19,10 +27,8 @@ const CLAWBOX_AI_DEVICE_POLL_URL =
   process.env.CLAWBOX_AI_DEVICE_POLL_URL?.trim()
   || "https://clawbox.com/api/clawbox-ai/device-poll";
 
-// Max time a session may sit in `configuring` before the poll route gives up
-// on the background configure and surfaces a retryable error. A gateway
-// restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
-const CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
+// Max time a session may sit in `configuring` (clawai-connect.ts).
+const CONFIGURING_TIMEOUT_MS = CLAWAI_CONFIGURING_TIMEOUT_MS;
 
 interface UpstreamPollResponse {
   status?: string;
@@ -88,109 +94,106 @@ async function readErrorBody(response: Response): Promise<{ raw: string; sentenc
 // though provisioning had completed. The session-status state machine
 // (pending → configuring → complete) lets a subsequent quick poll see
 // that finalisation finished and trigger the success overlay.
-async function runConfigureInBackground(session: ClawAiConnectSession, accessToken: string) {
-  try {
-    // The OpenClaw configure route below writes ~/.openclaw/openclaw.json and
-    // restarts the OpenClaw gateway, and it persists clawai_token only AFTER
-    // that. On a Hermes device that runtime isn't installed, so the write threw
-    // and the token was never stored — the device-login CTA could never
-    // succeed. Route Hermes devices through Hermes' own config instead.
-    // getActiveHarness() returns "openclaw" for every openclaw/dual-openclaw
-    // device, so the OpenClaw path below is untouched.
-    if ((await getActiveHarness()) === "hermes") {
-      const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
-      // THE PLAN, asked here as well, because this is the primary link path on
-      // this edition and nothing else on it holds a portal answer. The OpenClaw
-      // branch below reaches `/setup-api/ai-models/configure`, which records
-      // the plan itself; without this the two editions' own device-code flows
-      // would disagree, and a Hermes box would finish the link with no plan on
-      // record — so no withdrawal would be reachable at all until a BROWSER
-      // happened to poll `/setup-api/ai-models/status` (TASK-744).
-      //
-      // ONE cold round trip, bounded at `PORTAL_FETCH_TIMEOUT_MS` (4 s) — the
-      // cache is keyed by token and the box has never held this one — against a
-      // finaliser the UI gives three minutes. It cannot fail the pairing:
-      // `fetchPortalTier` reports every failure as `unreachable` rather than
-      // throwing. The wizard's next status poll then lands on the entry this
-      // call warmed.
-      const lookup = await fetchPortalTier(accessToken).catch(() => null);
-      try {
-        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier), {
-          // Absent unless the portal ANSWERED — an unreachable lookup or a
-          // probe that threw retires the plan rather than recording a guess.
-          portalPlan: lookup?.source === "portal" ? { verdict: lookup.planVerdict } : undefined,
-        });
-      } catch (err) {
-        // Only our own message is safe to store/show — a raw spawn failure can
-        // carry the hermes binary path.
-        throw new ClawaiApplyError(
-          err instanceof ClawaiApplyError ? err.message : "Couldn't configure ClawBox AI on this device.",
-        );
-      }
-      await writeClawAiSession({
-        ...session,
-        status: "complete",
-        error: null,
-        // Hermes applies the credential itself, with no configure route and no
-        // session sweep behind it, so there is nothing here that can warn.
-        warning: null,
-        completedAt: Date.now(),
-      });
-      return;
-    }
-
-    const configureResponse = await configureAiModelsPost(new Request("http://localhost/setup-api/ai-models/configure", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        scope: session.scope,
-        provider: "clawai",
-        apiKey: accessToken,
-        authMode: "subscription",
-        clawaiTier: session.tier ?? "flash",
-      }),
-    }));
-
-    if (!configureResponse.ok) {
-      // `readErrorBody`, NOT `.text()`. This one line is how the configure
-      // route's JSON body reached the wizard verbatim: the sign-in's own
-      // rollback message is a perfectly good sentence, and it was shown
-      // wrapped in the object it travelled in.
-      const configureBody = await readErrorBody(configureResponse);
-      const userFacing = formatUserFacingError(configureBody.sentence || "Failed to save ClawBox AI token.");
-      // The RAW body in the journal, deliberately: the owner is spared the
-      // braces, the operator diagnosing this box is not spared the evidence.
-      console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.raw.slice(0, 200));
-      await writeClawAiSession({ ...session, status: "error", error: userFacing });
-      return;
-    }
-
-    // The BODY of a successful configure, not just `response.ok`: a save can
-    // land and still not have done all of it — the session sweep this sign-in
-    // defers past the gateway restart is exactly that — and reading only the
-    // status dropped the one sentence that says so on the primary sign-in path
-    // of these boxes. Best effort: an unreadable body is a save that landed,
-    // never an error, so it costs the warning and nothing else.
-    let warning: string | null = null;
+//
+// It runs as the box's provider sign-in TASK (TASK-2148,
+// src/lib/provider-auth-tasks.ts), not as a promise nothing else can see: the
+// desktop's corner card shows it, a Settings reopened half-way finds it, and
+// the task waits out the gateway restart and reads the row back. The session
+// file still says how it ended, for the device-login card that polls here.
+async function saveClawaiSignIn(session: ClawAiConnectSession, accessToken: string): Promise<ProviderSaveOutcome> {
+  // The OpenClaw configure route below writes ~/.openclaw/openclaw.json and
+  // restarts the OpenClaw gateway, and it persists clawai_token only AFTER
+  // that. On a Hermes device that runtime isn't installed, so the write threw
+  // and the token was never stored — the device-login CTA could never
+  // succeed. Route Hermes devices through Hermes' own config instead.
+  // getActiveHarness() returns "openclaw" for every openclaw/dual-openclaw
+  // device, so the OpenClaw path below is untouched.
+  if ((await getActiveHarness()) === "hermes") {
+    const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
+    // THE PLAN, asked here as well, because this is the primary link path on
+    // this edition and nothing else on it holds a portal answer. The OpenClaw
+    // branch below reaches `/setup-api/ai-models/configure`, which records
+    // the plan itself; without this the two editions' own device-code flows
+    // would disagree, and a Hermes box would finish the link with no plan on
+    // record — so no withdrawal would be reachable at all until a BROWSER
+    // happened to poll `/setup-api/ai-models/status` (TASK-744).
+    //
+    // ONE cold round trip, bounded at `PORTAL_FETCH_TIMEOUT_MS` (4 s) — the
+    // cache is keyed by token and the box has never held this one — against a
+    // finaliser the UI gives three minutes. It cannot fail the pairing:
+    // `fetchPortalTier` reports every failure as `unreachable` rather than
+    // throwing. The wizard's next status poll then lands on the entry this
+    // call warmed.
+    const lookup = await fetchPortalTier(accessToken).catch(() => null);
     try {
-      const configured = await configureResponse.json() as { warning?: unknown };
-      if (typeof configured.warning === "string" && configured.warning.trim()) warning = configured.warning;
+      await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier), {
+        // Absent unless the portal ANSWERED — an unreachable lookup or a
+        // probe that threw retires the plan rather than recording a guess.
+        portalPlan: lookup?.source === "portal" ? { verdict: lookup.planVerdict } : undefined,
+      });
     } catch (err) {
-      console.warn("[clawai/poll] Could not read the configure answer's warning:", err instanceof Error ? err.message : err);
+      // Only our own message is safe to store/show — a raw spawn failure can
+      // carry the hermes binary path.
+      throw new ClawaiApplyError(
+        err instanceof ClawaiApplyError ? err.message : "Couldn't configure ClawBox AI on this device.",
+      );
     }
-
-    await writeClawAiSession({
-      ...session,
-      status: "complete",
-      error: null,
-      warning,
-      completedAt: Date.now(),
-    });
-  } catch (err) {
-    const userFacing = formatUserFacingError(err instanceof Error ? err.message : "Failed to save ClawBox AI token.");
-    console.error("[clawai/poll] Background configure threw", err);
-    await writeClawAiSession({ ...session, status: "error", error: userFacing });
+    // Hermes applies the credential itself, with no configure route and no
+    // session sweep behind it, so there is nothing here that can warn.
+    return { ok: true, body: { success: true } };
   }
+
+  const configureResponse = await configureAiModelsPost(new Request("http://localhost/setup-api/ai-models/configure", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope: session.scope,
+      provider: "clawai",
+      apiKey: accessToken,
+      authMode: "subscription",
+      clawaiTier: session.tier ?? "flash",
+    }),
+  }));
+
+  if (!configureResponse.ok) {
+    // `readErrorBody`, NOT `.text()`. This one line is how the configure
+    // route's JSON body reached the wizard verbatim: the sign-in's own
+    // rollback message is a perfectly good sentence, and it was shown
+    // wrapped in the object it travelled in.
+    const configureBody = await readErrorBody(configureResponse);
+    const userFacing = formatUserFacingError(configureBody.sentence || "Failed to save ClawBox AI token.");
+    // The RAW body in the journal, deliberately: the owner is spared the
+    // braces, the operator diagnosing this box is not spared the evidence.
+    console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.raw.slice(0, 200));
+    return { ok: false, body: { error: userFacing }, httpStatus: configureResponse.status };
+  }
+
+  // The BODY of a successful configure, not just `response.ok`: a save can
+  // land and still not have done all of it — the session sweep this sign-in
+  // defers past the gateway restart is exactly that — and reading only the
+  // status dropped the one sentence that says so on the primary sign-in path
+  // of these boxes. Best effort: an unreadable body is a save that landed,
+  // never an error, so it costs the warning and nothing else. The gateway
+  // restart it answers early about (TASK-1535) is the task's to wait out, so
+  // "complete" keeps meaning a box the owner can chat with.
+  try {
+    const configured = await configureResponse.json() as Record<string, unknown>;
+    return { ok: true, body: { ...configured, success: true } };
+  } catch (err) {
+    console.warn("[clawai/poll] Could not read the configure answer's warning:", err instanceof Error ? err.message : err);
+    return { ok: true, body: { success: true } };
+  }
+}
+
+/** The session record of how the task ended, for the device-login card that polls this route. */
+async function recordClawaiEnd(session: ClawAiConnectSession, end: ProviderSignInEnd): Promise<void> {
+  if (end.ok) {
+    const warning = typeof end.result.warning === "string" && end.result.warning.trim() ? end.result.warning : null;
+    await writeClawAiSession({ ...session, status: "complete", error: null, warning, completedAt: Date.now() });
+    return;
+  }
+  console.error("[clawai/poll] Background configure failed:", end.error);
+  await writeClawAiSession({ ...session, status: "error", error: formatUserFacingError(end.error) });
 }
 
 export async function POST() {
@@ -212,6 +215,22 @@ export async function POST() {
     return NextResponse.json({ status: "error", error: session.error });
   }
   if (session.status === "configuring") {
+    // The sign-in's task is the truth while it is known: running, it may run
+    // past the window below (a slow restart is waited out, not cut off); ended
+    // without writing the session — a web server that restarted under it — it
+    // says how, at once, instead of three minutes later.
+    const task = session.taskId ? getBackgroundTask(session.taskId) : null;
+    if (task?.state === "running") return NextResponse.json({ status: "configuring", taskId: task.id });
+    if (task) {
+      const end: ProviderSignInEnd = task.state === "succeeded"
+        ? { ok: true, result: task.result ?? {} }
+        : { ok: false, error: task.error || "ClawBox AI setup did not finish. Please request a new code and try again." };
+      await recordClawaiEnd(session, end);
+      const ended = await readClawAiSession();
+      return ended?.status === "complete"
+        ? NextResponse.json({ status: "complete", ...(ended.warning ? { warning: ended.warning } : {}) })
+        : NextResponse.json({ status: "error", error: ended?.error ?? formatUserFacingError(end.ok ? "" : end.error) });
+    }
     // The background configure normally flips the session to complete/error
     // within a gateway-restart cycle. If it never reports back (process died
     // mid-restart, etc.) the session would sit in `configuring` forever and
@@ -308,6 +327,17 @@ export async function POST() {
     return NextResponse.json({ status: "pending" });
   }
 
+  // The session this poll read may have ended while the portal answered: a
+  // sign-out clears it (src/lib/provider-sign-out.ts), and the token in hand
+  // must not sign the box back in to the account it just left.
+  const current = await readClawAiSession();
+  if (!current || current.device_id !== session.device_id) {
+    return NextResponse.json(
+      { status: "error", error: "This ClawBox AI sign-in was cancelled. Request a new code to sign in." },
+      { status: 410 },
+    );
+  }
+
   // Upstream issued a token. Mark the session as `configuring` first so
   // a concurrent poll (which can happen if the client is on a fast
   // interval) doesn't fire a second background configure. Then kick
@@ -321,7 +351,29 @@ export async function POST() {
     configuringStartedAt: Date.now(),
   };
   await writeClawAiSession(configuringSession);
-  void runConfigureInBackground(configuringSession, accessToken);
+  // Nothing awaited between the write above and the start below can start a
+  // second one: a poll that lands meanwhile reads `configuring`.
+  const start = startProviderSignInTask({
+    provider: "clawai",
+    label: "ClawBox AI",
+    ask: { deviceLogin: session.device_id },
+    save: async (ctx) => {
+      // Inside the task, so this write cannot land after the ending's.
+      await writeClawAiSession({ ...configuringSession, taskId: ctx.id });
+      return saveClawaiSignIn(configuringSession, accessToken);
+    },
+    onEnd: (end) => recordClawaiEnd(configuringSession, end),
+  });
+  if (!start.ok || !start.started) {
+    // Another provider change holds the box — or a ClawBox AI sign-in that is
+    // not this one (a pasted token) is already finishing. The token in hand is
+    // not saved over it; the owner asks for a new code once it is done.
+    const error = start.ok
+      ? "A ClawBox AI sign-in is already finishing on this box. Wait for it, then request a new code if it is still needed."
+      : providerAuthBusyMessage(start.running, "Request a new code once it has finished.");
+    await writeClawAiSession({ ...configuringSession, status: "error", error });
+    return NextResponse.json({ status: "error", error }, { status: 409 });
+  }
 
-  return NextResponse.json({ status: "configuring" });
+  return NextResponse.json({ status: "configuring", taskId: start.task.id });
 }

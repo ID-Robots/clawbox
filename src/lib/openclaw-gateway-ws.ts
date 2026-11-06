@@ -126,6 +126,67 @@ export async function gatewayWsChatSendMain(
 }
 
 /**
+ * Read the newest message of the main chat session — the `chat.history` the
+ * web chat sends the moment it opens, for the session it binds to (the key
+ * from THIS hello, as {@link gatewayWsChatSendMain} takes it). `/healthz`
+ * answers off a flag; this one has to open the session store, which is what
+ * the update's verify needs to know (src/lib/gateway-session-check.ts). Only
+ * the key it read is answered, never the message. Rejects as
+ * {@link gatewayWsCall} does.
+ */
+export async function gatewayWsMainChatHistory(
+  options: GatewayWsCallOptions = {},
+): Promise<{ sessionKey: string }> {
+  let sessionKey = "main";
+  await callAfterHello(
+    "chat.history",
+    (hello) => {
+      sessionKey = mainSessionKeyOf(hello);
+      return { sessionKey, limit: 1 };
+    },
+    options,
+  );
+  return { sessionKey };
+}
+
+/**
+ * The sessions with agent work running or queued RIGHT NOW (`sessions.list`
+ * with `activeOnly`), newest-updated first, and the main session's key from
+ * the same handshake — so a caller can tell the conversation the web chat is
+ * bound to from a tab, a channel's or a cron job's session.
+ *
+ * What a ClawBox MCP tool call cannot say for itself: the gateway calls the
+ * tool with no session key, so the session whose turn is running when the call
+ * arrives is the best evidence of who asked (src/lib/coding-agent-notify.ts).
+ * Rejects as {@link gatewayWsCall} does.
+ */
+export async function gatewayWsActiveSessions(
+  options: GatewayWsCallOptions = {},
+): Promise<{ mainSessionKey: string; sessionKeys: string[] }> {
+  let mainSessionKey = "main";
+  const payload = await callAfterHello(
+    "sessions.list",
+    (hello) => {
+      mainSessionKey = mainSessionKeyOf(hello);
+      // `closedObject` on the gateway's side: a key it does not know is refused.
+      return { activeOnly: true, rowMode: "compact", limit: 50 };
+    },
+    options,
+  );
+  const rows = Array.isArray(payload.sessions) ? payload.sessions : [];
+  const active: Array<{ key: string; updatedAt: number }> = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const { key, updatedAt, hasActiveRun } = row as Record<string, unknown>;
+    // `activeOnly` already selected them; a row that says otherwise is not taken on trust.
+    if (typeof key !== "string" || !key || hasActiveRun === false) continue;
+    active.push({ key, updatedAt: typeof updatedAt === "number" ? updatedAt : 0 });
+  }
+  active.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { mainSessionKey, sessionKeys: active.map((row) => row.key) };
+}
+
+/**
  * The exchange itself: connect, handshake, then ONE request whose params may
  * depend on what the gateway said in its hello (`chat.send` needs the session
  * key the hello names).
@@ -249,26 +310,32 @@ async function callAfterHello(
 }
 
 /**
- * Write config through the gateway: `config.get` for the current file hash,
- * then `config.patch` with the merge. The gateway validates, writes the file
- * and hot-applies what it can — the same write `openclaw config set` makes,
- * minus the process. Answers what changed; `noop` when nothing did.
+ * Write config through the gateway: one `config.patch` with the merge, against
+ * the revision the caller read (`baseHash`, from `config.get`). The gateway
+ * refuses it as a conflict when the file changed since, validates the merged
+ * config, writes the file and — for a change it hot-applies — answers once the
+ * running gateway has applied it: the same write `openclaw config set` makes,
+ * minus the process. `replacePaths` names the arrays the patch replaces on
+ * purpose (`docs/gateway/configuration/config-rpc.md` in the pinned core).
+ * Answers what changed; `noop` when nothing did.
+ *
+ * The caller reads the revision, rather than this function, because the caller
+ * builds the patch from what it read: `openclaw-config.ts` diffs the file
+ * against the config it wants, and a hash taken after that read could vouch
+ * for a file the patch was not computed from.
  */
 export async function gatewayWsPatchConfig(
   patch: Record<string, unknown>,
-  options: GatewayWsCallOptions & { replacePaths?: string[] } = {},
+  options: GatewayWsCallOptions & { baseHash: string; replacePaths?: string[] },
 ): Promise<{ noop: boolean; changedPaths: string[] }> {
-  const current = await gatewayWsCall("config.get", {}, options);
-  const baseHash = current.hash;
-  if (typeof baseHash !== "string" || !baseHash) throw new GatewayRpcError("config.get returned no hash", "NO_HASH");
   const result = await gatewayWsCall(
     "config.patch",
     {
-      baseHash,
+      baseHash: options.baseHash,
       raw: JSON.stringify(patch),
       ...(options.replacePaths?.length ? { replacePaths: options.replacePaths } : {}),
     },
-    options,
+    { timeoutMs: options.timeoutMs },
   );
   const changed = Array.isArray(result.changedPaths) ? result.changedPaths.filter((p): p is string => typeof p === "string") : [];
   return { noop: result.noop === true, changedPaths: changed };

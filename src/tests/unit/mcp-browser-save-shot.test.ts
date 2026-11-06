@@ -43,6 +43,14 @@ async function browserTools(): Promise<CaptureHarness> {
   return h;
 }
 
+/**
+ * One described capture inside a run. browser_open, not browser_screenshot:
+ * a run's screenshot is of the tab it opened, and a fresh module has none.
+ * The launch reply carries no picture here, so the one frame archived is the
+ * described one — the same frame a later browser_screenshot would archive.
+ */
+const capture = (h: CaptureHarness) => h.call("browser_open", { url: "https://example.test/" });
+
 beforeEach(() => {
   restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR");
   base = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shots-"));
@@ -66,7 +74,7 @@ afterEach(() => {
 describe("saveShot", () => {
   it("archives the described frame into a folder only the box's own user can open", async () => {
     const h = await browserTools();
-    const out = await h.call("browser_screenshot");
+    const out = await capture(h);
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("archived to this run's evidence folder as shot-001.png");
@@ -86,7 +94,7 @@ describe("saveShot", () => {
     fs.mkdirSync(evidence, { recursive: true });
     fs.writeFileSync(path.join(evidence, "shot-001.png"), "the run's own file");
     const h = await browserTools();
-    const out = await h.call("browser_screenshot");
+    const out = await capture(h);
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("as shot-002.png");
@@ -100,7 +108,7 @@ describe("saveShot", () => {
       fs.writeFileSync(path.join(evidence, `shot-${String(i).padStart(3, "0")}.png`), "kept");
     }
     const h = await browserTools();
-    const out = await h.call("browser_screenshot");
+    const out = await capture(h);
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).not.toContain("archived to");
@@ -111,7 +119,7 @@ describe("saveShot", () => {
 
   it("writes down what the picture showed, so the words outlive the transcript", async () => {
     const h = await browserTools();
-    expect((await h.call("browser_screenshot")).isError).toBe(false);
+    expect((await capture(h)).isError).toBe(false);
     // A dotfile, so it is never listed as an artifact — and the pull-request
     // body is built from it (src/lib/coding-review-visual.ts).
     const notes = JSON.parse(fs.readFileSync(path.join(evidence, ".shot-notes.json"), "utf8")) as Record<string, string>;
@@ -123,7 +131,7 @@ describe("saveShot", () => {
     for (let i = 1; i <= MAX_SHOTS_PER_RUN; i++) {
       fs.writeFileSync(path.join(evidence, `shot-${String(i).padStart(3, "0")}.png`), "kept");
     }
-    expect((await (await browserTools()).call("browser_screenshot")).isError).toBe(false);
+    expect((await capture(await browserTools())).isError).toBe(false);
     expect(fs.existsSync(path.join(evidence, ".shot-notes.json"))).toBe(false);
 
     fs.rmSync(evidence, { recursive: true, force: true });
@@ -132,7 +140,7 @@ describe("saveShot", () => {
       if (body.action === "screenshot") return { url: "https://example.test/", screenshot: PNG.toString("base64"), descriptionError: "the vision model did not answer" };
       return {};
     });
-    expect((await (await browserTools()).call("browser_screenshot")).isError).toBe(false);
+    expect((await capture(await browserTools())).isError).toBe(false);
     expect(fs.existsSync(path.join(evidence, "shot-001.png"))).toBe(true);
     expect(fs.existsSync(path.join(evidence, ".shot-notes.json"))).toBe(false);
   });

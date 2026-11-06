@@ -13,7 +13,15 @@ import { isAllowedHostHeader, isTunnelRequest, systemHostLabel } from "@/lib/hos
 import { USERS_CONFIG_KEY, identityFromClaims, parseUserRegistry, registryVersions } from "@/lib/session-identity";
 import type { SessionIdentity } from "@/lib/session-identity";
 import { ownerUsername } from "@/lib/owner-username";
-import { NON_OWNER_HOME, nonOwnerVerdict, requestIntent } from "@/lib/non-owner-scope";
+import {
+  NON_OWNER_HOME,
+  OPENCLAW_SHARED_KEY,
+  nonOwnerVerdict,
+  openclawSharedFrom,
+  requestIntent,
+} from "@/lib/non-owner-scope";
+import { sessionExpiredHeaders } from "@/lib/session-expiry";
+import { APP_PROXY_NEXT_URL_HEADER, APP_REOPEN_PAGE_CSP, appReopenPage } from "@/lib/app-window";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -44,6 +52,8 @@ interface ConfigSnapshot {
   // version their cookie must carry. Removing a user drops the entry, which is
   // what revokes their sessions here.
   users: ReadonlyMap<string, string>;
+  /** The owner shares OpenClaw with every signed-in user (src/lib/non-owner-scope.ts). */
+  openclawShared: boolean;
 }
 
 const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
@@ -90,6 +100,7 @@ function readConfigCached(): ConfigSnapshot {
       "pref:installed_meta"?: unknown;
       [UPDATE_LOCK_KEY]?: unknown;
       [USERS_CONFIG_KEY]?: unknown;
+      [OPENCLAW_SHARED_KEY]?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -102,6 +113,7 @@ function readConfigCached(): ConfigSnapshot {
       updateInProgress: parsed[UPDATE_LOCK_KEY] === true,
       publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
       users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
+      openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
     };
     return configCache;
   } catch (err) {
@@ -128,6 +140,8 @@ function readConfigCached(): ConfigSnapshot {
       // No non-owner can sign in on a box whose config cannot be read: fail
       // closed to "only the owner exists".
       users: NO_USERS,
+      // Closed like the users: an unreadable switch shares nothing.
+      openclawShared: false,
     };
     return configCache;
   } finally {
@@ -355,6 +369,65 @@ function isDocumentRequest(headers: Headers): boolean {
   const dest = headers.get("sec-fetch-dest");
   if (dest) return dest === "document" || dest === "iframe" || dest === "frame" || dest === "embed" || dest === "object";
   return (headers.get("accept") ?? "").includes("text/html");
+}
+
+/**
+ * A request a sandboxed document sent itself, and not a top-level navigation:
+ * `Origin: null` is what an opaque origin sends on a form post and a fetch,
+ * and a GET navigation sends no Origin at all. Over plain HTTP there is no
+ * Sec-Fetch-Dest, so without this a server app's own form post (and an
+ * `Accept: text/html` fetch) read as a page and met the session gate. It is
+ * let through like the app's other requests (step 2b) — exactly what a POST
+ * without that Accept header, or the same POST sent with fetch(), already
+ * was. Never when the request says it is a top-level navigation
+ * (`Sec-Fetch-Dest: document`, through the tunnel); over plain HTTP nothing
+ * says so, and a top-level POST from a sandboxed popup passes too — still
+ * nothing the fetch() form of it did not already reach. A visitor's GET, the
+ * only thing typing an address sends, still asks them to sign in.
+ */
+function isOpaqueFrameRequest(headers: Headers): boolean {
+  return headers.get("origin") === "null" && headers.get("sec-fetch-dest") !== "document";
+}
+
+/**
+ * Let a request through to the app proxy with its `Next-Url` kept: Next.js
+ * deletes that header before the route handler runs, and the app needs it
+ * (APP_PROXY_NEXT_URL_HEADER, src/lib/app-window.ts).
+ */
+function passToAppProxy(request: NextRequest): NextResponse {
+  const nextUrl = request.headers.get("next-url");
+  if (nextUrl === null) return NextResponse.next();
+  const headers = new Headers(request.headers);
+  headers.set(APP_PROXY_NEXT_URL_HEADER, nextUrl);
+  return NextResponse.next({ request: { headers } });
+}
+
+/**
+ * A server app's window navigated itself to a page under `/apps/<id>/`
+ * (src/lib/app-window.ts): a document request with no session that is not a
+ * top-level navigation — or over plain HTTP, where none says which it is.
+ * Answered with the page that asks the desktop around it to open that
+ * address again, which carries the owner's cookie. A visitor's tab has no
+ * desktop around it and goes on to /login; a top-level navigation through
+ * the tunnel (`Sec-Fetch-Dest: document`) gets the plain redirect below.
+ * A request that DID carry a session cookie is the desktop's own navigation
+ * coming back signed out, so that page goes to /login without asking again.
+ */
+function appWindowReopen(request: NextRequest, loginUrl: URL, hadSessionCookie: boolean): NextResponse | null {
+  if (!isAppProxyPath(request.nextUrl.pathname) || !isDocumentRequest(request.headers)) return null;
+  if (request.headers.get("sec-fetch-dest") === "document") return null;
+  if (request.method !== "GET" && request.method !== "HEAD") return null;
+  const login = `${loginUrl.pathname}${loginUrl.search}`;
+  return new NextResponse(request.method === "HEAD" ? null : appReopenPage(login, !hadSessionCookie), {
+    status: 401,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": APP_REOPEN_PAGE_CSP,
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
 }
 
 function isPublicPath(pathname: string, method: string): boolean {
@@ -604,9 +677,12 @@ export async function middleware(request: NextRequest) {
   // at all, and a cookie gate on those would break every proxied app. They
   // pass, which exposes the app's routes to whoever has the address the way
   // its port on 0.0.0.0 is exposed on the LAN today — and nothing of the
-  // box's: the proxy reaches the app's port and nothing else.
-  if (isAppProxyPath(request.nextUrl.pathname) && !isDocumentRequest(request.headers)) {
-    return NextResponse.next();
+  // box's: the proxy reaches the app's port and nothing else. A form the
+  // document posts is one of those requests too (isOpaqueFrameRequest); a
+  // page it navigates to is not, and is reopened by the desktop instead
+  // (appWindowReopen, step 5).
+  if (isAppProxyPath(request.nextUrl.pathname) && (!isDocumentRequest(request.headers) || isOpaqueFrameRequest(request.headers))) {
+    return passToAppProxy(request);
   }
 
   // 2a. The Control UI's own static files — /assets, /themes, /fonts,
@@ -707,20 +783,25 @@ export async function middleware(request: NextRequest) {
     // API answering a navigation redirect with HTML is defect #304), but a
     // HEADER costs nothing and carries the same fact on requests the desktop is
     // already making. src/app/page.tsx turns it into the navigation.
-    // 4a'. A ClawBox user who is not the owner (TASK-1256) reaches only what is
-    // scoped per user — src/lib/non-owner-scope.ts, an allow-list. A 403 rather
+    // 4a'. A ClawBox user who is not the owner gets the owner's desktop except
+    // the owner's chat, secrets in clear and the owner's account —
+    // src/lib/non-owner-scope.ts, which names those exceptions. A 403 rather
     // than the 401 below: the session is fine, and the desktop reads a 401 as
     // "signed out" and sends the person back to /login. The RAW path, for the
     // same reason as step 2. A page is answered with the desktop instead of the
     // JSON, carrying the notice the desktop turns into "only the owner can open
     // that" — `requestIntent`, not `isDocumentRequest`, because the box is
     // reached over plain HTTP, where browsers send no Sec-Fetch-Dest at all.
+    // The owner's "Share OpenClaw with all users" switch rides in from the same
+    // cached config.json read, so turning it off holds from the next request.
     if (!identity.isOwner) {
       const verdict = nonOwnerVerdict({
         pathname: request.nextUrl.pathname,
         method: request.method,
         searchParams: request.nextUrl.searchParams,
         intent: requestIntent(request.headers),
+        username: identity.username,
+        openclawShared: readConfigCached().openclawShared,
       });
       if (verdict === "redirect-home") {
         return NextResponse.redirect(new URL(NON_OWNER_HOME, request.url), {
@@ -790,17 +871,27 @@ export async function middleware(request: NextRequest) {
   // download stream is useless anyway, and the desktop shell drives the real
   // re-login. Genuine top-level page navigations (no /setup-api/ or /api/
   // prefix) still redirect below.
+  //
+  // The 401 is MARKED as the session gate's (src/lib/session-expiry.ts): a few
+  // routes answer 401 for a wrong current password or a refused key, and only
+  // this one means the page is signed out and must go to /login.
+  const loginUrl = new URL("/login", request.url);
+  loginUrl.searchParams.set("redirect", request.nextUrl.pathname);
+
+  // 5a. A server app's window navigating itself has no cookie to send — the
+  // desktop around it reopens the page with its own (src/lib/app-window.ts).
+  const reopen = appWindowReopen(request, loginUrl, !!sessionCookie);
+  if (reopen) return reopen;
+
   const accept = request.headers.get("accept") || "";
   if (
     isSetupApiPath(pathname) ||
     pathname.startsWith("/api/") ||
     accept.includes("application/json")
   ) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+    return NextResponse.json({ error: "Authentication required" }, { status: 401, headers: sessionExpiredHeaders() });
   }
 
-  const loginUrl = new URL("/login", request.url);
-  loginUrl.searchParams.set("redirect", request.nextUrl.pathname);
   return NextResponse.redirect(loginUrl);
 }
 

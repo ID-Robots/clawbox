@@ -7,7 +7,7 @@ import {
 } from "@/lib/clawai-cloud-defaults";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { CLOUD_CAPABILITIES, type CloudCapability } from "@/lib/clawai-cloud-defaults-state";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
@@ -62,7 +62,7 @@ export async function POST(req: Request) {
   // make it, and neither may a POST another site's page fires at the box with
   // the owner's cookie riding along. The same pair `/setup-api/stt` and the
   // Memory Shard provider route keep.
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse("Changing where this box runs its AI needs a signed-in browser session.", "owner_only", 403);
   }
   if (!isSameOriginRequest(req)) {

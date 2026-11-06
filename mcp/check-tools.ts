@@ -61,6 +61,8 @@ import type { Capabilities, McpContext } from "./lib/context";
 // wrong place.
 import { API_BASE } from "./lib/api";
 import type { Ed } from "./lib/register";
+import { PRIME_RADIANT_TOOLS } from "./tools/prime-radiant";
+import { MEMORY_SHARD_TOOLS } from "./tools/memory";
 
 /**
  * Everything a posture must decide: the context minus the server's identity.
@@ -222,6 +224,15 @@ const PROBE_GATED_COMMON = [
   // coding agent's own gate, because what it answers about is what a RUN will
   // find in its environment.
   "coding_secret_list",
+  // Importing a project (a GitHub repository or a folder on the box) is the
+  // app's Import panel as a tool (2026-10-30), under the coding agent's gate
+  // like the runs it exists for.
+  "coding_project_import",
+  // The coding team's settings, read and changed (2026-10-30): the owner's
+  // preferences about the agent, behind the agent's own gate — a box whose
+  // coding agent is off has no team to tune, and the route admits the bearer
+  // for the settable set alone.
+  "coding_settings_get", "coding_settings_set",
   // Deploying what a run built is the other half of handing it the task, so it
   // is behind the same switch: a box whose coding agent is off has nothing the
   // Following every run, resuming one, and the project matrix: the same family
@@ -229,6 +240,9 @@ const PROBE_GATED_COMMON = [
   // or resume, and its routes refuse the call anyway.
   "coding_run_list", "coding_agent_resume", "coding_project_status",
   "coding_team_run", "coding_team_status", "coding_team_stop",
+  // Publishing a project to the ClawBox Store: a project is the coding
+  // agent's, so the tool is behind the same switch.
+  "app_publish",
   "disk_cleanup", "disk_usage", "email_list", "email_read",
   "logs_tail", "screen_capture",
 ];
@@ -261,9 +275,20 @@ const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
  */
 const UNGATED_COMMON = [
   "memory_shard_status", "local_ai_status", "clawbox_ai_usage",
+  // The docs shipped with the install (TASK-2177): a box whose docs folder is
+  // missing answers "not installed" from the tool, never with a missing tool —
+  // the agent needs them most on the box where something has gone wrong.
+  "docs_search", "docs_read",
   // The Anthropic account pool's state (TASK-902): "no account connected" is
   // an answer, and a queue needs it most on the box where every one is limited.
   "anthropic_accounts",
+  // Prime Radiant's family: a box with no vault yet answers "open the app
+  // once", never a refusal to register — the vault is ClawBox's on both editions.
+  ...PRIME_RADIANT_TOOLS,
+  // Memory Shard's management tools: a box with it switched off answers
+  // "switched off", never a missing tool. Search is Hermes-only (the index on
+  // an OpenClaw box is OpenClaw's), so it is not common.
+  ...MEMORY_SHARD_TOOLS.filter((name) => name !== "memory_shard_status" && name !== "memory_shard_search"),
 ];
 
 /** The gate that points the OTHER way: it exists where the box cannot draw. */

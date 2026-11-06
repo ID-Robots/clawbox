@@ -199,7 +199,7 @@ describe("routing to ClawBox AI", () => {
     // into the owner's terminal the moment it opens there; the delegated runs
     // already restrict sources the same way.
     runWrapper({}, ["--setting-sources", "project", "-p", "x"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nproject\n-p\nx\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nproject\n-p\nx\n");
   });
 
   it("passes its arguments through to Claude Code untouched on a pinned level", () => {
@@ -220,10 +220,11 @@ describe("routing to ClawBox AI", () => {
  * terminal must follow the same setting the delegated runs use.
  */
 describe("effort", () => {
-  it("asks for ultracode with the flag and no env pin when nothing else was chosen", () => {
+  it("pins xhigh through the env, with no flag, when nothing else was chosen", () => {
+    // xhigh is the box's default since TASK-1749; ultracode is opt-in.
     runWrapper({}, ["-p", "explain this repo"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nuser\n-p\nexplain this repo\n");
-    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n-p\nexplain this repo\n");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
   });
 
   it("follows the effort the owner picked in the Coding Agent app", () => {
@@ -318,6 +319,67 @@ describe("which model the owner actually gets", () => {
   it("says on screen which model is about to answer", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
     expect(runWrapper().stderr).toContain("deepseek-v4-pro[1m]");
+  });
+});
+
+/**
+ * WHERE A 1M SESSION COMPACTS (TASK-2203). On a `[1m]` name Claude Code
+ * believes a 1M window and, for a model it does not know, never compacted
+ * before the provider's 1,048,576-token cap: a run died on DeepSeek's 400 at
+ * 1,017,351 tokens of context with no compaction at all. The wrapper names the
+ * window Claude Code compacts by — measured honoured on 2.1.300 and 2.1.316 —
+ * and only ever below the window the model really has.
+ */
+describe("the auto-compact window", () => {
+  it("gives a 1M model a window of 84% of the 1,048,576 tokens the proxy really serves", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    const { status, stderr } = runWrapper();
+    expect(status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(1_048_576 * 84 / 100)));
+    expect(stderr).toContain("auto-compact window 880803 tokens");
+  });
+
+  it("gives it to an override that names a 1M model too", () => {
+    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("880803");
+  });
+
+  it("leaves a 200k model to Claude Code's own default, and drops an inherited window", () => {
+    // Claude Code clamps the knob to the window it believes, so a 200k model
+    // gains nothing from it — and an inherited 1M value on a 1M model would be
+    // exactly the field failure again.
+    runWrapper({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000" });
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000" });
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("880803");
+  });
+
+  it("takes an explicit window, or `off` for Claude Code's default", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "700000" });
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("700000");
+    runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "off" });
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+  });
+
+  it("refuses a window that is not a number of tokens, before Claude Code starts", () => {
+    rmSync(envDump, { force: true });
+    for (const bad of ["85%", "0", "-1"]) {
+      const { status, stderr } = runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: bad });
+      expect(status, bad).not.toBe(0);
+      expect(stderr, bad).toContain("CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off'");
+      expect(existsSync(envDump), bad).toBe(false);
+    }
+  });
+
+  it("leaves an Anthropic run exactly as it was", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", anthropic_api_key: "sk-ant-api03-test-key" });
+    runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_AUTOCOMPACT_WINDOW: "85%" });
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+    runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_CODE_AUTO_COMPACT_WINDOW: "500000" });
+    expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("500000");
   });
 });
 

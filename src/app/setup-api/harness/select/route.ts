@@ -9,6 +9,7 @@ import {
 } from "@/lib/harness";
 import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import { CONFIG_ROOT } from "@/lib/config-store";
+import { retireOnboardingRitual } from "@/lib/language-persona";
 
 const exec = promisify(execFile);
 
@@ -100,6 +101,12 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+  // A set-up box runs no first-conversation ritual (TASK-1528), and the
+  // retirement holds off while Hermes is in play. The identity sync above
+  // restarted the gateway BEFORE this persist, so its ExecStartPre still read
+  // Hermes as active and left the workspace alone; do it now rather than leave
+  // the owner's first message to the ritual until the next heartbeat.
+  if (harness === "openclaw") await retireOnboardingRitual();
   // The agent's own tool list is built from a startup probe of which harness is
   // active, and nothing here bounces it — so ask the harness to rebuild it. Best
   // effort, after the write: see harness-mcp-refresh.ts for why it is the whole

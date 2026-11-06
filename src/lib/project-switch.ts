@@ -1,14 +1,14 @@
 /**
  * A per-project ON/OFF switch in the config store.
  *
- * Two of these now exist and they must behave identically: the owner's
- * "the assistant may ship this project to production"
- * (the per-project production permission) and "every run in this project goes through
- * the delivery pipeline" (`coding_pipeline_projects`). Both are standing
- * permissions for something that happens while nobody is watching, so both have
- * to fail the same way — towards OFF, on every unreadable value — and both have
- * to store the same shape, or a map that grew a row per project the owner once
- * looked at.
+ * One of these exists today: the owner's "the assistant may ship this project
+ * to production" (the per-project production permission). The delivery
+ * pipeline's default (`coding_pipeline_projects`) was the other until SCA A1
+ * removed the pipeline; a config.json that still carries that key is simply
+ * never read. A switch like this is a standing permission for something that
+ * happens while nobody is watching, so every one has to fail the same way —
+ * towards OFF, on every unreadable value — and store the same shape, or a map
+ * that grew a row per project the owner once looked at.
  *
  * THE RULES, AND WHY EACH ONE IS HERE.
  *

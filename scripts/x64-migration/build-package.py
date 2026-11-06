@@ -32,12 +32,65 @@ def replace_once(text, old, new):
     return text.replace(old, new)
 
 
+# The pinned core's `engines.node` — the same table install.sh, install-x64.sh
+# and clawbox-x64-step.sh carry (install-node-engine-table.test.ts holds the
+# text to one range, test_integration.py runs this copy): with 2026.9.3 it
+# became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is refused outright, and
+# 2026.10.6 raised it to `>=24.22.1 <25 || >=26.12.1` (the October 2026 Node.js
+# security releases).
+OPENCLAW_NODE_ENGINE = ">=24.22.1 <25, or >=26.12.1"
+
+
+def node_version_satisfies_openclaw_engine(version):
+    """The table over a version string (`24.18.0`, or `v24.18.0` as `node --version` prints it)."""
+    parts = re.match(r'v?(\d+)\.(\d+)\.(\d+)', version or '')
+    if not parts:
+        return False
+    major, minor, patch = (int(x) for x in parts.groups())
+    if major == 24:
+        return (minor, patch) >= (22, 1)
+    if major == 26:
+        return (minor, patch) >= (12, 1)
+    return major >= 27
+
+
+def node_dir_version(node_dir):
+    """What `<node-dir>/node --version` answers, or None when nothing there answers."""
+    try:
+        out = subprocess.run([os.path.join(node_dir, 'node'), '--version'], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
+
+
+def default_node_dir():
+    """The directory of the `node` on the builder's PATH, else the distro's.
+
+    The package was once rebuilt with the old default alone, `/usr/bin`, and so
+    pointed every core command — and the staged core's install — at the distro's
+    Node 22, which the pinned core refuses. The builder's own Node is the one the
+    owner uses on that desktop and is far more likely to be the right one.
+    """
+    found = shutil.which('node')
+    return os.path.dirname(os.path.realpath(found)) if found else '/usr/bin'
+
+
 def build(args):
     """Stage reviewed source and host adapters in an inspectable root-owned deb."""
     account = pwd.getpwnam(args.user)
     for value in [args.user, args.project, args.node_dir, args.npm_prefix, account.pw_dir]:
         if not re.fullmatch(r'[A-Za-z0-9_./-]+', value) or '..' in value:
             raise ValueError('host paths/user must contain only simple path characters')
+    # Refused HERE, where the person who ran the builder is reading, rather than
+    # at the next core update's stage, inside a root unit, after the archive
+    # has already cost the box its time: the Node the package names is the one
+    # every core command and the staged core's own install will run on.
+    pin = (REPO / 'config/openclaw-target.txt').read_text().strip()
+    version = node_dir_version(args.node_dir)
+    if version is None:
+        raise ValueError(f'--node-dir {args.node_dir}: nothing there answers `node --version`; name the bin directory of a Node the pinned core (openclaw@{pin}) accepts, {OPENCLAW_NODE_ENGINE}')
+    if not node_version_satisfies_openclaw_engine(version):
+        raise ValueError(f'--node-dir {args.node_dir} holds Node {version}, which the pinned core (openclaw@{pin}) refuses: it needs Node {OPENCLAW_NODE_ENGINE}; name the bin directory of one it accepts')
     root = Path(args.staging).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if any(root.iterdir()):
@@ -49,6 +102,9 @@ def build(args):
     lib = '/usr/local/libexec/clawbox/'
     for name in ['clawbox-x64-step.sh', 'clawbox-x64-gateway.sh']:
         write(root, lib+name, (HERE/name).read_text(), 0o755)
+    # Settings → Users: the sign-in check and a ClawBox user's own Terminal,
+    # granted below exactly as config/clawbox-sudoers grants it on the appliance.
+    write(root, lib+'clawbox-user-helper.sh', (REPO/'config/clawbox-user-helper.sh').read_text(), 0o755)
     write(root,lib+'openclaw-cli','''#!/usr/bin/env bash
 set -euo pipefail
 . /etc/clawbox/x64-integration.env
@@ -68,7 +124,7 @@ exec "$NODE_DIR/node" "$NPM_PREFIX/lib/node_modules/openclaw/openclaw.mjs" "$@"
     write(root, lib+'clawbox-root-step.sh', dispatcher, 0o755)
     launcher=(REPO/'config/clawbox-run-root-step.sh').read_text()
     # Grant only the capabilities the x64 worker actually implements.
-    allowed='bootstrap_updater set_timezone chpasswd fix_git_perms apt_update nvidia_jetpack performance_mode chromium_install vnc_install vnc_refresh ffmpeg_install openclaw_install openclaw_setup openclaw_config openclaw_patch gateway_setup rebuild_reboot post_update llamacpp_install clawkeep_install cloudflared_install'
+    allowed='bootstrap_updater set_timezone chpasswd fix_git_perms apt_update nvidia_jetpack performance_mode chromium_install vnc_install vnc_refresh ffmpeg_install openclaw_install openclaw_setup openclaw_config openclaw_patch gateway_setup rebuild_reboot post_update llamacpp_install clawkeep_install cloudflared_install user_add user_remove'
     launcher,count=re.subn(r'WEB_ROOT_STEPS="\n.*?\n"', f'WEB_ROOT_STEPS="\n{allowed}\n"', launcher, count=1, flags=re.S)
     if count!=1: raise ValueError('vendor launcher allow-list changed')
     write(root, lib+'clawbox-run-root-step.sh', launcher, 0o755)
@@ -112,7 +168,9 @@ RemainAfterExit=yes
 ExecStart={lib}clawbox-x64-gateway.sh start
 ExecStop={lib}clawbox-x64-gateway.sh stop
 TimeoutStartSec=600
-TimeoutStopSec=120
+# ExecStop waits for OpenClaw's own drain: its user unit stops within
+# TimeoutStopSec=330, so the bridge allows that and a margin.
+TimeoutStopSec=360
 
 [Install]
 WantedBy=multi-user.target
@@ -144,7 +202,8 @@ exec /usr/local/bin/cloudflared "$@"
             '/usr/bin/systemctl restart clawbox-gateway.service','/usr/bin/systemctl start clawbox-browser.service',
             '/usr/bin/systemctl stop clawbox-browser.service','/usr/bin/systemctl enable --now ollama.service',
             '/usr/bin/systemctl start ollama.service','/usr/bin/systemctl stop ollama.service',
-            '/usr/bin/systemctl start clawbox-embed.service','/usr/bin/systemctl stop clawbox-embed.service']
+            '/usr/bin/systemctl start clawbox-embed.service','/usr/bin/systemctl stop clawbox-embed.service',
+            lib+'clawbox-user-helper.sh']
     write(root,'/etc/sudoers.d/clawbox-x64-integration',f'{args.user} ALL=(root) NOPASSWD: '+', '.join(grants)+'\n',0o440)
     write(root,'/DEBIAN/control',f'''Package: clawbox-x64-integration
 Version: {args.version}
@@ -202,9 +261,9 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--user',default=owner.pw_name)
     parser.add_argument('--project',default=os.path.join(owner.pw_dir,'clawbox'))
-    parser.add_argument('--node-dir',default='/usr/bin')
+    parser.add_argument('--node-dir',default=default_node_dir(),help='the bin directory of the Node every core command runs on; must satisfy the pinned core\'s engines (default: the node on PATH)')
     parser.add_argument('--npm-prefix',default=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'))
-    parser.add_argument('--version',default='1.0.4')
+    parser.add_argument('--version',default='1.0.6')
     parser.add_argument('--staging',required=True)
     parser.add_argument('--output',required=True)
     build(parser.parse_args())

@@ -17,12 +17,23 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { spawn } from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import {
+  isAssistantBrowserArgv,
   isBrowserExecutable,
+  isBrowserOnPortArgv,
   isClawboxBrowserArgv,
   isForeignCdpBrowserArgv,
+  isOtherCdpBrowserArgv,
   findClawboxBrowserPids,
+  findCdpPortHolders,
+  inspectClawboxBrowser,
+  isStartedByBrowserUnit,
   parseProcCmdline,
+  terminateClawboxBrowser,
+  terminateForeignCdpBrowser,
 } from "@/lib/process-match";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
@@ -196,6 +207,76 @@ describe("isForeignCdpBrowserArgv", () => {
       MATCH,
     )).toBe(false);
   });
+
+  it("matches the gateway's managed browser by its profile even when it is not headless", () => {
+    expect(isForeignCdpBrowserArgv(
+      ["/usr/bin/chromium", "--user-data-dir=/home/clawbox/.openclaw/browser/openclaw/user-data", `--remote-debugging-port=${CDP_PORT}`],
+      MATCH,
+    )).toBe(true);
+    expect(isForeignCdpBrowserArgv(
+      ["/home/clawbox/.cache/ms-playwright/chromium_headless_shell-1181/chrome-linux/headless_shell", `--remote-debugging-port=${CDP_PORT}`],
+      MATCH,
+    )).toBe(true);
+  });
+
+  /**
+   * TASK-1480: "some other browser on our port" also describes the owner's
+   * own signed-in Chrome. open-browser terminates what this returns, so a
+   * visible browser on a person's profile must never qualify — it is reported
+   * as the port being taken instead.
+   */
+  it("does NOT match the owner's own visible browser on our port", () => {
+    const owners = [
+      ["/opt/google/chrome/chrome", "--user-data-dir=/home/clawbox/.config/google-chrome-debug", `--remote-debugging-port=${CDP_PORT}`],
+      // Chrome's live, title-rewritten command line: one space-joined string.
+      parseProcCmdline(`/opt/google/chrome/chrome --user-data-dir=/home/clawbox/my-chrome --remote-debugging-port=${CDP_PORT} --flag-switches-begin\0`),
+      ["/usr/bin/brave", `--remote-debugging-port=${CDP_PORT}`],
+    ];
+    for (const argv of owners) {
+      expect(isForeignCdpBrowserArgv(argv, MATCH)).toBe(false);
+      // …but it IS somebody on our port, which is what the status says.
+      expect(isOtherCdpBrowserArgv(argv, MATCH)).toBe(true);
+    }
+  });
+});
+
+describe("a configured owner browser", () => {
+  const OWNER_PROFILE = "/home/clawbox/.config/google-chrome-debug";
+  const OWNER = { profileDir: OWNER_PROFILE, cdpPort: 9222, ownProfile: false };
+  const ownerChrome = [
+    "/opt/google/chrome/chrome",
+    `--user-data-dir=${OWNER_PROFILE}`,
+    "--remote-debugging-port=9222",
+    "--restore-last-session",
+  ];
+
+  it("is the desktop browser, serving the configured port", () => {
+    expect(isClawboxBrowserArgv(ownerChrome, OWNER)).toBe(true);
+    expect(isBrowserOnPortArgv(ownerChrome, OWNER)).toBe(true);
+  });
+
+  it("is never a foreign browser to clear, on its own port or on ours", () => {
+    expect(isForeignCdpBrowserArgv(ownerChrome, OWNER)).toBe(false);
+    expect(isOtherCdpBrowserArgv(ownerChrome, OWNER)).toBe(false);
+    // Configured or not, a visible browser of the owner's on the DEFAULT port
+    // is not the assistant's either.
+    const onDefaultPort = [ownerChrome[0], `--user-data-dir=${OWNER_PROFILE}`, `--remote-debugging-port=${CDP_PORT}`];
+    expect(isForeignCdpBrowserArgv(onDefaultPort, MATCH)).toBe(false);
+  });
+
+  it("is open but unreachable when it was started without the configured port", () => {
+    const noPort = ["/opt/google/chrome/chrome", `--user-data-dir=${OWNER_PROFILE}`];
+    expect(isClawboxBrowserArgv(noPort, OWNER)).toBe(true);
+    expect(isBrowserOnPortArgv(noPort, OWNER)).toBe(false);
+  });
+
+  it("tells the assistant's browser from a person's", () => {
+    expect(isAssistantBrowserArgv(["/usr/bin/chromium", "--headless"])).toBe(true);
+    expect(isAssistantBrowserArgv(["/usr/bin/chromium", "--headless=new"])).toBe(true);
+    expect(isAssistantBrowserArgv(ownerChrome)).toBe(false);
+    expect(isAssistantBrowserArgv(["/bin/bash", "--headless"])).toBe(false);
+    expect(isAssistantBrowserArgv([])).toBe(false);
+  });
 });
 
 describe("parseProcCmdline", () => {
@@ -301,5 +382,92 @@ describe.runIf(process.platform === "linux")("findClawboxBrowserPids", () => {
   it("never returns its own pid", async () => {
     const pids = await findClawboxBrowserPids(MATCH);
     expect(pids).not.toContain(process.pid);
+  });
+});
+
+/**
+ * The owner's browser as a REAL process: an executable named `chrome` (a link
+ * to this Node binary, sleeping) on a profile and port of the owner's,
+ * started by this test — not by clawbox-browser.service. Every cleanup path
+ * open-browser and close-browser have must leave it running.
+ */
+describe.runIf(process.platform === "linux")("an owner browser ClawBox did not start", () => {
+  async function withOwnerBrowser(
+    port: number,
+    body: (pid: number, profileDir: string) => Promise<void>,
+  ): Promise<void> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "owner-browser-"));
+    const exe = path.join(dir, "chrome");
+    fs.symlinkSync(process.execPath, exe);
+    const profileDir = path.join(dir, "profile");
+    const child = spawn(exe, ["-e", "setTimeout(() => {}, 30000)", "--", `--user-data-dir=${profileDir}`, `--remote-debugging-port=${port}`], {
+      stdio: "ignore",
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(child.pid).toBeGreaterThan(0);
+      await body(child.pid!, profileDir);
+    } finally {
+      child.kill("SIGKILL");
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("is found as the configured browser, serving its port, not started by the unit", async () => {
+    await withOwnerBrowser(39222, async (pid, profileDir) => {
+      const found = await inspectClawboxBrowser({ profileDir, cdpPort: 39222, ownProfile: false });
+      expect(found.pids).toContain(pid);
+      expect(found.servingPort).toBe(true);
+      expect(found.startedByUnit).not.toContain(pid);
+      expect(await isStartedByBrowserUnit(pid)).toBe(false);
+    });
+  });
+
+  it("survives close-browser's fallback on the owner's profile", async () => {
+    await withOwnerBrowser(39223, async (pid, profileDir) => {
+      expect(await terminateClawboxBrowser({ profileDir, cdpPort: 39223, ownProfile: false })).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(alive(pid)).toBe(true);
+    });
+  });
+
+  it("survives open-browser's foreign-browser cleanup when it holds the desktop port on its own profile", async () => {
+    await withOwnerBrowser(39224, async (pid) => {
+      // ClawBox still on its own profile, the owner's browser sitting on the
+      // port ClawBox wants: reported as taken, never cleared.
+      const clawbox = { profileDir: "/home/clawbox/.config/clawbox-browser", cdpPort: 39224 };
+      const holders = await findCdpPortHolders(clawbox);
+      expect(holders.other).toContain(pid);
+      expect(holders.assistant).not.toContain(pid);
+      expect(await terminateForeignCdpBrowser(clawbox)).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(alive(pid)).toBe(true);
+    });
+  });
+
+  it("survives the cleanup when it is the configured browser", async () => {
+    await withOwnerBrowser(39225, async (pid, profileDir) => {
+      expect(await terminateForeignCdpBrowser({ profileDir, cdpPort: 39225, ownProfile: false })).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(alive(pid)).toBe(true);
+    });
+  });
+
+  it("is still closed on ClawBox's OWN profile, where nobody else's browser can be", async () => {
+    await withOwnerBrowser(39226, async (pid, profileDir) => {
+      // The same process, but its profile declared ClawBox's own: the old
+      // fallback applies unchanged.
+      expect(await terminateClawboxBrowser({ profileDir, cdpPort: 39226, ownProfile: true })).toBe(1);
+      for (let i = 0; i < 20 && alive(pid); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(alive(pid)).toBe(false);
+    });
   });
 });

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
 import { isInternalRequest } from "@/lib/internal-token";
-import { applyDeferredLanguagePersona } from "@/lib/language-persona";
+import { applyDeferredLanguagePersona, retireOnboardingRitual } from "@/lib/language-persona";
 import { refreshCatalogIfDue } from "@/lib/hermes-model-options";
 import { readTunnelMode } from "@/lib/named-tunnel";
 import { pushHeartbeatTick } from "@/lib/portal-heartbeat";
@@ -53,6 +53,13 @@ export async function GET(request: Request) {
     const unauthorized = await requireSession(request);
     if (unauthorized) return unauthorized;
   }
+
+  // A set-up box runs no first-conversation ritual (TASK-1528). The wizard's
+  // last step retires it and so does the gateway's ExecStartPre; this is the
+  // path for a box that was updated while the ritual was still pending and has
+  // not restarted its gateway since. A no-op once it is done, and it never
+  // throws. First, because the language payback below waits on exactly this.
+  await retireOnboardingRitual();
 
   // Pay back a language pick OpenClaw's first-conversation ritual made us
   // defer, if the introduction is over. This rides on the heartbeat because

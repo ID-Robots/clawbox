@@ -1,148 +1,226 @@
+import { createRequire } from "module";
 import { describe, expect, it } from "vitest";
 import {
-  installedAppIdsFor,
   nonOwnerVerdict,
-  NON_OWNER_APP_IDS,
   NON_OWNER_HOME,
+  OPENCLAW_SHARED_KEY,
+  OWNER_ONLY_APP_IDS,
+  openclawSharedFrom,
+  ownerOnlyAppIds,
   requestIntent,
+  USER_CHAT_WS_PATH,
   type RequestIntent,
 } from "@/lib/non-owner-scope";
+import { apps } from "@/lib/desktop-apps";
 
-// TASK-1256: a ClawBox user who is not the owner reaches only what is scoped
-// per user. An allow-list — every other route stays the owner's.
+// A ClawBox user who is not the owner gets the owner's desktop — every app and
+// Settings — with four exceptions: the owner's chat (each user has their
+// own), secrets in clear, the owner's account itself, and changing the box's
+// AI settings.
 
-function verdict(url: string, method = "GET", intent: RequestIntent = "fetch") {
+function verdict(url: string, method = "GET", intent: RequestIntent = "fetch", username = "alice", openclawShared?: boolean) {
   const u = new URL(url, "http://clawbox.local");
-  return nonOwnerVerdict({ pathname: u.pathname, method, searchParams: u.searchParams, intent });
+  return nonOwnerVerdict({ pathname: u.pathname, method, searchParams: u.searchParams, intent, username, openclawShared });
 }
 
-describe("nonOwnerVerdict", () => {
-  // TASK-1306: a user's own open windows — the route keys the file on the
-  // session's user, so reading and writing it reaches nobody else's.
-  it("allows reading and saving the user's own desktop state, and nothing else on that path", () => {
-    expect(verdict("/setup-api/desktop/state")).toBe("allow");
-    expect(verdict("/setup-api/desktop/state", "HEAD")).toBe("allow");
-    expect(verdict("/setup-api/desktop/state", "PUT")).toBe("allow");
-    for (const method of ["POST", "DELETE", "PATCH"]) {
-      expect(verdict("/setup-api/desktop/state", method)).toBe("deny");
-    }
-    expect(verdict("/setup-api/desktop/state/other")).toBe("deny");
-    expect(verdict("/setup-api/desktop", "PUT")).toBe("deny");
-    expect(verdict("/setup-api/preferences", "PUT")).toBe("deny");
-  });
+/** The same judge, with the owner's "Share OpenClaw with all users" switch on. */
+function sharedVerdict(url: string, method = "GET", intent: RequestIntent = "fetch") {
+  return verdict(url, method, intent, "alice", true);
+}
 
+describe("nonOwnerVerdict — the owner's desktop for every signed-in user", () => {
   it.each([
-    "/setup-api/users/me",
-    "/setup-api/setup/status",
-    "/setup-api/terminal/shells",
-    "/setup-api/update/status",
-    "/setup-api/network/internet",
-    "/setup-api/preferences?keys=ui_language",
-    "/setup-api/preferences?keys=terminal_settings",
-    "/setup-api/preferences?keys=ui_language,terminal_settings",
-  ])("allows GET %s", (url) => {
-    expect(verdict(url)).toBe("allow");
-  });
-
-  it.each([
-    "/setup-api/users",
-    "/setup-api/preferences?all=1",
-    "/setup-api/preferences?keys=ui_language,installed_meta",
-    "/setup-api/preferences?keys=ui_language&all=1",
-    "/setup-api/preferences",
-    "/setup-api/files",
-    "/setup-api/files/etc/passwd",
-    "/setup-api/kv",
-    "/setup-api/coding-agent/enable",
-    "/setup-api/system/credentials",
-    "/setup-api/gateway/token",
-    "/setup-api/install/run-step",
-    "/Setup-API/users/me",
-    "/setup-api/users/me/",
-  ])("denies GET %s", (url) => {
-    expect(verdict(url)).toBe("deny");
-  });
-
-  it.each([
+    ["GET", "/setup-api/users"],
     ["POST", "/setup-api/users"],
     ["DELETE", "/setup-api/users"],
+    ["GET", "/setup-api/preferences?all=1"],
     ["POST", "/setup-api/preferences"],
-    ["POST", "/setup-api/users/me"],
+    ["GET", "/setup-api/files"],
+    ["GET", "/setup-api/files/Documents/notes.txt"],
+    ["GET", "/setup-api/kv?key=ui:pending-actions"],
     ["POST", "/setup-api/coding-agent/enable"],
+    ["GET", "/setup-api/coding-agent/runs"],
     ["POST", "/setup-api/system/power"],
-    ["POST", "/setup-api/network/internet"],
-  ])("denies %s %s", (method, url) => {
-    expect(verdict(url, method)).toBe("deny");
+    ["GET", "/setup-api/wifi/status"],
+    ["GET", "/setup-api/ai-models/status"],
+    ["POST", "/setup-api/apps/install"],
+    ["GET", "/setup-api/apps/store"],
+    ["GET", "/setup-api/vnc"],
+    ["GET", "/setup-api/browser"],
+    ["GET", "/setup-api/clawkeep"],
+    ["POST", "/setup-api/clawkeep/memory/index"],
+    ["GET", "/setup-api/prime-radiant/status"],
+    ["GET", "/setup-api/gateway/ws-config"],
+    ["GET", "/setup-api/chat/tabs"],
+    ["POST", "/setup-api/chat/tabs"],
+    ["GET", "/setup-api/chat/history?sessionKey=desktop-user-alice"],
+    ["POST", "/setup-api/hermes/chat"],
+    ["POST", "/setup-api/tts/speak"],
+    ["POST", "/setup-api/chat/transcribe"],
+    ["POST", "/setup-api/install/run-step"],
+    ["GET", "/setup-api/update/status"],
+  ])("allows %s %s", (method, url) => {
+    expect(verdict(url, method)).toBe("allow");
   });
 
-  it("opens the connectivity probe only, not the network configuration beside it", () => {
-    expect(verdict("/setup-api/network/internet")).toBe("allow");
-    for (const url of ["/setup-api/network", "/setup-api/network/internet/x", "/setup-api/wifi/status", "/setup-api/wifi/scan"]) {
-      expect(verdict(url), url).toBe("deny");
-    }
-  });
-
-  it("denies the gateway, however the path ends", () => {
-    for (const url of ["/api/chat", "/assets/index.js", "/assets/logo.png", "/__openclaw__/plugin-icon/x.png", "/avatar/main"]) {
-      expect(verdict(url), url).toBe("deny");
-    }
-  });
-
-  it("answers an API path with the 403 even when a person navigates to it", () => {
-    for (const intent of ["navigation", "unknown", "fetch"] as const) {
-      expect(verdict("/setup-api/users", "GET", intent), intent).toBe("deny");
-      expect(verdict("/api/chat", "GET", intent), intent).toBe("deny");
-    }
-  });
-
-  it("opens the desktop, the updating page and a standalone Terminal", () => {
-    for (const url of ["/", "/updating", "/app/terminal", "/?notice=owner-only"]) {
+  it("opens every ClawBox page, the standalone apps and installed web apps", () => {
+    for (const url of ["/", "/updating", "/setup", "/app/terminal", "/app/settings", "/app/files", "/app/clawbox", "/app/coding", "/app/store", "/app/vnc", "/app/browser", "/app/prime-radiant", "/app/memory-shard", "/apps/notes/", "/?notice=owner-only"]) {
       expect(verdict(url, "GET", "navigation"), url).toBe("allow");
     }
   });
 
-  it("sends any other page back to the desktop", () => {
-    for (const url of ["/setup", "/setup/settings", "/app/settings", "/app/files", "/chat", "/sessions", "/settings", "/files", "/hermes", "/novnc", "/apps"]) {
+  it("lets the desktop's own media and public files through", () => {
+    for (const url of ["/clawbox-wallpaper.jpeg", "/pets/crab/sheet.png", "/fonts/geist.woff2", "/manifest.json", "/sw.js"]) {
+      expect(verdict(url), url).toBe("allow");
+      expect(verdict(url, "GET", "unknown"), url).toBe("allow");
+    }
+  });
+});
+
+describe("nonOwnerVerdict — what stays the owner's", () => {
+  it.each([
+    ["GET", "/setup-api/system/credentials"],
+    ["POST", "/setup-api/system/credentials"],
+    ["POST", "/setup-api/system/credentials/verify"],
+    ["POST", "/setup-api/setup/reset"],
+  ])("the owner's account: refuses %s %s", (method, url) => {
+    expect(verdict(url, method)).toBe("deny");
+  });
+
+  it.each([
+    // The model the whole box chats on — a user's first desktop load moved it.
+    ["POST", "/setup-api/chat/model"],
+    ["POST", "/setup-api/ai-models/configure"],
+    ["POST", "/setup-api/ai-models/model-fallback"],
+    ["POST", "/setup-api/ai-models/clawai/start"],
+    ["POST", "/setup-api/ai-models/clawai/poll"],
+    ["POST", "/setup-api/ai-models/oauth/exchange"],
+    ["POST", "/setup-api/providers/default"],
+    ["POST", "/setup-api/providers/enabled"],
+    // Signing the box out of a provider is the owner's; so is ClawBox AI's.
+    ["POST", "/setup-api/providers/sign-out"],
+    ["POST", "/setup-api/ai-models/clawai/sign-out"],
+    ["POST", "/setup-api/anthropic/accounts"],
+    ["POST", "/setup-api/harness/swap"],
+    ["POST", "/setup-api/harness/select"],
+    ["POST", "/setup-api/hermes/models"],
+    ["POST", "/setup-api/hermes/provider-key"],
+    ["POST", "/setup-api/hermes/oauth/start"],
+    ["DELETE", "/setup-api/hermes/oauth/cancel"],
+    ["POST", "/setup-api/local-ai"],
+    ["POST", "/setup-api/local-ai/exclusive"],
+    ["POST", "/setup-api/local-models"],
+    ["POST", "/setup-api/ollama/pull"],
+    ["DELETE", "/setup-api/llamacpp/models"],
+    ["POST", "/setup-api/whisper"],
+    ["POST", "/setup-api/ai-cloud-defaults"],
+    ["POST", "/setup-api/tts"],
+    ["POST", "/setup-api/tts/install"],
+    ["POST", "/setup-api/stt"],
+  ])("the box's AI settings: refuses %s %s", (method, url) => {
+    expect(verdict(url, method)).toBe("deny");
+  });
+
+  it("the box's AI settings: every user still READS them, however they are spelled", () => {
+    for (const url of ["/setup-api/chat/model", "/setup-api/ai-models/status", "/setup-api/ai-models/catalog", "/setup-api/providers/status", "/setup-api/tts", "/setup-api/stt", "/setup-api/local-ai/exclusive"]) {
+      expect(verdict(url, "GET")).toBe("allow");
+    }
+    for (const url of ["/setup-api/chat/model/", "/setup-api//chat/model", "/setup-api/Chat/Model", "/setup-api/chat%2Fmodel"]) {
+      expect(verdict(url, "POST")).toBe("deny");
+    }
+  });
+
+  it("the box's AI settings: a user's own chat, its speech and the local engines' inference stay theirs", () => {
+    for (const url of [
+      "/setup-api/chat/tabs",
+      "/setup-api/chat/transcribe",
+      "/setup-api/hermes/chat",
+      "/setup-api/tts/speak",
+      "/setup-api/tts/sample",
+      "/setup-api/tts/warm",
+      "/setup-api/local-ai/llamacpp/v1/chat/completions",
+      "/setup-api/local-ai/ollama/api/chat",
+      "/setup-api/local-ai/embed/v1/embeddings",
+    ]) {
+      expect(verdict(url, "POST")).toBe("allow");
+    }
+  });
+
+  it("the gateway token: refuses the Control UI page that carries it", () => {
+    expect(verdict("/setup-api/gateway")).toBe("deny");
+    expect(verdict("/setup-api/gateway", "GET", "navigation")).toBe("deny");
+  });
+
+  it("is not dodged by spelling: a trailing slash, doubled slashes, escapes or case", () => {
+    // Middleware never strips an API path's trailing slash, and the router
+    // serves `/setup-api/gateway/` from the same handler.
+    for (const url of [
+      "/setup-api/gateway/",
+      "/setup-api/gateway//",
+      "/setup-api//gateway",
+      "/setup-api/gatew%61y",
+      "/setup-api/Gateway",
+      "/setup-api/system/credentials/",
+      "/setup-api/system%2Fcredentials",
+      "/setup-api/setup/reset/",
+      "/API/chat",
+      "/api%2Fchat",
+      "/app/OpenClaw",
+    ]) {
+      expect(verdict(url, "GET", "fetch"), url).toBe("deny");
+    }
+    expect(verdict("/setup-api/%zz")).toBe("deny");
+    // …while an ordinary path with a slash at the end still opens.
+    expect(verdict("/setup-api/gateway/ws-config")).toBe("allow");
+    expect(verdict("/setup-api/users/")).toBe("allow");
+  });
+
+  it("the harnesses' consoles (every conversation on the box): sends their pages to the desktop", () => {
+    for (const url of ["/app/openclaw", "/app/hermes", "/chat", "/sessions", "/settings", "/overview"]) {
       expect(verdict(url, "GET", "navigation"), url).toBe("redirect-home");
-    }
-  });
-
-  it("sends a page asked for without Fetch Metadata or Accept (curl, plain-HTTP browsers) to the desktop too", () => {
-    for (const url of ["/settings", "/files", "/app/browser", "/hermes", "/novnc", "/setup"]) {
       expect(verdict(url, "GET", "unknown"), url).toBe("redirect-home");
-      expect(verdict(url, "HEAD", "unknown"), url).toBe("redirect-home");
+      expect(verdict(url, "GET", "fetch"), url).toBe("deny");
+      expect(verdict(url, "POST", "navigation"), url).toBe("deny");
     }
   });
 
-  it("keeps the 403 for code that says it is code, and for any write", () => {
-    expect(verdict("/settings", "GET", "fetch")).toBe("deny");
-    expect(verdict("/settings", "POST", "navigation")).toBe("deny");
-    expect(verdict("/settings", "POST", "unknown")).toBe("deny");
+  it("the gateway's HTTP trees, however the path ends", () => {
+    for (const url of ["/api/chat", "/api/sessions", "/assets/index.js", "/assets/logo.png", "/__openclaw__/plugin-icon/x.png", "/avatar/main", "/control-ui-config.json", "/something.js"]) {
+      expect(verdict(url), url).toBe("deny");
+    }
+    for (const intent of ["navigation", "unknown", "fetch"] as const) {
+      expect(verdict("/api/chat", "GET", intent), intent).toBe("deny");
+    }
   });
 
-  it("lets the desktop's own media through and nothing script-like", () => {
-    expect(verdict("/clawbox-wallpaper.jpeg")).toBe("allow");
-    expect(verdict("/pets/crab/sheet.png")).toBe("allow");
-    expect(verdict("/fonts/geist.woff2")).toBe("allow");
-    expect(verdict("/fonts/geist.woff2", "GET", "unknown")).toBe("allow");
-    expect(verdict("/control-ui-config.json")).toBe("deny");
-    expect(verdict("/control-ui-config.json", "GET", "unknown")).toBe("deny");
-    expect(verdict("/health")).toBe("deny");
-    expect(verdict("/something.js")).toBe("deny");
-    expect(verdict("/something.js", "GET", "unknown")).toBe("deny");
+  it("the owner's chat media — while a user's own chat reaches the pictures sent to THEM", () => {
+    const own = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:clawbox-user-alice")}/1b2c/full`;
+    const tab = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:clawbox-utab-0123456789ab-alice")}/1b2c/full`;
+    const owners = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:main")}/1b2c/full`;
+    const bobs = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:clawbox-user-bob")}/1b2c/full`;
+    expect(verdict(own)).toBe("allow");
+    expect(verdict(tab)).toBe("allow");
+    expect(verdict(owners)).toBe("deny");
+    expect(verdict(bobs)).toBe("deny");
+    expect(verdict(own, "POST")).toBe("deny");
+    expect(verdict(own, "GET", "fetch", "bob")).toBe("deny");
   });
 
-  it("lands a redirected non-owner on the desktop with the owner-only notice", () => {
+  it("lands a redirected user on the desktop with the owner-only notice", () => {
     expect(NON_OWNER_HOME).toBe("/?notice=owner-only");
   });
+});
 
-  it("shows a non-owner the Terminal and nothing else", () => {
-    expect(NON_OWNER_APP_IDS).toEqual(["terminal"]);
-  });
-
-  it("offers the owner's installed apps to the owner only", () => {
-    expect(installedAppIdsFor(true, ["weather", "notes"])).toEqual(["weather", "notes"]);
-    expect(installedAppIdsFor(false, ["weather", "notes"])).toEqual([]);
+describe("the desktop apps that stay the owner's", () => {
+  it("are the harnesses' own consoles alone — every other built-in app is every signed-in user's", () => {
+    expect(OWNER_ONLY_APP_IDS).toEqual(["openclaw", "hermes"]);
+    const ids = apps.map((a) => a.id);
+    for (const id of OWNER_ONLY_APP_IDS) expect(ids, id).toContain(id);
+    // Their standalone pages are the owner's too.
+    for (const id of OWNER_ONLY_APP_IDS) expect(verdict(`/app/${id}`, "GET", "navigation"), id).toBe("redirect-home");
+    for (const id of ids.filter((x) => !OWNER_ONLY_APP_IDS.includes(x))) {
+      expect(verdict(`/app/${id}`, "GET", "navigation"), id).toBe("allow");
+    }
   });
 });
 
@@ -171,5 +249,72 @@ describe("requestIntent", () => {
   it("calls a request that says nothing unknown", () => {
     expect(intent({})).toBe("unknown");
     expect(intent({ accept: "*/*" })).toBe("unknown");
+  });
+});
+
+describe("nonOwnerVerdict — the owner shares OpenClaw with every user", () => {
+  it("opens OpenClaw's app page, its Control UI pages and the page that carries the token", () => {
+    for (const url of ["/app/openclaw", "/App/OpenClaw", "/chat", "/sessions", "/settings", "/overview"]) {
+      for (const intent of ["navigation", "unknown", "fetch"] as const) {
+        expect(sharedVerdict(url, "GET", intent), `${url} ${intent}`).toBe("allow");
+      }
+    }
+    expect(sharedVerdict("/setup-api/gateway")).toBe("allow");
+    expect(sharedVerdict("/setup-api/gateway/")).toBe("allow");
+  });
+
+  it("opens the gateway's HTTP trees and the Control UI's own files — every method the owner's Control UI uses", () => {
+    for (const url of ["/api/chat", "/api/sessions", "/assets/index.js", "/__openclaw__/plugin-icon/x.png", "/avatar/main", "/control-ui-config.json", "/something.js"]) {
+      expect(sharedVerdict(url), url).toBe("allow");
+    }
+    expect(sharedVerdict("/api/sessions", "POST")).toBe("allow");
+    const owners = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:main")}/1b2c/full`;
+    expect(sharedVerdict(owners)).toBe("allow");
+  });
+
+  it("keeps the Hermes dashboard and the owner's account the owner's", () => {
+    expect(sharedVerdict("/app/hermes", "GET", "navigation")).toBe("redirect-home");
+    expect(sharedVerdict("/app/hermes", "GET", "fetch")).toBe("deny");
+    for (const [method, url] of [
+      ["GET", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials/verify"],
+      ["POST", "/setup-api/setup/reset"],
+    ]) {
+      expect(sharedVerdict(url, method), `${method} ${url}`).toBe("deny");
+    }
+  });
+
+  it("changes nothing while the switch is off or absent — exactly today's table", () => {
+    for (const shared of [undefined, false]) {
+      expect(verdict("/app/openclaw", "GET", "navigation", "alice", shared)).toBe("redirect-home");
+      expect(verdict("/chat", "GET", "navigation", "alice", shared)).toBe("redirect-home");
+      expect(verdict("/setup-api/gateway", "GET", "fetch", "alice", shared)).toBe("deny");
+      expect(verdict("/api/sessions", "GET", "fetch", "alice", shared)).toBe("deny");
+      expect(verdict("/something.js", "GET", "fetch", "alice", shared)).toBe("deny");
+    }
+  });
+
+  it("hides only Hermes from a non-owner's desktop while OpenClaw is shared", () => {
+    expect(ownerOnlyAppIds(false)).toEqual(OWNER_ONLY_APP_IDS);
+    expect(ownerOnlyAppIds(true)).toEqual(["hermes"]);
+  });
+
+  it("shares only on a literal true", () => {
+    expect(openclawSharedFrom(true)).toBe(true);
+    for (const value of [undefined, null, false, "true", 1, {}]) expect(openclawSharedFrom(value), String(value)).toBe(false);
+  });
+
+  it("names the switch and the user-chat socket path exactly as production-server.js reads them", () => {
+    const mirror = createRequire(import.meta.url)("../../../scripts/openclaw-sharing.js") as {
+      OPENCLAW_SHARED_KEY: string;
+      USER_CHAT_WS_PATH: string;
+      openclawSharedFrom: (value: unknown) => boolean;
+    };
+    expect(mirror.OPENCLAW_SHARED_KEY).toBe(OPENCLAW_SHARED_KEY);
+    expect(mirror.USER_CHAT_WS_PATH).toBe(USER_CHAT_WS_PATH);
+    for (const value of [true, false, "true", 1, null]) {
+      expect(mirror.openclawSharedFrom(value), String(value)).toBe(openclawSharedFrom(value));
+    }
   });
 });

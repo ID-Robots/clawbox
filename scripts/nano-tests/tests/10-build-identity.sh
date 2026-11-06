@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # timeout: 300
+# select: always
+# parallel: probes
+# covers: src/lib/build-identity.ts src/app/setup-api/system/build-identity/* scripts/verify-build-identity.sh scripts/write-build-info.mjs scripts/postbuild.sh
 #
 # The board runs the commit under test, cleanly built and actually served.
 #

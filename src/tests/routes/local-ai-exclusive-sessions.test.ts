@@ -30,6 +30,10 @@ const { configSetMock } = vi.hoisted(() => ({
   configSetMock: vi.fn<(op: string[]) => Promise<void>>(async () => {}),
 }));
 
+// The gateway applies a switch live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class. The route narrows on `err instanceof GatewayNotReadyError` to
   // keep "the gateway has not finished binding" out of a sentence that says the
@@ -131,6 +135,24 @@ describe("Local-only on (sessions)", () => {
       { key: "agent:main:main", entry: { sessionId: "s-main", ...DEEPSEEK_PIN } },
       { key: "agent:main:retained", entry: {} },
     ]);
+  });
+
+  it("switches the defaults, waits for the gateway to take them live, then the sessions — and never restarts", async () => {
+    answering();
+    const hot = await import("@/lib/gateway-hot-apply");
+    const { restartGateway } = await import("@/lib/openclaw-config");
+
+    const res = await post(true);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ enabled: true });
+    // TASK-1535: the session is pinned to a model the running gateway has to
+    // know, so the defaults it was switched to are confirmed applied first.
+    const settledAt = vi.mocked(hot.settleConfigWrite).mock.invocationCallOrder[0];
+    expect(vi.mocked(runOpenclawConfigSet).mock.invocationCallOrder[0]).toBeLessThan(settledAt);
+    expect(settledAt).toBeLessThan(gateway.mock.invocationCallOrder[0]);
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
   });
 
   it("switches the store's sessions through the gateway and records only what it confirmed", async () => {

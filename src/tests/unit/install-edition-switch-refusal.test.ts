@@ -462,6 +462,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
+    "clawbox-wifi-failover.service": "static:inactive",
     "clawbox-codex-auth-sync.service": "static:inactive",
     "clawbox-build-heal.service": "enabled:inactive",
   };
@@ -525,6 +526,7 @@ d("step_validate_services sees units belonging to another edition", () => {
       "clawbox-tunnel.service": "disabled:inactive",
       "clawbox-root-update@.service": "static:inactive",
       "clawbox-ap-watchdog.service": "static:inactive",
+      "clawbox-wifi-failover.service": "static:inactive",
       "clawbox-codex-auth-sync.service": "static:inactive",
       "clawbox-build-heal.service": "enabled:inactive",
       "clawbox-gateway.service": "enabled:active",
@@ -545,7 +547,7 @@ d("step_validate_services sees units belonging to another edition", () => {
     // clawbox-build-heal.service, the boot-time oneshot of TASK-1316) + 1 probe
     // (test mode drops the WiFi probe) + 1 on-device TTS verdict (openclaw
     // only — Hermes has no TTS step) + 3 foreign-unit checks.
-    expect(Number(total)).toBe(18);
+    expect(Number(total)).toBe(19);
   });
 });
 

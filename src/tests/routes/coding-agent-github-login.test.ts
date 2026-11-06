@@ -15,7 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  hasOwnerSession: vi.fn(async () => true),
+  hasPersonSession: vi.fn(async () => true),
   isSameOriginRequest: vi.fn(() => true),
   startDeviceLogin: vi.fn(async () => ({ userCode: "ABCD-1234", verificationUri: "https://github.com/login/device" })),
   pollDeviceLogin: vi.fn(async () => ({ status: "pending" as string, login: undefined as string | undefined })),
@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => ({
   noteGitHubAccountChanged: vi.fn(() => {}),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: mocks.hasOwnerSession }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: mocks.hasPersonSession }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: mocks.isSameOriginRequest }));
 vi.mock("@/lib/coding-github", () => ({
   startDeviceLogin: mocks.startDeviceLogin,
@@ -45,7 +45,7 @@ const req = (body: unknown) =>
 /** Every arm of this route logs; the suite is not about the journal. */
 beforeEach(async () => {
   errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-  mocks.hasOwnerSession.mockResolvedValue(true);
+  mocks.hasPersonSession.mockResolvedValue(true);
   mocks.isSameOriginRequest.mockReturnValue(true);
   mocks.pollDeviceLogin.mockResolvedValue({ status: "pending", login: undefined });
   vi.resetModules();
@@ -154,7 +154,7 @@ describe("an action outside the allow-list reaches nothing", () => {
 
 describe("the gates that run before the verb is even read", () => {
   it("refuses a caller with no owner session, whatever the action", async () => {
-    mocks.hasOwnerSession.mockResolvedValue(false);
+    mocks.hasPersonSession.mockResolvedValue(false);
     for (const action of ["start", "poll", "cancel"]) {
       const res = await POST(req({ action }));
       expect(res.status).toBe(403);
@@ -175,7 +175,7 @@ describe("the gates that run before the verb is even read", () => {
 
   it("answers the owner gate before the origin gate", async () => {
     // The bearer must get the same answer every owner-only route gives.
-    mocks.hasOwnerSession.mockResolvedValue(false);
+    mocks.hasPersonSession.mockResolvedValue(false);
     mocks.isSameOriginRequest.mockReturnValue(false);
     expect((await POST(req({ action: "start" }))).status).toBe(403);
     expect((await (await POST(req({ action: "start" }))).json()).kind).toBe("owner_only");

@@ -47,9 +47,22 @@ const UPDATE_KEYS = [
   // The /updating screen, the one page guaranteed to be open while the box is
   // offline.
   "update.stuckHint", "update.offlineHint",
+  // The run view both screens draw (TASK-2111): a box that is not answering,
+  // and /updating handing back to the desktop.
+  "update.notAnswering", "update.returningToDesktop",
   // Its "What's new" panel (TASK-1205).
   "update.whatsNewTitle", "update.whatsNewTitleGeneric", "update.whatsNewIntro",
   "update.whatsNewGeneric", "update.whatsNewReleaseNotes", "update.whatsNewChannel",
+  // The run view of the System Update window: step count, log, failure copy.
+  "update.stepsComplete", "update.stepStopped", "update.reconnectNote",
+  "update.highlights", "update.updateLog", "update.noFailureReason",
+  "update.stepCompleted", "update.stepPending",
+  // A branch or an update refused for installing an older harness than the
+  // one that wrote the box's data, and its override.
+  "update.harnessDowngrade.titleBranch", "update.harnessDowngrade.titleUpdate",
+  "update.harnessDowngrade.versionLine", "update.harnessDowngrade.schemaLine",
+  "update.harnessDowngrade.body", "update.harnessDowngrade.backupFailed",
+  "update.harnessDowngrade.switchAnyway", "update.harnessDowngrade.updateAnyway",
 ];
 
 /** Settings → Providers and the ClawBox AI device-code card (sweep: settings #1). */
@@ -109,6 +122,8 @@ const MEMORY_KEYS = [
   "clawkeep.memory.error.indexRebuildRequired",
   "clawkeep.memory.error.indexIdentityMismatched",
   "clawkeep.memory.error.indexIdentityMissing",
+  "clawkeep.memory.error.indexKeywordOnly",
+  "clawkeep.memory.error.embedderUnavailable",
   "clawkeep.memory.error.providerMismatch",
   "clawkeep.memory.error.providerDegraded",
   "clawkeep.memory.error.statusUnavailable",

@@ -26,27 +26,41 @@ export async function repairOpenclawConfig(repairs: {
   ensureMicrosoftTtsExcluded: () => Promise<boolean>
   /** Seeds `tts.auto` for the spoken-replies switch on a box that predates it. */
   ensureVoiceAutoReplyMode?: () => Promise<boolean>
+  /** Points the gateway's browser tool at the box's one browser (src/lib/shared-browser.ts). */
+  ensureSharedBrowserProfile?: () => Promise<boolean>
   restartGateway: (options?: { awaitReady?: boolean }) => Promise<void>
+  /**
+   * Lets a gateway still starting finish first (`waitForGatewayStartBeforeStop`):
+   * a repair's write is held until the core says `started`, so the restart
+   * after it lands just before the channel providers start, by construction.
+   */
+  letGatewayFinishStarting?: () => Promise<unknown>
 }): Promise<void> {
   const steps: Array<[label: string, run: () => Promise<boolean>]> = [
     ['migrate Local AI proxy URLs', repairs.ensureLocalAiProxyUrls],
     ['exclude Microsoft TTS', repairs.ensureMicrosoftTtsExcluded],
   ]
   if (repairs.ensureVoiceAutoReplyMode) steps.push(['seed the spoken-replies mode', repairs.ensureVoiceAutoReplyMode])
+  if (repairs.ensureSharedBrowserProfile) steps.push(['share the desktop browser with the assistant', repairs.ensureSharedBrowserProfile])
   let changed = false
   for (const [label, run] of steps) {
     try {
-      if (await run()) changed = true
+      if (await runOnceMoreIfMovedWhileHeld(run)) changed = true
     } catch (err) {
       console.error(`[instrumentation] Failed to ${label}:`, err instanceof Error ? err.message : err)
     }
   }
   if (!changed) return
   try {
-    // No readiness wait: nothing here reads the answer, and this promise gates
-    // `armUpdateContinuation`, which resumes a half-finished update. Spending
-    // the restart budget at boot would eat the margin the memory-probe delay
-    // is sized against for no information.
+    // The START wait is spent on purpose: the repair's write was held until
+    // the core said `started`, so a restart now would land just before its
+    // channel providers start and wait out the unit's whole stop timeout. It
+    // leaves the memory-probe gate alone, which reads the persisted
+    // continuation flag rather than this promise.
+    await repairs.letGatewayFinishStarting?.()
+    // No readiness wait after the restart: nothing here reads the answer, and
+    // this promise gates `armUpdateContinuation`, which resumes a half-finished
+    // update; spending the restart budget would buy no information.
     await repairs.restartGateway({ awaitReady: false })
   } catch (err) {
     console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
@@ -54,10 +68,27 @@ export async function repairOpenclawConfig(repairs: {
 }
 
 /**
+ * A repair reads openclaw.json at boot while the gateway's pre-start runs, and
+ * its write is held until the gateway is up (`@/lib/gateway-start-guard`). The
+ * pre-start's own passes rewrite the file meanwhile, so the held snapshot is
+ * refused (`config_changed_while_held`, by code: the class is not loaded here).
+ * Run once more, the repair reads the file as it is now, beside a gateway that
+ * no longer holds it.
+ */
+async function runOnceMoreIfMovedWhileHeld(run: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await run()
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code !== 'config_changed_while_held') throw err
+    return run()
+  }
+}
+
+/**
  * Ask the updater, once the boot rush has passed, whether an update is waiting
  * for its second half.
  *
- * WHY. An update reboots the box halfway through: the system fixups, the
+ * WHY. An update restarts ClawBox (or reboots the box) halfway through: the system fixups, the
  * Hermes re-provisioning and the build-identity check run AFTER the restart,
  * and `checkContinuation()` is what starts them. Its only caller was the
  * update status route, so the second half waited for somebody to open the
@@ -163,6 +194,28 @@ export async function seedProcessTimeZone(deps: {
 }
 
 /**
+ * The one-browser profile migration with this box's readers
+ * (src/lib/shared-browser.ts has the rule; this only hands it the box).
+ */
+function sharedBrowserMigration(set: (key: string, value: unknown) => Promise<void>) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { agentProfileMigration, PROFILE_MIGRATION_KEY } = require('./lib/shared-browser')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { desktopBrowserVersion, releaseBrowserProfile } = require('./lib/shared-browser-runtime')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { readDesktopBrowserConfig } = require('./lib/desktop-browser-config')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { OPENCLAW_HOME } = require('./lib/openclaw-config')
+  return agentProfileMigration({
+    readDesktop: () => readDesktopBrowserConfig(),
+    openclawHome: OPENCLAW_HOME,
+    releaseProfile: releaseBrowserProfile,
+    desktopBrowserVersion,
+    record: (value: unknown) => set(PROFILE_MIGRATION_KEY, value),
+  })
+}
+
+/**
  * Next.js calls this once per server start, in both runtimes. Everything
  * below is Node-only and loaded through `require()` so the Edge bundle never
  * sees it; each hook fails on its own and none of them may stop the boot.
@@ -171,8 +224,8 @@ export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
   // A second server on the same data/ — a `next dev` live-edit session beside
   // the running clawbox-setup — must not run the boot jobs too: it would
-  // reconcile and reattach the coding runs, resume their pipelines and PR
-  // watches, start a second email-approval poller and both schedulers, and
+  // reconcile and reattach the coding runs, resume their PR watches, start a
+  // second email-approval poller and both schedulers, and
   // repair openclaw.json (restarting the gateway) against the same files the
   // real server owns. It serves pages and routes; the real server keeps the jobs.
   if (process.env.CLAWBOX_SKIP_BOOT_JOBS === '1') {
@@ -220,7 +273,39 @@ export async function register() {
   // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
   // for why they must not run together. Never awaited: boot goes on. Never
   // rejects: every step inside catches for itself.
-  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, restartGateway })
+  //
+  // The browser repair, the profile migration and the keeper further down are
+  // for the DEVICE's own account only, like the git identity above: under
+  // `bun run dev` on a developer's machine they would rewrite that person's
+  // gateway config, copy their browser profile and close a headless browser
+  // of theirs that happened to sit on the port.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const onDeviceAccount = process.env.HOME === require('./lib/coding-git-factory-identity').CLAWBOX_ACCOUNT_HOME
+  let ensureSharedBrowserProfile: (() => Promise<boolean>) | undefined
+  if (onDeviceAccount) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const shared = require('./lib/shared-browser')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { readConfig, writeConfig, openclawIsAbsent } = require('./lib/openclaw-config')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { readDesktopBrowserConfig } = require('./lib/desktop-browser-config')
+      ensureSharedBrowserProfile = () => shared.ensureSharedBrowserProfile({
+        readConfig,
+        writeConfig,
+        readDesktop: () => readDesktopBrowserConfig(),
+        gatewayAbsent: openclawIsAbsent,
+      })
+    } catch (err) {
+      console.error('[instrumentation] Could not load the shared-browser repair:', err instanceof Error ? err.message : err)
+    }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { waitForGatewayStartBeforeStop } = require('./lib/gateway-start-guard')
+  const configRepaired = repairOpenclawConfig({
+    ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, ensureSharedBrowserProfile, restartGateway,
+    letGatewayFinishStarting: () => waitForGatewayStartBeforeStop(),
+  })
   try {
     // An update that rebooted the box still has its second half to run. Ask
     // here, so it starts whether or not anyone opens the Update page — see
@@ -260,7 +345,7 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, dropRemovedProjectsMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { migrateLegacyWebappStorage } = require('./lib/webapp-legacy-storage-migration')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -305,6 +390,9 @@ export async function register() {
     const ran = await runBootMigrations(
       [
         dropRemovedConsentMigration({ set, removeFile: removeDataFile }),
+        // The removed Projects app's pinned folders and backup records: the
+        // keys only — the folders, their git history and GitHub copies stay.
+        dropRemovedProjectsMigration({ get, set }),
         // The v4 wallpaper defaults. A box updated before its edition's own
         // brand landed still holds the picture it opened on back then, and
         // nothing but an owner opening Settings would ever move it.
@@ -313,12 +401,48 @@ export async function register() {
         // Before any webapp is served: the record it writes is what lets the
         // webapps route put the legacy-storage layer in front of an old app.
         legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() }),
+        // One browser profile for the owner and the assistant. BEFORE the
+        // keeper below starts the browser: which profile survives depends on
+        // whether the desktop one exists yet, and starting the browser is
+        // what creates it.
+        ...(onDeviceAccount ? [sharedBrowserMigration(set)] : []),
       ],
       { get, set },
     )
     if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
   } catch (err) {
     console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
+  }
+  if (onDeviceAccount) {
+    try {
+      // The owner's project folder, real on disk from the first boot and from
+      // the first boot after a factory reset (which empties config.json): the
+      // ~/Projects default when the owner never chose a folder
+      // (src/lib/project-folder.ts). A folder they chose is never touched.
+      // Every boot, not a one-shot: it is one config read and an mkdir that is
+      // a no-op once the folder is there.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { chosenProjectFolderFrom, ensureDefaultProjectFolder, PROJECT_FOLDER_CONFIG_KEY } = require('./lib/project-folder')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { get } = require('./lib/config-store')
+      if (!chosenProjectFolderFrom(await get(PROJECT_FOLDER_CONFIG_KEY))) await ensureDefaultProjectFolder()
+    } catch (err) {
+      console.error('[instrumentation] Could not make the default project folder:', err instanceof Error ? err.message : err)
+    }
+  }
+  if (onDeviceAccount) {
+    try {
+      // The box's one browser, kept up: the gateway attaches to it and never
+      // starts one, so a reboot or a closed window ends here. After the
+      // migration above, which decides the profile it starts on.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { startSharedBrowserKeeper } = require('./lib/shared-browser')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { sharedBrowserKeeperDeps } = require('./lib/shared-browser-runtime')
+      startSharedBrowserKeeper(sharedBrowserKeeperDeps())
+    } catch (err) {
+      console.error('[instrumentation] Could not start the shared-browser keeper:', err instanceof Error ? err.message : err)
+    }
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -330,17 +454,6 @@ export async function register() {
     // The scheduler is opt-in — if its module fails to load (missing deps,
     // syntax error in dev), the rest of the app must still boot.
     console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
-  }
-  try {
-    // Projects → GitHub daily auto-backup (TASK-1358). Off for every folder
-    // until its owner turns it on; the timer only asks an hourly question.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const projectBackupScheduler = require('./lib/project-backup-scheduler')
-    void projectBackupScheduler.start().catch((err: unknown) => {
-      console.error('[instrumentation] Project backup scheduler boot failed:', err instanceof Error ? err.message : err)
-    })
-  } catch (err) {
-    console.error('[instrumentation] Could not load the project backup scheduler:', err instanceof Error ? err.message : err)
   }
   try {
     // Old chat transcripts. Age is the only thing left to bound here -- the
@@ -366,6 +479,16 @@ export async function register() {
     // agent's next status question is not answered with "still running".
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const codingAgent = require('./lib/coding-agent')
+    // The teams the restart interrupted are CLAIMED first, synchronously,
+    // before anything below awaits: until they are picked back up, a read of
+    // one from the app's poll must not settle it failed. Its own try: a team
+    // that cannot be claimed must not stop the runs being reconciled.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('./lib/coding-team').claimOrphanedTeams()
+    } catch (err) {
+      console.error('[instrumentation] Could not claim the interrupted coding teams:', err instanceof Error ? err.message : err)
+    }
     // Asynchronous since runs got scopes of their own: a run may have SURVIVED
     // this restart, and only systemd can say which did. Chained rather than
     // raced with the watches below, which read the records this settles.
@@ -393,17 +516,6 @@ export async function register() {
         } catch (err) {
           console.error('[instrumentation] Could not resume the pull request watches:', err instanceof Error ? err.message : err)
         }
-        // Delivery pipelines the restart interrupted. AFTER the two above, and
-        // deliberately doing less than either: a stage waiting on a run or on a
-        // deployment is picked back up by the reconciliation and the deployment
-        // watches respectively, so what is left is a verification that was in
-        // flight and a stage nothing at all is behind. Its own try, so one boot
-        // step that throws does not take an unrelated one with it.
-        try {
-          codingAgent.resumePipelines()
-        } catch (err) {
-          console.error('[instrumentation] Could not resume the delivery pipelines:', err instanceof Error ? err.message : err)
-        }
         // The Anthropic account pool (TASK-902): its first read migrates a
         // legacy key into the secret store and arms the limit-reset wake, and
         // a run left waiting for a reset that passed while the box was down is
@@ -412,34 +524,69 @@ export async function register() {
         codingAgent.armAnthropicAccounts().catch((err: unknown) => {
           console.error('[instrumentation] Could not arm the Anthropic account pool:', err instanceof Error ? err.message : err)
         })
+        // The run queue and the team queue are on disk: what waited when the
+        // last server went starts now, in its turn, once the reconciliation
+        // has said which runs still hold a slot. Own catches, like the rest.
+        codingAgent.pumpRunQueue().catch((err: unknown) => {
+          console.error('[instrumentation] Could not start the queued coding runs:', err instanceof Error ? err.message : err)
+        })
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const codingTeam = require('./lib/coding-team')
+          // The team the restart interrupted is PICKED BACK UP where it was:
+          // its member runs that survived in their scopes were reattached
+          // above, and the team goes on with them — merging and reviewing
+          // what they finish, working the rest of its plan — rather than
+          // failing while they finish with nobody to take their work back.
+          // Any other interrupted board is closed with its branches named.
+          // Chained before the queue pump: the team holds the box.
+          codingTeam
+            .resumeOrphanedTeams()
+            .then((resumed: number) => {
+              if (resumed > 0) console.log(`[instrumentation] ${resumed} coding team(s) the previous server was running were picked back up`)
+            })
+            .catch((err: unknown) => {
+              console.error('[instrumentation] Could not pick up the interrupted coding teams:', err instanceof Error ? err.message : err)
+            })
+            .finally(() => {
+              codingTeam.startNextQueuedTeam().catch((err: unknown) => {
+                console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
+              })
+            })
+        } catch (err) {
+          console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
+        }
       })
   } catch (err) {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }
   try {
-    // Run worktrees nothing needs any more (src/lib/coding-run-worktree.ts).
-    // At most weekly — the module keeps the date, so this fires on the first
-    // boot after the week is up rather than on every restart — and after the
-    // boot rush, because it is a `git worktree list` per project and nothing
-    // on the box is waiting for its answer.
+    // The folder janitor (src/lib/coding-folder-janitor.ts): the worktrees
+    // and project copies runs and agents left behind, removed once nothing
+    // can still need them — daily, and a little after a run settles. It
+    // replaces the weekly worktree sweep, which forced dirty trees away; the
+    // owner's switch and retention are in the Coding Agent settings.
     //
     // A boot hook rather than a cron entry for the reason the memory schedule
     // is one: a timer rebuilt at every boot cannot be duplicated or orphaned
-    // by an update.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { sweepCodingWorktrees } = require('./lib/coding-agent')
-    const sweep = setTimeout(() => {
-      void sweepCodingWorktrees()
-        .then((removed: number) => {
-          if (removed > 0) console.log(`[instrumentation] Swept ${removed} stale coding worktree(s)`)
-        })
-        .catch((err: unknown) => {
-          console.error('[instrumentation] Coding worktree sweep failed:', err instanceof Error ? err.message : err)
-        })
-    }, 60_000)
-    sweep.unref?.()
+    // by an update. The module keeps the last pass's date on disk, so a
+    // restart neither skips a day nor runs twice in one.
+    //
+    // The DEVICE's own account only, like the git identity cleanup, the
+    // browser repair and the default project folder: under `bun run dev` on a
+    // developer's machine its scope would be that person's ~/Projects, and
+    // ten minutes later it would remove their own idle worktrees and move
+    // their second clones to a trash. The module refuses off the account as
+    // well (`start`); this keeps it from even loading there.
+    if (onDeviceAccount) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const folderJanitor = require('./lib/coding-folder-janitor')
+      folderJanitor.start()
+    } else {
+      console.log('[instrumentation] Not the device account: the coding folder janitor is not armed')
+    }
   } catch (err) {
-    console.error('[instrumentation] Could not arm the coding worktree sweep:', err instanceof Error ? err.message : err)
+    console.error('[instrumentation] Could not arm the coding folder janitor:', err instanceof Error ? err.message : err)
   }
   try {
     // The ClawBox AI cloud defaults (the owner's decision of 2026-09-14): a box
@@ -455,8 +602,20 @@ export async function register() {
     // waiting for the answer. It never rejects — see its own docblock.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { applyClawaiCloudDefaults } = require('./lib/clawai-cloud-defaults')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { reconcileChannelAudio } = require('./lib/stt-channel')
     const defaults = setTimeout(() => {
-      void applyClawaiCloudDefaults({ trigger: 'boot' })
+      // Then channel voice notes, on EVERY box: the applier stands down on a
+      // box with no subscription, which is the box whose Whisper is all it
+      // has, and it never takes the cloud row back off a box whose credential
+      // stopped backing it. AFTER the applier, so the order is read from the
+      // primary it may just have stored.
+      void Promise.resolve(applyClawaiCloudDefaults({ trigger: 'boot' }))
+        .catch(() => undefined)
+        .then(() => reconcileChannelAudio({ trigger: 'boot' }))
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Could not align channel voice notes with the transcription engines:', err instanceof Error ? err.message : err)
+        })
     }, 45_000)
     defaults.unref?.()
   } catch (err) {
@@ -589,5 +748,103 @@ export async function register() {
     })
   } catch (err) {
     console.error('[instrumentation] Could not load memory index scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Prime Radiant's nightly pass, armed from its own settings file the same
+    // way. Arming is a timer only: a box whose vault was never created skips
+    // the slot when it fires, and nothing is created at boot.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const primeRadiantScheduler = require('./lib/prime-radiant/nightly-scheduler')
+    void primeRadiantScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Prime Radiant nightly scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the Prime Radiant nightly scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The nightly OpenClaw database check, armed from the owner's schedule the
+    // same way. A slot only starts scripts/openclaw-db-maintenance.py
+    // `maintain`, which stops the gateway only when a database needs
+    // compacting and the core says it is idle.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const dbMaintenanceScheduler = require('./lib/openclaw-db-maintenance-scheduler')
+    void dbMaintenanceScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] OpenClaw database maintenance scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the OpenClaw database maintenance scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The scheduled-job alerts (src/lib/job-alerts.ts): every two minutes the
+    // active harness's own record of its scheduled jobs is read, and the owner
+    // is told — desktop notice and Telegram — when one fails, keeps being
+    // skipped or does not run when it is due. The owner's switch is in
+    // Settings → Harness and is read at every check.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const jobAlertsScheduler = require('./lib/job-alerts-scheduler')
+    jobAlertsScheduler.start()
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the scheduled-job alerts:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The app servers that were on the desktop before the reboot (see
+    // restartServerAppsAtBoot). They used to be restarted by a
+    // `clawbox-app-<id>.service` the OWNER hand-wrote, uncapped and outside
+    // every update; now the box starts them in the same capped scope a settle
+    // uses, from the `start` command it recorded in the app's meta.json.
+    //
+    // Delayed past the boot rush and not awaited: each start waits up to a
+    // minute for its own listener, and Next serves its first request before
+    // register() resolves. An app that is late is late; the desktop icon works
+    // as soon as the app answers.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { restartServerAppsAtBoot } = require('./lib/app-server-start')
+    setTimeout(() => {
+      void (restartServerAppsAtBoot() as Promise<string[]>)
+        .then((started: string[]) => {
+          if (started.length) console.log(`[instrumentation] Restarted app servers: ${started.join(', ')}`)
+        })
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Could not restart the app servers:', err instanceof Error ? err.message : err)
+        })
+    }, 30_000).unref()
+  } catch (err) {
+    console.error('[instrumentation] Could not load the app boot restart:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The app servers the AGENT runs as user units of its own
+    // (`<app>-app.service`, no cap) get the same MemoryHigh/MemoryMax a scope
+    // has (see capForeignAppServers). Once after the boot pass above, then
+    // every APP_CAPS_SWEEP_MS, because the agent starts such a unit whenever
+    // it likes; CLAWBOX_APP_CAPS=0 turns it off.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { capForeignAppServers, APP_CAPS_SWEEP_MS } = require('./lib/app-unit-limits')
+    const pass = () => {
+      void (capForeignAppServers() as Promise<string[]>)
+        .then((capped: string[]) => {
+          if (capped.length) console.log(`[instrumentation] Capped app server units: ${capped.join(', ')}`)
+        })
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Could not cap the app server units:', err instanceof Error ? err.message : err)
+        })
+    }
+    if (process.env.CLAWBOX_APP_CAPS !== '0') {
+      setTimeout(pass, 90_000).unref()
+      setInterval(pass, APP_CAPS_SWEEP_MS as number).unref()
+    }
+  } catch (err) {
+    console.error('[instrumentation] Could not load the app unit caps:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The long work Settings started (src/lib/background-tasks.ts) is read at
+    // boot, not at the first request that asks: a root step left running by
+    // the last server is adopted, and installs left queued behind it move on
+    // as soon as it ends — on a box nobody has opened a browser on since the
+    // restart, too. Synchronous and small: one JSON file.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { resumeBackgroundTasks } = require('./lib/background-tasks')
+    resumeBackgroundTasks()
+  } catch (err) {
+    console.error('[instrumentation] Could not resume the background tasks:', err instanceof Error ? err.message : err)
   }
 }

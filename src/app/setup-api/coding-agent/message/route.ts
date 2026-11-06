@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { queueRunMessage } from "@/lib/coding-agent";
+import { awaitRunMessageDelivery, getRun, queueRunMessage } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
@@ -38,11 +38,14 @@ const STATUS_FOR: Record<RunMessageRefusal, number> = {
  * prompt-injected "tell that run to delete the tests" must not reach work the
  * person at the desk asked for.
  *
- * The answer says which of the two deliveries happened, because they mean
- * different things to whoever is waiting: `delivered: true` is "the harness
- * has it, in this turn", and `delivered: false` is "it is queued and goes in
- * at the run's next attempt or when you resume it". A surface that could not
- * tell them apart would have to claim the stronger one.
+ * The answer says how the message reaches the run, because the ways mean
+ * different things to whoever is waiting (`delivery`, coding-run-messages.ts):
+ * `delivered` — the harness has it, mid-turn after a tool call or as its next
+ * turn; `after_tool_call` — it is in the run's inbox and the run is handed it
+ * the moment the tool call it is in ends; `next_start` — it waits for the
+ * run's next attempt, or for the owner's Resume. A message put in the inbox is
+ * waited on for a moment (DELIVERY_WAIT_MS) so a run between two quick tool
+ * calls answers `delivered`. `delivered` stays the boolean it always was.
  *
  * OUR PAGE ONLY, on top of that gate. Every other run route is a lifecycle
  * verb — stop it, pause it, resume it — and the worst a cross-site page could
@@ -59,9 +62,12 @@ const STATUS_FOR: Record<RunMessageRefusal, number> = {
  * right thing — "shorten it" and "that run has finished" need different next
  * steps.
  */
+/** How long the answer waits for the run's hook to take a message out of its inbox. */
+export const DELIVERY_WAIT_MS = 4_000;
+
 export const POST = runLifecycleRoute({
   verb: "send a message to",
-  act: (id, body, request) => {
+  act: async (id, body, request) => {
     if (!isSameOriginRequest(request)) {
       return NextResponse.json(
         { error: "A message to a run can only be sent from this ClawBox's own pages.", code: "cross_origin" },
@@ -70,10 +76,20 @@ export const POST = runLifecycleRoute({
     }
     const text = (body as { text?: unknown } | null)?.text;
     try {
-      const { run, delivered } = queueRunMessage(id, text);
+      const queued = queueRunMessage(id, text);
+      let { run, delivery } = queued;
+      if (delivery === "after_tool_call") {
+        const taken = await awaitRunMessageDelivery(id, queued.messageId, DELIVERY_WAIT_MS);
+        if (taken) {
+          delivery = "delivered";
+          run = getRun(id) ?? run;
+        }
+      }
       return NextResponse.json({
         queued: true,
-        delivered,
+        delivered: delivery === "delivered",
+        delivery,
+        messageId: queued.messageId,
         run,
         limits: { maxQueued: MAX_QUEUED_RUN_MESSAGES, maxChars: MAX_RUN_MESSAGE_CHARS },
       });

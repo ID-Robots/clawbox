@@ -1,242 +1,35 @@
 export const dynamic = "force-dynamic";
 
-import { execFile as execFileCb, spawn } from "child_process";
-import fs from "fs/promises";
 import { NextResponse } from "next/server";
-import { promisify } from "util";
-import { POST as configureAiModel } from "@/app/setup-api/ai-models/configure/route";
-import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
-import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 import {
-  clearLlamaCppPid,
-  ensureLlamaCppRuntimeDir,
-  getLlamaCppProvisioningStatus,
-  getLlamaCppLaunchSpec,
-  isLlamaCppPidRunning,
-  queryLlamaCppModels,
-  readLlamaCppPid,
-  tailLlamaCppLog,
-  writeLlamaCppPid,
-} from "@/lib/llamacpp-server";
-import { startRootStep } from "@/lib/root-step-runner";
-import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
-
-const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
-const encoder = new TextEncoder();
-const execFile = promisify(execFileCb);
-const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-const LLAMACPP_INSTALL_STEP = "llamacpp_install";
-const LLAMACPP_INSTALL_SERVICE = rootStepUnit(LLAMACPP_INSTALL_STEP);
-// Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
-// systemd, not us, owns the kill. A cold box builds llama.cpp from source with
-// CUDA and downloads a multi-GB GGUF; 30 min was not enough and the install
-// died mid-build.
-const LLAMACPP_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
-// How often we ask systemd how the install unit is doing while it runs.
-const LLAMACPP_INSTALL_POLL_MS = 3000;
-// `systemctl start --no-block` returns before the unit leaves "inactive".
-// Re-check a couple of times at this interval before concluding it finished,
-// so we don't mistake "hasn't started yet" for "already done".
-const LLAMACPP_INSTALL_START_GRACE_MS = 1000;
-const LLAMACPP_INSTALL_START_GRACE_POLLS = 2;
-const SYSTEMCTL_QUERY_TIMEOUT_MS = 15_000;
-// Phase-stable prefix: getLlamaCppOverlayProgress keys the "Provisioning
-// offline Gemma 4" step off "installing gemma 4", and the raw journal lines
-// (cmake, hf download, apt) match nothing — without this the wizard would jump
-// back to step 1 on every log line. Everything after the separator is shown to
-// the user as live detail.
-const INSTALL_STATUS_PREFIX = "Installing Gemma 4 for offline use";
-const INSTALL_STATUS_SEPARATOR = " — ";
-
-function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
-  controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
-}
-
-function getLastLogLine(logText: string): string | null {
-  const lines = logText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return lines.length > 0 ? lines[lines.length - 1] : null;
-}
-
-type ConfigureScope = "primary" | "local";
-
-function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
-  if (!logLine) return false;
-  const normalized = logLine.toLowerCase();
-  return normalized.includes("[llamacpp] missing hugging face cli")
-    || normalized.includes("[llamacpp] missing llama-server")
-    || normalized.includes("[llamacpp] missing local model");
-}
+  backgroundTaskResponse,
+  liveBackgroundTask,
+  startBackgroundTask,
+} from "@/lib/background-tasks";
+import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
+import { getActiveHarness } from "@/lib/harness";
+import {
+  LLAMACPP_MODEL_ID_RE,
+  llamacppInstallGroup,
+  llamacppInstallTask,
+  type ConfigureScope,
+} from "@/lib/llamacpp-install-task";
 
 /**
- * What THIS install run has written.
+ * POST /setup-api/llamacpp/install → install, start and configure Gemma 4
+ * through llama.cpp, streamed (`{status}` lines, then ONE closing
+ * `{success: true}` or `{error}`).
  *
- * Bounded by `sinceMs`, the moment this call started the unit: the journal is
- * persistent and this is polled from the first second — before the unit has
- * said anything — so an unbounded read answers with the LAST attempt's last
- * line, which the loop below shows as live progress and then reports as this
- * run's failure reason. root-step-journal.ts has the rest of the reasoning.
- */
-async function readLlamaCppInstallLog(sinceMs: number, lines: number): Promise<string> {
-  try {
-    const { stdout } = await execFile(
-      "/usr/bin/journalctl",
-      rootStepJournalArgs(LLAMACPP_INSTALL_STEP, { sinceMs, lines }),
-      { timeout: 10_000 },
-    );
-    return stdout;
-  } catch {
-    return "";
-  }
-}
-
-async function readLlamaCppInstallFailure(sinceMs: number): Promise<string | null> {
-  return getLastLogLine(await readLlamaCppInstallLog(sinceMs, 40));
-}
-
-/**
- * ActiveState/Result for the install unit. Empty strings mean "couldn't ask" —
- * callers treat that the same as "not running" and fall back to the on-disk
- * provisioning check, which is the real gate.
- */
-async function readInstallUnitState(): Promise<{ active: string; result: string }> {
-  try {
-    const { stdout } = await execFile(
-      "/usr/bin/systemctl",
-      ["show", LLAMACPP_INSTALL_SERVICE, "-p", "ActiveState", "-p", "Result"],
-      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
-    );
-    return {
-      active: /^ActiveState=(.*)$/m.exec(stdout)?.[1]?.trim() || "",
-      result: /^Result=(.*)$/m.exec(stdout)?.[1]?.trim() || "",
-    };
-  } catch {
-    return { active: "", result: "" };
-  }
-}
-
-function isUnitRunning(active: string): boolean {
-  return active === "activating" || active === "active" || active === "reloading";
-}
-
-/**
- * Run the root install step, streaming its journal output.
+ * Settings → Local AI's Install, Enable and "Make primary" on the Gemma row,
+ * and the setup wizard. The work is a BACKGROUND TASK of the server
+ * (src/lib/llamacpp-install-task.ts), which this response only follows: a
+ * closed Settings, a reload or a dropped tunnel leaves it running and its
+ * progress on the desktop's corner card.
  *
- * Previously this was a single blocking `systemctl start`, which emitted
- * nothing for up to 30 minutes — a cold Jetson build looked identical to a
- * hang, and there was no way to tell whether it was progressing. Now we start
- * the unit detached and poll systemd, so the wizard shows live build/download
- * lines and a genuine failure surfaces the moment the unit fails.
+ * Pressed while another engine installs, it is accepted all the same and waits
+ * its turn, queued (src/lib/local-ai-install-queue.ts) — one runtime and one
+ * gateway config are not two installs' to write at once.
  */
-async function repairLlamaCppRuntime(
-  onStatus: (line: string) => void,
-): Promise<{ ok: boolean; error?: string }> {
-  // Before the start, so nothing this run writes falls outside the window the
-  // journal reads are bounded by.
-  const startedAt = Date.now();
-  try {
-    await startRootStep(
-      LLAMACPP_INSTALL_STEP,
-      { noBlock: true, timeoutMs: SYSTEMCTL_QUERY_TIMEOUT_MS },
-    );
-  } catch (err) {
-    const failureLine = await readLlamaCppInstallFailure(startedAt);
-    return {
-      ok: false,
-      error: failureLine || (err instanceof Error ? err.message : "Failed to repair llama.cpp runtime"),
-    };
-  }
-
-  const deadline = Date.now() + LLAMACPP_INSTALL_TIMEOUT_MS;
-  let lastLine: string | null = null;
-  let sawRunning = false;
-  let gracePolls = 0;
-
-  while (Date.now() < deadline) {
-    const { active, result } = await readInstallUnitState();
-    if (isUnitRunning(active)) sawRunning = true;
-
-    const line = getLastLogLine(await readLlamaCppInstallLog(startedAt, 5));
-    if (line && line !== lastLine) {
-      lastLine = line;
-      onStatus(line);
-    }
-
-    if (active === "failed") {
-      return { ok: false, error: lastLine || `llama.cpp install failed (${result || "unknown"})` };
-    }
-
-    if (!isUnitRunning(active)) {
-      // Either it finished, or `--no-block` returned before it started. Give it
-      // a couple of short re-checks before believing the former.
-      if (sawRunning || gracePolls >= LLAMACPP_INSTALL_START_GRACE_POLLS) {
-        if (result && result !== "success") {
-          return { ok: false, error: lastLine || `llama.cpp install failed (${result})` };
-        }
-        return { ok: true };
-      }
-      gracePolls += 1;
-      await new Promise((resolve) => setTimeout(resolve, LLAMACPP_INSTALL_START_GRACE_MS));
-      continue;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, LLAMACPP_INSTALL_POLL_MS));
-  }
-
-  return { ok: false, error: lastLine || "Timed out installing the local Gemma 4 runtime." };
-}
-
-function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: string) {
-  return spawn(
-    "bash",
-    [
-      spec.scriptPath,
-      spec.modelDir,
-      spec.hfRepo,
-      spec.hfFile,
-      alias,
-      spec.host,
-      `${spec.port}`,
-      spec.logPath,
-      spec.binPath,
-      spec.hfBinPath,
-      `${spec.contextWindow}`,
-    ],
-    {
-      cwd: CLAWBOX_HOME_DIR,
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env, HOME: CLAWBOX_HOME_DIR },
-    }
-  );
-}
-
-async function configureLlamaCpp(
-  alias: string,
-  scope: ConfigureScope,
-  activate: boolean,
-): Promise<{ ok: boolean; error?: string }> {
-  const req = new Request("http://localhost/setup-api/ai-models/configure", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      provider: "llamacpp",
-      apiKey: alias,
-      authMode: "local",
-      scope,
-      activate,
-    }),
-  });
-  const res = await configureAiModel(req);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body?.success) {
-    return { ok: false, error: body?.error || "Failed to configure llama.cpp" };
-  }
-  return { ok: true };
-}
-
 export async function POST(request: Request) {
   let body: { model?: string; scope?: ConfigureScope; activate?: boolean };
   try {
@@ -250,186 +43,24 @@ export async function POST(request: Request) {
   // Only an explicit "switch to it" click sets this; a plain enable leaves the
   // customer's chosen provider in place.
   const activate = body.activate === true;
-  if (!MODEL_ID_RE.test(alias)) {
+  if (!LLAMACPP_MODEL_ID_RE.test(alias)) {
     return NextResponse.json({ error: "Invalid llama.cpp model ID" }, { status: 400 });
   }
+  // Sizes the window the server starts with (Hermes has a floor). Read here,
+  // before the check below, so nothing awaits between that check and the
+  // task it guards.
+  const harness = await getActiveHarness();
 
-  const spec = getLlamaCppLaunchSpec(alias);
+  // Asked again while an install runs or waits — a reopened Settings, the
+  // setup wizard retrying, a second browser: the SAME install is followed
+  // rather than a second root step and a second llama-server started under the
+  // first. Different settings for the same runtime are an install of their
+  // own, queued behind this one, so a "make primary" is never silently folded
+  // into a plain enable — and never refused either.
+  const asked = { alias, scope, activate } as const;
+  const live = liveBackgroundTask(llamacppInstallGroup(asked));
+  if (live) return backgroundTaskResponse(live.id);
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        await ensureLlamaCppRuntimeDir();
-        emit(controller, { status: "Checking local Gemma 4 runtime..." });
-
-        const existingModels = await queryLlamaCppModels(spec.baseUrl);
-        // Any model, not only this alias. `getLlamaCppLaunchSpec()` resolves
-        // `modelPath` from getDefaultLlamaCppFile() whatever the alias is, and
-        // start-llamacpp.sh passes that as `--model` while the alias is only
-        // `--alias` — so every alias on a box is the SAME GGUF and a non-empty
-        // /v1/models means THE runtime is up, whatever it calls itself.
-        //
-        // waitForLlamaCppReady() and isLlamaCppUp() (src/lib/local-ai-runtime.ts)
-        // already read it that way on every proxied inference request. This
-        // route was the one that did not, and it is the one with a 20-minute
-        // budget: a warm runtime under a label from an earlier install left the
-        // live pid blocking a restart, the alias never appeared, and the wizard
-        // polled for the full startupTimeoutMs before reporting a timeout for a
-        // runtime that was answering the whole time.
-        if (existingModels.length > 0) {
-          emit(controller, { status: "llama.cpp is already running. Applying configuration..." });
-          const configured = await configureLlamaCpp(alias, scope, activate);
-          if (!configured.ok) {
-            emit(controller, { error: configured.error });
-            controller.close();
-            return;
-          }
-          emit(controller, { success: true, model: alias, status: "llama.cpp is ready and configured." });
-          controller.close();
-          return;
-        }
-
-        let provisioning = await getLlamaCppProvisioningStatus(alias);
-        if (!provisioning.installed) {
-          emit(controller, {
-            status: provisioning.binaryAvailable
-              ? "Installing Gemma 4 for offline use..."
-              : "Installing llama.cpp and Gemma 4 for offline use...",
-          });
-          const repaired = await repairLlamaCppRuntime((line) => {
-            emit(controller, { status: `${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${line}` });
-          });
-          if (!repaired.ok) {
-            emit(controller, { error: repaired.error || "Failed to provision the local Gemma 4 runtime" });
-            controller.close();
-            return;
-          }
-          provisioning = await getLlamaCppProvisioningStatus(alias);
-          if (!provisioning.installed) {
-            emit(controller, { error: "llama.cpp install finished, but the local Gemma 4 runtime is still incomplete." });
-            controller.close();
-            return;
-          }
-        }
-
-        let pid = await readLlamaCppPid(spec.pidPath);
-        if (pid && !isLlamaCppPidRunning(pid)) {
-          await clearLlamaCppPid(spec.pidPath);
-          pid = null;
-        }
-        let attemptedRuntimeRepair = false;
-        let waitingForExistingStart = !!pid;
-        let startedRuntimeHere = false;
-
-        const deadline = Date.now() + spec.startupTimeoutMs;
-        let lastLogLine = "";
-
-        while (Date.now() < deadline) {
-          if (!pid) {
-            emit(controller, {
-              status: attemptedRuntimeRepair
-                ? `Restarting llama.cpp after repairing the local runtime...`
-                : provisioning.installed
-                  ? `Starting preinstalled Gemma 4...`
-                  : `Starting llama.cpp and downloading ${alias}...`,
-            });
-            await fs.writeFile(spec.logPath, "", "utf-8").catch(() => {});
-            const child = startLlamaCpp(spec, alias);
-
-            if (!child.pid) {
-              emit(controller, { error: "Failed to start llama.cpp" });
-              controller.close();
-              return;
-            }
-
-            child.unref();
-            await writeLlamaCppPid(child.pid, spec.pidPath);
-            pid = child.pid;
-            waitingForExistingStart = false;
-            startedRuntimeHere = true;
-            lastLogLine = "";
-          } else if (waitingForExistingStart) {
-            emit(controller, { status: "llama.cpp is already starting. Waiting for it to become ready..." });
-            waitingForExistingStart = false;
-          }
-
-          const models = await queryLlamaCppModels(spec.baseUrl);
-          // Same rule as the pre-check above: the runtime answering at all is
-          // the readiness signal, because one GGUF backs every alias.
-          if (models.length > 0) {
-            emit(controller, { status: "llama.cpp is ready. Applying ClawBox configuration..." });
-            const configured = await configureLlamaCpp(alias, scope, activate);
-            if (!configured.ok) {
-              emit(controller, { error: configured.error });
-              controller.close();
-              return;
-            }
-            if (startedRuntimeHere) {
-              emit(controller, { status: "Gemma 4 is configured. Returning it to standby to free RAM..." });
-              await stopLocalAiProvider("llamacpp").catch(() => {});
-              emit(controller, {
-                success: true,
-                model: alias,
-                status: `${alias} is installed and configured. It will wake automatically when OpenClaw needs it.`,
-              });
-            } else {
-              emit(controller, { success: true, model: alias, status: `${alias} is installed, running, and configured.` });
-            }
-            controller.close();
-            return;
-          }
-
-          const currentPid = await readLlamaCppPid(spec.pidPath);
-          if (currentPid && !isLlamaCppPidRunning(currentPid)) {
-            await clearLlamaCppPid(spec.pidPath);
-            pid = null;
-            const logText = await tailLlamaCppLog(spec.logPath);
-            const logLine = getLastLogLine(logText);
-            if (!attemptedRuntimeRepair && shouldRepairLlamaCppRuntime(logLine)) {
-              emit(controller, { status: "Repairing the llama.cpp runtime so Gemma can start..." });
-              attemptedRuntimeRepair = true;
-              const repaired = await repairLlamaCppRuntime((repairLine) => {
-                emit(controller, { status: `${INSTALL_STATUS_PREFIX}${INSTALL_STATUS_SEPARATOR}${repairLine}` });
-              });
-              if (!repaired.ok) {
-                emit(controller, { error: repaired.error || "Failed to repair llama.cpp runtime" });
-                controller.close();
-                return;
-              }
-              emit(controller, { status: "llama.cpp runtime repaired. Restarting Gemma..." });
-              continue;
-            }
-
-            emit(controller, { error: logLine || "llama.cpp exited before becoming ready." });
-            controller.close();
-            return;
-          }
-
-          const logText = await tailLlamaCppLog(spec.logPath);
-          const logLine = getLastLogLine(logText);
-          if (logLine && logLine !== lastLogLine) {
-            lastLogLine = logLine;
-            emit(controller, { status: logLine });
-          }
-
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-
-        emit(controller, { error: "Timed out waiting for llama.cpp to become ready." });
-        controller.close();
-      } catch (err) {
-        emit(controller, {
-          error: err instanceof Error ? err.message : "Failed to install llama.cpp model",
-        });
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "application/x-ndjson",
-      "Cache-Control": "no-cache",
-    },
-  });
+  const start = startBackgroundTask(llamacppInstallTask(asked, harness));
+  return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
 }

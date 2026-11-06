@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 
 export const dynamic = "force-dynamic";
@@ -111,7 +111,7 @@ async function listing(root: string, target: string) {
 }
 
 export async function GET(request: NextRequest) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Browsing folders needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },
@@ -146,7 +146,7 @@ export async function GET(request: NextRequest) {
  * contained by exactly the rule the listing uses.
  */
 export async function POST(request: NextRequest) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Creating a folder needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

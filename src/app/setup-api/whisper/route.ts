@@ -1,28 +1,34 @@
 export const dynamic = "force-dynamic";
 
-import { spawn } from "child_process";
-import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
+import {
+  backgroundTaskResponse,
+  liveBackgroundTask,
+  liveBackgroundTasks,
+  startBackgroundTask,
+} from "@/lib/background-tasks";
+import { WHISPER_ENGINE_INSTALL_KIND, WHISPER_SIZE_DOWNLOAD_KIND } from "@/lib/background-task-kinds";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
-import { CONFIG_ROOT } from "@/lib/config-store";
 import { checkInstallDisk, checkInstallDisks, dirBytes, diskRefusal } from "@/lib/install-disk";
 import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
 import { safeWhisperSize, whisperSize } from "@/lib/local-install";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
-import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { syncChannelAudio } from "@/lib/stt-channel";
-import { withWhisperLibraryPath } from "@/lib/stt-local";
 import { getSttPrimary, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
+import {
+  WHISPER_ENGINE_GROUP,
+  whisperEngineInstallParts,
+  whisperEngineInstallTask,
+  whisperSizeDownloadTask,
+  whisperSizeGroup,
+} from "@/lib/whisper-install-tasks";
 import {
   readWhisperState,
   removeWhisperSize,
-  restartWhisper,
-  setActiveWhisperSize,
   uninstallWhisperEngine,
   whisperCacheDir,
-  whisperFetchScript,
 } from "@/lib/whisper-models";
 
 /**
@@ -35,8 +41,12 @@ import {
  * `voice_whisper_install` root step — faster-whisper, the CTranslate2 CUDA
  * build and the `base` weights — in the shape `/setup-api/tts/install`
  * answers with (`{status}` lines, then ONE closing `{success: true}` or
- * `{error}`), 409 `already_installed` when the unit is there, 409 `busy`
- * while one runs. Everything else is the picker: GET its facts, POST a size
+ * `{error}`), 409 `already_installed` when the unit is there, and a second
+ * press while it runs (or waits) follows the same install. Pressed while
+ * ANOTHER engine installs, it is accepted and waits its turn as a queued task
+ * (src/lib/local-ai-install-queue.ts); so is a size pressed while another size
+ * downloads. The work of both is src/lib/whisper-install-tasks.ts. Everything
+ * else is the picker: GET its facts, POST a size
  * to fetch it and switch to it, DELETE one to get the disk back — or, with
  * `?scope=engine`, take speech-to-text off the box altogether (every size,
  * the stamp, the unit), which is Settings → Local AI's Uninstall.
@@ -53,53 +63,49 @@ import {
  * says so.
  */
 
-const encoder = new TextEncoder();
-/** A `medium` fetch on a slow link is tens of minutes; the client may leave, the child may not be killed for it. */
-const FETCH_TIMEOUT_MS = 60 * 60 * 1000;
-/** How often the cache directory is re-measured for the bar. */
-const PROGRESS_POLL_MS = 1500;
+/**
+ * A removal is deleting speech's files right now — the engine, or one size.
+ * An install or a download started under it would write into what it deletes,
+ * so those are refused (a removal takes seconds, not an install's minutes).
+ */
+let removing = false;
+/**
+ * Install and download requests between their first check and the start of
+ * their task — the awaits (the box's state, the disk) in which no task record
+ * exists yet to tell a removal that something is about to write. A count, not
+ * a flag: two downloads of different sizes may both be on their way to the
+ * queue.
+ */
+let starting = 0;
 
-function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: Record<string, unknown>) {
-  // A cancelled stream refuses further writes; the download itself goes on and
-  // the in-flight flag still has to be released by the end of the run.
-  try { controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`)); } catch { /* client gone */ }
+/**
+ * Anything writing speech's files, or about to: a start on its way, or a task
+ * — running OR queued — of either kind. A task counts on its own because a web
+ * server that restarted mid-install ADOPTS the engine's root step
+ * (src/lib/background-tasks.ts) with none of this module's flags set — its
+ * removal must still refuse.
+ */
+function speechBusy(): boolean {
+  return removing || starting > 0
+    || liveBackgroundTasks({ kinds: [WHISPER_ENGINE_INSTALL_KIND, WHISPER_SIZE_DOWNLOAD_KIND] }).length > 0;
 }
 
-/** One fetch at a time: two would write the same Hub cache entry. */
-let inFlight = false;
-/** One engine install at a time: two would fight over pip and the CTranslate2 build tree. */
-let engineInFlight = false;
 /**
- * Not below config/clawbox-root-update@.service's TimeoutStartSec (2 h), so
- * systemd, not this stream, owns the kill — the rule the tts/install route
- * keeps, and the CTranslate2 build alone is five minutes on an Orin.
+ * A download of this size already running (or queued): followed. Another size
+ * is a download of its own, which joins the queue behind this one — never a
+ * refusal (src/lib/local-ai-install-queue.ts, WHISPER_CACHE_LANE).
  */
-const ENGINE_INSTALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
-/**
- * The home the engine installs into, as the ROOT STEP sees it — not this
- * process's `CLAWBOX_HOME`. `clawbox-setup.service` loads `.env`, the root
- * step's unit does not, and install.sh fixes the installer's home to exactly
- * this literal (`CLAWBOX_HOME="/home/clawbox"`, inherited by install-voice.sh),
- * so an override here would measure a filesystem the files never land on.
- * `whisper-install-home.test.ts` pins the two literals together.
- */
-const INSTALLER_HOME = "/home/clawbox";
-const MIB = 1024 * 1024;
-/**
- * Where the WHOLE engine install writes, and a generous ceiling for each —
- * refusing up front costs a click, while running out part-way costs minutes of
- * build and a half-installed engine. Three places, measured per filesystem
- * (they share one on a stock Jetson, and nothing guarantees it): the CTranslate2
- * CUDA source and build tree under /tmp, the faster-whisper and CTranslate2
- * wheels plus `libctranslate2` under ~/.local, and the `base` weights in the
- * Hugging Face cache. 3 GiB in all.
- */
-function whisperEngineInstallParts() {
-  return [
-    { dir: "/tmp/CTranslate2-build", bytes: 2048 * MIB },
-    { dir: path.join(INSTALLER_HOME, ".local"), bytes: 768 * MIB },
-    { dir: path.join(INSTALLER_HOME, ".cache", "huggingface", "hub"), bytes: 256 * MIB },
-  ];
+function followSize(size: string): Response | null {
+  const live = liveBackgroundTask(whisperSizeGroup(size));
+  return live ? backgroundTaskResponse(live.id) : null;
+}
+
+/** A removal deleting speech's files right now: the one write a start must wait out. */
+function removalRefusal(): NextResponse {
+  return NextResponse.json(
+    { error: "Speech on this box is being removed right now. Try again in a moment.", code: "removing" },
+    { status: 409 },
+  );
 }
 
 export async function GET(request: Request) {
@@ -126,7 +132,7 @@ export async function GET(request: Request) {
 }
 
 async function guard(req: Request, verb: string): Promise<NextResponse | null> {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: `${verb} needs a signed-in browser session.`, code: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {
@@ -154,91 +160,45 @@ export async function POST(req: Request) {
   if (size === null) {
     return NextResponse.json({ error: "That is not a speech model this box offers.", code: "invalid" }, { status: 400 });
   }
+  // Before the disk check: the running download has used part of the space
+  // that check would measure it against, and this request only follows it.
+  const following = followSize(size);
+  if (following) return following;
+  if (removing) return removalRefusal();
 
-  const state = await readWhisperState();
-  if (!state.installed) {
-    return NextResponse.json(
-      { error: "Speech on this box is not installed yet. Install the voice first.", code: "not_installed" },
-      { status: 409 },
-    );
+  // Counted from the first await to the task's start, so a removal arriving
+  // in between refuses instead of deleting what this is about to write.
+  starting += 1;
+  try {
+    const state = await readWhisperState();
+    if (!state.installed) {
+      return NextResponse.json(
+        { error: "Speech on this box is not installed yet. Install the voice first.", code: "not_installed" },
+        { status: 409 },
+      );
+    }
+
+    const already = state.sizes.find((s) => s.id === size)?.cached === true;
+    if (!already) {
+      // Before a byte is fetched, and reported with the figures so the panel can
+      // say how much is missing rather than "not enough space". A download that
+      // then waits its turn measures again when it starts.
+      const needed = whisperSize(size)?.bytes ?? 0;
+      const disk = await checkInstallDisk(whisperCacheDir(size), needed);
+      if (!disk.ok) return diskRefusal(disk);
+    }
+
+    // Again after the awaits above: the same size may have started meanwhile.
+    // ANOTHER size running or queued is not a refusal: this one is accepted
+    // and waits its turn (`startBackgroundTask` queues it).
+    const startedMeanwhile = followSize(size);
+    if (startedMeanwhile) return startedMeanwhile;
+    if (removing) return removalRefusal();
+    const start = startBackgroundTask(whisperSizeDownloadTask(size, already));
+    return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
+  } finally {
+    starting -= 1;
   }
-
-  const already = state.sizes.find((s) => s.id === size)?.cached === true;
-  if (!already) {
-    // Before a byte is fetched, and reported with the figures so the panel can
-    // say how much is missing rather than "not enough space".
-    const needed = whisperSize(size)?.bytes ?? 0;
-    const disk = await checkInstallDisk(whisperCacheDir(size), needed);
-    if (!disk.ok) return diskRefusal(disk);
-  }
-
-  if (inFlight || engineInFlight) {
-    return NextResponse.json({ error: "A speech model is already being fetched.", code: "busy" }, { status: 409 });
-  }
-  inFlight = true;
-
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let timer: ReturnType<typeof setInterval> | null = null;
-      try {
-        if (!already) {
-          const total = whisperSize(size)?.bytes ?? 0;
-          emit(controller, { status: `Fetching the ${size} speech model…`, completed: 0, total });
-          const dir = whisperCacheDir(size);
-          timer = setInterval(() => {
-            void dirBytes(dir).then((bytes) => {
-              if (bytes !== null) emit(controller, { completed: bytes, total });
-            });
-          }, PROGRESS_POLL_MS);
-          const fetched = await runFetch(size, (line) => emit(controller, { status: line }));
-          if (timer) { clearInterval(timer); timer = null; }
-          if (!fetched.ok) {
-            // The unit is untouched, so the box still transcribes with whatever
-            // it did before this click. Nothing to undo.
-            emit(controller, { error: fetched.error });
-            return;
-          }
-          // Re-measured rather than assumed: a download that exits 0 with an
-          // incomplete snapshot is exactly the shape install-voice.sh's own
-          // cache check exists to catch.
-          const after = await readWhisperState();
-          if (after.sizes.find((s) => s.id === size)?.cached !== true) {
-            emit(controller, { error: "The download finished but the model is not complete on this box." });
-            return;
-          }
-        }
-
-        emit(controller, { status: "Pointing speech on this box at the new model…" });
-        const pointed = await setActiveWhisperSize(size);
-        if (!pointed.ok) {
-          emit(controller, { error: pointed.error ?? "Could not switch to that speech model." });
-          return;
-        }
-        const restarted = await restartWhisper();
-        emit(controller, {
-          success: true,
-          size,
-          restarted: restarted.ok,
-          // Not an error: the weights are here and the unit names them. The
-          // engine picks them up on its next start either way, and saying
-          // "failed" over a change that landed sends the owner to repeat it.
-          status: restarted.ok
-            ? `Speech on this box now uses the ${size} model.`
-            : `Speech on this box will use the ${size} model after the next restart.`,
-        });
-      } catch (err) {
-        emit(controller, { error: err instanceof Error ? err.message : "The speech model change failed." });
-      } finally {
-        if (timer) clearInterval(timer);
-        inFlight = false;
-        try { controller.close(); } catch { /* already closed */ }
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
-  });
 }
 
 /**
@@ -246,69 +206,43 @@ export async function POST(req: Request) {
  * every write here (the guard ran before this was reached), and refused while
  * the engine is already installed: the SIZES are the picker's job, and
  * re-running the engine install over a working one is what the Terminal is
- * for. The root unit runs on if the client leaves; the in-flight flag is
- * released only at its real end, so a second click cannot start a second
- * build under the first.
+ * for. The in-flight flag is released only at the install's real end, so a
+ * second click cannot start a second build under the first.
+ *
+ * A BACKGROUND TASK of the server, which this response only follows: closing
+ * Settings, a reload or a dropped tunnel leaves the build and its progress
+ * record running, the desktop's corner card keeps drawing it, and a POST while
+ * it runs — a reopened Settings — follows the same task instead of `busy`.
  */
 async function installEngine(): Promise<Response> {
-  // Reserved BEFORE the first await, and shared with the engine removal and a
-  // size fetch: two requests that arrive together must not both pass this and
-  // start two pip installs and two CTranslate2 builds in the same paths. Every
-  // early answer below gives the reservation back; the stream's own `finally`
-  // gives it back once an install has started.
-  if (engineInFlight || inFlight) {
-    return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
-  }
-  engineInFlight = true;
-  let state: Awaited<ReturnType<typeof readWhisperState>>;
-  let disk: Awaited<ReturnType<typeof checkInstallDisks>> | null = null;
+  const running = liveBackgroundTask(WHISPER_ENGINE_GROUP);
+  if (running) return backgroundTaskResponse(running.id);
+  if (removing) return removalRefusal();
+
+  // Counted BEFORE the first await, and read by the engine removal and a size
+  // removal: a removal arriving in the awaits below must not delete what this
+  // is about to install. Another engine's install running is no reason to
+  // refuse: this one is accepted and waits its turn in the queue.
+  starting += 1;
   try {
-    state = await readWhisperState();
+    const state = await readWhisperState();
+    if (state.installed) {
+      return NextResponse.json(
+        { error: "Speech on this box is already installed.", code: "already_installed" },
+        { status: 409 },
+      );
+    }
     // Before anything starts: a build that fails on a full disk minutes in is
-    // the outcome this refuses in one request.
-    if (!state.installed) disk = await checkInstallDisks(whisperEngineInstallParts());
-  } catch (err) {
-    engineInFlight = false;
-    throw err;
+    // the outcome this refuses in one request. The task measures again when its
+    // turn comes, for an install that waited behind another.
+    const disk = await checkInstallDisks(whisperEngineInstallParts());
+    if (!disk.ok) return diskRefusal(disk);
+    if (removing) return removalRefusal();
+    const start = startBackgroundTask(whisperEngineInstallTask());
+    return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
+  } finally {
+    starting -= 1;
   }
-  if (state.installed) {
-    engineInFlight = false;
-    return NextResponse.json(
-      { error: "Speech on this box is already installed.", code: "already_installed" },
-      { status: 409 },
-    );
-  }
-  if (!disk || !disk.ok) {
-    engineInFlight = false;
-    return diskRefusal(disk ?? (await checkInstallDisks(whisperEngineInstallParts())));
-  }
-
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        emit(controller, { status: "Installing speech on this box (faster-whisper)…" });
-        const result = await followRootStep("voice_whisper_install", {
-          timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
-          label: "the speech install",
-          onStatus: (line) => emit(controller, { status: line }),
-        });
-        if (!result.ok) {
-          emit(controller, { error: result.error || "The speech install did not finish." });
-        } else {
-          emit(controller, { success: true, status: "Speech on this box is installed." });
-        }
-      } catch (err) {
-        emit(controller, { error: err instanceof Error ? err.message : "The speech install failed." });
-      } finally {
-        engineInFlight = false;
-        try { controller.close(); } catch { /* already closed */ }
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
-  });
 }
 
 export async function DELETE(req: Request) {
@@ -322,12 +256,12 @@ export async function DELETE(req: Request) {
     // stream would then point the unit at weights that are gone — and while
     // the ENGINE is being installed, whose own pre-download is the second
     // writer into that cache.
-    if (inFlight || engineInFlight) {
+    if (speechBusy()) {
       return NextResponse.json({ error: "Speech on this box is being installed, or a model is being fetched, right now.", code: "busy" }, { status: 409 });
     }
-    // The same reservation as the install, for the whole removal: an install
-    // or a second removal started now would write into what this deletes.
-    engineInFlight = true;
+    // Held for the whole removal: an install, a download or a second removal
+    // started now would write into what this deletes.
+    removing = true;
     try {
       // Read BEFORE the removal, the Kokoro DELETE's pattern: afterwards the
       // stored preference is the only trace that the box's engine was chosen.
@@ -346,7 +280,7 @@ export async function DELETE(req: Request) {
         ...(warning ? { warning } : {}),
       });
     } finally {
-      engineInFlight = false;
+      removing = false;
     }
   }
 
@@ -358,10 +292,10 @@ export async function DELETE(req: Request) {
   // measurement through the re-read: the engine install pre-downloads `base`
   // and the engine removal measures and deletes every size, and a size removal
   // interleaved with either would measure or delete a cache under them.
-  if (inFlight || engineInFlight) {
+  if (speechBusy()) {
     return NextResponse.json({ error: "Speech on this box is being installed or changed right now.", code: "busy" }, { status: 409 });
   }
-  engineInFlight = true;
+  removing = true;
   try {
     const freed = await dirBytes(whisperCacheDir(size));
     const removed = await removeWhisperSize(size);
@@ -374,62 +308,8 @@ export async function DELETE(req: Request) {
     const state = await readWhisperState();
     return NextResponse.json({ ok: true, freedBytes: freed, ...state });
   } finally {
-    engineInFlight = false;
+    removing = false;
   }
-}
-
-/**
- * Run the fetcher and report what it said.
- *
- * Its own process group, so a timeout ends the download rather than orphaning a
- * multi-hundred-megabyte transfer; stderr is the reason a person reads, kept to
- * its last line so a Python traceback does not become the row's copy.
- *
- * The web server's environment plus the whisper-server unit's library path:
- * `libctranslate2.so.4` lives in ~/.local/lib, which the loader does not
- * search, and without it the fetcher's `import faster_whisper` fails on every
- * box whose engine is install-voice.sh's CUDA build — every Jetson (see
- * `withWhisperLibraryPath`).
- */
-function runFetch(size: string, onStatus: (line: string) => void): Promise<{ ok: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("/usr/bin/python3", [whisperFetchScript(CONFIG_ROOT), size], {
-      cwd: path.dirname(whisperFetchScript(CONFIG_ROOT)),
-      env: withWhisperLibraryPath(process.env),
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
-    let settled = false;
-    let stderr = "";
-    const finish = (outcome: { ok: boolean; error?: string }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      resolve(outcome);
-    };
-    const deadline = setTimeout(() => {
-      try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
-      finish({ ok: false, error: "The speech model download took too long and was stopped." });
-    }, FETCH_TIMEOUT_MS);
-
-    child.stdout?.setEncoding("utf-8");
-    child.stdout?.on("data", (chunk: string) => {
-      for (const line of chunk.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed) onStatus(trimmed);
-      }
-    });
-    child.stderr?.setEncoding("utf-8");
-    child.stderr?.on("data", (chunk: string) => {
-      stderr = `${stderr}${chunk}`.slice(-4000);
-    });
-    child.on("error", () => finish({ ok: false, error: "Could not start the speech model download." }));
-    child.on("close", (code) => {
-      if (code === 0) return finish({ ok: true });
-      const lines = stderr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      finish({ ok: false, error: lines.at(-1) || `The speech model download failed (exit ${code}).` });
-    });
-  });
 }
 
 /**

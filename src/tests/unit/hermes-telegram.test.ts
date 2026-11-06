@@ -441,8 +441,40 @@ describe("ensureHermesGateway", () => {
     const res = await ensureHermesGateway();
     expect(res).toMatchObject({ scope: "user", running: true, applied: false });
     expect(execFileMock).not.toHaveBeenCalled();
-    expect(runHermesCliMock.mock.calls[1][0]).toEqual(["gateway", "restart"]);
+    expect(runHermesCliMock.mock.calls[1][0]).toEqual(["gateway", "restart", "--yes"]);
     expect(runHermesCliMock.mock.calls[1][1]?.sudo).toBeUndefined();
+  });
+
+  // Hermes v0.22.4 refuses a bare `gateway restart` while anything is live
+  // ("Refusing to restart the gateway: 1 live session(s) would be
+  // interrupted.", exit 1), so the channel the owner just saved would wait for
+  // an unrelated restart. `--yes` is asked first; an older agent that does not
+  // know the flag is asked the old way, once.
+  it("passes --yes to the restart, and asks an agent older than the flag without it", async () => {
+    runHermesCliMock
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_USER_SERVICE_RUNNING, stderr: "" })
+      .mockResolvedValueOnce({ code: 2, stdout: "", stderr: "hermes: error: unrecognized arguments: --yes" })
+      .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_USER_SERVICE_RUNNING, stderr: "" });
+
+    const { ensureHermesGateway } = await import("@/lib/hermes-telegram");
+    const res = await ensureHermesGateway();
+    expect(res).toMatchObject({ scope: "user", running: true, applied: true });
+    expect(runHermesCliMock.mock.calls.slice(1, 3).map((c) => c[0])).toEqual([
+      ["gateway", "restart", "--yes"],
+      ["gateway", "restart"],
+    ]);
+  });
+
+  it("does not retry a restart the gateway refused for another reason", async () => {
+    runHermesCliMock
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_USER_SERVICE_RUNNING, stderr: "" })
+      .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "✗ Gateway service restart failed." })
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_USER_SERVICE_RUNNING, stderr: "" });
+
+    const { ensureHermesGateway } = await import("@/lib/hermes-telegram");
+    await expect(ensureHermesGateway()).resolves.toMatchObject({ applied: false });
+    expect(runHermesCliMock.mock.calls.filter((c) => c[0][1] === "restart")).toHaveLength(1);
   });
 
   // THE FALSE FAILURE THAT BECOMES A PRIVILEGED WRITE. A probe that could not
@@ -825,7 +857,7 @@ describe("ensureHermesGateway — first-time install", () => {
     execFileSucceeds();
     const res = await (await gatewayLib()).ensureHermesGateway();
     expect(res.applied).toBe(true);
-    expect(cliCalls()).toContain("gateway restart");
+    expect(cliCalls()).toContain("gateway restart --yes");
     const enable = execFileMock.mock.calls.find((c) => (c[1] as string[]).includes("enable"));
     expect(enable?.[0]).toBe("/usr/bin/systemctl");
     expect(enable?.[1]).toEqual(["--user", "enable", "hermes-gateway.service"]);

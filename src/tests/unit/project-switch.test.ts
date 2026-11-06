@@ -1,10 +1,10 @@
 /**
  * A per-project standing permission in the config store.
  *
- * Two of these exist — "the assistant may ship this project to production" and
- * "every run in this project goes through the delivery pipeline" — and both are
- * consents for something that happens while nobody is watching. So the rules
- * they share are tested once, here: every unreadable value fails towards OFF,
+ * One of these exists today — "the assistant may ship this project to
+ * production" (the delivery pipeline's default was the other, until SCA A1
+ * removed the pipeline) — and it is a consent for something that happens while
+ * nobody is watching. The rules are tested once, here, under the old key: every unreadable value fails towards OFF,
  * only the trues are stored, and `__proto__` is a legal project name.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -14,10 +14,8 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 
 type Switch = typeof import("@/lib/project-switch");
-type Store = typeof import("@/lib/coding-pipeline-store");
 
 let lib: Switch;
-let store: Store;
 let root: string;
 let restore: () => void;
 
@@ -42,7 +40,6 @@ beforeEach(async () => {
   const { vi } = await import("vitest");
   vi.resetModules();
   lib = await import("@/lib/project-switch");
-  store = await import("@/lib/coding-pipeline-store");
 });
 
 afterEach(() => {
@@ -112,15 +109,6 @@ describe("writing", () => {
   });
 });
 
-describe("the pipeline's own default", () => {
-  it("is that switch under its own key", async () => {
-    expect(await store.readPipelineDefault("shop")).toBe(false);
-    await store.setPipelineDefault("shop", true);
-    expect(await store.readPipelineDefault("shop")).toBe(true);
-    expect(await store.readPipelineProjects()).toEqual(["shop"]);
-    expect(store.PIPELINE_PROJECTS_CONFIG_KEY).toBe(KEY);
-  });
-});
 
 describe("a project name this cannot be filed under", () => {
   it("is not written, because the next write would drop it anyway", async () => {

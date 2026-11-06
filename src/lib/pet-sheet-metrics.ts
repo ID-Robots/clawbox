@@ -175,6 +175,30 @@ const clampInt = (v: unknown, lo: number, hi: number, fallback: number): number 
   return Math.min(hi, Math.max(lo, n));
 };
 
+/** No sleep loop needs more steps than this; a longer list is not one. */
+const MAX_SLEEP_FRAMES = 32;
+
+/**
+ * The frames a pet may be drawn in while it SLEEPS, or null.
+ *
+ * `sleepFrames` in a pet's `pet.json` — frame indices of the row the mascot
+ * sleeps on (`waiting`), in the order to step them. A sleeping pet must not
+ * blink: the crab's `waiting` row opens its eyes in frame 3, and stepping the
+ * whole row woke it up once a loop.
+ *
+ * `frames` is how many frames the row has. The list is taken whole or not at
+ * all — every entry an integer in `[0, frames)`, at least one — because a list
+ * with its bad entries dropped could step exactly the frame it was written to
+ * leave out. Null means "not declared": the caller holds the row's first frame.
+ */
+export function normaliseSleepFrames(raw: unknown, frames: number): number[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_SLEEP_FRAMES) return null;
+  const limit = Math.trunc(frames);
+  if (!(limit >= 1)) return null;
+  const valid = raw.every((f) => typeof f === "number" && Number.isInteger(f) && f >= 0 && f < limit);
+  return valid ? (raw.slice() as number[]) : null;
+}
+
 /**
  * Coerce metrics that arrived as JSON into something safe to render.
  *

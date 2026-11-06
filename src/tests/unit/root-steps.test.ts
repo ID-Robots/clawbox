@@ -299,29 +299,15 @@ describe("root-executed paths are outside clawbox's write access", () => {
     expect(read(INSTALL_SH)).toContain("> /etc/clawbox/network.env");
   });
 
-  it("points the other root readers of start-ap.sh at the root-owned copy", () => {
-    // The NetworkManager dispatcher hook (root, from dispatcher.d) and the
-    // watchdog both used to derive START_AP from $CLAWBOX_ROOT/scripts.
-    for (const name of ["nm-dispatcher-failover.sh", "ap-watchdog.sh"]) {
+  it("routes root AP callers through supervised installed services", () => {
+    for (const name of ["nm-dispatcher-failover.sh", "ap-watchdog.sh", "wifi-failover.sh", "recover.sh"]) {
       const src = read(path.join(REPO, "scripts", name));
-      const m = /^START_AP="([^"]*)"$/m.exec(src);
-      expect(m, `${name}: START_AP assignment`).not.toBeNull();
-      expect(m![1], name).toBe("${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}");
+      expect(src, name).not.toMatch(/^START_AP=/m);
+      expect(src, name).toMatch(/systemctl .*clawbox-(?:ap|wifi-failover)\.service/);
     }
-    // scripts/recover.sh and step_recover fall back to the tree copy ONLY when
-    // the libexec one is absent (recovery must work mid-migration); the libexec
-    // copy is the one tried first.
-    const recover = read(path.join(REPO, "scripts", "recover.sh"));
-    expect(recover.indexOf("/usr/local/libexec/clawbox/start-ap.sh"))
-      .toBeLessThan(recover.indexOf("/home/clawbox/clawbox/scripts/start-ap.sh"));
-    const sh = read(INSTALL_SH);
-    const stepRecover = sh.slice(sh.indexOf("step_recover() {"));
-    const recoverBody = stepRecover.slice(0, stepRecover.indexOf("\n}"));
-    expect(recoverBody).toContain('"$ROOT_LIBEXEC_DIR/start-ap.sh"');
-    // $SRC_DIR, not $PROJECT_DIR: the fallback reads from wherever root started
-    // install.sh, which on a dispatched step is the root-owned mirror. TASK-733.
-    expect(recoverBody.indexOf("$ROOT_LIBEXEC_DIR/start-ap.sh"))
-      .toBeLessThan(recoverBody.indexOf("$SRC_DIR/scripts/start-ap.sh"));
+    const recoverBody = shellFn(read(INSTALL_SH), "step_recover");
+    expect(recoverBody).toContain("systemctl restart clawbox-ap.service");
+    expect(recoverBody).not.toContain("bash");
   });
 
   it("writes the first-boot VNC unit against the root-owned copy, not the tree", () => {
@@ -383,7 +369,7 @@ describe("install_root_libexec: a copy that did not land is never a success", ()
     for (const f of ["clawbox-root-manifest.sh", "clawbox-run-root-step.sh", "clawbox-root-step.sh"]) {
       fs.writeFileSync(path.join(project, "config", f), "#!/bin/bash\n");
     }
-    for (const f of ["start-ap.sh", "stop-ap.sh", "ap-watchdog.sh", "ensure-vnc-on-first-boot.sh"]) {
+    for (const f of ["wifi-radio.sh", "wifi-failover.sh", "start-ap.sh", "stop-ap.sh", "ap-watchdog.sh", "ensure-vnc-on-first-boot.sh"]) {
       fs.writeFileSync(path.join(project, "scripts", f), "#!/bin/bash\n");
     }
     const script = [

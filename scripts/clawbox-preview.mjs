@@ -18,12 +18,14 @@
  *   - It stops by itself (--ttl). A pass that crashes, is stopped or simply
  *     forgets leaves nothing listening: the clock is inside this process, not
  *     in the caller's good intentions.
- *   - Its children stay in the CALLER's process group on purpose. The browser
- *     route only opens a loopback port whose listeners belong to the live run's
- *     own group and working folder (src/lib/coding-local-preview.ts), so
- *     detaching would produce a URL the device then refuses to open. Teardown
- *     therefore walks /proc for descendants and signals those by pid, never the
- *     group — the group is the run itself.
+ *   - Its children stay attached to the CALLER on purpose. The browser route
+ *     only opens a loopback port whose listeners are all the live run's own —
+ *     in its process group, descended from it, or inside its systemd scope —
+ *     and work in its folder (src/lib/coding-local-preview.ts). A server that
+ *     double-forked away from the run on a box without scopes would print a URL
+ *     the device then refuses to open. Teardown walks /proc for descendants and
+ *     signals those by pid, never the group — the group is the caller's, and
+ *     may be the run itself.
  *
  * HOW IT DECIDES WHAT TO DO
  *   command mode — the project declares how to start itself (clawbox.json

@@ -70,6 +70,40 @@ describe("the bundled pack", () => {
     expect(fs.statSync(path.join(dir, "spritesheet.webp")).size).toBeGreaterThan(100_000);
   });
 
+  it("sleeps only on the frames of its sleep row with the eyes shut", async () => {
+    // `waiting` (row 6) has the crab's eyes closed in frames 0, 1, 2, 4 and 5
+    // and OPEN in frame 3 — checked by eye off the sheet. Stepped whole, the
+    // sleeping crab blinked awake once a loop.
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), "public", "pets", "vibrant-clawd", "pet.json"), "utf-8"),
+    );
+    expect(meta.sleepFrames.length).toBeGreaterThan(0);
+    for (const f of meta.sleepFrames) expect([0, 1, 2, 4, 5]).toContain(f);
+    expect(meta.sleepFrames).not.toContain(3);
+  });
+
+  it("ships a still with the eyes shut, on the open-eyed still's scale and foot line", async () => {
+    // The fail-open body is a PNG, not the sheet; it swaps to this one asleep.
+    // Same size and same feet, or the crab would grow and hop as it dozed off.
+    const sharp = (await import("sharp")).default;
+    const feet = async (file: string) => {
+      const { data, info } = await sharp(path.join(process.cwd(), "public", file))
+        .ensureAlpha()
+        .extractChannel("alpha")
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      let lowest = -1;
+      for (let y = 0; y < info.height; y++) {
+        for (let x = 0; x < info.width; x++) if (data[y * info.width + x] > 8) lowest = y;
+      }
+      return { width: info.width, height: info.height, lowest };
+    };
+    const awake = await feet("clawbox-crab.png");
+    const asleep = await feet("clawbox-crab-sleep.png");
+    expect([asleep.width, asleep.height]).toEqual([awake.width, awake.height]);
+    expect(Math.abs(asleep.lowest - awake.lowest)).toBeLessThanOrEqual(1);
+  });
+
   it("is loadable with an empty pets directory, off the repo's own copy", async () => {
     const { loadPet, builtinPetDir, builtinInstalledPets, installedPets } = await loadModule();
     expect(installedPets()).toEqual([]); // nothing in the harness's own store
@@ -123,6 +157,8 @@ describe("the brand body", () => {
     // the atlas actually has (waving draws four frames, jumping five).
     expect([active?.cols, active?.rows]).toEqual([8, 9]);
     expect(active?.rowMetrics?.map((r) => r.frames)).toEqual([6, 6, 6, 4, 5, 6, 6, 6, 6]);
+    // And the frames it sleeps on travel with it, to the mascot.
+    expect(active?.sleepFrames).toEqual([0, 1, 2]);
   }, 30_000);
 
   it("stays the body when the owner switches the pet OFF — 'off' means the crab", async () => {

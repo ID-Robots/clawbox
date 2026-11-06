@@ -11,8 +11,9 @@ LOG_PATH="${7:?log path required}"
 BIN_PATH="${8:?llama-server path required}"
 HF_BIN="${9:?hf binary path required}"
 CTX_SIZE="${10:?ctx size required}"
-CACHE_TYPE_K="${LLAMACPP_CACHE_TYPE_K:-q4_0}"
-CACHE_TYPE_V="${LLAMACPP_CACHE_TYPE_V:-q4_0}"
+# q8_0, not q4_0: keep in step with DEFAULT_LLAMACPP_CACHE_TYPE in src/lib/llamacpp.ts.
+CACHE_TYPE_K="${LLAMACPP_CACHE_TYPE_K:-q8_0}"
+CACHE_TYPE_V="${LLAMACPP_CACHE_TYPE_V:-q8_0}"
 PID_PATH="${LLAMACPP_PID_PATH:-}"
 
 mkdir -p "$MODEL_DIR"

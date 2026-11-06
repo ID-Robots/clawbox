@@ -1,5 +1,6 @@
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { get } from "@/lib/config-store";
+import { readEdition } from "@/lib/edition-source";
 import { readConfig } from "@/lib/openclaw-config";
 // The persisted half of the refusal below. Its own module, and a deliberately
 // thin one: `/setup-api/ai-models/status` writes the same fact from the portal
@@ -59,18 +60,34 @@ function trimmedString(value: unknown): string | null {
  * hand-off — so the order only decides which read answers first, never which
  * token is used.
  *
+ * NOT on the Hermes edition. A box swapped from OpenClaw keeps its whole
+ * `~/.openclaw` — the swap step never deletes it — and that `openclaw.json`
+ * still names the account the box was signed in to before the swap: read
+ * first, it answered for a box that had signed out of ClawBox AI on Hermes
+ * since (seen on a lab board: the row stayed "Connected" over an empty store).
+ * Hermes keeps the token in the store, which its link always writes and the
+ * swap carries over, so the store is the answer there.
+ *
  * Never logged, never echoed, never returned to a browser. Callers that only
  * need to know whether one EXISTS should send a boolean (see
  * `/setup-api/chat/capabilities`), not the value.
  */
 export async function resolveClawaiToken(): Promise<string | null> {
+  let hermesEdition = false;
   try {
-    const config = await readConfig();
-    const key = trimmedString(config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey);
-    if (key) return key;
+    hermesEdition = readEdition() === "hermes";
   } catch {
-    // A Hermes SKU has no OpenClaw config to read. That is not a failure here,
-    // it is the whole reason this function has a second place to look.
+    // An unreadable lock reads as the module default, as everywhere else.
+  }
+  if (!hermesEdition) {
+    try {
+      const config = await readConfig();
+      const key = trimmedString(config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey);
+      if (key) return key;
+    } catch {
+      // No OpenClaw config to read is not a failure here: it is the whole
+      // reason this function has a second place to look.
+    }
   }
   try {
     return trimmedString(await get(HERMES_TOKEN_KEY));

@@ -156,6 +156,25 @@ describe("listKioskTabs", () => {
     expect(calls[0].url).toBe("http://127.0.0.1:19001/json/list");
   });
 
+  /**
+   * TASK-1480: the desktop (VNC) browser's port is configurable
+   * (src/lib/desktop-browser-config.ts). Put on the kiosk's port, what answers
+   * there is the desktop browser — never to be listed or driven as the kiosk.
+   */
+  it("never dials the port the desktop browser is configured on", async () => {
+    process.env.CLAWBOX_KIOSK_CDP_PORT = "19001";
+    process.env.CLAWBOX_BROWSER_CDP_PORT = "19001";
+    try {
+      respond = () => json([DESKTOP, ANTHROPIC]);
+      expect(await listKioskTabs()).toEqual({ available: false, tabs: [] });
+      expect(await openKioskTab("https://example.com/")).toEqual({ ok: false, available: false });
+      expect(await activateKioskTab("BBBB2222")).toEqual({ ok: false, available: false });
+      expect(calls).toHaveLength(0);
+    } finally {
+      process.env.CLAWBOX_BROWSER_CDP_PORT = "";
+    }
+  });
+
   it("answers available:false on a non-JSON or non-array body", async () => {
     respond = () => new Response("<html>nope</html>", { status: 200 });
     await expect(listKioskTabs()).resolves.toEqual({ available: false, tabs: [] });

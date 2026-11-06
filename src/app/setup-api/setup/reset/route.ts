@@ -21,6 +21,8 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import crypto from "crypto";
 import { startRootStep } from "@/lib/root-step-runner";
+import { readDesktopBrowserConfig } from "@/lib/desktop-browser-config";
+import { clientTimedOut, readUnitState, runUnitJob, unitIsStopped, type UnitState } from "@/lib/gateway-unit-job";
 
 const execFile = promisify(execFileCb);
 
@@ -66,10 +68,10 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 
-// The two named exceptions to the ~/.hermes wipe. Neither is owner state and
-// neither can be re-fetched on a reset device — it reboots into AP mode with no
-// internet. Rationale for both is at the HOME_CONTENT_WIPE_KEEP entry below.
-const HERMES_KEEP = new Set(["hermes-agent", "bin"]);
+// The named exceptions to the ~/.hermes wipe. None is owner state and none can
+// be re-fetched on a reset device — it reboots into AP mode with no internet.
+// Rationale for each is at the HOME_CONTENT_WIPE_KEEP entry below.
+const HERMES_KEEP = new Set(["hermes-agent", "bin", "installs", "tools"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
@@ -324,19 +326,91 @@ async function maskAndStopGateway(): Promise<void> {
   } catch (err) {
     console.warn("[Reset] Failed to mask gateway:", err instanceof Error ? err.message : err);
   }
+  // Waited for on the unit when the stop outlives its client: on an x64 bridge
+  // it waits for OpenClaw's own drain, and the wipe must not start beside a
+  // gateway that is still writing its state. A gateway still stopping, or not
+  // stopped at all, ends the reset here, before anything is wiped; the caller's
+  // catch unmasks it, asks systemd to start it again when the stop is still
+  // under way, and answers in these words. The waits are bounded so that answer
+  // reaches the page: the tunnel cuts a request at about 100 s (worst case
+  // here: mask 10 + client 15 + settle 45 + show 10 + unmask 10 + restart 5),
+  // and a reset that wiped minutes after the page showed a network error would
+  // be a failure reported over a reset that happened.
+  const stopAskedAt = Date.now();
+  let state: UnitState | null = null;
+  let stillStopping = false;
   try {
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"], { timeout: 15_000 });
+    const stop = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: 15_000,
+      settleBudgetMs: 45_000,
+    });
+    if (stop.kind === "in-flight") stillStopping = true;
+    else if (stop.kind === "settled") state = stop.state;
   } catch (err) {
+    // A stop that failed outright (a refused sudo, a stop cancelled by a
+    // restart someone else queued) proves nothing either way, so the unit is
+    // asked. A unit that cannot be asked either may still be running, and the
+    // wipe is not started on a guess: a restart of the device is the way back.
     console.warn("[Reset] Failed to stop gateway before wipe:", err instanceof Error ? err.message : err);
+    state = await readUnitState("clawbox-gateway.service");
+    if (!state) {
+      throw new GatewayNotStoppedError(
+        "The factory reset was not started because the assistant could not be confirmed stopped. Nothing was erased; restart the device and try again.",
+        false,
+      );
+    }
+  }
+  if (state && !unitIsStopped(state)) {
+    if (state.activeState === "deactivating") stillStopping = true;
+    else throw new GatewayNotStoppedError("The assistant did not stop, so the factory reset was not started. Nothing was erased.", false);
+  }
+  if (stillStopping) {
+    const waitedS = Math.round((Date.now() - stopAskedAt) / 1000);
+    throw new GatewayNotStoppedError(
+      `The assistant was still stopping after ${waitedS}s, so the factory reset was not started. Nothing was erased.`,
+      true,
+    );
   }
 }
 
-async function unmaskGateway(): Promise<void> {
-  if (!gatewayIsPartOfThisEdition()) return;
+/** The reset ended before anything was erased because the gateway had not stopped. */
+class GatewayNotStoppedError extends Error {
+  constructor(message: string, readonly stillStopping: boolean) {
+    super(message);
+    this.name = "GatewayNotStoppedError";
+  }
+}
+
+/**
+ * Put back a gateway this reset stopped and then did not wipe beside. The stop
+ * it asked for runs on after its client was killed, and an explicit stop is
+ * one `Restart=always` does not undo, so without this the assistant stays down
+ * until the box restarts. systemd queues the restart behind the running stop
+ * and starts the unit once its deactivation ends. A refusal (a masked unit, a
+ * refused sudo) comes back at once; a client still waiting at its deadline
+ * means systemd took the job, which is what answers true.
+ */
+async function startGatewayAgain(): Promise<boolean> {
+  try {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], { timeout: 5_000 });
+    return true;
+  } catch (err) {
+    if (clientTimedOut(err)) return true;
+    console.warn("[Reset] Failed to start the gateway again:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/** Whether the gateway is unmasked afterwards (true where this edition has none). */
+async function unmaskGateway(): Promise<boolean> {
+  if (!gatewayIsPartOfThisEdition()) return true;
   try {
     await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"], { timeout: 10_000 });
+    return true;
   } catch (err) {
     console.warn("[Reset] Failed to unmask gateway:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
@@ -354,8 +428,16 @@ const HOME_REMOVE_PATHS = [
   // OAuth tokens synthesized by gateway-pre-start.sh for the codex app-server.
   ".codex",
   // AI-browser Chromium profile: cookies, logged-in sessions, history
-  // (PROFILE in scripts/launch-browser.sh).
+  // (PROFILE in scripts/launch-browser.sh). A profile of the owner's own that
+  // they pointed the app at goes too — configuredBrowserProfile() below.
   ".config/clawbox-browser",
+  // The launch env file: the previous owner's start page, and which browser
+  // profile, port and executable of theirs the app was pointed at.
+  ".cache/clawbox/browser.env",
+  // Pictures the owner pasted into the Terminal (src/lib/terminal-paste-store.ts):
+  // screenshots of whatever was on their screen. The store's own pruning runs
+  // only when another picture is pasted, so a reset is what must take them.
+  ".cache/clawbox/terminal-paste",
   // Shell/REPL histories and identity the TerminalApp + agent run_command
   // accumulate; .netrc/.npmrc can carry plaintext credentials.
   ".bash_history",
@@ -378,7 +460,23 @@ const HOME_REMOVE_PATHS = [
 ];
 // User-visible folders the Files app exposes (and recreates empty on demand):
 // wipe the contents, keep the directories.
-const HOME_CONTENT_WIPE_DIRS = ["Documents", "Downloads", "Desktop"];
+//
+// Projects is the coding agent's default work folder — the owner's code, their
+// repositories and every app the agent built for them — and the rest are the
+// standard XDG user folders. They used to be missing from this list, so a reset
+// box handed the next owner the previous one's projects, music, pictures and
+// videos.
+const HOME_CONTENT_WIPE_DIRS = [
+  "Documents",
+  "Downloads",
+  "Desktop",
+  "Projects",
+  "Music",
+  "Pictures",
+  "Videos",
+  "Public",
+  "Templates",
+];
 
 // Directories wiped entry-by-entry with a NAMED exception list. Same
 // remove-everything default as HOME_REMOVE_PATHS — the exception is spelled
@@ -395,8 +493,9 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // is a wipe with ONE exception, not a keep-list.
     //
     // That exception is hermes-agent/, and it is not owner state at all. It is
-    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus the
-    // Python venv that ~/.local/bin/hermes (a 4-line shim) execs. Deleting it
+    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus (up
+    // to v0.21.1) the Python venv that ~/.local/bin/hermes (a 4-line shim)
+    // execs; from v0.21.7 that venv and its interpreter moved, see below. Deleting it
     // was the factory-reset defect this exception fixes: the shim survives the
     // wipe (it lives in ~/.local/bin), so a reset box was left with a `hermes`
     // command whose interpreter no longer existed:
@@ -430,6 +529,17 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // invisible to --porcelain. Re-provisioning the agent from upstream after
     // a reset is the real fix, and it needs network this device does not have
     // at reset time.
+    //
+    // From Hermes v0.21.7 the agent install is no longer one directory. The
+    // upstream package manager builds the agent's venv in installs/ (selected by
+    // installs/<key>/facts.json) and keeps the Python the launcher execs, plus
+    // uv, node and the agent's browser, in tools/; ~/.local/bin/hermes now
+    // execs a launcher in hermes-agent/.hermes/bin that runs
+    // tools/python-<version>/bin/python3. Kept with hermes-agent/ for the same
+    // reason: measured on a Nano, leaving out tools/ makes `hermes` fail with
+    // "python3: not found", and leaving out installs/ leaves it no
+    // dependencies. Both are upstream artifacts — hashes, interpreters,
+    // packages — with no owner data in them.
     //
     // The second exception is bin/, and it is the same category. It holds the
     // upstream `tirith` binary the agent runs BEFORE every shell command
@@ -467,6 +577,108 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
   },
 ];
 
+// Loose files directly in the home root — a ~/notes.txt, an export saved next
+// to the folders above, whatever the agent wrote there. Nothing listed them, so
+// a reset box used to hand them to the next owner. Wiped with a NAMED exception
+// list, the same remove-everything default as HOME_CONTENT_WIPE_KEEP: a file
+// that appears here tomorrow is removed unless somebody adds it below.
+//
+// Regular files ONLY. The directories in the home root (the ClawBox checkout,
+// llama.cpp/, .npm-global, .bun, .local, .cache …) are what the box runs on and
+// stay with the lists above, and a symlink is left as it is.
+const HOME_ROOT_FILE_KEEP = new Set([
+  // The shell start-up files from /etc/skel. install.sh appends the
+  // ~/.npm-global/bin and ~/.local/bin PATH entries to .bashrc, and the
+  // Terminal's login shell reaches it through .profile: without them `claude`,
+  // `codex`, `openclaw` and `hermes` are not found, and nothing on a reset box
+  // writes them back.
+  ".bashrc",
+  ".profile",
+  ".bash_logout",
+  // Sourced by the X session at login.
+  ".xsessionrc",
+  // Ubuntu's marker that silences the sudo hint on every login shell.
+  ".sudo_as_admin_successful",
+]);
+
+/**
+ * Remove the loose regular files directly in the home root, except
+ * HOME_ROOT_FILE_KEEP. Same failure contract as removeDirectoryContents: a
+ * survivor is reported, never thrown.
+ */
+async function removeLooseHomeFiles(): Promise<string[]> {
+  let names: string[];
+  try {
+    const entries = await fs.readdir(/* turbopackIgnore: true */ HOME_DIR, { withFileTypes: true });
+    names = entries
+      .filter((entry) => entry.isFile() && !HOME_ROOT_FILE_KEEP.has(entry.name))
+      .map((entry) => entry.name);
+  } catch (err: unknown) {
+    if (isEnoent(err)) return [];
+    return [`${HOME_DIR}: ${err}`];
+  }
+  // No `recursive`: a file swapped for a directory after the readdir fails to
+  // remove and is reported, rather than taking a directory with it.
+  const results = await Promise.allSettled(
+    names.map((name) => fs.rm(path.join(HOME_DIR, name), { force: true })),
+  );
+  const failures = results
+    .map((r, i) => r.status === "rejected" ? `${names[i]}: ${r.reason}` : null)
+    .filter((f): f is string => f !== null);
+  if (failures.length > 0) {
+    console.warn(`[Reset] Failed to remove ${failures.length} file(s) in ${HOME_DIR}:`, failures);
+  }
+  return failures;
+}
+
+/**
+ * The owner's own browser profile, when they pointed the Browser app at one
+ * (CLAWBOX_BROWSER_PROFILE_DIR, src/lib/desktop-browser-config.ts), relative
+ * to the home — removed for the reason ClawBox's own profile is: it holds
+ * their cookies and signed-in sessions.
+ *
+ * Guarded, because the path came from a file the owner edits by hand: only a
+ * directory strictly inside the home, and only a real Chromium profile — one
+ * with a `Local State` file at its root. A typo that names `~/.config` or the
+ * home itself is skipped and logged, never removed. Read BEFORE the wipe,
+ * which removes the file that names it.
+ *
+ * Judged on the RESOLVED path, not the one written: `~/link/Profile` with
+ * `link` pointing outside the home is lexically inside it, and `fs.rm` would
+ * follow that symlink and delete a profile that is not in the home at all.
+ * What is returned is the resolved location, relative to the resolved home,
+ * so the removal names exactly the directory that was checked.
+ */
+async function configuredBrowserProfile(): Promise<string | null> {
+  const config = await readDesktopBrowserConfig();
+  if (config.ownProfile) return null;
+  let home: string;
+  let profile: string;
+  try {
+    // turbopackIgnore: a path the build cannot evaluate would otherwise be
+    // traced as "any file in the project" and walk data/ (runtime-path.ts).
+    [home, profile] = await Promise.all([
+      fs.realpath(/* turbopackIgnore: true */ HOME_DIR),
+      fs.realpath(/* turbopackIgnore: true */ config.profileDir),
+    ]);
+  } catch {
+    console.warn("[Reset] The configured browser profile could not be resolved; not removing it");
+    return null;
+  }
+  const rel = path.relative(home, profile);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    console.warn("[Reset] Leaving the configured browser profile outside the home directory in place");
+    return null;
+  }
+  try {
+    await fs.access(/* turbopackIgnore: true */ path.join(profile, "Local State"));
+  } catch {
+    console.warn("[Reset] The configured browser profile has no Local State file; not removing it");
+    return null;
+  }
+  return rel;
+}
+
 /**
  * Wipe previous-owner state from the home directory so a factory-reset
  * device matches a fresh flash, not just a fresh ClawBox config. Returns
@@ -475,8 +687,10 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
  */
 async function wipeHomeUserState(): Promise<string[]> {
   const failures: string[] = [];
+  const ownerProfile = await configuredBrowserProfile();
+  const removePaths = ownerProfile ? [...HOME_REMOVE_PATHS, ownerProfile] : HOME_REMOVE_PATHS;
   await Promise.all(
-    HOME_REMOVE_PATHS.map((rel) =>
+    removePaths.map((rel) =>
       fs.rm(path.join(HOME_DIR, rel), { recursive: true, force: true }).catch((err) => {
         failures.push(`${rel}: ${err}`);
       }),
@@ -490,6 +704,7 @@ async function wipeHomeUserState(): Promise<string[]> {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel), keep);
     failures.push(...dirFailures.map((f) => labelFailure(rel, f)));
   }
+  failures.push(...(await removeLooseHomeFiles()));
   // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
   // crontab — that's the desired end state, not a failure; anything else
   // (missing binary, cron.deny) leaves a persistence vector and gets logged.
@@ -559,7 +774,9 @@ export async function POST(request: Request) {
   // `export async function POST()` — zero parameters, so it could not read a
   // cookie even in principle — and an unauthenticated POST really did wipe the
   // QA box on 2026-08-22T00:04Z. TASK-443.
-  const unauthorized = await requireSession(request);
+  // The owner's account itself: never another ClawBox user's to change or
+  // wipe, whatever else of the desktop they share (src/lib/non-owner-scope.ts).
+  const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) {
     await padResponseTime(startedAt);
     return unauthorized;
@@ -599,9 +816,11 @@ export async function POST(request: Request) {
   if (refused) return refused;
 
   try {
-    resetUpdateState();
-
     await maskAndStopGateway();
+
+    // Only once the wipe is really starting: a reset that ended above must
+    // leave a running update's state as it was.
+    resetUpdateState();
 
     const dataFailures: string[] = [];
     // The top of data/ is wiped by a readdir + rm pass of its own rather than
@@ -729,9 +948,16 @@ export async function POST(request: Request) {
     });
     return response;
   } catch (err) {
-    await unmaskGateway();
+    const unmasked = await unmaskGateway();
+    let error = err instanceof Error ? err.message : "Factory reset failed";
+    if (err instanceof GatewayNotStoppedError && err.stillStopping) {
+      // Said only once systemd took the restart: a masked unit refuses it.
+      error += unmasked && await startGatewayAgain()
+        ? " The assistant was asked to start again; try the reset again in a few minutes."
+        : " The assistant stays stopped until the device is restarted.";
+    }
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Factory reset failed" },
+      { error },
       { status: 500 },
     );
   }

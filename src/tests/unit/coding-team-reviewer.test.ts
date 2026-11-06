@@ -3,8 +3,8 @@
  * that is not what the reviewer said is never repaired into one.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_TASK_CHARS } from "@/lib/coding-agent";
-import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE } from "@/lib/coding-team-reviewer";
+import { TEAM_TASK_CHARS } from "@/lib/coding-agent";
+import { ANSWER_HEAD_CHARS, answerHead, FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF, REVIEWER_NUDGE, SHELL_REVIEWER_BRIEF } from "@/lib/coding-team-reviewer";
 
 describe("parseVerdict", () => {
   it("reads a bare object, a fenced one, and one buried in prose", () => {
@@ -107,14 +107,39 @@ describe("the reviewer's brief and task", () => {
     expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "", goal: "g" })).toContain("changed no files");
   });
 
-  it("names only so many changed files and counts the rest, and never exceeds the run route's cap", () => {
+  it("names only so many changed files and counts the rest, and never exceeds the team's cap", () => {
     const files = Array.from({ length: MAX_REVIEW_FILES + 15 }, (_, i) => `src/file-${i}.ts`);
     const text = reviewerTask({ taskId: "t3", description: "d", files, report: "r", goal: "g" });
     expect(text).toContain(`- src/file-${MAX_REVIEW_FILES - 1}.ts`);
     expect(text).not.toContain(`- src/file-${MAX_REVIEW_FILES}.ts`);
     expect(text).toContain("… and 15 more");
-    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(MAX_TASK_CHARS * 2), goal: "g" });
-    expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(TEAM_TASK_CHARS * 2), goal: "g" });
+    expect(long.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(long.endsWith("…")).toBe(true);
+  });
+});
+
+describe("the shell reviewer — the first review on a team with a branch", () => {
+  it("has a shell, is told to run the checks and to link or install node_modules, and may write nothing that is kept", () => {
+    expect(SHELL_REVIEWER_BRIEF).toContain("with a shell");
+    expect(SHELL_REVIEWER_BRIEF).toMatch(/run the checks the task's own verification names/);
+    expect(SHELL_REVIEWER_BRIEF).toContain("ln -s <project>/node_modules node_modules");
+    expect(SHELL_REVIEWER_BRIEF).toContain("nothing written in this folder is kept");
+    expect(SHELL_REVIEWER_BRIEF).not.toContain("Change NOTHING");
+    expect(SHELL_REVIEWER_BRIEF).toContain("The verdict object is the LAST thing you write");
+    // The read-only brief stays for a team in place, where the project is the only checkout.
+    expect(REVIEWER_BRIEF).toMatch(/Change NOTHING/);
+  });
+
+  it("names its checkout, the branch and the project whose node_modules it may link, in the task text", () => {
+    const text = reviewerTask({
+      taskId: "t1", description: "Fix it", files: ["a.js"], report: "done", goal: "g",
+      checkout: { folder: "/p/.clawbox/worktrees/review-t1-1", project: "/p", branch: "clawbox/team-1", base: "develop" },
+    });
+    expect(text).toContain("Review task t1: Fix it");
+    expect(text).toContain("Your folder: /p/.clawbox/worktrees/review-t1-1 — a throwaway checkout of the team's branch clawbox/team-1, forked from develop. The project itself is at /p; if the checks need its dependencies, link them (ln -s /p/node_modules node_modules) or install them here.");
+    // Without a base, none is named; without a checkout (in place), no folder line at all.
+    expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "r", goal: "g", checkout: { folder: "/w", project: "/p", branch: "b", base: null } })).toContain("branch b. The project");
+    expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "r", goal: "g" })).not.toContain("Your folder:");
   });
 });

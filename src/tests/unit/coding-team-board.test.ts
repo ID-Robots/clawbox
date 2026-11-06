@@ -113,6 +113,18 @@ describe("who may do what", () => {
     lib.setTeamStatus(b, OWNER, "stopped", "Owner pressed Stop");
     expect(b.status).toBe("stopped");
   });
+
+  it("keeps the owner's stop: nothing writes a stopped team back to work, or to failed", () => {
+    const b = board();
+    lib.setTeamStatus(b, OWNER, "stopped", "Owner pressed Stop");
+    const logged = b.log.length;
+    for (const status of ["working", "reviewing", "failed", "done", "planning"] as const) {
+      lib.setTeamStatus(b, { kind: "system" }, status, "an orchestrator step that was awaiting something");
+      expect(b.status, status).toBe("stopped");
+    }
+    expect(b.error ?? null).toBeNull();
+    expect(b.log).toHaveLength(logged);
+  });
 });
 
 describe("the audit log and the file", () => {
@@ -159,6 +171,25 @@ describe("the audit log and the file", () => {
     expect(lib.loadBoard(b.id)).toMatchObject({ status: "working", source: "owner", tasks: [{ task_id: "t1", depends_on: [] }] });
   });
 
+  it("still reads a board saved while teams had a time budget, dropping the budget's fields", () => {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "do it" });
+    lib.saveBoard(b);
+    const file = path.join(root, "data", "coding-team", `${b.id}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    raw.timeBudget = { deadline: "2026-10-01T10:00:00.000Z", label: "1 hour", preset: "1h", source: "picker", setAt: "2026-10-01T09:00:00.000Z" };
+    raw.timeStop = "time";
+    raw.skipped = [{ taskId: "t2", text: "does not fit before the cutoff: Polish", by: "fit", at: 1 }];
+    raw.extras = [{ kind: "tests", summary: "covered app.js", at: 2 }];
+    Object.assign(raw.tasks[0], { estimateMs: 600_000, priority: 1, optional: true });
+    raw.log.push({ ts: 3, type: "skip", message: "Left out to fit the time", actor: { kind: "system" } });
+    fs.writeFileSync(file, JSON.stringify(raw));
+    const read = lib.loadBoard(b.id);
+    expect(read).toMatchObject({ id: b.id, tasks: [{ task_id: "t1", status: "pending" }] });
+    for (const key of ["timeBudget", "timeStop", "skipped", "extras"]) expect(read).not.toHaveProperty(key);
+    for (const key of ["estimateMs", "priority", "optional"]) expect(read!.tasks[0]).not.toHaveProperty(key);
+  });
+
   it("caps the log, keeping the newest", () => {
     const b = board();
     for (let i = 0; i < lib.MAX_LOG_ENTRIES + 20; i++) lib.raiseAlert(b, SYSTEM, `alert ${i}`);
@@ -186,6 +217,126 @@ describe("scheduling queries", () => {
     lib.updateStatus(b, worker("run-bbbbbbbb"), "t3", "complete");
     expect(lib.isExhausted(b)).toBe(true);
     expect(lib.allComplete(b)).toBe(false);
+  });
+});
+
+describe("dependency gating: a dependent waits for an ACCEPTED dependency", () => {
+  /** t1, and t2 on it, with t1's worker finished — complete, not yet reviewed. */
+  function finishedNotReviewed() {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Scaffold the page" });
+    lib.postTask(b, PLANNER, { task_description: "Wire the form", depends_on: ["t1"] });
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "complete");
+    return b;
+  }
+
+  it("does not offer a dependent while its dependency is complete but still under review", () => {
+    const b = finishedNotReviewed();
+    expect(lib.readyTasks(b).map((t) => t.task_id)).toEqual([]);
+    expect(lib.waitingOn(b, b.tasks[1])).toEqual(["t1"]);
+    expect(lib.isAccepted(b.tasks[0])).toBe(false);
+  });
+
+  it("offers it once the reviewer accepts, and never when the reviewer rejects", () => {
+    const accepted = finishedNotReviewed();
+    lib.reviewTask(accepted, REVIEWER, "t1", "accepted", "Looks right.");
+    expect(lib.readyTasks(accepted).map((t) => t.task_id)).toEqual(["t2"]);
+    expect(lib.waitingOn(accepted, accepted.tasks[1])).toEqual([]);
+
+    const rejected = finishedNotReviewed();
+    lib.reviewTask(rejected, REVIEWER, "t1", "rejected", "The form does not submit.");
+    // t1 is offered again; t2 still waits for it.
+    expect(lib.readyTasks(rejected).map((t) => t.task_id)).toEqual(["t1"]);
+  });
+
+  it("names a dependency that will never be accepted", () => {
+    const b = finishedNotReviewed();
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "No.");
+    lib.assignTask(b, SYSTEM, "t1", "run-cccccccc");
+    lib.updateStatus(b, worker("run-cccccccc"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-cccccccc"), "t1", "complete");
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "Still no.");
+    expect(b.tasks[0].status).toBe("rejected");
+    expect(lib.blockedBy(b, b.tasks[1])).toEqual([{ task_id: "t1", status: "rejected" }]);
+    expect(lib.isExhausted(b)).toBe(true);
+  });
+});
+
+describe("holdTask: a dependent set back when its dependency is reopened", () => {
+  /** t1 accepted, t2 (on t1) finished and accepted, t3 (on t2) running. */
+  function chain() {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Schema" });
+    lib.postTask(b, PLANNER, { task_description: "API", depends_on: ["t1"] });
+    lib.postTask(b, PLANNER, { task_description: "UI", depends_on: ["t2"] });
+    for (const [id, run] of [["t1", "run-aaaaaaaa"], ["t2", "run-bbbbbbbb"]] as const) {
+      lib.assignTask(b, SYSTEM, id, run);
+      lib.updateStatus(b, worker(run), id, "in_progress");
+      lib.updateStatus(b, worker(run), id, "complete");
+      lib.reviewTask(b, REVIEWER, id, "accepted", "");
+    }
+    lib.assignTask(b, SYSTEM, "t3", "run-cccccccc");
+    lib.updateStatus(b, worker("run-cccccccc"), "t3", "in_progress");
+    return b;
+  }
+
+  it("is the system's alone, only for a task that started, and only on a real dependency", () => {
+    const b = chain();
+    for (const who of [PLANNER, REVIEWER, OWNER, worker("run-bbbbbbbb")]) {
+      expect(() => lib.holdTask(b, who, "t2", "t1", "x")).toThrow(lib.BoardAccessError);
+    }
+    expect(() => lib.holdTask(b, SYSTEM, "t1", "t2", "x")).toThrow(/does not depend/);
+    lib.postTask(b, PLANNER, { task_description: "Docs", depends_on: ["t1"] });
+    expect(() => lib.holdTask(b, SYSTEM, "t4", "t1", "x")).toThrow(/only a task that started/);
+  });
+
+  it("sets a finished task back to pending, unreviewed, the attempt counted as a hold, and says why on the board", () => {
+    const b = chain();
+    // The suite gate sends t1 back; t2, built on it, is held.
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "The suite is red.");
+    const held = lib.holdTask(b, SYSTEM, "t2", "t1", "rejected by the suite: test_api failed");
+    expect(held).toMatchObject({ status: "pending", assigned_to: null, review: null, attempts: 1, holds: 1 });
+    expect(held.hold).toMatchObject({ dependency: "t1", was: "complete", reason: "rejected by the suite: test_api failed" });
+    expect(lib.countedAttempts(held)).toBe(0);
+    const entry = b.log[b.log.length - 1];
+    expect(entry.type).toBe("hold");
+    expect(entry.message).toMatch(/^Task t2 held: its dependency t1 was reopened \(rejected by the suite.*\)\. Its result is set aside; it starts again on the new merged state once t1 is accepted\.$/);
+    // Not offered until t1 is accepted again; t1 itself is.
+    expect(lib.readyTasks(b).map((t) => t.task_id)).toEqual(["t1"]);
+    expect(lib.waitingOn(b, held)).toEqual(["t1"]);
+  });
+
+  it("sets a running task back too, and the next assignment clears the hold", () => {
+    const b = chain();
+    lib.holdTask(b, SYSTEM, "t3", "t2", "held");
+    expect(b.tasks[2]).toMatchObject({ status: "pending", holds: 1, hold: { was: "in_progress" } });
+    expect(b.log[b.log.length - 1].message).toContain("Its worker was stopped and its work set aside");
+    lib.assignTask(b, SYSTEM, "t3", "run-dddddddd");
+    expect(b.tasks[2]).toMatchObject({ hold: null, attempts: 2, holds: 1 });
+  });
+
+  it("never spends a task's two tries on holds: rejected after a hold, it is offered again", () => {
+    const b = chain();
+    lib.holdTask(b, SYSTEM, "t2", "t1", "reopened");
+    lib.assignTask(b, SYSTEM, "t2", "run-eeeeeeee");
+    lib.updateStatus(b, worker("run-eeeeeeee"), "t2", "in_progress");
+    lib.updateStatus(b, worker("run-eeeeeeee"), "t2", "complete");
+    lib.reviewTask(b, REVIEWER, "t2", "rejected", "Wrong field.");
+    // attempts 2, one of them a hold: one counted try, so one more is offered.
+    expect(b.tasks[1]).toMatchObject({ status: "pending", attempts: 2, holds: 1 });
+  });
+
+  it("lists the started dependents of a task and survives a round trip through the file", () => {
+    const b = chain();
+    expect(lib.startedDependents(b, "t1").map((t) => t.task_id)).toEqual(["t2"]);
+    expect(lib.startedDependents(b, "t2").map((t) => t.task_id)).toEqual(["t3"]);
+    lib.holdTask(b, SYSTEM, "t2", "t1", "reopened");
+    lib.saveBoard(b);
+    const back = lib.loadBoard(b.id)!;
+    expect(back.tasks[1]).toMatchObject({ holds: 1, hold: { dependency: "t1", was: "complete", reason: "reopened" } });
+    expect(back.tasks[0]).toMatchObject({ holds: 0, hold: null });
   });
 });
 
@@ -394,7 +545,7 @@ describe("teamMetrics", () => {
     ];
     const task = (id: string, extra: Partial<import("@/lib/coding-team-board").TeamTask>) => ({
       task_id: id, task_description: id, assigned_to: null, status: "pending" as const, result: null, depends_on: [], files_hint: [], review: null,
-      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, created_at: 1, updated_at: 1, ...extra,
+      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, ciReoffers: 0, budgetReoffers: 0, created_at: 1, updated_at: 1, ...extra,
     });
     b.tasks = [
       task("t1", { status: "complete", attempts: 1, review: { verdict: "accepted", notes: "", at: 1 } }),
@@ -431,6 +582,17 @@ describe("teamMetrics", () => {
       tasksAcceptedFirstTry: 2,
       tasksRejected: 2,
       tokensUsed: 12_000,
+      tokensByRole: { planner: 1_200, worker: 9_000, reviewer: 1_500, lead: 300 },
+      // Its runs name no account (a board from before the field): on none.
+      tokensByProvider: { "clawbox-ai": 0, anthropic: 0, openai: 0 },
+      // …and no breakdown either: in tokensUsed, in no kind.
+      tokenBreakdown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      tokenBreakdownByRole: {
+        planner: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+        worker: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+        reviewer: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+        lead: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      },
       wallMs: 60_000,
       messagesSent: 5,
       messagesToLead: 1,
@@ -830,5 +992,170 @@ describe("ownHarnessStateDenial", () => {
     expect(lib.ownHarnessStateDenial(`Read: ${MINE_WT}/sess-own.jsonl`, { ...OWN, sessionId: null })).toBe(false);
     // Another run's corner is not this one's.
     expect(lib.ownHarnessStateDenial(`Read: ${MINE}/memory/MEMORY.md`, { ...OWN, folders: ["/home/clawbox/Projects/other"] })).toBe(false);
+  });
+});
+
+describe("the team's pull request on the board", () => {
+  function accepted() {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "complete");
+    lib.reviewTask(b, REVIEWER, "t1", "accepted", "");
+    return b;
+  }
+  const PR = { number: 41, url: "https://github.com/o/r/pull/41", branch: "clawbox/team-x", base: "main", phase: "checks" as const, checks: { total: 2, passed: 1, failed: 0, pending: 1 }, merge: true, ciRounds: 0, failure: null, detail: null, openedAt: 1, updatedAt: 1 };
+
+  it("is recorded by the system alone, and survives a round trip through the file", () => {
+    const b = accepted();
+    expect(() => lib.recordTeamPr(b, REVIEWER, PR, "x")).toThrow(lib.BoardAccessError);
+    lib.recordTeamPr(b, SYSTEM, PR, "Opened pull request #41.");
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "pr", message: "Opened pull request #41.", payload: { number: 41, phase: "checks" } });
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.pr).toMatchObject({ number: 41, phase: "checks", merge: true, checks: { pending: 1 } });
+  });
+
+  it("re-offers a finished task for a red CI — the system's, with the failure as its notes, never against its two tries", () => {
+    const b = accepted();
+    expect(() => lib.reopenForCi(b, REVIEWER, "t1", "CI failed")).toThrow(lib.BoardAccessError);
+    const t = lib.reopenForCi(b, SYSTEM, "t1", "CI failed on pull request #41: test.");
+    expect(t).toMatchObject({ status: "pending", ciReoffers: 1, rejections: 1, review: { verdict: "rejected", notes: "CI failed on pull request #41: test." } });
+    expect(lib.countedAttempts(t)).toBe(0);
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "ci", actor: { kind: "system" }, task_id: "t1" });
+    expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
+  });
+
+  it("re-offers a task whose worker the team stopped itself (held past its budget) — the system's, the why as its notes, never against its two tries", () => {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    expect(() => lib.reopenAfterStop(b, SYSTEM, "t1", "paused")).toThrow(/only a task at work/);
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    expect(() => lib.reopenAfterStop(b, REVIEWER, "t1", "paused")).toThrow(lib.BoardAccessError);
+    const t = lib.reopenAfterStop(b, SYSTEM, "t1", "The previous worker (run-aaaaaaaa) was paused for over 60 minutes and nobody resumed it, so the team stopped it.");
+    expect(t).toMatchObject({ status: "pending", assigned_to: null, budgetReoffers: 1, rejections: 0, review: { verdict: "rejected", notes: expect.stringMatching(/paused for over 60 minutes/) } });
+    expect(lib.countedAttempts(t)).toBe(0);
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "budget", actor: { kind: "system" }, task_id: "t1", message: expect.stringMatching(/^Task t1 re-offered after the team stopped its worker: /) });
+    // Round trip: the count survives the file, and a board from before it reads as none.
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.tasks[0].budgetReoffers).toBe(1);
+  });
+});
+
+/** The team's asked-for effort (2026-10-30): kept on the board, re-read on load, dropped when it is not a level the app offers. */
+describe("the board's effort", () => {
+  it("is absent unless the team was asked for one, and survives a save and a load", () => {
+    expect(board()).not.toHaveProperty("effort");
+    const b = lib.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/inv", source: "owner", effort: "ultracode" }, OWNER);
+    expect(b.effort).toBe("ultracode");
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)?.effort).toBe("ultracode");
+    // A null is "none", not a level.
+    expect(lib.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/inv", source: "owner", effort: null }, OWNER)).not.toHaveProperty("effort");
+  });
+
+  it("drops a level the app does not offer when a file carries one", () => {
+    const b = board();
+    lib.saveBoard(b);
+    const file = path.join(root, "data", "coding-team", `${b.id}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    raw.effort = "turbo";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)).not.toHaveProperty("effort");
+    raw.effort = "max";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)?.effort).toBe("max");
+  });
+});
+
+/** A planner that could not read the project said so, and the team must not take its plan in silence. */
+describe("blindPlanReason", () => {
+  const MAP = { files: ["src/app.ts — the entry"], entryPoints: ["src/app.ts"], testCommands: ["npm test"], gotchas: [] };
+  const PLAN = JSON.stringify({ tasks: [{ task_description: "Inspect src/app.ts and fix the bug the logs could not read", files_hint: ["src/app.ts"] }] });
+
+  it("names a repo map whose entries say the source was not inspected, whatever the case", () => {
+    const map = { ...MAP, files: ["src/app.ts — Source NOT inspected", "src/b.ts — source not inspected"] };
+    expect(lib.blindPlanReason(PLAN, map, null)).toBe('its repo map says "Source NOT inspected" (2 of 4 entries)');
+  });
+
+  it("reads the shape's rationale and the prose around the JSON", () => {
+    const shape = { parallelism: 2, review: "each" as const, rationale: "Two parts; the tools were unavailable, so files are guessed" };
+    expect(lib.blindPlanReason(PLAN, MAP, shape)).toBe('its shape\'s rationale says "tools were unavailable"');
+    expect(lib.blindPlanReason(`I could not read the folder, so this is a guess.\n\`\`\`json\n${PLAN}\n\`\`\``, MAP, null)).toBe('its answer says "could not read"');
+    expect(lib.blindPlanReason(`${PLAN}\nNo source was read.`, MAP, null)).toBe('its answer says "No source was read"');
+    // A quote in the prose before the plan does not hide the plan's own bracket.
+    expect(lib.blindPlanReason(`The "plan": ${PLAN}`, MAP, null)).toBeNull();
+  });
+
+  it("does not read the tasks: a task may well ask its worker to inspect something", () => {
+    expect(lib.blindPlanReason(PLAN, MAP, { parallelism: 1, review: "each", rationale: "One file." })).toBeNull();
+    expect(lib.blindPlanReason(PLAN, null, null)).toBeNull();
+    expect(lib.blindPlanReason(null, null, null)).toBeNull();
+  });
+
+  it("says every place at once", () => {
+    const map = { ...MAP, gotchas: ["unable to read the tests"] };
+    expect(lib.blindPlanReason(`Note: source not inspected.\n${PLAN}`, map, null)).toBe('its repo map says "unable to read" (1 of 4 entries); its answer says "source not inspected"');
+  });
+});
+
+/** A task naming every file the others own makes every task overlap on its own. */
+describe("catch-all tasks and the overlap advice", () => {
+  const post = (b: ReturnType<typeof board>, ...tasks: Array<{ hint: string[]; deps?: string[] }>) => {
+    for (const t of tasks) lib.postTask(b, PLANNER, { task_description: `Touch ${t.hint.join(", ") || "nothing"}`, files_hint: t.hint, depends_on: t.deps ?? [] });
+  };
+
+  it("finds the task whose hint covers every hint of every other hinted task — a folder covering the files in it", () => {
+    const b = board();
+    post(b, { hint: ["src/a.ts"] }, { hint: ["./src/b.ts", "docs/b.md"] }, { hint: [] }, { hint: ["src/", "docs/b.md"], deps: ["t1", "t2"] });
+    expect(lib.catchAllTasks(b.tasks)).toEqual(["t4"]);
+    // On the advice, beside the fields it always had.
+    expect(lib.teamAdvice(b)).toEqual({ reason: "overlap", overlap: 100, catchAll: ["t4"] });
+  });
+
+  it("needs two other hinted tasks, and a hint that really covers theirs", () => {
+    const two = board();
+    post(two, { hint: ["src/a.ts"] }, { hint: ["src/a.ts", "src/b.ts"] });
+    expect(lib.catchAllTasks(two.tasks)).toEqual([]);
+    expect(lib.teamAdvice(two)).toEqual({ reason: "overlap", overlap: 67 });
+    // A file inside a folder another task names does not cover that folder.
+    const narrow = board();
+    post(narrow, { hint: ["src/"] }, { hint: ["docs/"] }, { hint: ["src/a.ts", "docs/a.md"] });
+    expect(lib.catchAllTasks(narrow.tasks)).toEqual([]);
+  });
+
+  it("leaves out an integration step — it waits on every other task, directly or through one — when the rest splits", () => {
+    const b = board();
+    post(b, { hint: ["src/a.ts"] }, { hint: ["src/b.ts"], deps: ["t1"] }, { hint: ["src/a.ts", "src/b.ts"], deps: ["t2"] });
+    expect(lib.catchAllLeftOut(b, ["t3"])).toEqual({ overlapWithout: 0, runsLast: true, leftOut: true });
+  });
+
+  it("keeps a catch-all task in the measure when it does not wait for the others, or the others overlap anyway", () => {
+    const early = board();
+    post(early, { hint: ["src/a.ts"] }, { hint: ["src/b.ts"] }, { hint: ["src/a.ts", "src/b.ts"], deps: ["t1"] });
+    expect(lib.catchAllLeftOut(early, ["t3"])).toEqual({ overlapWithout: 0, runsLast: false, leftOut: false });
+    const tangled = board();
+    post(tangled, { hint: ["src/a.ts"] }, { hint: ["src/a.ts"] }, { hint: ["src/a.ts"], deps: ["t1", "t2"] });
+    expect(lib.catchAllLeftOut(tangled, ["t1", "t2", "t3"]).leftOut).toBe(false);
+    expect(lib.catchAllLeftOut(tangled, ["t3"])).toEqual({ overlapWithout: 100, runsLast: true, leftOut: false });
+  });
+});
+
+describe("closeRejected: a rejection with no attempt left", () => {
+  it("closes a task its review just rejected, for good — the system's alone", () => {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Write index.html", files_hint: ["index.html"] });
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "complete");
+    expect(() => lib.closeRejected(b, SYSTEM, "t1")).toThrow(/only a task its review rejected/);
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "Deliverable missing: index.html (missing)");
+    // A first rejection alone would wait for another attempt.
+    expect(b.tasks[0].status).toBe("pending");
+    expect(() => lib.closeRejected(b, REVIEWER, "t1")).toThrow(lib.BoardAccessError);
+    expect(lib.closeRejected(b, SYSTEM, "t1")).toMatchObject({ status: "rejected", assigned_to: null, review: { verdict: "rejected" } });
+    expect(lib.isExhausted(b)).toBe(true);
+    expect(lib.allComplete(b)).toBe(false);
   });
 });

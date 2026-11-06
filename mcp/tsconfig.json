@@ -20,6 +20,8 @@
     "../src/lib/hermes-reasoning.ts",
     "../src/lib/local-model-profile.ts",
     "../src/lib/hermes-providers.ts",
+    "../src/lib/prime-radiant/schema.ts",
+    "../src/lib/prime-radiant/claims.ts",
     "../src/lib/task-title.ts"
   ],
   "exclude": []

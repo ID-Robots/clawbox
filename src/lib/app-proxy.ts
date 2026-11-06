@@ -42,6 +42,8 @@
  * are let through by the middleware WITHOUT a cookie for that reason (a
  * document navigation still needs one), which exposes the app's routes to
  * whoever has the address — the reason the listener check above exists.
+ * A page the document navigates to ITSELF arrives without the cookie too;
+ * the desktop opens it again with its own (src/lib/app-window.ts).
  *
  * THE BASE PATH
  *
@@ -57,6 +59,7 @@ import { runChild } from "@/lib/child-run";
 import { APP_ID_RE, projectPath, webappPath, writeWebappIndex } from "@/lib/code-projects";
 import { get as configGet } from "@/lib/config-store";
 import { isInside } from "@/lib/file-guard";
+import { PROJECT_FOLDER_CONFIG_KEY, projectFolderFrom } from "@/lib/project-folder";
 import { appProxyPath, type ClawboxManifest, isProxyablePort } from "@/lib/clawbox-manifest";
 import { pushPendingAction } from "@/lib/pending-actions";
 import { registerWebappInPreferences } from "@/lib/webapp-registry";
@@ -84,9 +87,25 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
  * bytes the app hands to everyone who opens it — and they carry no
  * per-request data. An app's own JSON, HTML or plain-text responses get no
  * CORS header and stay unreadable to another origin, which is where a notes
- * app's notes live. An app that wants to call its own API from inside the
- * sandbox needs a capability it can prove, not a hole opened for every page
- * on the web by accident.
+ * app's notes live.
+ *
+ * The one exception is the app's OWN API, `/apps/<id>/api/…`.
+ * Every app with a server calls it from its own document, and under the
+ * sandbox that document's fetch is a CORS request the app's server never
+ * answers — so every such app was a page that loads and then does nothing
+ * ("blocked by CORS policy" in a console nobody reads). For that tree, and
+ * that tree only, the proxy answers the opaque origin for any content type,
+ * still without credentials. What that costs: a sandboxed frame some other
+ * page puts on screen can read the API of an app on this box if it can
+ * reach the box at all — which, for a box on a LAN, the browser's local
+ * network access rules are what stand in the way of. A simple write (a
+ * form-encoded or plain-text POST) was reachable that way before this, since
+ * it needs no CORS; what is new is the read, and — through the preflight the
+ * proxy answers for this tree — the writes a form cannot send: a JSON body,
+ * PUT, PATCH and DELETE. The listener check above keeps all of it to the
+ * app's own process. The App Router's own fetches are the other exception —
+ * on every path, which is wider than this tree: see NEXT_ROUTER_REQUEST_HEADERS
+ * for what that opens and why it is taken.
  */
 const CORS_READABLE_TYPES = [
   "text/css",
@@ -117,14 +136,113 @@ export function appProxyAllowOrigin(
   requestOrigin: string | null,
   upstreamAllowOrigin: string | null,
   contentType: string | null,
+  /** Is this the app's own `/api` tree (see isAppApiPath) or an App Router fetch (isNextRouterRequest)? Answered whatever its type. */
+  anyType = false,
 ): string | null {
   if (upstreamAllowOrigin) return null;
   if (requestOrigin !== "null") return null;
+  if (anyType) return "null";
   const type = (contentType ?? "").split(";")[0].trim().toLowerCase();
   if (!type) return null;
   return CORS_READABLE_TYPES.some((allowed) => (allowed.endsWith("/") || allowed.endsWith("-") ? type.startsWith(allowed) : type === allowed))
     ? "null"
     : null;
+}
+
+/** Is `rest` (the path below `/apps/<id>`) the app's own API tree? */
+export function isAppApiPath(rest: string): boolean {
+  const lower = rest.toLowerCase();
+  return lower === "/api" || lower.startsWith("/api/");
+}
+
+/** The headers of an API answer a sandboxed document may read: what a media player needs for range requests, and what a paged list needs. */
+export const APP_API_EXPOSED_HEADERS = "Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, Location, Link, X-Total-Count";
+
+/**
+ * The app's own `Access-Control-Expose-Headers` with APP_API_EXPOSED_HEADERS
+ * added: its entries kept, ours appended where missing (names compare
+ * case-insensitively), a `*` left as it is since it already exposes them all.
+ */
+export function mergeExposedHeaders(existing: string | null): string {
+  const have = (existing ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  if (have.includes("*")) return have.join(", ");
+  const seen = new Set(have.map((h) => h.toLowerCase()));
+  for (const h of APP_API_EXPOSED_HEADERS.split(",").map((x) => x.trim())) {
+    if (!seen.has(h.toLowerCase())) have.push(h);
+  }
+  return have.join(", ");
+}
+/** The methods and headers a preflight for the app's API is answered with. */
+export const APP_API_PREFLIGHT_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
+export const APP_API_PREFLIGHT_MAX_AGE_S = 600;
+
+/**
+ * The request headers only Next.js's App Router sends: `RSC` on the fetch
+ * that IS a client-side navigation (and its prefetches), `Next-Action` on a
+ * server action. They are not CORS-safelisted, so from the sandboxed document
+ * every such fetch preflights — and a preflight for a page path went to the
+ * app, which never answers one. The fetch failed, Next fell back to a full
+ * page load, and that navigation, made by the frame itself, carried no
+ * cookie: clicking any link in a Next app's window showed the box's login.
+ *
+ * So the proxy answers the App Router the way it answers the app's `/api`
+ * tree: the preflight, and `null` on the answer, without credentials — but
+ * on any path, because a navigation can go to any page. That is WIDER than
+ * the API grant (see appProxyAllowOrigin): a page's RSC payload carries what
+ * its HTML carries, and any opaque origin that can reach the box — another
+ * app's window, or a sandboxed frame some other site puts on screen — can
+ * send these headers, read that payload and call a server action. Taken
+ * anyway, because none of it is new to anyone but a browser: apps on the box
+ * already reach each other's ports directly (one user runs them all), and a
+ * request without a page's Accept header has always passed the middleware
+ * without a session (step 2b), so through the tunnel the same payload is one
+ * curl away. Without the grant a Next app's every <Link> is a full page load
+ * and no server action can run in the window. A plain page load sends none
+ * of these headers and its HTML stays unreadable as before.
+ */
+export const NEXT_ROUTER_REQUEST_HEADERS = ["rsc", "next-action", "next-router-state-tree"] as const;
+/** What a preflight for the App Router is answered with: navigations and prefetches are GETs, server actions POSTs. */
+export const NEXT_ROUTER_PREFLIGHT_METHODS = "GET, HEAD, POST, OPTIONS";
+
+/** Is this one of the App Router's own fetches (a navigation, a prefetch, a server action)? */
+export function isNextRouterRequest(headers: Headers): boolean {
+  return NEXT_ROUTER_REQUEST_HEADERS.some((name) => headers.has(name));
+}
+
+/** Does this preflight ask for the App Router's headers? */
+export function isNextRouterPreflight(headers: Headers): boolean {
+  const asked = (headers.get("access-control-request-headers") ?? "").split(",").map((h) => h.trim().toLowerCase());
+  return NEXT_ROUTER_REQUEST_HEADERS.some((name) => asked.includes(name));
+}
+
+/**
+ * The `Access-Control-Expose-Headers` an App Router answer goes out with: the
+ * app's own entries kept and `*` added. The router reads its own headers off
+ * the answer (`Vary`, `x-nextjs-postponed`, `x-action-redirect`, `x-action-
+ * revalidated`, …) and a CORS answer exposes none of them by default. `*` is
+ * honoured because these requests never carry credentials.
+ */
+export function exposeAllHeaders(existing: string | null): string {
+  const have = (existing ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  if (!have.includes("*")) have.push("*");
+  return have.join(", ");
+}
+
+/**
+ * The `Origin` a request reaches the app with.
+ *
+ * Next.js refuses a server action whose Origin is not the host it was
+ * forwarded for — its CSRF guard — and the sandbox makes every action the
+ * app's own document sends say `Origin: null`, so no server action could run
+ * in the window at all ("Invalid Server Actions request"). What that guard
+ * protects is the credentials a browser attaches by itself, and this hop
+ * carries none: the proxy strips every cookie before the app sees a request.
+ * So on a server action (`Next-Action`) `null` becomes the origin the
+ * browser is on; every other request keeps the Origin it came with.
+ */
+export function appUpstreamOrigin(requestOrigin: string | null, headers: Headers, forwardedHost: string, protocol: string): string | null {
+  if (requestOrigin !== "null" || !headers.has("next-action")) return requestOrigin;
+  return `${protocol}://${forwardedHost}`;
 }
 
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
@@ -171,6 +289,8 @@ interface StoredMeta {
   port?: unknown;
   stripBasePath?: unknown;
   directory?: unknown;
+  /** The owner's opt-out from the boot pass; written by hand, kept on rewrite. */
+  autoStart?: unknown;
 }
 
 async function readMeta(id: string): Promise<StoredMeta | null> {
@@ -184,25 +304,23 @@ async function readMeta(id: string): Promise<StoredMeta | null> {
 }
 
 /**
- * The owner's project folder, read straight from the config store: the same
- * key coding-agent.ts's CODING_AGENT_DIR_CONFIG_KEY names (pinned by the
- * test), read here rather than imported because coding-agent.ts imports
- * THIS module for the settle-time registration.
+ * The owner's project folder's config key: the same key coding-agent.ts's
+ * CODING_AGENT_DIR_CONFIG_KEY names (pinned by the test), from
+ * src/lib/project-folder.ts rather than coding-agent.ts, which imports THIS
+ * module for the settle-time registration.
  */
-export const PROJECT_FOLDER_CONFIG_KEY = "coding_agent_default_directory";
+export { PROJECT_FOLDER_CONFIG_KEY };
 
 /**
  * The folder an app id names when its registration predates the `directory`
- * field: `<project folder>/<id>`, or the code project of that id. Null when
- * neither is a folder.
+ * field: `<project folder>/<id>` — the owner's folder, else the ~/Projects
+ * default, as every reader resolves it — or the code project of that id.
+ * Null when neither is a folder.
  */
 export async function projectFolderFor(id: string): Promise<string | null> {
   if (!APP_ID_RE.test(id)) return null;
-  const root = await configGet(PROJECT_FOLDER_CONFIG_KEY);
-  const candidates = [
-    ...(typeof root === "string" && path.isAbsolute(root) ? [path.join(root, id)] : []),
-    projectPath(id),
-  ];
+  const root = projectFolderFrom(await configGet(PROJECT_FOLDER_CONFIG_KEY));
+  const candidates = [path.join(root, id), projectPath(id)];
   for (const dir of candidates) {
     const stat = await fs.promises.stat(dir).catch(() => null);
     if (stat?.isDirectory()) return dir;
@@ -225,36 +343,82 @@ export function _resetListenerCacheForTests(): void {
  * own processes, which is what a run's server is — and nothing for another
  * user's, which is how the box's own port 80 and a root daemon are refused.
  */
-export async function listenerOwnedBy(port: number, directory: string): Promise<ListenerVerdict> {
+export async function listenerOwnedBy(port: number, directory: string, opts: { fresh?: boolean } = {}): Promise<ListenerVerdict> {
   const key = `${port}:${directory}`;
   const cached = verdicts.get(key);
   const now = Date.now();
-  if (cached && now - cached.at < (cached.verdict === "owned" ? LISTENER_CHECK_TTL_MS : LISTENER_REFUSAL_TTL_MS)) return cached.verdict;
+  // `fresh` is for the one caller that has just started the server itself and
+  // is waiting for it (app-server-start.ts): a three-second-old "nothing is
+  // listening" is the answer it is trying to get past.
+  if (!opts.fresh && cached && now - cached.at < (cached.verdict === "owned" ? LISTENER_CHECK_TTL_MS : LISTENER_REFUSAL_TTL_MS)) return cached.verdict;
   const verdict = await checkListener(port, directory);
   verdicts.set(key, { verdict, at: now });
   return verdict;
 }
 
-async function checkListener(port: number, directory: string): Promise<ListenerVerdict> {
-  if (!isProxyablePort(port)) return "not_owned";
+/**
+ * Forget what was learned about `port`, for every folder: its server has
+ * just been stopped, and a cached "owned" would otherwise vouch for the port
+ * for another 30 seconds — long enough for an uninstall and an install again
+ * to register the app over a server that is gone.
+ */
+export function forgetListenerVerdict(port: number): void {
+  for (const key of verdicts.keys()) {
+    if (key.startsWith(`${port}:`)) verdicts.delete(key);
+  }
+}
+
+/** Who listens on a port where 127.0.0.1 reaches it. */
+export interface PortListeners {
+  listening: boolean;
+  /** The pids `ss` names: this user's listeners. Another user's listens with none. */
+  pids: number[];
+}
+
+/** The listeners on `port`, from `ss -ltnp`; null when the listing failed. */
+export async function portListeners(port: number): Promise<PortListeners | null> {
   const r = await runChild("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], {
     timeoutMs: 5_000,
     env: { PATH: process.env.PATH ?? "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" },
   });
-  if (r.code !== 0) return "unverifiable";
-  const lines = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return "not_listening";
+  if (r.code !== 0) return null;
   // Only a row the proxy can actually reach at 127.0.0.1 vouches for the
   // port: a project's listener bound to some other local address must not
   // authorise a different service answering on loopback.
-  const reachable = lines.filter((l) => isLoopbackListenRow(l));
-  if (reachable.length === 0) return "not_listening";
+  const reachable = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l && isLoopbackListenRow(l));
   const pids = [...new Set([...reachable.join("\n").matchAll(/pid=(\d+)/g)].map((m) => Number(m[1])))];
-  if (pids.length === 0) return "not_owned";
+  return { listening: reachable.length > 0, pids };
+}
+
+const DELETED_SUFFIX = " (deleted)";
+
+/**
+ * A process's working directory, and whether that folder has been removed
+ * since. The kernel shows a removed one as `<path> (deleted)` — and that path,
+ * suffix stripped, may well be inside a folder made again under the same name
+ * by now, which is exactly the folder it is NOT running from. The suffix alone
+ * proves nothing (a folder may be called that); a link count of 0 does. Null
+ * when it cannot be read: another user's process, or one that has gone.
+ */
+export async function processCwd(pid: number): Promise<{ path: string; deleted: boolean } | null> {
+  const link = await fs.promises.readlink(`/proc/${pid}/cwd`).catch(() => null);
+  if (!link) return null;
+  if (!link.endsWith(DELETED_SUFFIX)) return { path: link, deleted: false };
+  const stat = await fs.promises.stat(`/proc/${pid}/cwd`).catch(() => null);
+  if (!stat) return null;
+  return stat.nlink === 0 ? { path: link.slice(0, -DELETED_SUFFIX.length), deleted: true } : { path: link, deleted: false };
+}
+
+async function checkListener(port: number, directory: string): Promise<ListenerVerdict> {
+  if (!isProxyablePort(port)) return "not_owned";
+  const found = await portListeners(port);
+  if (!found) return "unverifiable";
+  if (!found.listening) return "not_listening";
+  if (found.pids.length === 0) return "not_owned";
   const real = await fs.promises.realpath(directory).catch(() => directory);
-  for (const pid of pids) {
-    const cwd = await fs.promises.readlink(`/proc/${pid}/cwd`).catch(() => null);
-    if (cwd && isInside(cwd, real)) return "owned";
+  for (const pid of found.pids) {
+    const cwd = await processCwd(pid);
+    if (cwd && !cwd.deleted && isInside(cwd.path, real)) return "owned";
   }
   return "not_owned";
 }
@@ -293,6 +457,20 @@ export async function resolveAppProxyTarget(id: string): Promise<AppProxyResolut
   return { ok: true, target: { id, port: meta.port, stripBasePath: meta.stripBasePath === true, directory } };
 }
 
+/**
+ * The port and the folder an app's registration names, when it is a server
+ * app; null for a one-file webapp, an unregistered id, or a meta.json that
+ * cannot be read. The folder is null when the registration predates the
+ * `directory` field and no folder answers to the id any more.
+ */
+export async function registeredServer(id: string): Promise<{ port: number; directory: string | null } | null> {
+  if (!APP_ID_RE.test(id)) return null;
+  const meta = await readMeta(id);
+  if (!meta || !isProxyablePort(meta.port)) return null;
+  const directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : await projectFolderFor(id);
+  return { port: meta.port, directory };
+}
+
 /** The one-file stub the webapp route still serves for the id: it sends the frame to the proxied path. */
 export function serverAppStubHtml(name: string, id: string): string {
   const safeName = name.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c] as string));
@@ -310,7 +488,10 @@ export type RegisterOutcome = { ok: true } | { ok: false; reason: Exclude<Listen
 export async function registerServerApp(input: { id: string; directory: string; manifest: ClawboxManifest }): Promise<RegisterOutcome> {
   const { id, directory, manifest } = input;
   if (!APP_ID_RE.test(id) || !manifest.port) return { ok: false, reason: "failed", detail: "The manifest names no port." };
-  const verdict = await listenerOwnedBy(manifest.port, directory);
+  // Asked afresh: a registration is rare, and a verdict cached for the proxy
+  // can be up to 30 seconds old — older than the server it vouches for, when
+  // the app was removed and installed again in between.
+  const verdict = await listenerOwnedBy(manifest.port, directory, { fresh: true });
   if (verdict !== "owned") return { ok: false, reason: verdict, detail: listenerRefusal(verdict, manifest.port) };
   try {
     const existing = await readMeta(id);
@@ -324,6 +505,15 @@ export async function registerServerApp(input: { id: string; directory: string; 
         port: manifest.port,
         directory: path.resolve(directory),
         ...(manifest.stripBasePath ? { stripBasePath: true } : {}),
+        // Kept so the box can bring the app back after a reboot without
+        // re-reading a clawbox.json the project may have deleted since — the
+        // manifest ran, so its command is the one that works here. See
+        // `restartServerAppsAtBoot` in app-server-start.ts.
+        ...(manifest.start ? { start: manifest.start } : {}),
+        // The owner's opt-out survives a re-registration: a start that runs
+        // again rewrites this record, and dropping the flag would quietly put
+        // the app back on the boot pass for ever.
+        ...(existing?.autoStart === false ? { autoStart: false } : {}),
       }),
       "utf-8",
     );

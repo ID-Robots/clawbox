@@ -43,6 +43,15 @@ export const MAX_TAB_COMMAND = 2000;
 const WINDOW_ID_RE = /^[A-Za-z0-9_.:-]{1,120}$/;
 /** App ids: built-ins and `installed-<slug>`. */
 const APP_ID_RE = /^[A-Za-z0-9_.:-]{1,100}$/;
+/**
+ * Built-in apps this build no longer has. A window saved while one was open is
+ * dropped on the way in, like the setup wizard's: never drawn, never counted
+ * as open, never saved again. `projects` was the Files app opened on the
+ * owner's pinned folders (removed by TASK-1556); the folders themselves stay
+ * where they are and Files still opens them. An installed app's id always
+ * carries its `installed-` prefix, so no store app can be caught by this.
+ */
+export const RETIRED_APP_IDS: ReadonlySet<string> = new Set(["projects"]);
 const META_KEY_RE = /^[A-Za-z0-9_]{1,32}$/;
 const MAX_META_ENTRIES = 12;
 const MAX_META_VALUE = 4096;
@@ -202,7 +211,7 @@ function cleanWindow(value: unknown): SavedWindow | null {
   if (!isRecord(value)) return null;
   const { id, appId } = value;
   if (typeof id !== "string" || !WINDOW_ID_RE.test(id)) return null;
-  if (typeof appId !== "string" || !APP_ID_RE.test(appId) || appId === "setup") return null;
+  if (typeof appId !== "string" || !APP_ID_RE.test(appId) || appId === "setup" || RETIRED_APP_IDS.has(appId)) return null;
   const win: SavedWindow = { id, appId, minimized: value.minimized === true };
   const x = finite(value.x, -MAX_COORD, MAX_COORD);
   const y = finite(value.y, -MAX_COORD, MAX_COORD);

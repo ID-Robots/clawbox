@@ -125,6 +125,44 @@ describe("staging", () => {
     expect(fs.existsSync(path.join(lib.runInputsDir(RUN_ID), "id_ed25519"))).toBe(false);
   });
 
+  it("stages the owner's own files: a document in the home and a mockup in the assistant's workspace", async () => {
+    const docs = path.join(base, "Documents");
+    fs.mkdirSync(docs, { recursive: true });
+    const pdf = path.join(docs, "brief.pdf");
+    fs.writeFileSync(pdf, "%PDF");
+    const ws = path.join(base, ".openclaw", "workspace", "tmp");
+    fs.mkdirSync(ws, { recursive: true });
+    const mock = path.join(ws, "mockup.html");
+    fs.writeFileSync(mock, "<html/>");
+    const result = await lib.stageRunInputs(RUN_ID, [pdf, mock]);
+    expect(result.refused).toEqual([]);
+    expect(result.staged.map((f) => f.name)).toEqual(["brief.pdf", "mockup.html"]);
+  });
+
+  it("still refuses hidden files, secret-named files and the box's own state among the owner's files", async () => {
+    const proj = path.join(base, "Projects", "site");
+    fs.mkdirSync(path.join(proj, ".git"), { recursive: true });
+    const env = path.join(proj, ".env");
+    fs.writeFileSync(env, "KEY=1");
+    const gitCfg = path.join(proj, ".git", "config");
+    fs.writeFileSync(gitCfg, "[core]");
+    const named = path.join(proj, "credentials.json");
+    fs.writeFileSync(named, "{}");
+    const pem = path.join(proj, "server.pem");
+    fs.writeFileSync(pem, "-----");
+    const state = path.join(base, ".openclaw", "openclaw.json");
+    fs.writeFileSync(state, "{}");
+    const wsHidden = path.join(base, ".openclaw", "workspace", ".secret-notes");
+    fs.mkdirSync(path.dirname(wsHidden), { recursive: true });
+    fs.writeFileSync(wsHidden, "x");
+    const config = path.join(root, "data", "config.json");
+    fs.writeFileSync(config, "{}");
+    const all = [env, gitCfg, named, pem, state, wsHidden, config];
+    const result = await lib.stageRunInputs(RUN_ID, all);
+    expect(result.staged).toEqual([]);
+    expect(result.refused).toEqual(all.map((p) => ({ path: p, code: "outside_roots" })));
+  });
+
   it("refuses a symlink planted inside the media folder, wherever it points", async () => {
     const secret = path.join(base, ".openclaw", "openclaw.json");
     fs.writeFileSync(secret, '{"token":"claw_secret"}');

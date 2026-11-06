@@ -21,6 +21,12 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     chown: vi.fn(),
     unlink: vi.fn(),
+    // The desktop browser's launch env file (src/lib/desktop-browser-config.ts):
+    // absent unless a case configures a browser of the owner's.
+    readFile: vi.fn().mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
+    access: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    // No symlinks unless a case says so: every path resolves to itself.
+    realpath: vi.fn(async (p: unknown) => String(p)),
   },
 }));
 
@@ -160,6 +166,195 @@ describe("POST /setup-api/setup/reset", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(mockResetUpdateState).toHaveBeenCalled();
+  });
+
+  /** Every systemctl argv the route ran, in order. */
+  const systemctlCalls = () => mockExecFile.mock.calls
+    .map((call) => `${call[0]} ${(call[1] as string[]).join(" ")}`)
+    .filter((line) => line.includes("systemctl"));
+  const STOP_TIMED_OUT = Object.assign(
+    new Error("Command failed: /usr/bin/sudo /usr/bin/systemctl stop clawbox-gateway.service"),
+    { killed: true, signal: "SIGTERM", code: null },
+  );
+
+  it("erases nothing beside a gateway that is still stopping, says so, and starts it again", async () => {
+    // On an x64 bridge the stop waits for OpenClaw's own drain (up to 330 s):
+    // its 15 s client is killed and the job runs on. A wipe started beside it
+    // would race a gateway still writing its state. (On beta this test times
+    // out: the route waited the full 360 s and then wiped.)
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": {
+        stdout: "Job=91\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n",
+        stderr: "",
+      },
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    // The mocked client fails at once, so this is the 45 s wait and one poll;
+    // a longer wait does not answer in time, and the seconds it names say so.
+    await vi.advanceTimersByTimeAsync(47_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    const { error } = await res.json();
+    expect(error).toMatch(/still stopping after \d+s.*Nothing was erased.*asked to start again/);
+    expect(Number(/after (\d+)s/.exec(error)?.[1])).toBeLessThanOrEqual(47);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    expect(mockResetUpdateState).not.toHaveBeenCalled();
+    // Unmasked, then started again: an explicit stop is not one Restart=always undoes.
+    const calls = systemctlCalls();
+    const unmask = calls.indexOf("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service");
+    const restart = calls.indexOf("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+    expect(unmask).toBeGreaterThan(-1);
+    expect(restart).toBeGreaterThan(unmask);
+  });
+
+  it("treats a stop that settled with the unit still deactivating as still stopping", async () => {
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" },
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/still stopping.*Nothing was erased.*asked to start again/);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    const calls = systemctlCalls();
+    expect(calls.indexOf("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"))
+      .toBeGreaterThan(calls.indexOf("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service"));
+  });
+
+  // What a stop still under way leaves the restart: on hardware it is queued
+  // behind the running stop, so its 5 s client is killed while systemd holds
+  // it; refused outright (a start limit, a refused sudo), it comes back at once.
+  it.each<[string, Error, RegExp, RegExp | null]>([
+    [
+      "says it was asked to start again when the restart's client waits out its deadline",
+      Object.assign(new Error("Command failed: /usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"), {
+        killed: true, signal: "SIGTERM", code: null,
+      }),
+      /Nothing was erased.*asked to start again/,
+      null,
+    ],
+    [
+      "says it stays stopped when systemd refused the restart outright",
+      Object.assign(new Error("Job for clawbox-gateway.service failed: start request repeated too quickly"), { code: 1 }),
+      /Nothing was erased.*stays stopped until the device is restarted/,
+      /start again/,
+    ],
+  ])("%s", async (_what, restartAnswer, said, notSaid) => {
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" },
+      "systemctl restart clawbox-gateway.service": restartAnswer,
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    const { error } = await res.json();
+    expect(error).toMatch(said);
+    if (notSaid) expect(error).not.toMatch(notSaid);
+    expect(systemctlCalls()).toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+    expect(mockFs.rm).not.toHaveBeenCalled();
+  });
+
+  it("does not promise a restart it could not ask for", async () => {
+    // The unmask failed, so a restart would be refused as masked: the answer
+    // says the assistant stays stopped instead of that it is coming back.
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" },
+      "systemctl --runtime unmask clawbox-gateway.service": Object.assign(new Error("Command failed: unmask"), { code: 1 }),
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    const { error } = await res.json();
+    expect(error).toMatch(/Nothing was erased.*stays stopped until the device is restarted/);
+    expect(error).not.toMatch(/start again/);
+    expect(systemctlCalls()).not.toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+  });
+
+  it("erases nothing when the stop ended with the gateway still running, and leaves it running", async () => {
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=active\nSubState=running\nResult=success\n", stderr: "" },
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(20_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/did not stop.*Nothing was erased/);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    const calls = systemctlCalls();
+    expect(calls).toContain("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service");
+    expect(calls).not.toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+  });
+
+  it("asks the unit when the stop fails outright, and wipes only beside a stopped one", async () => {
+    // A stop cancelled by a restart someone else queued exits 1; the unit says
+    // whether the gateway is still there.
+    const cancelled = Object.assign(new Error("Job for clawbox-gateway.service canceled."), { code: 1 });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": cancelled,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=activating\nSubState=start-pre\nResult=success\n", stderr: "" },
+    });
+    const refused = await resetPost();
+    expect(refused.status).toBe(500);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": cancelled,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=inactive\nSubState=dead\nResult=success\n", stderr: "" },
+    });
+    const wiped = await resetPost();
+    quiet.mockRestore();
+    expect(wiped.status).toBe(200);
+  });
+
+  it("erases nothing when neither the stop nor the unit can be read", async () => {
+    // systemd answered neither: the gateway may still be running, so the
+    // destructive half does not start on a guess. A reboot is the way back.
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": Object.assign(new Error("Failed to connect to bus"), { code: 1 }),
+      "systemctl show clawbox-gateway.service": Object.assign(new Error("Failed to connect to bus"), { code: 1 }),
+    });
+    const res = await resetPost();
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/could not be confirmed stopped.*Nothing was erased/);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    expect(systemctlCalls()).not.toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
   });
 
   it("clears the session cookie in the reset response", async () => {
@@ -417,8 +612,9 @@ describe("POST /setup-api/setup/reset", () => {
     // The security-critical set: SSH keys (authorized_keys would readmit
     // the previous owner even after the password reset), codex OAuth tokens,
     // the AI-browser profile (cookies/sessions), credential-bearing dotfiles,
-    // and the HuggingFace login token.
-    for (const suffix of [".ssh", ".codex", "clawbox-browser", ".netrc", "huggingface/token"]) {
+    // the HuggingFace login token, and the pictures pasted into the Terminal
+    // (screenshots of the previous owner's screen, pruned only by a later paste).
+    for (const suffix of [".ssh", ".codex", "clawbox-browser", ".netrc", "huggingface/token", ".cache/clawbox/terminal-paste"]) {
       const call = mockFs.rm.mock.calls.find(
         ([p]) => typeof p === "string" && p.endsWith(suffix),
       );
@@ -427,12 +623,108 @@ describe("POST /setup-api/setup/reset", () => {
     }
   });
 
+  /**
+   * TASK-1480: the owner can point the Browser app at a browser profile of
+   * their own. It holds what ClawBox's own profile holds — their cookies and
+   * signed-in sessions — so a factory reset removes it as well, and the file
+   * that named it. The path came from a file the owner edits by hand, so the
+   * removal is guarded: inside the home, and a real Chromium profile only.
+   */
+  describe("a browser profile of the owner's own", () => {
+    const HOME = process.env.HOME || "/home/clawbox";
+    const configure = (profileDir: string) => {
+      mockFs.readFile.mockImplementation((async (p: unknown) => {
+        if (String(p) === process.env.CLAWBOX_BROWSER_ENV_FILE) return `CLAWBOX_BROWSER_PROFILE_DIR=${profileDir}\n`;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }) as never);
+    };
+    const removed = () => mockFs.rm.mock.calls.map(([p]) => String(p));
+
+    afterEach(() => {
+      mockFs.readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+      mockFs.access.mockRejectedValue(new Error("ENOENT"));
+      mockFs.realpath.mockImplementation((async (p: unknown) => String(p)) as never);
+    });
+
+    it("is wiped with ClawBox's own profile, and so is the file that named it", async () => {
+      configure(`${HOME}/.config/google-chrome-debug`);
+      mockFs.access.mockResolvedValue(undefined); // it has a `Local State`
+
+      await resetPost();
+
+      expect(removed()).toContain(`${HOME}/.config/google-chrome-debug`);
+      expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
+      expect(removed()).toContain(`${HOME}/.cache/clawbox/browser.env`);
+    });
+
+    it("is left alone when it is not a Chromium profile — a typo naming a whole folder", async () => {
+      configure(`${HOME}/.config`);
+      mockFs.access.mockRejectedValue(new Error("ENOENT")); // no `Local State`
+
+      await resetPost();
+
+      expect(removed()).not.toContain(`${HOME}/.config`);
+      expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
+    });
+
+    it("is left alone when a symlink in its path leads outside the home", async () => {
+      // `~/link/Profile`, lexically inside the home, with `link` pointing
+      // at another disk: fs.rm would follow it and delete the profile there.
+      configure(`${HOME}/link/Profile`);
+      mockFs.realpath.mockImplementation((async (p: unknown) =>
+        String(p) === `${HOME}/link/Profile` ? "/srv/elsewhere/Profile" : String(p)) as never);
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      expect(removed().some((p) => p.includes("Profile"))).toBe(false);
+      expect(removed().some((p) => p.includes("elsewhere"))).toBe(false);
+    });
+
+    it("is removed at its resolved location when a symlink in its path stays inside the home", async () => {
+      configure(`${HOME}/link/Profile`);
+      mockFs.realpath.mockImplementation((async (p: unknown) =>
+        String(p) === `${HOME}/link/Profile` ? `${HOME}/.config/chrome-profiles/Profile` : String(p)) as never);
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      // The directory that was checked, not the path that was written.
+      expect(removed()).toContain(`${HOME}/.config/chrome-profiles/Profile`);
+      expect(removed()).not.toContain(`${HOME}/link/Profile`);
+    });
+
+    it("is left alone when it cannot be resolved", async () => {
+      configure(`${HOME}/.config/google-chrome-debug`);
+      mockFs.realpath.mockImplementation((async (p: unknown) => {
+        if (String(p) === `${HOME}/.config/google-chrome-debug`) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return String(p);
+      }) as never);
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      expect(removed()).not.toContain(`${HOME}/.config/google-chrome-debug`);
+      expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
+    });
+
+    it("is left alone outside the home directory", async () => {
+      configure("/srv/shared-chrome");
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      expect(removed().some((p) => p.includes("shared-chrome"))).toBe(false);
+    });
+  });
+
   it("wipes user file folders but keeps the directories", async () => {
     await resetPost();
 
     // Documents/Downloads/Desktop are content-wiped via readdir+rm (the
-    // Files app expects the dirs to exist), not rm'd wholesale.
-    for (const dir of ["Documents", "Downloads", "Desktop"]) {
+    // Files app expects the dirs to exist), not rm'd wholesale — and so are
+    // ~/Projects (the coding agent's work folder) and the other XDG folders.
+    for (const dir of ["Documents", "Downloads", "Desktop", "Projects", "Music", "Pictures", "Videos", "Public", "Templates"]) {
       const call = mockFs.readdir.mock.calls.find(
         ([p]) => typeof p === "string" && p.endsWith(dir),
       );
@@ -506,6 +798,8 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   const HERMES_ENTRIES = [
     "hermes-agent",
     "bin",
+    "installs",
+    "tools",
     // Upstream's install-failure marker. It suppresses the tirith download for
     // 24 h, so a reset that kept it would leave a box that IS online unable to
     // re-fetch the scanner for another day.
@@ -528,9 +822,11 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   // future narrowing that kept `tirith` and removed its neighbour would
   // otherwise slip through.
   const HERMES_BIN_ENTRIES = ["tirith", "future-helper"];
-  // The reset preserves the agent install and the bin/ the scanner lives in.
-  // Everything else under ~/.hermes is previous-owner state and must go.
-  const KEPT_ENTRIES = ["hermes-agent", "bin"];
+  // The reset preserves the agent install — the checkout, plus (from Hermes
+  // v0.21.7) the venv in installs/ and the interpreter in tools/ — and the bin/
+  // the scanner lives in. Everything else under ~/.hermes is previous-owner
+  // state and must go.
+  const KEPT_ENTRIES = ["hermes-agent", "bin", "installs", "tools"];
   const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => !KEPT_ENTRIES.includes(e));
 
   const rmTargets = () =>
@@ -985,5 +1281,165 @@ describe("POST /setup-api/setup/reset — a non-directory where a directory belo
     } finally {
       await realFs.rm(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The owner's files outside the folders the reset used to know about.
+ *
+ * Reproduced on a device: a factory reset emptied Documents, Downloads,
+ * Desktop, ~/.openclaw and data/, but the previous owner's code in ~/Projects
+ * (the coding agent's work folder) and a loose ~/notes.txt were still there for
+ * the next owner, and so were Music, Pictures, Videos, Public and Templates.
+ *
+ * These run the real handler over a scratch home on the REAL filesystem, so
+ * what they check is what is left on disk rather than which strings reached a
+ * mocked `fs.rm`. Every path outside that home — data/, ~/.openclaw — stays
+ * mocked exactly as in the cases above.
+ */
+describe("POST /setup-api/setup/reset — ~/Projects and loose files in the home root", () => {
+  let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
+  let realFs: typeof import("fs/promises");
+  let nodePath: typeof import("path");
+  let home: string;
+
+  const at = (rel: string) => nodePath.join(home, rel);
+  const inHome = (p: unknown) => typeof p === "string" && (p === home || p.startsWith(`${home}/`));
+  const exists =(rel: string) => realFs.lstat(at(rel)).then(() => true, () => false);
+  async function plant(rel: string, content = "previous owner\n") {
+    await realFs.mkdir(nodePath.dirname(at(rel)), { recursive: true });
+    await realFs.writeFile(at(rel), content);
+  }
+
+  // The shell and session dotfiles the box itself needs.
+  const KEPT_DOTFILES = [".bashrc", ".profile", ".bash_logout", ".xsessionrc", ".sudo_as_admin_successful"];
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [] }),
+    }));
+
+    realFs = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+    nodePath = await vi.importActual<typeof import("path")>("path");
+    const os = await vi.importActual<typeof import("os")>("os");
+    home = await realFs.mkdtemp(nodePath.join(os.tmpdir(), "clawbox-reset-home-"));
+    // Read when the route module loads, which is below.
+    vi.stubEnv("HOME", home);
+    vi.stubGlobal("process", { ...process, getuid: () => 1000, getgid: () => 1000 });
+
+    mockFs.lstat.mockImplementation(((p: string) =>
+      inHome(p)
+        ? realFs.lstat(p)
+        : Promise.resolve({ isDirectory: () => true, isSymbolicLink: () => false })) as unknown as typeof fs.lstat);
+    mockFs.readdir.mockImplementation(((p: string, opts?: object) =>
+      inHome(p) ? realFs.readdir(p, opts as never) : Promise.resolve([])) as unknown as typeof fs.readdir);
+    mockFs.rm.mockImplementation(((p: string, opts?: object) =>
+      inHome(p) ? realFs.rm(p, opts) : Promise.resolve()) as unknown as typeof fs.rm);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue();
+    mockFs.chown.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue();
+    mockResetUpdateState.mockReturnValue();
+    setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+
+    session = installSessionFixture();
+    const mod = await import("@/app/setup-api/setup/reset/route");
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+    }));
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.clearAllMocks();
+    session.cleanup();
+    await realFs.rm(home, { recursive: true, force: true });
+  });
+
+  it("empties ~/Projects and the other user folders, and keeps the folders", async () => {
+    await plant("Projects/my-app/src/index.ts", "export const secret = 'previous owner';\n");
+    await plant("Projects/my-app/.git/config");
+    await plant("Projects/scratch.py");
+    for (const dir of ["Music", "Pictures", "Videos", "Public", "Templates"]) {
+      await plant(`${dir}/from-the-previous-owner`);
+    }
+
+    const res = await resetPost();
+
+    expect(res.status).toBe(200);
+    expect(await exists("Projects/my-app/src/index.ts")).toBe(false);
+    for (const dir of ["Projects", "Music", "Pictures", "Videos", "Public", "Templates"]) {
+      expect(await realFs.readdir(at(dir)), `expected ~/${dir} to be emptied`).toEqual([]);
+      expect((await realFs.lstat(at(dir))).isDirectory(), `expected ~/${dir} itself to stay`).toBe(true);
+    }
+  });
+
+  it("removes loose files in the home root, but not the box's dotfiles or any directory", async () => {
+    await plant("notes.txt");
+    // Remove-by-default: an unlisted dotfile goes too, not just visible files.
+    await plant(".some-future-token");
+    for (const dotfile of KEPT_DOTFILES) await plant(dotfile, `# ${dotfile} as flashed\n`);
+    // What the box runs on, and must come back up with.
+    const SYSTEM_FILES = [
+      "clawbox/package.json",
+      "llama.cpp/build/bin/llama-server",
+      ".npm-global/bin/openclaw",
+      ".bun/bin/bun",
+      ".local/bin/hermes",
+      ".cache/huggingface/hub/whisper.bin",
+    ];
+    for (const rel of SYSTEM_FILES) await plant(rel);
+    // A link in the home root is left as it is, and so is what it points at.
+    const elsewhere = `${home}-elsewhere`;
+    await realFs.mkdir(elsewhere);
+    await realFs.writeFile(nodePath.join(elsewhere, "keepme.txt"), "not in the home\n");
+    await realFs.symlink(elsewhere, at("linked-folder"));
+
+    try {
+      const res = await resetPost();
+
+      expect(res.status).toBe(200);
+      expect(await exists("notes.txt"), "a loose file in the home root survived the reset").toBe(false);
+      expect(await exists(".some-future-token")).toBe(false);
+      for (const dotfile of KEPT_DOTFILES) {
+        expect(await realFs.readFile(at(dotfile), "utf8"), `expected ~/${dotfile} to survive`)
+          .toBe(`# ${dotfile} as flashed\n`);
+      }
+      for (const rel of SYSTEM_FILES) {
+        expect(await exists(rel), `expected ~/${rel} to survive`).toBe(true);
+      }
+      expect((await realFs.lstat(at("linked-folder"))).isSymbolicLink()).toBe(true);
+      expect(await realFs.readdir(elsewhere)).toEqual(["keepme.txt"]);
+    } finally {
+      await realFs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a loose file it cannot remove and leaves the box reachable", async () => {
+    await plant("notes.txt");
+    mockFs.rm.mockImplementation(((p: string, opts?: object) =>
+      p === at("notes.txt")
+        ? Promise.reject(new Error("EACCES: permission denied"))
+        : inHome(p) ? realFs.rm(p, opts) : Promise.resolve()) as unknown as typeof fs.rm);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    const body = await res.json();
+    await vi.advanceTimersByTimeAsync(2_000);
+    warnSpy.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain("notes.txt");
+    const commands = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args ?? []).join(" ")}`);
+    expect(commands.some((c) => c.includes("reboot"))).toBe(false);
   });
 });

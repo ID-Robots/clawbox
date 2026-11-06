@@ -429,8 +429,84 @@ describe("the Memory search row is the embedder's own row", () => {
     expect(emb.running).toBe("on-demand");
     expect(emb.runtime).toBe("Text via Openai");
     expect(emb.params).toEqual({ model: "Text", via: "Openai" });
-    // The unit was never asked about: it is not what serves this box's search.
-    expect(calls.some(c => c.args.join(" ").includes("clawbox-embed"))).toBe(false);
+    // Asked only whether it FAILED (see below), never measured: it is not
+    // what serves this box's search.
+    expect(calls.some(c => c.args.join(" ").includes("clawbox-embed") && !/is-(active|enabled)/.test(c.args.join(" ")))).toBe(false);
+    expect(calls.some(c => c.cmd.includes("pgrep") || c.args.join(" ").includes("pgrep"))).toBe(false);
+  });
+
+  describe("an embedder that failed to start says why (TASK-2166)", () => {
+    /** The embedder's log, where scripts/start-embed-server.sh leaves its last word. */
+    async function embedLog(text: string) {
+      process.env.CLAWBOX_ROOT = tmpHome;
+      await fs.mkdir(path.join(tmpHome, "data", "embed"), { recursive: true });
+      await fs.writeFile(path.join(tmpHome, "data", "embed", "server.log"), text);
+    }
+    afterEach(() => {
+      delete process.env.CLAWBOX_ROOT;
+    });
+
+    const TOO_OLD = "This box's llama-server (version: 1 (f08f20a)) is too old for the memory embedder: it does not accept --no-webui. Updating ClawBox rebuilds llama.cpp at the version it pins.";
+
+    it("on its own row, with the reason and no path", async () => {
+      await embedLog([
+        "[embed] To rebuild it now: sudo bash /home/clawbox/clawbox/install.sh --step llamacpp_runtime",
+        `[embed] ${TOO_OLD}`,
+        "",
+      ].join("\n"));
+      embedUnit("failed");
+      bareBox();
+      const { buildLocalModelInventory } = await lib();
+      const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: OURS });
+      const emb = entry(models, "embeddings") as unknown as { running: string; detailCode: string; detail: string; params: Record<string, string> };
+      expect(emb.running).toBe("idle");
+      expect(emb.detailCode).toBe("embeddingsFailedBecause");
+      expect(emb.params).toEqual({ model: "Qwen 3", via: "llama.cpp", reason: TOO_OLD });
+      expect(emb.detail).toBe(`Stopped after an error: ${TOO_OLD}`);
+    });
+
+    it("rather than 'not pointed at it yet' — that failure is WHY it was never pointed at", async () => {
+      await embedLog("error: invalid argument: --embd-normalize\n");
+      embedUnit("failed");
+      bareBox();
+      const { buildLocalModelInventory } = await lib();
+      const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: { ...PROBES.embeddings, engine: ENGINE } });
+      const emb = entry(models, "embeddings") as unknown as { detailCode: string; params: Record<string, string> };
+      expect(emb.detailCode).toBe("embeddingsFailedBecause");
+      expect(emb.params.reason).toBe("error: invalid argument: --embd-normalize");
+    });
+
+    it("under a cloud embedder too, instead of a silent 'in the cloud'", async () => {
+      await embedLog("error: invalid argument: --embd-normalize\n");
+      embedUnit("failed");
+      bareBox();
+      const { buildLocalModelInventory } = await lib();
+      const { models } = await buildLocalModelInventory({
+        ...PROBES,
+        embeddings: { supported: true, ready: true, available: true, provider: "gemini", model: "gemini-embedding-001", local: false, engine: ENGINE },
+      });
+      const emb = entry(models, "embeddings") as unknown as { detailCode: string; detail: string; params: Record<string, string> };
+      expect(emb.detailCode).toBe("embeddingsCloudLocalFailed");
+      expect(emb.params.reason).toBe("error: invalid argument: --embd-normalize");
+      expect(emb.detail).toMatch(/^Searching your memory in the cloud\. The model on this box stopped after an error: error: invalid argument/);
+    });
+
+    it("keeps the plain lines when nothing failed, or there is no log to read", async () => {
+      process.env.CLAWBOX_ROOT = tmpHome;
+      embedUnit("failed");
+      bareBox();
+      const { buildLocalModelInventory } = await lib();
+      const { models } = await buildLocalModelInventory({ ...PROBES, embeddings: OURS });
+      expect(entry(models, "embeddings").detailCode).toBe("embeddingsFailed");
+
+      await embedLog("error: invalid argument: --embd-normalize\n");
+      responses = [];
+      embedUnit("asleep");
+      bareBox();
+      vi.resetModules();
+      const again = await (await lib()).buildLocalModelInventory({ ...PROBES, embeddings: OURS });
+      expect(entry(again.models, "embeddings").detailCode).toBe("embeddingsReady");
+    });
   });
 });
 

@@ -1,0 +1,4 @@
+{ "name": "inventory-api", "version": "1.0.0", "private": true, "main": "src/app.js",
+  "scripts": { "start": "node src/server.js", "test": "node --test test/*.test.js" },
+  "dependencies": { "express": "^4.21.2" },
+  "devDependencies": { "supertest": "^7.0.0" } }

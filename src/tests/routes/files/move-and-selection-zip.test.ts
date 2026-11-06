@@ -4,7 +4,7 @@
  *  - POST /setup-api/files?dir=<dest> `{ action: "move", paths, conflict }`
  *    (TASK-1274) — moves a selection into a folder, refuses a folder into
  *    itself and a protected container, asks about names the destination holds
- *    BEFORE moving anything, and carries Projects pins along;
+ *    BEFORE moving anything;
  *  - POST `{ action: "zip", paths }` then GET `?zip=<ticket>` (TASK-1273) — a
  *    selection downloaded as one ZIP, judged again when its bytes are read.
  */
@@ -17,12 +17,8 @@ import path from "path";
 const TEST_ROOT = fs.realpathSync(os.tmpdir()) + `/clawbox-files-move-${process.pid}-${Date.now()}`;
 
 type Route = typeof import("@/app/setup-api/files/route");
-type PathRoute = typeof import("@/app/setup-api/files/[...path]/route");
-type Pins = typeof import("@/lib/project-folders");
 let POST: Route["POST"];
 let GET: Route["GET"];
-let RENAME: PathRoute["PUT"];
-let pins: Pins;
 
 const at = (...p: string[]) => path.join(TEST_ROOT, ...p);
 const post = (dir: string, body: unknown) =>
@@ -72,8 +68,6 @@ beforeAll(async () => {
   reset();
   vi.resetModules();
   ({ POST, GET } = await import("@/app/setup-api/files/route"));
-  ({ PUT: RENAME } = await import("@/app/setup-api/files/[...path]/route"));
-  pins = await import("@/lib/project-folders");
 });
 
 beforeEach(() => reset());
@@ -200,28 +194,6 @@ describe("POST { action: move }", () => {
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("invalid");
     }
-  });
-
-  it("carries a Projects pin along with the folder it names, and pins inside it too", async () => {
-    await pins.addProjectFolder("projects/site");
-    await pins.addProjectFolder("projects/site/src");
-    const res = await move("Documents", ["projects/site"]);
-    expect(res.status).toBe(200);
-    expect((await pins.listProjectFolders()).map((f) => f.path)).toEqual(["Documents/site", "Documents/site/src"]);
-  });
-
-  it("carries a pin through a rename too", async () => {
-    await pins.addProjectFolder("projects/site");
-    const res = await RENAME(
-      new NextRequest(new URL("http://localhost/setup-api/files/projects/site"), {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ newName: "website" }),
-      }),
-      { params: Promise.resolve({ path: ["projects", "site"] }) },
-    );
-    expect(res.status).toBe(200);
-    expect((await pins.listProjectFolders()).map((f) => f.path)).toEqual(["projects/website"]);
   });
 });
 

@@ -75,10 +75,16 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "harness_swap",
   "hermes_edition",
   "llamacpp_install",
+  "llamacpp_runtime",
   "nvidia_jetpack",
   "ollama_install",
   "openclaw_config",
   "openclaw_install",
+  // The updater asks this before an update's openclaw_install, with the gateway
+  // still running: install.sh takes the step's fast path when everything is
+  // already at the pin, and otherwise changes nothing. A strict subset of
+  // openclaw_install, which is on this list already — no new capability.
+  "openclaw_install_fast",
   "openclaw_patch",
   "openclaw_setup",
   "openclaw_tts",
@@ -108,7 +114,7 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   // Off UI_ROOT_STEPS, like set_hostname, so `install/run-step` — the endpoint
   // the agent's bearer reaches with a step NAME — cannot start it. TASK-514.
   "set_timezone",
-  // Settings → Users (TASK-1256): create / remove a ClawBox user's Linux
+  // Settings → System → Users (TASK-1256): create / remove a ClawBox user's Linux
   // account. Each reads ONE record from a 0600 file under data/, like
   // chpasswd, and install.sh holds them to accounts in `clawbox-users` — never
   // root, never the owner. Owner-cookie-only routes start them

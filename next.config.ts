@@ -15,7 +15,7 @@ const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
 // shared by connect-src (fetch probes) and img-src (the handoff overlays'
 // <img> probes) so the two CSP directives can't drift apart.
 const LOCAL_LAN_SOURCES = "http://*.local http://*.local:* https://*.local https://*.local:*";
-// The build's own version, "v4.2.0": package.json's number with the "v" that
+// The build's own version, "v4.3.0": package.json's number with the "v" that
 // `readClawboxVersion` (updater.ts) puts on it for /setup-api/update/versions.
 // About falls back to this until that route answers, so the two must never
 // name different releases. It used to be `git describe --tags`, which names
@@ -68,7 +68,12 @@ const nextConfig: NextConfig = {
   // a Vite dev server insists on with the slash — reaches the proxy as
   // typed; the middleware keeps that redirect for every other path.
   skipTrailingSlashRedirect: true,
-  serverExternalPackages: ["better-sqlite3", "busboy", "sharp"],
+  // @vercel/blob (the ClawBox Store's large-package upload, src/lib/store-publish.ts)
+  // is loaded from node_modules at run time, not bundled: it brings undici,
+  // whose optional `node:sqlite` cache store Turbopack compiles into a
+  // throwing stub, and scripts/check-bundled-builtins.sh refuses any build
+  // that carries one.
+  serverExternalPackages: ["better-sqlite3", "busboy", "sharp", "@vercel/blob"],
   // sharp's native addon dlopen()s libvips at runtime, so Next's file tracing
   // — which follows `require`/`import` — never sees the shared object and
   // leaves it out of `.next/standalone`. The addon itself IS traced, which is
@@ -155,8 +160,11 @@ const nextConfig: NextConfig = {
     // The appliance root is not always /home/clawbox/clawbox (a dev box runs the
     // app from another user's home). Baked at build time because the coding-agent
     // run page builds its terminal command in the browser, where a runtime
-    // process.env read is not available.
-    NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+    // process.env read is not available. CLAWBOX_ROOT when the build is told
+    // (install.sh, the in-app updater), else the checkout the build runs from:
+    // a `bun run build` typed in a dev checkout used to bake the device path,
+    // and the run page's Terminal then ran a script that was not there.
+    NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || process.cwd(),
     // The in-app updater's own copy of scripts/preserve-local-edits.sh, carried
     // IN the build (src/lib/local-edits.ts). Its restart step saves the owner's
     // edits just before resetting a tree that step 1 has already moved to the

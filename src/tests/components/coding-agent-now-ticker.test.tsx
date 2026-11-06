@@ -12,7 +12,7 @@
  * clock stops; on the way back it is set at once, without waiting for a read.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@/tests/helpers/test-utils";
+import { act, render, screen, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentApp, { NOW_IDLE_TICK_MS, NOW_LIVE_TICK_MS } from "@/components/CodingAgentApp";
 
@@ -60,8 +60,11 @@ function stubBox(runs: unknown[] = []) {
   }));
 }
 
-/** The project row's commit line, by the text it carries. */
-const commitLine = (ago: string) => screen.queryByText(`${SUBJECT} · ${ago}`);
+/** The project row's "ago" label — the lean row (2026-10-28) says when the last commit was and not what it was, so the subject is not on it. */
+const commitLine = (ago: string) => {
+  const row = screen.queryByTestId("coding-agent-project-site");
+  return row ? within(row).queryByText(ago) : null;
+};
 const justNow = () => t("clawkeep.justNow");
 const minutesAgo = (count: number) => t("clawkeep.minutesAgo", { count });
 

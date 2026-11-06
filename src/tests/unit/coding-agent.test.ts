@@ -31,7 +31,8 @@ import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
+const chatNotice = vi.hoisted(() => vi.fn<(run: { id: string; status: string }) => Promise<undefined>>(async () => undefined));
+vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce, announceCodingRunToChat: chatNotice }));
 // A roomy box unless a test says otherwise: the team's spawn slot reads it.
 const memAvailable = vi.hoisted(() => vi.fn(async (): Promise<number | null> => 8000));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: memAvailable }));
@@ -202,6 +203,7 @@ beforeEach(async () => {
   process.env.CLAWBOX_MCP_TOKEN = "the-mcp-bearer-token-value";
   writeConfig({});
   announce.mockClear();
+  chatNotice.mockClear();
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -436,12 +438,17 @@ describe("a run", () => {
     // the command deny-list is gone. The FILE rules below still ship.
     expect(joined).toContain(`--tools ${lib.toolsFor(true, run.effort)}`);
     expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
-    // The default effort is ultracode, and ultracode's orchestration tool is
-    // listed AND pre-approved — listed alone it is refused headlessly.
-    expect(run.effort).toBe(lib.ULTRACODE_EFFORT);
-    expect(argv[argv.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
-    expect(argv[argv.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
-    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
+    // The default effort is xhigh (TASK-1749): no standing workflow fan-out,
+    // so neither the Workflow tool nor the ultracode brief rides along.
+    expect(run.effort).toBe("xhigh");
+    expect(argv[argv.indexOf("--tools") + 1].split(",")).not.toContain(lib.WORKFLOW_TOOL);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).not.toContain("Ultracode is on");
+    // Chosen, ultracode's orchestration tool is listed AND pre-approved —
+    // listed alone it is refused headlessly.
+    const ultra = lib.buildRunArgs({ effort: lib.ULTRACODE_EFFORT });
+    expect(ultra[ultra.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
+    expect(ultra[ultra.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
+    expect(ultra[ultra.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
     // The one command list that IS shipped: killing by name, and killing
@@ -485,6 +492,33 @@ describe("a run", () => {
     expect(env.SESSION_SECRET).toBeUndefined();
     expect(env.CLAWBOX_MCP_TOKEN).toBeUndefined();
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
+  });
+
+  // TASK-1749: a NEW run gets the lean brief, the lean helper sentence and
+  // the per-run visual decision, frozen on its record (a record from before
+  // the decision reads as visual: routes/coding-agent/diet.test.ts).
+  it("gives a new run the lean brief, lean helpers and the visual decision", async () => {
+    const dir = makeProject("parser");
+    fs.rmSync(path.join(dir, "index.html"));
+    fs.writeFileSync(path.join(dir, "main.py"), "print('hi')\n");
+    const plain = await finished((await lib.startRun({ task: "Fix the parser in main.py", projectId: "parser", source: "agent" })).id);
+    expect(plain.visual).toBe(false);
+    let argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    let prompt = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(prompt).not.toContain("Delegate instead of doing everything in one thread");
+    expect([lib.leanHelpersBrief(false), lib.leanHelpersBrief(true)].some((s) => prompt.includes(s))).toBe(true);
+    expect(prompt).not.toContain(lib.LEAN_VISUAL_BRIEF);
+    // Its server holds no browser family, only the run's assistant_message.
+    expect(JSON.parse(argv[argv.indexOf("--mcp-config") + 1]).mcpServers.clawbox.env.CLAWBOX_RUN_BROWSER).toBe("0");
+
+    makeProject("site");
+    const visual = await finished((await lib.startRun({ task: "Fix the parser", projectId: "site", source: "agent" })).id);
+    // The folder has an index.html: the run keeps the tools and the browser block.
+    expect(visual.visual).toBe(true);
+    argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    prompt = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(prompt).toContain(lib.LEAN_VISUAL_BRIEF);
+    expect(argv).toContain("--mcp-config");
   });
 
   it("turns the stream-json into a faithful record and tells the owner", async () => {
@@ -599,8 +633,10 @@ describe("a run", () => {
     makeProject("site");
     const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
     expect(first.status).toBe("failed");
-    // "steps" in the owner's words; the number is the run's own ceiling.
-    expect(first.error).toMatch(/60 steps/);
+    // "step limit" in the owner's words, the turns taken against the run's
+    // own ceiling, and the way on (the Continue action) named.
+    expect(first.error).toMatch(/step limit \(60 of \d+\)/);
+    expect(first.error).toMatch(/Continue/);
     expect(first.sessionId).toBe("sess-abc-123");
 
     installFakeWrapper(HAPPY_BODY);
@@ -668,6 +704,15 @@ describe("a run", () => {
     expect(round.task).toHaveLength(lib.MAX_BOX_TASK_CHARS);
     expect(round.task.endsWith("\n…(truncated)")).toBe(true);
     expect((await finished(round.id)).status).toBe("completed");
+
+    // A coding team's run is the box's too: its worker text is built to
+    // TEAM_TASK_CHARS, past the typed limit, and starts.
+    announce.mockClear();
+    const worker = await lib.startRun({ task: "w".repeat(lib.TEAM_TASK_CHARS), projectId: "site", source: "owner", team: { id: "team-abcdefgh", role: "worker", taskId: "t1" } });
+    expect(worker.task).toHaveLength(lib.TEAM_TASK_CHARS);
+    expect((await finished(worker.id)).status).toBe("completed");
+    // And it sends no finish notice of its own: the owner hears once, when the TEAM settles.
+    expect(announce).not.toHaveBeenCalled();
   });
 
   it("does not report a run finished on a result event alone — the process must exit", async () => {
@@ -745,7 +790,7 @@ describe("a run", () => {
       expect(task).toMatch(/Start by running the project's own verification/);
       expect(task).toMatch(/a result from the earlier session is not yours to claim/);
       // The pass IS the review: it is told not to send the reviewer helper.
-      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toMatch(/do not send the reviewer helper over your own work/);
+      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain(lib.leanHelpersBrief(true));
 
       // The review pass itself completed and touched files — and must NOT
       // chain: once ITS commit attempt is over (the moment a follow-up would
@@ -779,6 +824,42 @@ describe("a run", () => {
       // (the moment a follow-up would start), the run is still alone.
       await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
       expect(allRuns().length).toBe(1);
+    });
+
+    it("announces the run its paused review pass held back once the owner stops that pass", async () => {
+      // The run had a deliverable, so its finish notice waits for the gate the
+      // review pass ends in; a pass paused and then stopped never reached it,
+      // and neither the desktop nor the chat that asked ever heard (TASK-2132).
+      installFakeClaude();
+      const flag = path.join(base, "review-pause-flag");
+      installFakeWrapper([
+        `if grep -q "Automatic review pass" "${stdinFile()}"; then`,
+        `  echo '${INIT}'`,
+        `  while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+        "  exit 0",
+        "fi",
+        'echo done > "$PWD/out.txt"',
+        TOUCHING_BODY,
+      ].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      makeProject("site");
+      const first = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent", deliverable: { kind: "paths", paths: ["out.txt"] } })).id);
+      expect(first.status).toBe("completed");
+      await vi.waitFor(() => { expect(allRuns().length).toBe(2); }, { timeout: 10_000 });
+      const pass = allRuns().find((r) => r.reviewOf === first.id)!;
+      await vi.waitFor(() => { expect(lib.getRun(pass.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 10_000 });
+      lib.pauseRun(pass.id);
+      expect((await finished(pass.id)).status).toBe("paused");
+      // The owner stops it later, as on a box: the pause's own chain is over by then.
+      expect(await lib.waitForRunSettled(pass.id, 10_000)).toBe(true);
+      // Held: the gate has not looked at the run yet.
+      expect(announce.mock.calls.map(([r]) => (r as { id: string }).id)).not.toContain(first.id);
+
+      expect(lib.stopRun(pass.id).status).toBe("stopped");
+      await vi.waitFor(() => {
+        expect(announce.mock.calls.map(([r]) => (r as { id: string }).id)).toContain(first.id);
+      }, { timeout: 10_000 });
+      expect(lib.getRun(first.id)?.status).toBe("completed");
     });
 
     it("records a commit the run made ITSELF, so the pull request step and the row see it", async () => {
@@ -820,28 +901,6 @@ describe("a run", () => {
       const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
       await vi.waitFor(() => { expect(lib.getRun(done.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
       expect(allRuns().length).toBe(1);
-    });
-  });
-
-  describe("the token limit", () => {
-    it("settles as stopped, not completed, when the result event beat the kill", async () => {
-      installFakeClaude();
-      // One turn that alone exceeds the limit, with the result event right
-      // behind it in the same write: the process has said "success" before
-      // the device's kill lands. The device's verdict must stand — a record
-      // that read "completed" beside "Stopped at the token limit" was both.
-      const spent = JSON.stringify({
-        type: "assistant",
-        message: { usage: { input_tokens: 20_000, output_tokens: 10 }, content: [{ type: "text", text: "Done" }] },
-      });
-      installFakeWrapper([`printf '%s\\n' '${INIT}' '${spent}' '${RESULT}'`, "exit 0"].join("\n"));
-      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
-      makeProject("site");
-      const run = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
-      expect(run.status).toBe("stopped");
-      expect(run.error).toMatch(/Stopped at the token limit/);
-      expect(run.resumable).toBe(true);
-      expect(run.progress.join("\n")).toContain("Token limit reached");
     });
   });
 
@@ -911,8 +970,13 @@ describe("a run", () => {
       await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
       lib.pauseRun(started.id);
       await finished(started.id);
+      // The pause is no ending: the chat that asked for the run hears nothing yet.
+      expect(chatNotice).not.toHaveBeenCalled();
       const stopped = lib.stopRun(started.id);
       expect(stopped.status).toBe("stopped");
+      // The stop never reaches finishRun, so it tells the chat itself (TASK-2132).
+      expect(chatNotice.mock.calls.map(([r]) => [r.id, r.status])).toEqual([[started.id, "stopped"]]);
+      expect(announce).not.toHaveBeenCalled();
     });
 
     it("refuses to resume a run whose folder is gone, naming the folder instead of blaming the wrapper", async () => {
@@ -1164,7 +1228,7 @@ describe("what a run can verify with", () => {
     for (const tool of lib.MCP_BROWSER_TOOLS) expect(argv).toContain(tool);
     expect(argv).toContain(lib.MCP_MEDIA_TOOLS.images);
     expect(argv).toContain(lib.MCP_MEDIA_TOOLS.audio);
-    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 2);
+    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length + 3);
     // The run's own server is told which of the two it may register; the
     // variable carries no secret, like everything else in this block.
     expect(server.env.CLAWBOX_RUN_MEDIA).toBe("images,audio");
@@ -1723,11 +1787,11 @@ describe("counting sub-agents", () => {
     expect(progress.match(/Sub-agent finished \(explorer\)/g) ?? []).toHaveLength(1);
   });
 
-  it("bills a workflow as it runs, from its task_progress totals, and stops at the ceiling", async () => {
+  it("bills a workflow as it runs, from its task_progress totals, by the delta each time", async () => {
     // The CLI reports a workflow's cumulative spend on every task_progress
-    // (0 → 2368 → 2368 in the probe); the ceiling must hold while the
-    // fan-out runs, not after it.
-    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
+    // (0 → 2368 → 2368 in the probe); the record's spend must be current
+    // while the fan-out runs, not after it.
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
     const WORKFLOW = JSON.stringify({
       type: "assistant",
       message: { content: [{ type: "tool_use", id: "call_w", name: "Workflow", input: { script: "export const meta = { name: \"sweep\", description: \"check\" }" } }] },
@@ -1742,17 +1806,14 @@ describe("counting sub-agents", () => {
       `echo '${progressAt(4_000)}'`,
       `echo '${progressAt(4_000)}'`,
       `echo '${progressAt(12_000)}'`,
-      "sleep 20",
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
       "exit 0",
     ].join("\n"));
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "sweep", projectId: "site", source: "agent" })).id);
-    expect(run.status).toBe("stopped");
-    expect(run.resumable).toBe(true);
+    expect(run.status).toBe("completed");
     // Deltas, never the running total twice: 0 + 4000 + 0 + 8000.
     expect(run.tokensUsed).toBe(12_000);
-    expect(run.error).toMatch(/Stopped at the token limit \(12,000 of 10,000\)/);
-    expect(run.progress.join("\n")).toContain("Token limit reached");
   });
 
   it("takes a refused launch back out of the counts", async () => {
@@ -1837,6 +1898,9 @@ describe("counting sub-agents", () => {
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(3 * 6_100);
+    // The same bill by category: cache reads are most of it (TASK-1749).
+    expect(run.tokenBreakdown).toEqual({ input: 3_000, output: 300, cacheCreation: 0, cacheRead: 15_000 });
+    expect(run.spawnTokens).toEqual([3 * 6_100]);
     expect(run.commandsRun).toBe(1);
     expect(run.progress.join("\n")).not.toContain("helper says hi");
     expect(run.progress.join("\n")).not.toContain("npm test");
@@ -1865,6 +1929,7 @@ describe("counting sub-agents", () => {
     const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
     // 5,000 twice (one message each), then 700 + 9 of output the events never carried.
     expect(run.tokensUsed).toBe(10_000 + 700 + 9);
+    expect(run.tokenBreakdown).toEqual({ input: 10_000, output: 709, cacheCreation: 0, cacheRead: 0 });
   });
 
   it("raises the bill to the CLI's own modelUsage total at the end, never lowers it", async () => {
@@ -1879,12 +1944,39 @@ describe("counting sub-agents", () => {
     makeProject("site");
     let run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(33_250);
+    // Raised by category to the process's modelUsage, every model summed.
+    expect(run.tokenBreakdown).toEqual({ input: 4_000, output: 250, cacheCreation: 0, cacheRead: 29_000 });
     expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-pro[1m]"]);
 
     const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 10 } } });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_LOW}'`, "exit 0"].join("\n"));
     run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(1_000);
+    expect(run.tokenBreakdown).toEqual({ input: 1_000, output: 0, cacheCreation: 0, cacheRead: 0 });
+  });
+});
+
+describe("a resumed session's bill", () => {
+  beforeEach(() => readyDevice());
+
+  it("is its own assistant events, never the CLI's modelUsage — which carries the session's history", async () => {
+    // Measured 2026-10-18: a review pass resumes the run's session and its
+    // CLI reports modelUsage for the whole session, so raising the record to
+    // it billed the run's own tokens a second time.
+    const A = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 1_000, output_tokens: 0 }, content: [{ type: "text", text: "hi" }] } });
+    const FIRST = JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 1, session_id: "sess-abc-123", modelUsage: { m: { inputTokens: 30_000 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${FIRST}'`, "exit 0"].join("\n"));
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
+    expect(first.tokensUsed).toBe(30_000);
+
+    const B = JSON.stringify({ type: "assistant", message: { id: "m2", usage: { input_tokens: 2_000, output_tokens: 0 }, content: [{ type: "text", text: "more" }] } });
+    // The resumed process's modelUsage: the first spawn's 30,000 + this one's 2,000.
+    const SECOND = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { m: { inputTokens: 32_000 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${B}'`, `echo '${SECOND}'`, "exit 0"].join("\n"));
+    const resumed = await finished((await lib.startRun({ task: "finish", resumeRunId: first.id, source: "agent" })).id);
+    // A resume is a record of its own: its bill is its own 2,000, not 32,000.
+    expect(resumed.tokensUsed).toBe(2_000);
   });
 });
 
@@ -2493,8 +2585,12 @@ describe("a team run's message tool", () => {
     expect(planner.CLAWBOX_TEAM_TASK).toBe("none");
     for (const solo of [lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home }), lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team: null })]) {
       const soloEnv = JSON.parse(solo).mcpServers.clawbox.env;
-      for (const key of ["CLAWBOX_RUN_ID", "CLAWBOX_TEAM_ID", "CLAWBOX_TEAM_ROLE", "CLAWBOX_TEAM_TASK"]) expect(soloEnv[key]).toBeUndefined();
+      // A single writing run is named (its assistant_message), never as a team member.
+      expect(soloEnv.CLAWBOX_RUN_ID).toBe("run-ab12cd34");
+      for (const key of ["CLAWBOX_TEAM_ID", "CLAWBOX_TEAM_ROLE", "CLAWBOX_TEAM_TASK"]) expect(soloEnv[key]).toBeUndefined();
     }
+    // A read-only single run has no assistant_message, so it is not named.
+    expect(JSON.parse(lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, readOnly: true })).mcpServers.clawbox.env.CLAWBOX_RUN_ID).toBeUndefined();
   });
 
   it("approves team_message for every team run, the read-only planner and reviewer included, and for no other run", () => {
@@ -2586,13 +2682,80 @@ describe("the team's spawn slot", () => {
     expect(memAvailable).not.toHaveBeenCalled();
   });
 
-  it("refuses outright, not as a wait, while a stranger's run holds the box", async () => {
-    fs.writeFileSync(runsFile(), JSON.stringify([liveWorker("team-other")]));
+  /** A live run of no team, of a review pass, or of another team: what a team now shares the box with. */
+  const liveRun = (id: string, extra: Record<string, unknown> = {}) => ({ ...liveWorker("team-x"), id, team: null, ...extra });
+  const planner = { id: "team-1", role: "planner" as const, taskId: null };
+
+  it("admits a team's run beside runs that are not the team's — a single run, its review pass, another team's — within the owner's limit", async () => {
+    // Before: any live run of no team refused the planner outright (wait: false),
+    // and the automatic review pass the box starts after every run was one.
+    writeConfig({ coding_agent_max_parallel_runs: 4 });
+    fs.writeFileSync(runsFile(), JSON.stringify([
+      liveRun("run-single01"),
+      liveRun("run-review01", { reviewOf: "run-single00" }),
+      liveRun("run-otherteam", { team: { id: "team-2", role: "worker", taskId: "t1" } }),
+    ]));
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
-    const slot = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" });
-    expect(slot).toMatchObject({ ok: false, wait: false });
+    memAvailable.mockClear();
+    expect(await lib.teamSpawnSlot(planner)).toEqual({ ok: true });
+    // Not the team's first run on the box: the memory guard was asked.
+    expect(memAvailable).toHaveBeenCalledTimes(1);
+  });
+
+  // The runs file is read once per test (the store is kept per file path), so
+  // each case below writes the box it is about once.
+
+  it("makes a team WAIT, never fail, while the box is at the owner's limit — strangers counted the way the ordinary gate counts them", async () => {
+    writeConfig({ coding_agent_max_parallel_runs: 3 });
+    fs.writeFileSync(runsFile(), JSON.stringify([
+      liveRun("run-single01"),
+      liveRun("run-single02"),
+      // A review pass has its own pool, as it has for the ordinary gate: no slot of the owner's.
+      liveRun("run-review01", { reviewOf: "run-single01" }),
+    ]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    memAvailable.mockClear();
+    // Two single runs and one of the team's own workers being started: the third of three.
+    const full = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, 1);
+    expect(full).toMatchObject({ ok: false, wait: true });
+    expect((full as { reason: string }).reason).toContain("3 coding runs at once");
+    // A count refusal needs no memory reading.
     expect(memAvailable).not.toHaveBeenCalled();
+    // Nothing of the team's starting: the third slot is the planner's.
+    expect(await lib.teamSpawnSlot(planner)).toEqual({ ok: true });
+  });
+
+  it("makes a team wait when memory is tight beside runs that are not its own, a review pass's included", async () => {
+    writeConfig({ coding_agent_max_parallel_runs: 4 });
+    fs.writeFileSync(runsFile(), JSON.stringify([liveRun("run-single01"), liveRun("run-review01", { reviewOf: "run-single00" })]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    memAvailable.mockResolvedValueOnce(500);
+    const tight = await lib.teamSpawnSlot(planner);
+    expect(tight).toMatchObject({ ok: false, wait: true });
+    expect((tight as { reason: string }).reason).toContain("beside the 2 going (500 MB free");
+    memAvailable.mockResolvedValueOnce(null);
+    expect(await lib.teamSpawnSlot(planner)).toMatchObject({ ok: false, wait: true, reason: expect.stringContaining("Cannot read") });
+  });
+
+  it("lets two teams work side by side: each its own ceiling, the owner's limit shared", async () => {
+    writeConfig({ coding_agent_max_parallel_runs: 4 });
+    const ofTeam = (id: string, teamId: string, taskId: string) => liveRun(id, { team: { id: teamId, role: "worker", taskId } });
+    fs.writeFileSync(runsFile(), JSON.stringify([ofTeam("run-a0000001", "team-a", "t1"), ofTeam("run-a0000002", "team-a", "t2"), ofTeam("run-b0000001", "team-b", "t1")]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    // Team A's third beside team B's first: A's own ceiling's last, the limit's fourth.
+    expect(await lib.teamSpawnSlot({ id: "team-a", role: "worker", taskId: "t3" })).toEqual({ ok: true });
+    // A team's ceiling is its own: A at three with one being started waits on it…
+    const own = await lib.teamSpawnSlot({ id: "team-a", role: "reviewer", taskId: "t1" }, 1);
+    expect(own).toMatchObject({ ok: false, wait: true });
+    expect((own as { reason: string }).reason).toContain(`${lib.MAX_TEAM_WORKERS} runs going`);
+    // …and the limit is shared: B, at one of its own, waits once its next would be the fifth.
+    const shared = await lib.teamSpawnSlot({ id: "team-b", role: "worker", taskId: "t2" }, 1);
+    expect(shared).toMatchObject({ ok: false, wait: true });
+    expect((shared as { reason: string }).reason).toContain("4 coding runs at once");
   });
 });
 
@@ -2612,4 +2775,15 @@ it("preserves a final result beyond the display summary for machine consumers an
   const done = await finished(run.id);
   expect(done.summary).toHaveLength(6000);
   expect(done.resultText).toBe(full);
+});
+
+it("keeps no second copy of a result the summary already holds whole", async () => {
+  readyDevice();
+  makeProject("site");
+  installFakeWrapper(`echo '${INIT}'\necho '${JSON.stringify({ type: "result", subtype: "success", result: "Done: two files.", num_turns: 1 })}'\nexit 0`);
+  const run = await lib.startRun({ task: "Plan it", projectId: "site", source: "agent" });
+  const done = await finished(run.id);
+  expect(done.summary).toBe("Done: two files.");
+  // Readers take `resultText ?? summary`; a copy was a fifth of every flush.
+  expect(done.resultText).toBeNull();
 });

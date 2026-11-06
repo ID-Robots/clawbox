@@ -14,14 +14,20 @@ import { get, set, setMany } from "@/lib/config-store";
 import {
   callGatewayRpc,
   gatewayIsAbsent,
-  GatewayNotReadyError,
   readConfig,
-  restartGateway,
   runOpenclawConfigSetBatch,
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
+import {
+  readGatewayConfigBaseline,
+  restartGatewayAnsweringEarly,
+  settleConfigWrite,
+  type ConfigWriteSettlement,
+} from "@/lib/gateway-hot-apply";
 import { CONFIG_BUSY_ERROR_CODE, isConfigMutationConflict } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
+import { disarmLocalCompactionModel, isClawboxCompactionModel } from "@/lib/local-compaction-model";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { clawboxAiNonChatModelReason, isClawboxAiNonChatModelRef } from "@/lib/clawbox-ai-models";
 
@@ -82,11 +88,13 @@ function snapshotOverrides(session: Record<string, unknown>): SessionOverrideSna
 // That half-applied state is visible in the UI as a failed toggle while
 // the user's chat actually continues routing to the cloud fallback.
 /**
- * One `config set --batch-json` for every model write of a toggle: the CLI
- * takes 10-12 s per invocation on a Jetson (so the helper's default timeout
- * stays), and a batch is applied to one snapshot and validated as a whole, so
- * the primary and the fallbacks land together or not at all — the half-applied
- * state the header above describes cannot come from here.
+ * ONE write for every model write of a toggle, applied to one snapshot and
+ * validated as a whole, so the primary and the fallbacks land together or not
+ * at all — the half-applied state the header above describes cannot come from
+ * here. Through the running gateway it is one exact `config.patch` (the
+ * fallbacks array included, TASK-1535), which answers once the gateway has
+ * applied it; without one it is the `config set --batch-json` it always was,
+ * at 10-12 s per CLI start on a Jetson (so the helper's default timeout stays).
  */
 async function setConfigBatch(ops: OpenclawConfigSetArgs[]) {
   await runOpenclawConfigSetBatch(ops);
@@ -400,6 +408,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ enabled: body.enabled });
     }
     const warnings: string[] = [];
+    // Where the model writes below left the running gateway (TASK-1535). They
+    // are `agents.defaults.model.*` and `plugins.entries.*`, which the core
+    // hot-applies, so the answer is normally "applied" and nothing restarts.
+    let settlement: ConfigWriteSettlement = "applied";
 
     if (body.enabled) {
       const localModel = (await get("local_ai_model")) as string | undefined;
@@ -423,6 +435,7 @@ export async function POST(request: Request) {
       if (Array.isArray(currentFallbacks) && currentFallbacks.length > 0) {
         await set(SAVED_FALLBACKS_KEY, currentFallbacks);
       }
+      const baseline = await readGatewayConfigBaseline();
 
       // 1. Flip the defaults so *new* sessions pick up local — both lists in
       //    one batch, so the primary can never land with the cloud fallbacks
@@ -430,7 +443,15 @@ export async function POST(request: Request) {
       await setConfigBatch([
         ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
         ["agents.defaults.model.fallbacks", "[]", "--json"],
+        // Tool Search off while the primary is the on-device model
+        // (src/lib/local-tool-search.ts), in the batch that puts it there.
+        ...(await localToolSearchArmOps(config, localModel)),
       ]);
+      settlement = await settleConfigWrite({ before: config, after: await readConfig(), baseline, label: "local-only" });
+      // Local-only means nothing of this box's conversations goes to a cloud
+      // model — a summary included: ClawBox's cloud compaction model comes out
+      // (src/lib/local-compaction-model.ts). An owner's own value stays theirs.
+      if (await isClawboxCompactionModel(config)) await disarmLocalCompactionModel("local-only");
 
       // 2. Sweep every existing session's per-session override. Without
       //    this step the toggle only affects sessions born after the
@@ -458,6 +479,8 @@ export async function POST(request: Request) {
       const savedPrimary = (await get(SAVED_PRIMARY_KEY)) as string | undefined;
       const savedFallbacks = (await get(SAVED_FALLBACKS_KEY)) as string[] | undefined;
       const savedSessionOverrides = (await get(SAVED_SESSION_OVERRIDES_KEY)) as FilesBackup | undefined;
+      const configBefore = await readConfig();
+      const baseline = await readGatewayConfigBaseline();
 
       // The saved primary — and any saved fallback — can be Anthropic's, and a
       // provider save made while Local-only was on may have switched that
@@ -520,7 +543,7 @@ export async function POST(request: Request) {
         // available here makes the read atomic with the write. So this site
         // says "I cannot know", which counts the change: this path runs once
         // per Local-only exit and only when the saved primary or a fallback
-        // names the gated provider, it already restarts the gateway and
+        // names the gated provider, it already waits on the gateway and
         // re-patches every session, so at worst it spends one enumeration —
         // against a silent miss that would leave the catalogue behind until a
         // doubling backoff expired.
@@ -530,6 +553,17 @@ export async function POST(request: Request) {
         );
         if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
       }
+      // Back on a cloud primary: OpenClaw's own Tool Search back, as it ships.
+      // Only when the primary did move — with no restorable primary the box
+      // stays on the local model, and so does the setting.
+      if (restorablePrimary && localToolSearchDisarmNeeded(configBefore, restorablePrimary)) {
+        const toolSearchWarning = await disarmLocalToolSearch("local-only");
+        if (toolSearchWarning) warnings.push(toolSearchWarning);
+      }
+      // Before the sessions go back: a session is patched to a model the
+      // running gateway has to know, and the restored primary's plugin may have
+      // just been switched on in that batch.
+      settlement = await settleConfigWrite({ before: configBefore, after: await readConfig(), baseline, label: "local-only" });
       const restore = savedSessionOverrides
         ? await restoreSessionOverrides(savedSessionOverrides)
         : { complete: true, sessionsKept: 0 };
@@ -543,15 +577,16 @@ export async function POST(request: Request) {
         // values. Nothing saved is cleared either, so the retry starts over.
         //
         // The primary and fallbacks were already written back to the cloud
-        // values above, and a box that says Local-only while every new
-        // session after the next gateway start would go to the cloud is a
-        // box claiming a state it does not have. Put them back where the
-        // mode says they are.
+        // values above — and the gateway hot-applies them — and a box that
+        // says Local-only while every new session goes to the cloud is a box
+        // claiming a state it does not have. Put them back where the mode says
+        // they are.
         const localModel = (await get("local_ai_model")) as string | undefined;
         if (localModel) {
           await setConfigBatch([
             ["agents.defaults.model.primary", JSON.stringify(localModel), "--json"],
             ["agents.defaults.model.fallbacks", "[]", "--json"],
+            ...(await localToolSearchArmOps(await readConfig(), localModel)),
           ]);
         } else {
           console.error("[local-only] restore incomplete and no local model recorded; the primary stays on the saved provider");
@@ -582,21 +617,27 @@ export async function POST(request: Request) {
       }
     }
 
-    try {
-      await restartGateway();
-    } catch (err) {
-      // `warning` is rendered by LocalAiPanel in its amber "the change landed"
-      // notice, so the sentence has to be true of a change that landed. A
-      // gateway still coming back is not a failed restart, and the raw message
-      // ("gateway did not come back") read as one — the false failure this
-      // whole task removes. A REFUSED restart keeps the old wording, minus the
-      // raw error text, which was CLI internals in an owner-facing string.
-      warnings.push(
-        err instanceof GatewayNotReadyError
-          ? "Saved, but the gateway has not finished restarting — local-only mode applies once it is serving again."
-          : "Saved, but the gateway restart failed — local-only mode applies at the next restart.",
-      );
-      console.error("Failed to restart gateway after exclusive config change:", err);
+    // NO RESTART for a switch the gateway applied live — which is every one of
+    // them on a healthy box: this route used to restart clawbox-gateway after
+    // every toggle, 50 s of dead chat that ran past what the browser would wait
+    // for (TASK-1535). The restart is kept as the fallback for a gateway that
+    // could not confirm the change, and it is ANSWERED EARLY: the request
+    // returns once systemd has taken it, never after the gateway is back.
+    //
+    // `warning` is rendered by LocalAiPanel in its amber "the change landed"
+    // notice, so each sentence has to be true of a change that landed. A
+    // REFUSED restart keeps the old wording, minus the raw error text, which was
+    // CLI internals in an owner-facing string.
+    if (settlement === "restart-required") {
+      try {
+        await restartGatewayAnsweringEarly();
+        warnings.push("Saved. The assistant is restarting to apply it and will be back in about a minute.");
+      } catch (err) {
+        warnings.push("Saved, but the gateway restart failed — local-only mode applies at the next restart.");
+        console.error("Failed to restart gateway after exclusive config change:", err);
+      }
+    } else if (settlement === "gateway-restarting") {
+      warnings.push("Saved. The assistant is restarting to apply it and will be back in about a minute.");
     }
 
     return NextResponse.json({

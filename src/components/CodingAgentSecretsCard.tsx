@@ -27,6 +27,17 @@ import HelpTip from "./HelpTip";
  *     reaches.
  *   - the ADD form, with the scope picker.
  *
+ * And, for the OWNER only, "Import from assistant": a picker of the NAMES of
+ * keys the main assistant already holds, which copies one into this list
+ * server-side (src/lib/assistant-secrets.ts). The value never reaches the
+ * browser — not in the picker, not in the answer — and the copy arrives
+ * un-ticked, so the three parts above still decide whether a run gets it. The
+ * picker can also limit the copy to one run or to a last day (none by
+ * default), and the row then says so — or that it no longer reaches a run. The
+ * button is drawn only when the import route answers this session with a
+ * source to copy from: another ClawBox user, a box without one, or a box with
+ * the feature switched off sees the card exactly as before.
+ *
  * Its own component and its own reads and writes, like CodingAgentRulesCard:
  * the settings panel serialises its writes through one chain so two answers
  * cannot land out of order, and a list with an add, a remove and a per-row
@@ -42,6 +53,32 @@ interface SecretRow {
   updatedAt: number;
   inject: boolean;
   readable: boolean;
+  /** A copy's expiry: "run" or an ISO instant (SecretExpiry). Absent for most rows. */
+  expiresAt?: string;
+  /** No run will be handed it again — see SecretView. */
+  expired?: boolean;
+}
+
+/** The import picker's expiry choice. "none" is the default and sends nothing. */
+type ImportExpiry = "none" | "run" | "date";
+
+/** Today in the browser's own calendar, as a date input writes it (YYYY-MM-DD). */
+function todayInput(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * The end of the chosen day in the owner's own time zone, as the instant the
+ * box stores — "until the 25th" means through the 25th where the owner is. Null
+ * for a day that is not one, or that is already over.
+ */
+function endOfDay(day: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return null;
+  const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999);
+  if (Number.isNaN(end.getTime()) || end.getDate() !== Number(m[3]) || end.getTime() <= Date.now()) return null;
+  return end.toISOString();
 }
 
 interface SecretsPayload {
@@ -83,6 +120,49 @@ function projectsOf(data: unknown): ProjectOption[] {
   });
 }
 
+/** One key the assistant holds, by NAME. Never a value — see the header. */
+interface AssistantKey {
+  name: string;
+  source: string;
+}
+
+/**
+ * The import route's answer, or null when there is nothing to offer: a refusal
+ * (not the owner, switched off), an older box without the route, or a box
+ * whose assistant keeps nothing this box can copy (`sources` empty).
+ */
+function assistantKeysOf(data: unknown): AssistantKey[] | null {
+  const d = data as { names?: unknown; sources?: unknown } | null;
+  if (!d || !Array.isArray(d.sources) || d.sources.length === 0 || !Array.isArray(d.names)) return null;
+  return d.names.flatMap((n) => {
+    const row = n as Record<string, unknown> | null;
+    return row && typeof row.name === "string" && SECRET_NAME_RE.test(row.name)
+      ? [{ name: row.name, source: typeof row.source === "string" ? row.source : "" }]
+      : [];
+  });
+}
+
+/**
+ * What the import route told this session: the keys to offer, null for nothing
+ * to offer (see `assistantKeysOf`), or "unreadable" — the owner's session on a
+ * box with a source whose key file could not be read, which is said on the
+ * card rather than hidden behind a missing button.
+ */
+type AssistantKeys = AssistantKey[] | null | "unreadable";
+
+async function fetchAssistantKeys(): Promise<AssistantKeys | undefined> {
+  try {
+    const res = await fetch("/setup-api/coding-agent/secrets/import", { cache: "no-store" });
+    if (res.ok) return assistantKeysOf(await res.json());
+    const refusal = await res.json().catch(() => null) as { code?: unknown } | null;
+    return refusal?.code === "source_unreadable" ? "unreadable" : null;
+  } catch {
+    // No answer at all (the network blinked) is not "nothing to offer": the
+    // caller keeps what it last knew rather than taking the import away.
+    return undefined;
+  }
+}
+
 /** A row's key: one name may exist once per scope, so both name it. */
 function rowKey(row: { name: string; scope: string }): string {
   return `${row.scope}/${row.name}`;
@@ -104,6 +184,14 @@ export default function CodingAgentSecretsCard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  /** The assistant's key names, null when this session is offered no import, or "unreadable". */
+  const [assistantKeys, setAssistantKeys] = useState<AssistantKeys>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importName, setImportName] = useState("");
+  const [importScope, setImportScope] = useState(BOX_SCOPE);
+  const [importExpiry, setImportExpiry] = useState<ImportExpiry>("none");
+  const [importUntil, setImportUntil] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
 
   const apply = useCallback((payload: SecretsPayload) => {
     setRows(rowsOf(payload));
@@ -150,6 +238,15 @@ export default function CodingAgentSecretsCard() {
     return () => { active = false; };
   }, []);
 
+  // The assistant's key NAMES. Asked on mount, so the button is only drawn for
+  // a session the route will answer, and again each time the picker opens, so
+  // a key added to the assistant meanwhile is offered.
+  useEffect(() => {
+    let active = true;
+    void fetchAssistantKeys().then((keys) => { if (active && keys !== undefined) setAssistantKeys(keys); });
+    return () => { active = false; };
+  }, []);
+
   /**
    * The refusal, worded here when the box sent a code this build knows.
    *
@@ -160,7 +257,9 @@ export default function CodingAgentSecretsCard() {
    */
   const refusalText = (payload: SecretsPayload | null): string => {
     const key = payload?.code ? REFUSAL_KEYS[payload.code] : undefined;
-    if (key) return t(key);
+    // `n` for the too-short sentence, which an import can reach as well as the
+    // add form; a sentence without the placeholder ignores it.
+    if (key) return t(key, { n: MIN_SECRET_VALUE_CHARS });
     return payload?.error || t("codingAgent.secretsFailed");
   };
 
@@ -168,6 +267,7 @@ export default function CodingAgentSecretsCard() {
     setBusy(which);
     setError(null);
     setSaved(null);
+    setCopied(null);
     try {
       const res = await fetch(url, init);
       const payload = await res.json().catch(() => null) as SecretsPayload | null;
@@ -237,6 +337,85 @@ export default function CodingAgentSecretsCard() {
     `/setup-api/coding-agent/secrets?name=${encodeURIComponent(row.name)}&scope=${encodeURIComponent(row.scope)}`,
     rowKey(row),
   );
+
+  /** Already in the list under that name for that scope — the copy would be refused. */
+  const isHere = (keyName: string, keyScope: string): boolean =>
+    rows.some((row) => row.name === keyName && row.scope === keyScope);
+
+  // The picker's choice: the one the owner picked while it is still offered and
+  // not already here, else the first that can be copied. Derived rather than
+  // kept in sync by an effect, so a re-read list can never leave it stale.
+  const importChoice = (() => {
+    const keys = Array.isArray(assistantKeys) ? assistantKeys : [];
+    if (importName && keys.some((k) => k.name === importName) && !isHere(importName, importScope)) return importName;
+    return keys.find((k) => !isHere(k.name, importScope))?.name ?? "";
+  })();
+
+  /** Ask again what is on offer; no answer at all keeps what the card last knew. */
+  const refreshAssistantKeys = () => {
+    void fetchAssistantKeys().then((keys) => { if (keys !== undefined) setAssistantKeys(keys); });
+  };
+
+  const openImport = () => {
+    setImportOpen(true);
+    setError(null);
+    setCopied(null);
+    // Every opening starts from "no expiry": a choice left behind by a Cancel
+    // must not ride along on the next copy unseen.
+    setImportExpiry("none");
+    setImportUntil("");
+    refreshAssistantKeys();
+    // And the list itself: a one-run copy goes when its run ends, and the
+    // picker must not keep calling that name "already here".
+    void load();
+  };
+
+  const copyFromAssistant = async () => {
+    if (!importChoice) return;
+    const name = importChoice;
+    let expiresAt: string | undefined;
+    if (importExpiry === "run") expiresAt = "run";
+    if (importExpiry === "date") {
+      const until = endOfDay(importUntil);
+      if (!until) {
+        setError(t("codingAgent.secretsImportUntilInvalid"));
+        return;
+      }
+      expiresAt = until;
+    }
+    const ok = await write(
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // The name, the scope and the expiry, and nothing else: the box reads
+        // the value itself and never sends it here.
+        body: JSON.stringify({ name, scope: importScope, ...(expiresAt ? { expiresAt } : {}) }),
+      },
+      "/setup-api/coding-agent/secrets/import",
+      "import",
+    );
+    if (ok) {
+      setImportOpen(false);
+      setImportName("");
+      setImportExpiry("none");
+      setImportUntil("");
+      setCopied(name);
+    } else {
+      // A refusal can mean the assistant's side moved — the key gone from its
+      // file, the feature switched off — so ask again what is on offer rather
+      // than keep offering the same refused name. The refusal stays on screen.
+      refreshAssistantKeys();
+    }
+  };
+
+  const expiryText = (row: SecretRow): string => {
+    if (row.expiresAt === "run") return t(row.expired ? "codingAgent.secretsExpiryUsed" : "codingAgent.secretsExpiryRun");
+    if (row.expired) return t("codingAgent.secretsExpired");
+    const until = new Date(row.expiresAt ?? "");
+    return Number.isNaN(until.getTime())
+      ? t("codingAgent.secretsExpired")
+      : t("codingAgent.secretsExpiryUntil", { date: until.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) });
+  };
 
   const scopeLabel = (s: string): string => {
     if (s === BOX_SCOPE) return t("codingAgent.secretsScopeBox");
@@ -312,6 +491,16 @@ export default function CodingAgentSecretsCard() {
                 {!row.readable && (
                   <p className="mt-0.5 text-[11px] text-amber-300 leading-relaxed" data-testid="coding-agent-secret-unreadable">
                     {t("codingAgent.secretsUnreadable")}
+                  </p>
+                )}
+                {/* A copy the owner limited: how long it may still reach runs,
+                    or that it no longer reaches any. */}
+                {(row.expiresAt || row.expired) && (
+                  <p
+                    className={`mt-0.5 text-[11px] leading-relaxed ${row.expired ? "text-amber-300" : "text-[var(--text-muted)]"}`}
+                    data-testid="coding-agent-secret-expiry"
+                  >
+                    {expiryText(row)}
                   </p>
                 )}
               </div>
@@ -408,11 +597,135 @@ export default function CodingAgentSecretsCard() {
         </div>
       </div>
 
+      {/* Import from assistant — the owner's only, and only where there is a
+          source to copy from (see the header). Names in, names out. */}
+      {assistantKeys === "unreadable" && (
+        <p className="mt-3 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-secrets-import-unreadable">
+          {t("codingAgent.secretsImportSourceFailed")}
+        </p>
+      )}
+      {Array.isArray(assistantKeys) && (
+        <div className="mt-3" data-testid="coding-agent-secrets-import">
+          {!importOpen ? (
+            <button
+              type="button"
+              onClick={openImport}
+              disabled={formLocked}
+              data-testid="coding-agent-secrets-import-open"
+              className={BTN_QUIET}
+            >
+              {t("codingAgent.secretsImportOpen")}
+            </button>
+          ) : (
+            <div className={`${INSET_SURFACE} px-3 py-2.5 space-y-1.5`} data-testid="coding-agent-secrets-import-picker">
+              <p className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.secretsImportOpen")}</p>
+              <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">{t("codingAgent.secretsImportHint")}</p>
+              {assistantKeys.length === 0 ? (
+                <p className="text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-secrets-import-empty">
+                  {t("codingAgent.secretsImportEmpty")}
+                </p>
+              ) : (
+                <div className="flex flex-col sm:flex-row gap-1.5">
+                  <select
+                    value={importChoice}
+                    onChange={(e) => setImportName(e.target.value)}
+                    disabled={busy !== null}
+                    aria-label={t("codingAgent.secretsImportNameLabel")}
+                    data-testid="coding-agent-secrets-import-name"
+                    className={`flex-1 min-w-0 text-base sm:text-xs font-mono ${FIELD}`}
+                  >
+                    {importChoice === "" && <option value="">{t("codingAgent.secretsImportNoneLeft")}</option>}
+                    {assistantKeys.map((k) => {
+                      const here = isHere(k.name, importScope);
+                      return (
+                        <option key={k.name} value={k.name} disabled={here}>
+                          {here ? t("codingAgent.secretsImportHere", { name: k.name }) : k.name}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <select
+                    value={importScope}
+                    onChange={(e) => setImportScope(e.target.value)}
+                    disabled={busy !== null}
+                    aria-label={t("codingAgent.secretsScopeLabel")}
+                    data-testid="coding-agent-secrets-import-scope"
+                    className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
+                  >
+                    <option value={BOX_SCOPE}>{t("codingAgent.secretsScopeBox")}</option>
+                    {projects.map((p) => (
+                      <option key={p.folder} value={p.folder}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {/* How long the copy may reach runs. None by default: the copy is
+                  inert until ticked whatever is picked here. */}
+              {assistantKeys.length > 0 && (
+                <div className="flex flex-col sm:flex-row gap-1.5">
+                  <select
+                    value={importExpiry}
+                    onChange={(e) => setImportExpiry(e.target.value as ImportExpiry)}
+                    disabled={busy !== null}
+                    aria-label={t("codingAgent.secretsImportExpiryLabel")}
+                    data-testid="coding-agent-secrets-import-expiry"
+                    className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
+                  >
+                    <option value="none">{t("codingAgent.secretsImportExpiryNone")}</option>
+                    <option value="run">{t("codingAgent.secretsImportExpiryRun")}</option>
+                    <option value="date">{t("codingAgent.secretsImportExpiryDate")}</option>
+                  </select>
+                  {importExpiry === "date" && (
+                    <input
+                      type="date"
+                      value={importUntil}
+                      min={todayInput()}
+                      onChange={(e) => setImportUntil(e.target.value)}
+                      disabled={busy !== null}
+                      aria-label={t("codingAgent.secretsImportUntilLabel")}
+                      data-testid="coding-agent-secrets-import-until"
+                      className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
+                    />
+                  )}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setImportOpen(false)}
+                  disabled={busy === "import"}
+                  data-testid="coding-agent-secrets-import-cancel"
+                  className={BTN_QUIET}
+                >
+                  {t("codingAgent.secretsImportCancel")}
+                </button>
+                {assistantKeys.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void copyFromAssistant()}
+                    disabled={busy !== null || !importChoice || full}
+                    data-testid="coding-agent-secrets-import-copy"
+                    className={`${BTN_SECONDARY} shrink-0`}
+                  >
+                    {t("codingAgent.secretsImportCopy")}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* The name it was saved under, and nothing about the value — the one
           confirmation this card can honestly give. */}
       {saved && (
         <p className="mt-2 text-[11px] text-emerald-300" data-testid="coding-agent-secrets-saved">
           {t("codingAgent.secretsSaved", { name: saved })}
+        </p>
+      )}
+      {copied && (
+        <p className="mt-2 text-[11px] text-emerald-300" data-testid="coding-agent-secrets-imported">
+          {t("codingAgent.secretsImported", { name: copied })}
         </p>
       )}
 
@@ -442,6 +755,12 @@ const REFUSAL_KEYS: Record<string, string> = {
   value_too_short: "codingAgent.secretsRefusedShort",
   full: "codingAgent.secretsRefusedFull",
   not_found: "codingAgent.secretsRefusedGone",
+  exists: "codingAgent.secretsRefusedExists",
+  not_importable: "codingAgent.secretsRefusedNotImportable",
+  not_held: "codingAgent.secretsImportGone",
+  source_unreadable: "codingAgent.secretsImportSourceFailed",
+  disabled: "codingAgent.secretsImportDisabled",
+  invalid_expiry: "codingAgent.secretsImportUntilInvalid",
   store_unreadable: "codingAgent.secretsStoreFailed",
   store_unwritable: "codingAgent.secretsStoreFailed",
   key_unavailable: "codingAgent.secretsKeyFailed",

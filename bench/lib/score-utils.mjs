@@ -103,9 +103,12 @@ export async function nodeCheck(workdir, rel) {
  * dropped and the check passes. A timer the code under test leaves open (a
  * refresh loop started at import) therefore holds the run to timeoutMs — and
  * the detail then says it timed out rather than showing bare -1 counts.
+ *
+ * --test-reporter=tap, named: node 23 and newer default to the spec reporter,
+ * whose summary has no `# pass N` / `# fail N` lines to count.
  */
 export async function nodeTest(workdir, { timeoutMs = 120_000 } = {}) {
-  const res = await run("node", ["--test"], { cwd: workdir, timeoutMs });
+  const res = await run("node", ["--test", "--test-reporter=tap"], { cwd: workdir, timeoutMs });
   const tap = res.stdout + res.stderr;
   const passCount = Number(tap.match(/^# pass (\d+)/m)?.[1] ?? -1);
   const failCount = Number(tap.match(/^# fail (\d+)/m)?.[1] ?? -1);

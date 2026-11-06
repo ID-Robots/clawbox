@@ -1,20 +1,26 @@
 /**
- * The OpenClaw gateway as a consumer of the box's active Anthropic account
- * (TASK-1260) — the real pool and swap, a stand-in gateway.
+ * The OpenClaw gateway as a consumer of the box's Anthropic account pool
+ * (TASK-1260; the gateway leg of 2026-10-14) — the real pool and swap, a
+ * stand-in for core's auth store and the `openclaw models auth` verbs.
  *
  * What would make it worthless or harmful if it broke:
  *
- *  1. THE GATEWAY FOLLOWS — on a limit or a refused credential the chat's
- *     Claude subscription is rewritten with the active account and the gateway
- *     restarted on it; a write the restart lost is written again.
- *  2. IT DOES NOT TAKE OVER FOR NOTHING — connecting a first account never
- *     replaces the sign-in the chat already runs on; an API key is never put
- *     where a Claude account's token belongs.
- *  3. THE KEEPER — the gateway's token is renewed before it ends, and a sign-in
- *     the owner made in Settings since is left alone.
- *  4. THE FAILURES — a cron run (a heartbeat is one) that died on the limit is
- *     reported and run once more after the swap; the chat's own report sends
- *     the turn again into its session; another provider's failure moves nothing.
+ *  1. THE POOL IN THE GATEWAY — every Claude account is its own profile, the
+ *     access token only, in an order that follows the pool (the active account
+ *     first, the chat's own sign-in last); a limited account out of the order
+ *     while another can answer, or the chat's own subscription sign-in, so no
+ *     session core pinned to it stays there, and back at its reset; never a
+ *     restart.
+ *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
+ *     an unreadable config removes nothing; the owner's own profiles are never
+ *     written or removed; a write core refused is owed, not claimed.
+ *  3. WHAT CORE SAW — a rate limit core rotated off is the pool's limit until
+ *     Anthropic's reset; a throttle is not; a refused credential is checked.
+ *  4. THE FAILURES — a cron run (a heartbeat is one) or a chat turn that died
+ *     on the limit is retried once on the account the pool moved to; another
+ *     provider's failure moves nothing.
+ *  5. THE OWNER'S SWITCH — "use these accounts for the chat" puts the accounts
+ *     in before the chat's model is set, and says why when it cannot.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -37,46 +43,86 @@ let swap: typeof import("@/lib/anthropic-swap");
 let gw: typeof import("@/lib/anthropic-gateway");
 let fp: (token: string) => string;
 
-type Profile = import("@/lib/anthropic-gateway-auth").GatewayAnthropicProfile;
+type Failure = import("@/lib/openclaw-auth-store").ProfileFailureState;
+type Usage = import("@/lib/anthropic-usage").AnthropicUsageReading;
 
-/** A gateway whose one subscription profile holds `token` — and what was done to it. */
-function fakeGateway(initial: string | null = "sk-ant-oat01-the-chats-own-sign-in") {
-  const state = {
-    token: initial,
-    writes: [] as { access: string; expires: number | null }[],
-    restarts: 0,
+const H = 3_600_000;
+const OWN = "sk-ant-oat01-the-chats-own-sign-in";
+
+/** Core's store and the CLI that writes it — and what was asked of them. */
+function fakeCore() {
+  const core = {
+    profiles: new Map<string, { type: string; secret: string; expires: number | null }>([["anthropic:default", { type: "oauth", secret: OWN, expires: null }]]),
+    order: null as string[] | null,
+    failures: {} as Record<string, Failure>,
+    chatOnClaude: true as boolean | null,
+    /** openclaw.json's `auth.order.anthropic`, which core's paste-token writes beside a sign-in of another mode. */
+    configOrder: null as string[] | null,
+    readable: true,
+    pastes: [] as { profileId: string; access: string; expires: number | null }[],
+    logouts: [] as string[],
+    orders: [] as string[][],
     calls: [] as { method: string; params: Record<string, unknown> }[],
     cronJobs: [] as unknown[],
-    /** When set, the next restart puts this token back (the gateway flushed its own copy). */
-    flushOnRestart: null as string | null,
+    /** Anthropic's usage windows, by access token; absent is "could not be asked". */
+    usage: new Map<string, Usage>(),
+    refusePaste: false,
+    /** Ids whose paste core refuses, whatever `refusePaste` says. */
+    refusePasteOf: new Set<string>(),
+    refuseOrder: false,
+    /** `order set` answers OK and the stored order reads back otherwise (core's read raced it). */
+    orderReadsBackOtherwise: false,
+    /** The `--agent` arguments openclaw.json's roster calls for; null: no `main` in it. */
+    agent: [] as string[] | null,
+    /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
+    pasteExitsAfterWrite: false,
   };
-  const profile = (): Profile[] => state.token === null ? [] : [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(state.token), expires: null }];
   gw._setGatewayDepsForTests({
     absent: () => false,
-    list: profile,
-    write: (token) => {
-      state.writes.push(token);
-      if (state.token === null) return { written: 0, failed: 0 };
-      state.token = token.access;
-      return { written: 1, failed: 0 };
-    },
-    restart: async () => {
-      state.restarts += 1;
-      if (state.flushOnRestart) {
-        state.token = state.flushOnRestart;
-        state.flushOnRestart = null;
+    chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null, agent: core.agent }),
+    read: () => core.readable
+      ? {
+        kind: "present",
+        profiles: [...core.profiles].map(([profileId, p]) => ({ profileId, type: p.type, fingerprint: fp(p.secret), refreshFingerprint: null, expires: p.expires, fenced: false, fence: null })),
+        order: core.order ? [...core.order] : null,
+        failures: core.failures,
       }
+      : { kind: "unreadable" },
+    paste: async (profileId, token) => {
+      if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
+      core.pastes.push({ profileId, ...token });
+      core.profiles.set(profileId, { type: "token", secret: token.access, expires: token.expires });
+      // applyAuthProfileConfig: beside a sign-in of another mode the paste
+      // starts (or leads) a CONFIG order.
+      if (core.configOrder) core.configOrder = [profileId, ...core.configOrder.filter((id) => id !== profileId)];
+      else if (core.profiles.get("anthropic:default")?.type === "oauth") core.configOrder = [profileId, "anthropic:default"];
+      if (core.pasteExitsAfterWrite) throw new Error("Model auth changes were saved, but the Gateway could not refresh them.");
     },
+    logout: async (profileId) => {
+      core.logouts.push(profileId);
+      core.profiles.delete(profileId);
+      if (core.order) core.order = core.order.filter((id) => id !== profileId);
+      if (core.configOrder) core.configOrder = core.configOrder.filter((id) => id !== profileId);
+    },
+    order: async (ids) => {
+      if (core.refuseOrder) throw new Error("the auth state is busy");
+      core.orders.push([...ids]);
+      core.order = ids.length > 0 ? [...ids] : null;
+      if (core.orderReadsBackOtherwise && core.order) core.order = [...core.order].reverse();
+    },
+    unsetConfigOrder: async () => {
+      core.configOrder = null;
+    },
+    usage: async (access) => core.usage.get(access) ?? null,
     call: async (method, params) => {
-      state.calls.push({ method, params });
-      if (method === "cron.list") return { jobs: state.cronJobs };
+      core.calls.push({ method, params });
+      if (method === "cron.list") return { jobs: core.cronJobs };
       return { ok: true };
     },
   });
-  return state;
+  return core;
 }
 
-const H = 3_600_000;
 const oauth = (access: string, expiresIn = 8 * H) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + expiresIn });
 
 beforeEach(async () => {
@@ -96,6 +142,7 @@ beforeEach(async () => {
   (await import("@/lib/project-secrets"))._resetSecretKeyCacheForTests();
   pool._resetAnthropicAccountsForTests();
   swap._resetAnthropicSwapForTests();
+  announceAnthropicLimit.mockClear();
 });
 
 afterEach(() => {
@@ -114,205 +161,589 @@ async function twoClaudeAccounts() {
   return { work, personal };
 }
 
-describe("the swap reaching the gateway", () => {
-  it("moves the chat's Claude subscription to the next account on a limit, and restarts the gateway on it", async () => {
-    const gateway = fakeGateway();
-    gw.startGatewaySwap();
-    const { work, personal } = await twoClaudeAccounts();
-    await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "coding" });
-    await swap.whenSwapsSettled();
+const p = (id: string) => `anthropic:clawbox-${id}`;
+const UNSAID = { fiveHour: null, sevenDay: null };
+const spent = (resetsAt: number): Usage => ({ exhausted: true, resetsAt, kind: "session", utilization: UNSAID });
+const rateLimited = (now = Date.now(), until = now + 30_000): Failure => ({
+  cooldownUntil: until, cooldownReason: "rate_limit", disabledUntil: null, disabledReason: null, blockedUntil: null, lastFailureAt: now - 1_000,
+});
 
-    expect(gateway.token).toBe("sk-ant-oat01-personal");
-    expect(gateway.writes).toEqual([{ access: "sk-ant-oat01-personal", expires: expect.any(Number) }]);
-    expect(gateway.restarts).toBe(1);
-    const view = await pool.describePool();
-    expect(view.gateway).toMatchObject({ following: true, accountId: personal.id, label: "Personal Max" });
-    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched", count: 1 });
-    // The gateway is never handed the refresh token.
-    expect(JSON.stringify(gateway.writes)).not.toContain("refresh-");
+describe("the pool in the gateway", () => {
+  it("puts every Claude account in as its own profile — the access token only — the active one first and the chat's own sign-in last", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    expect(core.pastes.map((w) => w.profileId).sort()).toEqual([p(work.id), p(personal.id)].sort());
+    expect(core.pastes.find((w) => w.profileId === p(work.id))).toMatchObject({ access: "sk-ant-oat01-work", expires: expect.any(Number) });
+    expect(JSON.stringify(core.pastes)).not.toContain("refresh-");
+    expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:default"]);
+    // The chat's own sign-in is never written or taken out.
+    expect(core.profiles.get("anthropic:default")?.secret).toBe(OWN);
+    expect(core.logouts).toEqual([]);
+    expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: work.id, label: "Work Max" });
+
+    // A second pass with nothing changed asks core for nothing.
+    const asked = core.pastes.length + core.orders.length;
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(core.pastes.length + core.orders.length).toBe(asked);
   });
 
-  it("does not take over the chat's own sign-in when the owner merely connects accounts", async () => {
-    const gateway = fakeGateway();
+  it("moves the order when the pool moves — a limit seen elsewhere, the owner's new order — and never restarts anything", async () => {
+    const core = fakeCore();
     gw.startGatewaySwap();
-    await twoClaudeAccounts();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+
+    // A coding run hit Work's limit.
+    await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "coding" });
     await swap.whenSwapsSettled();
-    expect(gateway.writes).toEqual([]);
-    expect(gateway.restarts).toBe(0);
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+    const view = await pool.describePool();
+    expect(view.gateway).toMatchObject({ following: true, accountId: personal.id, label: "Personal Max" });
+    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched", count: 2 });
+
+    // The owner puts Work first again once it is back.
+    await pool.clearLimit(work.id);
+    await pool.reorderAccounts([work.id, personal.id]);
+    await swap.whenSwapsSettled();
+    expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:default"]);
+  });
+
+  it("never moves a chat that is on another provider, and takes the pool out when the chat leaves Claude", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).toBe("idle");
+    expect(core.pastes).toEqual([]);
+    expect(core.orders).toEqual([]);
+
+    core.chatOnClaude = true;
+    await gw.keepGatewayMirror();
+    expect(core.profiles.size).toBe(3);
+    core.chatOnClaude = false;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.logouts).toHaveLength(2);
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
     expect((await pool.describePool()).gateway.following).toBe(false);
   });
 
-  it("follows every move once it follows — a reset back to the first account included", async () => {
-    const gateway = fakeGateway();
-    gw.startGatewaySwap();
-    const { work } = await twoClaudeAccounts();
-    await pool.setReturnToPrimary(true);
-    const until = Date.now() + 5_000;
-    await pool.markLimited(work.id, until, "session");
-    await swap.whenSwapsSettled();
-    expect(gateway.token).toBe("sk-ant-oat01-personal");
-
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(until + 1);
-    await pool.readPoolState();
-    await swap.whenSwapsSettled();
-    expect(gateway.token).toBe("sk-ant-oat01-work");
-    expect(gateway.restarts).toBe(2);
+  it("takes nothing out when openclaw.json cannot be read, or core's store cannot", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    core.chatOnClaude = null;
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+    core.chatOnClaude = true;
+    core.readable = false;
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+    expect(core.logouts).toEqual([]);
+    expect(core.profiles.size).toBe(3);
   });
 
-  it("writes again when the restart put the old token back, and says so if it happens twice", async () => {
-    const gateway = fakeGateway();
-    gw.startGatewaySwap();
-    const { work } = await twoClaudeAccounts();
-    gateway.flushOnRestart = "sk-ant-oat01-the-chats-own-sign-in";
-    await pool.markLimited(work.id, Date.now() + H, "session");
-    await swap.whenSwapsSettled();
-    expect(gateway.token).toBe("sk-ant-oat01-personal");
-    expect(gateway.writes).toHaveLength(2);
-    expect(gateway.restarts).toBe(2);
-    expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "ok", code: "switched" });
-  });
-
-  it("leaves the gateway where it is when the active account is an API key, and says why", async () => {
-    const gateway = fakeGateway();
+  it("keeps the chat on the Claude accounts when an API key is the active account, and says why", async () => {
+    const core = fakeCore();
     gw.startGatewaySwap();
     const work = await pool.addOAuthAccount({ label: "Work Max", email: "work@example.com", tokens: oauth("sk-ant-oat01-work") });
     await pool.addApiKeyAccount({ label: "Key", key: "sk-ant-api03-a-key-000000000000000000000" });
     await pool.markLimited(work.id, Date.now() + H, "session");
     await swap.whenSwapsSettled();
-    expect(gateway.writes).toEqual([]);
-    expect((await pool.describePool()).lastSwap?.consumers.gateway).toEqual({ status: "skipped", code: "not_transferable", count: null });
+    // The pool's key is never the gateway's; with its one Claude account
+    // limited, the chat's own subscription sign-in answers.
+    expect(core.order).toEqual(["anthropic:default"]);
+    expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "skipped", code: "not_transferable" });
   });
 
-  it("does nothing on a gateway that does not run on a Claude subscription", async () => {
-    const gateway = fakeGateway(null);
-    gw.startGatewaySwap();
+  it("takes out an account that left the pool or needs the owner — and only the pool's own", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.removeAccount(personal.id);
+    await gw.keepGatewayMirror();
+    expect(core.logouts).toEqual([p(personal.id)]);
+    await pool.markCredentialProblem(work.id, "revoked");
+    await gw.keepGatewayMirror();
+    expect(core.logouts).toEqual([p(personal.id), p(work.id)]);
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+  });
+
+  it("puts a token the pool renewed in — no restart — and owes a write core refused instead of claiming it", async () => {
+    const core = fakeCore();
     const { work } = await twoClaudeAccounts();
-    await pool.markLimited(work.id, Date.now() + H, "session");
-    await swap.whenSwapsSettled();
-    expect(gateway.restarts).toBe(0);
-    expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "skipped", code: "not_subscription" });
-  });
-});
-
-describe("a restart that failed, and two writers at once", () => {
-  it("records the move as owed until the restart succeeds, and the keeper finishes it", async () => {
-    const gateway = fakeGateway();
-    gw.startGatewaySwap();
-    const { work, personal } = await twoClaudeAccounts();
-    const restart = vi.fn(async (): Promise<void> => { throw new Error("Start request repeated too quickly"); });
-    gw._setGatewayDepsForTests({
-      absent: () => false,
-      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
-      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
-      restart,
-      call: async () => ({}),
-    });
-    gw.startGatewaySwap();
-    await pool.markLimited(work.id, Date.now() + H, "session");
-    await swap.whenSwapsSettled();
-    expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "failed", code: "restart_failed" });
-    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
-
-    restart.mockImplementation(async () => undefined);
-    expect(await gw.keepGatewayMirror()).toBe("resynced");
-    expect(restart).toHaveBeenCalledTimes(2);
-    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
-    expect(await gw.keepGatewayMirror()).toBe("fresh");
-  });
-
-  it("makes the keeper wait for a swap in progress instead of mistaking its token for the owner's", async () => {
-    const gateway = fakeGateway();
-    const { work, personal } = await twoClaudeAccounts();
-    await gw.syncGatewayTo(work.id, { restart: false });
-    let release: () => void = () => {};
-    const restarting = new Promise<void>((resolve) => { release = resolve; });
-    let entered = false;
-    gw._setGatewayDepsForTests({
-      absent: () => false,
-      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
-      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
-      restart: async () => { entered = true; await restarting; },
-      call: async () => ({}),
-    });
-    gw.startGatewaySwap();
-    await pool.markLimited(work.id, Date.now() + H, "session");
-    await vi.waitFor(() => expect(entered).toBe(true));
-    const keeper = gw.keepGatewayMirror();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    release();
-    await swap.whenSwapsSettled();
-    expect(await keeper).not.toBe("stood_down");
-    expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: personal.id });
-  });
-});
-
-describe("the keeper", () => {
-  it("renews the gateway's token through the pool before it ends — no restart — and is quiet while it is fresh", async () => {
-    const gateway = fakeGateway();
-    const work = await pool.addOAuthAccount({ label: "Work Max", email: "work@example.com", tokens: oauth("sk-ant-oat01-work", 2 * H) });
-    await pool.addOAuthAccount({ label: "Personal Max", email: "me@example.com", tokens: oauth("sk-ant-oat01-personal") });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 })));
-    expect(await gw.syncGatewayTo(work.id, { restart: true })).toMatchObject({ status: "ok" });
-    // The pool renewed the two-hour token on the way in: that is what the gateway holds.
-    expect(gateway.token).toBe("sk-ant-oat01-work-renewed");
-    expect(await gw.keepGatewayMirror()).toBe("fresh");
-    expect(gateway.restarts).toBe(1);
-  });
-
-  it("puts the renewal in when the pool renewed the account elsewhere", async () => {
-    const gateway = fakeGateway();
-    const work = await pool.addOAuthAccount({ label: "Work Max", email: "work@example.com", tokens: oauth("sk-ant-oat01-work") });
-    await gw.syncGatewayTo(work.id, { restart: false });
+    await gw.keepGatewayMirror();
     await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
-    expect(await gw.keepGatewayMirror()).toBe("renewed");
-    expect(gateway.token).toBe("sk-ant-oat01-work-v2");
-    expect(gateway.restarts).toBe(0);
+
+    core.refusePaste = true;
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: true });
+    // The old token stays in the order meanwhile: it still answers until it ends.
+    expect(core.order).toContain(p(work.id));
+
+    core.refusePaste = false;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: false, fingerprint: fp("sk-ant-oat01-work-v2") });
+  });
+});
+
+describe("a limited account and the sessions core pinned to it", () => {
+  // Core keeps a session's automatic auth pin on any profile that is in the
+  // stored order and not cooling down for that session's model. A spent
+  // account left in the order, even last, kept answering the sessions pinned
+  // to it with the provider's limit text whenever core's own backoff lapsed.
+  // Left out of the order, core drops that pin on the session's next turn.
+  it("leaves a limited account out of the order while another can answer, and keeps its profile, renewed, for the reset", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+
+    await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+    // Out of the order, not out of the store: nothing to paste back at the reset.
+    expect(core.logouts).toEqual([]);
+    expect(core.profiles.has(p(work.id))).toBe(true);
+    // A token the pool renews meanwhile still goes in.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await gw.keepGatewayMirror();
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+
+    // Back (here by the owner's clear): in again, after the active account.
+    await pool.clearLimit(work.id);
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
   });
 
-  it("stands down when the owner signed the chat in again in Settings", async () => {
-    const gateway = fakeGateway();
-    const work = await pool.addOAuthAccount({ label: "Work Max", email: "work@example.com", tokens: oauth("sk-ant-oat01-work") });
-    await gw.syncGatewayTo(work.id, { restart: false });
-    gateway.token = "sk-ant-oat01-the-owner-signed-in-again";
-    expect(await gw.keepGatewayMirror()).toBe("stood_down");
-    expect(gateway.token).toBe("sk-ant-oat01-the-owner-signed-in-again");
-    expect((await pool.describePool()).gateway.following).toBe(false);
+  it("hands the order to the owner's own subscription sign-in when no account of the pool can answer, and takes the accounts back at their reset", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    const synced = await gw.syncGatewayNow();
+    // A session core pinned to a spent account drops that pin on its next
+    // turn, and the sign-in answers it.
+    expect(core.order).toEqual(["anthropic:default"]);
+    expect(synced.status).toBe("ok");
+    // Out of the order, not out of the store, and the chat is still the pool's.
+    expect(core.logouts).toEqual([]);
+    expect(core.profiles.has(p(work.id))).toBe(true);
+    expect(core.profiles.has(p(personal.id))).toBe(true);
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    expect(await gw.keepGatewayMirror()).not.toBe("failed");
+    expect(core.order).toEqual(["anthropic:default"]);
+
+    await pool.clearLimit(personal.id);
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+  });
+
+  it("keeps every limited account in, by its reset and ahead of it, when the owner's other Anthropic credential is an API key or of a kind the store does not say", async () => {
+    for (const type of ["api_key", ""]) {
+      const core = fakeCore();
+      core.profiles.set("anthropic:default", { type, secret: OWN, expires: null });
+      gw.startGatewaySwap();
+      const { work, personal } = await twoClaudeAccounts();
+      await gw.keepGatewayMirror();
+      await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+      await pool.markLimited(personal.id, Date.now() + H, "session");
+      await swap.whenSwapsSettled();
+      await gw.syncGatewayNow();
+      expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+      for (const account of [work, personal]) await pool.removeAccount(account.id);
+      await swap.whenSwapsSettled();
+    }
+  });
+
+  it("leaves an API key the store holds beside the sign-in out while the sign-in leads — the turn's one rotation must not spend it — and a static token that has run out is no sign-in", async () => {
+    const core = fakeCore();
+    core.profiles.set("anthropic:key", { type: "api_key", secret: "sk-ant-api03-owner", expires: null });
+    core.order = ["anthropic:key", "anthropic:default"];
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:key", "anthropic:default"]);
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual(["anthropic:default"]);
+    expect(core.profiles.has("anthropic:key")).toBe(true);
+
+    core.profiles.set("anthropic:default", { type: "token", secret: OWN, expires: Date.now() - 60_000 });
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default", "anthropic:key"]);
+  });
+
+  it("never empties the order on a box with no sign-in of the owner's: every account limited, or the one that can answer not held", async () => {
+    const core = fakeCore();
+    core.profiles.delete("anthropic:default");
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    // An empty order is `order clear`, which falls back to openclaw.json's
+    // order or profiles and re-admits every pool account.
+    expect(core.order).toEqual([p(personal.id), p(work.id)]);
+
+    // Personal can answer again, but core would not take its token: only a
+    // HELD account that can answer lets the limited one out.
+    await pool.clearLimit(personal.id);
+    core.refusePasteOf.add(p(personal.id));
+    core.profiles.delete(p(personal.id));
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(work.id)]);
+    expect(core.orders.every((ids) => ids.length > 0)).toBe(true);
+  });
+
+  it("puts an account back in at its reset, without waiting for the keeper", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    await pool.markLimited(work.id, Date.now() + H, "weekly");
+    await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), "anthropic:default"]));
+    // The pool's reset wake comes 20 s past the reset; the keeper's ten-minute pass does not run here.
+    await vi.advanceTimersByTimeAsync(H + 30_000);
+    await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]));
+  });
+});
+
+describe("what the move needs, and what can wait for the keeper", () => {
+  it("counts a move as done once the gateway leads with the active account — another account owed costs no retry", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    const third = await pool.addOAuthAccount({ label: "Third Max", email: "third@example.com", tokens: oauth("sk-ant-oat01-third") });
+    await gw.keepGatewayMirror();
+    // The third account's renewal will not land; the limit moves the pool to Personal.
+    await pool.replaceCredential(third.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-third-v2"), email: "third@example.com" });
+    core.refusePasteOf.add(p(third.id));
+    const retried = vi.fn(async () => true);
+    await swap.reportAnthropicFailure({ text: "You've hit your weekly limit · resets Mon 9am", source: "cron", accountId: work.id, retry: { key: "cron:job-p", after: "gateway", run: retried } });
+
+    expect(core.order?.[0]).toBe(p(personal.id));
+    const view = await pool.describePool();
+    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched_partly", count: 3 });
+    expect(retried).toHaveBeenCalledTimes(1);
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    // The keeper finishes the third account's write.
+    core.refusePasteOf.clear();
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.profiles.get(p(third.id))?.secret).toBe("sk-ant-oat01-third-v2");
+  });
+
+  it("backs off a keeper whose writes keep failing instead of spawning the CLI every pass", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    core.refusePaste = true;
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+    const tried = core.orders.length;
+    core.refusePaste = false;
+    // The third pass comes inside the back-off: nothing is asked of core.
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+    expect(core.pastes).toEqual([]);
+    expect(core.orders.length).toBe(tried);
+    // A move of the pool's still goes through at once.
+    expect(await gw.syncGatewayNow()).toMatchObject({ status: "ok", code: "switched" });
+  });
+
+  it("undoes the orders it wrote when the pool comes out — no one-entry order left to hide a later credential", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect(core.order).not.toBeNull();
+    expect(core.configOrder).not.toBeNull();
+    core.chatOnClaude = false;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    expect(core.order).toBeNull();
+    expect(core.configOrder).toBeNull();
+    // A box that never ran the pool keeps an order the owner set by hand.
+    core.order = ["anthropic:default"];
     expect(await gw.keepGatewayMirror()).toBe("idle");
+    expect(core.order).toEqual(["anthropic:default"]);
+  });
+
+  it("keeps the chat named on the account the order really leads with while the active one's write is owed", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Personal's token is renewed elsewhere and core will not take it; the owner puts Personal first.
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2"), email: "me@example.com" });
+    core.refusePasteOf.add(p(personal.id));
+    core.refuseOrder = true;
+    await pool.reorderAccounts([personal.id, work.id]);
+    await swap.whenSwapsSettled();
+    // Not on the new active account yet — but on the pool, not "does not use these accounts".
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: true });
+    expect((await pool.describePool()).gateway.following).toBe(true);
+  });
+
+  it("says the chat is off the accounts as soon as they are out, even with the order's cleanup still owed", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    core.chatOnClaude = false;
+    core.refuseOrder = true;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    expect((await pool.describePool()).gateway.following).toBe(false);
+    // The keeper finishes it.
+    core.refuseOrder = false;
+    await gw.syncGatewayNow();
+    expect(core.order).toBeNull();
+  });
+
+  it("writes nothing to a roster without a `main` agent, and says so instead of looping", async () => {
+    const core = fakeCore();
+    core.agent = null;
+    await twoClaudeAccounts();
+    expect(await gw.syncGatewayNow()).toEqual({ status: "skipped", code: "agent_unsupported", count: null });
+    expect(core.pastes).toEqual([]);
+    expect(await gw.putChatOnPool(async () => ({ ok: true }))).toMatchObject({ ok: false, code: "agent_unsupported", status: 409 });
+  });
+
+  it("clears on take-out an order core said it wrote, even when its read-back disagreed", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    core.orderReadsBackOtherwise = true;
+    await gw.keepGatewayMirror();
+    core.orderReadsBackOtherwise = false;
+    core.chatOnClaude = false;
+    await gw.syncGatewayNow();
+    expect(core.order).toBeNull();
+  });
+
+  it("stops naming the pool when the roster loses its `main` agent", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect((await pool.describePool()).gateway.following).toBe(true);
+    core.agent = null;
+    expect(await gw.syncGatewayNow()).toMatchObject({ status: "skipped", code: "agent_unsupported" });
+    expect((await pool.describePool()).gateway.following).toBe(false);
+  });
+
+  it("leaves an order the owner had in openclaw.json before the pool came", async () => {
+    const core = fakeCore();
+    core.configOrder = ["anthropic:default"];
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    core.chatOnClaude = false;
+    await gw.keepGatewayMirror();
+    expect(core.configOrder).toEqual(["anthropic:default"]);
+  });
+});
+
+describe("what landed is what the store says", () => {
+  it("counts a token the CLI wrote and then failed to announce as in — no false failure", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    core.pasteExitsAfterWrite = true;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: false });
+  });
+});
+
+describe("what core saw", () => {
+  it("records a rate limit core rotated off as the pool's limit until Anthropic's reset, and moves everything once", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const resetsAt = Date.now() + 2 * H;
+    core.usage.set("sk-ant-oat01-work", spent(resetsAt));
+    core.failures[p(work.id)] = rateLimited();
+
+    expect(await gw.noteGatewayCooldowns()).toBe(1);
+    await swap.whenSwapsSettled();
+
+    const limited = (await pool.readAccounts()).find((a) => a.id === work.id);
+    expect(limited).toMatchObject({ status: "limited", limitKind: "session", limitedUntil: resetsAt });
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+    expect(announceAnthropicLimit).toHaveBeenCalledTimes(1);
+    // One failure is one limit: seen again, nothing more happens.
+    await pool.clearLimit(work.id);
+    expect(await gw.noteGatewayCooldowns()).toBe(0);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
+  });
+
+  it("sees a failure whose 30-second cooldown is already over by the time it looks", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const resetsAt = Date.now() + 2 * H;
+    core.usage.set("sk-ant-oat01-work", spent(resetsAt));
+    const now = Date.now();
+    // The first rate limit after a success: 30 s, and the watcher came at 45 s.
+    core.failures[p(work.id)] = rateLimited(now - 45_000, now - 15_000);
+    expect(await gw.noteGatewayCooldowns(now)).toBe(1);
+    await swap.whenSwapsSettled();
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitedUntil: resetsAt });
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+  });
+
+  it("does not reach further back than a quarter of an hour on its first look, and needs a reason core still keeps", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    core.usage.set("sk-ant-oat01-work", spent(Date.now() + H));
+    core.usage.set("sk-ant-oat01-personal", spent(Date.now() + H));
+    const now = Date.now();
+    // Before this process started looking (a boot) — and a success since cleared the other's reason.
+    core.failures[p(work.id)] = rateLimited(now - 3 * H, now - 3 * H + 30_000);
+    core.failures[p(personal.id)] = { ...rateLimited(now - 60_000), cooldownReason: null, cooldownUntil: null };
+    expect(await gw.noteGatewayCooldowns(now)).toBe(0);
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+  });
+
+  it("reads a newer rate limit over a refusal left on record from an earlier failure", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const resetsAt = Date.now() + 2 * H;
+    core.usage.set("sk-ant-oat01-work", spent(resetsAt));
+    const now = Date.now();
+    // An old permanent-auth disable (over), then a real rate limit 45 s ago.
+    core.failures[p(work.id)] = { ...rateLimited(now - 45_000, now - 15_000), disabledUntil: now - 60 * 60_000, disabledReason: "auth_permanent" };
+    expect(await gw.noteGatewayCooldowns(now)).toBe(1);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitedUntil: resetsAt });
+  });
+
+  it("leaves an account in when Anthropic says none of its windows is spent — a throttle core's own cooldown covers", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    core.usage.set("sk-ant-oat01-work", { exhausted: false, resetsAt: null, kind: "session", utilization: UNSAID });
+    core.failures[p(work.id)] = rateLimited();
+    expect(await gw.noteGatewayCooldowns()).toBe(0);
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+  });
+
+  it("with Anthropic unreachable, takes core's own window — never longer than a session window", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const now = Date.now();
+    // Core's fifth rate limit in a row: eight minutes — a cap, not a throttle.
+    core.failures[p(work.id)] = rateLimited(now, now + 8 * 60_000);
+    core.failures[p(personal.id)] = rateLimited(now, now + 30 * H);
+    expect(await gw.noteGatewayCooldowns(now)).toBe(2);
+    const accounts = await pool.readAccounts();
+    expect(accounts.find((a) => a.id === work.id)?.limitedUntil).toBe(now + 8 * 60_000);
+    expect(accounts.find((a) => a.id === personal.id)?.limitedUntil).toBe(now + 5 * H);
+  });
+
+  it("with Anthropic unreachable, leaves core's short cooldowns to core and takes the cap once its back-off reaches five minutes", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Core's rate-limit back-off on one account, each failure after the last
+    // window ended: 30 s, 1, 2, 4 min — throttles, so no swap ends a live
+    // coding run — then 8 min, a cap the pool takes over.
+    let at = Date.now();
+    const verdicts: number[] = [];
+    for (const window of [30_000, 60_000, 120_000, 240_000, 480_000]) {
+      core.failures[p(work.id)] = { ...rateLimited(at, at + window), lastFailureAt: at };
+      verdicts.push(await gw.noteGatewayCooldowns(at + 1_000));
+      await swap.whenSwapsSettled();
+      if (verdicts.length < 5) {
+        expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+        expect((await pool.readPoolState()).activeId).toBe(work.id);
+      }
+      at += window + 5_000;
+    }
+    expect(verdicts).toEqual([0, 0, 0, 0, 1]);
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+    expect(announceAnthropicLimit).toHaveBeenCalledTimes(1);
+  });
+
+  it("with Anthropic unreachable, judges core's window by its length — a cap first seen late is still a cap", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const now = Date.now();
+    // An eight-minute window first looked at four minutes in (a web-server restart).
+    core.failures[p(work.id)] = { ...rateLimited(now - 4 * 60_000, now + 4 * 60_000), lastFailureAt: now - 4 * 60_000 };
+    expect(await gw.noteGatewayCooldowns(now)).toBe(1);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.limitedUntil).toBe(now + 4 * 60_000);
+  });
+
+  it("with Anthropic unreachable and core's window over, sets nothing aside", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const now = Date.now();
+    core.failures[p(work.id)] = rateLimited(now - 45_000, now - 15_000);
+    expect(await gw.noteGatewayCooldowns(now)).toBe(0);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
+  });
+
+  it("checks a credential core saw refused with the pool's own renewal, and puts the renewed token in", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 })));
+    core.failures[p(work.id)] = { ...rateLimited(), cooldownReason: "auth" };
+    expect(await gw.noteGatewayCooldowns()).toBe(1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-renewed");
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
   });
 });
 
 describe("failed gateway turns", () => {
   const LIMIT = "All models failed (1): anthropic/claude-opus-5-5: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You've hit your weekly limit · resets Mon 9am\"}}";
 
-  it("reports a cron run (a heartbeat is one) that died on the limit, and runs it once more after the swap", async () => {
-    const gateway = fakeGateway();
+  it("runs a cron (a heartbeat is one) that died on the limit once more, on the account the pool moved to", async () => {
+    const core = fakeCore();
     gw.startGatewaySwap();
     const { work, personal } = await twoClaudeAccounts();
-    // The gateway already follows account #1.
-    await gw.syncGatewayTo(work.id, { restart: false });
-    const now = Date.now();
-    gateway.cronJobs = [
+    await gw.keepGatewayMirror();
+    core.usage.set("sk-ant-oat01-work", spent(Date.now() + 3 * 24 * H));
+    core.failures[p(work.id)] = rateLimited();
+    const now = Date.now() + 5_000;
+    core.cronJobs = [
       { id: "heartbeat-main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 1_000 } },
       { id: "daily-digest", state: { lastStatus: "ok", lastRunAtMs: now - 2_000 } },
       { id: "old-failure", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 60 * 60_000 } },
       { id: "openai-job", state: { lastStatus: "error", lastError: "429 rate_limit_exceeded from api.openai.com", lastRunAtMs: now - 500 } },
     ];
-    expect(await gw.scanGatewayCrons(now)).toBe(1);
-    expect(gateway.token).toBe("sk-ant-oat01-personal");
-    expect(gateway.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "heartbeat-main", mode: "force" } }]);
-    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitKind: "weekly" });
-    expect((await pool.describePool()).lastSwap).toMatchObject({ source: "cron", toId: personal.id, consumers: { retries: { code: "retried", count: 1 } } });
 
+    // The watcher's pass: what core recorded, then the crons.
+    await gw.noteGatewayCooldowns();
+    await swap.whenSwapsSettled();
+    expect(await gw.scanGatewayCrons(now)).toBe(1);
+
+    expect(core.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "heartbeat-main", mode: "force" } }]);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited" });
+    expect((await pool.describePool()).lastSwap).toMatchObject({ toId: personal.id, consumers: { retries: { code: "retried", count: 1 } } });
     // Looked at once: the next pass does not report the same run again.
     expect(await gw.scanGatewayCrons(now + 1)).toBe(0);
   });
 
-  it("sends a failed chat turn again into its session after a real limit's swap", async () => {
-    const gateway = fakeGateway();
+  it("sends a failed chat turn again into its session once core's record of the limit has moved the pool", async () => {
+    const core = fakeCore();
     gw.startGatewaySwap();
     const { work } = await twoClaudeAccounts();
-    await gw.syncGatewayTo(work.id, { restart: false });
+    await gw.keepGatewayMirror();
+    core.usage.set("sk-ant-oat01-work", { exhausted: true, resetsAt: Date.now() + 3 * 24 * H, kind: "weekly", utilization: UNSAID });
+    core.failures[p(work.id)] = rateLimited();
     const outcome = await gw.reportChatFailure({
       errorMessage: "⚠️ API rate limit reached. Please try again later.",
       detail: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You've hit your weekly limit · resets Mon 9am\"}}",
@@ -322,72 +753,81 @@ describe("failed gateway turns", () => {
       message: "Summarise my inbox",
     });
     expect(outcome).toMatchObject({ handled: true, kind: "limit", limitKind: "weekly", activeLabel: "Personal Max", retry: "sent" });
-    const sent = gateway.calls.filter((c) => c.method === "chat.send");
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitKind: "weekly" });
+    const sent = core.calls.filter((c) => c.method === "chat.send");
     expect(sent).toEqual([{ method: "chat.send", params: expect.objectContaining({ sessionKey: "agent:main:main", message: "Summarise my inbox", deliver: false }) }]);
     // The retry's key is stable for the turn it repeats.
     expect((sent[0].params as { idempotencyKey: string }).idempotencyKey).toMatch(/^clawbox-swap-[0-9a-f]{16}$/);
   });
 
-  it("treats a bare rate limit as a throttle: same account, the turn sent again a minute later — and as the cap only when it comes back", async () => {
-    const gateway = fakeGateway();
+  it("blames no pool account for a turn core recorded nothing against — the chat's own sign-in, say", async () => {
+    const core = fakeCore();
     gw.startGatewaySwap();
-    const { work } = await twoClaudeAccounts();
-    await gw.syncGatewayTo(work.id, { restart: false });
-    const bare = {
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const outcome = await gw.reportChatFailure({
+      detail: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You've hit your weekly limit · resets Mon 9am\"}}",
+      reason: "rate_limit",
+      provider: "anthropic",
+      sessionKey: "agent:main:main",
+      message: "Summarise my inbox",
+    });
+    expect(outcome).toMatchObject({ handled: true, kind: "limit", activeLabel: "Work Max", retry: "sent" });
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+    expect(core.calls.filter((c) => c.method === "chat.send")).toHaveLength(1);
+  });
+
+  it("treats a bare rate limit as a throttle: nothing moved, the turn sent again a minute later", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const first = await gw.reportChatFailure({
       errorMessage: "⚠️ API rate limit reached. Please try again later.",
       detail: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
       reason: "rate_limit",
       provider: "anthropic",
       sessionKey: "agent:main:main",
       message: "Summarise my inbox",
-    };
-    vi.useFakeTimers({ toFake: ["setTimeout"] });
-    const first = await gw.reportChatFailure(bare);
+    });
     expect(first).toMatchObject({ handled: true, kind: "throttled", retry: "later", activeLabel: "Work Max" });
     expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
-    expect(gateway.restarts).toBe(0);
-    expect(gateway.calls.filter((c) => c.method === "chat.send")).toEqual([]);
+    expect(core.calls.filter((c) => c.method === "chat.send")).toEqual([]);
     vi.advanceTimersByTime(60_000);
     vi.useRealTimers();
-    await vi.waitFor(() => expect(gateway.calls.filter((c) => c.method === "chat.send")).toHaveLength(1));
-
-    // The retry was throttled too (the chat reports it without a turn of its
-    // own): the account IS capped, and the first turn goes again after the swap.
-    const second = await gw.reportChatFailure({ ...bare, message: undefined });
-    expect(second).toMatchObject({ handled: true, kind: "limit", activeLabel: "Personal Max", retry: "sent" });
-    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("limited");
-    expect(gateway.token).toBe("sk-ant-oat01-personal");
-    expect(gateway.calls.filter((c) => c.method === "chat.send")).toHaveLength(2);
+    await vi.waitFor(() => expect(core.calls.filter((c) => c.method === "chat.send")).toHaveLength(1));
   });
 
-  it("puts a renewed token in before retrying when Anthropic refused a token the pool could still renew", async () => {
-    const gateway = fakeGateway();
+  it("tells the chat of no move when the pool's only account is the Terminal's `claude` sign-in, which the gateway cannot carry", async () => {
+    const core = fakeCore();
     gw.startGatewaySwap();
-    const { work } = await twoClaudeAccounts();
-    await gw.syncGatewayTo(work.id, { restart: true });
-    const lastSwap = (await pool.describePool()).lastSwap;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 })));
+    // 2026-10-10: the chat was told 13 times that the box had "moved
+    // everything that uses Claude" to a sign-in the gateway cannot use.
+    fs.mkdirSync(path.join(root, "home", ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(root, "home", ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-FAKE-terminal-sign-in" } }));
+    const [login] = await pool.readAccounts();
+    expect(login.kind).toBe("login");
+    await swap.whenSwapsSettled();
+
     const outcome = await gw.reportChatFailure({
-      errorMessage: "Authentication failed.",
-      detail: "HTTP 401: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+      errorMessage: 'No API key found for provider "anthropic".',
       reason: "auth",
       provider: "anthropic",
       sessionKey: "agent:main:main",
       message: "Summarise my inbox",
     });
-    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeLabel: "Work Max", retry: "sent" });
-    // The gateway got the renewal and was restarted onto it BEFORE the turn went again.
-    expect(gateway.token).toBe("sk-ant-oat01-work-renewed");
-    expect(gateway.restarts).toBe(2);
-    const order = gateway.calls.map((c) => c.method);
-    expect(order).toEqual(["chat.send"]);
-    // Not a swap: nothing new filed, the account still in.
-    expect((await pool.describePool()).lastSwap?.id).toBe(lastSwap?.id);
-    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
+    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeId: null, activeLabel: null, allLimited: false, retry: "none" });
+    expect(core.pastes).toEqual([]);
+    expect(core.calls.filter((c) => c.method === "chat.send")).toEqual([]);
+    const view = await pool.describePool();
+    expect(view.activeAccountId).toBe(login.id);
+    expect(view.gateway.following).toBe(false);
+    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "skipped", code: "not_transferable", count: null });
   });
 
   it("ignores another provider's failure", async () => {
-    fakeGateway();
+    fakeCore();
     await twoClaudeAccounts();
     expect(await gw.reportChatFailure({ errorMessage: "rate limited", reason: "rate_limit", provider: "openai" })).toBeNull();
   });
@@ -403,5 +843,92 @@ describe("failed gateway turns", () => {
       { id: "b", lastStatus: "ok", lastError: null, lastRunAtMs: 6 },
     ]);
     expect(gw.parseCronJobs(null)).toEqual([]);
+  });
+});
+
+describe("the owner's switch: use these accounts for the chat too", () => {
+  it("puts the Claude accounts in BEFORE the chat's model is set", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    const { work } = await twoClaudeAccounts();
+    const setModel = vi.fn(async () => {
+      // The model route resolves Claude's row from what the store holds now.
+      expect(core.profiles.has(p(work.id))).toBe(true);
+      core.chatOnClaude = true;
+      return { ok: true as const };
+    });
+    expect(await gw.putChatOnPool(setModel)).toMatchObject({ ok: true });
+    expect(setModel).toHaveBeenCalledTimes(1);
+    expect(core.order?.[0]).toBe(p(work.id));
+    // And the keeper that follows keeps them.
+    await gw.keepGatewayMirror();
+    expect(core.logouts).toEqual([]);
+  });
+
+  it("refuses with no Claude account to give, and sets no model", async () => {
+    const core = fakeCore();
+    await pool.addApiKeyAccount({ label: "Key", key: "sk-ant-api03-a-key-000000000000000000000" });
+    const setModel = vi.fn(async () => ({ ok: true as const }));
+    expect(await gw.putChatOnPool(setModel)).toMatchObject({ ok: false, code: "no_claude_account", status: 409 });
+    expect(setModel).not.toHaveBeenCalled();
+    expect(core.pastes).toEqual([]);
+  });
+
+  it("sets no model when core would not take the accounts, and answers the model route's refusal as its own", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    core.refusePaste = true;
+    const setModel = vi.fn(async () => ({ ok: false as const, error: "That provider is switched off. Switch it on first.", status: 409 }));
+    expect(await gw.putChatOnPool(setModel)).toMatchObject({ ok: false, code: "gateway_write_failed", status: 502 });
+    expect(setModel).not.toHaveBeenCalled();
+    core.refusePaste = false;
+    core.chatOnClaude = false;
+    expect(await gw.putChatOnPool(setModel)).toEqual({ ok: false, code: "model_not_set", error: "That provider is switched off. Switch it on first.", status: 409 });
+    // The chat did not move, so the accounts are out again and the card offers the switch.
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    expect((await pool.describePool()).gateway.following).toBe(false);
+  });
+
+  it("answers a model route that failed AFTER the chat's model landed on Claude as done, with what the box reported — the accounts stay", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    const { work } = await twoClaudeAccounts();
+    const setModel = vi.fn(async () => {
+      // `agents.defaults.model.primary` is written, then a later step of the model route throws.
+      core.chatOnClaude = true;
+      return { ok: false as const, error: "The plugin state could not be written.", status: 500 };
+    });
+    const result = await gw.putChatOnPool(setModel);
+    expect(result).toMatchObject({ ok: true, warning: expect.stringContaining("The plugin state could not be written.") });
+    // Taking them out would leave a chat on Claude with no credential of the pool's.
+    expect(core.logouts).toEqual([]);
+    expect(core.order?.[0]).toBe(p(work.id));
+    expect((await pool.describePool()).gateway.following).toBe(true);
+  });
+
+  it("takes nothing out when the model route failed and openclaw.json cannot be read to tell whether the chat moved, and says so", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    await twoClaudeAccounts();
+    const setModel = vi.fn(async () => {
+      core.chatOnClaude = null;
+      return { ok: false as const, error: "Failed to switch chat model", status: 500 };
+    });
+    const result = await gw.putChatOnPool(setModel);
+    expect(result).toMatchObject({ ok: false, code: "model_unknown", status: 500 });
+    expect(result.ok ? "" : result.error).toMatch(/could not be read.*Failed to switch chat model$/);
+    expect(core.logouts).toEqual([]);
+  });
+
+  it("decides a model route that threw the same way as one that refused — the accounts go out when the chat did not move", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    await twoClaudeAccounts();
+    const setModel = vi.fn(async (): Promise<{ ok: true }> => {
+      throw new Error("the config store could not be written");
+    });
+    expect(await gw.putChatOnPool(setModel)).toEqual({ ok: false, code: "model_not_set", error: "the config store could not be written", status: 500 });
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    expect((await pool.describePool()).gateway.following).toBe(false);
   });
 });

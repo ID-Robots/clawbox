@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { logSafe } from "@/lib/log-safe";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { readProviderStatus } from "@/lib/provider-status";
 
@@ -24,7 +24,7 @@ import { readProviderStatus } from "@/lib/provider-status";
  * so) and 404 for an id this harness has no row for.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing an AI provider's switch needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

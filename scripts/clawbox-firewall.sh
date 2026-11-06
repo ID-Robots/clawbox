@@ -133,8 +133,12 @@ ufw_available() {
 # so on a box with a German or French language pack a grep for the English word
 # "inactive" finds nothing — and a fail-open check would then decide the
 # firewall was already up and never enable it, while logging success.
+# Read whole, then matched: `head -1` and `grep -q` stop reading early, and the
+# SIGPIPE that leaves ufw makes the pipeline false under pipefail.
 ufw_is_active() {
-  LC_ALL=C ufw status 2>/dev/null | head -1 | grep -q "^Status: active"
+  local status
+  status="$(LC_ALL=C ufw status 2>/dev/null)" || return 1
+  [[ "${status%%$'\n'*}" == "Status: active"* ]]
 }
 
 enable_if_inactive() {
@@ -227,10 +231,12 @@ disable_unused_rpcbind() {
   # Jetson image (autofs and ypbind are never installed). Under pipefail that
   # non-zero wins over grep's match and the whole condition reads false — so the
   # guard would never fire and a box mounting NFS would have rpcbind masked out
-  # from under it. Capture first, then test the captured text.
+  # from under it. Capture first, then test the captured text — from a
+  # here-string: `printf | grep -q` is a pipeline too, and printf still writing
+  # the later lines when grep exits at a match is SIGPIPE, the same false again.
   local rpc_status
   rpc_status=$(dpkg-query -W -f='${Status}\n' nfs-common nfs-kernel-server autofs ypbind 2>/dev/null || true)
-  if printf '%s\n' "$rpc_status" | grep -q "^install ok installed"; then
+  if grep -q "^install ok installed" <<<"$rpc_status"; then
     log "rpcbind left alone — an NFS/NIS package is installed"
     return 0
   fi

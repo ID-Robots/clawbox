@@ -32,7 +32,7 @@ function archivedRelativePaths(): string[] {
 }
 
 describe("what the Hermes archiver actually collects", () => {
-  it.each(["hermes-agent", "bin", "cache", "image_cache", "audio_cache", "logs"])(
+  it.each(["hermes-agent", "bin", "installs", "tools", "cache", "image_cache", "audio_cache", "logs"])(
     "never has %s on the allowlist",
     (excluded) => {
       // The Settings card promises these are left out, and the customer's

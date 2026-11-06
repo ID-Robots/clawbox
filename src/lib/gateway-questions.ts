@@ -41,6 +41,8 @@
 // That is also why there is no Skip here: an empty answer is not a value the
 // gateway accepts.
 
+import { retryWhileAgentStarting } from "@/lib/chat-gateway-starting";
+
 /** The event the gateway broadcasts when the agent parks on a question. */
 export const QUESTION_REQUESTED_EVENT = "question.requested";
 /** …and the one it broadcasts when that question reaches a terminal state. */
@@ -360,15 +362,21 @@ export function readQuestionList(raw: unknown): QuestionCard[] {
  * The bound key travels WITH the answer, for the reason the approvals replay
  * does: this call is not cancelled when the owner switches conversation, so a
  * slow list for the tab they left must not land under the tab they are in.
+ *
+ * A connect right after a restart can ask before the agent has finished
+ * starting; that refusal is waited out (bounded, `retryWhileAgentStarting`) so
+ * a question the agent is parked on still comes back. `signal` is the asking
+ * connection's — a newer one asks for itself.
  */
 export async function loadPendingQuestions(
   request: (method: string, params: unknown) => Promise<unknown>,
   key: string,
   apply: (pending: QuestionCard[], forKey: string) => void,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<void> {
   let payload: unknown;
   try {
-    payload = await request("question.list", {});
+    payload = await retryWhileAgentStarting(() => request("question.list", {}), { signal: opts.signal });
   } catch {
     return;
   }

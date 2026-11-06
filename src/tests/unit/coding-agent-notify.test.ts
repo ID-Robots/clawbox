@@ -32,7 +32,8 @@ const readTelegramAllowFrom = vi.hoisted(() => vi.fn());
 const readConfigStrict = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom, readConfigStrict }));
 
-import { announceAnthropicLimit, announceCodingAgent, buildAnnouncement, buildAnthropicLimitNotice } from "@/lib/coding-agent-notify";
+import { announceAnthropicLimit, announceCodingAgent, announceCodingTeam, buildAnnouncement, buildAnthropicLimitNotice, buildTeamAnnouncement } from "@/lib/coding-agent-notify";
+import type { TeamBoard } from "@/lib/coding-team-board";
 
 const SECRET_TASK = "Add the API key sk-live-DO-NOT-LEAK to config";
 const SECRET_SUMMARY = "I wrote the key sk-live-DO-NOT-LEAK into config.js";
@@ -50,6 +51,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     sessionId: "sess-1",
     provider: "clawbox-ai",
     requestedModel: null,
+    modelRole: null,
     anthropicAccount: null,
     accountSwitches: [],
     model: "deepseek-v4-flash",
@@ -59,7 +61,6 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     reviewOf: null,
     reviewLoopOf: null,
     reviewRound: null,
-    pipeline: null,
     team: null,
     readOnly: false,
     extraBrief: null,
@@ -83,7 +84,8 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     modelsUsed: [],
     maxTurns: 400,
     tokensUsed: 0,
-    tokenLimit: null,
+    tokenBreakdown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+    spawnTokens: [],
     thinkingTokens: 0,
     lastActivityAt: 1_000_000 + 95_000,
     retries: 0,
@@ -95,20 +97,42 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     exitCode: 0,
     media: { images: true, audio: true },
     reviewPass: false,
+    visual: null,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     unit: null,
     streamOffset: 0,
     leftover: false,
+    headAtStart: null,
     commitError: null,
     worktree: null,
     deliverable: null,
     deliverableCheck: null,
     attempts: [],
-    completionAttempts: 3,
     messages: [],
     ...over,
   };
+}
+
+/** A settled team's board — only the fields the notice may read, so a new read shows up here as a type error. */
+function board(over: Partial<TeamBoard> = {}): TeamBoard {
+  const partial: Pick<TeamBoard, "id" | "goal" | "projectId" | "status" | "branch" | "pr" | "error" | "tasks"> = {
+    id: "team-k3x9q2ab",
+    goal: SECRET_TASK,
+    projectId: "site",
+    status: "done",
+    branch: "clawbox/team-k3x9q2ab",
+    pr: null,
+    error: "The final review rejected the merged work: it wrote sk-live-DO-NOT-LEAK into config.js",
+    tasks: [
+      { task_id: "t1", task_description: SECRET_TASK, status: "complete", result: SECRET_SUMMARY },
+      { task_id: "t2", task_description: SECRET_TASK, status: "complete", result: SECRET_SUMMARY },
+      { task_id: "t3", task_description: SECRET_TASK, status: "failed", result: SECRET_SUMMARY },
+      { task_id: "t4", task_description: SECRET_TASK, status: "retired", result: null },
+    ] as unknown as TeamBoard["tasks"],
+    ...over,
+  };
+  return partial as TeamBoard;
 }
 
 /** The one entry the notice appended to the owner-notice ring. */
@@ -159,6 +183,62 @@ describe("the text", () => {
     expect(buildAnnouncement(run({ status: "completed" }))).toMatch(/open the Coding Agent app/);
     expect(buildAnnouncement(run({ status: "failed" }))).toMatch(/did not finish/);
     expect(buildAnnouncement(run({ status: "stopped" }))).toMatch(/was stopped/);
+  });
+});
+
+describe("a team's text", () => {
+  it("is a template with the team id, the counts and the branch — never the goal, a task, a result or the error", () => {
+    for (const status of ["done", "failed", "stopped"] as const) {
+      const text = buildTeamAnnouncement(board({ status }));
+      expect(text).toContain("team-k3x9q2ab");
+      expect(text).toContain('project "site"');
+      // t4 is retired: not a task the team owed.
+      expect(text).toContain("2 of 3 tasks done, 1 failed, on branch clawbox/team-k3x9q2ab");
+      expect(text).not.toContain("DO-NOT-LEAK");
+      expect(text).not.toContain("config.js");
+      expect(text).not.toContain("final review");
+    }
+    expect(buildTeamAnnouncement(board({ status: "done" }))).toMatch(/^Coding team team-k3x9q2ab finished .*open the Coding Agent app/);
+    expect(buildTeamAnnouncement(board({ status: "failed" }))).toMatch(/did not finish/);
+    expect(buildTeamAnnouncement(board({ status: "stopped" }))).toMatch(/was stopped/);
+  });
+
+  it("names the pull request when the box opened one, and says nothing of a branch an in-place team has none of", () => {
+    expect(buildTeamAnnouncement(board({ pr: { number: 12 } as TeamBoard["pr"] }))).toContain("on branch clawbox/team-k3x9q2ab, pull request #12");
+    expect(buildTeamAnnouncement(board({ branch: null, projectId: null }))).toContain("in its folder (2 of 3 tasks done, 1 failed).");
+  });
+
+  it("goes to the desktop as the team's finish card named after the team, and to Telegram, with the same template", async () => {
+    readTelegramAllowFrom.mockResolvedValue(["12345"]);
+    readConfigStrict.mockResolvedValue({ channels: { telegram: { botToken: "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" } } });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await announceCodingTeam(board());
+    const payload = ringEntry();
+    // A `coding_team settled` ring action, not a toast: the desktop draws the
+    // same top-right finish card a run gets, whose Open hands the app the team.
+    expect(payload.type).toBe("coding_team");
+    expect(payload.phase).toBe("settled");
+    expect(payload.teamId).toBe("team-k3x9q2ab");
+    expect(payload.projectId).toBe("site");
+    expect(payload.status).toBe("done");
+    // t4 is retired: not a task the team owed.
+    expect(payload.tasksDone).toBe(2);
+    expect(payload.tasksTotal).toBe(3);
+    expect(payload.prNumber).toBeUndefined();
+    expect(payload.id).toBe("coding-team:team-k3x9q2ab");
+    expect(payload.message).toBe(buildTeamAnnouncement(board()));
+    expect(String(payload.message).length).toBeLessThanOrEqual(280);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const sent = JSON.stringify(fetchMock.mock.calls[0]);
+    expect(sent).toContain("Coding team team-k3x9q2ab finished");
+    expect(sent).not.toContain("DO-NOT-LEAK");
+  });
+
+  it("never throws: a ring that cannot be written and a Telegram that will not answer cost only the notice", async () => {
+    kvSet.mockImplementation(() => { throw new Error("disk full"); });
+    readTelegramAllowFrom.mockRejectedValue(new Error("no config"));
+    await expect(announceCodingTeam(board())).resolves.toBeUndefined();
   });
 });
 
@@ -389,6 +469,112 @@ describe("the Telegram leg", () => {
 });
 
 /**
+ * OpenClaw's multi-account Telegram channel keeps each bot under
+ * `channels.telegram.accounts.<id>`, and `openclaw channels add` moves the
+ * root's token there when a second account is added — so the root holds none.
+ * Reading only the root logged "no Telegram bot is configured" on a box whose
+ * bot works, and the approved senders it then asked for were the wrong
+ * account's: the pairing store files them per account.
+ */
+describe("the Telegram leg on a multi-account OpenClaw channel", () => {
+  const ROOT_BOT = "700001:RootChannelBot_0";
+  const DEFAULT_ACCOUNT_BOT = "700002:DefaultAccountBot_0";
+  const WORK_BOT = "700003:WorkAccountBot_00";
+  const ENV_REF = { source: "env", provider: "default", id: "TELEGRAM_WORK_BOT_TOKEN" };
+
+  function sentWith(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    return fetchMock.mock.calls.map(([url]) => String(url));
+  }
+
+  beforeEach(() => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+  });
+
+  it("still sends through the top-level token, for the default account", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: ROOT_BOT, accounts: { work: { botToken: WORK_BOT } } } },
+    });
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(sentWith(fetchMock)).toEqual([`https://api.telegram.org/bot${ROOT_BOT}/sendMessage`]);
+    expect(readTelegramAllowFrom).toHaveBeenCalledWith("default");
+  });
+
+  it("sends through accounts.default when the top level holds no token", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: {
+        telegram: {
+          enabled: true,
+          accounts: { work: { botToken: WORK_BOT }, default: { botToken: DEFAULT_ACCOUNT_BOT } },
+        },
+      },
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(sentWith(fetchMock)).toEqual([`https://api.telegram.org/bot${DEFAULT_ACCOUNT_BOT}/sendMessage`]);
+    expect(readTelegramAllowFrom).toHaveBeenCalledWith("default");
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining("no Telegram bot"));
+  });
+
+  it("follows defaultAccount to another account, and asks THAT account who is approved", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: {
+        telegram: {
+          enabled: true,
+          defaultAccount: "Work",
+          accounts: { default: { botToken: DEFAULT_ACCOUNT_BOT }, work: { botToken: WORK_BOT } },
+        },
+      },
+    });
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(sentWith(fetchMock)).toEqual([`https://api.telegram.org/bot${WORK_BOT}/sendMessage`]);
+    expect(readTelegramAllowFrom).toHaveBeenCalledWith("work");
+  });
+
+  it("says the bot could not be read — not that there is none — for an account holding a secret reference", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, defaultAccount: "work", accounts: { work: { botToken: ENV_REF } } } },
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("could not be read"));
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining("no Telegram bot is configured"));
+  });
+
+  it("says no bot is configured when no account holds a token at all", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, accounts: { work: { enabled: true }, family: { botToken: "" } } } },
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("no Telegram bot is configured"));
+  });
+});
+
+/**
  * The Anthropic account-limit notices (TASK-902): one when an account becomes
  * limited and the box moves on, one when that leaves no account — and never
  * the run card's type, which is deduped by run id and would take the place of
@@ -417,11 +603,13 @@ describe("the Anthropic account-limit notices", () => {
     expect(buildAnthropicLimitNotice({ kind: "all_limited", resetAt: null, runId: null }, SOFIA)).toMatch(/as soon as one is back/);
   });
 
-  it("goes to the desktop as a plain notice that opens Settings → AI providers, not as a run card", async () => {
+  it("goes to the desktop as a plain notice that opens Settings → Providers on the accounts, not as a run card", async () => {
     await announceAnthropicLimit({ kind: "switched", fromLabel: "A", toLabel: "B", resetAt: AT_2250, runId: "run-k3x9q2ab" });
     const payload = ringEntry();
     expect(payload.type).toBe("notify");
-    expect(payload.action).toEqual({ open: "settings", section: "ai" });
+    // The accounts sit folded behind a button on the Anthropic row; the focus
+    // is what lands the owner with them open and in view.
+    expect(payload.action).toEqual({ open: "settings", section: "ai", focus: "anthropicAccounts" });
     expect(payload.runId).toBeUndefined();
   });
 

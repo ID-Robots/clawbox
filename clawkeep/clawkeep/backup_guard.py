@@ -139,6 +139,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -322,6 +323,12 @@ def scan(plan: BackupPlan, *, refused: LinkRule = _link_refused) -> Preflight:
     roots = [asset.source_path for asset in plan.assets]
     unwalked = [src for _, src, reason in plan.skipped if reason in _UNWALKED_REASONS]
     state_dir = next((a.source_path for a in plan.assets if a.kind == "state"), None)
+    # The owner's folders: a temporary-looking name in one is never left out.
+    workspaces = sorted(
+        {src for kind, src, _ in plan.skipped if kind == "workspace"}
+        | {a.source_path for a in plan.assets if a.kind == "workspace"}
+    )
+    now = time.time()
     found: dict[str, RefusedLink] = {}
     archives: dict[str, own_backups.ArchiveFile] = {}
 
@@ -348,6 +355,18 @@ def scan(plan: BackupPlan, *, refused: LinkRule = _link_refused) -> Preflight:
             asset_root,
         )
 
+    def tmp_tree(entry: os.DirEntry[str], asset_root: str) -> None:
+        """A temporary tree an unfinished run left behind — measured (one walk
+        of that tree, only of those) and recorded when its rule leaves it out.
+        It is still walked below for links like any directory."""
+        if (entry.path in archives or not own_backups.tmp_tree_named(entry.name)
+                or _is_volatile(entry.path, state_dir)):
+            return
+        size, newest = own_backups.measure_tree(entry.path)
+        rule = own_backups.tmp_tree_rule(entry.path, state_dir, workspaces, newest, now)
+        if rule:
+            archives[entry.path] = own_backups.ArchiveFile(entry.path, size, rule, asset_root, is_dir=True)
+
     for asset in plan.assets:
         top = asset.source_path
         if os.path.islink(top):
@@ -369,6 +388,7 @@ def scan(plan: BackupPlan, *, refused: LinkRule = _link_refused) -> Preflight:
                     if entry.is_symlink():
                         consider(entry.path, top)
                     elif entry.is_dir(follow_symlinks=False):
+                        tmp_tree(entry, top)
                         stack.append(entry.path)
                     else:
                         measure(entry, top)

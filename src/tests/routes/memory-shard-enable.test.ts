@@ -28,7 +28,7 @@ vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
 
 const { ownerSession } = vi.hoisted(() => ({ ownerSession: { value: true } }));
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => ownerSession.value),
+  hasPersonSession: vi.fn(async () => ownerSession.value),
 }));
 
 // The one write in a reset that a full or read-only disk can refuse. Faked
@@ -45,6 +45,10 @@ vi.mock("@/lib/clawkeep-memory", async (importOriginal) => {
     },
   };
 });
+
+// The vault index the switch hands a catch-up run to: stubbed, it embeds.
+const { vaultIndex } = vi.hoisted(() => ({ vaultIndex: { reindexPrimeRadiantVault: vi.fn(async () => null) } }));
+vi.mock("@/lib/prime-radiant/shard-index", () => vaultIndex);
 
 let enablePOST: typeof import("@/app/setup-api/clawkeep/memory/enable/route").POST;
 let resetPOST: typeof import("@/app/setup-api/clawkeep/memory/reset/route").POST;
@@ -108,6 +112,22 @@ describe("POST /setup-api/clawkeep/memory/enable", () => {
     const res = await enablePOST(post("enable", { enabled: true }));
     expect((await res.json()).enabled).toBe(true);
     expect(scheduler.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("catches the Prime Radiant vault's index up when the switch goes on, and only then", async () => {
+    await enablePOST(post("enable", { enabled: true }));
+    await vi.waitFor(() => expect(vaultIndex.reindexPrimeRadiantVault).toHaveBeenCalledTimes(1));
+    await enablePOST(post("enable", { enabled: false }));
+    await enablePOST(post("enable", { setupComplete: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(vaultIndex.reindexPrimeRadiantVault).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers the switch even when the vault catch-up fails", async () => {
+    vaultIndex.reindexPrimeRadiantVault.mockRejectedValueOnce(new Error("embedder down"));
+    const res = await enablePOST(post("enable", { enabled: true }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).enabled).toBe(true);
   });
 
   it("leaves the scheduler alone when only the wizard flag is written", async () => {
@@ -189,7 +209,12 @@ describe("POST /setup-api/clawkeep/memory/reset", () => {
 
     const res = await resetPOST(post("reset"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ enabled: false, setupComplete: false });
+    // Beside the two flags, what was cleared and what was kept — the words the
+    // assistant relays when it resets for the owner.
+    const body = await res.json();
+    expect(body).toMatchObject({ enabled: false, setupComplete: false });
+    expect(body.cleared).toHaveLength(3);
+    expect(body.kept.join(" ")).toMatch(/folder list/);
 
     // EXPLICIT false, not a deleted key: an absent flag falls back to the
     // switch, and a box that had been switched on would then still believe it
@@ -226,7 +251,9 @@ describe("POST /setup-api/clawkeep/memory/reset", () => {
     expect(scheduler.refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses the agent, which holds the same bearer middleware admits", async () => {
+  // The assistant's own bearer is admitted, and its reset waits on confirm
+  // (memory-shard-assistant.test.ts); a request carrying neither is refused.
+  it("refuses a caller that is neither a signed-in person nor the assistant", async () => {
     await shard.setMemoryShardEnabled(true);
     await shard.setMemoryShardSetupComplete(true);
     ownerSession.value = false;

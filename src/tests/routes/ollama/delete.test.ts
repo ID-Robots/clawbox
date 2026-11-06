@@ -8,7 +8,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 // Removing a model is the OWNER's verb now, not the MCP bearer's — the same
 // gate the install routes keep. The handler had none of its own before.
 const owner = { value: true };
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
 
 describe("POST /setup-api/ollama/delete", () => {
   let ollamaDeletePost: (req: Request) => Promise<Response>;

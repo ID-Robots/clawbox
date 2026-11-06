@@ -11,8 +11,8 @@ Only the latest release line receives security fixes. Devices update in place vi
 
 | Version | Supported |
 | ------- | --------- |
-| Latest release (3.1.x) | ✅ |
-| Older releases | ❌ — please update first |
+| Latest release (4.x) | ✅ |
+| Older releases (3.x and earlier) | ❌ — please update first |
 
 ## Network exposure
 
@@ -48,8 +48,8 @@ Report privately using **GitHub's private vulnerability reporting**:
 the repository **Security** tab → **Report a vulnerability**. This keeps the report
 confidential between you and the maintainers until a fix is available.
 
-If private reporting is unavailable, email **yanko@idrobots.com** instead. Encrypt
-or omit sensitive details (tokens, device IPs) and we will arrange a secure channel.
+If private reporting is unavailable, email **security@clawbox.com** instead. <!-- public-hygiene: allow published security contact -->
+Encrypt or omit sensitive details (tokens, device IPs) and we will arrange a secure channel.
 
 Please include, where you can:
 
@@ -64,5 +64,16 @@ Please include, where you can:
 - An initial assessment and severity triage within 7 days.
 - Progress updates until the issue is resolved, and credit in the release notes
   once a fix ships (unless you prefer to stay anonymous).
+
+If you believe the issue is being actively exploited, say so in the first line of your report.
+
+### Our obligations
+
+Under the EU Cyber Resilience Act (Regulation (EU) 2024/2847), the manufacturer
+reports actively exploited vulnerabilities and severe incidents affecting ClawBox
+to ENISA and the designated national CSIRT, and informs affected users, within
+the time limits the Regulation sets.
+
+Manufacturer: ID Robots OOD (АЙ ДИ РОБОТС ООД), Plovdiv, Bulgaria.
 
 Thank you for helping keep ClawBox devices and their owners safe.

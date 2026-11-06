@@ -20,7 +20,7 @@ vi.mock("@/lib/coding-github", async (importOriginal) => ({
   disconnectGitHub: vi.fn(),
 }));
 const owner = vi.hoisted(() => vi.fn(async () => true));
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: owner }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: owner }));
 const resolve = vi.hoisted(() => vi.fn(async () => ({ directory: "/home/clawbox/Projects/site", projectId: null })));
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),

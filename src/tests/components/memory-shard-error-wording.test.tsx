@@ -23,15 +23,15 @@ import { I18nProvider } from "@/lib/i18n";
  * key, and a stub spelled the other way would only prove a lookup that always
  * misses.
  */
-vi.mock("@/lib/translations", () => ({
-  translations: {
-    en: {
-      "clawkeep.memory.title": "Memory index",
-      "clawkeep.memory.error.indexIdentityMismatched": "Der Index passt nicht zum Einbettungsmodell.",
-      "clawkeep.memory.runError.migrationBusy": "Das Einbettungsmodell wird noch eingerichtet.",
-    },
-  },
+const TABLE = vi.hoisted(() => ({
+  "clawkeep.memory.title": "Memory index",
+  "clawkeep.memory.error.indexIdentityMismatched": "Der Index passt nicht zum Einbettungsmodell.",
+  "clawkeep.memory.runError.migrationBusy": "Das Einbettungsmodell wird noch eingerichtet.",
 }));
+// The provider reads the locale's chunk (src/lib/translation-chunks.ts); the
+// aggregate is its fallback. Both answer the same three strings here.
+vi.mock("@/lib/translation-chunks", () => ({ loadLocaleTable: async () => TABLE }));
+vi.mock("@/lib/translations", () => ({ translations: { en: TABLE } }));
 
 const STATUS = {
   available: true,

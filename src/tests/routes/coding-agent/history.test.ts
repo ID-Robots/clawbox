@@ -1,13 +1,10 @@
 /**
  * The run-history routes (TASK-1178) against the real store in a temp root:
  *
- *  - GET /setup-api/coding-agent/history — the settings card's summary, the
- *    archive's pages and one archived run; DELETE ?view=archive — owner-only.
+ *  - GET /setup-api/coding-agent/history — the settings card's summary.
  *  - GET /setup-api/coding-agent/history/export — owner-only, a real .zip.
- *  - GET /setup-api/coding-agent/history/file — an archived run's evidence,
- *    under the artifacts route's rules.
  *  - GET /setup-api/coding-agent/runs?history=1 — the older runs' pages.
- *  - POST /setup-api/coding-agent/enable { historyRetention, historyLimit }.
+ *  - POST /setup-api/coding-agent/enable { historyRetention }.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -28,7 +25,6 @@ let data: string;
 let history: typeof import("@/lib/coding-run-history");
 let historyRoute: typeof import("@/app/setup-api/coding-agent/history/route");
 let exportRoute: typeof import("@/app/setup-api/coding-agent/history/export/route");
-let fileRoute: typeof import("@/app/setup-api/coding-agent/history/file/route");
 let runsRoute: typeof import("@/app/setup-api/coding-agent/runs/route");
 let enableRoute: typeof import("@/app/setup-api/coding-agent/enable/route");
 
@@ -36,16 +32,12 @@ const url = (p: string) => `http://localhost/setup-api/coding-agent/${p}`;
 const asOwner = (p: string, init: RequestInit = {}) => new Request(url(p), { ...init, headers: { ...(init.headers as Record<string, string> | undefined), Cookie: session.cookie } });
 const asAgent = (p: string, init: RequestInit = {}) => new Request(url(p), { ...init, headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${MCP_TOKEN}` } });
 
-function archived(id: string, startedAt = 1_000) {
+/** An older run "keep everything" kept, with one evidence file. */
+function older(id: string, startedAt = 1_000) {
   const evidence = path.join(data, "coding-agent-artifacts", id);
   fs.mkdirSync(evidence, { recursive: true });
   fs.writeFileSync(path.join(evidence, "shot.png"), "\x89PNG fake");
-  fs.writeFileSync(path.join(evidence, "page.html"), "<script>alert(1)</script>");
-  return history.archiveRun(
-    { id, task: `Archived ${id}`, status: "completed", startedAt, completedAt: startedAt + 1, directory: "/home/x/Projects/site" }, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
-    { evidenceDir: evidence, inputsDir: null, streamLog: null, stderrLog: null, transcript: null },
-    "trimmed",
-  )!;
+  expect(history.writeOlderRun({ id, task: `Older ${id}`, status: "completed", startedAt, completedAt: startedAt + 1, directory: "/home/x/Projects/site" })).toBe(true); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
 }
 
 beforeEach(async () => {
@@ -61,7 +53,6 @@ beforeEach(async () => {
   history.invalidateUsage();
   historyRoute = await import("@/app/setup-api/coding-agent/history/route");
   exportRoute = await import("@/app/setup-api/coding-agent/history/export/route");
-  fileRoute = await import("@/app/setup-api/coding-agent/history/file/route");
   runsRoute = await import("@/app/setup-api/coding-agent/runs/route");
   enableRoute = await import("@/app/setup-api/coding-agent/enable/route");
 });
@@ -77,55 +68,28 @@ afterEach(async () => {
 
 describe("GET history", () => {
   it("answers the card's summary: the mode, the counts, the weight, the disk and the transcript period", async () => {
-    archived("run-aaaaaaa1");
-    const res = await historyRoute.GET(asOwner("history"));
+    older("run-aaaaaaa1");
+    const res = await historyRoute.GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({
       mode: "standard",
-      limit: 100,
-      limits: [100, 300, 1000],
       liveKept: 30,
-      counts: { live: 0, older: 0, archived: 1 },
+      counts: { live: 0, older: 1 },
       disk: { minFreeBytes: 2 * 1024 ** 3 },
     });
-    expect(body.usage.archive).toBeGreaterThan(0);
-    expect(body.usage.total).toBeGreaterThanOrEqual(body.usage.archive);
+    // The extended N and the archive went with their modes (SCA2 C1).
+    for (const gone of ["limit", "limits"]) expect(body[gone], gone).toBeUndefined();
+    expect(body.counts.archived).toBeUndefined();
+    expect(body.usage.archive).toBeUndefined();
+    expect(body.usage.olderRuns).toBeGreaterThan(0);
+    expect(body.usage.total).toBeGreaterThanOrEqual(body.usage.olderRuns + body.usage.evidence);
     expect(typeof body.disk.low).toBe("boolean");
     expect(body.transcripts.map((t: { label: string }) => t.label)).toEqual(["~/.claude-ds/settings.json", "~/.claude/settings.json"]);
   });
 
-  it("pages the archive, answers one archived run, and a JSON 404 for one it does not hold", async () => {
-    archived("run-aaaaaaa1", 1_000);
-    archived("run-aaaaaaa2", 2_000);
-    archived("run-aaaaaaa3", 3_000);
-    const page = await (await historyRoute.GET(asAgent("history?view=archive&offset=1&limit=1"))).json();
-    expect(page).toMatchObject({ total: 3, offset: 1, entries: [{ id: "run-aaaaaaa2", title: "Archived run-aaaaaaa2" }] });
-    const one = await historyRoute.GET(asOwner("history?view=archive&id=run-aaaaaaa3"));
-    expect((await one.json()).run).toMatchObject({ entry: { id: "run-aaaaaaa3" }, record: { task: "Archived run-aaaaaaa3" } });
-    const missing = await historyRoute.GET(asOwner("history?view=archive&id=run-zzzzzzzz"));
-    expect(missing.status).toBe(404);
-    expect(await missing.json()).toMatchObject({ kind: "not_found" });
-  });
-});
-
-describe("DELETE history", () => {
-  it("refuses the agent's bearer and a request that does not name the archive", async () => {
-    archived("run-aaaaaaa1");
-    const agent = await historyRoute.DELETE(asAgent("history?view=archive", { method: "DELETE" }));
-    expect(agent.status).toBe(403);
-    expect(await agent.json()).toMatchObject({ kind: "owner_only" });
-    const bare = await historyRoute.DELETE(asOwner("history", { method: "DELETE" }));
-    expect(bare.status).toBe(400);
-    expect(history.archiveIndex()).toHaveLength(1);
-  });
-
-  it("clears the archive for the owner", async () => {
-    archived("run-aaaaaaa1");
-    archived("run-aaaaaaa2");
-    const res = await historyRoute.DELETE(asOwner("history?view=archive", { method: "DELETE" }));
-    expect(await res.json()).toEqual({ cleared: 2 });
-    expect(fs.existsSync(path.join(data, "coding-agent-archive"))).toBe(false);
+  it("has no archive to page or clear any more", () => {
+    expect((historyRoute as Record<string, unknown>).DELETE).toBeUndefined();
   });
 });
 
@@ -136,50 +100,28 @@ describe("GET history/export", () => {
     expect(await res.json()).toMatchObject({ kind: "owner_only" });
   });
 
-  it("streams one archived run as a zip, and 404s one it does not hold", async () => {
-    archived("run-aaaaaaa1");
-    const res = await exportRoute.GET(asOwner("history/export?runId=run-aaaaaaa1"));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toBe("application/zip");
-    expect(res.headers.get("content-disposition")).toBe('attachment; filename="clawbox-run-aaaaaaa1.zip"');
-    const names = unzip(Buffer.from(await res.arrayBuffer())).map((e) => e.name).sort();
-    expect(names).toEqual(["run-aaaaaaa1/archive.json", "run-aaaaaaa1/evidence/page.html", "run-aaaaaaa1/evidence/shot.png", "run-aaaaaaa1/run.json"]);
-    expect((await exportRoute.GET(asOwner("history/export?runId=run-zzzzzzzz"))).status).toBe(404);
-    expect((await exportRoute.GET(asOwner("history/export?runId=../../config"))).status).toBe(404);
-  });
-
-  it("streams the whole history, live list and archive, under one manifest", async () => {
-    archived("run-aaaaaaa1");
+  it("streams the whole history — the live list and the older runs — under one manifest, and nothing per run", async () => {
+    older("run-aaaaaaa1");
     const live = { id: "run-bbbbbbb1", task: "live one", directory: "/home/x/Projects/site", status: "completed", startedAt: 5_000 }; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     fs.writeFileSync(path.join(data, "coding-agent-runs.json"), JSON.stringify([live]));
     fs.mkdirSync(path.join(data, "coding-agent-artifacts", live.id), { recursive: true });
     fs.writeFileSync(path.join(data, "coding-agent-artifacts", live.id, "report.md"), "# Report");
     const res = await exportRoute.GET(asOwner("history/export"));
     expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/zip");
     expect(res.headers.get("content-disposition")).toMatch(/^attachment; filename="clawbox-run-history-\d{4}-\d{2}-\d{2}\.zip"$/);
     const entries = unzip(Buffer.from(await res.arrayBuffer()));
     const byName = new Map(entries.map((e) => [e.name, e.data.toString()]));
-    expect(JSON.parse(byName.get("manifest.json")!)).toMatchObject({ kind: "clawbox-run-history", retention: "standard", runs: 1, archivedRuns: 1 });
+    const manifest = JSON.parse(byName.get("manifest.json")!);
+    expect(manifest).toMatchObject({ kind: "clawbox-run-history", retention: "standard", runs: 1, olderRuns: 1 });
+    expect(manifest.archivedRuns).toBeUndefined();
     expect(JSON.parse(byName.get("runs.json")!)[0]).toMatchObject({ id: live.id, task: "live one" });
     expect(byName.get(`evidence/${live.id}/report.md`)).toBe("# Report");
-    expect(byName.has("archive/run-aaaaaaa1/run.json")).toBe(true);
-  });
-});
-
-describe("GET history/file", () => {
-  it("serves a picture inline and anything else as plain text, and nothing outside the bundle", async () => {
-    archived("run-aaaaaaa1");
-    const png = await fileRoute.GET(asOwner("history/file?runId=run-aaaaaaa1&file=shot.png"));
-    expect(png.status).toBe(200);
-    expect(png.headers.get("content-type")).toBe("image/png");
-    const html = await fileRoute.GET(asOwner("history/file?runId=run-aaaaaaa1&file=page.html"));
-    expect(html.headers.get("content-type")).toBe("text/plain; charset=utf-8");
-    expect(html.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(await html.text()).toBe("<script>alert(1)</script>");
-    for (const bad of ["../run.json", "..%2Frun.json", ".hidden", "nope.png"]) {
-      expect((await fileRoute.GET(asOwner(`history/file?runId=run-aaaaaaa1&file=${bad}`))).status, bad).toBe(404);
-    }
-    expect((await fileRoute.GET(asOwner("history/file?runId=../x&file=shot.png"))).status).toBe(404);
+    expect(byName.has("older-runs/run-aaaaaaa1.json")).toBe(true);
+    expect(byName.has("evidence/run-aaaaaaa1/shot.png")).toBe(true);
+    // The per-run zip went with the archive: `?runId=` is the whole export too.
+    const perRun = await exportRoute.GET(asOwner("history/export?runId=run-aaaaaaa1"));
+    expect(perRun.headers.get("content-disposition")).toMatch(/clawbox-run-history-/);
   });
 });
 
@@ -199,23 +141,31 @@ describe("GET runs?history=1", () => {
   });
 });
 
-describe("POST enable { historyRetention, historyLimit }", () => {
+describe("POST enable { historyRetention }", () => {
   const post = (body: unknown, owner = true) => enableRoute.POST((owner ? asOwner : asAgent)("enable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
 
-  it("saves the mode and the limit and answers the status carrying them", async () => {
-    const res = await post({ historyRetention: "extended", historyLimit: 300 });
+  it("saves the mode and answers the status carrying it, with no extended N", async () => {
+    const res = await post({ historyRetention: "everything" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ historyRetention: "extended", historyLimit: 300, historyLimits: [100, 300, 1000], historyLiveKept: 30 });
+    const body = await res.json();
+    expect(body).toMatchObject({ historyRetention: "everything", historyLiveKept: 30 });
+    // The N went with its mode (SCA2 C1), its choices before it (SCA C3).
+    expect(body.historyLimit).toBeUndefined();
+    expect(body.historyLimits).toBeUndefined();
     const cfg = JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf-8"));
-    expect(cfg).toMatchObject({ coding_agent_history_retention: "extended", coding_agent_history_limit: 300 });
+    expect(cfg).toMatchObject({ coding_agent_history_retention: "everything" });
+    expect(cfg.coding_agent_history_limit).toBeUndefined();
   });
 
-  it("refuses a value the box does not offer before saving anything, and the agent's bearer", async () => {
-    for (const body of [{ historyRetention: "forever" }, { historyRetention: 3 }, { historyLimit: 50 }, { historyRetention: "extended", historyLimit: "300" }]) {
+  it("refuses a value the box does not offer — the retired modes included — before saving anything, the N it no longer takes, and the agent's bearer", async () => {
+    for (const body of [{ historyRetention: "forever" }, { historyRetention: 3 }, { historyRetention: "extended" }, { historyRetention: "archive" }]) {
       const res = await post(body);
       expect(res.status, JSON.stringify(body)).toBe(400);
       expect((await res.json()).kind).toBe("invalid");
     }
+    // A body about the N alone is a body the route does not know (400, no
+    // kind); one that carries it beside a mode saves the mode and ignores it.
+    expect((await post({ historyLimit: 300 })).status).toBe(400);
     expect((await post({ historyRetention: "everything" }, false)).status).toBe(403);
     const cfg = JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf-8"));
     expect(cfg.coding_agent_history_retention).toBeUndefined();

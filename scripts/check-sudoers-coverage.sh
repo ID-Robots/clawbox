@@ -814,7 +814,7 @@ sub resolve_items {
 }
 
 # ── TypeScript / JavaScript ─────────────────────────────────────────────────
-my $SPAWNERS = qr/(?:execFileAsync|execFileSync|execFile|execAsync|execSync|spawnSync|spawn|runCommand|exec)/;
+my $SPAWNERS = qr/(?:execFileAsync|execFileSync|execFile|execAsync|execSync|spawnSync|spawn|runCommand|runUnitJob|exec)/;
 
 sub scan_ts {
   my ($rel, $raw) = @_;

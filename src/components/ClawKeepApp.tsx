@@ -9,6 +9,7 @@ import {
 } from "@/hooks/useClawkeepShieldStatus";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
+import { boxNowMs } from "@/lib/box-clock";
 import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
 import ClawKeepWizard from "./ClawKeepWizard";
@@ -24,6 +25,7 @@ import {
   jsonOrError,
   timeAgo,
 } from "./clawkeep-ui";
+import { formatBytesApart } from "@/lib/format-bytes";
 
 /**
  * Is anything still missing before a backup can run?
@@ -102,12 +104,66 @@ interface ClawKeepStatus {
    *  backed-up folders, or at nothing — the first twenty named, all counted. */
   skippedLinks?: SkippedLink[];
   skippedLinkCount?: number;
+  /** Why the last run would not upload, with the sizes it decided on; null or
+   *  absent (older servers) when it was not refused before the upload. */
+  lastRefusal?: BackupRefusal | null;
 }
 
 /** One symbolic link a backup did not carry: where it is, and its text. */
 interface SkippedLink {
   path: string;
   target: string;
+}
+
+/** A backup the daemon would not upload: the account cannot hold it, or its
+ *  usage could not be counted. Exact byte counts — `refusalText` formats them. */
+interface BackupRefusal {
+  kind: "quota_full" | "usage_unverified";
+  neededBytes: number;
+  usedBytes: number;
+  quotaBytes: number;
+}
+
+/** A refusal as it arrives in a JSON body, or null for anything else — an
+ *  older server sends none, and a kind this build has no words for is not
+ *  shown as one it does. */
+function readRefusal(value: unknown): BackupRefusal | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind !== "quota_full" && raw.kind !== "usage_unverified") return null;
+  const bytes = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
+  return {
+    kind: raw.kind,
+    neededBytes: bytes(raw.neededBytes),
+    usedBytes: bytes(raw.usedBytes),
+    quotaBytes: bytes(raw.quotaBytes),
+  };
+}
+
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * Why a backup was not uploaded, in the owner's language and in sizes a person
+ * reads — "needs 1.2 GB, only 300 MB of 5.0 GB free", never a byte count.
+ *
+ * Two sentences for a backup that does not fit, because the remedy differs: an
+ * archive larger than the whole plan cannot be made room for by deleting
+ * snapshots, and telling the owner to delete some would cost them backups for
+ * nothing.
+ */
+function refusalText(refusal: BackupRefusal, t: Translate): string {
+  if (refusal.kind === "usage_unverified") return t("clawkeep.error.usageUnverified");
+  // The two figures a sentence compares are printed apart: a backup that
+  // misses by a little must not read "needs 1.2 GB, but only 1.2 GB is free".
+  if (refusal.neededBytes > refusal.quotaBytes) {
+    const [needed, quota] = formatBytesApart(refusal.neededBytes, refusal.quotaBytes);
+    return t("clawkeep.error.largerThanPlan", { needed, quota });
+  }
+  const [needed, free] = formatBytesApart(
+    refusal.neededBytes,
+    Math.max(0, refusal.quotaBytes - refusal.usedBytes),
+  );
+  return t("clawkeep.error.noRoomFor", { needed, free, quota: formatBytes(refusal.quotaBytes) });
 }
 
 // Map the daemon's phase id to an i18n key for the progress panel.
@@ -141,7 +197,7 @@ interface RestoreResponse {
   ok: true;
   archive: string;
   archiveBytes: number;
-  assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+  assets: { kind: string; targetPath: string; backupPath: string | null; bytesRestored: number }[];
   /** Restarts that could NOT be taken — the owner has to act. */
   restartErrors: string[];
   /**
@@ -177,11 +233,23 @@ interface PairPollResponse {
 function backupErrorText(
   code: string | undefined,
   serverSentence: string | undefined,
-  t: (key: string) => string,
+  t: Translate,
+  refusal: BackupRefusal | null = null,
 ): string {
   switch (code) {
     case "quota_full":
-      return t("clawkeep.error.outOfSpace");
+      // The daemon's own check knows what THIS backup needs and says so; the
+      // portal refusing credentials for a full account knows only "full".
+      return refusal?.kind === "quota_full"
+        ? refusalText(refusal, t)
+        : t("clawkeep.error.outOfSpace");
+    case "usage_unverified":
+      // Not "could not reach ClawKeep": the portal may be fine. The usage could
+      // not be counted, so nothing was uploaded.
+      return t("clawkeep.error.usageUnverified");
+    case "already_running":
+      // Not a failure — the scheduled run, or an earlier click, is in flight.
+      return t("clawkeep.error.alreadyRunning");
     case "tier_limit":
       // A different remedy from "out of space": the account has room, the plan
       // does not cover this backup.
@@ -303,9 +371,12 @@ export default function ClawKeepApp() {
   // only from new data would freeze. Seeded with the current time so a lapsed
   // box never flashes green on first paint. A minute is finer than anything it
   // decides (a 36 h window, a 1 h run cap) and coarse enough to cost nothing.
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  // It is the box's clock (src/lib/box-clock.ts), as every time it is held
+  // against is, and an answer re-reads it so a backup that has just finished
+  // is held against a "now" from after it, not one up to a minute old.
+  const [nowMs, setNowMs] = useState(() => boxNowMs());
   useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    const id = window.setInterval(() => setNowMs(boxNowMs()), 60_000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -330,6 +401,7 @@ export default function ClawKeepApp() {
     shownSeq.current = seq;
     if (next) {
       setStatus(next);
+      setNowMs(boxNowMs());
       setError(null);
     } else {
       setError(failure);
@@ -367,7 +439,7 @@ export default function ClawKeepApp() {
     // Reads the clock directly rather than `nowMs`: this is an effect, not a
     // render, and taking `nowMs` as a dependency would tear the poll down and
     // re-arm it every minute.
-    const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
+    const intervalMs = isBackupRunning(status, boxNowMs()) ? 3000 : 10000;
     const hidden = () => document.visibilityState === "hidden";
     let missed = false;
     const look = () => {
@@ -513,14 +585,24 @@ export default function ClawKeepApp() {
         // is otherwise entirely in the owner's language, so it must not be the
         // one client that discards it. The server's own sentence is the LAST
         // resort, for a code this build does not know.
-        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          code?: string;
+          refusal?: unknown;
+        };
         if (body.code === "needs_passphrase") {
           // There is a modal for exactly this, reached today only by a status
           // check that can be seconds stale. The failure itself can open it.
           setPassphraseSetup({ onSaved: () => { void runBackupNowRef.current(label); } });
           return;
         }
-        setError(backupErrorText(body.code, body.error, t));
+        // The run changed what the card should say — a refusal lapses it, and
+        // a run already in flight is the progress panel's to show — so the
+        // card is brought up to date BEFORE the banner goes up: a status
+        // answer clears the banner, and this order keeps the sentence on
+        // screen instead of flashing it.
+        await refresh();
+        setError(backupErrorText(body.code, body.error, t, readRefusal(body.refusal)));
         return;
       }
       setBackupResult((await res.json()) as BackupResponse);
@@ -1168,9 +1250,10 @@ function BackupProgressPanel({
   // reads at render time — the React compiler rule that flags those is on).
   // It's the only thing the panel uses time for: deriving the upload MB/s
   // line. The visible elapsed-time clock was removed at the user's request.
+  // The box's clock, as the upload's start and the heartbeat are stamped on it.
   const [nowMs, setNowMs] = useState(0);
   useEffect(() => {
-    const tick = () => setNowMs(Date.now());
+    const tick = () => setNowMs(boxNowMs());
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
@@ -1404,6 +1487,12 @@ function DashboardCard({
     : protection.state === "protected" && !status.schedule?.enabled
     ? "clawkeep.status.protectedOffSub"
     : copy.subheadKey;
+  // A run the daemon REFUSED has a reason the generic line gets wrong: "one
+  // retry and we'll lock it back down" sends the owner of a full account to a
+  // button that can only refuse again. The reason is in the status, so it is
+  // here for a run nobody was watching — the nightly one — long after the
+  // banner a manual run raised has gone. Only beside the "error" it explains.
+  const refusal = protection.reason === "error" ? readRefusal(status.lastRefusal) : null;
 
   return (
     <div className={`${CARD} relative flex flex-col items-center text-center pt-8 pb-6`}>
@@ -1430,8 +1519,13 @@ function DashboardCard({
       </div>
 
       <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
-      <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, nowMs) })}
+      <p
+        className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed"
+        data-testid={refusal ? "clawkeep-refusal" : undefined}
+      >
+        {refusal
+          ? refusalText(refusal, t)
+          : t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, nowMs) })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
@@ -1801,9 +1895,13 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
           <li key={a.targetPath} className="text-gray-300">
             <span className="font-mono">{a.targetPath}</span>{" "}
             <span className="text-[var(--text-muted)]">
-              ({formatBytes(a.bytesRestored)} —{" "}
-              {t("clawkeep.result.previousAt")}{" "}
-              <span className="font-mono">{a.backupPath}</span>)
+              ({formatBytes(a.bytesRestored)}
+              {a.backupPath && (
+                <>
+                  {" "}—{" "}{t("clawkeep.result.previousAt")}{" "}
+                  <span className="font-mono">{a.backupPath}</span>
+                </>
+              )})
             </span>
           </li>
         ))}
@@ -1990,7 +2088,7 @@ function RestoreModal({
       // No backdrop blur under the dim: a full-screen blur is redone over the whole
       // desktop on every frame anything beneath it moves (the mascot always does).
       // One step darker keeps the look.
-      className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/90"
+      className="main-screen-scrim fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/90"
       onClick={onClose}
     >
       <div
@@ -1998,7 +2096,7 @@ function RestoreModal({
         role="dialog"
         aria-modal="true"
         aria-label={t("clawkeep.restoreModal.aria")}
-        className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80%]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -2321,14 +2419,14 @@ function SetPassphraseModal({
     {/* No backdrop blur under the dim: a full-screen blur is redone over the whole
         desktop on every frame anything beneath it moves (the mascot always does).
         One step darker keeps the look. */}
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
+    <div className="main-screen-scrim fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
       <form
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={t("clawkeep.encryption.setTitle")}
         onSubmit={submit}
-        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
+        className="max-h-full overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.setTitle")}
@@ -2488,14 +2586,14 @@ function RestorePassphraseModal({
     {/* No backdrop blur under the dim: a full-screen blur is redone over the whole
         desktop on every frame anything beneath it moves (the mascot always does).
         One step darker keeps the look. */}
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
+    <div className="main-screen-scrim fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
       <form
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={t("clawkeep.encryption.enterTitle")}
         onSubmit={submit}
-        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
+        className="max-h-full overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.enterTitle")}

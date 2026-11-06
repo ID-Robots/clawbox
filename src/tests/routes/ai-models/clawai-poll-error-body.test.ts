@@ -21,6 +21,7 @@ vi.mock("@/lib/clawai-connect", () => ({
   createClawAiUserCode: vi.fn(() => "ABCD-1234"),
   createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
   CLAWAI_USER_CODE_LENGTH: 8,
+  CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
   writeClawAiSession: vi.fn(),
   readClawAiSession: vi.fn(),
   clearClawAiSession: vi.fn(),
@@ -33,8 +34,15 @@ vi.mock("@/lib/hermes-clawai", () => ({
   ClawaiApplyError: class ClawaiApplyError extends Error {},
 }));
 vi.mock("@/lib/clawbox-ai-portal-tier", () => ({ fetchPortalTier: vi.fn() }));
+// The finaliser is the box's provider sign-in task (TASK-2148): it waits out a
+// gateway restart and reads the row back before it ends.
+vi.mock("@/lib/gateway-hot-apply", () => ({ waitForGatewayBack: vi.fn(async () => true) }));
+vi.mock("@/lib/provider-status", () => ({
+  readProviderStatus: vi.fn(async () => ({ harness: "openclaw", providers: [], defaultProvider: null, unrunnable: [], degraded: false })),
+}));
 
 import { readClawAiSession, writeClawAiSession } from "@/lib/clawai-connect";
+import { resetBackgroundTasksForTests } from "@/lib/background-tasks";
 import { POST as configurePost } from "@/app/setup-api/ai-models/configure/route";
 
 const mockReadSession = vi.mocked(readClawAiSession);
@@ -70,15 +78,19 @@ async function finalise() {
   )));
   const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
   await POST();
-  // The finalise runs off the request lifecycle; let its microtasks drain.
-  for (let i = 0; i < 20; i += 1) await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  // The finalise runs off the request lifecycle, as the box's sign-in task:
+  // wait for the ending it writes onto the session.
+  await vi.waitFor(() => expect(mockWriteSession.mock.calls.some(([session]) => {
+    const status = (session as { status?: string }).status;
+    return status === "complete" || status === "error";
+  })).toBe(true));
 }
 
 describe("the device-code finaliser never stores a raw response body", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    resetBackgroundTasksForTests();
     mockWriteSession.mockResolvedValue(undefined as never);
   });
 
@@ -178,6 +190,28 @@ describe("the device-code finaliser never stores a raw response body", () => {
     expect(said).toContain("Token save failed");
     expect(said).toContain(body);
     logged.mockRestore();
+  });
+
+  it.each([
+    [409, "ClawBox AI could not replace an older sign-in stored in its credential slot (deepseek:default)."],
+    [500, "Failed to configure AI model. Please check your credentials and try again."],
+  ])("ends a %i configure as an error at once — the next poll says it, not configuring", async (status, sentence) => {
+    // A refused configure must not leave the session to the configuring
+    // window's 3-minute timeout: the owner would watch progress for nothing.
+    mockConfigure.mockResolvedValue(new Response(
+      JSON.stringify({ error: sentence }),
+      { status, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+    expect(sessionError()).toBe(sentence);
+
+    // The very next tick reads what the finaliser stored.
+    const stored = mockWriteSession.mock.calls.at(-1)?.[0];
+    mockReadSession.mockResolvedValue(stored as never);
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    const next = await POST();
+    expect(await next.json()).toEqual({ status: "error", error: sentence });
   });
 
   it("leaves a successful configure alone", async () => {

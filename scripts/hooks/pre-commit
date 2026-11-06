@@ -9,6 +9,9 @@
 # `git commit --no-verify`; CI runs the same check first thing either way.
 set -euo pipefail
 
-if git diff --cached --name-only --diff-filter=ACMR | grep -qxE 'package\.json|bun\.lock|package-lock\.json'; then
+# Read whole, then matched: `git diff | grep -q` can SIGPIPE git on a long
+# list, and under pipefail that reads as "not touched" and skips the check.
+staged="$(git diff --cached --name-only --diff-filter=ACMR)" || staged=""
+if grep -qxE 'package\.json|bun\.lock|package-lock\.json' <<<"$staged"; then
   node "$(git rev-parse --show-toplevel)/scripts/check-lockfiles.mjs" --staged
 fi

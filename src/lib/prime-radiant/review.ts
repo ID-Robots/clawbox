@@ -1,0 +1,282 @@
+/**
+ * Settling a review item: what `POST review/<id>/resolve` does.
+ *
+ *   pick    — candidate `n` is the true answer: verified under the item's
+ *             claim id; every OTHER candidate's claim id is retired (see
+ *             verify.ts). One commit, `verify: <claimId>`.
+ *   new     — none of them: the owner's own text is verified, every
+ *             candidate's id retired.
+ *
+ * `by` is who settled it, as the stamp records it — "owner", or "assistant"
+ * when the agent did through the MCP bearer, whose commit then names it.
+ *   later   — put off; the item stays in the queue as `later`.
+ *   dismiss — nothing to change; resolved with no commit. A contradiction
+ *             dismissed so is not raised again while its two texts stay as
+ *             they were (review-store.ts `keepDismissed`).
+ * Any of them may carry the settler's `reason`, kept as `resolution.note`.
+ *
+ * Resolutions are serialised (one at a time per process), so two tabs
+ * pressing "pick" on the same item verify once: the second finds the item
+ * already resolved.
+ *
+ * SERVER ONLY.
+ */
+
+import { processStore } from "@/lib/process-store";
+import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
+import { isClaimId } from "./claims";
+import type { VaultAuthor } from "./git";
+import { vaultDir } from "./paths";
+import { notifyVaultChanged } from "./reindex-hook";
+import {
+  addReviewItem,
+  cleanCandidates,
+  closeItemsForRetired,
+  getReviewItem,
+  RAISED_REVIEW_KINDS,
+  settleReviewItem,
+  type RaisedReviewKind,
+  type ReviewItem,
+  type ReviewResolution,
+} from "./review-store";
+import type { ClaimEvidence } from "./schema";
+import { readClaimPages } from "./state-db";
+import { readPage, type VaultPage } from "./vault";
+import { cleanVerifiedText, MAX_VERIFIED_TEXT, verifyClaim, VerifyError } from "./verify";
+
+export type ResolveAction = (
+  | { action: "pick"; candidate: number }
+  | { action: "new"; text: string; page?: string | null }
+  | { action: "later" }
+  | { action: "dismiss" }
+) & {
+  /** Why, in the settler's words: kept on the item (`resolution.note`). */
+  reason?: string;
+};
+
+/** The longest reason kept on an item. */
+export const MAX_RESOLVE_REASON = 500;
+
+export class ReviewError extends Error {
+  constructor(
+    readonly code: "invalid" | "not_found" | "already_resolved" | "no_claim" | "verify_failed",
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ReviewError";
+  }
+}
+
+/** A resolve body read strictly. Throws {@link ReviewError} `invalid`. */
+export function readResolveAction(body: unknown): ResolveAction {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  if (b.reason !== undefined && b.reason !== null && typeof b.reason !== "string") throw new ReviewError("invalid", "reason must be text.", 400);
+  const reason = typeof b.reason === "string" ? b.reason.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_RESOLVE_REASON) : "";
+  const action = readAction(b);
+  return reason ? { ...action, reason } : action;
+}
+
+function readAction(b: Record<string, unknown>): ResolveAction {
+  switch (b.action) {
+    case "pick":
+      if (typeof b.candidate !== "number" || !Number.isInteger(b.candidate) || b.candidate < 0) {
+        throw new ReviewError("invalid", "Name the candidate to keep by its number.", 400);
+      }
+      return { action: "pick", candidate: b.candidate };
+    case "new": {
+      const text = cleanVerifiedText(b.text);
+      if (!text) throw new ReviewError("invalid", `Write the fact as one line of 1 to ${MAX_VERIFIED_TEXT} characters.`, 400);
+      return { action: "new", text, page: typeof b.page === "string" ? b.page : null };
+    }
+    case "later":
+      return { action: "later" };
+    case "dismiss":
+      return { action: "dismiss" };
+    default:
+      throw new ReviewError("invalid", "action must be pick, new, later or dismiss.", 400);
+  }
+}
+
+const lockStore = processStore("prime-radiant:review-lock", () => ({ lock: createSerialLock() as SerialLock }));
+
+export interface ResolveResult {
+  item: ReviewItem;
+  commit: string | null;
+  retired: string[];
+}
+
+export async function resolveReviewItem(
+  id: string,
+  action: ResolveAction,
+  options: { by: string; via?: string; author?: VaultAuthor; person?: boolean; vault?: string; now?: Date } = { by: "owner" },
+): Promise<ResolveResult> {
+  const vault = options.vault ?? vaultDir();
+  return lockStore.lock(async () => {
+    const item = getReviewItem(vault, id);
+    if (!item) throw new ReviewError("not_found", "No such review item.", 404);
+    if (item.status === "resolved") throw new ReviewError("already_resolved", "That item was already resolved.", 409);
+    const at = (options.now ?? new Date()).toISOString();
+
+    if (action.action === "later" || action.action === "dismiss") {
+      const resolution: ReviewResolution = { action: action.action, by: options.by, ...(options.via ? { via: options.via } : {}), ...(action.reason ? { note: action.reason } : {}) };
+      settleReviewItem(vault, id, action.action === "later" ? "later" : "resolved", resolution, at);
+      return { item: getReviewItem(vault, id) ?? item, commit: null, retired: [] };
+    }
+
+    if (!item.claimId) throw new ReviewError("no_claim", "This item is not about one claim; dismiss it once it is dealt with.", 409);
+    let text: string;
+    let evidence: ClaimEvidence[] = [];
+    let page: string | null = null;
+    if (action.action === "pick") {
+      const chosen = item.candidates[action.candidate];
+      if (!chosen) throw new ReviewError("invalid", "There is no candidate with that number.", 400);
+      const cleaned = cleanVerifiedText(chosen.text);
+      if (!cleaned) throw new ReviewError("invalid", `That candidate is longer than ${MAX_VERIFIED_TEXT} characters; write it as a new answer.`, 400);
+      text = cleaned;
+      evidence = chosen.evidence.map((e) => ({ kind: e.kind, ...(e.page ? { path: e.page } : {}), ...(e.note ? { note: e.note } : {}) }));
+      page = chosen.claimId === item.claimId ? chosen.page : null;
+    } else {
+      text = action.text;
+      page = action.page ?? null;
+    }
+    // Every other id a candidate was filed under loses: the fact lives on under
+    // the item's claim id alone (also when the winning text came from another id).
+    const retire = item.candidates.map((c) => c.claimId).filter((cid): cid is string => isClaimId(cid) && cid !== item.claimId);
+    let verified;
+    try {
+      verified = await verifyClaim({
+        claimId: item.claimId,
+        text,
+        by: options.by,
+        ...(options.via ? { via: options.via } : {}),
+        retire,
+        page: page ?? item.pages[0] ?? null,
+        evidence,
+        note: `verified by ${options.via ? `${options.by} via ${options.via}` : options.by} from review ${item.id}`,
+        author: options.author,
+        person: options.person,
+        vault,
+        now: options.now,
+      });
+    } catch (err) {
+      if (err instanceof VerifyError) {
+        throw new ReviewError(err.code === "invalid" ? "invalid" : "verify_failed", err.message, err.code === "invalid" ? 400 : 409);
+      }
+      throw err;
+    }
+    const resolution: ReviewResolution = {
+      action: action.action,
+      text,
+      ...(action.action === "pick" ? { candidate: action.candidate } : {}),
+      commit: verified.commit,
+      retired: verified.retired,
+      by: options.by,
+      ...(options.via ? { via: options.via } : {}),
+      ...(action.reason ? { note: action.reason } : {}),
+    };
+    settleReviewItem(vault, id, "resolved", resolution, at);
+    // Items still waiting on a claim this verification retired ask about nothing now.
+    try {
+      closeItemsForRetired(vault, verified.retired, options.by, at);
+    } catch {
+      /* they can be dismissed by hand */
+    }
+    await notifyVaultChanged(verified.changed);
+    return { item: getReviewItem(vault, id) ?? item, commit: verified.commit, retired: verified.retired };
+  });
+}
+
+/** A review item a caller raises by hand (`POST review`), read strictly. */
+export function readNewItem(body: unknown): {
+  kind: RaisedReviewKind;
+  claimId: string | null;
+  pages: string[];
+  candidates: ReturnType<typeof cleanCandidates>;
+  note: string | null;
+} {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const kind = b.kind ?? "contradiction";
+  if (typeof kind !== "string" || !(RAISED_REVIEW_KINDS as readonly string[]).includes(kind)) {
+    throw new ReviewError("invalid", `kind must be one of ${RAISED_REVIEW_KINDS.join(", ")}.`, 400);
+  }
+  if (b.claimId !== undefined && b.claimId !== null && !isClaimId(b.claimId)) throw new ReviewError("invalid", "claimId is not a claim id.", 400);
+  if (b.pages !== undefined && !Array.isArray(b.pages)) throw new ReviewError("invalid", "pages must be a list.", 400);
+  if (b.candidates !== undefined && !Array.isArray(b.candidates)) throw new ReviewError("invalid", "candidates must be a list.", 400);
+  const candidates = cleanCandidates((b.candidates as unknown[] | undefined) ?? []);
+  const pages = ((b.pages as unknown[] | undefined) ?? []).filter((p): p is string => typeof p === "string");
+  const claimId = isClaimId(b.claimId) ? b.claimId : null;
+  if (!claimId && candidates.length === 0 && pages.length === 0) {
+    throw new ReviewError("invalid", "Say what the item is about: a claim, a page or candidates.", 400);
+  }
+  const note = typeof b.note === "string" && b.note.trim() !== "" ? b.note.trim().slice(0, 500) : null;
+  return { kind: kind as RaisedReviewKind, claimId, pages, candidates, note };
+}
+
+export function createReviewItem(body: unknown, options: { by: string; vault?: string; now?: Date }): { item: ReviewItem; created: boolean } {
+  const input = readNewItem(body);
+  const vault = options.vault ?? vaultDir();
+  return addReviewItem(
+    vault,
+    {
+      kind: input.kind,
+      claimId: input.claimId,
+      pages: input.pages,
+      candidates: input.candidates,
+      evidence: [{ kind: "raised-by", source: options.by, ...(input.note ? { note: input.note } : {}) }],
+      dedupeKey: input.claimId ? `manual:${input.kind}:${input.claimId}` : null,
+    },
+    (options.now ?? new Date()).toISOString(),
+  );
+}
+
+/** A review item as the Review screen shows it: the disputed fact in words, not only its id. */
+export interface ReviewItemView extends ReviewItem {
+  /**
+   * The disputed claim's text as its page says it NOW (an edit keeps the id
+   * but changes the words); else the text it was raised about; null when the
+   * item is about no one fact or neither is known.
+   */
+  claimText: string | null;
+}
+
+/** Pages one listing reads at most to word its disputed facts; past it, the raised text stands. */
+const MAX_CLAIM_TEXT_PAGES = 100;
+
+/**
+ * Each item with its disputed fact's words. Only the pages the items name
+ * (and, for a fact none of them holds, the page the claim registry last saw
+ * it on) are read — never the whole vault — once each, however many items
+ * share them.
+ */
+export async function withClaimTexts(items: readonly ReviewItem[], vault: string = vaultDir()): Promise<ReviewItemView[]> {
+  let registry: Map<string, string>;
+  try {
+    registry = readClaimPages(vault, items.flatMap((i) => (i.claimId ? [i.claimId] : [])));
+  } catch {
+    registry = new Map();
+  }
+  const pages = new Map<string, Promise<VaultPage | null>>();
+  const read = (rel: string): Promise<VaultPage | null> | null => {
+    if (!pages.has(rel)) {
+      if (pages.size >= MAX_CLAIM_TEXT_PAGES) return null;
+      pages.set(rel, readPage(rel, vault).catch(() => null));
+    }
+    return pages.get(rel) ?? null;
+  };
+  return Promise.all(
+    items.map(async (item): Promise<ReviewItemView> => {
+      if (!item.claimId) return { ...item, claimText: null };
+      const raised = item.candidates.find((c) => c.claimId === item.claimId);
+      // The claim's own page first: the one it was raised on, then the item's pages.
+      const recorded = registry.get(item.claimId);
+      const where = [...new Set([...(raised?.page ? [raised.page] : []), ...item.pages, ...(recorded ? [recorded] : [])])];
+      for (const rel of where) {
+        const page = await read(rel);
+        const claim = page?.parsed.ok ? page.parsed.frontmatter.claims.find((c) => c.id === item.claimId) : undefined;
+        if (claim) return { ...item, claimText: claim.text };
+      }
+      return { ...item, claimText: raised?.text ?? null };
+    }),
+  );
+}

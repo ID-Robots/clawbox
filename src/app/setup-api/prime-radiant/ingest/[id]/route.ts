@@ -1,0 +1,48 @@
+/**
+ * /setup-api/prime-radiant/ingest/<id>
+ *
+ * GET — one job and its DEAD-LETTER list: `{ job, deadLetter: [{ seq, label,
+ * error, attempts, bytes }] }` — the files that still failed after the job's
+ * own second round and that no later job has taken over (labels only, never
+ * a path on this box). 404 `not_found` for an id this box has no job for.
+ * Read-only: never creates the state database.
+ *
+ * DELETE — stop the job. 202 `{ stopping: true, job }`; the job settles on
+ * its own as `stopped` (what it wrote stays; files it did not reach wait —
+ * its `queued`, never dead letters — for the next run or a retry) and its
+ * events stream ends. 409 `not_running` (with the job) for one that already finished,
+ * 404 `not_found`. The owner (cookie AND same origin) or the assistant
+ * through the MCP bearer, like the start.
+ */
+import { requireSession } from "@/lib/route-auth";
+import { getIngestJob, safeJobId, stopIngest } from "@/lib/prime-radiant/ingest";
+import { readDeadLetter } from "@/lib/prime-radiant/ingest-store";
+import { vaultDir } from "@/lib/prime-radiant/paths";
+import { fail, json, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
+
+export const dynamic = "force-dynamic";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+export async function GET(req: Request, ctx: Ctx) {
+  const denied = await requireSession(req);
+  if (denied) return denied;
+  const id = safeJobId((await ctx.params).id);
+  const job = id ? getIngestJob(id) : null;
+  if (!id || !job) return fail("not_found", "No such ingest job.", 404);
+  try {
+    return json({ job, deadLetter: readDeadLetter(vaultDir(), id) });
+  } catch (err) {
+    return vaultFailure("ingest job", err);
+  }
+}
+
+export async function DELETE(req: Request, ctx: Ctx) {
+  const gate = await writerGuard(req, "Stopping an ingest");
+  if (!gate.ok) return gate.response;
+  const id = safeJobId((await ctx.params).id);
+  const job = id ? getIngestJob(id) : null;
+  if (!id || !job) return fail("not_found", "No such ingest job.", 404);
+  if (!stopIngest(id)) return json({ error: "That ingest is not running.", code: "not_running", job }, 409);
+  return json({ stopping: true, job: getIngestJob(id) ?? job }, 202);
+}

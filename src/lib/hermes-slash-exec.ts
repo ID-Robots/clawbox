@@ -81,6 +81,8 @@ export interface HermesSlashResult {
   readonly sessionModel: string;
   /** The provider beside `sessionModel`, from the same event. */
   readonly sessionProvider: string;
+  /** The RPC's own result, when the request named one (`rpc`) and it answered. */
+  readonly result?: Record<string, unknown>;
 }
 
 export interface HermesSlashRequest {
@@ -91,6 +93,13 @@ export interface HermesSlashRequest {
   readonly model?: string;
   readonly provider?: string;
   readonly signal?: AbortSignal;
+  /**
+   * A session-scoped RPC to call INSTEAD of running `command` — `session.compress`,
+   * Hermes' manual compression of an idle session, whose `slash.exec` form
+   * answered "(no output)" and compressed nothing on a board (TASK-2127). The
+   * connection and the resume are this module's; the result comes back whole.
+   */
+  readonly rpc?: string;
 }
 
 interface RpcFrame {
@@ -335,6 +344,8 @@ export async function runHermesSlashCommand(
     }
   };
   req.signal?.addEventListener("abort", abort, { once: true });
+  // A Stop that fired while the ticket was being fetched never fires again.
+  if (req.signal?.aborted) abort();
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -393,6 +404,14 @@ export async function runHermesSlashCommand(
     const stored = result?.stored_session_id;
     const sessionId = typeof stored === "string" && stored ? stored : req.sessionId || "";
     if (!transportSid || !sessionId) return null;
+
+    if (req.rpc) {
+      const answered = await call(req.rpc, { session_id: transportSid }, COMMAND_TIMEOUT_MS);
+      if (answered === TIMED_OUT) return { output: STILL_RUNNING, sessionId, ...announcedFields(announced) };
+      if (!answered) return null;
+      if (answered.error) return { output: errorText(answered) || NO_OUTPUT, sessionId, ...announcedFields(announced) };
+      return { output: readOutput(answered.result) || NO_OUTPUT, sessionId, ...announcedFields(announced), result: answered.result ?? {} };
+    }
 
     let frame = await call(
       "slash.exec",

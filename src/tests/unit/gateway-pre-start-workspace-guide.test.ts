@@ -1213,7 +1213,8 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     // so a CRLF file was appended to on EVERY boot and grew without bound —
     // the failure whole-line matching was introduced to prevent, not cause.
     const existing = "# AGENTS\r\n\r\n## ClawBox integration\r\n\r\nSee `CLAWBOX.md`.\r\n"
-      + "## System actions on this ClawBox\r\n\r\nMine.\r\n";
+      + "## System actions on this ClawBox\r\n\r\nMine.\r\n"
+      + "## Voice notes on this ClawBox\r\n\r\nMine too.\r\n";
     writeFileSync(agents, existing);
 
     const { stdout } = run();
@@ -1296,5 +1297,71 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(stderr).toContain("could not append the system-actions rule");
     expect(stderr).not.toContain("could not roll");
     expect(readFileSync(agents, "utf-8")).toBe("# AGENTS\n");
+  });
+});
+
+/**
+ * What the agent says when a channel voice note could not be transcribed.
+ *
+ * When every engine fails, the core hands the turn on with a marker in place of
+ * a transcript and has no setting for the reply. Left to itself the model
+ * answered a Telegram voice note on a real box with "can't recognise audio,
+ * send text" — while Whisper was one install away. The rule lives in AGENTS.md
+ * for the reason the system-actions rule does: it is the file the harness
+ * injects into every session.
+ */
+describe("gateway-pre-start tells the agent how speech-to-text is turned on", () => {
+  const VOICE_RULE = "## Voice notes on this ClawBox";
+  let agents: string;
+
+  beforeEach(() => {
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(guide, readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  it("appends the voice-notes rule to an AGENTS.md that already carries the other two", () => {
+    // The field-box shape after this change ships: pointer and system-actions
+    // rule both present, so only the rule's own marker can deliver it.
+    const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
+      + "## System actions on this ClawBox\n\nMine.\n";
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).toContain("Appended the voice-notes rule to AGENTS.md");
+    expect(stdout).not.toContain("Appended the system-actions rule");
+    const after = readFileSync(agents, "utf-8");
+    expect(after.startsWith(existing)).toBe(true);
+    expect(after).toContain(VOICE_RULE);
+    // Says that speech-to-text is not available, rather than only "send text"...
+    expect(after).toMatch(/speech-to-text is not available/);
+    expect(after).toMatch(/Do not just ask for text/);
+    // ...and names both ways to turn it on, in the words Settings uses.
+    expect(after).toMatch(/Settings -> Local AI -> Whisper -> Install/);
+    expect(after).toMatch(/ClawBox AI under Settings -> Providers/);
+  });
+
+  it("appends it once, however many times the gateway starts", () => {
+    writeFileSync(agents, "# AGENTS\n");
+
+    run();
+    const afterFirst = readFileSync(agents, "utf-8");
+    const second = run();
+
+    expect(second.stdout).not.toContain("Appended the voice-notes rule");
+    expect(readFileSync(agents, "utf-8")).toBe(afterFirst);
+    expect(afterFirst.split(VOICE_RULE)).toHaveLength(2);
+  });
+
+  it("leaves an owner's own voice-notes section alone", () => {
+    const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
+      + "## System actions on this ClawBox\n\nMine.\n\n"
+      + `${VOICE_RULE}\n\nAnswer voice notes in Bulgarian.\n`;
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).not.toMatch(/Appended/);
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
   });
 });

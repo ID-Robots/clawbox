@@ -8,7 +8,7 @@ import {
   openKioskTab,
   type KioskAction,
 } from "@/lib/kiosk-tabs";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
@@ -57,7 +57,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse("Only the owner's own session may steer the kiosk browser", "owner_only", 403);
   }
   if (!isSameOriginRequest(req)) {

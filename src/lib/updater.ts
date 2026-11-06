@@ -1,7 +1,7 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import path from "./runtime-path";
 import { get, getKnown, set, setMany } from "./config-store";
 import {
@@ -23,7 +23,10 @@ import {
 } from "./openclaw-doctor-ownership";
 import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
 import { runHermesCli } from "./hermes-cli";
+import { hermesHome } from "./hermes-env";
 import { waitForPortOpen } from "./port-probe";
+import { monotonicNow } from "./monotonic-clock";
+import { waitForGatewayStartBeforeStop } from "./gateway-start-guard";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
@@ -39,7 +42,43 @@ import {
   holderFromAnotherBoot,
   type UpdateLockHolder,
 } from "./update-lock";
-import { hasX64DesktopIntegration } from "./x64-integration";
+import {
+  hasX64DesktopIntegration,
+  hasX64Install,
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS,
+  X64_DESKTOP_GATEWAY_READY_WAIT_MS,
+} from "./x64-integration";
+import {
+  UNIT_JOB_SETTLE_BUDGET_MS,
+  describeUnitState,
+  readUnitState,
+  runUnitJob,
+  unitIsStopped,
+  unitJobWasCanceled,
+  waitForUnitJob,
+  type UnitJobOutcome,
+} from "./gateway-unit-job";
+import { probeMainChatSession, verifyGatewaySessions, withSimulatedSessionFault } from "./gateway-session-check";
+import {
+  describeStillStarting,
+  formatWaited,
+  readGatewayStartState,
+  waitForGatewayStart,
+  type GatewayStartVerdict,
+} from "./gateway-start-wait";
+import {
+  OpenclawStateMaintenanceError,
+  isOpenclawMaintenanceRefusal,
+  withOpenclawMaintenanceRetry,
+} from "./openclaw-maintenance";
+import {
+  X64_ROOT_STEPS_SKIPPED,
+  classifyX64RootStepExit,
+  classifyX64RootStepGap,
+  rebuildAsOwner,
+  restartUiProcess,
+  x64SkippedStepsWarning,
+} from "./x64-install-update";
 
 /**
  * "An update was accepted and then lost its process" — written where the lock
@@ -88,7 +127,26 @@ import {
 } from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
-import { readStateSchemaVersion, statePath } from "./openclaw-state-store";
+import { readAgentSchemaVersions, readStateSchemaVersion, statePath } from "./openclaw-state-store";
+import {
+  assessHarnessDowngrade,
+  HARNESS_DOWNGRADE_BACKUP_FAILED_CODE,
+  HARNESS_DOWNGRADE_CODE,
+  harnessDowngradeMessage,
+  parseHermesPin,
+  type DowngradeMoment,
+  type HarnessDowngradeDetail,
+  type HarnessDowngradeErrorCode,
+  type SchemaOnDisk,
+} from "./harness-downgrade";
+import {
+  backUpBeforeDowngrade,
+  clearDowngradeAuthorization,
+  downgradeAuthorizedFor,
+  writeDowngradeAuthorization,
+} from "./harness-downgrade-backup";
+import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
+import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -121,20 +179,20 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // It is the THIRD copy of the pin (install.sh, install-x64.sh, here), and
 // nothing in the code can derive it: it exists precisely for the moment the file
 // the other two read cannot be read. So the guard is a test —
-// `install-node-engine-table.test.ts`, "pins the same core version everywhere it
-// is written down" — which fails if any of the four drifts. What drift costs,
+// `harness-pins.test.ts`, "pins the same core version everywhere it is written
+// down" — which fails if any of the four drifts. What drift costs,
 // measured on this value: with the pin file unreadable, install.sh falls back to
 // 2026.9.3 while this fell back to 2026.8.1, so `readUpdateStatus` answered
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.9.4";
+const OPENCLAW_VERSION_FALLBACK = "2026.10.9";
 
 /**
- * The state-DB schema each pinned core supports, read from
- * `OPENCLAW_STATE_SCHEMA_VERSION` in the published tarball's
- * `dist/openclaw-state-db-contract-*.js` — not from release notes, which do
- * not carry the number.
+ * The state-DB schema each pinned core supports, read from the published
+ * package's own `package.json` (`openclaw.schemaVersions.state`) — not from
+ * release notes, which do not carry the number. The `harness-contract` CI job
+ * fails when the row for the pin disagrees with the package.
  *
  * It exists because OpenClaw NEVER downgrades a state schema. Once a core has
  * opened `~/.openclaw/state/openclaw.sqlite` it migrates the file forward and
@@ -155,12 +213,45 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.8.1": 15,
   "2026.9.3": 16,
   "2026.9.4": 17,
+  "2026.10.2": 20,
+  "2026.10.3": 20,
+  "2026.10.6": 20,
+  "2026.10.7": 20,
+  "2026.10.9": 20,
+};
+
+/**
+ * The AGENT-database schema each pinned core supports
+ * (`openclaw.schemaVersions.agent`, from the same published package.json), for
+ * the same reason as the state table above: an older core refuses an agent
+ * database a newer one has migrated, and `doctor --fix` cannot repair a newer
+ * schema. The two move separately — 2026.10.6 took the agent databases to 25
+ * and left the state database on 20 — so a guard that read the state schema
+ * alone let a box that had run 2026.10.6 switch to a branch pinning 2026.10.3,
+ * whose repair step then refused every agent database and left the gateway
+ * stopped. Exact-match only, and checked by the same `harness-contract` job.
+ */
+const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
+  "2026.8.1": 19,
+  "2026.9.3": 19,
+  "2026.9.4": 19,
+  "2026.10.2": 24,
+  "2026.10.3": 24,
+  "2026.10.6": 25,
+  "2026.10.7": 25,
+  "2026.10.9": 25,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */
 export function openclawStateSchemaFor(version: string | null | undefined): number | null {
   if (!version) return null;
   return OPENCLAW_STATE_SCHEMA_BY_VERSION[version.trim()] ?? null;
+}
+
+/** The agent-database schema `version` supports, or null when this pin is not in the table. */
+export function openclawAgentSchemaFor(version: string | null | undefined): number | null {
+  if (!version) return null;
+  return OPENCLAW_AGENT_SCHEMA_BY_VERSION[version.trim()] ?? null;
 }
 
 /**
@@ -346,20 +437,12 @@ function errorText(err: unknown): string {
  * a whole run, so it gets the full three attempts. The VERSION CHECK is polled
  * by four surfaces: a long retry there is dead time on every poll, and the
  * refusal it is answering is caused by too many anonymous requests from this
- * address — which a blanket 3x would feed. It asks twice, briefly, and it
- * spends those two asks on the call it reads the answer from rather than
- * splitting them: hence the third budget below, which is what the advisory tag
- * fetch gets so the check's total stays where it was.
+ * address — which a blanket 3x would feed. It asks twice, briefly, and only
+ * with calls whose answer it reads: the tag `ls-remote` and the pinned
+ * branch's fetch (getTargetVersion says why there is no third).
  */
 const REMOTE_FETCH_ATTEMPTS = 3;
 const REMOTE_CHECK_ATTEMPTS = 2;
-/**
- * The advisory tag fetch asks ONCE, and the retry it used to hold is spent on
- * the `ls-remote` the tag answer is actually read from. That keeps the number
- * of anonymous requests a version check can make exactly where it was — which
- * matters, because the refusal being retried is caused by too many of them.
- */
-const REMOTE_ADVISORY_ATTEMPTS = 1;
 /**
  * An override that is not a non-negative number of milliseconds is replaced
  * with the default, and said out loud.
@@ -622,6 +705,14 @@ interface UpdateStepDef {
    * being "completed" on a box that has no OpenClaw.
    */
   applies?: () => boolean;
+  /**
+   * A root step asked first, with the gateway left running, that either does
+   * this step's work on its fast path or changes nothing (see
+   * rootStepTookFastPath). Only the full update's `openclaw_install` has one:
+   * the OpenClaw-only update is the owner's repair, and it always runs the
+   * full step.
+   */
+  fastPathStep?: string;
 }
 
 /** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
@@ -687,6 +778,15 @@ export interface UpdateState {
    * client reading one — keeps compiling and behaving exactly as before.
    */
   warnings?: UpdateWarning[];
+  /**
+   * What `error` is, for a refusal the screen says in the owner's language:
+   * the run would install an older harness than the one that wrote the box's
+   * data, or the backup the override takes first could not be taken. Absent
+   * for every other failure, whose `error` is shown as it is.
+   */
+  errorCode?: HarnessDowngradeErrorCode;
+  /** The harnesses and versions behind a `harness_downgrade` refusal. */
+  downgrade?: HarnessDowngradeDetail;
 }
 
 export { RESTART_STEP_ID } from "./update-constants";
@@ -709,7 +809,7 @@ import { currentCoreRelease } from "./plugin-repair-run";
 // InvocationID` cannot answer it (systemd has collected the instance by the
 // time anyone asks), and the same read is owed to the follow in
 // root-step-follow.ts.
-import { rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
+import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -816,9 +916,9 @@ async function readBuildId(): Promise<string> {
  * as success — this function never returns normally.
  */
 async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
-  const deadline = Date.now() + REBUILD_TAKEOVER_TIMEOUT_MS;
-  let message = "Rebuild did not restart the device within the expected window";
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + REBUILD_TAKEOVER_TIMEOUT_MS;
+  let message = "Rebuild did not restart ClawBox within the expected window";
+  while (monotonicNow() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     if (rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP))) {
       const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP, dispatchedAt);
@@ -872,7 +972,8 @@ function getStepFailureLine(logText: string, unit: string): string | null {
     .filter(Boolean)
     .filter((line) => !line.startsWith(`${unit}:`)
       && !SYSTEMD_LIFECYCLE_LINE.test(line)
-      && !SESSION_BOOKKEEPING_LINE.test(line));
+      && !SESSION_BOOKKEEPING_LINE.test(line)
+      && !DISPATCH_VERDICT_LINE.test(line));
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
   }
@@ -1306,6 +1407,18 @@ export async function resolveEffectiveUpdateBranch(
  * one run (before the rebuild and again by the post-update verification) and a
  * doubled line reads like two separate problems.
  */
+/**
+ * After the gateway answers: is it a working assistant, or one whose agents'
+ * databases the migration did not reach? The pre-start that just ran wrote what
+ * it found (src/lib/openclaw-migration-status.ts). Said as a warning on the
+ * update's own result — the update did what it could, and a green "Completed"
+ * over agents that refuse every turn is the silent ready this replaces.
+ */
+async function warnIfOpenclawDatabasesDegraded(): Promise<void> {
+  const status = await readOpenclawMigrationStatus().catch(() => null);
+  if (status) warnUpdate("openclaw-migration-degraded", describeOpenclawMigration(status));
+}
+
 function warnUpdate(code: string, message: string): void {
   console.warn(`[Updater] WARNING: ${message}`);
   if (!runtime.state.warnings) runtime.state.warnings = [];
@@ -1731,6 +1844,97 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
 
+  await syncCheckoutForRebuild();
+
+  // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
+  // every successful `next build`, so the continuation can demand positive
+  // evidence the rebuild actually happened. Without it, a power cycle in the
+  // few seconds between unit failure and our watcher noticing would reset the
+  // unit's systemd state and let the continuation fake a completed update.
+  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // Captured before the dispatch, so the failure read below cannot miss a line
+  // the unit wrote in its first moments — nor pick up the previous attempt's.
+  // Wall clock on purpose, like every journal `--since` here: the journal
+  // stamps its lines with it. Deadlines use `monotonicNow()`.
+  const rebuildDispatchedAt = Date.now();
+  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
+  await waitForRebuildToTakeOver(rebuildDispatchedAt);
+}
+
+/**
+ * The restart step on a PC installed with install-x64.sh: the same checkout
+ * sync, then the rebuild and the restart as the desktop OWNER — the account
+ * this server runs as — instead of the appliance's `rebuild_reboot` root unit,
+ * which that PC's root helper does not have and whose last act is a reboot.
+ *
+ * No `fix_git_perms` first: on that PC every Git operation in the checkout,
+ * this update's included, runs as its owner, so there is no root-owned file for
+ * it to repair.
+ *
+ * The continuation flag is the appliance's, written the same way and judged the
+ * same way after the restart (a new BUILD_ID or a failed step), so the second
+ * half of the update — post_update and gateway_verify — resumes exactly as it
+ * does after the appliance's reboot. Only the UI restarts; the PC never does.
+ */
+async function updateClawBoxAsOwner(): Promise<void> {
+  await syncCheckoutForRebuild();
+  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  try {
+    await rebuildAsOwner(PROJECT_DIR, {
+      onProgress: (detail) => {
+        const running = runtime.state.steps[runtime.state.currentStepIndex];
+        if (running?.status === "running") running.detail = detail;
+      },
+    });
+  } catch (err) {
+    // The previous build is back in place (or reclaimed on the next start), so
+    // there is no restart to continue from — the same rule as
+    // waitForRebuildToTakeOver.
+    await set("update_needs_continuation", undefined);
+    throw new Error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await restartUiProcess();
+}
+
+/**
+ * Step 1 on a PC installed with install-x64.sh: fetch the update branch and
+ * move the checkout onto it, as the owner.
+ *
+ * The appliance's `bootstrap_updater` is a root unit that runs install.sh out of
+ * the checkout it just fetched. That PC's root side must never run the
+ * owner-writable checkout (clawbox-x64-root-step.sh says why), so there is no
+ * root equivalent to call — and none is needed: the fetch, the save of local
+ * edits and the reset are all things the owner can do to their own tree. Moving
+ * the tree here, before the package and OpenClaw steps, keeps the appliance's
+ * order: `openclaw_install` reads the NEW release's pin.
+ */
+async function syncCheckoutAsOwner(): Promise<void> {
+  const { local, upstream, source } = await resolveUpdateBranch(PROJECT_DIR);
+  const slash = upstream.indexOf("/");
+  const remote = slash > 0 ? upstream.slice(0, slash) : "";
+  const branch = slash > 0 ? upstream.slice(slash + 1) : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote) || !isSafeBranch(branch)) {
+    throw new Error(`This ClawBox cannot fetch its update branch: ${upstream} is not a remote branch the updater can name.`);
+  }
+  console.log(`[Updater] Fetching ${upstream} as the desktop owner (resolved from: ${source})`);
+  const fetched = await reachOrigin(
+    PROJECT_DIR,
+    ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
+    { timeout: 120_000 },
+  );
+  if (!fetched.reachable) {
+    throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
+  }
+  // The code install.sh's step 1 raises for the same save, so the restart
+  // step's own save recognises it the way it does on the appliance.
+  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+}
+
+/**
+ * Point the checkout at the update branch for the rebuild that follows — both
+ * hosts' restart step. Repins and the orphan marker first, then the hard sync.
+ */
+async function syncCheckoutForRebuild(): Promise<void> {
   // Throws UnresolvableUpdateBranchError rather than retargeting a device that
   // cannot say which branch it belongs to; this step is failFast, so the owner
   // gets the message instead of a silent channel change.
@@ -1758,6 +1962,14 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // diagnosis has already recorded the state the box arrived in.
   await removeOrphanDeployedSha(PROJECT_DIR);
 
+  await syncCheckoutToUpstream(local, upstream, LOCAL_EDITS_SAVED_BEFORE_RESTART);
+}
+
+/**
+ * Save local edits, then hard-sync the checkout to `upstream`, which must
+ * already be on disk. `savedCode` is the card a save is announced under.
+ */
+async function syncCheckoutToUpstream(local: string, upstream: string, savedCode: string): Promise<void> {
   // Hard-sync to upstream. The device is an appliance — the working tree
   // must always match what we ship, period. Local edits made via SSH /
   // partial earlier updates / branch flips are discarded.
@@ -1816,7 +2028,7 @@ async function updateClawBoxAndReboot(): Promise<void> {
   const alreadyNamed = saved !== null && saved.savedTo !== "git-stash"
     && (runtime.state.warnings ?? []).some((w) => w.message.split(/\s+/).includes(saved.savedTo));
   if (saved && !alreadyNamed) {
-    warnUpdate(LOCAL_EDITS_SAVED_BEFORE_RESTART, saved.message);
+    warnUpdate(savedCode, saved.message);
     await persistWarnings();
   }
   await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
@@ -1827,23 +2039,42 @@ async function updateClawBoxAndReboot(): Promise<void> {
   }
   await execGit(PROJECT_DIR, ["reset", "--hard", upstream], gitOptions);
   await execGit(PROJECT_DIR, ["clean", "-fd"], gitOptions);
-  // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
-  // every successful `next build`, so the continuation can demand positive
-  // evidence the rebuild actually happened. Without it, a power cycle in the
-  // few seconds between unit failure and our watcher noticing would reset the
-  // unit's systemd state and let the continuation fake a completed update.
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
-  // Captured before the dispatch, so the failure read below cannot miss a line
-  // the unit wrote in its first moments — nor pick up the previous attempt's.
-  const rebuildDispatchedAt = Date.now();
-  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
-  await waitForRebuildToTakeOver(rebuildDispatchedAt);
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
 // 2-3 min; shared across both UPDATE_STEPS and OPENCLAW_UPDATE_STEPS so the
 // two flows can't drift apart.
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
+// What a schema migration costs on a Jetson Nano, per GiB of OpenClaw database:
+// the 9.x -> 10.x `doctor --fix` of a box with ~10 GB agent databases took
+// about 40 minutes. Rounded up to five minutes a GiB.
+const OPENCLAW_MIGRATION_MS_PER_GIB = 300_000;
+
+/**
+ * How long the updater waits for `openclaw_install` on the appliance, for a
+ * box whose OpenClaw databases weigh `databaseBytes`.
+ *
+ * The step runs the new core's schema migration, which is minutes per gigabyte
+ * of agent database, and this is only the CLIENT's wait: the root unit carries
+ * on past it (`TimeoutStartSec=7200`, config/clawbox-root-update@.service). With
+ * the flat five minutes a ~10 GB box's 40-minute migration was reported failed
+ * while it still ran, the gateway came back on a core whose agents' databases
+ * were half-way through — up, and every agent degraded — and a Retry met a core
+ * already replaced. The desktop integration's budget has the same reason
+ * (X64_DESKTOP_CORE_STEP_TIMEOUT_MS) and is the ceiling here too.
+ */
+export function openclawInstallTimeoutFor(databaseBytes: number): number {
+  return migrationBudgetMs(databaseBytes, {
+    baseMs: OPENCLAW_INSTALL_TIMEOUT_MS,
+    perGibMs: OPENCLAW_MIGRATION_MS_PER_GIB,
+    capMs: X64_DESKTOP_CORE_STEP_TIMEOUT_MS,
+  });
+}
+
+async function applianceOpenclawInstallTimeoutMs(): Promise<number> {
+  const bytes = await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0);
+  return openclawInstallTimeoutFor(bytes);
+}
 const GATEWAY_HEALTH_WAIT_MS = Number(process.env.GATEWAY_HEALTH_WAIT_MS || "30000");
 const GATEWAY_RECOVERY_WAIT_MS = Number(process.env.GATEWAY_RECOVERY_WAIT_MS || "45000");
 const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || "1500");
@@ -1851,7 +2082,47 @@ const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || 
 // tunable: a pre-start still running at this point is killed by systemd
 // itself, so the wait below never outlives the thing it waits for.
 const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
+// How long a gateway systemd says is still starting is waited for, after the
+// windows above have passed: the same ceiling, since a box with large agent
+// databases spends minutes of it in the pre-start and more loading them once
+// the process is up (see `@/lib/gateway-start-wait`). Tunable for tests only.
+const GATEWAY_START_LIMIT_MS = Number(process.env.GATEWAY_START_LIMIT_MS || String(GATEWAY_PRE_START_TIMEOUT_MS));
+const GATEWAY_START_POLL_MS = Number(process.env.GATEWAY_START_POLL_MS || "5000");
+const GATEWAY_START_POLL_MAX_MS = Number(process.env.GATEWAY_START_POLL_MAX_MS || "15000");
+// The session check after the gateway listens (`ensureGatewayServesSessions`):
+// how long a gateway that cannot be asked yet — its first 10-20 s refuse every
+// connect with "gateway starting" — is asked again, how long a gateway the
+// check restarted has to answer (a fresh start may spend a while in the same
+// reclamation), and how long one `chat.history` may take on a loaded Jetson.
+// Tunable for tests only, and a typo is the default rather than a budget: a
+// NaN window would give a restarted gateway one ask (sessionWaitMs).
+function sessionWaitMs(name: string, fallback: number): number {
+  const value = Number(process.env[name] || fallback);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+const GATEWAY_SESSION_WINDOW_MS = sessionWaitMs("GATEWAY_SESSION_WINDOW_MS", 60_000);
+const GATEWAY_SESSION_RECOVERY_WINDOW_MS = sessionWaitMs("GATEWAY_SESSION_RECOVERY_WINDOW_MS", 120_000);
+const GATEWAY_SESSION_POLL_MS = sessionWaitMs("GATEWAY_SESSION_POLL_MS", 3_000);
+const GATEWAY_SESSION_CALL_TIMEOUT_MS = 15_000;
+// The floor of the update's `doctor --fix` bound; it grows with the databases.
 const DOCTOR_FIX_TIMEOUT_MS = 90_000;
+
+/**
+ * How long the update's `openclaw doctor --fix` (gateway_verify, and the
+ * standalone OpenClaw update's gateway_restart) may run on a box whose OpenClaw
+ * databases weigh `databaseBytes`: the old flat 90 s plus two minutes a GiB,
+ * never past twenty minutes (`doctorFixBudgetMs`).
+ *
+ * The flat 90 s was cut off on every box with ~3 GB of agent databases, so the
+ * repairs doctor exists to make in the verify never landed there. The cap is
+ * what keeps the verify sane: the gateway is stopped for the whole run, and a
+ * schema migration, the one thing that legitimately takes longer, belongs to
+ * `openclaw_install`'s own budget.
+ */
+export function doctorFixTimeoutFor(databaseBytes: number): number {
+  return doctorFixBudgetMs(databaseBytes, DOCTOR_FIX_TIMEOUT_MS);
+}
+
 const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
@@ -1894,6 +2165,103 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
     intervalMs: GATEWAY_WAIT_INTERVAL_MS,
     probeTimeoutMs: 1_000,
   });
+}
+
+/** The running step's detail line, or none. Ignored once the step has ended. */
+function showRunningStepDetail(detail: string | undefined): void {
+  const running = runtime.state.steps[runtime.state.currentStepIndex];
+  if (running?.status === "running") running.detail = detail;
+}
+
+/**
+ * Wait for clawbox-gateway the way systemd sees it, not for one flat window.
+ *
+ * `firstWindowMs` is the port-only window this call site always had, so a
+ * gateway that starts quickly is answered exactly as before. Past it the unit
+ * is followed: still starting (pre-start, auto-restart, up but not listening)
+ * means wait on, up to GATEWAY_START_LIMIT_MS, with the update screen saying
+ * so; failed, stopped or crash-looping ends the wait at once. A box with a
+ * large memory database reached "not listening on port 18789" a few seconds
+ * before its gateway came up, and the owner read that red X as a broken update.
+ *
+ * `afterRestart`: this process has just started the unit and systemd took the
+ * restart, so a unit systemctl cannot describe is still the one starting.
+ * Before any restart there is no such evidence, and "could not look" goes on
+ * to the repair, as it always did.
+ */
+async function waitForGatewayToStart(firstWindowMs: number, afterRestart: boolean): Promise<GatewayStartVerdict> {
+  let lastLogged = "";
+  try {
+    const verdict = await waitForGatewayStart({
+      waitForPort: waitForGateway,
+      readState: () => readGatewayStartState("clawbox-gateway.service"),
+      firstWindowMs,
+      limitMs: GATEWAY_START_LIMIT_MS,
+      pollMs: GATEWAY_START_POLL_MS,
+      maxPollMs: GATEWAY_START_POLL_MAX_MS,
+      unknownIsStarting: afterRestart,
+      onStillStarting: (state, waitedMs) => {
+        showRunningStepDetail(describeStillStarting(state, waitedMs));
+        // Once per change of state, not per round: ten minutes of rounds would
+        // bury the one line that says where the start stood.
+        const described = state ? describeUnitState(state) : "unknown";
+        if (described !== lastLogged) {
+          lastLogged = described;
+          console.log(`[Updater] clawbox-gateway still starting after ${formatWaited(waitedMs)}: ${described}`);
+        }
+      },
+    });
+    if (verdict.kind === "listening" && verdict.waitedMs > firstWindowMs) {
+      console.log(`[Updater] clawbox-gateway listening after ${formatWaited(verdict.waitedMs)}`);
+    }
+    return verdict;
+  } finally {
+    showRunningStepDetail(undefined);
+  }
+}
+
+/**
+ * What a gateway wait that did not end listening found, as the head of the
+ * step's error. Always opens with the sentence the update has always used, so
+ * nothing that reads it loses its anchor; what follows says which ending it was.
+ */
+function gatewayNotListeningPrefix(verdict: Exclude<GatewayStartVerdict, { kind: "listening" }>): string {
+  const base = `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`;
+  const unit = verdict.state ? `clawbox-gateway.service is ${describeUnitState(verdict.state)}` : null;
+  if (verdict.kind === "timed-out") {
+    return `${base} after ${formatWaited(verdict.waitedMs)} of waiting for it to start${unit ? ` (${unit})` : ""}`;
+  }
+  switch (verdict.reason) {
+    case "unit-failed":
+    case "unit-stopped":
+      return unit ? `${base} (${unit})` : base;
+    case "crash-loop":
+      return `${base} (clawbox-gateway.service restarted ${verdict.restarts} times while starting)`;
+    default:
+      return base;
+  }
+}
+
+/**
+ * Restart the gateway for the recovery below, and leave its readiness to the
+ * wait that follows.
+ *
+ * A restart whose job is still running after the client's 60 s and the 360 s
+ * settle budget is a pre-start still at work — the unit allows it 600 s, and
+ * the database housekeeping in it is budgeted for most of that — so it is the
+ * start the wait follows, not a failure. A restart systemd finished with the
+ * unit down, or never answered about, still throws.
+ */
+async function restartGatewayForRecovery(): Promise<void> {
+  try {
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
+  } catch (err) {
+    // By name, not `instanceof`: two dozen suites import this module beside a
+    // `@/lib/openclaw-config` mock without the class, where `instanceof
+    // undefined` would throw (openclaw-config-mock-completeness.test.ts).
+    if (!(err instanceof Error) || err.name !== "GatewayNotReadyError") throw err;
+    console.warn(`[Updater] ${err.message}; following the unit's start instead`);
+  }
 }
 
 /**
@@ -1991,12 +2359,22 @@ function doctorChildEnv(): NodeJS.ProcessEnv {
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
+  // Measured per run, before doctor touches them: the verify's doctor reads
+  // every agent database, and a flat 90 s stopped it on every ~3 GB box.
+  const databaseBytes = await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0);
+  const timeoutMs = doctorFixTimeoutFor(databaseBytes);
+  // Said on every run, not only when doctor is cut off: the bound it was given
+  // is what tells a field log "not long enough" apart from "stuck".
+  console.log(`[Updater] openclaw doctor --fix: bound ${Math.round(timeoutMs / 1000)}s `
+    + `for ${(databaseBytes / 1024 ** 3).toFixed(2)} GiB of OpenClaw databases`);
   try {
-    await execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
-      timeout: DOCTOR_FIX_TIMEOUT_MS,
+    // Asked again while another holder has the state under maintenance: the
+    // core refuses before it acts (`@/lib/openclaw-maintenance`).
+    await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
+      timeout,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
-    });
+    }), { timeoutMs, label: "openclaw doctor --fix" });
   } catch (err) {
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
@@ -2032,7 +2410,7 @@ async function runOpenclawDoctorFix(): Promise<void> {
       return;
     }
     warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
-      + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err)}`);
+      + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err, timeoutMs)}`);
   }
 }
 
@@ -2043,12 +2421,13 @@ async function runOpenclawDoctorFix(): Promise<void> {
  * warning built from its first line would name the command back at the owner
  * and nothing else. Doctor states its own blocker — `Legacy exec approvals
  * exist at …` is the one this card is about — and it states it in the output,
- * so that is what is quoted. A killed child is called killed, because a 90 s
- * timeout and a refusal are not the same problem.
+ * so that is what is quoted. A killed child is called killed, with the bound
+ * it was actually given, because a timeout and a refusal are not the same
+ * problem.
  */
-function describeDoctorFailure(err: unknown): string {
+function describeDoctorFailure(err: unknown, timeoutMs: number): string {
   if ((err as { killed?: boolean } | null)?.killed) {
-    return `it was still running after ${Math.round(DOCTOR_FIX_TIMEOUT_MS / 1000)}s and was stopped`;
+    return `it was still running after ${Math.round(timeoutMs / 1000)}s and was stopped`;
   }
   const said = commandOutput(err)
     .split(/\r?\n/)
@@ -2087,8 +2466,12 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   let accepted = true;
   let text: string;
   try {
-    const { stdout } = await execFile(openclawBin(), ["config", "validate", "--json"], {
-      timeout: 60_000,
+    // A validate that lands while a gateway start or a doctor run holds the
+    // state is refused with "retry when it finishes", worded as `valid:false`
+    // on `<root>`. Asked again; still refused, it is NO verdict (below), never
+    // the core refusing this device's configuration.
+    const { stdout } = await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["config", "validate", "--json"], {
+      timeout,
       maxBuffer: 2 * 1024 * 1024,
       // SIGKILL at the deadline, the counterpart of the `-k 5` the boot
       // script's validate bounds carry (TASK-741): node's `execFile` sends
@@ -2101,9 +2484,10 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
       // every later doctor exactly as the original file does.
       killSignal: "SIGKILL",
       env: openclawChildEnv(),
-    });
+    }), { timeoutMs: 60_000, label: "openclaw config validate" });
     text = stdout ?? "";
   } catch (err) {
+    if (err instanceof OpenclawStateMaintenanceError) return null;
     // The core prints the verdict as JSON on stdout and exits 1 when it
     // refuses. Any other non-zero exit carries no verdict at all.
     accepted = false;
@@ -2132,6 +2516,9 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
       return { accepted, payload: null };
     }
     text = commandOutput(err);
+    // The core's maintenance refusal is about who holds the state, not about
+    // the config: no verdict, whatever its payload says.
+    if (isOpenclawMaintenanceRefusal(text)) return null;
   }
   let parsed: unknown;
   try {
@@ -2204,12 +2591,121 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
   );
 }
 
+const GATEWAY_STOP_CLIENT_MS = 30_000;
+const GATEWAY_STOP_UNCLEAN = "gateway-stop-unclean";
+// How many times the stop is asked for while other jobs keep replacing it. Each
+// ask first waits out the job that replaced the last one (up to the settle
+// budget, UNIT_JOB_SETTLE_BUDGET_MS — a job still queued past it is a start
+// the guard is there to refuse, and the next stop takes its place), so this
+// counts whole rounds of a competing restarter, not tries in a second.
+const GATEWAY_STOP_ATTEMPTS = 3;
+
 async function stopGatewayForMaintenance(): Promise<void> {
-  await execFile(
-    "/usr/bin/sudo",
-    ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"],
-    { timeout: 30_000, maxBuffer: 1024 * 1024 },
-  );
+  // Read before the stop so an earlier crash's result is not blamed on it.
+  const before = await readUnitState("clawbox-gateway.service").catch(() => null);
+  const stop = await stopGatewayUnit();
+  if (stop.kind === "in-flight") {
+    throw new Error(`clawbox-gateway was still stopping ${Math.round(stop.waitedMs / 1000)}s after it was asked to — not starting maintenance beside it`);
+  }
+  if (stop.kind === "settled" && stop.state.activeState === "active") {
+    throw new Error(`clawbox-gateway did not stop: it is ${describeUnitState(stop.state)}`);
+  }
+  // Judged only over a unit that was up: one crash-looping in auto-restart
+  // already carries a failed result the stop did not cause.
+  if (before?.activeState === "active") await warnIfGatewayStopUnclean(stop);
+}
+
+/**
+ * The stop itself, asked again when another job REPLACED it (TASK-2200).
+ *
+ * The client's 30 s is not the unit's stop deadline: TimeoutStopSec=330
+ * (config/clawbox-gateway.service), and OpenClaw sizes its graceful drain from
+ * it, so a clean stop can outlive the client by minutes. That stop is waited
+ * for on the unit, never reported as a failure, and never raced: a gateway
+ * still draining is a second writer of the state the maintenance step is about
+ * to touch.
+ *
+ * Nor is a stop that LOST to another job a failed one. systemd keeps one job
+ * per unit, and a `start` or `restart` queued while the stop runs — the web
+ * server's restart after a settings save, a root step's own start, anyone's
+ * `systemctl restart` — takes its place: the client prints "Job for
+ * clawbox-gateway.service canceled." and exits 1. Thrown as it was, that
+ * sentence ended "Applying system fixups" before it ran a single fixup, on a
+ * box whose gateway was down a moment later all the same: the maintenance
+ * guard is in place before this runs, so the start that won is skipped by its
+ * condition once the unit has drained.
+ *
+ * So the unit decides, never the client. Once the job that replaced the stop
+ * has finished, a unit that is down is what the stop was for. One that is up —
+ * a start queued before the stop began finds the unit still active and has
+ * nothing to skip — is asked to stop again, up to GATEWAY_STOP_ATTEMPTS times,
+ * and still up after that is the failure it always was. Any other failure of
+ * the stop (a refused sudo, an unknown unit) is thrown untouched, at once.
+ */
+async function stopGatewayUnit(): Promise<UnitJobOutcome> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+        unit: "clawbox-gateway.service",
+        timeoutMs: GATEWAY_STOP_CLIENT_MS,
+      });
+    } catch (err) {
+      if (!unitJobWasCanceled(err, "clawbox-gateway.service")) throw err;
+      const after = await waitForUnitJob({
+        unit: "clawbox-gateway.service",
+        timeoutMs: GATEWAY_STOP_CLIENT_MS,
+        pollMs: GATEWAY_WAIT_INTERVAL_MS,
+      });
+      const state = after.kind === "returned" ? null : after.state;
+      const now = state ? describeUnitState(state) : "unreadable";
+      if (after.kind === "settled" && unitIsStopped(after.state)) {
+        console.log(
+          `[Updater] another job for clawbox-gateway replaced the update's stop; the unit ended ${now}, which is what the stop was for`,
+        );
+        // Read afresh by the caller's checks, which is the state just judged.
+        return { kind: "returned" };
+      }
+      if (attempt >= GATEWAY_STOP_ATTEMPTS) {
+        throw new Error(
+          `clawbox-gateway did not stop: another start or restart of the unit canceled the update's stop ${attempt} times, and it is ${now}`,
+        );
+      }
+      console.warn(
+        `[Updater] another job for clawbox-gateway canceled the update's stop and the unit is ${now}; asking again (${attempt + 1}/${GATEWAY_STOP_ATTEMPTS})`,
+      );
+    }
+  }
+}
+
+/**
+ * Say so on the update's own result when the update stopped a running gateway
+ * and it did not go quietly: the unit ended failed or with a result other than
+ * success — `Gateway shutdown did not complete cleanly`, exit 1, is how a box
+ * with a dead chat after an update began (TASK-2153), and `timeout` is
+ * systemd's SIGKILL at the unit's 330 s. A clean drain that merely outlived the
+ * 30 s client is not that, however long it took. The update carries on — the
+ * gateway is down either way — but this was only in the journal, and it is the
+ * first line anyone diagnosing what came next needs. Never throws.
+ */
+async function warnIfGatewayStopUnclean(stop: Exclude<UnitJobOutcome, { kind: "in-flight" }>): Promise<void> {
+  try {
+    const state = stop.kind === "settled" ? stop.state : await readUnitState("clawbox-gateway.service");
+    if (state === null) return;
+    const failed = state.activeState === "failed" || (state.result !== "" && state.result !== "success");
+    if (!failed) return;
+    const took = stop.kind === "settled"
+      ? ` after about ${Math.round((GATEWAY_STOP_CLIENT_MS + stop.waitedMs) / 1000)}s`
+      : "";
+    warnUpdate(
+      GATEWAY_STOP_UNCLEAN,
+      `The OpenClaw gateway running before the update did not shut down cleanly when the update stopped it${took} `
+        + `(clawbox-gateway.service ended ${describeUnitState(state)}). `
+        + "The update carried on; if the chat does not answer after it, restart the device.",
+    );
+    await persistWarnings();
+  } catch (err) {
+    console.warn("[Updater] could not record how the gateway stopped:", err instanceof Error ? err.message : err);
+  }
 }
 
 async function removeGatewayMaintenanceMask(): Promise<void> {
@@ -2247,9 +2743,13 @@ async function removeGatewayMaintenanceMask(): Promise<void> {
  * left running and the step fails instead.
  */
 async function waitForGatewayPreStart(): Promise<void> {
-  const deadline = Date.now() + GATEWAY_PRE_START_TIMEOUT_MS;
+  // Monotonic, as systemd counts the TimeoutStartSec this mirrors: this wait
+  // runs at boot, when timesyncd steps the clock of a box with no RTC (half a
+  // day after a night off), and on `Date.now()` that step ended it at once and
+  // failed a healthy update.
+  const deadline = monotonicNow() + GATEWAY_PRE_START_TIMEOUT_MS;
   let announced = false;
-  while (Date.now() < deadline) {
+  while (monotonicNow() < deadline) {
     let subState: string | null = null;
     try {
       const { stdout } = await execFile(
@@ -2268,12 +2768,40 @@ async function waitForGatewayPreStart(): Promise<void> {
       console.log("[Updater] waiting for clawbox-gateway to finish its pre-start before stopping it");
     }
     // Never sleep past the ceiling: the gateway is masked while this waits.
-    await delay(Math.min(GATEWAY_WAIT_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+    await delay(Math.min(GATEWAY_WAIT_INTERVAL_MS, Math.max(0, deadline - monotonicNow())));
   }
   // systemd's own TimeoutStartSec has killed any pre-start by now, so this is
   // a unit whose state could not be confirmed for ten minutes. Leave it alone:
   // the step fails and the mask is lifted, the gateway is not stopped.
   throw new Error("clawbox-gateway did not leave its pre-start within the unit's ceiling — not stopping it");
+}
+
+/**
+ * And a gateway out of its pre-start can still be starting: Type=simple goes
+ * straight to `running`, and the core runs its startup sidecars and channels
+ * for half a minute after. A stop in that window waits out the unit's whole
+ * TimeoutStopSec (see `waitForGatewayStartBeforeStop`), and both callers that
+ * matter land in it by construction: post_update quiesces a gateway the build
+ * or the boot has just started, and the after-update plugin repair one that
+ * has just come back. Masked first for the reason waitForGatewayPreStart
+ * gives. Never a failure: a start that does not finish in time is stopped
+ * anyway, as it always was.
+ */
+async function letGatewayFinishStarting(): Promise<void> {
+  const began = monotonicNow();
+  const outcome = await waitForGatewayStartBeforeStop({
+    onHold: (_waitedMs, first) => {
+      if (first) console.log("[Updater] clawbox-gateway is still starting; letting it finish before stopping it");
+    },
+  });
+  if (outcome === "not-starting") return;
+  const waited = formatWaited(monotonicNow() - began);
+  const said = {
+    settled: `clawbox-gateway finished starting; stopping it after ${waited}`,
+    gone: `clawbox-gateway stopped running during the ${waited} wait for its start`,
+    "timed-out": `clawbox-gateway had not finished starting after ${waited}; stopping it anyway`,
+  } as const;
+  console.log(`[Updater] ${said[outcome]}`);
 }
 
 /**
@@ -2293,6 +2821,7 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
     masked = true;
     await setGatewayMaintenanceMask(true);
     await waitForGatewayPreStart();
+    await letGatewayFinishStarting();
     await stopGatewayForMaintenance();
     outcome = { ok: true, value: await operation() };
   } catch (err) {
@@ -3013,11 +3542,11 @@ async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<vo
   const switchedOff = await clawboxDisabledEntryId(pluginId).catch(() => null);
   if (switchedOff) {
     try {
-      await execFile(
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "enable", switchedOff, "--accept-capabilities"],
-        { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
-      );
+        { timeout, maxBuffer: 4 * 1024 * 1024 },
+      ), { timeoutMs: 60_000, label: "openclaw plugins enable" });
     } catch (err) {
       console.warn(
         `[Updater] "${switchedOff}" was reinstalled but could not be switched back on; `
@@ -3133,11 +3662,11 @@ async function reinstallManagedPluginPayload(
   let lastError: unknown;
   for (const spec of specs) {
     try {
-      await execFile(
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "install", spec, "--force", "--accept-capabilities"],
-        { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
-      );
+        { timeout, maxBuffer: 4 * 1024 * 1024 },
+      ), { timeoutMs: 360_000, label: "openclaw plugins install" });
       return true;
     } catch (err) {
       lastError = err;
@@ -3172,11 +3701,11 @@ async function reinstallManagedPluginPayload(
  */
 async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
   try {
-    await execFile(
+    await withOpenclawMaintenanceRetry((timeout) => execFile(
       openclawBin(),
       ["plugins", "enable", pluginId, "--accept-capabilities"],
-      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
-    );
+      { timeout, maxBuffer: 4 * 1024 * 1024 },
+    ), { timeoutMs: 60_000, label: "openclaw plugins enable" });
     // The OTHER repair path for the same state (TASK-606). A marker the boot
     // script wrote and only the boot script cleared would leave a permanent
     // "Needs repair" badge on a plugin this update just consented — the false
@@ -3365,15 +3894,38 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // The desktop package restores its existing user gateway before its core
     // step returns, including failures. It must not inherit the appliance's
     // doctor/pre-start migrations or rewrite the owner's providers/sessions.
+    // Its boot is far slower than the appliance's, so it gets its own window
+    // (X64_DESKTOP_GATEWAY_READY_WAIT_MS says why): restarting a gateway that
+    // is still booting only starts the slow boot over.
     gatewayNeedsRecovery = false;
-    if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-    await restartGateway({ awaitReady: false });
-    if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
+  }
+  if (hasX64Install(PROJECT_DIR)) {
+    // install-x64.sh's clawbox-gateway.service runs the same pre-start as the
+    // appliance's, so a plain restart already performs every migration that
+    // unit owes. What that PC lacks is the root-owned maintenance helper the
+    // quiesced repair below starts through sudo — and the legacy quarantine's
+    // hard-coded /home/clawbox — so it gets the restart and the diagnosis, not
+    // the appliance's repairs. Its sudoers grant carries this restart.
+    // Same unit, same slow start on large databases: followed the same way.
+    gatewayNeedsRecovery = false;
+    if (!options.restartFirst && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
+    await restartGatewayForRecovery();
+    const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+    if (verdict.kind === "listening") return;
+    throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
   }
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
-  if (!recoverImmediately && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+  // Followed, not raced: a gateway systemd says is still starting is waited
+  // for here rather than stopped for the repair below and started over, which
+  // on a large database only begins the same slow start again. Anything else
+  // past the old 30 s — failed, stopped, crash-looping, or a unit systemctl
+  // cannot describe — goes on to the repair exactly as before.
+  if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
 
   // post_update and the standalone OpenClaw updater both run several config,
   // doctor and plugin commands. Do all remaining repair against a stopped,
@@ -3402,25 +3954,103 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // read that turns "not listening" into a diagnosis. A throw from inside
   // restartGateway would abort the function before the legacy-state quarantine
   // it exists to perform ever ran.
-  await restartGateway({ awaitReady: false });
-  if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+  await restartGatewayForRecovery();
+  const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+  if (verdict.kind === "listening") return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
-    throw new Error(await describeDeadGateway(beforeRecoveryLog));
+    throw new Error(await describeDeadGateway(beforeRecoveryLog, gatewayNotListeningPrefix(verdict)));
   }
 
   await withGatewayQuiesced(async () => {
     await quarantineLegacyOpenclawState();
     await runOpenclawDoctorFix();
   });
-  await restartGateway({ awaitReady: false });
-  if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+  await restartGatewayForRecovery();
+  const afterRecovery = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+  if (afterRecovery.kind === "listening") return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
   throw new Error(
     await describeDeadGateway(afterRecoveryLog, "OpenClaw gateway still offline after legacy state recovery"),
   );
+}
+
+/**
+ * One plain restart of the gateway, the way this install restarts it, and the
+ * same wait `ensureGatewayHealthy` gives a restart — no doctor, no pre-start
+ * of the update's own: the session failure below is the running process's,
+ * and the restart that cleared it in the field was nothing more.
+ */
+async function restartGatewayAndWait(): Promise<void> {
+  // The store failure is answered on the first ask, which lands moments after
+  // the gateway began answering — just after it started, before its channel
+  // providers have (see letGatewayFinishStarting).
+  await letGatewayFinishStarting();
+  await restartGatewayForRecovery();
+  if (hasX64DesktopIntegration(PROJECT_DIR)) {
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    throw new Error("The existing OpenClaw user gateway did not become ready after a restart. Check its service logs before retrying the update.");
+  }
+  const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
+  if (verdict.kind === "listening") return;
+  throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
+}
+
+/**
+ * After the gateway listens: does it serve the chat (TASK-2153)?
+ *
+ * A gateway that answers `/healthz` and listens can still refuse every session
+ * call — a box updated to a new core did, for 22 minutes, after this step had
+ * passed. `@/lib/gateway-session-check` asks it one `chat.history`, restarts it
+ * once when it answers that it cannot, and fails the step with the owner's
+ * words when the restart did not help. A check that cannot ask (no token this
+ * server can read, a gateway still starting) leaves the step as it was.
+ *
+ * `CLAWBOX_TEST_SESSION_FAULT` is a hardware-test seam (see
+ * `withSimulatedSessionFault`), read per run; nothing on a box sets it.
+ */
+async function ensureGatewayServesSessions(): Promise<void> {
+  // No OpenClaw gateway on the Hermes edition: nothing to ask.
+  if (gatewayIsAbsent()) return;
+  const outcome = await verifyGatewaySessions({
+    probe: withSimulatedSessionFault(
+      () => probeMainChatSession(GATEWAY_SESSION_CALL_TIMEOUT_MS),
+      process.env.CLAWBOX_TEST_SESSION_FAULT,
+    ),
+    restart: restartGatewayAndWait,
+    windowMs: GATEWAY_SESSION_WINDOW_MS,
+    recoveryWindowMs: GATEWAY_SESSION_RECOVERY_WINDOW_MS,
+    intervalMs: GATEWAY_SESSION_POLL_MS,
+    log: (line) => console.log(`[Updater] gateway sessions: ${line}`),
+    onDetail: showRunningStepDetail,
+  });
+  if (outcome.verdict === "serving") {
+    console.log(`[Updater] gateway sessions: serving${outcome.restarted ? " after one restart" : ""}`);
+    return;
+  }
+  // Not a failure — nothing said the store failed — but not a silent green
+  // either: a gateway that listens and never answers the chat's own request,
+  // or is still getting its sessions ready after a restart, is the one thing
+  // here the owner may meet next. Not for another refusal (it answered), nor
+  // for a token this server cannot read before any restart (nothing was
+  // asked); after a restart the gateway was asked before, so it counts.
+  if (outcome.answer.kind === "unreachable" && (outcome.restarted || !outcome.answer.final)) {
+    warnUpdate(
+      "gateway-sessions-unconfirmed",
+      `The update could not confirm the chat answers: the OpenClaw gateway did not answer a chat request `
+        + `within ${Math.round((outcome.restarted ? GATEWAY_SESSION_RECOVERY_WINDOW_MS : GATEWAY_SESSION_WINDOW_MS) / 1000)}s `
+        + `(${outcome.detail}). If the chat stays silent, restart the device.`,
+    );
+  } else if (outcome.answer.kind === "unavailable") {
+    warnUpdate(
+      "gateway-sessions-unconfirmed",
+      "The update could not confirm the chat answers: the OpenClaw gateway was still getting its chat sessions "
+        + `ready after a restart (${outcome.detail}). This usually finishes on its own; `
+        + "if the chat does not answer in a few minutes, restart the device.",
+    );
+  }
 }
 
 /**
@@ -3437,10 +4067,12 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
  *
  * Not on the x64 desktop package, for the reason `ensureGatewayHealthy` gives:
  * that gateway is the owner's user service, and the appliance's repairs are not
- * its to inherit.
+ * its to inherit. Nor on a PC installed with install-x64.sh: the retry runs
+ * under `withGatewayQuiesced`, whose root-owned maintenance helper that PC does
+ * not have.
  */
 async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
-  if (hasX64DesktopIntegration(PROJECT_DIR)) return;
+  if (hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR)) return;
   try {
     await retryPluginRepairsAfterCoreUpdate({
       release: currentCoreRelease,
@@ -3551,6 +4183,9 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // Keyed on the binary, not the edition: there is nothing to install where
     // no `openclaw` ships. (Hermes today; the two predicates can diverge.)
     applies: () => !openclawIsAbsent(),
+    // An update that does not move the pin usually has nothing for this step
+    // to do; install.sh says so before the gateway is touched.
+    fastPathStep: "openclaw_install_fast",
   },
   {
     id: "openclaw_patch",
@@ -3583,7 +4218,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     failFast: true,
   },
   {
-    // Runs after reboot via checkContinuation — picks up dispatcher scripts,
+    // Runs after the restart or reboot via checkContinuation — picks up dispatcher scripts,
     // sysctls, and other root fixups that landed in the new install.sh.
     // 5 min, not 60s: on a freshly-installed device the fixups run on cold
     // caches (clawkeep pip force-reinstall, vnc apt work) and routinely
@@ -3632,10 +4267,14 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 90_000,
     // Health first: the after-update plugin retry (TASK-1088) restarts the
     // gateway only when it has something to load, and only a healthy gateway
-    // is one it can prove a repair against.
+    // is one it can prove a repair against. The session check (TASK-2153) asks
+    // the gateway the owner is left with, after the degraded-agents warning
+    // that its throw must not swallow.
     customRun: async () => {
       await ensureGatewayHealthy();
       await retryPluginRepairsLeftByOlderCore();
+      await warnIfOpenclawDatabasesDegraded();
+      await ensureGatewayServesSessions();
     },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
@@ -3643,6 +4282,33 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // directly contradicted the step before it: post_update's smoke test
     // fails the install if anything IS listening on 18789.
     applies: () => !gatewayIsAbsent(),
+  },
+  {
+    // llama-server onto the llama.cpp commit this release pins
+    // (install.sh's step_llamacpp_runtime). install.sh only ever asked whether
+    // a llama-server was THERE, and no update asked at all, so a box kept the
+    // build it was born with through every pin move — one was still on a May
+    // build that rejects `--embd-normalize`, and its memory embedder could not
+    // start (TASK-2166).
+    //
+    // A box already on the pin answers in one `--version` probe. One that is
+    // not compiles llama.cpp with CUDA once — 25 min measured on an 8 GB Orin
+    // Nano with the assistant up beside it (four compile jobs; a fresh
+    // install's 19 min runs six) — in a tree beside the build it runs on,
+    // which keeps working until the new one is swapped in and has started. Last, after the gateway is verified, so
+    // a slow compile never stands between the owner and a working assistant.
+    // Not failFast, and advisory on an overrun: a box that could not rebuild
+    // keeps its old (working) llama-server and says so on a CLAWBOX-WARN
+    // line, a warning on the update rather than a failed one.
+    //
+    // Not on a PC: install-x64.sh builds llama.cpp its own way, and neither
+    // x64 root dispatcher has this step.
+    id: "llamacpp_runtime",
+    label: "Updating the local AI runtime",
+    timeoutMs: 90 * 60_000,
+    requiresRoot: true,
+    advisoryOnOverrun: true,
+    applies: () => !onX64Host(),
   },
   // Two steps are deliberately NOT on this list any more (owner's rulings,
   // 2026-09-17).
@@ -3653,7 +4319,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   // for a few hours after it unpinned for the update's length instead. Now the
   // update does not touch the power profile at all: the box keeps the profile
   // it booted with, and clawbox-performance.service applies the persisted or
-  // default one at the reboot that ends the update. install.sh's
+  // default one when the update ends (rebuild_reboot restarts it, or reboots). install.sh's
   // step_performance_mode still runs on a full install and by hand, and its
   // update_owns_the_box guard stays for a hand-run step while an update is in
   // flight.
@@ -3685,6 +4351,19 @@ function applicableSteps(): UpdateStepDef[] {
 }
 
 /**
+ * Either kind of PC: the desktop integration package or install-x64.sh. A
+ * host file that cannot be judged answers "no" — the appliance's reading,
+ * the same one `rebuiltByOwner` takes.
+ */
+function onX64Host(): boolean {
+  try {
+    return hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Runs a root-privileged step via the clawbox-root-update@ systemd template
  * service. The main service runs as clawbox with NoNewPrivileges=true, so the
  * escalation is systemd's: the template service runs as root.
@@ -3695,7 +4374,7 @@ function applicableSteps(): UpdateStepDef[] {
  * arbitrary root with no password. TASK-539.
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   try {
     await startRootStep(stepId, { timeoutMs: timeoutMs + 30_000 });
   } catch (err) {
@@ -3706,7 +4385,7 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
     // successful) log line as the failure, which is how a healthy update
     // once showed "failed: Linkdown routing sysctl installed".
     if ((err as { killed?: boolean }).killed) {
-      const waitedS = Math.round((Date.now() - startedAt) / 1000);
+      const waitedS = Math.round((monotonicNow() - startedAt) / 1000);
       throw new BudgetOverrunError(
         `${stepId} was still running after ${waitedS}s — gave up waiting (it may finish on its own in the background)`,
       );
@@ -3717,8 +4396,8 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
 
 async function waitForRootStepToSettle(stepId: string): Promise<void> {
   const serviceName = rootStepUnit(stepId);
-  const deadline = Date.now() + ROOT_STEP_SETTLE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + ROOT_STEP_SETTLE_TIMEOUT_MS;
+  while (monotonicNow() < deadline) {
     try {
       const { stdout } = await execFile(
         "/usr/bin/systemctl",
@@ -3759,9 +4438,160 @@ async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number):
   });
 }
 
+/**
+ * install.sh's own line for a fast path that ran, as the journal carries it.
+ * ANCHORED to the start of the line: the fast-only step prints no doctor or npm
+ * transcript, but a line that merely quotes this one is not this box taking it.
+ */
+const OPENCLAW_FAST_PATH_LINE = /^OpenClaw refresh: fast path\b/;
+
+/**
+ * Ask a root step's fast variant first, with the gateway left running, and say
+ * whether it took the fast path.
+ *
+ * The update's `openclaw_install` runs with the gateway quiesced — masked,
+ * stopped, restarted afterwards — which costs minutes and the owner's chat even
+ * when the core is already at the pin. A quiesced gateway also fails one of the
+ * facts install.sh's fast path rests on, so that path can only be asked for
+ * BEFORE the quiesce, by `openclaw_install_fast`: it takes the fast path when
+ * every fact holds and otherwise changes nothing. Anything but its own
+ * "fast path" line — a full-path answer, a runner that does not know the step,
+ * a failure, a journal that cannot be read — answers false, and the caller
+ * runs the full step exactly as before.
+ */
+async function rootStepTookFastPath(stepId: string, timeoutMs: number): Promise<boolean> {
+  const startedAt = Date.now();
+  showRunningStepDetail("Checking whether OpenClaw is already up to date");
+  try {
+    await execAsRoot(stepId, timeoutMs);
+  } catch (err) {
+    // Never start the quiesced full step beside a check that is still running.
+    if (err instanceof BudgetOverrunError) await waitForRootStepToSettle(stepId);
+    console.warn(
+      `[Updater] ${stepId} did not answer (${err instanceof Error ? err.message : String(err)}) — running the full step`,
+    );
+    return false;
+  } finally {
+    showRunningStepDetail(undefined);
+  }
+  await collectRootStepWarnings(stepId, startedAt);
+  const journal = await readRootStepJournal(stepId, startedAt);
+  const fast = journal.split(/\r?\n/).some((line) => OPENCLAW_FAST_PATH_LINE.test(line.trim()));
+  console.log(fast
+    ? `[Updater] ${stepId}: OpenClaw is already current — fast path taken, gateway left running`
+    : `[Updater] ${stepId}: the full step is needed — running it with the gateway quiesced`);
+  return fast;
+}
+
+/**
+ * The steps a PC installed with install-x64.sh runs as the desktop owner, never
+ * through a root unit: the two that move and rebuild the checkout (see
+ * syncCheckoutAsOwner and updateClawBoxAsOwner).
+ */
+const X64_INSTALL_OWNER_STEPS: ReadonlySet<string> = new Set(["bootstrap_updater", RESTART_STEP_ID]);
+
+/**
+ * Whether this box's restart step rebuilds as the owner (install-x64.sh, no
+ * integration package). For the continuation, which runs on every status poll
+ * and at boot: a host file that cannot be judged answers "no" here — the
+ * appliance's stricter reading — and the next update reports it properly.
+ */
+function rebuiltByOwner(): boolean {
+  try {
+    return !hasX64DesktopIntegration(PROJECT_DIR) && hasX64Install(PROJECT_DIR);
+  } catch {
+    return false;
+  }
+}
+
+/** What one half of a run on such a PC skipped, and the card that says so. */
+interface X64SkippedSteps {
+  code: string;
+  labels: string[];
+}
+
+/** Everything THIS dispatch of a root step wrote, or "" if it cannot be read. */
+async function readRootStepJournal(stepId: string, sinceMs: number): Promise<string> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      rootStepJournalArgs(stepId, { sinceMs, lines: 80 }),
+      { timeout: 10_000 },
+    );
+    return String(stdout ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/** `systemctl show <unit> -p ExecMainStatus --value` — kept while a failed unit stays loaded. */
+async function getRootStepExitStatus(stepId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", rootStepUnit(stepId), "-p", "ExecMainStatus", "--value"],
+      { timeout: 10_000 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A root step on a PC installed with install-x64.sh: run it, and when the root
+ * helper installed there cannot run it at all, skip it with one warning instead
+ * of failing the update.
+ *
+ * "Cannot run it at all" is read off what the dispatcher and the installer copy
+ * SAID in this run (classifyX64RootStepGap) — a step it ran and that failed
+ * stays a failure, with the appliance's own failure reading. The launcher
+ * being unreachable is the same answer one level up. Either way nothing on the
+ * root side changed, so going on is safe: these are system-package and
+ * OpenClaw steps, and the part of the update that is ClawBox itself runs as the
+ * owner. A helper that learns a step later (the owner re-runs the installer's
+ * root_step_contract, which the card names) simply starts running it.
+ *
+ * No outer gateway quiesce: the appliance's needs a root-owned maintenance
+ * helper this PC does not have, and install-x64.sh's own OpenClaw step stops
+ * and restarts the gateway around its migration.
+ */
+async function execX64InstallRootStep(step: UpdateStepDef, startedAt: number, skipped: X64SkippedSteps): Promise<void> {
+  try {
+    await execAsRoot(step.id, step.timeoutMs);
+    return;
+  } catch (err) {
+    if (err instanceof BudgetOverrunError) throw err;
+    const launcherUnavailable = (err as { rootStepUnavailable?: boolean } | null)?.rootStepUnavailable === true;
+    const journal = launcherUnavailable ? "" : await readRootStepJournal(step.id, startedAt);
+    const gap = launcherUnavailable
+      ? "launcher"
+      : journal.trim()
+        ? classifyX64RootStepGap(journal)
+        : classifyX64RootStepExit(await getRootStepExitStatus(step.id));
+    if (!gap) throw err;
+    console.warn(`[Updater] ${step.label}: this PC's root helper cannot run ${step.id} (${gap}) — skipped`);
+    if (!skipped.labels.includes(step.label)) skipped.labels.push(step.label);
+    const message = x64SkippedStepsWarning(skipped.labels, PROJECT_DIR);
+    if (!runtime.state.warnings) runtime.state.warnings = [];
+    const card = runtime.state.warnings.find((w) => w.code === skipped.code);
+    if (card) card.message = message;
+    else runtime.state.warnings.push({ code: skipped.code, message });
+    await persistWarnings();
+  }
+}
+
 let cachedTargetVersion: string | null = null;
 let targetVersionCacheTime = 0;
 const TARGET_VERSION_CACHE_TTL = 60_000; // Cache failures for 60s to avoid repeated git ls-remote
+// A version check that SAW origin is good for half an hour: the desktop asks
+// every 30 min and every open Settings tab asks too, and each uncached answer
+// is three git round-trips to origin (1.6–2.3 s measured on the laptop, more on
+// a Jetson's WiFi), so the 60 s TTL meant nearly every poll paid them. A refusal
+// keeps the short TTL, so a box that could not reach the releases asks again
+// soon; `?force=1` (Settings → Check for updates) and a finished update still
+// drop the cache at once (invalidateVersionCache).
+const VERSION_INFO_GOOD_TTL = 30 * 60_000;
 
 // ASKED PER CALL, never frozen at import. `findOpenclawBin()` remembers only the
 // MANAGED core's path; a fallback answer ("openclaw", or a second core under
@@ -3992,19 +4822,46 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
 }
 
 export async function getVersionInfo(): Promise<VersionInfo> {
-  if (cachedVersionInfo && Date.now() - versionInfoCacheTime < TARGET_VERSION_CACHE_TTL) {
-    return cachedVersionInfo;
+  // ONE read of the lock for the whole answer (harness.ts says why: install.sh
+  // rewrites the file on every update, and each read is a fresh chance to get
+  // the "openclaw" default back), and the cache is only an answer for the
+  // edition it was made on. Which harnesses are reported, and which of them
+  // are offered an update, follow the edition — and a Settings → Harness swap
+  // changes it under a web server that keeps running, which then served the
+  // pre-swap payload, OpenClaw offer included, for up to 30 minutes.
+  const edition = readEdition();
+  if (cachedVersionInfo && cachedVersionInfo.edition === edition) {
+    const ttl = cachedVersionInfo.remote.reachable ? VERSION_INFO_GOOD_TTL : TARGET_VERSION_CACHE_TTL;
+    if (Date.now() - versionInfoCacheTime < ttl) return cachedVersionInfo;
   }
 
-  const edition = readEdition();
-  const hasHermes = hasHermesHarness();
-  const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent] = await Promise.all([
-    getTargetVersion(),
-    // The Hermes edition ships no openclaw binary, so skip the spawn and read
-    // the version from the installed package.json (absent there too → null,
-    // which is correct: there is no OpenClaw version to report on Hermes).
-    openclawIsAbsent()
-      ? readPkgVersion(OPENCLAW_PKG)
+  // hasHermesHarness(), applied to that one read.
+  const hasHermes = edition === "hermes" || edition === "dual";
+  // openclawIsAbsent() — THE STEP LIST'S OWN PREDICATE — applied to that one
+  // read: `openclaw_install` applies exactly where this is false, so the
+  // OpenClaw half of this payload offers an update only where the update
+  // performs one. On `dual` that is true whichever harness is answering — the
+  // full update keeps both harnesses at their pins. On the Hermes edition it is
+  // not, and a core still on its disk is no reason to say otherwise: the
+  // Settings → Harness swap from OpenClaw leaves the old core there, unused,
+  // and this payload used to read its package.json and offer "OpenClaw
+  // 2026.10.7 → 2026.10.9" on every desktop start of a box whose update would
+  // never touch it. The swap back installs and doctors the pinned core before
+  // the lock flips (install.sh harness_swap_to_openclaw), so nothing stale is
+  // ever what such a box runs.
+  const openclawAbsent = edition === "hermes";
+  // One round of concurrent reads. The release remote's check used to wait
+  // for the tag ls-remote to finish first for no reason (neither reads the
+  // other's answer). The pinned branch's fetch still runs AFTER the tag
+  // ls-remote: they are this check's two anonymous requests to GitHub, and the
+  // refusal both are retried for is caused by an address sending too many, so
+  // they go one after the other rather than as a burst.
+  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
+    getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
+    // Nothing to read on the Hermes edition: there is no OpenClaw to report
+    // there (see `openclawAbsent` above).
+    openclawAbsent
+      ? Promise.resolve(null)
       : execFile(openclawBin(), ["--version"], { timeout: 10_000 })
           .then(({ stdout }) => stdout.trim() || null)
           // Fallback: read version from the installed package.json
@@ -4012,14 +4869,12 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
-    readPinnedOpenclawVersion(),
+    // No target on the Hermes edition, where the update installs none.
+    openclawAbsent ? Promise.resolve(null) : readPinnedOpenclawVersion(),
     readClawboxVersion(),
     // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
-  ]);
-  const [{ target: pinnedBranchTarget, remote: pinnedRemote }, releaseRemote] = await Promise.all([
-    getPinnedBranchTarget(PROJECT_DIR),
     checkReleaseRemote(PROJECT_DIR),
   ]);
   // THREE reads of the same question, none of which may be overruled by
@@ -4089,20 +4944,17 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
-    // The tag fetch is ADVISORY: `ls-remote` below asks origin directly, so the
-    // answer is not read from the local tag refs this call updates. Its refusal
-    // is logged, never promoted — reporting the remote unreachable because an
-    // advisory call was refused while the authoritative one answered is the
-    // false-failure half of the same bug.
-    const tagFetch = await reachOrigin(
-      PROJECT_DIR,
-      ["fetch", "--quiet", "--tags", "origin"],
-      // The delay is explicit even at one attempt: dropping it would fall back
-      // to the UPDATE path's 4 s budget, so raising REMOTE_ADVISORY_ATTEMPTS
-      // later would silently put a 4 s sleep on every polled version check.
-      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
-    );
-    if (!tagFetch.reachable) console.warn(`[Updater] advisory tag fetch did not land: ${tagFetch.reason}`);
+    // No `git fetch --tags origin` first. It fed the local tag refs that the
+    // old ancestry guard (below) read; since that guard went, nothing reads them
+    // — the answer comes from `ls-remote` — and the fetch had become the most
+    // expensive request of the check for no answer at all: the remote's default
+    // refspec plus `--tags` downloads every branch on origin and every tag's
+    // history, anonymously. Its 20 s timeout sat in front of every version
+    // check, so a slow link to GitHub spent all of it here before the calls that
+    // decide anything had started. Measured 2026-11-03 on the e2e-install box:
+    // the fetch hit its timeout, /setup-api/update/status answered after 28 s,
+    // and the setup wizard showed "Checking for updates..." for all of it.
+    //
     // The AUTHORITATIVE call, and so the one that is retried. It used to get a
     // single attempt: one refused ls-remote then made every surface say the
     // update server could not be reached, and TARGET_VERSION_CACHE_TTL held
@@ -4507,6 +5359,12 @@ interface RunOptions {
    * the post-reboot continuation and the OpenClaw-only flow pass their own start.
    */
   resumeFromInterruption?: boolean;
+  /**
+   * The owner's explicit "Back up and update anyway": a run that would install
+   * an older harness than the one that wrote the box's data backs that data up
+   * and goes ahead instead of being refused (see harnessDowngradePreflight).
+   */
+  allowHarnessDowngrade?: boolean;
 }
 
 /**
@@ -4740,7 +5598,13 @@ async function resumeContinuation(): Promise<boolean> {
   // erased by a power cycle; the BUILD_ID can't). Legacy boolean flags (written
   // by the previous updater version) carry no build identity — for those the
   // unit check and the "is there a build at all" check apply.
-  const unitFailed = rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
+  //
+  // On a PC installed with install-x64.sh no rebuild unit ran: the owner built
+  // in-process and a failure there clears the flag before it throws. A `failed`
+  // rebuild_reboot Result on such a PC is an older updater's attempt, never
+  // this run's — so only the build identity is evidence there.
+  const ownerRebuilt = rebuiltByOwner();
+  const unitFailed = !ownerRebuilt && rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const currentBuildId = await readBuildId();
   const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId;
@@ -4752,13 +5616,14 @@ async function resumeContinuation(): Promise<boolean> {
   // 2026-09-04, TASK-709.
   const buildMissing = currentBuildId === "";
   if (unitFailed || buildUnchanged || buildMissing) {
+    const logs = ownerRebuilt ? "the clawbox-setup service log" : "clawbox-root-update@rebuild_reboot logs";
     const message = unitFailed
       // No start time survives the restart this check runs after — see
       // readRootStepFailure.
       ? (await readRootStepFailure(REBUILD_ROOT_STEP, null)) ?? "Rebuild failed before the restart"
       : buildMissing
-        ? "The device restarted with no build at all (.next/BUILD_ID is missing) — see clawbox-root-update@rebuild_reboot logs"
-        : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+        ? `ClawBox restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
+        : `ClawBox restarted without producing a new build — see ${logs}`;
     runtime.state = createInitialState(steps);
     runtime.state.warnings = await restoreWarnings();
     runtime.state.phase = "failed";
@@ -4791,9 +5656,20 @@ async function resumeContinuation(): Promise<boolean> {
   return true;
 }
 
-export function startUpdate(): { started: boolean; error?: string } {
+const DB_MAINTENANCE_BUSY =
+  "OpenClaw database maintenance is running (the gateway is stopped for it) — update when it has finished";
+
+export function startUpdate(
+  opts: { allowHarnessDowngrade?: boolean } = {},
+): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
+  }
+  // A database compaction holds the gateway down with the same guard the
+  // update takes and LIFTS when it is done — under a running compaction the
+  // update would lift it halfway and start the gateway beside the doctor.
+  if (dbMaintenanceRunning()) {
+    return { started: false, error: DB_MAINTENANCE_BUSY };
   }
 
   runtime.running = true;
@@ -4804,7 +5680,11 @@ export function startUpdate(): { started: boolean; error?: string } {
 
   // A fresh run — which continues an interrupted one from the step it died on
   // when the disk says there was one (runUpdate).
-  launchUpdate(steps, 0, { markCompleted: true, resumeFromInterruption: true });
+  launchUpdate(steps, 0, {
+    markCompleted: true,
+    resumeFromInterruption: true,
+    allowHarnessDowngrade: opts.allowHarnessDowngrade === true,
+  });
   return { started: true };
 }
 
@@ -4833,6 +5713,9 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     customRun: async () => {
       await ensureGatewayHealthy({ restartFirst: true });
       await retryPluginRepairsLeftByOlderCore();
+      // First: the session check's throw must not swallow it.
+      await warnIfOpenclawDatabasesDegraded();
+      await ensureGatewayServesSessions();
     },
   },
 ];
@@ -4840,6 +5723,9 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
   if (updateOwned()) {
     return { started: false, error: "Update already in progress" };
+  }
+  if (dbMaintenanceRunning()) {
+    return { started: false, error: DB_MAINTENANCE_BUSY };
   }
   // Every step in this list is OpenClaw's, so there is no filtered version of
   // it worth running — the whole flow is inapplicable. Refuse honestly instead
@@ -4911,49 +5797,245 @@ async function checkInternet(): Promise<boolean> {
  * runUpdate). It must not make an offline box wait through retries for the
  * "No internet connection" it is about to be told.
  */
-async function readUpdateTargetOpenclawPin(): Promise<string | null> {
-  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
-  if (envPin) return envPin;
-  let upstream: string;
+interface HarnessPins {
+  /** The branch the pins were read off (`origin/<branch>`), when they were. */
+  branch: string | null;
+  openclaw: string | null;
+  /** Asked for only on a box that runs Hermes. */
+  hermes: { commit: string; version: string | null } | null;
+}
+
+/** `<ref>:<file>` from the checkout's object store, or null when it is not there. */
+async function showAtRef(ref: string, file: string): Promise<string | null> {
   try {
-    ({ upstream } = await resolveUpdateBranch(PROJECT_DIR));
-  } catch {
-    // Unresolvable: step 0 refuses the run with its own sentence.
-    return null;
-  }
-  if (!upstream.startsWith("origin/")) return null;
-  const branch = upstream.slice("origin/".length);
-  if (!isSafeBranch(branch)) return null;
-  const remote = await reachOrigin(PROJECT_DIR, ["fetch", "--quiet", "origin", branch], {
-    timeout: 20_000,
-    attempts: 1,
-  });
-  if (!remote.reachable) return null;
-  try {
-    const { stdout } = await execGit(PROJECT_DIR, ["show", `${upstream}:config/openclaw-target.txt`], {
+    const { stdout } = await execGit(PROJECT_DIR, ["show", `${ref}:${file}`], {
       timeout: 10_000,
+      // install.sh is several hundred kilobytes.
+      maxBuffer: 16 * 1024 * 1024,
     });
-    // The same first-token read as readPinnedOpenclawVersion and install.sh.
-    return String(stdout ?? "").trim().split(/\s+/)[0] || null;
+    return String(stdout ?? "");
   } catch {
     return null;
   }
 }
 
 /**
- * When the pre-flight is asked, which decides what a refusal can truthfully
- * say about the box.
+ * The harness pins `origin/<branch>` carries, read with ONE fetch and
+ * `git show` — nothing is checked out, so a refusal leaves the box exactly as
+ * it was. Shared by the update's pre-flight and the Settings update-branch
+ * route, so both judge a branch by the same two files install.sh installs
+ * from: `config/openclaw-target.txt` (first token, as readPinnedOpenclawVersion
+ * and install.sh read it) and install.sh's `HERMES_PIN_COMMIT` (parseHermesPin).
+ * `OPENCLAW_PIN_VERSION` overrides the OpenClaw pin here as it does in install.sh.
  *
- * `before-update`: ahead of step 1, and nothing has changed. `before-install`:
- * at the `openclaw_install` boundary, after the repo sync and the package steps
- * ahead of it have run — but before the core is touched, so the assistant still
- * has the one it had.
+ * ONE attempt, and every failure is a null pin rather than a throw: this is a
+ * pre-flight, and the install step asks again on the synced tree.
  */
-type SchemaCheckMoment = "before-update" | "before-install";
+async function readPinsAtBranch(branch: string, wantHermes: boolean): Promise<HarnessPins> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim() || null;
+  const pins: HarnessPins = { branch, openclaw: envPin, hermes: null };
+  if (envPin && !wantHermes) return pins;
+  if (!isSafeBranch(branch)) return { ...pins, branch: null };
+  const remote = await reachOrigin(PROJECT_DIR, ["fetch", "--quiet", "origin", branch], {
+    timeout: 20_000,
+    attempts: 1,
+  });
+  if (!remote.reachable) return pins;
+  const upstream = `origin/${branch}`;
+  if (!envPin) {
+    pins.openclaw = (await showAtRef(upstream, "config/openclaw-target.txt"))?.trim().split(/\s+/)[0] || null;
+  }
+  if (wantHermes) {
+    const installer = await showAtRef(upstream, "install.sh");
+    pins.hermes = installer ? parseHermesPin(installer) : null;
+  }
+  return pins;
+}
 
 /**
- * "This box's data is newer than the core this update would install" — asked
- * BEFORE the core is touched, answered in one sentence or not at all.
+ * The pins this update will INSTALL: the release it is about to sync to.
+ * Null pins whenever that cannot be done without guessing — no branch, a
+ * remote that is not `origin`, a fetch that did not land, a release with no
+ * pin file.
+ */
+async function readUpdateTargetPins(wantHermes: boolean): Promise<HarnessPins> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim() || null;
+  const unknown: HarnessPins = { branch: null, openclaw: envPin, hermes: null };
+  if (envPin && !wantHermes) return unknown;
+  let upstream: string;
+  try {
+    ({ upstream } = await resolveUpdateBranch(PROJECT_DIR));
+  } catch {
+    // Unresolvable: step 0 refuses the run with its own sentence.
+    return unknown;
+  }
+  if (!upstream.startsWith("origin/")) return unknown;
+  return readPinsAtBranch(upstream.slice("origin/".length), wantHermes);
+}
+
+/** The pins in the checkout on disk — the target once the sync is behind the run. */
+async function readCheckoutPins(wantHermes: boolean): Promise<HarnessPins> {
+  let hermes: HarnessPins["hermes"] = null;
+  if (wantHermes) {
+    const installer = await readFile(path.join(PROJECT_DIR, "install.sh"), "utf-8").catch(() => null);
+    hermes = installer ? parseHermesPin(installer) : null;
+  }
+  return { branch: null, openclaw: await readPinnedOpenclawVersion(), hermes };
+}
+
+/** `git` in the Hermes checkout the box runs, as its owner (this server's user). */
+async function hermesGit(args: string[]): Promise<{ code: number; stdout: string }> {
+  const dir = process.env.HERMES_AGENT_DIR || path.join(hermesHome(), "hermes-agent");
+  try {
+    const { stdout } = await execFile("git", ["-c", `safe.directory=${dir}`, "-C", dir, ...args], { timeout: 10_000 });
+    return { code: 0, stdout: String(stdout ?? "").trim() };
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    return { code: typeof code === "number" ? code : -1, stdout: "" };
+  }
+}
+
+/**
+ * What the Hermes checkout is on, and whether `targetCommit` is behind it.
+ * `merge-base --is-ancestor` answers 0 (behind), 1 (not behind) or something
+ * else (a commit this clone does not have — a shallow checkout); only the
+ * first two are an answer.
+ */
+async function readInstalledHermes(targetCommit: string | null): Promise<{
+  installed: { commit: string | null; version: string | null } | null;
+  targetIsAncestor: boolean | null;
+}> {
+  const head = await hermesGit(["rev-parse", "HEAD"]);
+  const commit = head.code === 0 && /^[0-9a-f]{40}$/i.test(head.stdout) ? head.stdout.toLowerCase() : null;
+  if (commit && targetCommit && commit === targetCommit.toLowerCase()) {
+    return { installed: { commit, version: null }, targetIsAncestor: false };
+  }
+  const version = await readHermesVersion();
+  if (!commit && !version) return { installed: null, targetIsAncestor: null };
+  let targetIsAncestor: boolean | null = null;
+  if (commit && targetCommit) {
+    const ancestry = await hermesGit(["merge-base", "--is-ancestor", targetCommit, "HEAD"]);
+    targetIsAncestor = ancestry.code === 0 ? true : ancestry.code === 1 ? false : null;
+  }
+  return { installed: { commit, version: version ? version.replace(/^v/, "") : null }, targetIsAncestor };
+}
+
+/**
+ * Whether Hermes keeps a session store on disk (`state.db`, the default
+ * profile's or any named profile's) — the data an older release cannot run on
+ * once a newer gateway runtime has written it. Without one there is nothing a
+ * Hermes downgrade could break.
+ */
+function hermesHasData(): boolean {
+  try {
+    const home = hermesHome();
+    if (existsSync(path.join(home, "state.db"))) return true;
+    const profiles = path.join(home, "profiles");
+    return readdirSync(profiles).some((name) => existsSync(path.join(profiles, name, "state.db")));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The newest agent database on disk, by schema. A store that could not be
+ * asked is no evidence: null, like readStateSchemaVersion's null.
+ */
+function newestAgentSchema(): SchemaOnDisk | null {
+  try {
+    let newest: SchemaOnDisk | null = null;
+    for (const db of readAgentSchemaVersions()) {
+      if (!newest || db.version > newest.version) newest = { label: db.path, version: db.version };
+    }
+    return newest;
+  } catch (err) {
+    console.warn("[Updater] could not read the OpenClaw agent databases' schema:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * "Would installing `pins` move a harness on this box backwards?" — the
+ * versions installed now and the schemas on disk against the target's, judged
+ * by assessHarnessDowngrade. Null when nothing would; never throws, because a
+ * guard may not be the thing that fails an update.
+ *
+ * `openclaw` / `hermes` say which harnesses this run installs. The warnings for
+ * an OpenClaw pin that could not be read, or one whose schemas the tables do
+ * not know, are how the guard's own blind spots are found.
+ */
+async function harnessDowngradeFor(
+  pins: HarnessPins,
+  scope: { openclaw: boolean; hermes: boolean },
+): Promise<HarnessDowngradeDetail | null> {
+  try {
+    let openclaw = null;
+    if (scope.openclaw) {
+      if (!pins.openclaw) {
+        console.warn(
+          "[Updater] could not read which OpenClaw this update installs; the state-DB pre-flight stood down"
+          + " until the install step, which asks again on the synced tree",
+        );
+      } else {
+        const supported = {
+          state: openclawStateSchemaFor(pins.openclaw),
+          agent: openclawAgentSchemaFor(pins.openclaw),
+        };
+        if (supported.state === null || supported.agent === null) {
+          console.warn(
+            `[Updater] no state schema recorded for the pinned OpenClaw ${pins.openclaw}; the state-DB pre-flight stood down`,
+          );
+        }
+        const dbPath = statePath();
+        const state = dbPath ? readStateSchemaVersion() : null;
+        openclaw = {
+          target: pins.openclaw,
+          installed: await readPkgVersion(OPENCLAW_PKG),
+          onDisk: {
+            state: dbPath && state !== null ? { label: dbPath, version: state } : null,
+            agent: newestAgentSchema(),
+          },
+          supported,
+        };
+      }
+    }
+    let hermes = null;
+    if (scope.hermes && pins.hermes && hermesHasData()) {
+      hermes = { target: pins.hermes, hasData: true, ...(await readInstalledHermes(pins.hermes.commit)) };
+    }
+    const downgrades = assessHarnessDowngrade({ openclaw, hermes });
+    return downgrades.length > 0 ? { branch: pins.branch, downgrades } : null;
+  } catch (err) {
+    console.warn(
+      "[Updater] could not compare the harnesses before the update:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+/**
+ * For the Settings update-branch route: would updates that follow `branch`
+ * install an older harness than the one that wrote this box's data? Read off
+ * `origin/<branch>` without checking anything out; null when not, or when it
+ * could not be told (an unreachable origin, a branch origin does not carry —
+ * the update then refuses with its own sentence).
+ */
+export async function checkBranchHarnessDowngrade(branch: string): Promise<HarnessDowngradeDetail | null> {
+  const scope = { openclaw: !openclawIsAbsent(), hermes: hasHermesHarness() };
+  if (!scope.openclaw && !scope.hermes) return null;
+  return harnessDowngradeFor(await readPinsAtBranch(branch, scope.hermes), scope);
+}
+
+/**
+ * "This box's data is newer than the harness this update would install" —
+ * asked BEFORE anything is touched, answered with the sentence and the detail
+ * the screen localises, or not at all.
+ *
+ * `moment` (see DowngradeMoment): `before-update` is ahead of step 1, and
+ * nothing has changed; `before-install` is the `openclaw_install` boundary,
+ * after the repo sync and the package steps ahead of it have run — but before
+ * the core is touched, so the assistant still has the one it had.
  *
  * WHY IT IS A PRE-FLIGHT AND NOT A FAILURE MESSAGE. OpenClaw migrates
  * `~/.openclaw/state/openclaw.sqlite` forward and NEVER back. A box whose store
@@ -4967,55 +6049,79 @@ type SchemaCheckMoment = "before-update" | "before-install";
  * could only retry into the same wall. The numbers are knowable before anything
  * is touched, so they are read before anything is touched.
  *
- * IT REFUSES ONLY ON PROOF. Four separate unknowns each return null — a target
- * pin that could not be read, a pin whose schema is not in the table, a device
- * with no state store, a store that could not be read — because none of them is
- * evidence of a newer schema, and an update refused over an unknown strands
- * exactly the box an update repairs. Standing down costs what the box has
- * today: the mid-run failure.
+ * IT REFUSES ONLY ON PROOF (assessHarnessDowngrade): a database on a newer
+ * schema than the target declares, or a target older than what is installed.
+ * Every unknown — a target pin that could not be read, a pin whose schemas are
+ * not in the tables, a device with no store, a store that could not be read, a
+ * version that cannot be ordered — returns null, because none of them is
+ * evidence, and an update refused over an unknown strands exactly the box an
+ * update repairs. Standing down costs what the box has today: the mid-run
+ * failure, which the installer's own pre-check now stops before the core is
+ * swapped.
  *
- * `target` is the pin the update will install — see readUpdateTargetOpenclawPin
- * for why that is not simply the pin file on disk.
+ * `pins` are what the update will install — see readUpdateTargetPins for why
+ * that is not simply the pin file on disk.
  */
-async function newerStateSchemaRefusal(target: string | null, moment: SchemaCheckMoment): Promise<string | null> {
-  try {
-    if (!target) {
-      console.warn(
-        "[Updater] could not read which OpenClaw this update installs; the state-DB pre-flight stood down"
-        + " until the install step, which asks again on the synced tree",
-      );
-      return null;
-    }
-    const supported = openclawStateSchemaFor(target);
-    if (supported === null) {
-      console.warn(
-        `[Updater] no state schema recorded for the pinned OpenClaw ${target}; the state-DB pre-flight stood down`,
-      );
-      return null;
-    }
-    const dbPath = statePath();
-    if (!dbPath) return null;
-    const onDisk = readStateSchemaVersion();
-    if (onDisk === null || onDisk <= supported) return null;
-    return (
-      `This device's OpenClaw data is newer than the version this update installs. `
-      + `${dbPath} is on state schema ${onDisk}, and the pinned OpenClaw ${target} supports schema ${supported}. `
-      + `OpenClaw never downgrades a state schema, so installing it would leave the assistant unable to open its own data — `
-      + (moment === "before-update"
-        ? `the update was refused before it changed anything. `
-        : `the update stopped before it touched OpenClaw, and the assistant keeps the core it has. `)
-      + `Update ClawBox to a build whose pinned OpenClaw supports state schema ${onDisk} or newer, `
-      + `or restore the backup taken before the core that migrated this device.`
-    );
-  } catch (err) {
-    // A guard may not be the thing that fails an update. Whatever went wrong
-    // here, the box is no worse off than it was before this check existed.
-    console.warn(
-      "[Updater] could not read the OpenClaw state schema before the update:",
-      err instanceof Error ? err.message : err,
-    );
-    return null;
+async function harnessDowngradeRefusal(
+  pins: HarnessPins,
+  scope: { openclaw: boolean; hermes: boolean },
+  moment: DowngradeMoment,
+): Promise<{ message: string; detail: HarnessDowngradeDetail } | null> {
+  const detail = await harnessDowngradeFor(pins, scope);
+  return detail ? { detail, message: harnessDowngradeMessage(detail, moment) } : null;
+}
+
+/** Settle the run as refused before step 1: the box is as it was. */
+async function refuseBeforeStepOne(error: string, errorCode: HarnessDowngradeErrorCode, detail?: HarnessDowngradeDetail) {
+  runtime.state.phase = "failed";
+  runtime.state.error = error;
+  runtime.state.errorCode = errorCode;
+  if (detail) runtime.state.downgrade = detail;
+  runtime.state.currentStepIndex = -1;
+  await clearUpdateLock();
+}
+
+/**
+ * The override's first half: back the data up, then tell the installer which
+ * core it may set the newer databases aside for (harness-downgrade-backup.ts).
+ * Both happen or the run is refused with the reason — never a downgrade
+ * without a backup behind it.
+ */
+async function backUpForDowngrade(
+  detail: HarnessDowngradeDetail,
+): Promise<{ ok: true } | { ok: false; message: string; reason: string }> {
+  console.warn(
+    `[Updater] installing an older harness at the owner's request; backing its data up first: ${
+      detail.downgrades.map((d) => `${d.harness} ${d.installed ?? "?"} -> ${d.target}`).join(", ")}`,
+  );
+  // The OpenClaw backup child is pinned to this device's tree, like every
+  // other `openclaw` the updater starts.
+  const backup = await backUpBeforeDowngrade(detail.downgrades, openclawChildEnv());
+  if (!backup.ok) {
+    return {
+      ok: false,
+      message: "The assistant's data could not be backed up, so the older version was not installed and "
+        + `nothing was changed: ${backup.reason}`,
+      // The screen says the sentence in the owner's language and this as given.
+      reason: backup.reason,
+    };
   }
+  try {
+    await writeDowngradeAuthorization({
+      openclaw: detail.downgrades.find((d) => d.harness === "openclaw")?.target ?? null,
+      hermes: detail.downgrades.find((d) => d.harness === "hermes")?.target ?? null,
+      hermesCommit: detail.downgrades.find((d) => d.harness === "hermes")?.targetCommit ?? null,
+      backupDir: backup.dir,
+    });
+  } catch (err) {
+    const message = `The assistant's data was backed up to ${backup.dir}, but the installer could not be told to use it, `
+      + `so the older version was not installed and nothing was changed: ${err instanceof Error ? err.message : String(err)}`;
+    // The whole sentence, not just the error: here the backup DID happen, and
+    // where it went is what the owner needs from this rare failure.
+    return { ok: false, message, reason: message };
+  }
+  warnUpdate("harness-downgrade-backup", backup.summary);
+  return { ok: true };
 }
 
 /** Execute or resume update steps, recording failure and respecting host maintenance ownership. */
@@ -5025,6 +6131,17 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // leave Telegram stopped until gateway_verify, which a failed rebuild or
   // rejected core pin never reaches. Resolve once for this run/continuation.
   const desktopIntegration = hasX64DesktopIntegration(PROJECT_DIR);
+  // A PC installed with install-x64.sh and no integration package: its root
+  // helper has no bootstrap_updater or rebuild_reboot, so those two run as the
+  // owner and every other root step is best-effort (execX64InstallRootStep).
+  // An appliance answers false here and runs exactly as before.
+  const x64Install = !desktopIntegration && hasX64Install(PROJECT_DIR);
+  // One card per half of the run: the half after the UI restart is a new
+  // process, and its skips are its own.
+  const x64Skipped: X64SkippedSteps = {
+    code: startFrom === 0 ? X64_ROOT_STEPS_SKIPPED : `${X64_ROOT_STEPS_SKIPPED}:after-restart`,
+    labels: [],
+  };
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -5133,20 +6250,46 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // target could not be read, the `openclaw_install` boundary below asks again
   // on the synced tree — `schemaCheckedPin` is what it compares against, so a
   // pin already cleared here is not asked twice.
+  //
+  // AND OF EVERY HARNESS IT MOVES. A run that syncs the checkout installs the
+  // target branch's Hermes too, so on a box that runs Hermes that pin is read
+  // off the same fetch; a run that is past the sync, or never has one, installs
+  // the Hermes the box already has.
+  //
+  // THE OVERRIDE. `allowHarnessDowngrade` is the owner's "Back up and update
+  // anyway": instead of the refusal, the data is backed up (ClawKeep, else the
+  // harness's own backup command) and the installer is told which core it may
+  // set the newer databases aside for. No backup, no downgrade. Every run
+  // first withdraws any such authorisation an earlier one left — an override
+  // run writes its own after its backup — so no run can ever set data aside
+  // on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
   let schemaCheckedPin: string | null = null;
-  if (remainingSteps.some((s) => s.id === "openclaw_install")) {
-    const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
-    const target = syncAhead ? await readUpdateTargetOpenclawPin() : await readPinnedOpenclawVersion();
-    const refusal = await newerStateSchemaRefusal(target, "before-update");
-    schemaCheckedPin = target;
-    if (refusal) {
-      console.error(`[Updater] refusing the update before step 1: ${refusal}`);
-      runtime.state.phase = "failed";
-      runtime.state.error = refusal;
-      runtime.state.currentStepIndex = -1;
-      await clearUpdateLock();
+  const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
+  const downgradeScope = {
+    openclaw: remainingSteps.some((s) => s.id === "openclaw_install"),
+    hermes: syncAhead && hasHermesHarness(),
+  };
+  if (downgradeScope.openclaw || downgradeScope.hermes) {
+    await clearDowngradeAuthorization();
+    const pins = syncAhead ? await readUpdateTargetPins(downgradeScope.hermes) : await readCheckoutPins(false);
+    const refusal = await harnessDowngradeRefusal(pins, downgradeScope, "before-update");
+    schemaCheckedPin = pins.openclaw;
+    if (refusal && !options.allowHarnessDowngrade) {
+      console.error(`[Updater] refusing the update before step 1: ${refusal.message}`);
+      await refuseBeforeStepOne(refusal.message, HARNESS_DOWNGRADE_CODE, refusal.detail);
       return;
+    }
+    if (refusal) {
+      const backup = await backUpForDowngrade(refusal.detail);
+      if (!backup.ok) {
+        console.error(`[Updater] refusing the update before step 1: ${backup.message}`);
+        await refuseBeforeStepOne(backup.message, HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, {
+          ...refusal.detail,
+          backupFailure: backup.reason,
+        });
+        return;
+      }
     }
   }
 
@@ -5212,16 +6355,36 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // the sentence and the run stops: the steps before it changed packages and
     // the checkout, never OpenClaw, so the assistant keeps the core it has
     // instead of the retired one the install would have left.
+    //
+    // An override run backs up here instead, for a pin the first ask could not
+    // read; one whose authorisation already names this pin goes ahead.
     if (step.id === "openclaw_install") {
       const installing = await readPinnedOpenclawVersion();
       const refusal = installing === schemaCheckedPin
         ? null
-        : await newerStateSchemaRefusal(installing, "before-install");
-      if (refusal) {
-        console.error(`[Updater] refusing to install OpenClaw ${installing}: ${refusal}`);
+        : await harnessDowngradeRefusal(
+          { branch: null, openclaw: installing, hermes: null },
+          { openclaw: true, hermes: false },
+          "before-install",
+        );
+      let stop: { message: string; code: HarnessDowngradeErrorCode; backupFailure?: string } | null = null;
+      if (refusal && !options.allowHarnessDowngrade) {
+        stop = { message: refusal.message, code: HARNESS_DOWNGRADE_CODE };
+      } else if (refusal && !(await downgradeAuthorizedFor(installing))) {
+        const backup = await backUpForDowngrade(refusal.detail);
+        if (!backup.ok) {
+          stop = { message: backup.message, code: HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, backupFailure: backup.reason };
+        }
+      }
+      if (refusal && stop) {
+        console.error(`[Updater] refusing to install OpenClaw ${installing}: ${stop.message}`);
         runtime.state.steps[i].status = "failed";
-        runtime.state.steps[i].error = refusal;
-        runtime.state.error = refusal;
+        runtime.state.steps[i].error = stop.message;
+        runtime.state.error = stop.message;
+        runtime.state.errorCode = stop.code;
+        runtime.state.downgrade = stop.backupFailure === undefined
+          ? refusal.detail
+          : { ...refusal.detail, backupFailure: stop.backupFailure };
         failed = true;
         break;
       }
@@ -5242,20 +6405,43 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // No guard needed on the write: `watchRootStepProgress` promises no headline
     // after its stopper runs, and the `finally` below stops it before the step
     // is marked anything but running.
-    const stopProgress = step.requiresRoot
+    //
+    // `viaRoot`: the step really goes through a root unit this time. On a PC
+    // installed with install-x64.sh the checkout steps run as the owner, and
+    // that unit's journal and Result then belong to some earlier run.
+    const viaRoot = step.requiresRoot === true && !(x64Install && X64_INSTALL_OWNER_STEPS.has(step.id));
+    const stopProgress = viaRoot
       ? watchRootStepProgress(step.id, stepStartedAt, (headline) => {
           runtime.state.steps[i].detail = headline;
         })
       : null;
 
     try {
-      if (step.customRun) {
+      if (x64Install && step.id === "bootstrap_updater") {
+        await syncCheckoutAsOwner();
+      } else if (x64Install && step.id === RESTART_STEP_ID) {
+        await updateClawBoxAsOwner();
+      } else if (step.customRun) {
         await step.customRun();
+      } else if (step.requiresRoot && x64Install) {
+        await execX64InstallRootStep(step, stepStartedAt, x64Skipped);
       } else if (step.requiresRoot) {
         // Desktop bootstrap also installs a missing Claude CLI. Its HTTPS
         // download alone allows five minutes; use the system-fixup budget.
-        const timeoutMs = desktopIntegration && step.id === "bootstrap_updater" ? 900_000 : step.timeoutMs;
-        if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
+        // The desktop's core step archives and migrates the state when the
+        // pin moves, which is minutes per gigabyte of agent database
+        // (X64_DESKTOP_CORE_STEP_TIMEOUT_MS says why the budget is its own).
+        const timeoutMs = desktopIntegration && step.id === "bootstrap_updater"
+          ? 900_000
+          : desktopIntegration && step.id === "openclaw_install"
+            ? X64_DESKTOP_CORE_STEP_TIMEOUT_MS
+            : step.id === "openclaw_install"
+              ? await applianceOpenclawInstallTimeoutMs()
+              : step.timeoutMs;
+        if (step.fastPathStep && !desktopIntegration && !gatewayIsAbsent()
+          && await rootStepTookFastPath(step.fastPathStep, timeoutMs)) {
+          // Done, with the gateway never stopped: nothing to recover.
+        } else if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {
           await execAsRoot(step.id, timeoutMs);
@@ -5284,7 +6470,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
       // that reaches the owner instead of only the journal.
-      if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
+      if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
@@ -5297,7 +6483,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         // and an overrun is its ORDINARY shape on the repair path (a Hermes
         // clone plus a 3.2 GB model fetch) — so this is the run most likely to
         // have skipped a fixup, and the one where the step is shown green.
-        if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
+        if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
         runtime.state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
         continue;
@@ -5311,7 +6497,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // any line in its journal belong to an earlier run, while the message
       // already says what is wrong and names the command that repairs it.
       const launcherUnavailable = (err as { rootStepUnavailable?: boolean } | null)?.rootStepUnavailable === true;
-      if (step.requiresRoot && !launcherUnavailable && rootStepResultFailed(await getRootStepResult(step.id))) {
+      if (viaRoot && !launcherUnavailable && rootStepResultFailed(await getRootStepResult(step.id))) {
         const rootFailure = await readRootStepFailure(step.id, stepStartedAt);
         if (rootFailure) message = rootFailure;
       }
@@ -5319,7 +6505,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // list of them is the only record of which. Raised as warnings beside the
       // step's own error, never instead of it — `state.steps[i].error` below is
       // untouched.
-      if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
+      if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "failed";
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);

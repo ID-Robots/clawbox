@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 // one app scoped per user, and a list of installed shells tells nobody
 // anything about the owner.
 export async function GET(req: Request) {
-  const denied = await requireSession(req, { allowNonOwner: true });
+  const denied = await requireSession(req);
   if (denied) return denied;
   return NextResponse.json({ shells: availableShells(readEtcShells()), defaultShell: DEFAULT_SHELL });
 }

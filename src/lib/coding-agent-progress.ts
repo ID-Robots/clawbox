@@ -41,7 +41,6 @@ export type ProgressLabelKey =
   | "startedWith"
   | "continuing"
   | "thinking"
-  | "tokenLimit"
   | "subagentStarted"
   | "subagentFinished"
   | "subagentRefused"
@@ -52,25 +51,16 @@ export type ProgressLabelKey =
   | "reviewLoopTurn"
   | "reviewLoopRound"
   | "reviewRound"
-  | "pipelineReview"
-  | "pipelineImprovement"
-  | "pipelineDeployPreview"
-  | "pipelineDeployProduction"
-  | "pipelineVerifyPreview"
-  | "pipelineVerifyProduction"
-  | "pipelineVerified"
-  | "pipelineWaitingOwner"
-  | "pipelineResumed"
-  | "pipelineComplete"
-  | "pipelineStopped"
   | "resuming"
   | "reattached"
   | "startingFresh"
   | "noRepository"
+  | "notRepositoryRoot"
   | "worktree"
   | "worktreeMerged"
   | "worktreeRemoved"
   | "worktreeKept"
+  | "worktreeParked"
   | "evidencePruned"
   | "workingOnBranch"
   | "noPullRequest"
@@ -95,6 +85,12 @@ export type ProgressLabelKey =
   | "resumedByOwner"
   | "drafted"
   | "startedFromDraft"
+  | "queued"
+  | "startedFromQueue"
+  | "queueCanceled"
+  // Failing CI (src/lib/coding-ci.ts): what failed, and a run fixing it.
+  | "ciFailed"
+  | "ciFix"
   | "leftoverRunning"
   | "endedLeftovers"
   | "ownerEndedLeftovers"
@@ -102,23 +98,40 @@ export type ProgressLabelKey =
   // done, and what it did about not finding it (src/lib/coding-deliverable.ts).
   | "deliverableMet"
   | "deliverableMissing"
-  | "anotherAttempt"
   | "droppedSteps"
   // The owner's secret store (src/lib/project-secrets.ts): which of their
   // secrets this run was handed, and which one the box could not open.
   | "secretsInjected"
   | "secretsUnreadable"
+  // The project's MCP allowlist (src/lib/project-mcp-servers.ts): which servers
+  // this run starts with, and which ticked ones it could not be given.
+  | "mcpServers"
+  | "mcpServersMissing"
   | "anthropicAccount"
   | "accountRefused"
   | "accountMoved"
   | "accountSwitched"
   | "accountsWaiting"
   | "resumedAfterLimit"
+  // The CLI carrying on by itself past a full window (TASK-2141): no stop.
+  | "usageLimitContinuing"
+  | "usageLimitGrace"
+  // A run that outgrew its model's context window, carried on in place
+  // (TASK-2203, src/lib/coding-context-window.ts).
+  | "contextCompacted"
+  | "contextCompactedUnsized"
   // A coding team's run speaking (src/lib/coding-team-messages.ts), on the
   // SENDER's feed; what a run receives is already there as a queued message.
   | "teamMessageToRun"
   | "teamMessageToLead"
-  | "teamMessageToAssistant";
+  | "teamMessageToAssistant"
+  // A single run telling the assistant that started it something mid-run
+  // (src/lib/coding-run-report.ts).
+  | "runMessageToAssistant"
+  // A message delivered TO this run (src/lib/coding-run-messages.ts): mid-turn
+  // through its inbox hook, or as its next turn / with a start.
+  | "messageMidTurn"
+  | "messageToRun";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -182,8 +195,14 @@ const FILE_TOOLS: Record<string, { labelKey: ProgressLabelKey; label: string; ic
  */
 const PLAN_RE = /^Plan: (\d+) tasks?, (\d+) done$/;
 
-/** A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. */
-const MCP_TOOL_RE = /^mcp__[A-Za-z0-9-]+__([A-Za-z0-9_]+)$/;
+/**
+ * A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. The
+ * server is any name a project's allowlist admits (src/lib/project-mcp-servers.ts):
+ * a single `_` or a `-` in it (even last: `mcp__srv___tool`), never a double
+ * underscore — the first `__` after the server ends it — and the tool starts
+ * with a letter or digit and may hold a `-` or `_` after it.
+ */
+const MCP_TOOL_RE = /^mcp__[A-Za-z0-9](?:[A-Za-z0-9-]|_(?!_))*_?__([A-Za-z0-9][A-Za-z0-9_-]*)$/;
 const BARE_TOOL_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 
 /** Where every run's folder lives on the box; a command echoing it is all noise. */
@@ -219,15 +238,20 @@ function shorten(s: string, max: number): string {
  * The wording is frozen for a second reason: runs already on disk carry these
  * exact strings, and the reader has to go on recognising them.
  */
+/** How the progress line of a run that ended with its own work still live starts; the chat notice looks for it. */
+export const ENDED_WITH_LIVE_WORK = "Ended with its own work still running";
+
 export const RUNNER_STEP = {
   thinking: "Thinking…",
   continuing: "Continuing after a background helper finished",
-  tokenLimit: "Token limit reached",
   resuming: "Resuming the previous session",
   // The web server restarted and this run outlived it in its own systemd scope.
   reattached: "The web server restarted; this run kept going and was picked back up",
   noRepository:
     "Not a git repository yet: the work is committed into a new one when the run settles, and there is no pull request to open.",
+  /** The folder is inside a repository that is not its own (a project under a parent checkout): no branch in that repository, no pull request. */
+  notRepositoryRoot: (root: string) =>
+    `Part of the repository at ${root}, not a repository of its own: no branch is made there and there is no pull request to open`,
   merged: "Merged into the base branch",
   providerSilent: "The provider did not answer; starting over in a fresh session",
   paused: "Paused — resume to continue",
@@ -236,6 +260,13 @@ export const RUNNER_STEP = {
   resumedByOwner: "Resumed by the owner",
   drafted: "Drafted — start it when ready",
   startedFromDraft: "Started from a draft",
+  // The run queue (coding-agent.ts startOrQueueRun): every slot was taken.
+  queued: (position: number) => `Queued — number ${position} in line for a slot`,
+  startedFromQueue: "Started from the queue",
+  queueCanceled: "Canceled by the owner before it started",
+  ciFix: (runId: string, attempt: number, max: number) => `Fixing the failed CI of ${runId} (attempt ${attempt} of ${max})`,
+  keptAlive: (n: number) => `The stop guard kept the run working ${n === 1 ? "once" : `${n} times`} while work it had started was still running`,
+  endedWithLiveWork: (what: string) => `${ENDED_WITH_LIVE_WORK} (the stop guard's limit was reached): ${what}`,
   leftoverRunning:
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",
@@ -243,32 +274,10 @@ export const RUNNER_STEP = {
   /** The deliverable the run was held to was there, so "completed" is honest. */
   deliverableMet: "The deliverable is there",
 
-  // ── the delivery pipeline (src/lib/coding-pipeline.ts) ───────────────────
-  //
-  // A sentence per stage rather than one with the stage's name in it, for the
-  // reason `deployStarted` is two sentences: a stage name travelling through
-  // the feed as an English parameter is a word no locale can translate.
-  pipelineReview: "Delivery pipeline: reviewing the work",
-  pipelineDeployPreview: "Delivery pipeline: deploying a preview",
-  pipelineDeployProduction: "Delivery pipeline: deploying to production",
-  pipelineVerifyPreview: "Delivery pipeline: checking the preview",
-  pipelineVerifyProduction: "Delivery pipeline: checking production",
-  pipelineWaitingOwner: "Delivery pipeline: waiting for you to approve the production deployment",
-  pipelineComplete: "Delivery pipeline: finished, and what was deployed was checked",
-  /**
-   * A stage the web server restarted under, picked back up.
-   *
-   * No stage NAME in it, deliberately: `stageNoun` answers English, and this
-   * block's own rule is that a stage name travelling through the feed as a
-   * parameter is a word no locale can translate. Which stage it was is on the
-   * strip beside this line anyway.
-   */
-  pipelineResumed: "Delivery pipeline: picking up where it left off after a restart",
-
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   /**
    * A team message this run sent. Three sentences rather than one with the
-   * addressee in it, for the pipeline's reason: "the lead" travelling as a
+   * addressee in it, because "the lead" travelling as a
    * parameter is an English word no locale can translate. The text is the
    * run's own words and goes last, where the reader can take the rest of the
    * line for it.
@@ -276,6 +285,7 @@ export const RUNNER_STEP = {
   teamMessageToRun: (runId: string, text: string) => `Team message to ${runId}: ${text}`,
   teamMessageToLead: (text: string) => `Team message to the lead: ${text}`,
   teamMessageToAssistant: (text: string) => `Team message to the assistant: ${text}`,
+  runMessageToAssistant: (kind: string, text: string) => `Message to the assistant (${kind}): ${text}`,
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
   /** On the FOLLOW-UP run: whose pull request it was started to fix, and which
    *  round of that loop it is — the round is what makes a fix run readable on
@@ -290,8 +300,10 @@ export const RUNNER_STEP = {
   worktree: (branch: string, base: string) => `Working in its own copy of the project on ${branch}, forked from ${base}`,
   worktreeMerged: (base: string) => `Merged into ${base} and the run's copy of the project removed`,
   worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
-  /** Why the copy is still on disk: unmerged work, a conflict, a pull request that owns the branch. */
+  /** Why the copy is still on disk: it could not be removed, or git could not say what is on its branch. */
   worktreeKept: (reason: string) => `The run's copy of the project was kept: ${reason}`,
+  /** The files went, the branch did not: the work was not merged home (a dirty project, a conflict, a pull request that owns the branch), so the branch is where it stays. */
+  worktreeParked: (branch: string, reason: string) => `The run's copy of the project was removed; its work is kept on ${branch} — ${reason}`,
   /**
    * What the settle took out of the run's evidence folder (pruneArtifacts in
    * coding-agent-artifacts.ts): an environment a run built there, or a link
@@ -324,14 +336,6 @@ export const RUNNER_STEP = {
    *  tail of that command's output. */
   deliverableMissing: (reason: string) => `Not finished yet: ${reason}`,
   /** Going back in for another go at the deliverable, same record, same session. */
-  anotherAttempt: (attempt: number, attempts: number) => `Attempt ${attempt} of ${attempts} at the deliverable`,
-  /** The delivery pipeline sent the work back for another lap. */
-  pipelineImprovement: (round: number, rounds: number) => `Delivery pipeline: improvement round ${round} of ${rounds}`,
-  /** The address the box fetched, screenshotted and judged. */
-  pipelineVerified: (url: string) => `Checked ${url} and it shows what was asked for`,
-
-  /** Why the pipeline is not going on. */
-  pipelineStopped: (reason: string) => `Delivery pipeline stopped: ${reason}`,
   /** A helper going out: the type in parentheses, its own description after a colon. */
   helperStarted: (opts: { workflow: boolean; type: string; what: string }) =>
     opts.workflow
@@ -366,6 +370,18 @@ export const RUNNER_STEP = {
    */
   secretsUnreadable: (names: readonly string[]) => `Could not read these secrets: ${names.join(", ")}`,
   /**
+   * The MCP servers this run's project opted into, by name — never a value.
+   * What makes "the run can read the board" visible in the run's own feed.
+   */
+  mcpServers: (names: readonly string[]) => `MCP servers in this run: ${names.join(", ")}`,
+  /**
+   * A ticked server this run could not be given: no longer configured in the
+   * harness, configured in a way a run cannot reproduce, or the ClawBox MCP
+   * switch is off. Said here, because the run's failure without it would read
+   * like any other.
+   */
+  mcpServersMissing: (names: readonly string[]) => `Not available to this run: ${names.join(", ")}`,
+  /**
    * Which of the owner's Anthropic accounts this spawn is on (TASK-902). Said
    * only when it CHANGES, so a run that stays on one account says it once.
    * The owner's own label, never an email and never a credential.
@@ -384,6 +400,23 @@ export const RUNNER_STEP = {
   accountsWaiting: (clock: string) => `Every Anthropic account is at its usage limit; waiting for the reset at ${clock}`,
   /** The box resumed a run that was waiting for a reset — nobody pressed anything. */
   resumedAfterLimit: "The usage limit reset; carrying on where it left off",
+  /**
+   * The provider refused a request past the model's context window and the
+   * run is carried on in its own session, compacted (TASK-2203). The numbers
+   * are the provider's, when it gave them; plain digits so the line reads back.
+   */
+  contextCompacted: (attempt: number, max: number, context: number | null, window: number | null) =>
+    (context !== null && window !== null
+      ? `The conversation outgrew the model's context window (${context} of ${window} tokens); compacting it and carrying on in the same session (attempt ${attempt} of ${max})`
+      : `The conversation outgrew the model's context window; compacting it and carrying on in the same session (attempt ${attempt} of ${max})`),
+  /**
+   * The CLI said a usage window is full and that it carries on by itself
+   * (TASK-2141): "continuing automatically", or inside its grace window. Not a
+   * stop — the run goes on, on the same account; this only says so.
+   */
+  usageLimitCarriesOn: (how: "continuing" | "grace") => how === "grace"
+    ? "Anthropic usage limit reached; Claude Code is in its grace window and carries on on the same account"
+    : "Anthropic usage limit reached; Claude Code is continuing automatically on the same account",
 } as const;
 
 /** One recognisable runner sentence: what it looks like, and what it means. */
@@ -408,7 +441,6 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Started with (\S+)$/, labelKey: "startedWith", icon: "play_arrow", params: (m) => ({ model: m[1] }) },
   { re: /^Continuing after a background helper finished$/, labelKey: "continuing", icon: "sync" },
   { re: /^Thinking…$/, labelKey: "thinking", icon: "psychology" },
-  { re: /^Token limit reached$/, labelKey: "tokenLimit", icon: "hourglass_disabled" },
   {
     re: /^Sub-agent started(?: \(([^)]*)\))?(?::\s*(.*))?$/,
     labelKey: "subagentStarted",
@@ -426,25 +458,16 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Review round (\d+) for (\S+)$/, labelKey: "reviewLoopRound", icon: "rate_review", params: (m) => ({ round: Number(m[1]), id: m[2] }) },
   { re: /^Review round for (\S+)$/, labelKey: "reviewLoopTurn", icon: "rate_review", params: (m) => ({ id: m[1] }) },
   { re: /^Review round (\d+) of (\d+) handed to the coding agent$/, labelKey: "reviewRound", icon: "loop", params: (m) => ({ round: Number(m[1]), max: Number(m[2]) }) },
-  { re: /^Delivery pipeline: reviewing the work$/, labelKey: "pipelineReview", icon: "rate_review" },
-  { re: /^Delivery pipeline: improvement round (\d+) of (\d+)$/, labelKey: "pipelineImprovement", icon: "loop", params: (m) => ({ round: Number(m[1]), rounds: Number(m[2]) }) },
-  { re: /^Delivery pipeline: deploying a preview$/, labelKey: "pipelineDeployPreview", icon: "cloud_upload" },
-  { re: /^Delivery pipeline: deploying to production$/, labelKey: "pipelineDeployProduction", icon: "rocket_launch" },
-  { re: /^Delivery pipeline: checking the preview$/, labelKey: "pipelineVerifyPreview", icon: "fact_check" },
-  { re: /^Delivery pipeline: checking production$/, labelKey: "pipelineVerifyProduction", icon: "fact_check" },
-  { re: /^Delivery pipeline: waiting for you to approve the production deployment$/, labelKey: "pipelineWaitingOwner", icon: "pan_tool" },
-  { re: /^Delivery pipeline: picking up where it left off after a restart$/, labelKey: "pipelineResumed", icon: "restart_alt" },
-  { re: /^Delivery pipeline: finished, and what was deployed was checked$/, labelKey: "pipelineComplete", icon: "verified" },
-  { re: /^Delivery pipeline stopped: (.+)$/, labelKey: "pipelineStopped", icon: "cancel", params: (m) => ({ reason: m[1] }) },
-  { re: /^Checked (\S+) and it shows what was asked for$/, labelKey: "pipelineVerified", icon: "verified", params: (m) => ({ url: m[1] }) },
   { re: /^Resuming the previous session$/, labelKey: "resuming", icon: "history" },
   { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
   { re: /^Not a git repository yet: .*$/, labelKey: "noRepository", icon: "folder_off" },
+  { re: /^Part of the repository at (.+), not a repository of its own: .*$/, labelKey: "notRepositoryRoot", icon: "folder_off", params: (m) => ({ root: m[1] }) },
   { re: /^Working in its own copy of the project on (.+), forked from (.+)$/, labelKey: "worktree", icon: "account_tree", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^Merged into (.+) and the run's copy of the project removed$/, labelKey: "worktreeMerged", icon: "merge", params: (m) => ({ base: m[1] }) },
   { re: /^The run's copy of the project was removed; it left nothing on its branch$/, labelKey: "worktreeRemoved", icon: "delete_sweep" },
   { re: /^The run's copy of the project was kept: (.+)$/, labelKey: "worktreeKept", icon: "inventory_2", params: (m) => ({ reason: m[1] }) },
+  { re: /^The run's copy of the project was removed; its work is kept on (\S+) — (.+)$/, labelKey: "worktreeParked", icon: "account_tree", params: (m) => ({ branch: m[1], reason: m[2] }) },
   { re: /^Removed from the evidence folder, where environments and links out of it do not belong: (.+)$/, labelKey: "evidencePruned", icon: "delete_sweep", params: (m) => ({ paths: m[1] }) },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^No pull request: (.+)$/, labelKey: "noPullRequest", icon: "block", params: (m) => ({ reason: m[1] }) },
@@ -469,15 +492,22 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Resumed by the owner$/, labelKey: "resumedByOwner", icon: "play_circle" },
   { re: /^Drafted — start it when ready$/, labelKey: "drafted", icon: "draft" },
   { re: /^Started from a draft$/, labelKey: "startedFromDraft", icon: "play_arrow" },
+  { re: /^Queued — number (\d+) in line for a slot$/, labelKey: "queued", icon: "hourglass_top", params: (m) => ({ n: Number(m[1]) }) },
+  { re: /^Started from the queue$/, labelKey: "startedFromQueue", icon: "play_arrow" },
+  { re: /^Canceled by the owner before it started$/, labelKey: "queueCanceled", icon: "cancel" },
+  // ciFailureLine (src/lib/coding-ci.ts).
+  { re: /^CI failed on pull request #(\d+): (.+)$/, labelKey: "ciFailed", icon: "error", params: (m) => ({ n: Number(m[1]), what: m[2] }) },
+  { re: /^Fixing the failed CI of (run-[a-z0-9]{8}) \(attempt (\d+) of (\d+)\)$/, labelKey: "ciFix", icon: "build", params: (m) => ({ run: m[1], n: Number(m[2]), max: Number(m[3]) }) },
   { re: /^Something this run started is still running .*$/, labelKey: "leftoverRunning", icon: "dns" },
   { re: /^Ended what the run had left running$/, labelKey: "endedLeftovers", icon: "power_settings_new" },
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },
   { re: /^The deliverable is there$/, labelKey: "deliverableMet", icon: "task_alt" },
   { re: /^Not finished yet: (.+)$/, labelKey: "deliverableMissing", icon: "pending", params: (m) => ({ reason: m[1] }) },
-  { re: /^Attempt (\d+) of (\d+) at the deliverable$/, labelKey: "anotherAttempt", icon: "replay", params: (m) => ({ attempt: Number(m[1]), attempts: Number(m[2]) }) },
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
   { re: /^Secrets in this run's environment: (.+)$/, labelKey: "secretsInjected", icon: "key", params: (m) => ({ names: m[1] }) },
   { re: /^Could not read these secrets: (.+)$/, labelKey: "secretsUnreadable", icon: "key_off", params: (m) => ({ names: m[1] }) },
+  { re: /^MCP servers in this run: (.+)$/, labelKey: "mcpServers", icon: "hub", params: (m) => ({ names: m[1] }) },
+  { re: /^Not available to this run: (.+)$/, labelKey: "mcpServersMissing", icon: "link_off", params: (m) => ({ names: m[1] }) },
   { re: /^On Anthropic account "(.*)"$/, labelKey: "anthropicAccount", icon: "account_circle", params: (m) => ({ label: m[1] }) },
   {
     re: /^Anthropic account "(.*)" hit its usage limit \(back at (\d{1,2}:\d{2})\); carrying on with "(.*)" in the same session$/,
@@ -499,9 +529,27 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   },
   { re: /^Every Anthropic account is at its usage limit; waiting for the reset at (\d{1,2}:\d{2})$/, labelKey: "accountsWaiting", icon: "hourglass_top", params: (m) => ({ time: m[1] }) },
   { re: /^The usage limit reset; carrying on where it left off$/, labelKey: "resumedAfterLimit", icon: "play_circle" },
+  {
+    re: /^The conversation outgrew the model's context window \((\d+) of (\d+) tokens\); compacting it and carrying on in the same session \(attempt (\d+) of (\d+)\)$/,
+    labelKey: "contextCompacted",
+    icon: "compress",
+    params: (m) => ({ context: Number(m[1]), window: Number(m[2]), n: Number(m[3]), max: Number(m[4]) }),
+  },
+  {
+    re: /^The conversation outgrew the model's context window; compacting it and carrying on in the same session \(attempt (\d+) of (\d+)\)$/,
+    labelKey: "contextCompactedUnsized",
+    icon: "compress",
+    params: (m) => ({ n: Number(m[1]), max: Number(m[2]) }),
+  },
+  { re: /^Anthropic usage limit reached; Claude Code is continuing automatically on the same account$/, labelKey: "usageLimitContinuing", icon: "fast_forward" },
+  { re: /^Anthropic usage limit reached; Claude Code is in its grace window and carries on on the same account$/, labelKey: "usageLimitGrace", icon: "fast_forward" },
   { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },
   { re: /^Team message to the lead: (.+)$/, labelKey: "teamMessageToLead", icon: "forum", params: (m) => ({ text: m[1] }) },
   { re: /^Team message to the assistant: (.+)$/, labelKey: "teamMessageToAssistant", icon: "forum", params: (m) => ({ text: m[1] }) },
+  { re: /^Message to the assistant \((question|blocker|milestone)\): (.+)$/, labelKey: "runMessageToAssistant", icon: "forum", params: (m) => ({ kind: m[1], text: m[2] }) },
+  // runMessageProgressLine — the mid-turn shape first: the other is its prefix.
+  { re: /^Message to the run, mid-turn: (.+)$/, labelKey: "messageMidTurn", icon: "mark_chat_read", params: (m) => ({ text: m[1] }) },
+  { re: /^Message to the run: (.+)$/, labelKey: "messageToRun", icon: "chat", params: (m) => ({ text: m[1] }) },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {
@@ -548,7 +596,7 @@ export function describeProgressLine(raw: string): ProgressDescription {
     if (known) return { kind: "tool", ...known };
     // Not one of ours — still never the raw mcp__ name; the tool's own words
     // with the underscores taken out is the most honest label left.
-    return { kind: "tool", label: toolName.replace(/_/g, " "), icon: "extension" };
+    return { kind: "tool", label: toolName.replace(/[_-]+/g, " ").trim(), icon: "extension" };
   }
 
   // The runner's own vocabulary, last: a sentence the agent happens to write

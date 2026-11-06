@@ -129,7 +129,11 @@ export async function startRunBranch(input: {
   runId: string;
   /** The ClawBox checkout. A run must never branch or commit THIS repository. */
   protectedRoot: string;
-}): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string; reason?: "no_repository" }> {
+}): Promise<
+  | { ok: true; branch: string; base: string }
+  | { ok: false; detail: string; reason?: "no_repository" }
+  | { ok: false; detail: string; reason: "not_repository_root"; root: string }
+> {
   const dir = path.resolve(input.directory);
   const branch = runBranchName(input.runId);
 
@@ -164,6 +168,23 @@ export async function startRunBranch(input: {
       return {
         ok: false,
         detail: "This folder is inside ClawBox's own checkout, so a pull request would branch ClawBox itself. Work in a folder under your project folder instead.",
+      };
+    }
+    // Never a folder INSIDE a repository that is not its own — the same test
+    // addRunWorktree makes. A project under a parent checkout (~/Projects with
+    // a .git of its own, packages/app in a monorepo) resolves to the PARENT's
+    // repository, so `checkout -b` here moved the owner's parent branch under
+    // them on every run, and the settle then refused the commit as
+    // `foreign_repo` (coding-git.ts) — 39 of 44 live runs on the owner's box
+    // ended gave_up over a pull request that was never possible. A fact the
+    // runner acts on (no branch, no pull request, the work stays in the
+    // folder), not a failed flow.
+    if (root !== dir) {
+      return {
+        ok: false,
+        reason: "not_repository_root",
+        root,
+        detail: `This folder is part of the repository at ${root} rather than being one, so no branch is made there and there is no pull request to open.`,
       };
     }
   }

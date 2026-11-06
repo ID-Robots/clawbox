@@ -6,7 +6,7 @@ import { pushPendingAction } from "@/lib/pending-actions";
 
 export class PowerApprovalConflict extends Error {}
 
-export type PowerAction = "restart" | "shutdown";
+export type PowerAction = "restart" | "shutdown" | "update";
 export interface PowerApproval {
   id: string;
   action: PowerAction;
@@ -107,9 +107,21 @@ const telegram = () => telegramModule ??= import("@/lib/email-approval-telegram"
 const execFileAsync = promisify(execFile);
 const POWER_ACTIONS = { restart: "reboot", shutdown: "poweroff" } as const;
 
-export function isPowerAction(action: unknown): action is PowerAction {
+/** The two actions /setup-api/system/power takes. */
+export function isPowerAction(action: unknown): action is "restart" | "shutdown" {
   return action === "restart" || action === "shutdown";
 }
+
+/** Every action the owner can confirm: power plus a software update asked for in chat. */
+export function isApprovalAction(action: unknown): action is PowerAction {
+  return isPowerAction(action) || action === "update";
+}
+
+const QUESTION: Record<PowerAction, { ask: string; yes: string; failed: string }> = {
+  restart: { ask: "Restart this ClawBox?", yes: "Restart", failed: "The power command failed." },
+  shutdown: { ask: "Shut down this ClawBox?", yes: "Shut down", failed: "The power command failed." },
+  update: { ask: "Install the ClawBox software update now? The desktop and chat go offline for a few minutes while it installs.", yes: "Update", failed: "The update could not be started." },
+};
 
 /** Pending requests deliberately expire across a server restart; they never execute unattended. */
 export function pendingPowerApproval(): PowerApproval | null {
@@ -128,6 +140,15 @@ export function powerKeyboardPending(): boolean {
 }
 
 export async function dispatchPowerAction(action: PowerAction): Promise<void> {
+  if (action === "update") {
+    // Lazy: the updater is a large module the power path never needs.
+    const { startUpdate } = await import("@/lib/updater");
+    const result = startUpdate();
+    if (!result.started) throw new Error(result.error ?? "The update did not start");
+    const { prefetchUpdateWhatsNew } = await import("@/lib/update-whats-new-server");
+    void prefetchUpdateWhatsNew();
+    return;
+  }
   const systemctlAction = POWER_ACTIONS[action];
   await execFileAsync("/usr/bin/sudo", ["/usr/bin/systemctl", systemctlAction], { timeout: 10_000 });
 }
@@ -161,8 +182,8 @@ export async function requestPowerApproval(action: PowerAction, reason: string):
       for (const chatId of (await ownerChatIds()).slice(0, 5)) {
         try {
         const messageId = await sendApprovalMessage(token, chatId,
-          `${action === "restart" ? "Restart" : "Shut down"} this ClawBox?\n\nRequested reason: ${prompt.reason}\n\nExpires in 2 minutes.`, [
-            { text: action === "restart" ? "Restart" : "Shut down", callback_data: `pa:${prompt.id}` },
+          `${QUESTION[action].ask}\n\nRequested reason: ${prompt.reason}\n\nExpires in 2 minutes.`, [
+            { text: QUESTION[action].yes, callback_data: `pa:${prompt.id}` },
             { text: "Cancel", callback_data: `pd:${prompt.id}` },
           ]);
         prompt.messages.push({ chatId, messageId });
@@ -226,7 +247,7 @@ export async function applyPowerApprovalCallback(query: TelegramCallbackQuery): 
   try { await resolvePowerApproval(prompt.id, prompt.action, data.startsWith("pa:")); }
   catch {
     for (const m of prompt.messages) await replyInChat(token, m.chatId,
-      "The power command failed. Please try again from the desktop.", m.messageId).catch(() => undefined);
+      `${QUESTION[prompt.action].failed} Please try again from the desktop.`, m.messageId).catch(() => undefined);
   }
   return true;
 }

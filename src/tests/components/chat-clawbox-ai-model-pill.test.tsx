@@ -17,7 +17,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * ClawBox AI names ONE thing in the chat header: the provider pill.
  *
  * There used to be a second pill beside it naming the model — a picker on the
- * Hermes side, a click-less label ("Flash 4.1") on both — and for this provider
+ * Hermes side, a click-less label ("DeepSeek V4 Flash") on both — and for this provider
  * it was noise twice over: the customer does not choose a ClawBox AI model (the
  * product runs one, and the plan decides what that resolves to), and the row it
  * sat in is the narrowest thing in the UI. The width budget in

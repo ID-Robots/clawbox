@@ -14,10 +14,29 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 import { saveEnv } from "@/tests/helpers/env";
 
 const startRun = vi.hoisted(() => vi.fn());
+// The route starts through the queue (startOrQueueRun); a start it does not
+// queue is the start the cases below script on `startRun`.
+const startOrQueueRun = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, startRun };
+  return { ...actual, startRun, startOrQueueRun };
 });
+
+// The owner's-stop hold (coding-team.ts ownerStopRefusal, tested there):
+// nothing held unless a case says so.
+const hold = vi.hoisted(() => ({
+  ownerStopWorkForRun: vi.fn(),
+  ownerStopRefusal: vi.fn(),
+  releaseOwnerStopHold: vi.fn(),
+}));
+vi.mock("@/lib/coding-team", () => hold);
+
+// Which chat asked (coding-agent-notify.ts, tested there): none unless a case says so.
+const chat = vi.hoisted(() => ({ findChatOrigin: vi.fn(), recordRunChatOrigin: vi.fn(), forgetRunChatOrigin: vi.fn() }));
+vi.mock("@/lib/coding-agent-notify", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/coding-agent-notify")>("@/lib/coding-agent-notify")),
+  ...chat,
+}));
 
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
@@ -49,6 +68,10 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   startRun.mockResolvedValue(RUN);
+  hold.ownerStopWorkForRun.mockImplementation(async (input: { task: string; resumeRunId: string | null }) => ({ directory: "/home/clawbox/clawbox/data/code-projects/site", text: input.task, runId: input.resumeRunId }));
+  hold.ownerStopRefusal.mockReturnValue(null);
+  chat.findChatOrigin.mockResolvedValue(null);
+  startOrQueueRun.mockImplementation(async (input: unknown) => ({ run: await startRun(input), queued: false }));
   const lib = await import("@/lib/coding-agent");
   CodingAgentError = lib.CodingAgentError;
   ProviderChoiceError = lib.ProviderChoiceError;
@@ -89,11 +112,73 @@ describe("the gate", () => {
   });
 });
 
+describe("the chat that asked (TASK-2132)", () => {
+  const ORIGIN = { harness: "openclaw", key: "agent:main:clawbox-abc123def456", at: 1 };
+
+  it("records the agent's run under the id it is started with, before the start", async () => {
+    chat.findChatOrigin.mockResolvedValue(ORIGIN);
+    startRun.mockImplementation(async (input: { runId: string }) => {
+      // A run that fails at once ends inside the start: its chat must already be known.
+      expect(chat.recordRunChatOrigin).toHaveBeenCalledWith(input.runId, ORIGIN);
+      return { ...RUN, id: input.runId };
+    });
+    const res = await POST(req({ auth: "bearer" }));
+    expect(res.status).toBe(202);
+    expect(chat.recordRunChatOrigin).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks nothing for the owner's own start, and records nothing when no chat asked", async () => {
+    await POST(req({ auth: "cookie" }));
+    expect(chat.findChatOrigin).not.toHaveBeenCalled();
+    await POST(req({ auth: "bearer" }));
+    expect(chat.findChatOrigin).toHaveBeenCalledTimes(1);
+    expect(chat.recordRunChatOrigin).not.toHaveBeenCalled();
+    expect(chat.forgetRunChatOrigin).not.toHaveBeenCalled();
+  });
+
+  it("forgets the record of a start the route refused — the refusal was the tool's answer", async () => {
+    chat.findChatOrigin.mockResolvedValue(ORIGIN);
+    startRun.mockRejectedValue(new CodingAgentError("invalid", "That folder does not exist."));
+    const res = await POST(req({ auth: "bearer" }));
+    expect(res.status).toBe(400);
+    const [runId] = chat.recordRunChatOrigin.mock.calls[0];
+    expect(chat.forgetRunChatOrigin).toHaveBeenCalledWith(runId);
+  });
+});
+
+describe("a team the owner stopped", () => {
+  it("refuses the agent's run on its work 409 owner_stopped, before any start is announced", async () => {
+    const { OwnerStoppedTeamError } = await import("@/lib/coding-agent");
+    hold.ownerStopRefusal.mockReturnValueOnce(new OwnerStoppedTeamError("team-stop0001", "The owner stopped coding team team-stop0001 on this work."));
+    const res = await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", resumeRunId: "run-aaaaaaaa" } }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The owner stopped coding team team-stop0001 on this work.", kind: "busy", code: "owner_stopped" });
+    expect(hold.ownerStopWorkForRun).toHaveBeenCalledWith({ task: "Finish it", projectId: "site", directory: null, resumeRunId: "run-aaaaaaaa" });
+    expect(hold.ownerStopRefusal).toHaveBeenCalledWith({ directory: "/home/clawbox/clawbox/data/code-projects/site", text: "Finish it", runId: "run-aaaaaaaa" });
+    expect(startOrQueueRun).not.toHaveBeenCalled();
+    expect(hold.releaseOwnerStopHold).not.toHaveBeenCalled();
+  });
+
+  it("never holds the owner's run; the agent's run once the user asked again starts, and lifts the hold", async () => {
+    expect((await POST(req({ auth: "cookie" }))).status).toBe(202);
+    expect(hold.ownerStopWorkForRun).not.toHaveBeenCalled();
+    expect((await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", userAskedAgain: true } }))).status).toBe(202);
+    expect(hold.ownerStopRefusal).not.toHaveBeenCalled();
+    expect(hold.releaseOwnerStopHold).toHaveBeenCalledWith({ directory: "/home/clawbox/clawbox/data/code-projects/site", text: "Finish it", runId: null });
+  });
+
+  it("lifts no hold for a start that failed", async () => {
+    startRun.mockRejectedValueOnce(new CodingAgentError("busy", "A coding run is already in progress."));
+    expect((await POST(req({ auth: "bearer", body: { task: "Finish it", projectId: "site", userAskedAgain: true } }))).status).toBe(409);
+    expect(hold.releaseOwnerStopHold).not.toHaveBeenCalled();
+  });
+});
+
 describe("the answer", () => {
   it("is 202 with the run record, at once", async () => {
     const res = await POST(req());
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ started: true, run: RUN });
+    expect(await res.json()).toEqual({ started: true, queued: false, run: RUN });
   });
 
   it("passes the folder and resume id through untouched", async () => {
@@ -263,5 +348,62 @@ describe("the files a run is given", () => {
   it("sends nothing when the caller named nothing, so an absent list stays absent", async () => {
     await POST(req({ body: { task: "Add a dark mode toggle", projectId: "site" } }));
     expect(startRun.mock.calls[0][0].inputs).toBeUndefined();
+  });
+});
+
+describe("a run beyond the limit", () => {
+  it("is QUEUED, not refused: 202 with the queued record and its place, for the bearer as for the owner", async () => {
+    const queuedRun = { ...RUN, status: "queued", queued: { at: 1, position: 2 } };
+    startOrQueueRun.mockResolvedValueOnce({ run: queuedRun, queued: true });
+    const res = await POST(req({ auth: "bearer" }));
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ started: false, queued: true, run: queuedRun });
+    expect(startOrQueueRun).toHaveBeenCalledWith(expect.objectContaining({ source: "agent" }));
+  });
+
+  it("answers a start that was not queued as it always did", async () => {
+    expect(await (await POST(req())).json()).toEqual({ started: true, queued: false, run: RUN });
+  });
+});
+
+describe("a Fix CI continuation", () => {
+  it("passes fixCi through only as true — what failed is the box's to append", async () => {
+    await POST(req({ body: { task: "Fix the failing CI checks.", resumeRunId: "run-k3x9q2ab", fixCi: true } }));
+    expect(startOrQueueRun).toHaveBeenLastCalledWith(expect.objectContaining({ resumeRunId: "run-k3x9q2ab", fixCi: true }));
+    await POST(req({ body: { task: "Carry on.", resumeRunId: "run-k3x9q2ab", fixCi: "yes" } }));
+    expect(startOrQueueRun.mock.calls[startOrQueueRun.mock.calls.length - 1][0]).not.toHaveProperty("fixCi");
+  });
+});
+
+/**
+ * `effort` — the per-request override of the owner's effort setting
+ * (2026-10-30, the Create card's Ultracode toggle): one of the levels the app
+ * offers, refused HERE with a `code` when it is not, and never invented.
+ */
+describe("effort", () => {
+  it("passes an offered level through to the runner", async () => {
+    await POST(req({ body: { task: "Do the thing", projectId: "site", effort: "ultracode" } }));
+    expect(startRun).toHaveBeenCalledWith(expect.objectContaining({ effort: "ultracode" }));
+    await POST(req({ body: { task: "Do the thing", projectId: "site", effort: "low" } }));
+    expect(startRun).toHaveBeenLastCalledWith(expect.objectContaining({ effort: "low" }));
+  });
+
+  it("sends none when the caller named none, so the owner's setting decides", async () => {
+    await POST(req({ body: { task: "t", projectId: "site" } }));
+    expect(startRun.mock.calls[0][0]).not.toHaveProperty("effort");
+    await POST(req({ body: { task: "t", projectId: "site", effort: null } }));
+    expect(startRun.mock.calls[1][0]).not.toHaveProperty("effort");
+  });
+
+  it("refuses a level this box does not offer with 400, a code and the list, before the runner is asked", async () => {
+    for (const effort of ["medium", "ULTRACODE", "turbo", 3, true]) {
+      startRun.mockClear();
+      const res = await POST(req({ body: { task: "t", projectId: "site", effort } }));
+      expect(res.status, String(effort)).toBe(400);
+      const body = await res.json();
+      expect(body).toMatchObject({ kind: "invalid", code: "effort" });
+      expect(body.error).toMatch(/low, xhigh, max, ultracode/);
+      expect(startRun).not.toHaveBeenCalled();
+    }
   });
 });

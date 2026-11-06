@@ -1,8 +1,8 @@
 # Nano hardware tests
 
 The on-device test suite: a handful of checks that only mean something on a real
-Jetson, run automatically on **one** freshly reflashed board from the nano lab
-for every pull request, after which the board is recycled — handed to the lab
+Jetson, run on **one** freshly reflashed board from the nano lab for the events
+in [When it runs](#when-it-runs), after which the board is recycled — handed to the lab
 host's reflash queue for a clean golden restore — whether the tests passed,
 failed or were cancelled (see [How recycling works](#how-recycling-works)).
 
@@ -11,11 +11,19 @@ Everything that does not need the hardware already runs in the container CI
 
 ## When it runs
 
-**Every pull request of ours into `beta` or `main`, drafts included,
-automatically** — no label needed. It is part of the PR's suite like `Tests`
-or `E2E`: the check is **On-device tests (nano-lab)**. The workflow
-(`.github/workflows/nano-hardware-tests.yml`) runs when a PR is opened or
-reopened and again on every push to it, as long as:
+In **batches** since 20 Oct 2026: a pull request into `beta` no longer takes a
+board of its own. The check is **On-device tests (nano-lab)**, the workflow
+`.github/workflows/nano-hardware-tests.yml`, and a board runs on
+
+| Event | Tests |
+|---|---|
+| a pull request into `main` (the `beta` → `main` promotion), drafts included, when it is opened or reopened and on every push to it | the ones its changes reach, plus the core smoke set ([Which tests a run picks](#which-tests-a-run-picks)) |
+| a pull request into `beta` labelled `nano-full` or `nano-long` | all of them (`nano-long`: the long tier too) |
+| a dispatch ([Dispatching a branch](#dispatching-a-branch)) | all of them (`long` ticked: the long tier too) |
+| every second night, 01:00 UTC, on `beta`'s head: `.github/workflows/nano-hardware-tests-schedule.yml` dispatches it | all of them — **only once that file is on `main`**, see [The night run](#the-night-run) |
+
+Pushes to `beta` or `main` no longer start it. A pull request that does take
+a board runs as long as:
 
 | Condition | Why |
 |---|---|
@@ -24,10 +32,33 @@ reopened and again on every push to it, as long as:
 | The PR changes something besides documentation | See [Docs-only pull requests](#docs-only-pull-requests). |
 
 Since 2 Oct 2026 **On-device tests (nano-lab)** is a **required** check on
-`beta`, and a skipped run (a docs-only PR, `skip-nano`) counts as passing.
+`beta`, and a skipped run (a PR into `beta` without `nano-full`/`nano-long`, a
+docs-only PR, `skip-nano`) counts as passing.
 
-A **draft** runs like any other PR: the coding agent opens most of our PRs as
-drafts, and the board run is part of the checks it waits for. Marking a draft
+### The night run
+
+GitHub starts a `schedule:` trigger only from the workflow files on the
+repository's **default branch**, `main` — never from `beta`'s. Until a
+promotion carries `.github/workflows/nano-hardware-tests-schedule.yml` to
+`main`, GitHub does not know that workflow at all: no night run happens, and
+`beta`'s head reaches a board only through a dispatch or a labelled pull
+request. Whether it is live:
+
+```bash
+gh workflow list --all | grep 'every 2nd night'   # nothing: the night run is not live yet
+```
+
+Until it is, dispatch `beta` by hand after the merges that matter (add
+`-f long=true` for the long tier):
+
+```bash
+gh workflow run nano-hardware-tests.yml --ref beta -f ref=beta
+```
+
+### Drafts and labels
+
+A **draft** runs like any other PR that takes a board: the coding agent opens
+most of our PRs as drafts, and the board run is part of the checks it waits for. Marking a draft
 ready for review starts no second run — its head commit has already been
 tested, and the check stays on that commit. Labels start nothing either: the
 review bots' and auto-triage labels never cost a board.
@@ -73,6 +104,41 @@ entirely instead of reporting it as skipped.
 
 To put a docs-only PR on a board anyway, dispatch its branch (below) —
 `plan`'s summary prints the exact command.
+
+### Which tests a run picks
+
+A pull request runs only the tests its changes reach, plus a core smoke set;
+everything else runs on a dispatch (the night run is one). `plan` hands the PR's changed files to
+`scripts/nano-tests/select-tests.sh`, which reads the map from the tests'
+own headers:
+
+| Header (first 20 lines of a test) | Means |
+|---|---|
+| `# covers: GLOB GLOB …` | the source areas the test exercises, as shell `case` patterns over repository paths (`*` crosses `/`); as many lines as it needs |
+| `# select: always` | part of the **core smoke set** every run includes: `10-build-identity`, `20-services`, `30-chat-turn` |
+
+A changed file picks every test whose `covers` match it; a changed test file
+picks that test. Files that never reach a board pick nothing: documentation,
+`src/tests/`, `e2e/`, `e2e-install/`, the CI files other than this workflow,
+the test and lint configs. The board then runs the core set and the picked
+tests; every other test is reported as a skip, *not affected by this change*,
+in the TAP output, the job summary and `summary.json` (`selection`).
+
+**Every doubt runs every test** — the full suite is the safe answer:
+
+- a changed file that no test's map covers (`install.sh`, `package.json`,
+  `bun.lock` and most of `src/lib/` are deliberately unmapped);
+- the runner itself: `scripts/nano-tests/*.sh`, this workflow, and
+  `scripts/public-hygiene.mjs`, which redacts the board's logs;
+- a list of changed files that is incomplete or empty;
+- a dispatch (the night run included) and a pull request labelled
+  **`nano-full`** (or `nano-long`). `plan` reads the PR's labels when it runs,
+  so add the label and re-run the workflow (or push) to get the full suite.
+
+`plan`'s job summary and the board job's summary both say which tests ran and
+why. The map is in the tests on purpose: a test that starts exercising a new
+area adds a `# covers:` line in the same change, and the self-test fails a
+pattern that matches no file.
 
 ### Dispatching a branch
 
@@ -202,7 +268,8 @@ Three jobs. **Needs a board?** (`plan`) decides, the board job does the work,
 and **PR comment** reports it.
 
 0. **Needs a board?** (`ubuntu-latest`): the gate above, then the docs-only
-   verdict. `false` skips the board job, with the reason in this job's summary.
+   verdict and the test selection ([Which tests a run picks](#which-tests-a-run-picks)).
+   `false` skips the board job, with the reason in this job's summary.
 1. **Resolve the branch under test**: a PR's head branch and head commit; a
    dispatch's input resolved to a branch (see
    [Dispatching a branch](#dispatching-a-branch)). The branch must pass
@@ -227,7 +294,8 @@ and **PR comment** reports it.
    the newer push has its own run. A board on any other commit fails the job
    before a single test runs.
 5. **Run the suite** (≤ 40 min, less any time spent waiting for a board, never
-   less than 20; not on a superseded run): `scripts/nano-tests/run.sh <serial>`.
+   less than 20; not on a superseded run): `scripts/nano-tests/run.sh <serial>`
+   with `NANO_TESTS_SELECT` from `plan`.
 6. **Redact** `results/` and upload it as the artifact
    `nano-results-<run id>-<attempt>`, and write the redacted **job summary**:
    board serial and lab, the commit, one row per test with its result,
@@ -363,16 +431,45 @@ rather than wait.
 ## The tests
 
 Each is `scripts/nano-tests/tests/NN-name.sh`, run in order, each with its own
-deadline. A failed test does not stop the next one.
+deadline. A failed test does not stop the next one. Neighbours that share a
+`# parallel: GROUP` header run **side by side**, each under its own deadline,
+and their results still come out in NN order with their own durations: only
+tests that read the box do — no restart, no reboot, no memory pressure, no
+`sudo` (the self-test refuses a parallel test that uses one). Today that is
+`10-`, `20-` and `25-` (`probes`), `30-` and `40-` (`agent`, after the probes
+have waited out the gateway's settling) and `77-` and `78-` (`after-boot`).
+`NANO_PARALLEL=0` runs every test on its own.
 
 | Test | Deadline | Checks | Skips when |
 |---|---|---|---|
 | `10-build-identity` | 5 min | `/setup-api/system/build-identity?force=1` names the head commit for both the checkout and the build, `dirty` false for both, `drift.buildVsCheckout` `match`, the stamped build is the deployed `BUILD_ID`; `clawbox-setup.service` started **after** that build was deployed (so it serves it); `scripts/verify-build-identity.sh` passes on the board | — |
 | `20-services` | 5 min | `clawbox-gateway` and `clawbox-setup` active, `clawbox-vnc` too when the board enables it; `nano-ci health`; `/setup-api/gateway/health` 200 with `available: true`; the dashboard serves `/login`; `~/.npm-global/bin/openclaw --version` works as `clawbox` | — |
+| `25-gateway-channels` | 5 min | the gateway's own `/startupz` answers 200 and `/readyz` reports its event loop not degraded on two probes in a row (a gateway that just started says `degraded: cpu` for its first seconds: that is waited out for up to 180 s, not reported); `/readyz` lists nothing in `failing`; `openclaw channels status --json` has no status issue and every enabled channel account is running with no last error | — (no channel configured: only the gateway half runs) |
 | `30-chat-turn` | 11 min | `openclaw agent --agent main -m "Reply with exactly this text and nothing else: NANO-CI-OK <serial>" --json` answers `NANO-CI-OK <serial>` within 240 s through the `main` agent's configured provider (ClawBox AI on every lab board); retried once after 60 s | — |
 | `40-coding-agent-run` | 10 min | `POST /setup-api/coding-agent/run` in a fresh `~/Projects/nano-ci-<run id>` (or inside the owner's project folder if one is set) asks for `hello.txt` with one given line; `runs?id=` is long-polled until the run settles; it must be `completed` and the file must hold exactly that line | — |
+| `41-coding-agent-mcp-servers` | 15 min | a stand-in board MCP server is registered with the board's own harness (`openclaw mcp set`, a fixture token in its env); the owner's checklist (`GET /setup-api/coding-agent/mcp-servers`, an owner cookie minted on the board) lists it usable and unticked and never the token, the MCP bearer may not tick it, the owner ticks it and "ClawBox read-only tools" for a fresh code project; a run there must call the board's tool (which answers after 30 s, so the run stays live) and `device_status` — while it runs the Coding Agent app itself (`/app/coding` in a headless Chromium of the box's own, with an owner session, the run opened by the app's open-run event) shows its live card with both servers in the timeline, its record names both servers and the harness argv keeps `--strict-mcp-config` with a 0600 `--mcp-config` file under `data/coding-agent-streams/` and no token; it completes with the board's answer on disk, the token is in no run record, history or evidence file, and the config file is gone. Undone on the way out | OpenClaw is not installed |
+| `42-coding-agent-openai` | 10 min | OpenAI as a coding provider on the board's pinned Codex CLI (`config/codex-target.txt`, `~/.local/bin/codex`): its `exec` and `exec resume` take `--json`, `--skip-git-repo-check`, `-c` and `-m`, `login` takes `--device-auth` and `logout` answers (help read with a throwaway `CODEX_HOME`, never `~/.codex`); the status lists OpenAI with its models and finds the CLI; the MCP bearer gets 403 from `GET /setup-api/coding-agent/openai` and the owner (a cookie minted on the board) its state, with nothing key-shaped in it; Settings → Coding Agent in a headless Chromium of the box's own shows the OpenAI provider row (Connect, or Connected) and the OpenAI card's status, key field and "Sign in with ChatGPT"; pressing that shows OpenAI's own device page and a one-time code (never printed) and Cancel ends it; with an OpenAI credential on the board, one small run on `openai` must complete with exactly the line asked for | the run step, when the board holds no OpenAI credential for coding runs |
+| `43-coding-run-keepalive` | 15 min | a git repository in a fresh `~/Projects/nano-ci-<run id>-keepalive` with `main` and `beta`, checked out on an unrelated branch, and a one-line file in `~/Documents`; a run started with `baseBranch: "beta"` and that file as an input reads the line, starts a 3-minute background job that writes it to `late.txt`, and is told to end its turn at once. It must fork from beta (the record says so, its branch has none of the unrelated branch), receive the file, and settle `completed` only after the job is done, with "The stop guard kept the run working" on its page and `late.txt` holding the line on its branch | — |
+| `46-coding-run-launcher-watcher` | 15 min | the board's `claude-ds` is put behind a stand-in launcher that forks a `--heal-watch <session dir>` watcher into the run's scope (its own session, adopted by init, alive until the harness exits, its cgroup logged), and put back afterwards. A run that only writes `done.txt` must settle `completed` within 5 minutes with no stop-guard line, no `stop-blocks.json`, a stamped command clock and `leftover` false, while the log shows the watcher in `clawbox-run-<run id>-….scope`; a run that leaves `python3 -m http.server` listening must settle `completed` with `leftover` true, the port answering, and the owner's Kill must end it | — |
+| `47-coding-run-launcher-watcher-midrun` | 15 min | the same stand-in launcher in front of `claude-ds`, except that its watcher waits for the spawn's command clock to be stamped and then RESTARTS itself (as on an account failover mid-run) as `<launcher> --heal-watch <the harness's CLAUDE_CONFIG_DIR, else ~/.claude>`, its own session, adopted by init, and stays 6–8 s after the harness has gone. A run that sleeps 8 s and writes `done.txt` must settle `completed` with no stop-guard line, no `stop-blocks.json` and `leftover` false, while the log shows the restarted watcher in `clawbox-run-<run id>-….scope`, started after the clock's stamp and ending only after the harness, and `<clock>.stop-ran` names its session folder; a run that leaves `setsid python3 -m http.server` listening must settle `completed` with `leftover` true, no stop refusal naming `--heal-watch`, the port answering, and the owner's Kill must end it | — |
+| `48-coding-role-defaults` | 5 min | a coding team's role with nothing stored starts on its own default model (TASK-2217): `GET /setup-api/coding-agent/settings` (what `coding_settings_get` reads) names, for every role the board left on auto, the planner on its provider's best model and a worker and a reviewer on its middle one; the board's checkout, run with its bun, resolves every provider × role with nothing stored to Anthropic `claude-fable-5-1` / `claude-opus-5-5` / `claude-opus-5-5`, OpenAI `gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-sol` and ClawBox AI `deepseek-v4-flash` for all three. Read-only | — (a role the board stored a choice for is a note, not a check) |
+| `45-codex-auth-mirror-lock` | 10 min | the codex credential mirror is not held up by the live gateway's writes. A fixture login (a `state-db` shared store holding `openai:chatgpt`, reached through `OPENCLAW_STATE_DIR`, and an app-server `codex-home` that has rotated) in a throwaway folder whose agent `openclaw-agent.sqlite` is a symlink to the live main agent's; real chat turns (two rounds of two) keep the gateway writing that database while `scripts/codex-auth-mirror.js` runs over and over as `clawbox-codex-auth-sync.service` runs it. Every pass must exit 0 in under 2 s, reach the write-back and find no profile to record the rotation in, adopt nothing and leave the live `auth_profile_store` row unchanged; every other pass runs under a `node --require` statement recorder, and on the live store those may only open read-only and read its `auth_profile_store` row first, never `BEGIN IMMEDIATE` or a write; at least one pass must run while the gateway holds the write lock (a non-waiting probe every 10 ms), and a `BEGIN IMMEDIATE` queued beside the passes shows what beta's write-back waited | the main agent holds a ChatGPT sign-in of its own (never written by a fixture), or any other profile under `openai:chatgpt` (it shadows the fixture login); no SQLite agent store; the gateway never held the lock during a pass (that leg only) |
+| `50-memory-pressure` | 7 min | swap is on with at least 1 GB; a throwaway hog (oom_score_adj 1000, random bytes so zram cannot compress it away) takes memory down to ~350 MB available and holds 45 s; the gateway's `/healthz` and the dashboard's `/login` must answer at least 3 in 4 probes meanwhile; afterwards `clawbox-gateway` and `clawbox-setup` are the same processes (no OOM kill, no restart) and the gateway settles again | — |
+| `55-multi-user` | 10 min | the owner adds a user through `POST /setup-api/users` (the real `user_add` root step) and the account is a `clawbox-users` member in no admin group, with `signIn.available` true; a wrong password is refused 401 and the user's own password signs them in through `/login-api`; with their cookie the routes that used to answer `owner_only` (preferences, kv, coding-agent runs, Files, store, VNC, ClawKeep, Prime Radiant, Users, Wi-Fi, AI status) answer them and the desktop page serves, while the owner's password route and the gateway console page answer 403 and `ws-config` hands them no token; their chat socket gets a hello naming `agent:main:clawbox-user-<name>` and no device token, the owner's `chat.history` is refused `FORBIDDEN`, a real turn on their key is answered and no frame of another session arrives; the owner removes them, the Linux account is gone and their password no longer signs in. Both cookies are minted on the board from `data/.session-secret` and never leave it | — |
 | `60-media-tools` | 10 min | a coding run asked to use `generate_image` leaves a PNG of at least 4 KB and 64×64 px (`generate_audio` and a clip of at least 8 KB when only audio is on), and the run's `mediaGenerated` counter shows the tool was used | the coding agent's `generateImages` and `generateAudio` are both off |
-| `70-reboot-survival` | 13 min | restarts the gateway the way the box does (`sudo -n systemctl restart clawbox-gateway.service`, or `systemctl --user` for a legacy user unit); within 120 s it is back as a new process and `/setup-api/gateway/health` reports it available; then the `30-chat-turn` turn passes again | — |
+| `65-prime-radiant-mcp` | 5 min | the box's own MCP server, started over stdio from the checkout as a harness starts it, lists all 31 `prime_radiant_*` tools; `prime_radiant_status` answers; with a page in the wiki, `prime_radiant_page` reads the first one `prime_radiant_pages` lists and `prime_radiant_search` answers for its title (hits, or Memory Shard's off / indexing state). Read-only | the wiki has no page yet (search and page half only) |
+| `68-local-ai-chat` | 15 min | Local AI as the chat model, the way an owner uses it: when the picker has no local row yet, Settings → Local AI's Install (`POST /setup-api/llamacpp/install`, `scope: local`) turns Gemma on; the chat header's pick (`POST /setup-api/chat/model`) makes `llamacpp/<id>` the primary and `tools.toolSearch` must read `{"enabled": false}` (direct tool schemas); then `openclaw agent --agent main` is asked "направи ми проста todo страница" on a session of its own. The turn must be answered by `llamacpp` (no cloud fallback, from the CLI's `agentMeta`), call `clawbox__webapp_create` (`toolSummary`) and leave a new HTML page in `data/webapps/`, stay under 8,000 prompt tokens per model call (the lean prompt; OpenClaw's full one is ~13k), and reply in Bulgarian, not Russian (letters and whole words only one of the two has, judged by the test, not by the plugin); two attempts, one must pass. The gateway and the web server must be the same processes afterwards, and llama-server must decode at 10 tok/s or more on one fixed ~900-token prompt (its own `timings`; no measurement fails too); MemAvailable before and at its lowest during the turn, llama-server's RSS and the prefill speed are noted. Then the launch, read off the running box: llama-server's `--ctx-size` must equal the row's `contextWindow`, and neither the window, the KV cache nor the row's `maxTokens` may still be a superseded shipped value (131072, `q4_0`, 131072 — the shipped 32768, `q8_0`, 8192 pass; any other value is noted as an owner's `.env`); the row must declare reasoning `none`/`high` with `off` as the model's default, and llama-server must start with `--reasoning off`; one short question ("Колко е 17 × 23?") asked through the gateway at the default level and again with `--thinking high` must cost at least 40 more output tokens the second time (its reasoning). Undone on the way out, a deadline included: the web apps it made uninstalled, the primary and `tools.toolSearch` back as they were (a ClawBox AI primary comes back as the one chat id `chat/model` writes for every ClawBox AI pick), Local AI off again when the test turned it on | OpenClaw, the llama.cpp runtime or the Gemma GGUF is not on the board (the test downloads nothing), or Local AI is an Ollama model |
+| `70-mcp-first-call-after-idle` | 40 min, **long tier** | the first assistant tool call after the box's MCP server sat idle (TASK-2189), on the runtime the board runs: a chat turn opens the server (`prime_radiant_status`), the box is left alone for 11 min — past the 10-minute idle rule in `mcp/clawbox-mcp.ts` — and the assistant is then asked to create one Prime Radiant page with `prime_radiant_page_create`, calling it once and never retrying. **Hermes** (the desktop chat's own `/setup-api/hermes/chat`, as the owner): the server its long-lived process holds must still run after the pause, `~/.hermes/logs/errors.log` must gain no "lost its stdio subprocess" line, and two fresh conversations must add no server. **OpenClaw** (`openclaw agent` on one session key): that session's server must have idle-exited as before, and the create on the same key must work. Either way the page exists exactly once; every page made is deleted again (a vault-less box is initialised the way opening the app does) | Hermes runs no long-lived process holding the server |
+| `75-full-reboot` | 15 min | ONE pass, so the board reboots once: first the gateway is restarted the way the box does it (`sudo -n systemctl restart clawbox-gateway.service`, or `systemctl --user` for a legacy user unit); within 120 s it is back as a new process and `/setup-api/gateway/health` reports it available, and the `30-chat-turn` turn passes again. Then a REAL reboot (`sudo -n systemctl reboot`, the power menu's grant): the board comes back with a new boot id within 6 min, a `/tmp` file is gone and a home file kept; `clawbox-gateway`/`clawbox-setup` come back enabled and active by themselves, no `clawbox*` unit failed; **boot-time readiness**: the gateway's early `degraded: cpu` is waited out, and it must be started and settled within 5 min; same commit, `/login` 200, and a chat turn answers. Reboot-to-answer, -to-settled and -to-chat times are noted. A failed restart is reported and the reboot still runs (this was `70-reboot-survival` and `75-full-reboot`) | — |
+| `76-gnome-initial-setup` | 15 min | GNOME's first-run assistant does not run for `clawbox` after boot. When `~/.config/gnome-initial-setup-done` is missing or newer than the boot (`nano-ci rebuild` runs no install.sh step), `step_gnome_initial_setup_done` is run from the board's checkout as `clawbox` — it must write `yes` and end the running assistant — and the board reboots as in `75`. After a boot that started with the marker, once the session is 90 s up: the marker is `clawbox`'s and holds `yes`, and `pgrep` finds no `gnome-initial-setup` for `clawbox` | no GNOME session for `clawbox` (desktop off) |
+| `77-vnc-clean-boot` | 3 min | in the boot `75` made: `clawbox-vnc` is active, and the current boot's journal (`journalctl -b`, systemd's own lines for the unit) shows it started exactly once with no `clawbox-vnc.service: Main process exited` line, so the first-boot VNC unit did not restart a desktop that was already up. Whether that unit ran this boot is noted. A journal that shows no start of the unit at all (the `clawbox` user cannot read it) is a failure, not a pass | `clawbox-vnc` undefined, or disabled (headless) |
+| `78-one-browser` | 4 min | in the boot `75` made: exactly one browser process serves a DevTools port, on the profile the Browser app reports, and none runs on a gateway-managed profile; the gateway's browser config is attach-only on that port and the default profile; Close in the Browser app answers `409 shared_browser` and the browser keeps its pid | Chromium not installed, or the isolated assistant browser is configured |
+| `79-browser-clean-start` | 7 min | the shared browser starts clean (`scripts/lib/browser-clean-start.sh`). Twice — after a clean stop of its unit (as a reboot does) and after a SIGKILL (its profile must then record a crashed exit) — with three tabs of its own open and its profile then set to restore the last session, it is started again with the Browser app's Open and must have exactly one tab, none of the three, a new pid and `--hide-crash-restore-bubble` on its command line. Started twice more while it runs — Open (`alreadyRunning`) and `scripts/launch-browser.sh` (exit 0) — it keeps its pid and its one tab | Chromium not installed, or the isolated assistant browser is configured |
+| `80-coding-team-branches` | 15 min | a real coding team (`POST /setup-api/coding-agent/team`, the board's own models) in a simulated repository (`make_sim_repo` in `lib.sh`: a `develop` base, a local bare origin, a fake `./test.sh`), with pull requests on and two runs at once: two tasks side by side, one of whose workers is asked to commit on a branch it makes itself (`git checkout -b`), both appending to `CHANGELOG.md`. That worker's commit must reach the team branch with no `NO CHANGE` rejection; a merge conflict between the two must not stop the team, and a team whose every task is accepted must end `done`; each task's own reviewer must have a shell and run something, and the read-only one over the merged result must have run its git reads and ruled — never "static review only"; a `done` team must have pushed its branch to the origin (opening the pull request on GitHub needs a login the board does not have). Then a second team in the same folder, which the first left on its branch, must fork from `develop` without the first team's commits (stopped once it has its branch). The settings are put back | — (a situation the models did not bring about — no conflict, no branch of the worker's own — is a note, not a pass) |
+| `81-coding-team-busy-slot` | 12 min | with one run at a time allowed and a run in **another** folder holding that slot (`sleep 60`), a team is started in a simulated repository whose checkout was left on a coding team's branch, with a goal whose two steps edit the same two files, asked as two tasks. The team must wait for the slot — no alert for it, not failed — and end `done`; a plan whose tasks share most of their files must run as **one** run; that run's copy of the project must fork from `develop`, without the leftover team branch's commit. The settings are put back | — (the other run over before the team needed the slot, or a planner that did not split the work: a note, not a pass) |
+| `85-update-rollback` | 70 min, **long tier** | the board is put on the current release (head of `main`, via `nano-ci rebuild`), then updated to `NANO_BRANCH` through the box's own updater (`/setup-api/update/run`) while every `next build` it starts is SIGKILLed, as an OOM kill would; the update must end `failed` with a reason, and the box must still serve `/login`, settle its gateway, serve a build that names its checked-out commit (no drift) and answer a chat turn | `NANO_BRANCH` unset |
+| `90-upgrade-from-release` | 70 min, **long tier** | from the current release (kept when `85` left the board there, rebuilt otherwise), an owner's update to `NANO_BRANCH` through `/setup-api/update/run` must end `completed` on exactly `NANO_SHA`, with no drift, a settled gateway, no failed `clawbox*` unit, a project file, the setup/password flags, the main agent's model and its session store unchanged, and a chat turn that answers | `NANO_BRANCH` or `NANO_SHA` unset |
+| `91-update-gateway-stop-race` | 70 min, **long tier** | the update's gateway stop survives another job taking its place (TASK-2200). On OpenClaw, first the race on the board's own systemd: under the maintenance guard, a `systemctl restart clawbox-gateway.service` queued while the gateway is stopping must cancel the stop ("Job for clawbox-gateway.service canceled.") and the unit must still end down. Then a watcher queues that restart every time the gateway is stopping under the guard — from the start and again from `@reboot`, where "Applying system fixups" runs — while an owner's update to `NANO_BRANCH` runs; it must end `completed` with `post_update` completed, on `NANO_SHA`, with the runtime settled and kept. On Hermes the race is skipped (no gateway) and the fixups step must complete all the same | `NANO_BRANCH` or `NANO_SHA` unset |
 
 Notes on what the brief asked for and what the box actually offers:
 
@@ -383,11 +480,23 @@ Notes on what the brief asked for and what the box actually offers:
 - **ClawBox AI only.** The suite tests the happy path: a box on the ClawBox
   AI plan, which is how every lab board is set up. The chat turn goes through
   whatever provider the `main` agent is configured with; the suite does not
-  assert which one. On-device models (Gemma on llama.cpp, the wizard's ollama
-  presets) are not tested for now.
-- **A reboot.** `sudo -n reboot` is not granted to `clawbox`, so
-  `70-reboot-survival` restarts the gateway instead, through the sudoers grant
-  `restartGateway()` uses.
+  assert which one. Gemma on llama.cpp is tested by `68-local-ai-chat`, which
+  makes it the primary for its own turns and puts the board's model back
+  after; the wizard's ollama presets are not tested for now.
+- **A reboot.** `75-full-reboot` restarts the gateway the way the box does,
+  then reboots the whole board through `sudo -n systemctl reboot`, the grant
+  the power menu uses — one reboot per run.
+- **Readiness settles.** Every readiness wait in the suite
+  (`wait_gateway_settled` in `lib.sh`) treats an early `degraded` event loop
+  as a gateway still warming up and waits for two settled probes in a row; only
+  a gateway still degraded when its budget runs out is a failure.
+- **The long tier.** A test whose header says `# tier: long` takes tens of
+  minutes: `85-` and `90-` rebuild the board and run the box's own updater (up
+  to ~70 min), `70-` waits out the MCP server's 10-minute idle rule. It runs only
+  with `NANO_TESTS_LONG=1`: on a pull request labelled `nano-long` (add the
+  label, then push or re-run the job — labelling alone starts no run) or a
+  dispatch with `long` ticked; the job's limit is then 280 min. Otherwise it
+  is reported as a skip.
 - **The ClawBox edition.** The suite assumes the OpenClaw edition every lab
   board runs; on a Hermes-only board the gateway tests fail rather than skip.
 
@@ -436,6 +545,8 @@ read -r SERIAL IP LAB <<<"$(nano-ci reserve "TASK-NNN: nano tests by hand")"
 nano-ci rebuild "$SERIAL" <branch>                  # a branch, never a SHA or tag
 NANO_SHA=<the commit the board runs> scripts/nano-tests/run.sh "$SERIAL"
 scripts/nano-tests/run.sh --only 30-chat "$SERIAL"  # one test
+NANO_TESTS_SELECT="10-build-identity 50-memory-pressure" scripts/nano-tests/run.sh "$SERIAL"  # these, the rest skipped
+git diff --name-only origin/beta... | scripts/nano-tests/select-tests.sh  # what a PR would run
 nano-ci recycle "$SERIAL"                           # to the reflash queue; no longer yours
 ```
 
@@ -460,7 +571,13 @@ with it.
    ```
 
    `# timeout: NNN` (seconds, within the first 20 lines) is the deadline; the
-   default is 600. Keep the suite inside the job's 40-minute cap.
+   default is 600. Keep the suite inside the job's 40-minute cap. In the same
+   first 20 lines: `# covers: GLOB …` for the source areas it exercises (a
+   PR touching them runs it — see
+   [Which tests a run picks](#which-tests-a-run-picks); without one it runs on
+   pull requests only when its own file or an unmapped file changes),
+   `# select: always` only for the core smoke set, and
+   `# parallel: GROUP` only when it reads the box and nothing else.
 3. Report with `lib.sh`: `ok "…"`, `not_ok "…"`, `skip "…"` (prints
    `ok # SKIP …`), `note "…"` for the log, and end with `finish`. The verdict is
    what the test prints — any `not ok` fails it, only `# SKIP` oks skip it, and

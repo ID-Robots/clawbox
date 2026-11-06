@@ -36,7 +36,7 @@ const h = vi.hoisted(() => ({
   execResult: { stdout: "[register-mcp] registered\n", stderr: "" } as { stdout: string; stderr: string } | Error,
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: h.owner }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: h.owner }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
 // PARTIAL, over the real module — see openclaw-config-mock-completeness.test.ts.
 vi.mock("@/lib/openclaw-config", async (importOriginal) => ({

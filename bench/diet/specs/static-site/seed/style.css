@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; margin: 0; color: #222; }
+nav { display: flex; gap: 24px; padding: 16px 32px; background: #1f2937; }
+nav a { color: #fff; text-decoration: none; }
+main { padding: 32px; max-width: 960px; margin: 0 auto; }
+.cards { display: flex; gap: 24px; }
+.card { flex: 1; min-width: 260px; border: 1px solid #ddd; border-radius: 8px; padding: 24px; }

@@ -473,6 +473,7 @@ export function EmailFullView({
       // Portalled to <body> for the same reason the image preview is: the chat
       // root carries a transform, which makes it the containing block for a
       // fixed-position child and would trap this inside the popup.
+      className="main-screen-scrim"
       style={{
         position: 'fixed',
         inset: 0,

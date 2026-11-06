@@ -8,7 +8,7 @@ import http from "http";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { findPlaywrightChromium, parsePortOwner, probeCdp, upgradeStatus } from "@/lib/cdp-probe";
+import { findPlaywrightChromium, parsePortOwner, portOwnerPid, probeCdp, upgradeStatus } from "@/lib/cdp-probe";
 
 let server: http.Server | null = null;
 
@@ -118,5 +118,22 @@ describe("finding Playwright's Chromium on the box", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+/** The listener itself, from `ss` — what the owner-browser attach trusts over argv. */
+describe.runIf(process.platform === "linux")("portOwnerPid", () => {
+  it("names the process listening on a port, and nobody on a closed one", async () => {
+    const listener = http.createServer();
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const port = (listener.address() as { port: number }).port;
+      const pid = await portOwnerPid(port);
+      // `ss` may be missing on a minimal runner; when it answers, it is us.
+      if (pid !== null) expect(pid).toBe(process.pid);
+    } finally {
+      listener.close();
+    }
+    expect(await portOwnerPid(1)).toBeNull();
   });
 });

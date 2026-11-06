@@ -2,31 +2,47 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { notifyCodingAgentChanged } from "@/lib/ui-events";
-import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
+import { dispatchOpenSettingsSection, notifyCodingAgentChanged } from "@/lib/ui-events";
+import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, type CodingProvider } from "@/lib/coding-provider";
+import {
+  MODEL_ROLES,
+  ROLE_AUTO,
+  ROLE_DEFAULTS,
+  ROLE_MODEL_TIERS,
+  roleModelOptions,
+  type ModelRole,
+} from "@/lib/coding-role-models";
+import { codingModelName } from "@/lib/coding-model-names";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
 import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
+import CodingAgentJanitorSection from "./CodingAgentJanitorSection";
 // The toggle lives in its own module now — the secrets card draws one too.
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
+import CodingAgentOpenAICard from "./CodingAgentOpenAICard";
 import CodingRunHistoryCard from "./CodingRunHistoryCard";
+import CodingAgentFolderPicker from "./CodingAgentFolderPicker";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
 import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
-import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { BTN_SECONDARY, CARD, FIELD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
 /**
  * Settings → Coding Agent: everything the owner DECIDES about delegated
  * Claude Code runs (src/lib/coding-agent.ts), in one place.
  *
- * The switch, the default project folder, how hard a run thinks, the two
- * ceilings a run stops at, the automatic review pass, the GitHub account
- * its work is backed up to — and, right under it, the ClawBox Improvement
- * Program, whose reports go out on that same GitHub credential.
+ * The switch, the default project folder, who pays, how hard a run thinks and
+ * the three switches that decide what a run does with its work sit in the
+ * open; everything else — the ceilings, the pull-request details, the team
+ * settings, the media switches — is behind one "Advanced" fold, closed by
+ * default, because nineteen controls in one column with a paragraph behind
+ * each was the page the owner called overwhelming. Under the card: the run
+ * history, the allow-list, the secrets, the Anthropic account and the GitHub
+ * account its work is backed up to.
  * These used to sit at the top of the Coding Agent desktop app, above the
  * run history; the owner wanted the app to be about the runs and the
  * settings to live with the other settings. The app keeps the readiness
@@ -64,12 +80,17 @@ export interface Readiness {
    *  it sends nothing, and absent must read as healthy. */
   harnessHealthy?: boolean;
   problems: string[];
+  /** Per provider: could a run start on it now, and what it is missing.
+   *  `problems` here are the provider's own; the box's are in the list above.
+   *  Optional: an older server answers without it, and no provider's choices
+   *  are then drawn as unavailable. */
+  providers?: { id: CodingProviderId; ready: boolean; problems: string[] }[];
 }
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
 
 /** Which account pays for a run — src/lib/coding-provider.ts. */
-export type CodingProviderId = "clawbox-ai" | "anthropic";
+export type CodingProviderId = CodingProvider;
 
 export interface GitHubState {
   installed: boolean;
@@ -95,24 +116,12 @@ export interface AgentStatus {
    *  (TASK-1366). Optional: an older server answers with none, and the control
    *  is then not drawn at all. */
   prBodyIncludesTask?: PrBodyTaskMode;
-  /** How many follow-up turns the review loop may hand the harness after the
-   *  pull request is opened. 0 is off. Optional: an older server answers with
-   *  none, and the card then shows no control rather than inventing a value. */
-  reviewRounds?: number;
-  minReviewRounds?: number;
-  maxReviewRounds?: number;
-  /** May the box merge a pull request its own review loop cleared? Optional,
-   *  and OFF when absent — it is a consent, not a preference. */
+  /** May the box merge a pull request its own review loop cleared? Optional:
+   *  an older server answers with none and the card then shows no control;
+   *  OFF when absent — it is a consent, not a preference. */
   autoMerge?: boolean;
-  /** How many goes a run with a deliverable gets at it, its own first turn
-   *  counted as one. Optional, for the reason `reviewRounds` is: an older
-   *  server answers with none and the control is then not drawn at all. */
-  completionAttempts?: number;
-  minCompletionAttempts?: number;
-  maxCompletionAttempts?: number;
-  /** How many runs may be going at once. Optional, for the reason
-   *  `completionAttempts` is: an older server answers with none and the
-   *  control is then not drawn at all. */
+  /** How many runs may be going at once. Optional: an older server answers
+   *  with none and the control is then not drawn at all. */
   maxParallelRuns?: number;
   minMaxParallelRuns?: number;
   maxMaxParallelRuns?: number;
@@ -120,8 +129,6 @@ export interface AgentStatus {
    *  the counted settings are: an older server answers with none and the Run
    *  history card is then not drawn at all. */
   historyRetention?: HistoryRetentionMode;
-  historyLimit?: number;
-  historyLimits?: number[];
   historyLiveKept?: number;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
@@ -152,12 +159,9 @@ export interface AgentStatus {
    *  picker is simply not drawn there. */
   provider?: CodingProviderId;
   providers?: CodingProviderId[];
+  /** The providers the owner connected (a subset of `providers`, never empty). Optional: a server from before the list answers without it, and the default provider reads as the one connected. */
+  connectedProviders?: CodingProviderId[];
   subagents: boolean;
-  maxTurns: number;
-  minMaxTurns: number;
-  maxMaxTurns: number;
-  tokenLimit: number | null;
-  minTokenLimit: number;
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
   reviewPass: boolean;
@@ -165,15 +169,27 @@ export interface AgentStatus {
    *  Optional: an older server does not answer with it. OFF by default, so
    *  the fallback below is `?? false`. */
   teamDynamic?: boolean;
-  /** May a run draw pictures, and may the box draw the project's icon and
-   *  favicon? Optional: an older server does not answer with it. ON by
+  /**
+   * A team's provider, model and effort per role, "auto" for the role's
+   * default (src/lib/coding-role-models.ts roleModelsView). Optional: a server
+   * that predates the setting answers without it, and the section is not
+   * drawn there; one that predates per-role providers answers without
+   * `provider`, and draws what it has.
+   */
+  roleModels?: Partial<Record<ModelRole, RoleModelsViewEntry>>;
+  /** What each role starts on right now, whether that provider can run, and
+   *  what a token costs there (coding-agent.ts TeamRoleModelMap). Optional:
+   *  an older server answers without it, and the rows then say nothing more
+   *  than their two selects. */
+  roleModelMap?: Partial<Record<ModelRole, RoleModelMapEntry>>;
+  /** May a run have this box draw pictures (and the box draw the project's
+   *  icon and favicon) and speak clips into its project? One switch since
+   *  SCA C3. Optional: an older server does not answer with it. ON by
    *  default, so the fallback below is `?? true`, not `?? false`. */
-  generateImages?: boolean;
-  /** May a run have this box speak a clip into its project? */
-  generateAudio?: boolean;
+  generateMedia?: boolean;
   /** Does a run verify its work in the Chromium on the box's own screen, or
    *  in an invisible one? Optional, and ON by default like the media
-   *  switches — a server that predates the field is a box already driving the
+   *  switch — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
   // The owner's standing permission rules are deliberately NOT here, though the
@@ -184,6 +200,40 @@ export interface AgentStatus {
   // only suggest it did.
 }
 
+/** One role's stored choice as the status draws it: every half, "auto" where nothing is stored. */
+export interface RoleModelsViewEntry {
+  /** Absent from a server that predates per-role providers: read as "auto". */
+  provider?: CodingProviderId | typeof ROLE_AUTO;
+  /** "auto", a tier, or a model id of `provider`. */
+  model: string;
+  effort: string;
+}
+
+/** One role as its next fresh run would start (coding-agent.ts TeamRoleModel). */
+export interface RoleModelMapEntry {
+  provider: CodingProviderId;
+  /** Null where the provider's plan decides. */
+  model: string | null;
+  effort: string;
+  auto: boolean;
+  ready: boolean;
+  problems: string[];
+  /** A token's cost on that model, the plan's flash tier = 1; null where nobody can say. */
+  relativeCost: number | null;
+}
+
+/**
+ * A role's model choice as ONE select value — the provider and the model are
+ * one decision on screen, as they are one pair in the runner: "auto", a tier
+ * on the team's own account ("standard", "economy"), or "provider/model".
+ */
+/** What each role DOES, on its row label ("Workers: write your code") rather than only behind the help tip. */
+const ROLE_JOB_KEY: Record<ModelRole, string> = {
+  planner: "codingAgent.roleModelsRoleJob.planner",
+  worker: "codingAgent.roleModelsRoleJob.worker",
+  reviewer: "codingAgent.roleModelsRoleJob.reviewer",
+};
+
 /** How often to ask again while the GitHub answer is one we do not trust. */
 const GITHUB_REPROBE_MS = 15_000;
 
@@ -191,18 +241,18 @@ const GITHUB_REPROBE_MS = 15_000;
 const CONFIRM_MS = 5_000;
 
 /**
- * Where a refusal is shown. The three typed fields carry theirs right under
- * the input that was refused; every other setting's lands at the foot of the
+ * Where a refusal is shown. The typed fields carry theirs right under the
+ * input that was refused; every other setting's lands at the foot of the
  * settings card, and GitHub's under the GitHub card. Before this the one
- * message sat below the GitHub card, a screen away from a Steps field that
- * still held the refused number.
+ * message sat below the GitHub card, a screen away from the field that
+ * still held the refused value.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
+type ErrorSlot = "dir" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it. The run history's is inside its own card.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns", "gitAuthor", "history"]);
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "maxParallelRuns", "gitAuthor", "history"]);
 
 /**
  * The label of each choice for how much of the task a pull request carries,
@@ -238,24 +288,10 @@ export function devicePollSeconds(raw: unknown): number {
 // role so the many call sites below read unchanged.
 const SMALL_BUTTON = BTN_SECONDARY;
 
-export default function CodingAgentSettingsPanel({
-  onReset,
-  onStatus,
-  onOpenHistory,
-}: {
-  /** Open the Coding Agent's Run history page, from the Run history card.
-   *  Absent where this panel is not inside the app, and the card then draws
-   *  no button for it. */
-  onOpenHistory?: () => void;
-  /** Called after a successful reset, so the host can leave this page: the
-   *  settings it describes no longer exist and the window's front door is the
-   *  setup wizard again. */
-  onReset?: () => void;
-  /** Every status the route answers with, as it arrives — the sidebar's
-   *  "On · Max effort" subtitle is read off the same payload this panel
-   *  renders, so the two can never disagree. */
-  onStatus?: (status: AgentStatus) => void;
-}) {
+// No props: the Run history card's "Open run history" button went with the
+// owner's "delete useless UI" (the rail's Run history entry opens the same
+// page), and `onOpenHistory`, `onReset` and `onStatus` went with it.
+export default function CodingAgentSettingsPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [github, setGithub] = useState<GitHubState | null>(null);
@@ -269,6 +305,8 @@ export default function CodingAgentSettingsPanel({
   /** Setting writes queued or in flight. Every setting control is disabled
    *  while this is above zero, so no second write can be started by hand. */
   const [pendingWrites, setPendingWrites] = useState(0);
+  /** The roles a disconnect put back on their default, named under the providers until the next change. */
+  const [rolesReset, setRolesReset] = useState<{ roles: ModelRole[]; provider: CodingProviderId } | null>(null);
   const [error, setError] = useState<{ slot: ErrorSlot; message: string } | null>(null);
   // Sign-out is two taps, like clearing history. The offer is taken back on
   // its own after CONFIRM_MS: an armed red button found minutes later is a
@@ -296,29 +334,20 @@ export default function CodingAgentSettingsPanel({
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
   // The typed fields are DRAFTS until saved, so typing does not fight the
   // status the route keeps returning.
-  const [dirDraft, setDirDraft] = useState<string | null>(null);
-  const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
-  const [tokensDraft, setTokensDraft] = useState<string | null>(null);
+  /** The folder picker is up (the 2026-10-30 redesign: the folder is chosen,
+   *  never typed — see CodingAgentFolderPicker). */
+  const [picking, setPicking] = useState(false);
   const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
   const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
-  // `load` must not re-run because a translation function or a parent's
-  // callback was re-created: a refetch on every render would overwrite a
-  // freshly toggled switch with the stale status it read a moment earlier.
-  // Read both through refs instead, synchronised after commit so a discarded
-  // render never leaks into them.
+  // `load` must not re-run because a translation function was re-created: a
+  // refetch on every render would overwrite a freshly toggled switch with the
+  // stale status it read a moment earlier. Read it through a ref instead,
+  // synchronised after commit so a discarded render never leaks into it.
   const tRef = useRef(t);
-  const onStatusRef = useRef(onStatus);
   useEffect(() => {
     tRef.current = t;
-    onStatusRef.current = onStatus;
-  }, [t, onStatus]);
-
-  /** The one place a status lands: the panel and the sidebar see the same one. */
-  const publish = useCallback((next: AgentStatus) => {
-    setStatus(next);
-    onStatusRef.current?.(next);
-  }, []);
+  }, [t]);
 
   /** The switch and the settings — the half of the panel that must render
    *  whatever GitHub is doing. */
@@ -327,10 +356,7 @@ export default function CodingAgentSettingsPanel({
       const s = await fetch("/setup-api/coding-agent/status", { cache: "no-store" });
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
-      publish(next);
-      setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
-      setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
-      setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
+      setStatus(next);
       setAuthorNameDraft(prev => (prev === null ? (next.gitAuthorName ?? "") : prev));
       setAuthorEmailDraft(prev => (prev === null ? (next.gitAuthorEmail ?? "") : prev));
     } catch {
@@ -338,7 +364,7 @@ export default function CodingAgentSettingsPanel({
     } finally {
       setLoading(false);
     }
-  }, [publish]);
+  }, []);
 
   /** The GitHub card's answer, on its own: the re-probe below wants this one
    *  refreshed and nothing else — re-running the status load on a timer would
@@ -361,6 +387,9 @@ export default function CodingAgentSettingsPanel({
   // GitHub read that threw took the switch down with it — the panel sat
   // disabled over a perfectly good status because gh could not be asked.
   useEffect(() => {
+    // The panel's first read: it has no other moment to ask, and each answer
+    // is one render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadStatus();
     void loadGithub();
   }, [loadStatus, loadGithub]);
@@ -452,7 +481,7 @@ export default function CodingAgentSettingsPanel({
    * the whole re-read status — and ONE AT A TIME. The route answers the
    * status as of its own write, so two writes in flight at once could land in
    * either order, and the older answer would then overwrite the newer state
-   * on screen (and, through `publish`, in the sidebar). The controls are
+   * on screen. The controls are
    * disabled while a write is pending, and a write that slips in anyway (a
    * blur and a click in the same tick) is queued, not raced.
    *
@@ -472,7 +501,7 @@ export default function CodingAgentSettingsPanel({
         });
         if (!res.ok) throw new Error(await readError(res, failMsg));
         const next = await res.json() as AgentStatus;
-        publish(next);
+        setStatus(next);
         // The Coding Agent app is another window; its On/Off chip and its
         // readiness checklist follow what was just saved.
         notifyCodingAgentChanged();
@@ -495,8 +524,8 @@ export default function CodingAgentSettingsPanel({
   /**
    * A status re-read, behind whatever write is in flight.
    *
-   * `loadStatus` ends in the same `publish` the writes do, so it is a writer
-   * of the panel's state and the sidebar's in every sense that matters here.
+   * `loadStatus` ends in the same `setStatus` the writes do, so it is a writer
+   * of the panel's state in every sense that matters here.
    * Fired straight from the Anthropic card while a provider write was still
    * on the wire, its GET could be ANSWERED from before that write landed and
    * then overwrite the newer provider on screen — the exact ordering
@@ -512,12 +541,14 @@ export default function CodingAgentSettingsPanel({
 
   const toggle = (next: boolean) => saveSetting({ enabled: next }, "switch", t("codingAgent.toggleFailed"));
 
-  const saveDirectory = async () => {
-    const value = (dirDraft ?? "").trim();
-    // "" clears it. The route answers the re-read status, so a symlink
-    // comes back as the folder it actually leads to.
-    const next = await saveSetting({ defaultDirectory: value === "" ? null : value }, "dir", t("codingAgent.folderFailed"));
-    if (next) setDirDraft(next.defaultDirectory ?? "");
+  /**
+   * The folder the picker chose, saved at once: there is no draft to keep,
+   * and the row redraws from the route's answer — a symlink comes back as the
+   * folder it actually leads to, which is what the row then shows.
+   */
+  const pickDirectory = (path: string) => {
+    setPicking(false);
+    void saveSetting({ defaultDirectory: path }, "dir", t("codingAgent.folderFailed"));
   };
 
   /**
@@ -541,37 +572,6 @@ export default function CodingAgentSettingsPanel({
       setAuthorNameDraft(next.gitAuthorName ?? "");
       setAuthorEmailDraft(next.gitAuthorEmail ?? "");
     }
-  };
-
-  // The two blur-saved fields go back to the stored value whenever what was
-  // typed is not saved — blank, or refused by the route. A draft left holding
-  // a refused number would re-post that refusal on every blur, and the
-  // message beside the field already says what was wrong with it. The folder
-  // field is different: it saves only on an explicit Save or Enter, so a
-  // mistyped path stays put to be corrected rather than retyped.
-  const saveTurns = async () => {
-    const stored = String(status?.maxTurns ?? "");
-    // A blank Steps field means nothing — unlike a blank token field, which
-    // is "no ceiling" — so it is never posted: Number("") is 0, which the
-    // route refuses.
-    if ((turnsDraft ?? "").trim() === "") {
-      setTurnsDraft(stored);
-      return;
-    }
-    const n = Number(turnsDraft);
-    if (!Number.isFinite(n) || n === status?.maxTurns) return;
-    const next = await saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
-    setTurnsDraft(next ? String(next.maxTurns) : stored);
-  };
-
-  const saveTokens = async () => {
-    const raw = (tokensDraft ?? "").trim();
-    const limit = raw === "" ? null : Number(raw);
-    if (limit !== null && !Number.isFinite(limit)) return;
-    if (limit === (status?.tokenLimit ?? null)) return;
-    const stored = status?.tokenLimit == null ? "" : String(status.tokenLimit);
-    const next = await saveSetting({ tokenLimit: limit }, "tokens", t("codingAgent.tokensFailed"));
-    setTokensDraft(next ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : stored);
   };
 
   /** The GitHub device flow, driven by this card so it works from a phone:
@@ -644,6 +644,28 @@ export default function CodingAgentSettingsPanel({
 
   const readiness = status?.readiness;
   const saving = pendingWrites > 0;
+  // The per-role section's accounts: the ones this build knows, and of those
+  // the ones that cannot run now. The box's own missing pieces are in
+  // `readiness.problems` beside the default account's, and in no account's
+  // own list — so they are what the top list has that none of those has.
+  const roleProviders: CodingProviderId[] = status?.providers?.length ? [...status.providers] : [...CODING_PROVIDERS];
+  // The accounts a role may be pinned to: the ones the owner connected. A
+  // server from before the list answers without it — its default provider is
+  // then the one connected, which is exactly what it ran on.
+  const connectedProviders: CodingProviderId[] = status?.connectedProviders?.length
+    ? status.connectedProviders.filter((id) => roleProviders.includes(id))
+    : status?.provider ? [status.provider] : roleProviders;
+  const providerVerdicts = readiness?.providers ?? [];
+  const unreadyProviders = providerVerdicts.filter((v) => !v.ready && connectedProviders.includes(v.id));
+  /** Disconnect an account, and say which roles the box put back on their default because they were pinned to it. */
+  const disconnectProvider = async (id: CodingProviderId) => {
+    const pinned = MODEL_ROLES.filter((role) => status?.roleModels?.[role]?.provider === id);
+    const after = await saveSetting({ providers: connectedProviders.filter((p) => p !== id) }, "providers", t("codingAgent.providerFailed"));
+    const reset = after ? pinned.filter((role) => after.roleModels?.[role]?.provider === ROLE_AUTO) : [];
+    setRolesReset(reset.length > 0 ? { roles: reset, provider: id } : null);
+  };
+  const sharedProblems = (readiness?.problems ?? []).filter((p) => !providerVerdicts.some((v) => v.problems.includes(p)));
+  const providerName = (id: CodingProviderId) => t(CODING_PROVIDER_NAME_KEY[id]);
   /** The refusal shown in one slot, if that is where it belongs. */
   const errorIn = (slot: ErrorSlot) => (
     error?.slot === slot ? <StatusMessage type="error" message={error.message} /> : null
@@ -691,110 +713,43 @@ export default function CodingAgentSettingsPanel({
           </p>
         )}
 
-        {/* Where work goes when the assistant does not name a project. */}
-        <div className="mt-4">
-          <label htmlFor="coding-agent-dir" className="text-xs font-medium text-[var(--text-secondary)]">
-            {t("codingAgent.folderLabel")}
-          </label>
-          <div className="flex items-center gap-2 mt-1.5">
-            <input
-              id="coding-agent-dir"
-              type="text"
-              value={dirDraft ?? ""}
-              onChange={(e) => setDirDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveDirectory(); }}
-              placeholder={t("codingAgent.folderPlaceholder")}
-              spellCheck={false}
+        {/* Where work goes when the assistant does not name a project. The
+            path is TEXT and the choice is made in the picker (2026-10-30:
+            typing a path is not a thing an owner does on a phone); the id
+            stays on the element that carries the value, so the e2e reads it
+            with toHaveText. Browse stays live during a write — opening a
+            listing writes nothing — and a pick made meanwhile queues behind
+            the write like every other setting. */}
+        <div className="mt-4 flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.folderLabel")}</p>
+            <p
+              className={`mt-1 font-mono text-[12px] break-all ${status?.defaultDirectory ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
               data-testid="coding-agent-folder"
-              // text-base on a phone: an input under 16px makes iOS Safari
-              // zoom the page on focus, which scrolls the rest of the
-              // settings out of view.
-              className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
-            />
-            <button
-              type="button"
-              onClick={() => void saveDirectory()}
-              disabled={saving || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
-              className={BTN_SECONDARY}
+              data-value={status?.defaultDirectory ?? ""}
             >
-              {t("codingAgent.folderSave")}
-            </button>
-          </div>
-          {errorIn("dir")}
-        </div>
-
-        {/* WHO THE BOX COMMITS AS. Drawn only by a server that answers with the
-            limit, so an older box shows nothing rather than two fields whose
-            Save it would refuse as an unknown body.
-
-            Left blank, a project's own git config decides and the placeholder
-            catches what is left — which is what every box did before this
-            existed. It is worth filling in for one concrete reason, and the
-            hint says it: a host's GitHub integration refuses a deployment
-            whose git author cannot deploy the project, so the box's own
-            bookkeeping commits fail the check on a pull request it opened. */}
-        {typeof status?.maxGitAuthorChars === "number" && (
-          <div className="mt-4" data-testid="coding-agent-commit-author">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.commitAuthorTitle")}
-            </span>
-            <div className="grid gap-2 mt-1.5 sm:grid-cols-2">
-              <div>
-                <label htmlFor="coding-agent-author-name" className="sr-only">
-                  {t("codingAgent.commitAuthorNameLabel")}
-                </label>
-                <input
-                  id="coding-agent-author-name"
-                  type="text"
-                  value={authorNameDraft ?? ""}
-                  onChange={(e) => setAuthorNameDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
-                  placeholder={t("codingAgent.commitAuthorNamePlaceholder")}
-                  aria-label={t("codingAgent.commitAuthorNameLabel")}
-                  maxLength={status.maxGitAuthorChars}
-                  spellCheck={false}
-                  data-testid="coding-agent-author-name"
-                  className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
-                />
-              </div>
-              <div>
-                <label htmlFor="coding-agent-author-email" className="sr-only">
-                  {t("codingAgent.commitAuthorEmailLabel")}
-                </label>
-                <input
-                  id="coding-agent-author-email"
-                  type="email"
-                  value={authorEmailDraft ?? ""}
-                  onChange={(e) => setAuthorEmailDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
-                  placeholder={t("codingAgent.commitAuthorEmailPlaceholder")}
-                  aria-label={t("codingAgent.commitAuthorEmailLabel")}
-                  maxLength={status.maxGitAuthorChars}
-                  spellCheck={false}
-                  autoComplete="off"
-                  data-testid="coding-agent-author-email"
-                  className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
-                />
-              </div>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <button
-                type="button"
-                onClick={() => void saveGitAuthor()}
-                disabled={saving
-                  || ((authorNameDraft ?? "") === (status?.gitAuthorName ?? "")
-                    && (authorEmailDraft ?? "") === (status?.gitAuthorEmail ?? ""))}
-                data-testid="coding-agent-author-save"
-                className={BTN_SECONDARY}
-              >
-                {t("codingAgent.commitAuthorSave")}
-              </button>
-            </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t("codingAgent.commitAuthorHint")}
+              {status?.defaultDirectory ?? t("codingAgent.folderUnset")}
             </p>
-            {errorIn("gitAuthor")}
           </div>
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            disabled={!status}
+            data-testid="coding-agent-folder-browse"
+            className={BTN_SECONDARY}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">folder_open</span>
+            {t("codingAgent.browse")}
+          </button>
+        </div>
+        {errorIn("dir")}
+        {picking && (
+          <CodingAgentFolderPicker
+            initialDir={status?.defaultDirectory ?? null}
+            onPick={pickDirectory}
+            onClose={() => setPicking(false)}
+            testId="coding-agent-folder-picker"
+          />
         )}
 
         {/* WHICH ACCOUNT PAYS. Drawn only by a server that answers with the
@@ -803,47 +758,92 @@ export default function CodingAgentSettingsPanel({
             allowed on purpose — the owner may pick it and then paste the key
             below — so this says what is missing instead of refusing, and the
             run route is what actually holds the line. */}
-        {(status?.providers?.length ?? 0) > 1 && (
-          <div className="mt-4">
-            {/* A span with an id, not a <label>: a label names ONE control
-                and this names a group of buttons, so a screen reader was told
-                nothing. role="group" + aria-labelledby is the pairing that
-                actually announces "Runs on" before the options. */}
-            <span id="coding-agent-provider-label" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.providerLabel")}
-            </span>
-            <div
-              className={`${SEGMENTED_TRACK} mt-1.5`}
-              data-testid="coding-agent-provider"
-              role="group"
-              aria-labelledby="coding-agent-provider-label"
-            >
+        {(status?.providers?.length ?? 0) > 0 && (
+          <div className="mt-4" data-testid="coding-agent-providers">
+            <div className="flex items-center gap-1.5">
+              <span id="coding-agent-provider-label" className="text-xs font-medium text-[var(--text-secondary)]">
+                {t("codingAgent.providerLabel")}
+              </span>
+              <HelpTip text={t("codingAgent.providers.hint")} label={t("codingAgent.providerLabel")} testId="coding-agent-providers-help" />
+            </div>
+            <ul className="mt-1.5 space-y-1.5" role="group" aria-labelledby="coding-agent-provider-label" data-testid="coding-agent-provider">
               {(status?.providers ?? []).map((id) => {
-                const active = status?.provider === id;
+                const connected = connectedProviders.includes(id);
+                const verdict = providerVerdicts.find((v) => v.id === id);
+                // Set up = its own credential is there. The box's shared
+                // problems (the harness, the wrapper) stop every account alike
+                // and are said at the top; they do not grey one account.
+                const setUp = !verdict || verdict.problems.length === 0;
+                const last = connected && connectedProviders.length === 1;
                 return (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => void saveSetting({ provider: id }, "provider", t("codingAgent.providerFailed"))}
-                    disabled={saving}
-                    aria-pressed={active}
-                    data-testid={`coding-agent-provider-${id}`}
-                    className={active ? SEGMENT_ON : SEGMENT_OFF}
-                  >
-                    {t(CODING_PROVIDER_NAME_KEY[id])}
-                  </button>
+                  <li key={id} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-provider-${id}`} data-connected={connected}>
+                    <span className="text-xs text-[var(--text-primary)] min-w-[7rem]">{t(CODING_PROVIDER_NAME_KEY[id])}</span>
+                    {connected && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-emerald-300 border-emerald-400/40" data-testid={`coding-agent-provider-${id}-connected`}>
+                        {t("codingAgent.providers.connected")}
+                      </span>
+                    )}
+                    {/* Which connected account a solo run, and a role left on
+                        Default, runs on: the stored default provider, chosen
+                        here now that the "Runs on" choice is gone. */}
+                    {connected && (
+                      <button
+                        type="button"
+                        onClick={() => void saveSetting({ provider: id }, "providers", t("codingAgent.providerFailed"))}
+                        disabled={saving || status?.provider === id}
+                        aria-pressed={status?.provider === id}
+                        data-testid={`coding-agent-provider-default-${id}`}
+                        className={status?.provider === id
+                          ? "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40"
+                          : "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20 hover:text-[var(--text-primary)]"}
+                      >
+                        {status?.provider === id ? t("codingAgent.providers.default") : t("codingAgent.providers.makeDefault")}
+                      </button>
+                    )}
+                    <span className="ml-auto" />
+                    {connected ? (
+                      <button
+                        type="button"
+                        onClick={() => void disconnectProvider(id)}
+                        disabled={saving || last}
+                        title={last ? t("codingAgent.providers.lastOne") : undefined}
+                        data-testid={`coding-agent-provider-disconnect-${id}`}
+                        className={BTN_SECONDARY}
+                      >
+                        {t("codingAgent.providers.disconnect")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void saveSetting({ providers: [...connectedProviders, id] }, "providers", t("codingAgent.providerFailed"))}
+                        disabled={saving || !setUp}
+                        data-testid={`coding-agent-provider-connect-${id}`}
+                        className={BTN_SECONDARY}
+                      >
+                        {t("codingAgent.providers.connect")}
+                      </button>
+                    )}
+                    {!setUp && verdict && (
+                      <p className="w-full text-[11px] text-amber-400 leading-relaxed" data-testid={`coding-agent-provider-${id}-not-set-up`}>
+                        {t("codingAgent.providers.notSetUp", { provider: t(CODING_PROVIDER_NAME_KEY[id]), reason: verdict.problems.join(" ") })}
+                      </p>
+                    )}
+                  </li>
                 );
               })}
-            </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t(status?.provider === "anthropic" ? "codingAgent.providerHintAnthropic" : "codingAgent.providerHintClawbox")}
-            </p>
-            {/* An EXPLICIT false only: a server that predates the field sends
-                nothing, and a box whose Anthropic access is perfectly fine
-                must not be told it is missing by a `!undefined`. */}
-            {status?.provider === "anthropic" && status?.readiness?.anthropicConnected === false && (
-              <p className="mt-1.5 text-[11px] text-amber-400" data-testid="coding-agent-provider-unconnected">
-                {t("codingAgent.providerNotConnected")}
+            </ul>
+            <button
+              type="button"
+              onClick={() => dispatchOpenSettingsSection("ai")}
+              data-testid="coding-agent-providers-setup"
+              className={`${BTN_SECONDARY} mt-2`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">tune</span>
+              {t("codingAgent.providers.setUp")}
+            </button>
+            {rolesReset && (
+              <p className="mt-1.5 text-[11px] text-amber-400" data-testid="coding-agent-providers-roles-reset">
+                {t("codingAgent.providers.rolesReset", { roles: rolesReset.roles.map((role) => t(`codingAgent.roleModels.${role}`)).join(", "), provider: t(CODING_PROVIDER_NAME_KEY[rolesReset.provider]) })}
               </p>
             )}
           </div>
@@ -874,53 +874,6 @@ export default function CodingAgentSettingsPanel({
           </div>
         </div>
 
-        {/* The ceilings a run stops at — both the owner's to set. There is no
-            time limit and no price limit: a run ends when it finishes, runs
-            out of steps, hits a token ceiling if one is set, or goes quiet.
-            Saved on blur and on Enter, so a half-typed number is never sent. */}
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <div>
-            <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.turnsLabel")}
-            </label>
-            <input
-              id="coding-agent-turns"
-              type="number"
-              inputMode="numeric"
-              min={status?.minMaxTurns ?? 10}
-              max={status?.maxMaxTurns ?? 2000}
-              value={turnsDraft ?? ""}
-              onChange={(e) => setTurnsDraft(e.target.value)}
-              onBlur={() => void saveTurns()}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveTurns(); }}
-              disabled={saving}
-              data-testid="coding-agent-turns"
-              className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-            />
-            {errorIn("turns")}
-          </div>
-          <div>
-            <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.tokensLabel")}
-            </label>
-            <input
-              id="coding-agent-tokens"
-              type="number"
-              inputMode="numeric"
-              min={status?.minTokenLimit ?? 10000}
-              placeholder={t("codingAgent.tokensPlaceholder")}
-              value={tokensDraft ?? ""}
-              onChange={(e) => setTokensDraft(e.target.value)}
-              onBlur={() => void saveTokens()}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveTokens(); }}
-              disabled={saving}
-              data-testid="coding-agent-tokens"
-              className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-            />
-            {errorIn("tokens")}
-          </div>
-        </div>
-
         {/* The automatic review pass: one more run, in the same session, after
             every completed run that changed files. It used to be reachable
             only by POSTing the field — an owner could neither find it nor
@@ -948,81 +901,9 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-        {/* The coding team's lead: after each worker settles, one short
-            read-only run may add a task or retire a pending one. Off by
-            default — each turn is a paid run, and the plan the owner saw
-            posted then moves under a running team. Read when a team starts,
-            so it never changes a team already at work. */}
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.teamDynamicLabel")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.teamDynamicHint")}
-              label={t("codingAgent.teamDynamicLabel")}
-              testId="coding-agent-team-dynamic-help"
-            />
-          </div>
-          <Switch
-            checked={status?.teamDynamic ?? false}
-            busy={busy === "teamDynamic"}
-            disabled={!status || saving}
-            label={t("codingAgent.teamDynamicLabel")}
-            testId="coding-agent-team-dynamic"
-            onChange={(next) => void saveSetting({ teamDynamic: next }, "teamDynamic", t("codingAgent.teamDynamicFailed"))}
-          />
-        </div>
-
-        {/* The two media switches. Under the review pass because they are
-            about what a run may SPEND rather than how it works, and both are
-            on unless the owner says otherwise — the pictures one also draws
-            the project's own icon and favicon. */}
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.genImagesLabel")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.genImagesHint")}
-              label={t("codingAgent.genImagesLabel")}
-              testId="coding-agent-gen-images-help"
-            />
-          </div>
-          <Switch
-            checked={status?.generateImages ?? true}
-            busy={busy === "genImages"}
-            disabled={!status || saving}
-            label={t("codingAgent.genImagesLabel")}
-            testId="coding-agent-gen-images"
-            onChange={(next) => void saveSetting({ generateImages: next }, "genImages", t("codingAgent.genImagesFailed"))}
-          />
-        </div>
-
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.genAudioLabel")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.genAudioHint")}
-              label={t("codingAgent.genAudioLabel")}
-              testId="coding-agent-gen-audio-help"
-            />
-          </div>
-          <Switch
-            checked={status?.generateAudio ?? true}
-            busy={busy === "genAudio"}
-            disabled={!status || saving}
-            label={t("codingAgent.genAudioLabel")}
-            testId="coding-agent-gen-audio"
-            onChange={(next) => void saveSetting({ generateAudio: next }, "genAudio", t("codingAgent.genAudioFailed"))}
-          />
-        </div>
-
-        {/* Which browser a run checks its work in. Beside the media switches
-            because it is the same kind of answer — what a run may use, not how
-            it works — and ON unless the owner says otherwise: `?? true`, since
+        {/* Which browser a run checks its work in. In the open rather than in
+            the fold because it puts a window on the owner's SCREEN — and ON
+            unless the owner says otherwise: `?? true`, since
             a server that predates the field is a box that IS driving the
             screen, and rendering it off would invite the owner to switch on
             something that was never off. Off is not a loss of browsing: the
@@ -1048,10 +929,11 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-
         {/* Branch -> pull request -> wait for Actions -> merge. Under the
             review pass because it runs after it, and the review's verdict is
-            one of the things that gates the merge. */}
+            one of the things that gates the merge. The switch stays in the
+            open; what the pull request then carries, how many review rounds
+            it gets and whether it is merged are in the fold below. */}
         <div className="flex items-start justify-between gap-4 mt-4">
           <div className="min-w-0 flex items-center gap-1.5">
             <span className="text-xs font-medium text-[var(--text-secondary)]">
@@ -1073,177 +955,419 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-        {/* How much of the task that pull request shows (TASK-1366). Its
-            sentence is on the card rather than behind a help tip: it is the
-            one place the owner learns the box takes their paths, addresses
-            and tokens out before publishing. Hidden on a server that does not
-            answer with the field, like the counted settings below. */}
-        {typeof status?.prBodyIncludesTask === "string" && (
-          <div className="mt-4">
-            <div className="flex items-start justify-between gap-4">
-              <label htmlFor="coding-agent-pr-body-task" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
-                {t("codingAgent.prBodyIncludesTaskLabel")}
-              </label>
-              <select
-                id="coding-agent-pr-body-task"
-                value={status.prBodyIncludesTask}
-                disabled={saving}
-                data-testid="coding-agent-pr-body-task"
-                onChange={(e) => void saveSetting({ prBodyIncludesTask: e.target.value }, "prBodyIncludesTask", t("codingAgent.prBodyIncludesTaskFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
-              >
-                {(Object.keys(PR_BODY_TASK_LABEL_KEY) as PrBodyTaskMode[]).map((id) => (
-                  <option key={id} value={id}>{t(PR_BODY_TASK_LABEL_KEY[id])}</option>
-                ))}
-              </select>
-            </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t("codingAgent.prBodyIncludesTaskHint")}
-            </p>
+        {/* Everything else, folded. The card had nineteen controls stacked
+            with no grouping, each behind a paragraph of help; the owner asked
+            for less. What stays above is what a box is set up with — the
+            switch, the folder, who pays, how hard, and the three switches
+            that decide what a run DOES with its work. The ceilings, the
+            pull-request details, the team settings and the media switches
+            are here, closed by default, in four short groups. A native
+            <details>, so the fold costs no state and a find-in-page still
+            opens it. The settings error line is drawn OUTSIDE it, below, so
+            a refusal from a folded control is seen whether or not the fold
+            is open. */}
+        <details className="group mt-5 border-t border-white/[0.07] pt-4" data-testid="coding-agent-settings-advanced">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)] [&::-webkit-details-marker]:hidden">
+            <span className="material-symbols-rounded transition-transform group-open:rotate-180" style={{ fontSize: 16 }} aria-hidden="true">expand_more</span>
+            {t("codingAgent.settingsAdvanced")}
+          </summary>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupCeilings")}</p>
+            {/* No step field since SCA3: the step ceiling is a safety net
+                (DEFAULT_MAX_TURNS, 2,000 for a writing run; a reading role's
+                cap is 100) rather than a setting, and a run that reaches it
+                offers Continue. There is no time limit, no price limit and
+                (since SCA A2) no token limit either: a run ends when it
+                finishes, hits the net, or goes quiet. */}
+            {/* How many runs at once. Each one works in a copy of the project on
+                a branch of its own, so this is a question about the box's memory
+                rather than about the filesystem — which is why it is a number the
+                owner may raise and not a switch. Hidden on a server that answers
+                with no field. */}
+            {typeof status?.maxParallelRuns === "number" && (
+              <>
+                <div className="flex items-start justify-between gap-4 mt-4">
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <label htmlFor="coding-agent-max-parallel-runs" className="text-xs font-medium text-[var(--text-secondary)]">
+                      {t("codingAgent.maxParallelRunsLabel")}
+                    </label>
+                    <HelpTip
+                      text={t("codingAgent.maxParallelRunsHint")}
+                      label={t("codingAgent.maxParallelRunsLabel")}
+                      testId="coding-agent-max-parallel-runs-help"
+                    />
+                  </div>
+                  <select
+                    id="coding-agent-max-parallel-runs"
+                    value={String(status.maxParallelRuns)}
+                    disabled={saving}
+                    data-testid="coding-agent-max-parallel-runs"
+                    onChange={(e) => void saveSetting({ maxParallelRuns: Number(e.target.value) }, "maxParallelRuns", t("codingAgent.maxParallelRunsFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-28`}
+                  >
+                    {Array.from(
+                      { length: (status.maxMaxParallelRuns ?? 4) - (status.minMaxParallelRuns ?? 1) + 1 },
+                      (_, i) => (status.minMaxParallelRuns ?? 1) + i,
+                    ).map((n) => (
+                      <option key={n} value={n}>{String(n)}</option>
+                    ))}
+                  </select>
+                </div>
+                {errorIn("maxParallelRuns")}
+              </>
+            )}
           </div>
-        )}
-
-        {/* What happens to that pull request AFTER it is opened: CI going red,
-            review comments, a conflict with a sibling merge. Each round is one
-            follow-up turn in the run's own session, so the number is a budget
-            and not a timer. Hidden altogether on a server that does not answer
-            with the field — a control over a setting the box has no route for
-            would save nothing. */}
-        {typeof status?.reviewRounds === "number" && (
-          <>
-            <div className="flex items-start justify-between gap-4 mt-4">
-              <div className="min-w-0 flex items-center gap-1.5">
-                <label htmlFor="coding-agent-review-rounds" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.reviewRoundsLabel")}
-                </label>
-                <HelpTip
-                  text={t("codingAgent.reviewRoundsHint")}
-                  label={t("codingAgent.reviewRoundsLabel")}
-                  testId="coding-agent-review-rounds-help"
-                />
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupPullRequest")}</p>
+            {/* How much of the task that pull request shows (TASK-1366). Its
+                sentence is on the card rather than behind a help tip: it is the
+                one place the owner learns the box takes their paths, addresses
+                and tokens out before publishing. Hidden on a server that does not
+                answer with the field, like the counted settings above. */}
+            {typeof status?.prBodyIncludesTask === "string" && (
+              <div className="mt-4">
+                <div className="flex items-start justify-between gap-4">
+                  <label htmlFor="coding-agent-pr-body-task" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
+                    {t("codingAgent.prBodyIncludesTaskLabel")}
+                  </label>
+                  <select
+                    id="coding-agent-pr-body-task"
+                    value={status.prBodyIncludesTask}
+                    disabled={saving}
+                    data-testid="coding-agent-pr-body-task"
+                    onChange={(e) => void saveSetting({ prBodyIncludesTask: e.target.value }, "prBodyIncludesTask", t("codingAgent.prBodyIncludesTaskFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
+                  >
+                    {(Object.keys(PR_BODY_TASK_LABEL_KEY) as PrBodyTaskMode[]).map((id) => (
+                      <option key={id} value={id}>{t(PR_BODY_TASK_LABEL_KEY[id])}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+                  {t("codingAgent.prBodyIncludesTaskHint")}
+                </p>
               </div>
-              {/* A select rather than a number field: the range is six values,
-                  so there is no draft to hold, nothing to save on blur, and
-                  nothing the owner can type that the route would refuse. */}
-              <select
-                id="coding-agent-review-rounds"
-                value={String(status.reviewRounds)}
-                disabled={saving}
-                data-testid="coding-agent-review-rounds"
-                onChange={(e) => void saveSetting({ reviewRounds: Number(e.target.value) }, "reviewRounds", t("codingAgent.reviewRoundsFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-28`}
-              >
-                {Array.from(
-                  { length: (status.maxReviewRounds ?? 6) - (status.minReviewRounds ?? 0) + 1 },
-                  (_, i) => (status.minReviewRounds ?? 0) + i,
-                ).map((n) => (
-                  <option key={n} value={n}>
-                    {n === 0 ? t("codingAgent.reviewRoundsOff") : String(n)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {errorIn("reviewRounds")}
+            )}
 
+            {/* May the box merge a pull request its own review loop cleared? A
+                consent, off until the owner says so. (The loop's round count
+                is no longer a setting since SCA C3: every pull request gets
+                DEFAULT_REVIEW_ROUNDS.) Hidden on a server that does not
+                answer with the field — a control over a setting the box has
+                no route for would save nothing. */}
+            {typeof status?.autoMerge === "boolean" && (
+              <>
+                <div className="flex items-start justify-between gap-4 mt-4">
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <span className="text-xs font-medium text-[var(--text-secondary)]">
+                      {t("codingAgent.autoMergeLabel")}
+                    </span>
+                    <HelpTip
+                      text={t("codingAgent.autoMergeHint")}
+                      label={t("codingAgent.autoMergeLabel")}
+                      testId="coding-agent-auto-merge-help"
+                    />
+                  </div>
+                  <Switch
+                    checked={status?.autoMerge ?? false}
+                    busy={busy === "autoMerge"}
+                    disabled={!status || saving}
+                    label={t("codingAgent.autoMergeLabel")}
+                    testId="coding-agent-auto-merge"
+                    onChange={(next) => void saveSetting({ autoMerge: next }, "autoMerge", t("codingAgent.autoMergeFailed"))}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* WHO THE BOX COMMITS AS. Drawn only by a server that answers with the
+                limit, so an older box shows nothing rather than two fields whose
+                Save it would refuse as an unknown body.
+
+                Left blank, a project's own git config decides and the placeholder
+                catches what is left — which is what every box did before this
+                existed. It is worth filling in for one concrete reason, and the
+                hint says it: a host's GitHub integration refuses a deployment
+                whose git author cannot deploy the project, so the box's own
+                bookkeeping commits fail the check on a pull request it opened. */}
+            {typeof status?.maxGitAuthorChars === "number" && (
+              <div className="mt-4" data-testid="coding-agent-commit-author">
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.commitAuthorTitle")}
+                </span>
+                <div className="grid gap-2 mt-1.5 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="coding-agent-author-name" className="sr-only">
+                      {t("codingAgent.commitAuthorNameLabel")}
+                    </label>
+                    <input
+                      id="coding-agent-author-name"
+                      type="text"
+                      value={authorNameDraft ?? ""}
+                      onChange={(e) => setAuthorNameDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
+                      placeholder={t("codingAgent.commitAuthorNamePlaceholder")}
+                      aria-label={t("codingAgent.commitAuthorNameLabel")}
+                      maxLength={status.maxGitAuthorChars}
+                      spellCheck={false}
+                      data-testid="coding-agent-author-name"
+                      className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="coding-agent-author-email" className="sr-only">
+                      {t("codingAgent.commitAuthorEmailLabel")}
+                    </label>
+                    <input
+                      id="coding-agent-author-email"
+                      type="email"
+                      value={authorEmailDraft ?? ""}
+                      onChange={(e) => setAuthorEmailDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
+                      placeholder={t("codingAgent.commitAuthorEmailPlaceholder")}
+                      aria-label={t("codingAgent.commitAuthorEmailLabel")}
+                      maxLength={status.maxGitAuthorChars}
+                      spellCheck={false}
+                      autoComplete="off"
+                      data-testid="coding-agent-author-email"
+                      className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => void saveGitAuthor()}
+                    disabled={saving
+                      || ((authorNameDraft ?? "") === (status?.gitAuthorName ?? "")
+                        && (authorEmailDraft ?? "") === (status?.gitAuthorEmail ?? ""))}
+                    data-testid="coding-agent-author-save"
+                    className={BTN_SECONDARY}
+                  >
+                    {t("codingAgent.commitAuthorSave")}
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+                  {t("codingAgent.commitAuthorHint")}
+                </p>
+                {errorIn("gitAuthor")}
+              </div>
+            )}
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupTeams")}</p>
+            {/* The coding team's lead: after each worker settles, one short
+                read-only run may add a task or retire a pending one. Off by
+                default — each turn is a paid run, and the plan the owner saw
+                posted then moves under a running team. Read when a team starts,
+                so it never changes a team already at work. */}
             <div className="flex items-start justify-between gap-4 mt-4">
               <div className="min-w-0 flex items-center gap-1.5">
                 <span className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.autoMergeLabel")}
+                  {t("codingAgent.teamDynamicLabel")}
                 </span>
                 <HelpTip
-                  text={t("codingAgent.autoMergeHint")}
-                  label={t("codingAgent.autoMergeLabel")}
-                  testId="coding-agent-auto-merge-help"
+                  text={t("codingAgent.teamDynamicHint")}
+                  label={t("codingAgent.teamDynamicLabel")}
+                  testId="coding-agent-team-dynamic-help"
                 />
               </div>
               <Switch
-                checked={status?.autoMerge ?? false}
-                busy={busy === "autoMerge"}
+                checked={status?.teamDynamic ?? false}
+                busy={busy === "teamDynamic"}
                 disabled={!status || saving}
-                label={t("codingAgent.autoMergeLabel")}
-                testId="coding-agent-auto-merge"
-                onChange={(next) => void saveSetting({ autoMerge: next }, "autoMerge", t("codingAgent.autoMergeFailed"))}
+                label={t("codingAgent.teamDynamicLabel")}
+                testId="coding-agent-team-dynamic"
+                onChange={(next) => void saveSetting({ teamDynamic: next }, "teamDynamic", t("codingAgent.teamDynamicFailed"))}
               />
             </div>
-          </>
-        )}
 
-        {/* How many goes a run gets at the thing it was asked to DELIVER.
-            Beside the pull-request controls because the commonest deliverable
-            IS the pull request those switches ask for, and hidden on a server
-            that answers with no field, like the rounds above. */}
-        {typeof status?.completionAttempts === "number" && (
-          <>
+            {/* What each role of a team runs on: the account that pays, the
+                model there, and the effort. A planner reads and plans (and
+                comes back as the lead), a reviewer reads and judges; only
+                workers write the code — so the planner defaults to the
+                provider's best model, workers and reviewers to its middle one
+                (ROLE_DEFAULT_MODELS), and the first two to at most Extra high
+                effort. "Default" stores nothing: a box that never opens this
+                runs on the defaults, and the older standard/economy choices
+                read back as the same two options. */}
+            {status?.roleModels && (
+              <div className="mt-4" data-testid="coding-agent-role-models">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.roleModelsLabel")}</span>
+                  <HelpTip
+                    text={t("codingAgent.roleModelsHint")}
+                    label={t("codingAgent.roleModelsLabel")}
+                    testId="coding-agent-role-models-help"
+                  />
+                </div>
+                {/* One row per role: the account, the model there, the effort.
+                    Three selects that share the width and wrap under the
+                    name in a narrow window. No price beside any of them (the
+                    owner's ruling, 2026-10-28): the planner keeps its own
+                    reckoning server-side, the screen says what runs where. */}
+                <div className="mt-1.5 space-y-2.5">
+                  {MODEL_ROLES.filter((role) => status.roleModels![role]).map((role) => {
+                    const current = status.roleModels![role]!;
+                    const defaults = ROLE_DEFAULTS[role];
+                    const roleName = t(`codingAgent.roleModels.${role}`);
+                    const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
+                      ? status.effortLevels
+                      : [...status.effortLevels, current.effort as Effort];
+                    const pinned = current.provider && current.provider !== ROLE_AUTO ? current.provider : null;
+                    // A pinned account that is no longer connected (or that
+                    // this build does not know) still reads back as itself —
+                    // greyed, with the word — rather than as a blank select.
+                    const strayProvider = pinned && !connectedProviders.includes(pinned) ? pinned : null;
+                    const offered = pinned ? roleModelOptions(pinned) : [];
+                    const strayModel = pinned && current.model !== ROLE_AUTO && !offered.includes(current.model) && !(ROLE_MODEL_TIERS as readonly string[]).includes(current.model) ? current.model : null;
+                    const resolved = status.roleModelMap?.[role];
+                    const about = resolved
+                      ? t("codingAgent.roleModelNow", {
+                        model: resolved.model ? codingModelName(resolved.model) : t("codingAgent.roleModelPlanDecides"),
+                        provider: providerName(resolved.provider),
+                      })
+                      : null;
+                    return (
+                      <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
+                        {/* The role and its job on one label line ("Workers:
+                            write your code"), the three selects under it. */}
+                        <p className="w-full text-[11px] text-[var(--text-secondary)]" data-testid={`coding-agent-role-${role}-label`}>
+                          {roleName}<span className="text-[var(--text-muted)]">: {t(ROLE_JOB_KEY[role])}</span>
+                        </p>
+                        <select
+                          value={current.provider}
+                          disabled={saving}
+                          aria-label={t("codingAgent.roleProviderFor", { role: roleName })}
+                          data-testid={`coding-agent-role-${role}-provider`}
+                          // A new account drops a model only the old one
+                          // offered (the route does that on its own); a tier
+                          // or Auto rides along.
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { provider: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
+                        >
+                          <option value={ROLE_AUTO}>{t("codingAgent.roleProvider.auto")}</option>
+                          {connectedProviders.map((p) => (
+                            <option key={p} value={p}>{providerName(p)}</option>
+                          ))}
+                          {strayProvider && (
+                            <option value={strayProvider}>{t("codingAgent.roleProvider.notConnected", { provider: providerName(strayProvider) })}</option>
+                          )}
+                        </select>
+                        <select
+                          value={current.model}
+                          disabled={saving}
+                          aria-label={t("codingAgent.roleModelFor", { role: roleName })}
+                          data-testid={`coding-agent-role-${role}-model`}
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[9rem]`}
+                        >
+                          {/* Which model the default is depends on the role
+                              and the account: the "Now:" line under the row
+                              names it. */}
+                          <option value={ROLE_AUTO}>{t("codingAgent.roleModel.autoForProvider")}</option>
+                          {/* On the team's own account the older two choices
+                              stand; pinned to an account, that account's
+                              models. */}
+                          {!pinned && ROLE_MODEL_TIERS.map((tier) => (
+                            <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
+                          ))}
+                          {pinned && (ROLE_MODEL_TIERS as readonly string[]).includes(current.model) && (
+                            <option value={current.model}>{t(`codingAgent.roleModel.${current.model}`)}</option>
+                          )}
+                          {offered.map((id) => (
+                            <option key={id} value={id}>{codingModelName(id)}</option>
+                          ))}
+                          {strayModel && <option value={strayModel}>{codingModelName(strayModel)}</option>}
+                        </select>
+                        <select
+                          value={current.effort}
+                          disabled={saving}
+                          aria-label={t("codingAgent.roleEffortFor", { role: roleName })}
+                          data-testid={`coding-agent-role-${role}-effort`}
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { effort: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} w-[9.5rem]`}
+                        >
+                          <option value={ROLE_AUTO}>
+                            {defaults.effortCap
+                              ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
+                              : t("codingAgent.roleEffort.autoOwner")}
+                          </option>
+                          {levels.map((level) => (
+                            <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
+                          ))}
+                        </select>
+                        {/* What the role starts on right now — the answer the
+                            runner gives, so "Default" is never a mystery. */}
+                        {about && (
+                          <p className="w-full text-[10px] text-[var(--text-muted)] leading-relaxed" data-testid={`coding-agent-role-${role}-about`}>
+                            {about}
+                          </p>
+                        )}
+                        {resolved && !resolved.ready && (
+                          <p className="w-full text-[10px] text-amber-400 leading-relaxed" data-testid={`coding-agent-role-${role}-unready`}>
+                            {t("codingAgent.roleModelCannotStart", { provider: providerName(resolved.provider) })}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Why a connected account cannot run right now, once per
+                    account rather than once per row: its own missing pieces,
+                    and the box's, in the readiness check's own words. */}
+                {unreadyProviders.length > 0 && (
+                  <ul className="mt-2 space-y-0.5" data-testid="coding-agent-role-providers-unready">
+                    {unreadyProviders.map((v) => {
+                      const reason = [...sharedProblems, ...v.problems].join(" ");
+                      return (
+                        <li key={v.id} className="text-[11px] text-amber-400 leading-relaxed" data-testid={`coding-agent-role-provider-${v.id}-unready`}>
+                          {reason
+                            ? t("codingAgent.roleProviderNotReady", { provider: providerName(v.id), reason })
+                            : t("codingAgent.roleProviderGroupNotReady", { provider: providerName(v.id) })}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupMedia")}</p>
+            {/* The media switch: pictures and speech together (SCA C3; it was
+                two). In the fold because it is about what a run may SPEND
+                rather than how it works, and on unless the owner says
+                otherwise — it also draws the project's own icon and favicon. */}
             <div className="flex items-start justify-between gap-4 mt-4">
               <div className="min-w-0 flex items-center gap-1.5">
-                <label htmlFor="coding-agent-completion-attempts" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.completionAttemptsLabel")}
-                </label>
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.genMediaLabel")}
+                </span>
                 <HelpTip
-                  text={t("codingAgent.completionAttemptsHint")}
-                  label={t("codingAgent.completionAttemptsLabel")}
-                  testId="coding-agent-completion-attempts-help"
+                  text={t("codingAgent.genMediaHint")}
+                  label={t("codingAgent.genMediaLabel")}
+                  testId="coding-agent-gen-media-help"
                 />
               </div>
-              {/* A select, for the reason the rounds above are one: six values,
-                  nothing to hold as a draft, nothing typeable the route refuses. */}
-              <select
-                id="coding-agent-completion-attempts"
-                value={String(status.completionAttempts)}
-                disabled={saving}
-                data-testid="coding-agent-completion-attempts"
-                onChange={(e) => void saveSetting({ completionAttempts: Number(e.target.value) }, "completionAttempts", t("codingAgent.completionAttemptsFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-28`}
-              >
-                {Array.from(
-                  { length: (status.maxCompletionAttempts ?? 6) - (status.minCompletionAttempts ?? 1) + 1 },
-                  (_, i) => (status.minCompletionAttempts ?? 1) + i,
-                ).map((n) => (
-                  <option key={n} value={n}>{String(n)}</option>
-                ))}
-              </select>
+              <Switch
+                checked={status?.generateMedia ?? true}
+                busy={busy === "genMedia"}
+                disabled={!status || saving}
+                label={t("codingAgent.genMediaLabel")}
+                testId="coding-agent-gen-media"
+                onChange={(next) => void saveSetting({ generateMedia: next }, "genMedia", t("codingAgent.genMediaFailed"))}
+              />
             </div>
-            {errorIn("completionAttempts")}
-          </>
-        )}
-
-        {/* How many runs at once. Each one works in a copy of the project on
-            a branch of its own, so this is a question about the box's memory
-            rather than about the filesystem — which is why it is a number the
-            owner may raise and not a switch. Hidden on a server that answers
-            with no field, like the two above. */}
-        {typeof status?.maxParallelRuns === "number" && (
-          <>
-            <div className="flex items-start justify-between gap-4 mt-4">
-              <div className="min-w-0 flex items-center gap-1.5">
-                <label htmlFor="coding-agent-max-parallel-runs" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.maxParallelRunsLabel")}
-                </label>
-                <HelpTip
-                  text={t("codingAgent.maxParallelRunsHint")}
-                  label={t("codingAgent.maxParallelRunsLabel")}
-                  testId="coding-agent-max-parallel-runs-help"
-                />
-              </div>
-              <select
-                id="coding-agent-max-parallel-runs"
-                value={String(status.maxParallelRuns)}
-                disabled={saving}
-                data-testid="coding-agent-max-parallel-runs"
-                onChange={(e) => void saveSetting({ maxParallelRuns: Number(e.target.value) }, "maxParallelRuns", t("codingAgent.maxParallelRunsFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-28`}
-              >
-                {Array.from(
-                  { length: (status.maxMaxParallelRuns ?? 4) - (status.minMaxParallelRuns ?? 1) + 1 },
-                  (_, i) => (status.minMaxParallelRuns ?? 1) + i,
-                ).map((n) => (
-                  <option key={n} value={n}>{String(n)}</option>
-                ))}
-              </select>
-            </div>
-            {errorIn("maxParallelRuns")}
-          </>
-        )}
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.janitorGroup")}</p>
+            {/* The folder janitor: worktrees and copies runs left behind
+                (src/lib/coding-folder-janitor.ts). Its own state and route,
+                read once when the panel opens, never on the status poll. */}
+            <CodingAgentJanitorSection />
+          </div>
+        </details>
 
         {errorIn("settings")}
       </div>
@@ -1254,13 +1378,10 @@ export default function CodingAgentSettingsPanel({
       {status?.historyRetention && (
         <CodingRunHistoryCard
           mode={status.historyRetention}
-          limit={status.historyLimit ?? 100}
-          limits={status.historyLimits ?? [100, 300, 1000]}
           liveKept={status.historyLiveKept ?? 30}
           saving={saving}
           onSave={(patch) => saveSetting(patch, "history", t("codingAgent.history.saveFailed"))}
           error={errorIn("history")}
-          onOpenHistory={onOpenHistory}
         />
       )}
 
@@ -1284,6 +1405,16 @@ export default function CodingAgentSettingsPanel({
           leave the owner nothing to press. */}
       {(status?.providers?.length ?? 0) > 1 && (
         <CodingAgentAnthropicCard onChanged={() => void refreshStatus()} />
+      )}
+
+      {/* The owner's own OpenAI account — an API key or a ChatGPT sign-in —
+          for runs on OpenAI, which run on the Codex CLI. Drawn on a server
+          that offers the provider at all, for the Anthropic card's reason.
+          The server offers it (status.providers, `offeredProviders`) only
+          where the Codex CLI is installed or the account is already set up,
+          so a box without the CLI has neither this card nor the row above. */}
+      {(status?.providers ?? []).includes("openai") && (
+        <CodingAgentOpenAICard onChanged={() => void refreshStatus()} />
       )}
 
       {/* GitHub. gh keeps the token and lends it to git; ClawBox never

@@ -1,0 +1,433 @@
+/**
+ * The desktop's corner card for long work Settings started
+ * (src/components/BackgroundTaskCards.tsx).
+ *
+ * Pinned: a running task shows its steps, a bar with the percentage and the
+ * time left once there is a rate, and its live log behind a disclosure; it
+ * cannot be dismissed while it runs; an ended one says how it ended and can be
+ * closed; the hook polls the tasks route, draws what is worth drawing, and
+ * asks at once when a surface says it started something.
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { I18nProvider } from "@/lib/i18n";
+import BackgroundTaskCards, { useBackgroundTasks } from "@/components/BackgroundTaskCards";
+import {
+  BACKGROUND_TASK_EVENT,
+  formatEtaParts,
+  notifyBackgroundTaskStarted,
+  visibleBackgroundTasks,
+  type BackgroundTaskView,
+} from "@/lib/background-task-client";
+import { _resetBoxClockForTests } from "@/lib/box-clock";
+import { PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
+
+function task(over: Partial<BackgroundTaskView> = {}): BackgroundTaskView {
+  return {
+    id: "t1", kind: "whisper-engine-install", group: "whisper-engine", title: "Installing speech (Whisper)", meta: null,
+    state: "running",
+    steps: [
+      { id: "install", label: "Build faster-whisper", state: "running", weight: 9 },
+      { id: "wire", label: "Switch voice notes to it", state: "pending", weight: 1 },
+    ],
+    status: "Building CTranslate2 (cmake)", completed: null, total: null,
+    startedAt: 1_000, updatedAt: 2_000, stepStartedAt: 1_000, finishedAt: null, error: null, result: null,
+    log: ["Installing speech on this box (faster-whisper)…", "Building CTranslate2 (cmake)"], logCount: 2,
+    runner: "r", dismissed: false, percent: 42.5, etaSeconds: 300,
+    cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, label: "Whisper", lanes: [], needs: null, queuedAt: null, queuedBehind: null,
+    ...over,
+  };
+}
+
+function renderCards(tasks: BackgroundTaskView[], onDismiss = vi.fn()) {
+  render(<I18nProvider><BackgroundTaskCards tasks={tasks} onDismiss={onDismiss} /></I18nProvider>);
+  return onDismiss;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe("BackgroundTaskCards", () => {
+  it("draws a running task: headline, steps, percent, time left, and no close button", () => {
+    renderCards([task()]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-state", "running");
+    expect(card).toHaveTextContent("Installing speech (Whisper)");
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Building CTranslate2 (cmake)");
+    expect(screen.getByTestId("background-task-percent")).toHaveTextContent("42%");
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "42.5");
+    expect(screen.getByTestId("background-task-eta")).toBeInTheDocument();
+    expect(screen.getByTestId("background-task-steps")).toHaveTextContent("Build faster-whisper");
+    expect(screen.queryByTestId("background-task-dismiss")).toBeNull();
+  });
+
+  it("opens and closes the live log", () => {
+    renderCards([task()]);
+    expect(screen.queryByTestId("background-task-log")).toBeNull();
+    fireEvent.click(screen.getByTestId("background-task-log-toggle"));
+    expect(screen.getByTestId("background-task-log")).toHaveTextContent("Installing speech on this box (faster-whisper)…");
+    expect(screen.getByTestId("background-task-log-toggle")).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByTestId("background-task-log-toggle"));
+    expect(screen.queryByTestId("background-task-log")).toBeNull();
+  });
+
+  it("never paints 0 % over a step that measures nothing", () => {
+    // Every phase-1 install spends most of its time in one step that reports
+    // lines but no bytes (a build, a pip install): the weighted share is 0 for
+    // all of it, and "0%" under a build line saying 87 % read as stuck.
+    renderCards([task({ percent: 0, etaSeconds: null, completed: null, total: null })]);
+    expect(screen.getByTestId("background-task-percent")).not.toHaveTextContent("0%");
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+    // Bytes measured: 0 % is then a real figure, and said.
+    cleanup();
+    renderCards([task({ percent: 0, etaSeconds: null, completed: 0, total: 1000 })]);
+    expect(screen.getByTestId("background-task-percent")).toHaveTextContent("0%");
+  });
+
+  it("draws no ETA where the server gave none", () => {
+    renderCards([task({ etaSeconds: null, percent: null })]);
+    expect(screen.queryByTestId("background-task-eta")).toBeNull();
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+  });
+
+  it("says how a failed task ended and lets it be closed", () => {
+    const onDismiss = renderCards([task({ state: "failed", error: "no CUDA toolkit", finishedAt: 5_000 })]);
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("no CUDA toolkit");
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    fireEvent.click(screen.getByTestId("background-task-dismiss"));
+    expect(onDismiss).toHaveBeenCalledWith("t1");
+  });
+
+  it("reads a success's own closing line", () => {
+    renderCards([task({ state: "succeeded", finishedAt: 5_000, result: { status: "Speech on this box is installed." } })]);
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Speech on this box is installed.");
+  });
+});
+
+// A provider sign-in or sign-out (TASK-2148): the same card as the installs,
+// with a turning ring for a change that measures nothing it could fill a bar
+// with, then its ending — the error said in full when it failed.
+describe("BackgroundTaskCards — a provider sign-in or sign-out", () => {
+  const providerTask = (over: Partial<BackgroundTaskView> = {}) => task({
+    id: "p1",
+    kind: "provider-sign-in",
+    group: "provider-auth",
+    title: "Connecting OpenAI",
+    meta: { subject: "openai", action: "sign-in", label: "OpenAI" },
+    steps: [
+      { id: "save", label: "Save the sign-in on the box", state: "done", weight: 3 },
+      { id: "restart", label: "Restart the assistant", state: "running", weight: 2 },
+      { id: "verify", label: "Check the connection", state: "pending", weight: 1 },
+    ],
+    status: "Restarting the assistant to use the new sign-in…",
+    percent: 50,
+    etaSeconds: null,
+    ...over,
+  });
+
+  it("turns a ring while it runs, with its current step", async () => {
+    renderCards([providerTask()]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-kind", "provider-sign-in");
+    expect(card).toHaveTextContent("Connecting OpenAI");
+    const ring = screen.getByTestId("background-task-spinner");
+    expect(ring).toHaveTextContent("progress_activity");
+    expect(ring).toHaveClass("motion-safe:animate-spin");
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Restarting the assistant to use the new sign-in…");
+    expect(screen.getByTestId("background-task-steps")).toHaveTextContent("Restart the assistant");
+    // Words from the English table, a chunk of its own.
+    await waitFor(() => expect(screen.getByTestId("background-task-percent")).toHaveTextContent("Step 2 of 3"));
+    expect(screen.queryByTestId("background-task-dismiss")).toBeNull();
+  });
+
+  it("says done in the box's own words, and a failure with its error", () => {
+    renderCards([providerTask({ state: "succeeded", result: { status: "Connected to OpenAI." }, finishedAt: Date.now() })]);
+    expect(screen.queryByTestId("background-task-spinner")).toBeNull();
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Connected to OpenAI.");
+    cleanup();
+    renderCards([providerTask({ kind: "provider-sign-out", title: "Signing out of OpenAI", state: "failed", error: "OpenAI is the default provider.", finishedAt: Date.now() })]);
+    expect(screen.getByTestId("background-task-card")).toHaveAttribute("data-task-state", "failed");
+    expect(screen.getByTestId("background-task-headline")).toHaveTextContent("OpenAI is the default provider.");
+    expect(screen.getByTestId("background-task-dismiss")).toBeInTheDocument();
+  });
+
+  it("keeps the install cards' own mark", () => {
+    renderCards([task()]);
+    expect(screen.queryByTestId("background-task-spinner")).toBeNull();
+  });
+
+  it("tells them too about a provider change that ran and ended between two of its reads", async () => {
+    const done = providerTask({ state: "succeeded", finishedAt: Date.now() });
+    const answers = [[], [done]];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ tasks: answers.shift() ?? [done] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      renderHook(() => useBackgroundTasks(true));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+      // Seen ended once is no news the next time.
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+      expect(changed).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    }
+  });
+
+  it("tells every provider surface on the desktop when a provider change it saw running has ended", async () => {
+    const running = providerTask();
+    const answers = [[running], [running], [{ ...running, state: "succeeded", finishedAt: Date.now() }]];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ tasks: answers.shift() ?? [] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      renderHook(() => useBackgroundTasks(true));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      expect(changed).not.toHaveBeenCalled();
+      act(() => notifyBackgroundTaskStarted("p1"));
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    } finally {
+      window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    }
+  });
+});
+
+describe("visibleBackgroundTasks / formatEtaParts", () => {
+  it("keeps running tasks, unseen failures and fresh successes", () => {
+    const now = 100 * 60 * 1000;
+    const list = [
+      task({ id: "run" }),
+      task({ id: "failed", state: "failed", finishedAt: 1 }),
+      task({ id: "interrupted", state: "interrupted", finishedAt: 1 }),
+      task({ id: "gone", state: "failed", finishedAt: 1, dismissed: true }),
+      task({ id: "fresh", state: "succeeded", finishedAt: now - 60_000 }),
+      task({ id: "stale", state: "succeeded", finishedAt: now - 60 * 60 * 1000 }),
+    ];
+    expect(visibleBackgroundTasks(list, now).map((t) => t.id)).toEqual(["run", "failed", "interrupted", "fresh"]);
+  });
+
+  it("rounds the time left up to whole minutes", () => {
+    expect(formatEtaParts(null)).toBeNull();
+    expect(formatEtaParts(30)).toEqual({ hours: 0, minutes: 1 });
+    expect(formatEtaParts(61)).toEqual({ hours: 0, minutes: 2 });
+    expect(formatEtaParts(3_900)).toEqual({ hours: 1, minutes: 5 });
+  });
+});
+
+describe("useBackgroundTasks", () => {
+  it("asks the tasks route, and again at once when a surface starts a task", async () => {
+    const answers = [[] as BackgroundTaskView[], [task()]];
+    const fetchMock = vi.fn<(url: string) => Promise<Response>>(async () => new Response(JSON.stringify({ tasks: answers.shift() ?? [task()] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useBackgroundTasks(true));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(result.current.tasks).toEqual([]);
+    act(() => notifyBackgroundTaskStarted("t1"));
+    await waitFor(() => expect(result.current.tasks.map((t) => t.id)).toEqual(["t1"]));
+    expect(fetchMock.mock.calls[0][0]).toBe("/setup-api/background-jobs/tasks");
+  });
+
+  it("asks nothing while disabled (not the owner's desktop)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useBackgroundTasks(false));
+    window.dispatchEvent(new CustomEvent(BACKGROUND_TASK_EVENT));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.tasks).toEqual([]);
+  });
+
+  it("hides a dismissed card at once and tells the server", async () => {
+    const failed = task({ state: "failed", error: "boom", finishedAt: Date.now() });
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      init?.method === "POST" ? new Response("{}") : new Response(JSON.stringify({ tasks: [failed] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useBackgroundTasks(true));
+    await waitFor(() => expect(result.current.tasks).toHaveLength(1));
+    act(() => result.current.dismiss("t1"));
+    expect(result.current.tasks).toHaveLength(0);
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ id: "t1", action: "dismiss" });
+  });
+
+  it("never runs two polls at once, however often a surface says it started something", async () => {
+    // A stream names its task on its first AND its closing line, and Settings
+    // fires the event for each: a kick that landed while a poll was in flight
+    // used to start a second polling loop beside the first, for good.
+    let inFlight = 0;
+    let most = 0;
+    const pending: Array<() => void> = [];
+    const fetchMock = vi.fn<(url: string) => Promise<Response>>(() => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      return new Promise((resolve) => {
+        pending.push(() => {
+          inFlight -= 1;
+          resolve(new Response(JSON.stringify({ tasks: [task()] })));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderHook(() => useBackgroundTasks(true));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => {
+      notifyBackgroundTaskStarted("t1");
+      notifyBackgroundTaskStarted("t1");
+    });
+    expect(most).toBe(1);
+    // The kicks are not lost: one more poll follows the one in flight.
+    await act(async () => { pending.shift()?.(); });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await act(async () => { pending.shift()?.(); });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(most).toBe(1);
+  });
+});
+
+describe("Cancel on the corner card", () => {
+  it("is offered only on running work that can stop safely", () => {
+    renderCards([task()]);
+    expect(screen.queryByTestId("background-task-cancel")).toBeNull();
+    cleanup();
+    renderCards([task({ cancellable: true })]);
+    expect(screen.getByTestId("background-task-cancel")).toBeInTheDocument();
+  });
+
+  it("asks the box to stop it, and says it is stopping rather than claiming it stopped", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    renderCards([task({ cancellable: true })]);
+    fireEvent.click(screen.getByTestId("background-task-cancel"));
+
+    // The provider reads the owner's language too; the stop is the POST.
+    const stopCall = () => (fetchMock.mock.calls as unknown as [string, RequestInit?][])
+      .find(([url, init]) => url === "/setup-api/background-jobs/tasks" && init?.method === "POST");
+    await waitFor(() => expect(stopCall()).toBeDefined());
+    expect(JSON.parse(String(stopCall()![1]!.body))).toEqual({ id: "t1", action: "cancel" });
+    expect(screen.queryByTestId("background-task-cancel")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("background-task-percent")).toHaveTextContent("Stopping…"));
+  });
+
+  it("gives the button back when the box refused the stop", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: false, code: "not_running" }), { status: 409 })));
+    renderCards([task({ cancellable: true })]);
+    fireEvent.click(screen.getByTestId("background-task-cancel"));
+    await waitFor(() => expect(screen.getByTestId("background-task-cancel")).toBeInTheDocument());
+  });
+
+  it("draws a cancelled task plainly, as the owner's own ending, and lets it be closed", async () => {
+    renderCards([task({ state: "cancelled", finishedAt: 3_000, result: { status: "Cancelled." } })]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-state", "cancelled");
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Cancelled."));
+    expect(screen.getByTestId("background-task-dismiss")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("lets a cancelled task step aside like a success, never staying on the desktop like a failure", () => {
+    const now = 1_000_000;
+    const cancelled = task({ id: "c", state: "cancelled", finishedAt: now - 60_000 });
+    const stale = task({ id: "s", state: "cancelled", finishedAt: now - 11 * 60_000 });
+    const failed = task({ id: "f", state: "failed", finishedAt: now - 11 * 60_000, error: "boom" });
+    expect(visibleBackgroundTasks([cancelled, stale, failed], now).map((t) => t.id)).toEqual(["c", "f"]);
+  });
+});
+
+describe("the success card on a browser whose clock is off the box's", () => {
+  afterEach(() => {
+    _resetBoxClockForTests();
+  });
+
+  it("keeps a success the box just finished up for its 30 s, with the browser two minutes ahead", async () => {
+    // On the browser's clock the box's `finishedAt` was already two minutes
+    // old, so its 30 s timer ran out the moment the card arrived.
+    const skewMs = -2 * 60_000;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return new Response("{}");
+      const boxNow = Date.now() + skewMs;
+      const done = task({ state: "succeeded", finishedAt: boxNow - 1_000, result: { status: "Speech on this box is installed." } });
+      return new Response(JSON.stringify({ tasks: [done] }), { headers: { date: new Date(boxNow).toUTCString() } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useBackgroundTasks(true));
+    await waitFor(() => expect(result.current.tasks).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(result.current.tasks).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+});
+
+describe("a queued install's card (TASK-2128)", () => {
+  const queued = (over: Partial<BackgroundTaskView> = {}) => task({
+    id: "q1",
+    state: "queued",
+    status: "Queued — starts after Kokoro",
+    steps: [
+      { id: "install", label: "Build faster-whisper", state: "pending", weight: 9 },
+      { id: "wire", label: "Switch voice notes to it", state: "pending", weight: 1 },
+    ],
+    percent: 0,
+    etaSeconds: null,
+    queuedAt: 1_500,
+    queuedBehind: { id: "k1", kind: "voice-kokoro-install", title: "Installing the voice (Kokoro)", label: "Kokoro" },
+    ...over,
+  });
+
+  it("is its own card: says what it waits for, has no bar and no close button, and offers Cancel", async () => {
+    renderCards([queued()]);
+    const card = screen.getByTestId("background-task-card");
+    expect(card).toHaveAttribute("data-task-state", "queued");
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Queued — starts after Kokoro"));
+    expect(within(card).getByText("schedule")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.queryByTestId("background-task-dismiss")).toBeNull();
+    // Nothing of it has started, so it can always be dropped — even work that
+    // could not be stopped once running.
+    expect(screen.getByTestId("background-task-cancel")).toBeInTheDocument();
+    expect(screen.queryByTestId("background-task-no-cancel")).toBeNull();
+  });
+
+  it("names the memory-search model in the owner's language, and says no name when the box gave none", async () => {
+    renderCards([queued({ queuedBehind: { id: "e1", kind: "embed-model-download", title: "Downloading", label: "Memory search" } })]);
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Queued — starts after Memory search"));
+    cleanup();
+    renderCards([queued({ queuedBehind: null })]);
+    await waitFor(() => expect(screen.getByTestId("background-task-headline")).toHaveTextContent("Queued — starts when the install before it ends"));
+  });
+
+  it("cancels a queued install with the same POST as a running one", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    renderCards([queued()]);
+    fireEvent.click(screen.getByTestId("background-task-cancel"));
+    await waitFor(() => expect((fetchMock.mock.calls as unknown as [string, RequestInit?][])
+      .some(([url, init]) => url === "/setup-api/background-jobs/tasks" && JSON.parse(String(init?.body ?? "{}")).action === "cancel")).toBe(true));
+  });
+
+  it("is drawn while it waits, and polled like running work", () => {
+    expect(visibleBackgroundTasks([queued({ dismissed: true })], Date.now()).map((t) => t.id)).toEqual(["q1"]);
+  });
+});
+
+describe("work that has no Cancel (TASK-2128)", () => {
+  it("says it cannot be stopped half-way where the button would be, so nobody looks for it", async () => {
+    renderCards([task({ cancellable: false })]);
+    await waitFor(() => expect(screen.getByTestId("background-task-no-cancel")).toHaveTextContent("This step can't be stopped half-way"));
+    cleanup();
+    renderCards([task({ cancellable: true })]);
+    expect(screen.queryByTestId("background-task-no-cancel")).toBeNull();
+    cleanup();
+    // An ending is not a step in progress.
+    renderCards([task({ state: "failed", error: "boom", finishedAt: 3_000 })]);
+    expect(screen.queryByTestId("background-task-no-cancel")).toBeNull();
+  });
+});

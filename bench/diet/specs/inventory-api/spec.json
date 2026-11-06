@@ -1,0 +1,16 @@
+{
+  "id": "inventory-api",
+  "tier": "long",
+  "project": "inventory-api",
+  "task": "This folder is a Node.js Express inventory API. SPEC.md describes six features (items CRUD with validation, listing with search/pagination/sort, API-key auth on writes, JSON-file persistence with atomic writes, CSV export, stock movements with history). The test suite in test/ encodes the spec and fails today. Implement all six features as separate modules under src/ (routes, store, middleware, csv), with no new dependencies and without editing anything in test/, until `npm test` passes. Then start the server with `npm start` and confirm GET /items answers. Commit nothing yourself.",
+  "source": { "kind": "seed" },
+  "setup": "npm ci --no-audit --no-fund",
+  "accept": [
+    { "name": "npm test", "cmd": "npm test", "timeoutSec": 180 },
+    { "name": "tests unchanged", "cmd": "git diff --quiet \"$BASE\" -- test/ && [ -z \"$(git ls-files --others --exclude-standard -- test/)\" ]", "timeoutSec": 30 },
+    { "name": "no new dependencies", "cmd": "node __acceptance__/deps_check.js", "timeoutSec": 30 },
+    { "name": "split into modules under src/", "cmd": "n=$(find src -name '*.js' -not -path '*/node_modules/*' | wc -l); echo \"src js files: $n\"; [ \"$n\" -ge 4 ]", "timeoutSec": 30 }
+  ],
+  "probe": { "start": "npm start", "url": "http://127.0.0.1:{port}/items", "expectStatus": 200, "expectBodyIncludes": "items" },
+  "rubric": "Check the module split is real (store knows nothing about HTTP, routes do not touch fs, auth is a reusable middleware, CSV escaping is its own pure function) rather than one big file re-exported. Persistence must write a temp file in the same directory and rename it (no partial files), keep ids monotonic across reloads and deletes, and the server must still run with no DATA_FILE set (in-memory). Validation should be shared between POST and PATCH (PATCH validates only the fields present, still enforces sku uniqueness), errors are always JSON { error }, malformed JSON bodies give 400 not 500, and sort/limit/page parsing is defensive. No new dependencies, test/ untouched, no leftover debug logging."
+}

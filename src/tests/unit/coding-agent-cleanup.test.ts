@@ -31,7 +31,7 @@ import { readFirstTurn } from "@/tests/helpers/fake-harness";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
-vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
+vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce, announceCodingRunToChat: vi.fn(async () => undefined) }));
 
 const closeSessionsForRun = vi.hoisted(() => vi.fn(async () => 0));
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun }));
@@ -164,7 +164,7 @@ describe("the browser tab a run opened", () => {
       model: null, summary: null, error: null, numTurns: 0, filesTouched: [], commandsRun: 0,
       permissionDenials: 0, deniedActions: [], effort: "max", subagentsActive: 0, activeSubagents: [], subagents: [],
       subagentsTotal: 0, subagentsByType: {}, modelsUsed: [], commit: null, maxTurns: 150, tokensUsed: 0,
-      tokenLimit: null, thinkingTokens: 0, lastActivityAt: Date.now(), retries: 0, resumable: false,
+      thinkingTokens: 0, lastActivityAt: Date.now(), retries: 0, resumable: false,
       reviewOf: null, pr: null, progress: [], progressAt: [], todos: [], exitCode: null,
     }]));
     const stopped = lib.stopRun("run-abc12345");
@@ -313,6 +313,107 @@ describe("the group check itself", () => {
     // Nothing there any more: the answer is "no", not an error.
     expect(lib.killRunGroup(pgid)).toBe(false);
     expect(lib.killRunGroup(null)).toBe(false);
+  });
+});
+
+/**
+ * The keep-alive hook's rule, at the settle (scripts/coding-run-hook.mjs
+ * `leftovers`): a leftover is what the RUN started — what started after its
+ * spawn's first command. Whatever launched the harness shares its group and
+ * its scope from before that (a launcher's watcher stays until the session
+ * ends), and is not something "this run started" for the owner to end.
+ */
+describe("what a run left running, by its command clock", () => {
+  const HOOK = path.resolve(__dirname, "../../../scripts/coding-run-hook.mjs");
+  /** The harness's first tool call: the PreToolUse guard from its --settings, run as Claude Code runs it. */
+  const FIRST_COMMAND = [
+    `guard=$(${JSON.stringify(process.execPath)} -e 'const a=process.argv;const i=a.indexOf("--settings");const pre=i<0?[]:(JSON.parse(a[i+1]).hooks.PreToolUse||[]);const m=pre.find((x)=>x.matcher==="*");process.stdout.write(m?m.hooks[0].command:"")' -- "$@")`,
+    '[ -n "$guard" ] && sh -c "$guard" </dev/null',
+  ].join("\n");
+  /** The end of the harness's turn: its Stop hook from its --settings, run as Claude Code runs it. */
+  const STOP_HOOK = [
+    `stop=$(${JSON.stringify(process.execPath)} -e 'const a=process.argv;const i=a.indexOf("--settings");const st=i<0?[]:(JSON.parse(a[i+1]).hooks.Stop||[]);process.stdout.write(st.length?st[0].hooks[0].command:"")' -- "$@")`,
+    `[ -n "$stop" ] && echo '{"hook_event_name":"Stop"}' | sh -c "$stop" >/dev/null`,
+  ].join("\n");
+  let pidFile: string;
+  beforeEach(() => {
+    // The hook script where this checkout's runs find it.
+    fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
+    fs.copyFileSync(HOOK, path.join(root, "scripts", "coding-run-hook.mjs"));
+    pidFile = path.join(base, "sleeper.pid");
+  });
+  afterEach(() => {
+    const pid = fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, "utf8")) : 0;
+    try {
+      if (pid > 1) process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  });
+
+  it("is not what was in the run's group before its first command — a launcher's process", async () => {
+    readyDevice([
+      `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
+      "sleep 0.3",
+      FIRST_COMMAND,
+      'mkdir -p "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin"',
+      'ln -s /nonexistent/python3 "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin/python"',
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const settled = await finished(run.id);
+    expect(settled.status).toBe("completed");
+    // Nothing of the run's is left to change the evidence folder, so its prune
+    // ran, after the verdict and without waiting on the launcher's process.
+    expect(settled.progress.some((l) => l.startsWith("Removed from the evidence folder"))).toBe(true);
+    // The launcher's process outlived the harness, in the harness's group...
+    const sleeper = Number(fs.readFileSync(pidFile, "utf8"));
+    expect(() => process.kill(sleeper, 0)).not.toThrow();
+    // ...and is not the run's leftover: nothing offered to end, no handle kept on it.
+    await vi.waitFor(() => expect(lib.getRun(run.id)?.pgid).toBeNull(), { timeout: 10_000 });
+    const after = lib.getRun(run.id);
+    expect(after?.leftover).toBe(false);
+    expect(after?.progress.join(" ")).not.toMatch(/still running/i);
+  });
+
+  it("is not the launcher's process either when the run called no tool at all", async () => {
+    // Its own Stop hook ran with the clock still empty: no command ran, so
+    // nothing in its group can be the run's.
+    readyDevice([
+      `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
+      "sleep 0.3",
+      STOP_HOOK,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Answer it", projectId: "site", source: "agent" });
+    expect((await finished(run.id)).status).toBe("completed");
+    expect(() => process.kill(Number(fs.readFileSync(pidFile, "utf8")), 0)).not.toThrow();
+    await vi.waitFor(() => expect(lib.getRun(run.id)?.pgid).toBeNull(), { timeout: 10_000 });
+    expect(lib.getRun(run.id)?.leftover).toBe(false);
+  });
+
+  it("is what a command started after it, though the harness's going reparented it", async () => {
+    readyDevice([
+      FIRST_COMMAND,
+      "sleep 0.05",
+      `sleep 60 & echo $! > ${JSON.stringify(pidFile)}`,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Serve it", projectId: "site", source: "agent" });
+    expect((await finished(run.id)).status).toBe("completed");
+    await vi.waitFor(() => expect(lib.getRun(run.id)?.progress.join(" ")).toMatch(/still running/i), { timeout: 10_000 });
+    const after = lib.getRun(run.id);
+    expect(after?.leftover).toBe(true);
+    expect(after?.pgid).toBeTruthy();
+    // ...kept for the owner's Kill, which still ends it.
+    expect(lib.killRunLeftovers(run.id).leftover).toBe(false);
+    await vi.waitFor(() => expect(groupAlive(after?.pgid as number)).toBe(false), { timeout: 8_000 });
   });
 });
 

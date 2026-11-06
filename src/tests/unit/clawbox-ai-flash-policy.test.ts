@@ -73,6 +73,38 @@ async function competingWriter() {
 }
 
 describe("Flash model-policy repair under the native cross-process lock", () => {
+  it("waits for a starting gateway before taking the lock, and not again inside it", async () => {
+    // Held with the lock taken, the write would keep the gateway's own
+    // pre-start CLI writes out of the lock for the whole pre-start.
+    await fs.writeFile(configPath, JSON.stringify(configWithAllow([PRO])));
+    vi.resetModules();
+    // Pending until released, so the test can see the lock is still free
+    // while the hold waits: taken before the hold, it would be held here.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = vi.fn<typeof import("@/lib/gateway-start-guard").holdWhileGatewayStarts>(async () => {
+      await gate;
+      return false;
+    });
+    vi.doMock("@/lib/gateway-start-guard", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/gateway-start-guard")>()),
+      holdWhileGatewayStarts: held,
+    }));
+    try {
+      const { repairClawboxAiFlashModelPolicy } = await import("@/lib/openclaw-config");
+      const repairing = repairClawboxAiFlashModelPolicy();
+      await vi.waitFor(() => expect(held).toHaveBeenCalledTimes(1));
+      const lock = await fs.open(`${configPath}.lock`, "wx");
+      await lock.close();
+      await fs.unlink(`${configPath}.lock`);
+      release();
+      expect(await repairing).toBe(true);
+      expect(held.mock.calls.map(([label]) => label)).toEqual(["locked config write"]);
+    } finally {
+      vi.doUnmock("@/lib/gateway-start-guard");
+    }
+  });
+
   it.each([PRO, "clawai/deepseek-v4-pro"])("appends Flash for %s without changing any other config", async (allowedPro) => {
     const config = configWithAllow([allowedPro, "anthropic/*"]);
     await fs.writeFile(configPath, JSON.stringify(config));

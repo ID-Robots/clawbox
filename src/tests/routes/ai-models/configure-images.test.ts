@@ -83,7 +83,12 @@ const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() 
   LLAMACPP_PROXY_BASE_URL: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
 }));
 
-vi.mock("@/lib/openclaw-config", () => ({
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
+vi.mock("@/lib/openclaw-config", async () => ({
+  ...(await import("./config-write-passthrough")).configWritePassthrough,
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
   // finished coming back" from "the restart was refused", and `instanceof
@@ -123,6 +128,9 @@ vi.mock("@/lib/llamacpp", () => ({
   getLlamaCppContextWindow: vi.fn().mockReturnValue(131072),
   getLlamaCppMaxTokens: vi.fn().mockReturnValue(131072),
   getLlamaCppProxyBaseUrl: vi.fn().mockReturnValue(LLAMACPP_PROXY_BASE_URL),
+  // The real declaration: the row a 2026.10+ core gets (src/lib/llamacpp.ts).
+  LLAMACPP_REASONING_COMPAT: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+  llamaCppThinkingDefaultOp: (ref: string) => [`agents.defaults.models[${JSON.stringify(ref)}].params.thinking`, "off"],
 }));
 
 vi.mock("@/lib/local-ai-runtime", () => ({
@@ -139,6 +147,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 // generation is stated rather than inherited from wherever the suite runs.
 vi.mock("@/lib/openclaw-core-generation", () => ({
   installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+  installedOpenclawCoreAtLeast: vi.fn(async () => true),
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({

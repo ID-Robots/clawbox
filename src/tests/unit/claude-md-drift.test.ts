@@ -15,10 +15,18 @@ import { describe, expect, it } from "vitest";
  *    `ClawKeepApp.tsx` has never had: it names memory nowhere.
  *
  * These cases hold the document to the tree rather than to its own memory.
+ *
+ * The document is CLAUDE.md AND the area files it links under docs/agents/:
+ * CLAUDE.md is the short map, and the per-area notes these cases check moved
+ * into those files verbatim (claude-md-map.test.ts), so they are read as one.
  */
 
 const REPO = process.cwd();
-const DOC = fs.readFileSync(path.join(REPO, "CLAUDE.md"), "utf-8");
+const AGENT_DOCS = path.join(REPO, "docs", "agents");
+const DOC = [
+  path.join(REPO, "CLAUDE.md"),
+  ...fs.readdirSync(AGENT_DOCS).filter((name) => name.endsWith(".md")).sort().map((name) => path.join(AGENT_DOCS, name)),
+].map((file) => fs.readFileSync(file, "utf-8")).join("\n");
 
 /** Every source file under the trees CLAUDE.md describes, by name and by repo-relative path. */
 function indexSources(): { byName: Map<string, string[]>; paths: Set<string> } {

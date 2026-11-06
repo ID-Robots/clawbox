@@ -172,6 +172,8 @@ export default function TerminalSettingsSheet({ onClose }: { onClose: () => void
     { label: tr("terminal.prevTab", "Previous tab"), keys: [shortcutLabel("prevTab", mac), shortcutFallbackLabel("prevTab")] },
     { label: tr("terminal.copy", "Copy"), keys: [shortcutLabel("copy", mac)] },
     { label: tr("terminal.paste", "Paste"), keys: [shortcutLabel("paste", mac)] },
+    // Not the Screenshot app's capture keys: they stand aside while a terminal
+    // has the focus (TASK-1491), so the shell gets every key typed into it.
   ];
 
   const isDefault = JSON.stringify(settings) === JSON.stringify(DEFAULT_TERMINAL_SETTINGS);

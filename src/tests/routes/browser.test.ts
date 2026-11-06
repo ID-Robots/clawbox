@@ -15,6 +15,7 @@ const mockPage = vi.hoisted(() => ({
   title: vi.fn().mockResolvedValue("Google"),
   screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
   bringToFront: vi.fn().mockResolvedValue(undefined),
+  isClosed: vi.fn().mockReturnValue(false),
   mouse: {
     click: vi.fn().mockResolvedValue(undefined),
     dblclick: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +66,14 @@ const probeVerdict = vi.hoisted(() => ({ value: null as "ours" | "foreign" | "do
 const realBrowser = vi.hoisted(() => ({ value: true }));
 const getRealBrowser = vi.hoisted(() => vi.fn(async () => realBrowser.value));
 const writeBrowserLaunchEnv = vi.hoisted(() => vi.fn(async () => {}));
+// The configured browser's own process serving the configured port, as /proc
+// would show it — none unless a case says so. Never the real /proc: on a
+// ClawBox the suite would find the box's own desktop browser there.
+const browserOnPort = vi.hoisted(() => ({ value: [] as number[] }));
+// Any process on the configured profile, port or not.
+const browserOnProfile = vi.hoisted(() => ({ value: [] as number[] }));
+// The pid `ss` says is listening on the CDP port.
+const portListener = vi.hoisted(() => ({ value: null as number | null }));
 
 vi.mock("child_process", () => ({
   execFile: execFileMock,
@@ -93,6 +102,7 @@ vi.mock("@/lib/cdp-probe", () => ({
     }
   },
   describePortOwner: async () => "",
+  portOwnerPid: async () => portListener.value,
   // A path by default: the route now REFUSES to launch without one (there is
   // no Chromium to launch), and every headless case here is about a box that
   // has the runtime. The one case that is about a box without it sets this to
@@ -111,6 +121,12 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
 // The desktop launch writes the owner's start page where scripts/launch-browser.sh
 // reads it — ~/.cache/clawbox/browser.env, which on this box is the REAL file the
 // running Chromium was started from. Never from a test.
+vi.mock("@/lib/process-match", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/process-match")>()),
+  findBrowserOnPortPids: async () => browserOnPort.value,
+  findClawboxBrowserPids: async () => browserOnProfile.value,
+}));
+
 vi.mock("@/lib/browser-setup", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/browser-setup")>()),
   writeBrowserLaunchEnv,
@@ -173,6 +189,7 @@ describe("/setup-api/browser", () => {
     mockPage.title.mockResolvedValue("Google");
     mockPage.screenshot.mockResolvedValue(Buffer.from("PNG"));
     mockPage.bringToFront.mockResolvedValue(undefined);
+    mockPage.isClosed.mockReturnValue(false);
     mockPage.mouse.click.mockResolvedValue(undefined);
     mockPage.mouse.dblclick.mockResolvedValue(undefined);
     mockPage.mouse.move.mockResolvedValue(undefined);
@@ -197,6 +214,11 @@ describe("/setup-api/browser", () => {
     mockOwnedBrowser.isConnected.mockReturnValue(true);
     launchChromium.mockResolvedValue(mockOwnedBrowser);
     probeVerdict.value = null;
+    browserOnPort.value = [];
+    browserOnProfile.value = [];
+    portListener.value = null;
+    process.env.CLAWBOX_BROWSER_CDP_PORT = "";
+    process.env.CLAWBOX_BROWSER_PROFILE_DIR = "";
     // The install writes this into the web server's env on a test box; the
     // sandbox cases below drive it, so every other case starts from "off".
     delete process.env.CLAWBOX_TEST_MODE;
@@ -307,6 +329,83 @@ describe("/setup-api/browser", () => {
     expect(mockOwnedBrowser.close).not.toHaveBeenCalled();
     await sendAction("close", second);
     expect(mockOwnedBrowser.close).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * TASK-1480: the desktop browser's port is the owner's to configure
+   * (src/lib/desktop-browser-config.ts) — here through its environment
+   * override, which outranks the launch env file.
+   */
+  it("attaches to the configured CDP port, with that port's Origin", async () => {
+    process.env.CLAWBOX_BROWSER_CDP_PORT = "9222";
+    try {
+      await launchSession();
+      expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:9222", {
+        timeout: 30_000,
+        headers: { Origin: "http://127.0.0.1:9222" },
+      });
+    } finally {
+      process.env.CLAWBOX_BROWSER_CDP_PORT = "";
+    }
+  });
+
+  it("attaches to the owner's own browser — started without our allowed Origin — by sending none", async () => {
+    process.env.CLAWBOX_BROWSER_CDP_PORT = "9222";
+    try {
+      // The owner started it, so it refuses our Origin like a stranger's
+      // browser would; its process (configured profile + port) is what says
+      // it is the desktop browser.
+      probeVerdict.value = "foreign";
+      browserOnPort.value = [4242];
+      portListener.value = 4242;
+
+      const { body } = await launchSession();
+
+      expect(body.browser).toBe("desktop");
+      expect(launchChromium).not.toHaveBeenCalled();
+      expect(connectOverCDP).toHaveBeenCalledWith("http://127.0.0.1:9222", { timeout: 30_000 });
+    } finally {
+      process.env.CLAWBOX_BROWSER_CDP_PORT = "";
+    }
+  });
+
+  it("does not take another browser's answer for the owner's when the owner's never bound the port", async () => {
+    process.env.CLAWBOX_BROWSER_CDP_PORT = "9222";
+    try {
+      // The owner's browser was GIVEN 9222, but a different browser (pid
+      // 5150) is the one listening and refusing our Origin.
+      probeVerdict.value = "foreign";
+      browserOnPort.value = [4242];
+      portListener.value = 5150;
+
+      const { body } = await launchSession();
+
+      expect(body.browser).toBe("headless");
+      expect(connectOverCDP).not.toHaveBeenCalled();
+    } finally {
+      process.env.CLAWBOX_BROWSER_CDP_PORT = "";
+    }
+  });
+
+  it("never starts the unit over the owner's browser when it is open without the port — it verifies headless", async () => {
+    process.env.CLAWBOX_BROWSER_PROFILE_DIR = "/home/clawbox/.config/google-chrome-debug";
+    try {
+      setDesktopBrowserReady(Number.MAX_SAFE_INTEGER); // nothing ever answers the port
+      browserOnProfile.value = [4242];
+
+      const { body } = await launchSession();
+
+      expect(body.browser).toBe("headless");
+      expect(execFileMock).not.toHaveBeenCalledWith(
+        "/usr/bin/sudo",
+        ["/usr/bin/systemctl", "start", "clawbox-browser.service"],
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(writeBrowserLaunchEnv).not.toHaveBeenCalled();
+    } finally {
+      process.env.CLAWBOX_BROWSER_PROFILE_DIR = "";
+    }
   });
 
   it("reuses the shared CDP connection across launches", async () => {
@@ -460,6 +559,15 @@ describe("/setup-api/browser", () => {
       expect(closed.browser).toBe("desktop");
     });
 
+    it("opens a tab of its own in the desktop browser instead of borrowing the owner's last one", async () => {
+      // The desktop browser is the owner's too: `pages().at(-1)` there may be
+      // the tab they are reading, and the session's close would then close it.
+      mockContext.newPage.mockClear();
+      const { body } = await launchSession();
+      expect(body.browser).toBe("desktop");
+      expect(mockContext.newPage).toHaveBeenCalledTimes(1);
+    });
+
     it("goes straight to the headless Chromium when it is off, without touching the owner's screen", async () => {
       realBrowser.value = false;
 
@@ -472,6 +580,25 @@ describe("/setup-api/browser", () => {
       expect(connectOverCDP).not.toHaveBeenCalled();
       expect(execFileMock).not.toHaveBeenCalled();
       expect(writeBrowserLaunchEnv).not.toHaveBeenCalled();
+    });
+
+    it("answers 410 and drops a headless session whose page closed with its Chromium", async () => {
+      // A headless page goes when its browser exits. Answering 200 with no
+      // picture kept the dead session alive, and every capture came back empty.
+      realBrowser.value = false;
+      const { body } = await launchSession();
+      expect(body.browser).toBe("headless");
+
+      mockPage.isClosed.mockReturnValue(true);
+      mockPage.screenshot.mockClear();
+      const gone = await sendAction("screenshot", body.sessionId);
+      expect(gone.res.status).toBe(410);
+      expect(gone.body.error).toBe("Browser tab was closed");
+      expect(mockPage.screenshot).not.toHaveBeenCalled();
+
+      const again = await sendAction("screenshot", body.sessionId);
+      expect(again.res.status).toBe(400);
+      expect(again.body.error).toBe("No active browser session");
     });
 
     it("starts the desktop browser when it is on and nothing is up yet", async () => {

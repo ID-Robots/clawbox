@@ -22,7 +22,7 @@ vi.mock("fs/promises", () => ({
 // not. Mocked so the tests say the answer outright rather than minting a
 // session against a secret on disk; the helper's own suite covers the cookie.
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn().mockResolvedValue(false),
+  hasPersonSession: vi.fn().mockResolvedValue(false),
 }));
 
 // Who may READ: the route asks `requireSession` (bearer, cookie, test mode —
@@ -31,6 +31,9 @@ vi.mock("@/lib/owner-session", () => ({
 // suite covers the credentials.
 vi.mock("@/lib/route-auth", () => ({
   requireSession: vi.fn(),
+  // Nobody signed in: the language read and write act on the box default.
+  // preferences-language.test.ts covers a user's own language.
+  sessionIdentity: vi.fn().mockResolvedValue(null),
 }));
 
 import { NextResponse } from "next/server";
@@ -225,8 +228,8 @@ describe("/setup-api/preferences", () => {
       };
 
       it("refuses the whole request from a caller without an owner session", async () => {
-        const { hasOwnerSession } = await import("@/lib/owner-session");
-        vi.mocked(hasOwnerSession).mockResolvedValue(false);
+        const { hasPersonSession } = await import("@/lib/owner-session");
+        vi.mocked(hasPersonSession).mockResolvedValue(false);
         const req = new Request("http://localhost/setup-api/preferences", {
           method: "POST",
           headers: { Authorization: "Bearer not-a-cookie" },
@@ -241,8 +244,8 @@ describe("/setup-api/preferences", () => {
       });
 
       it("lands from the owner's own session", async () => {
-        const { hasOwnerSession } = await import("@/lib/owner-session");
-        vi.mocked(hasOwnerSession).mockResolvedValue(true);
+        const { hasPersonSession } = await import("@/lib/owner-session");
+        vi.mocked(hasPersonSession).mockResolvedValue(true);
         const req = new Request("http://localhost/setup-api/preferences", {
           method: "POST",
           headers: { Cookie: "clawbox_session=owner" },
@@ -252,20 +255,20 @@ describe("/setup-api/preferences", () => {
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ ok: true });
         expect(mockSetMany).toHaveBeenCalledWith({ "pref:installed_meta": planted.installed_meta });
-        expect(hasOwnerSession).toHaveBeenCalledTimes(1);
+        expect(hasPersonSession).toHaveBeenCalledTimes(1);
       });
 
       it("never asks about the session for a body that names no installed_* key", async () => {
         // The desktop's ordinary writes (wallpaper, window state) and the
         // agent's `preferences_set` stay exactly as they were.
-        const { hasOwnerSession } = await import("@/lib/owner-session");
+        const { hasPersonSession } = await import("@/lib/owner-session");
         const req = new Request("http://localhost/setup-api/preferences", {
           method: "POST",
           body: JSON.stringify({ wp_opacity: 80, hidden_installed: ["x"] }),
         });
         const res = await POST(req);
         expect(res.status).toBe(200);
-        expect(hasOwnerSession).not.toHaveBeenCalled();
+        expect(hasPersonSession).not.toHaveBeenCalled();
         expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80, "pref:hidden_installed": ["x"] });
       });
     });

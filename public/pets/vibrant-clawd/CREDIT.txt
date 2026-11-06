@@ -47,4 +47,6 @@ Where it is used
     default, wherever the crab is the placeholder; an ordinary built-in,
     already-installed tile on a Hermes-only box;
   - public/clawbox-crab.png (and its inlined copy, and the docs-site copy) is
-    a still of row 0 frame 0, cut by scripts/generate-crab-still.mjs.
+    a still of row 0 frame 0, cut by scripts/generate-crab-still.mjs;
+    public/clawbox-crab-sleep.png, cut by the same script from row 6 at the
+    first of pet.json's `sleepFrames`, is that still with the eyes shut.

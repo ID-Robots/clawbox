@@ -1,6 +1,9 @@
 import { uuid } from "@/lib/chat-history-cache";
+import { chatFailureNote, type ChatFailureWords } from "@/lib/chat-error-text";
+import { userTabKeyFor } from "@/lib/chat-scope";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
 import { commandsFromOpenClawList, type SlashCommand } from "@/lib/chat-slash-commands";
+import { openclawSessionTokens, type ConversationSize } from "@/lib/chat-local-fit";
 import {
   isInternalRoutingMessage,
   isFailedImageGenerationNotice,
@@ -55,6 +58,54 @@ export const HISTORY_LIMIT = 50;
  */
 export const SPOKEN_HISTORY_TIMEOUT_MS = 10_000;
 
+/**
+ * The DELTA half of `chat.history`, and the reason a read no longer has to pull
+ * fifty messages to learn that one arrived.
+ *
+ * The RPC takes an optional `cursor`. A cursor shaped `history-page:…` asks for a
+ * WINDOW of the transcript; any other cursor is a delta cursor, and the gateway
+ * answers with only what was appended since it:
+ *
+ *   { kind: "delta", messages, deltaCursor, … }  — what happened since
+ *   { kind: "reset" }                           — "I cannot tell you; read a page"
+ *
+ * A FULL page carries `deltaCursor` too, so a client's first read arms this and
+ * every read after it is the difference.
+ *
+ * A delta row is an ENVELOPE — `{ sessionKey, message, messageId, messageSeq,
+ * runId }` — around the same message object a page carries. `deltaHistoryRows`
+ * unwraps it, so the merge feeds `projectGatewayHistory` rows of one shape.
+ *
+ * OPTIONAL CAPABILITY, both ways: a core that predates the cursor REJECTS the
+ * param (the RPC validates what it is given) and one that predates the delta
+ * simply answers a page. The first is retried once without the cursor, the
+ * second is recognised by the absence of `kind` — so on an old box this is
+ * exactly the full read it always was, and no caller has to know which box it
+ * is talking to.
+ */
+/** The cursor that continues a delta, when the gateway offered one. */
+function asDeltaCursor(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * The rows of a delta, unwrapped from their envelopes.
+ *
+ * A row with no `message` field is already a message — the shape a page returns,
+ * and the shape a core that answers deltas without envelopes uses — so it is
+ * passed through rather than dropped.
+ */
+export function deltaHistoryRows(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((row) => {
+    if (row && typeof row === "object" && "message" in row) {
+      const inner = (row as { message?: unknown }).message;
+      if (inner && typeof inner === "object") return inner;
+    }
+    return row;
+  });
+}
+
 /** Strip gateway wrapper tags like `<final>`, `<thinking>`, etc. */
 export function stripGatewayTags(text: string): string {
   return text.replace(/<\/?(?:final|thinking|response|answer|reply)>/gi, "").trim();
@@ -82,6 +133,35 @@ export function extractText(msg: unknown): string {
   return "";
 }
 
+
+/** The gateway's `customType` for a run that ended in an error before any reply. */
+const RUN_FAILED_BEFORE_REPLY = "run-failed-before-reply";
+
+/** The gateway's own preface on that row, ahead of the raw error it quotes. */
+const STORED_FAILURE_PREFACE_RE = /^\s*Your request couldn['\u2019]t be completed:\s*/i;
+
+/**
+ * The stored failure row as the chat's own failure note — the same sentence,
+ * tone and button the live error frame paints (`chatFailureNote`), tagged with
+ * the failed run so the live copy and this one are never shown side by side.
+ * Never the row's own text: it quotes the gateway's error for an operator,
+ * device path and CLI instruction included.
+ */
+function storedRunFailure(m: Record<string, unknown>, words: ChatFailureWords | undefined): HistoryMessage | null {
+  if (m.customType !== RUN_FAILED_BEFORE_REPLY || m.display === false) return null;
+  const stored = typeof m.content === "string" ? m.content : extractText(m);
+  const note = chatFailureNote(stored.replace(STORED_FAILURE_PREFACE_RE, ""), undefined, words);
+  const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+  const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+  return {
+    role: "system",
+    text: note.text,
+    timestamp: (m.timestamp as number) || 0,
+    ...(runId ? { failedRun: runId } : {}),
+    ...(note.variant ? { variant: note.variant } : {}),
+    ...(note.actions ? { actions: note.actions } : {}),
+  };
+}
 
 /**
  * Turn a raw `chat.history` page into the transcript the chat renders.
@@ -114,7 +194,7 @@ export function extractText(msg: unknown): string {
 export function projectGatewayHistory(
   rawMessages: unknown[],
   spokenPayload: unknown,
-  options?: { imageWaitFrom?: number | null },
+  options?: { imageWaitFrom?: number | null; failureWords?: ChatFailureWords },
 ): HistoryPage {
   const imageWaitFrom = options?.imageWaitFrom ?? null;
   const watchingImage = imageWaitFrom !== null;
@@ -128,6 +208,17 @@ export function projectGatewayHistory(
     if (!msg || typeof msg !== "object") continue;
     const m = msg as Record<string, unknown>;
     const role = (m.role as string)?.toLowerCase();
+    // The box's own record of a run that failed before it replied. Skipped with
+    // every other non-chat row until 2026-10-30, and that is how a ClawBox AI
+    // turn with no usable sign-in left the owner's question with nothing under
+    // it: the live error line went up, the `session.message` push for this
+    // very row re-read the transcript, and the mascot chat's re-read — which
+    // keeps no notes of its own — painted the transcript without it.
+    if (role === "custom") {
+      const failure = storedRunFailure(m, options?.failureWords);
+      if (failure) chatMsgs.push(failure);
+      continue;
+    }
     if (role !== "user" && role !== "assistant") continue;
     const raw = extractText(m);
     if (isSentinel(raw)) continue;
@@ -274,6 +365,41 @@ function gatewayError(err: unknown): HarnessError {
   return asHarnessError(err, "upstream");
 }
 
+/** The refusal a multi-agent gateway gives a call that names no agent. */
+const AGENT_SELECTION_REQUIRED = "AGENT_SELECTION_REQUIRED";
+
+/**
+ * Did the gateway refuse because it cannot tell WHICH agent was meant?
+ *
+ * That answer does not change on a retry: the same request names the same
+ * (missing) agent every time, so a caller must stop asking rather than loop.
+ * Walks `cause` because `gatewayError` wraps the frame rejection, and reads
+ * `details.code` as well as `code` since the core may nest it.
+ */
+export function isAgentSelectionRequired(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const e = current as { code?: unknown; message?: unknown; details?: unknown; cause?: unknown };
+    if (e.code === AGENT_SELECTION_REQUIRED) return true;
+    const details = e.details as { code?: unknown } | null | undefined;
+    if (details && typeof details === "object" && details.code === AGENT_SELECTION_REQUIRED) return true;
+    if (typeof e.message === "string" && e.message.includes(AGENT_SELECTION_REQUIRED)) return true;
+    current = e.cause;
+  }
+  return false;
+}
+
+/**
+ * The agent a fully qualified session key names (`agent:<agentId>:<rest>`),
+ * or `undefined` for any other shape. Never guessed: a key that does not say
+ * which agent it belongs to yields nothing, so no caller picks one for it.
+ */
+export function agentIdFromSessionKey(key: string): string | undefined {
+  const parts = key.split(":");
+  if (parts.length < 3 || parts[0] !== "agent" || !parts[1]) return undefined;
+  return parts[1].toLowerCase();
+}
+
 export class OpenClawGatewayAdapter implements HarnessAdapter {
   readonly id = "openclaw" as const;
 
@@ -285,6 +411,40 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
      *  extras (Bun adds `preconnect`) a test double has no business providing. */
     private readonly fetchImpl: FetchLike = (input, init) => fetch(input, init),
   ) {}
+
+  /**
+   * The last raw rows this adapter read for a session, and the gateway cursor
+   * that continues them.
+   *
+   * RAW, not projected: the six shipped fixes in `projectGatewayHistory` are
+   * the reason a merge must not re-derive anything, so a delta is appended to
+   * rows and the lot is projected again — one transcript, one rule set. Keyed
+   * by session, because a tab switch is a different transcript and a cursor
+   * pointing into the old one would graft two conversations together.
+   */
+  private historyDelta: { sessionKey: string; rows: unknown[]; cursor: string } | null = null;
+
+  /**
+   * Which cleaned transcript `historyDelta` belongs to.
+   *
+   * A read is a round trip, and the owner can clear or delete the session while
+   * one is in flight (a reset is two requests of its own; the spoken-history
+   * half is a third). Without this, the read finishes AFTER the reset and puts
+   * the forgotten rows back as the base, and the next delta appends the new
+   * conversation onto a transcript the owner believes is gone.
+   */
+  private historyGeneration = 0;
+
+  /**
+   * The order reads started in, and the one whose base is current.
+   *
+   * Two reads can overlap — the panel after a push, the catch-up on open — and
+   * the slower one may carry the older cursor. Only a read newer than the last
+   * committed one replaces the base; a stale arrival returns its own rows to
+   * its caller and leaves the cache alone.
+   */
+  private historyReadSeq = 0;
+  private historyCommittedSeq = 0;
 
   connect(): Promise<void> {
     return this.link.open();
@@ -361,6 +521,66 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     } catch (err) {
       throw gatewayError(err);
     }
+    // The rows behind this cursor are the conversation that was just forgotten.
+    // Kept, they would be the base a delta appends to, and the next read would
+    // put the cleared transcript back on screen.
+    this.historyDelta = null;
+    // A read that started before this reset must not put those rows back.
+    this.historyGeneration += 1;
+    this.historyCommittedSeq = this.historyReadSeq;
+  }
+
+  /**
+   * The session row's own numbers (`sessions.describe`): the last prompt as
+   * measured and the core's pre-prompt estimate, whichever is larger. The
+   * limit is left to the caller, who knows the local window; the row's
+   * `contextTokens` is the budget of whatever model the session is on NOW, and
+   * right after a switch that can still be the cloud model's.
+   */
+  async conversationSize(sessionKey: string): Promise<ConversationSize | null> {
+    if (!sessionKey) return null;
+    try {
+      const res = await this.link.request("sessions.describe", { key: sessionKey }) as { session?: unknown } | null;
+      const tokens = openclawSessionTokens(res?.session ?? null);
+      return tokens === null ? null : { tokens };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `sessions.compact` without `maxLines`: the gateway summarizes the session
+   * with its configured compaction model — the cloud model while the primary is
+   * on the box (src/lib/local-compaction-model.ts). A refusal, an answer that
+   * says nothing was compacted, or one whose `result` counts show the history
+   * no smaller rejects: the caller offers a new chat instead. An answer
+   * without both counts is taken at its word.
+   */
+  async compactConversation(sessionKey: string): Promise<{ tokensBefore?: number; tokensAfter?: number }> {
+    let res: { ok?: unknown; compacted?: unknown; result?: { tokensBefore?: unknown; tokensAfter?: unknown } } | null;
+    try {
+      res = await this.link.request("sessions.compact", { key: sessionKey }) as typeof res;
+    } catch (err) {
+      throw gatewayError(err);
+    }
+    if (!res || res.ok === false || res.compacted === false) {
+      throw new HarnessError("upstream", "The conversation was not shortened.");
+    }
+    // A history read cached before the summary would graft the old rows back.
+    if (sessionKey === this.link.sessionKey()) {
+      this.historyDelta = null;
+      this.historyGeneration += 1;
+      this.historyCommittedSeq = this.historyReadSeq;
+    }
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    const tokensBefore = num(res.result?.tokensBefore);
+    const tokensAfter = num(res.result?.tokensAfter);
+    // A summary that left the conversation no smaller is not a shortening
+    // (the Hermes twin, /setup-api/hermes/compress, answers 409 for the same).
+    if (tokensBefore !== undefined && tokensAfter !== undefined && tokensAfter >= tokensBefore) {
+      throw new HarnessError("upstream", "The conversation was not shortened.");
+    }
+    return { tokensBefore, tokensAfter };
   }
 
   /**
@@ -371,13 +591,19 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    * structure (`cron:`, `dashboard:` and friends are reserved shapes).
    */
   newSessionKey(mainSessionKey: string): string {
+    const tabId = uuid().replace(/-/g, "").slice(0, 12).toLowerCase();
+    // A ClawBox user other than the owner chats under their own keys
+    // (src/lib/chat-scope.ts): a tab beside THEIR main is theirs too, or the
+    // gateway relay would refuse it as someone else's conversation.
+    const userTab = userTabKeyFor(mainSessionKey, tabId);
+    if (userTab) return userTab;
     const parts = mainSessionKey.split(":");
     // Lowercased like the suffix, and for the same reason: the gateway
     // lowercases the key it files the session under, so a main key that ever
     // arrived with an uppercase agent id would leave the popup persisting a
     // tab key that no longer names the session behind it.
     const agentId = (parts[0] === "agent" && parts[1] ? parts[1] : "main").toLowerCase();
-    return `agent:${agentId}:clawbox-${uuid().replace(/-/g, "").slice(0, 12).toLowerCase()}`;
+    return `agent:${agentId}:clawbox-${tabId}`;
   }
 
   ownsSessionKey(key: string): boolean {
@@ -390,6 +616,15 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    * aborted first and the delete gets one paced retry.
    */
   async deleteSession(key: string, opts: { running: boolean }): Promise<void> {
+    // The transcript behind this key is going away; a cursor pointing into it
+    // would graft a deleted conversation onto whatever takes its place.
+    if (this.historyDelta?.sessionKey === key) this.historyDelta = null;
+    // Same reason as the reset: a read in flight for this key belongs to a
+    // transcript that is about to be deleted.
+    if (key === this.link.sessionKey()) {
+      this.historyGeneration += 1;
+      this.historyCommittedSeq = this.historyReadSeq;
+    }
     if (opts.running) {
       await this.link.request("chat.abort", { sessionKey: key }).catch(() => { /* best effort */ });
     }
@@ -402,14 +637,18 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
   }
 
   async loadHistory(options?: HistoryOptions): Promise<HistoryPage> {
-    let result: Record<string, unknown>;
+    const sessionKey = this.link.sessionKey();
+    const limit = options?.limit ?? HISTORY_LIMIT;
+    const generation = this.historyGeneration;
+    const readSeq = ++this.historyReadSeq;
+    let rows: unknown[];
+    let cursor: string | null;
     let spokenPayload: unknown;
     try {
-      [result, spokenPayload] = await Promise.all([
-        this.link.request("chat.history", {
-          sessionKey: this.link.sessionKey(),
-          limit: options?.limit ?? HISTORY_LIMIT,
-        }) as Promise<Record<string, unknown>>,
+      // Both halves at once: the transcript's rows and the durable spoken-reply
+      // supplement are independent, and the supplement is a local route.
+      [{ rows, cursor }, spokenPayload] = await Promise.all([
+        this.readHistoryRows(sessionKey, limit),
         this.fetchImpl("/setup-api/chat/spoken-history", {
           cache: "no-store",
           // `.catch` covers a REJECTED request; it does nothing for one that
@@ -424,8 +663,86 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     } catch (err) {
       throw gatewayError(err);
     }
-    const msgs = (result.messages as unknown[]) || [];
-    return projectGatewayHistory(msgs, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
+    // The owner cleared or deleted the session while this read was out: these
+    // rows are the conversation that was just forgotten, so they are neither
+    // cached nor handed back to be painted.
+    if (generation !== this.historyGeneration) {
+      return projectGatewayHistory([], { items: [] }, { imageWaitFrom: options?.imageWaitFrom });
+    }
+    // Armed only when the gateway says it can continue from here. A box that
+    // answered a page WITHOUT a cursor gets the same page next time, exactly as
+    // before. Only the newest read may arm it: a slower older read that landed
+    // after a newer one would otherwise set the base back a step.
+    if (readSeq > this.historyCommittedSeq) {
+      this.historyCommittedSeq = readSeq;
+      this.historyDelta = cursor ? { sessionKey, rows, cursor } : null;
+    }
+    return projectGatewayHistory(rows, spokenPayload, { imageWaitFrom: options?.imageWaitFrom, failureWords: options?.failureWords });
+  }
+
+  /**
+   * The raw rows of the transcript, and the cursor that continues them.
+   *
+   * A delta read when the gateway gave us a cursor to spend, a full page
+   * otherwise — and a full page again the moment the delta path says it cannot
+   * be trusted (`kind: "reset"`, or a delta we have no base for). The rows are
+   * capped at `limit` because a delta never shrinks them: a page carries the
+   * last `limit` messages, and both the image-failure window and the
+   * spoken-reply fold in the projection assume that same window.
+   */
+  private async readHistoryRows(
+    sessionKey: string,
+    limit: number,
+  ): Promise<{ rows: unknown[]; cursor: string | null }> {
+    const base = this.historyDelta?.sessionKey === sessionKey ? this.historyDelta : null;
+    let result = await this.requestHistory(sessionKey, limit, base?.cursor ?? null);
+    // "I cannot describe what changed" — the session was cleared, the gateway
+    // restarted, the cursor aged out — or a delta with nothing to merge it
+    // into. Both are a page, not a failure.
+    if (result.kind === "reset" || (result.kind === "delta" && !base)) {
+      result = await this.requestHistory(sessionKey, limit, null);
+    }
+    if (result.kind === "delta" && base) {
+      const appended = deltaHistoryRows(result.messages);
+      return {
+        rows: [...base.rows, ...appended].slice(-limit),
+        cursor: asDeltaCursor(result.deltaCursor),
+      };
+    }
+    return {
+      rows: Array.isArray(result.messages) ? result.messages : [],
+      cursor: asDeltaCursor(result.deltaCursor),
+    };
+  }
+
+  /**
+   * One `chat.history` RPC, with the delta cursor when there is one to spend.
+   *
+   * A core that predates the parameter REJECTS it rather than ignoring it: the
+   * RPC validates what it is given. One retry without the cursor, which answers
+   * with a page — and a page re-arms the base from its own result, so from then
+   * on this adapter reads pages, which is what it did before the cursor existed.
+   * Without that retry an old gateway would answer the chat's very first
+   * history read with an error, and the transcript would never load at all.
+   *
+   * The cached base is deliberately NOT dropped here: if the retry fails too the
+   * read failed for its own reasons (the socket went away, the box restarted),
+   * and the rows are still a sound base for the next attempt. Clearing them on a
+   * transient error would make the next read a full page for no reason.
+   */
+  private async requestHistory(
+    sessionKey: string,
+    limit: number,
+    cursor: string | null,
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { sessionKey, limit };
+    if (cursor) params.cursor = cursor;
+    try {
+      return (await this.link.request("chat.history", params)) as Record<string, unknown>;
+    } catch (err) {
+      if (!cursor) throw err;
+      return (await this.link.request("chat.history", { sessionKey, limit })) as Record<string, unknown>;
+    }
   }
 
   /**
@@ -441,16 +758,22 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    * composer, would do nothing. `includeArgs` is what makes a row able to say
    * `/model <model>` instead of `/model`.
    *
-   * Deliberately NOT bound to a session key: the catalogue asked for without
-   * one is the agent's, which is what a composer wants, and passing this
-   * surface's key would make the answer depend on a session that may not exist
-   * yet on a box whose first turn has not been sent.
+   * Deliberately NOT bound to a session key: passing this surface's key would
+   * make the answer depend on a session that may not exist yet on a box whose
+   * first turn has not been sent. It IS bound to the agent that key names
+   * (`agentId`, optional on `commands.list`): a gateway with several agents
+   * and explicit ownership refuses an unnamed call with
+   * AGENT_SELECTION_REQUIRED. The id comes only from this chat's own session
+   * key, so the catalogue is the agent the turns go to; a key that names no
+   * agent sends none and leaves the choice to the gateway.
    */
   async listCommands(): Promise<readonly SlashCommand[]> {
+    const agentId = agentIdFromSessionKey(this.link.sessionKey());
     try {
       const result = await this.link.request("commands.list", {
         scope: "text",
         includeArgs: true,
+        ...(agentId ? { agentId } : {}),
       });
       return commandsFromOpenClawList(result);
     } catch (err) {

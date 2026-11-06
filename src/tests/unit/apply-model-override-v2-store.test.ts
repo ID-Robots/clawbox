@@ -156,4 +156,52 @@ describe("applyModelOverrideToAllAgentSessions on an OpenClaw 2 (SQLite) agent s
     const targets = callGateway.mock.calls.flatMap(([, params]) => (params.targets as Array<{ agentId: string }>).map((t) => t.agentId));
     expect(targets).toEqual(["main", "main"]);
   });
+
+  describe("a move onto the on-device model", () => {
+    const gateway = () => vi.fn(async (_method: string, params: Record<string, unknown>) => ({
+      outcomes: (params.targets as Array<{ key: string }>).map((t) => ({ ok: true, key: t.key })),
+    }));
+    const patchOf = (call: unknown[]) => (call[1] as { patch: Record<string, unknown> }).patch;
+    const keysOf = (call: unknown[]) => ((call[1] as { targets: Array<{ key: string }> }).targets).map((t) => t.key).sort();
+
+    it("resets a level picked for a cloud model to the local default, in the same patch", async () => {
+      const root = makeV2AgentStore("main", {
+        "agent:main:cloud-high": { sessionId: "s1", providerOverride: "deepseek", modelOverride: "deepseek-v4-flash", modelOverrideSource: "auto", thinkingLevel: "high" },
+        "agent:main:cloud-none": { sessionId: "s2", providerOverride: "deepseek", modelOverride: "deepseek-v4-flash", modelOverrideSource: "auto" },
+        "agent:main:local-high": { sessionId: "s3", providerOverride: "llamacpp", modelOverride: "gemma4-e2b-it-q4_0", modelOverrideSource: "auto", thinkingLevel: "high" },
+      });
+      const callGateway = gateway();
+
+      const result = await applyModelOverrideToAllAgentSessions(
+        { provider: "llamacpp", modelId: "gemma4-e2b-it-q4_0" },
+        { agentsDir: root, callGateway },
+      );
+
+      expect(callGateway).toHaveBeenCalledTimes(2);
+      const reset = callGateway.mock.calls.find((call) => patchOf(call).thinkingLevel !== undefined)!;
+      expect(patchOf(reset)).toEqual({ model: "llamacpp/gemma4-e2b-it-q4_0", thinkingLevel: "off" });
+      expect(keysOf(reset)).toEqual(["agent:main:cloud-high"]);
+      // A session with no sticky level follows the model's own default, and an
+      // owner's High already on Gemma stays: model only, as before.
+      const plain = callGateway.mock.calls.find((call) => patchOf(call).thinkingLevel === undefined)!;
+      expect(patchOf(plain)).toEqual({ model: "llamacpp/gemma4-e2b-it-q4_0" });
+      expect(keysOf(plain)).toEqual(["agent:main:cloud-none", "agent:main:local-high"]);
+      expect(result.sessionsUpdated).toBe(3);
+    });
+
+    it("leaves every other switch a single model-only patch", async () => {
+      const root = makeV2AgentStore("main", {
+        "agent:main:cloud-high": { sessionId: "s1", providerOverride: "deepseek", modelOverride: "deepseek-v4-flash", modelOverrideSource: "auto", thinkingLevel: "high" },
+      });
+      const callGateway = gateway();
+
+      await applyModelOverrideToAllAgentSessions(
+        { provider: "anthropic", modelId: "claude-sonnet-4-6" },
+        { agentsDir: root, callGateway },
+      );
+
+      expect(callGateway).toHaveBeenCalledTimes(1);
+      expect(patchOf(callGateway.mock.calls[0])).toEqual({ model: "anthropic/claude-sonnet-4-6" });
+    });
+  });
 });

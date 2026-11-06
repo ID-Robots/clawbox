@@ -124,6 +124,7 @@ describe.skipIf(!canRun)("/setup-api/chat/transcribe with a MediaRecorder WebM (
     fs.mkdirSync(openclawHome, { recursive: true });
     fs.writeFileSync(path.join(openclawHome, "openclaw.json"), JSON.stringify({
       models: { providers: { [CLAWBOX_AI_PROVIDER]: { baseUrl: "https://clawbox.com/api/ai", apiKey: TOKEN } } },
+      auth: { profiles: { [`${CLAWBOX_AI_PROVIDER}:default`]: { provider: CLAWBOX_AI_PROVIDER, mode: "api_key" } } },
     }));
     process.env.HOME = tmpHome;
     process.env.OPENCLAW_HOME = openclawHome;

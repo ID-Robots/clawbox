@@ -25,6 +25,12 @@
 
 import fs from "fs";
 import os from "os";
+import type { CiFailure } from "@/lib/coding-ci";
+import { emptyTokenBreakdown, readTokenBreakdown, type TokenBreakdown } from "@/lib/coding-agent";
+import { isOfferedEffort, type CodingEffort } from "@/lib/coding-effort";
+import { CODING_PROVIDERS, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { isSettledTeamStatus, type TeamStatus } from "@/lib/coding-team-status";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
@@ -44,7 +50,13 @@ export const MAX_TEAM_TASKS = 8;
 /** The audit log keeps this many entries; the oldest fall off. */
 export const MAX_LOG_ENTRIES = 400;
 export const MAX_GOAL_CHARS = 4_000;
-export const MAX_TASK_DESCRIPTION_CHARS = 2_000;
+/**
+ * A task description is the WHOLE brief its worker gets (TASK_RULES): the
+ * verify and commit steps and the goal's constraints live in it. At 2,000, 5
+ * of 6 descriptions of one live team were cut before their verify step;
+ * `workerTask` builds the worker's text to TEAM_TASK_CHARS, so this fits.
+ */
+export const MAX_TASK_DESCRIPTION_CHARS = 6_000;
 export const MAX_RESULT_CHARS = 6_000;
 /** The lead (the `coding_team_dynamic` switch) may add this many tasks over a team's whole life… */
 export const MAX_LEAD_ADDS = 3;
@@ -54,10 +66,28 @@ export const MAX_LEAD_RETIRES = 2;
 export const MAX_DIGEST_CHARS = 2_500;
 /** The planner's one-line reason for the team's shape, as the card shows it. */
 export const MAX_RATIONALE_CHARS = 200;
+/** One list of the planner's repo map holds this many entries… */
+export const MAX_REPO_MAP_ITEMS = 12;
+/** …each at most this long… */
+export const MAX_REPO_MAP_ITEM_CHARS = 200;
+/** …and the whole map, as a worker's brief carries it, at most this long. */
+export const MAX_REPO_MAP_CHARS = 2_000;
+/**
+ * Above this share of a plan's hinted files being shared with another task,
+ * the tasks "mostly overlap": they would queue on the same files, merge into
+ * each other's conflicts, and each pay to read what the others read — one run
+ * would do the same work once (`teamAdvice`).
+ */
+export const OVERLAP_ADVICE_SHARE = 0.6;
 /** Log lines of the kinds a teammate should hear about, quoted at the end of the digest. */
 const DIGEST_LOG_LINES = 5;
 
-export type TeamStatus = "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+/**
+ * `queued`: asked for while another team was working — persisted, and started
+ * by the box itself in the order asked once the teams ahead of it settle
+ * (coding-team.ts startNextQueuedTeam). Neither working nor settled.
+ */
+export type { TeamStatus };
 /**
  * `retired` is the lead's: a pending task it decided the goal no longer
  * needs. Terminal, and neither a failure nor a block — a task that waited on
@@ -83,6 +113,46 @@ export interface TeamShape {
   /** Why, in a line — shown on the card. */
   rationale: string;
 }
+
+/**
+ * The planner's compact map of the parts of the project the goal touches: the
+ * files, where the code starts, how it is tested, and what bites. Put on the
+ * board once and handed to every worker and reviewer in its brief, so a team
+ * of three does not pay for the same exploration three more times.
+ */
+export interface RepoMap {
+  files: string[];
+  entryPoints: string[];
+  testCommands: string[];
+  gotchas: string[];
+}
+
+/**
+ * Why a single run would have been cheaper than this team (`teamAdvice`):
+ * the plan has one task, or its tasks' files mostly overlap — `overlap` is
+ * the share of the plan's hinted files another task names too, in percent.
+ * `catchAll`: the planned tasks that name every file the others own
+ * (`catchAllTasks`) — on an overlap verdict only, and only when there are any.
+ */
+export interface TeamAdvice {
+  reason: "one_task" | "overlap";
+  overlap: number;
+  catchAll?: string[];
+}
+
+/** Tokens the team's runs spent, by the role they ran in. */
+export interface RoleTokens {
+  planner: number;
+  worker: number;
+  reviewer: number;
+  lead: number;
+}
+
+/** Tokens the team's runs spent by kind, by the role they ran in. */
+export type RoleTokenBreakdown = Record<keyof RoleTokens, TokenBreakdown>;
+
+/** Tokens the team's runs spent, by the account that paid for them (each run's own provider). */
+export type ProviderTokens = Record<CodingProvider, number>;
 
 /** The one reviewer run over the merged result, in the `final` review mode. */
 export interface FinalReview {
@@ -112,6 +182,24 @@ export interface TeamMetrics {
   tasksRejected: number;
   /** Tokens every run of the team spent, from each run's own record. */
   tokensUsed: number;
+  /** The same tokens by role: what the planner, the workers, the reviewers and the lead each cost. */
+  tokensByRole: RoleTokens;
+  /**
+   * The same tokens by the four ways a provider bills them — fresh input,
+   * output, cache written, cache read — summed from each run's own
+   * breakdown (`TeamRunRef.tokenBreakdown`), in total and by role. A run on a
+   * board from before the field has none: its tokens are in `tokensUsed` and
+   * in neither of these, which then read as zeros.
+   */
+  tokenBreakdown: TokenBreakdown;
+  tokenBreakdownByRole: RoleTokenBreakdown;
+  /**
+   * The same tokens by the provider each run was paid from (`TeamRunRef.provider`)
+   * — a team whose roles sit on different accounts costs each its own share.
+   * A run on a board from before the field names no provider: its tokens are
+   * in `tokensUsed` and in neither of these.
+   */
+  tokensByProvider: ProviderTokens;
   /** From the team's creation to its end — or to now, while it works. */
   wallMs: number;
   /**
@@ -135,7 +223,7 @@ export interface TeamMetrics {
   readOnlyRefusals: number;
 }
 
-const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
+const TEAM_STATUSES: readonly TeamStatus[] = ["queued", "planning", "working", "reviewing", "done", "failed", "stopped"];
 const TASK_STATUSES: readonly TaskStatus[] = ["pending", "in_progress", "complete", "failed", "rejected", "retired"];
 const RUN_ROLES: readonly TeamRunRef["role"][] = ["planner", "worker", "reviewer", "lead"];
 
@@ -171,8 +259,92 @@ export interface TeamTask {
   origin: "plan" | "lead";
   /** How many times the task was rejected — by the reviewer, the rule, or a merge that failed. */
   rejections: number;
+  /**
+   * How many of its `attempts` were HELD rather than judged (`holdTask`): a
+   * dependency of it was rejected or reopened after it had started, so the
+   * attempt was stopped or its result set aside through no fault of its own.
+   * Never counted against the task's two tries (`countedAttempts`).
+   */
+  holds: number;
+  /** Why the task is back to pending after a hold, until a worker takes it again — the next worker is told. */
+  hold: TaskHold | null;
+  /**
+   * How many of its `attempts` the team's pull request sent it back for, its
+   * CI red (`reopenForCi`) — bounded by the team's own CI rounds
+   * (MAX_TEAM_CI_ROUNDS), never against the task's two tries.
+   */
+  ciReoffers: number;
+  /**
+   * How many of its `attempts` the team stopped itself (`reopenAfterStop`):
+   * its worker was held — paused — past RUN_BUDGET_MS with nobody resuming
+   * it. Offered once more, never against the task's two tries; a board from
+   * before the field reads as 0.
+   */
+  budgetReoffers: number;
   created_at: number;
   updated_at: number;
+}
+
+/** A task set back because a task it depends on was rejected or reopened (`holdTask`). */
+export interface TaskHold {
+  /** The dependency that was reopened. */
+  dependency: string;
+  /** What happened to it, in a line — the reviewer's notes, the suite's failure. */
+  reason: string;
+  /** What the hold did to the task: its running attempt stopped, or its finished result set aside. */
+  was: "in_progress" | "complete";
+  at: number;
+}
+
+/** A task's attempts that count toward its two tries — its holds are not its own failures. */
+export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number; budgetReoffers?: number }): number {
+  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0) - (task.budgetReoffers ?? 0));
+}
+
+/**
+ * The pull request a team opened because its goal asked for one
+ * (coding-team.ts teamPullRequest) — the ORCHESTRATOR's, never a worker's:
+ * opened from the team's branch once every task is accepted, the suite is
+ * green and the final review passed, its checks watched, its CI failures
+ * re-offered to the tasks they point at in bounded rounds, and merged only
+ * when the goal asks for the merge and every check passes.
+ *
+ *   checks        — opened or updated; its checks are running
+ *   failed_checks — red: tasks re-offered with the failure, a fix coming
+ *   green         — every check passed; the goal asked for no merge
+ *   merged        — merged by the orchestrator
+ *   left_open     — not merged, and why (`detail`): a conflict, a hold label, no checks at all
+ *   failed        — still red after MAX_TEAM_CI_ROUNDS rounds, or could not be read
+ */
+export interface TeamPr {
+  number: number;
+  url: string;
+  branch: string;
+  base: string;
+  phase: "checks" | "failed_checks" | "green" | "merged" | "left_open" | "failed";
+  checks: { total: number; passed: number; failed: number; pending: number };
+  /** The goal asks for the merge — read once, when the pull request was opened. */
+  merge: boolean;
+  /** Rounds of re-offered tasks its red CI has had. */
+  ciRounds: number;
+  /** Its last red CI, read. */
+  failure: CiFailure | null;
+  detail: string | null;
+  openedAt: number;
+  updatedAt: number;
+}
+
+const TEAM_PR_PHASES: readonly TeamPr["phase"][] = ["checks", "failed_checks", "green", "merged", "left_open", "failed"];
+
+/**
+ * Accepted: complete AND ruled accepted — by the reviewer, or by the rule a
+ * shape without a reviewer runs on. `complete` alone is not enough: a task is
+ * complete the moment its worker settles, before its review, and a dependent
+ * dispatched then was built on work the reviewer went on to reject (seen live,
+ * 2026-10-10).
+ */
+export function isAccepted(task: Pick<TeamTask, "status" | "review">): boolean {
+  return task.status === "complete" && task.review?.verdict === "accepted";
 }
 
 /** One run's part in the team. */
@@ -189,6 +361,32 @@ export interface TeamRunRef {
   sentAt?: number[];
   /** Tokens the run spent, from its record once it settled; absent before. */
   tokens?: number;
+  /**
+   * The same tokens by kind, from the record's own `tokenBreakdown` once it
+   * settled; absent before, and on a board from before the field.
+   */
+  tokenBreakdown?: TokenBreakdown;
+  /**
+   * The account the run was paid from, and its model there — from its record
+   * when it started, the model brought up to what answered once it settled;
+   * null where the provider's plan chose and nothing said which. `modelRole`
+   * is the role its model choice was made for: `planner` for the lead too.
+   * Each ABSENT on a board from before.
+   */
+  provider?: CodingProvider;
+  model?: string | null;
+  modelRole?: ModelRole;
+}
+
+/** A model id as a run ref keeps it: what a record could carry, never a page of text. */
+const MAX_REF_MODEL_CHARS = 120;
+
+/** A run ref's model off disk or a record: the id, null for "the plan's", undefined for nothing readable. */
+export function refModel(raw: unknown): string | null | undefined {
+  if (raw === null) return null;
+  if (typeof raw !== "string") return undefined;
+  const id = raw.trim();
+  return id && id.length <= MAX_REF_MODEL_CHARS && !/\s/.test(id) ? id : undefined;
 }
 
 /** Who worked on a team, counted from the board: the figure the card shows. */
@@ -203,7 +401,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "budget" | "pr" | "repo_map";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -265,8 +463,32 @@ export interface TeamBoard {
   error: string | null;
   /** The shape the planner gave the team, or null — then it runs the way every team did before (all the slots, a reviewer per task). */
   shape: TeamShape | null;
+  /** The planner's map of what the goal touches, once it gave one; null on a board from before, or a plan without one. */
+  repoMap: RepoMap | null;
+  /**
+   * The plan had ONE task, so it ran as one ordinary run — no team branch, no
+   * worktree, no reviewer run of the team's — and the board followed it.
+   */
+  singleRun: boolean;
+  /**
+   * The team's work is on this branch and NOT in the project folder — a single
+   * run whose merge home the project refused (it was dirty, on another branch,
+   * or conflicted) — with the reason, in the device's words. The team is not
+   * done then, and the owner decides what becomes of the branch. Null or
+   * absent: whatever the team made is in the project.
+   */
+  unlanded?: { branch: string; reason: string } | null;
   /** The `coding_team_dynamic` switch as it stood when the team started: may a lead add or retire tasks while it runs? */
   dynamic: boolean;
+  /**
+   * The effort the team was ASKED for (the route's `effort`, the assistant's
+   * `coding_team_run`), one of OFFERED_EFFORT_LEVELS — absent when the owner's
+   * setting decides, as on every board from before 2026-10-30. The
+   * orchestrator hands it to every member run as its input effort; a reading
+   * role's cap and the read-only clamp still apply there (a planner asked for
+   * ultracode runs at xhigh).
+   */
+  effort?: CodingEffort;
   /**
    * When the lead's last turn was written (ms): its inbox, and the message
    * that calls it back, are what was said to the lead after this. Set only
@@ -277,12 +499,35 @@ export interface TeamBoard {
   lastLeadAt: number;
   /** The one review over the merged result (review mode `final`), once it ruled. */
   finalReview: FinalReview | null;
+  /** The pull request the goal asked for, once the orchestrator opened it; null for a team whose goal asked for none. */
+  pr: TeamPr | null;
   /** The figures, kept current on every save (`teamMetrics`). */
   metrics: TeamMetrics;
+  /**
+   * The team's runs held back right now until the box has a free slot for
+   * them (`teamSpawnSlot`: the owner's limit, the team's own, the memory
+   * guard). Absent while nothing waits, and on a settled team.
+   */
+  slotWaits?: SlotWait[];
   createdAt: number;
   updatedAt: number;
   /** When the team settled (done, failed, stopped); null while it works. */
   finishedAt: number | null;
+  /**
+   * On a team the owner STOPPED: when the user asked for its work again and
+   * the assistant started it with `userAskedAgain` — the end of the hold that
+   * stop puts on the assistant's own starts (coding-team.ts ownerStopRefusal).
+   * Absent while it holds.
+   */
+  holdReleasedAt?: number;
+}
+
+/** One of the team's runs waiting for a free slot on the box: which, why, since when (ms). */
+export interface SlotWait {
+  role: TeamRunRef["role"];
+  taskId: string | null;
+  reason: string;
+  since: number;
 }
 
 export class BoardAccessError extends Error {
@@ -395,6 +640,14 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     log.push(entry as unknown as LogEntry);
   }
   const finalReview = b.finalReview as Record<string, unknown> | null | undefined;
+  // Only an unsettled team has a run waiting; one that is not a wait is dropped.
+  const slotWaits = Array.isArray(b.slotWaits) && !isSettledTeamStatus(b.status as TeamStatus)
+    ? (b.slotWaits as unknown[]).flatMap((w): SlotWait[] => {
+        const wait = w as Record<string, unknown> | null;
+        if (!wait || !(RUN_ROLES as readonly unknown[]).includes(wait.role) || typeof wait.reason !== "string" || typeof wait.since !== "number") return [];
+        return [{ role: wait.role as SlotWait["role"], taskId: typeof wait.taskId === "string" ? wait.taskId : null, reason: wait.reason, since: wait.since }];
+      })
+    : [];
   const board: TeamBoard = {
     id: b.id,
     goal: b.goal,
@@ -414,6 +667,16 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
             : [];
           const run: TeamRunRef = { id: ref.id, role: ref.role as TeamRunRef["role"], taskId: typeof ref.taskId === "string" ? ref.taskId : null, ...(sentAt.length ? { sentAt } : {}) };
           if (typeof ref.tokens === "number" && Number.isFinite(ref.tokens) && ref.tokens >= 0) run.tokens = ref.tokens;
+          // Leniently, figure by figure: a bad one reads as 0, a field that is no breakdown as none.
+          if (ref.tokenBreakdown && typeof ref.tokenBreakdown === "object" && !Array.isArray(ref.tokenBreakdown)) run.tokenBreakdown = readTokenBreakdown(ref.tokenBreakdown);
+          // Who paid and on what: each re-read on its own, absent when the
+          // file has none this box could have written — a board from before.
+          if (isCodingProvider(ref.provider)) run.provider = ref.provider;
+          const model = refModel(ref.model);
+          if (model !== undefined) run.model = model;
+          // A ref from before 2026-10-30 may say `bulk`: that was a worker's run.
+          const modelRole = ref.modelRole === "bulk" ? "worker" : ref.modelRole;
+          if ((MODEL_ROLES as readonly unknown[]).includes(modelRole)) run.modelRole = modelRole as ModelRole;
           return [run];
         })
       : [],
@@ -423,22 +686,97 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     error: typeof b.error === "string" ? b.error : null,
     // A board from before the planner could shape a team has none: it ran the default.
     shape: normalizeShape(b.shape),
+    repoMap: normalizeRepoMap(b.repoMap),
+    singleRun: b.singleRun === true,
+    unlanded: normalizeUnlanded(b.unlanded),
     dynamic: b.dynamic === true,
+    // Re-read, never trusted: a level this box does not offer is dropped, and
+    // the team runs on the owner's setting as a board without one does.
+    ...(isOfferedEffort(b.effort) ? { effort: b.effort } : {}),
     lastLeadAt: typeof b.lastLeadAt === "number" && Number.isFinite(b.lastLeadAt) && b.lastLeadAt > 0 ? b.lastLeadAt : 0,
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
       ? { verdict: finalReview.verdict, notes: finalReview.notes, at: typeof finalReview.at === "number" ? finalReview.at : 0 }
       : null,
+    pr: normalizeTeamPr(b.pr),
     metrics: EMPTY_METRICS,
+    ...(slotWaits.length ? { slotWaits } : {}),
     createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
     finishedAt: typeof b.finishedAt === "number" ? b.finishedAt : null,
+    ...(typeof b.holdReleasedAt === "number" ? { holdReleasedAt: b.holdReleasedAt } : {}),
   };
   // Worked out again rather than trusted from the file: they are the board's, not the file's.
   board.metrics = teamMetrics(board);
   return board;
 }
 
+/**
+ * A repo map as the planner gave it or as a file holds it, bounded: every
+ * list cut to MAX_REPO_MAP_ITEMS entries of MAX_REPO_MAP_ITEM_CHARS on one
+ * line each, blanks and repeats dropped, and the lists cut from the end until
+ * the rendered map fits MAX_REPO_MAP_CHARS. Advice, not a contract: what is not
+ * text is left out, never a reason to refuse a plan. Null when nothing is left.
+ * Takes the planner's snake_case (`entry_points`) and the board's camelCase.
+ */
+export function normalizeRepoMap(raw: unknown): RepoMap | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const list = (...keys: string[]): string[] => {
+    const value = keys.map((k) => r[k]).find((v) => v !== undefined);
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of value) {
+      if (typeof item !== "string") continue;
+      const line = clip(oneLine(item), MAX_REPO_MAP_ITEM_CHARS);
+      if (!line || seen.has(line)) continue;
+      seen.add(line);
+      out.push(line);
+      if (out.length >= MAX_REPO_MAP_ITEMS) break;
+    }
+    return out;
+  };
+  const map: RepoMap = {
+    files: list("files"),
+    entryPoints: list("entryPoints", "entry_points"),
+    testCommands: list("testCommands", "test_commands"),
+    gotchas: list("gotchas"),
+  };
+  // Over the bound, the longest list gives up its last entry first: one long
+  // list of files must not push out the one test command.
+  const lists = [map.files, map.entryPoints, map.testCommands, map.gotchas];
+  while (repoMapText(map).length > MAX_REPO_MAP_CHARS) {
+    const longest = lists.reduce((a, b) => (b.length > a.length ? b : a));
+    if (!longest.length) break;
+    longest.pop();
+  }
+  return lists.some((l) => l.length) ? map : null;
+}
+
+/**
+ * The map as a run's brief carries it — one line per list, the lists that
+ * are empty left out. "" for no map.
+ */
+export function repoMapText(map: RepoMap | null): string {
+  if (!map) return "";
+  const lines = [
+    map.files.length ? `Files: ${map.files.join("; ")}` : "",
+    map.entryPoints.length ? `Entry points: ${map.entryPoints.join("; ")}` : "",
+    map.testCommands.length ? `Test commands: ${map.testCommands.join("; ")}` : "",
+    map.gotchas.length ? `Gotchas: ${map.gotchas.join("; ")}` : "",
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
 /** A shape read back from disk: the planner's fields, or null — never a half-shape that would schedule oddly. */
+/** `TeamBoard.unlanded` as read back: both strings, bounded, or nothing. */
+function normalizeUnlanded(raw: unknown): { branch: string; reason: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { branch, reason } = raw as { branch?: unknown; reason?: unknown };
+  if (typeof branch !== "string" || !branch.trim() || typeof reason !== "string") return null;
+  return { branch: branch.slice(0, 200), reason: reason.slice(0, 500) };
+}
+
 function normalizeShape(raw: unknown): TeamShape | null {
   if (!raw || typeof raw !== "object") return null;
   const s = raw as Record<string, unknown>;
@@ -491,14 +829,64 @@ function normalizeTask(raw: unknown): TeamTask | null {
     rejections: typeof t.rejections === "number" && Number.isInteger(t.rejections) && t.rejections >= 0
       ? t.rejections
       : (t.status === "rejected" || (typeof t.attempts === "number" && t.attempts > 1) || review?.verdict === "rejected" ? 1 : 0),
+    // A board from before holds had none.
+    holds: typeof t.holds === "number" && Number.isInteger(t.holds) && t.holds >= 0 ? t.holds : 0,
+    hold: normalizeHold(t.hold),
+    ciReoffers: typeof t.ciReoffers === "number" && Number.isInteger(t.ciReoffers) && t.ciReoffers >= 0 ? t.ciReoffers : 0,
+    budgetReoffers: typeof t.budgetReoffers === "number" && Number.isInteger(t.budgetReoffers) && t.budgetReoffers >= 0 ? t.budgetReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
+    // A task's `role` (`bulk`, until 2026-10-30) is not read back: every task is a worker's.
   };
 }
 
+/** A team's pull request off disk, or null — every field checked: its number and branch reach `gh`. */
+function normalizeTeamPr(raw: unknown): TeamPr | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.number !== "number" || !Number.isInteger(p.number) || p.number <= 0) return null;
+  if (typeof p.url !== "string" || typeof p.branch !== "string" || typeof p.base !== "string") return null;
+  if (!(TEAM_PR_PHASES as readonly unknown[]).includes(p.phase)) return null;
+  const c = p.checks && typeof p.checks === "object" ? p.checks as Record<string, unknown> : {};
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+  const f = p.failure && typeof p.failure === "object" ? p.failure as Record<string, unknown> : null;
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 40) : []);
+  return {
+    number: p.number,
+    url: p.url,
+    branch: p.branch,
+    base: p.base,
+    phase: p.phase as TeamPr["phase"],
+    checks: { total: n(c.total), passed: n(c.passed), failed: n(c.failed), pending: n(c.pending) },
+    merge: p.merge === true,
+    ciRounds: n(p.ciRounds),
+    failure: f && typeof f.prNumber === "number"
+      ? { prNumber: f.prNumber, at: n(f.at), checks: strings(f.checks), tests: strings(f.tests), files: strings(f.files), excerpt: typeof f.excerpt === "string" ? f.excerpt.slice(0, 4_000) : "", unread: strings(f.unread) }
+      : null,
+    detail: typeof p.detail === "string" ? p.detail.slice(0, 1_000) : null,
+    openedAt: n(p.openedAt),
+    updatedAt: n(p.updatedAt),
+  };
+}
+
+function normalizeHold(raw: unknown): TaskHold | null {
+  if (!raw || typeof raw !== "object") return null;
+  const h = raw as Record<string, unknown>;
+  if (typeof h.dependency !== "string" || !TASK_ID_RE.test(h.dependency) || typeof h.reason !== "string") return null;
+  return {
+    dependency: h.dependency,
+    reason: h.reason.slice(0, MAX_HOLD_REASON_CHARS),
+    was: h.was === "in_progress" ? "in_progress" : "complete",
+    at: typeof h.at === "number" ? h.at : 0,
+  };
+}
+
+/** A hold's reason, as the board keeps it and the next worker reads it. */
+export const MAX_HOLD_REASON_CHARS = 600;
+
 // ─── Mutations (every one role-checked and logged) ───────────────────────────
 
-export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean }, actor: Actor): TeamBoard {
+export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean; effort?: CodingEffort | null }, actor: Actor): TeamBoard {
   if (actor.kind !== "owner" && actor.kind !== "system") {
     throw new BoardAccessError(actor, "create", `Only the owner starts a team; ${describeActor(actor)} may not.`);
   }
@@ -522,9 +910,13 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     alerts: 0,
     error: null,
     shape: null,
+    repoMap: null,
+    singleRun: false,
     dynamic: input.dynamic === true,
+    ...(input.effort ? { effort: input.effort } : {}),
     lastLeadAt: 0,
     finalReview: null,
+    pr: null,
     metrics: EMPTY_METRICS,
     createdAt: now,
     updatedAt: now,
@@ -535,8 +927,13 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
   return board;
 }
 
-/** The Planner sizes the team: how many workers side by side, and how the work is reviewed. Nobody else may, and only once. */
-export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): TeamShape {
+/**
+ * The Planner sizes the team: how many workers side by side, and how the work
+ * is reviewed. Nobody else may, and only once. `boxWidth` is how many runs the
+ * box lets go at once (the owner's Settings): the log line says so when the
+ * shape asks for more than that, since the extra workers only wait for a seat.
+ */
+export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape, boxWidth?: number): TeamShape {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "shape", `Only the planner shapes the team; ${describeActor(actor)} may not.`);
   if (board.shape) throw new Error("The team already has its shape.");
   if (!Number.isInteger(shape.parallelism) || shape.parallelism < 1) throw new Error("A team's parallelism is a whole number of at least 1.");
@@ -549,10 +946,27 @@ export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): Team
     ts: now,
     actor,
     type: "shape",
-    message: `Team shaped: ${shape.parallelism} side by side, review ${shape.review}${rationale ? ` — ${firstLine(rationale, MAX_RATIONALE_CHARS)}` : ""}`,
+    message: `Team shaped: ${shape.parallelism} side by side${typeof boxWidth === "number" && boxWidth < shape.parallelism ? ` (the box allows ${boxWidth} at once)` : ""}, review ${shape.review}${rationale ? ` — ${firstLine(rationale, MAX_RATIONALE_CHARS)}` : ""}`,
     payload: { parallelism: shape.parallelism, review: shape.review },
   });
   return board.shape;
+}
+
+/** The Planner maps the parts of the project the goal touches. Nobody else may, and only once. */
+export function setRepoMap(board: TeamBoard, actor: Actor, raw: unknown): RepoMap {
+  if (actor.kind !== "planner") throw new BoardAccessError(actor, "repo_map", `Only the planner maps the project; ${describeActor(actor)} may not.`);
+  if (board.repoMap) throw new Error("The team already has its repo map.");
+  const map = normalizeRepoMap(raw);
+  if (!map) throw new Error("The repo map is empty.");
+  board.repoMap = map;
+  const counts = [
+    map.files.length ? `${map.files.length} file(s)` : "",
+    map.entryPoints.length ? `${map.entryPoints.length} entry point(s)` : "",
+    map.testCommands.length ? `${map.testCommands.length} test command(s)` : "",
+    map.gotchas.length ? `${map.gotchas.length} gotcha(s)` : "",
+  ].filter(Boolean);
+  append(board, { ts: Date.now(), actor, type: "repo_map", message: `Repo map: ${counts.join(", ")}` });
+  return map;
 }
 
 /**
@@ -594,6 +1008,10 @@ export function postTask(
     reviewRunId: null,
     origin,
     rejections: 0,
+    holds: 0,
+    hold: null,
+    ciReoffers: 0,
+    budgetReoffers: 0,
     created_at: now,
     updated_at: now,
   };
@@ -657,6 +1075,8 @@ export function assignTask(board: TeamBoard, actor: Actor, taskId: string, worke
   const now = Date.now();
   task.assigned_to = workerId;
   task.attempts += 1;
+  // The hold is answered: the worker taking it now was told why in its task text.
+  task.hold = null;
   task.updated_at = now;
   append(board, { ts: now, actor, type: "task", task_id: taskId, message: `Task ${taskId} assigned to ${workerId} (attempt ${task.attempts})` });
   return task;
@@ -693,7 +1113,10 @@ export function submitResult(board: TeamBoard, actor: Actor, taskId: string, res
   return task;
 }
 
-/** The Review Loop's verdict. A rejection puts the task back to pending for one more attempt. */
+/**
+ * The Review Loop's verdict. A rejection puts the task back to pending for one
+ * more attempt — counted without its holds, which were never its own doing.
+ */
 export function reviewTask(board: TeamBoard, actor: Actor, taskId: string, verdict: "accepted" | "rejected", notes: string): TeamTask {
   if (actor.kind !== "reviewer") throw new BoardAccessError(actor, "review", `Only the reviewer records a verdict; ${describeActor(actor)} may not.`);
   const task = requireTask(board, taskId);
@@ -702,12 +1125,123 @@ export function reviewTask(board: TeamBoard, actor: Actor, taskId: string, verdi
   task.review = { verdict, notes: notes.slice(0, 2_000), at: now };
   if (verdict === "rejected") {
     task.rejections += 1;
-    task.status = task.attempts >= 2 ? "rejected" : "pending";
+    task.status = countedAttempts(task) >= 2 ? "rejected" : "pending";
     task.assigned_to = null;
   }
   task.updated_at = now;
   append(board, { ts: now, actor, type: "review", task_id: taskId, message: `Task ${taskId} ${verdict}${notes ? `: ${firstLine(notes)}` : ""}`, payload: { verdict } });
   return task;
+}
+
+/**
+ * A task its review just sent back that gets NO further attempt — the one run
+ * of a plan run as a single run (coding-team.ts runAsSingleRun) was every
+ * attempt there is — closed as `rejected` for good, rather than left pending
+ * on a team that has settled. The system's alone; the review's line already
+ * says why.
+ */
+export function closeRejected(board: TeamBoard, actor: Actor, taskId: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "close_rejected", `Only the system closes a rejected task; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.review?.verdict !== "rejected" || (task.status !== "pending" && task.status !== "rejected")) {
+    throw new Error(`Task ${taskId} is ${task.status}; only a task its review rejected is closed.`);
+  }
+  task.status = "rejected";
+  task.assigned_to = null;
+  task.updated_at = Date.now();
+  board.updatedAt = task.updated_at;
+  return task;
+}
+
+/**
+ * HOLD a task that started on a dependency which has since been rejected or
+ * reopened: the system's, and only for a task that really depends on it and
+ * that started — a running attempt (the orchestrator stops its worker and
+ * sets its work aside first) or a finished one (its result is set aside; what
+ * it merged stays on the team's branch for the next attempt to build on).
+ *
+ * Back to pending, unassigned and unreviewed, so it starts again only once the
+ * dependency is accepted again (`readyTasks`) — on the new merged state. The
+ * attempt is counted as a HOLD, never against the task's two tries, and the
+ * why goes on the board and into the next worker's task text.
+ */
+export function holdTask(board: TeamBoard, actor: Actor, taskId: string, dependency: string, reason: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "hold", `Only the system holds a task; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "in_progress" && task.status !== "complete") throw new Error(`Task ${taskId} is ${task.status}; only a task that started is held.`);
+  if (!task.depends_on.includes(dependency)) throw new Error(`Task ${taskId} does not depend on ${dependency}.`);
+  const was = task.status;
+  const why = firstLine(reason.trim(), MAX_HOLD_REASON_CHARS);
+  const now = Date.now();
+  task.status = "pending";
+  task.assigned_to = null;
+  task.review = null;
+  task.holds += 1;
+  task.hold = { dependency, reason: why, was, at: now };
+  task.updated_at = now;
+  append(board, {
+    ts: now,
+    actor,
+    type: "hold",
+    task_id: taskId,
+    message: `Task ${taskId} held: its dependency ${dependency} was reopened${why ? ` (${firstLine(why, 200)})` : ""}. ${was === "in_progress" ? "Its worker was stopped and its work set aside" : "Its result is set aside"}; it starts again on the new merged state once ${dependency} is accepted.`,
+    payload: { dependency, was },
+  });
+  return task;
+}
+
+/**
+ * The team's pull request came back RED: a task its failure points at goes
+ * back to pending with the failure as its notes — the system's, never a
+ * reviewer's (nobody judged the work), and never against the task's two tries
+ * (`ciReoffers`; the team's CI rounds are the bound). Its next worker reads
+ * the failure as "a previous attempt was rejected"; what started on it is
+ * held, as for any reopening.
+ */
+export function reopenForCi(board: TeamBoard, actor: Actor, taskId: string, notes: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "ci_reopen", `Only the system re-offers a task for the team's CI; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "complete") throw new Error(`Task ${taskId} is ${task.status}; only a complete task is re-offered for the CI.`);
+  const now = Date.now();
+  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.rejections += 1;
+  task.ciReoffers += 1;
+  task.status = "pending";
+  task.assigned_to = null;
+  task.updated_at = now;
+  append(board, { ts: now, actor, type: "ci", task_id: taskId, message: `Task ${taskId} re-offered for the pull request's failing checks: ${firstLine(notes)}` });
+  return task;
+}
+
+/**
+ * The team STOPPED a worker itself — held (paused) past RUN_BUDGET_MS with
+ * nobody resuming it — and offers the task once more: back to pending with
+ * the why as its notes, the system's (nobody judged the work), never against
+ * the task's two tries (`budgetReoffers`; the orchestrator offers it once).
+ * Its next worker reads the why as "a previous attempt was rejected".
+ */
+export function reopenAfterStop(board: TeamBoard, actor: Actor, taskId: string, notes: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "budget_reopen", `Only the system re-offers a task it stopped; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "in_progress") throw new Error(`Task ${taskId} is ${task.status}; only a task at work is re-offered after a stop.`);
+  const now = Date.now();
+  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.budgetReoffers += 1;
+  task.status = "pending";
+  task.assigned_to = null;
+  task.updated_at = now;
+  append(board, { ts: now, actor, type: "budget", task_id: taskId, message: `Task ${taskId} re-offered after the team stopped its worker: ${firstLine(notes)}` });
+  return task;
+}
+
+/** The orchestrator records where the team's pull request stands — opened, checked, re-offered, merged. The system's alone. */
+export function recordTeamPr(board: TeamBoard, actor: Actor, pr: TeamPr, note: string): TeamPr {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "pr", `Only the system records the team's pull request; ${describeActor(actor)} may not.`);
+  const now = Date.now();
+  board.pr = { ...pr, updatedAt: now };
+  board.updatedAt = now;
+  append(board, { ts: now, actor, type: "pr", message: firstLine(note, 600), payload: { number: pr.number, phase: pr.phase } });
+  return board.pr;
 }
 
 /** A guardrail spoke: recorded, counted, never silent. */
@@ -823,11 +1357,21 @@ export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus
   if (actor.kind === "worker" || actor.kind === "planner" || actor.kind === "reviewer") {
     throw new BoardAccessError(actor, "team_status", `${describeActor(actor)} may not change the team's status.`);
   }
+  // Only the owner stops a team (above), and the stop is the last word on the
+  // board: an orchestrator step that was awaiting something when the stop
+  // landed — the team branch, a worker's start — must not write the team back
+  // to `working`, which kept it holding the box with nobody working, or to
+  // `failed`, which the assistant reads as "start a fresh run".
+  if (board.status === "stopped" && status !== "stopped") return;
   const now = Date.now();
   board.status = status;
   if (status === "failed" && note) board.error = note;
   board.updatedAt = now;
-  if (isSettledTeamStatus(status)) board.finishedAt ??= now;
+  if (isSettledTeamStatus(status)) {
+    board.finishedAt ??= now;
+    // Nothing of a settled team waits for anything.
+    delete board.slotWaits;
+  }
   append(board, { ts: now, actor, type: "team_status", message: `Team → ${status}${note ? `: ${firstLine(note)}` : ""}` });
 }
 
@@ -835,12 +1379,44 @@ export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus
 
 /**
  * Pending tasks whose dependencies are all out of the way, in posting order.
- * A RETIRED dependency is out of the way: the lead decided the goal does not
- * need it, so what waited on it does not wait forever.
+ * Out of the way means ACCEPTED (`isAccepted`) — never merely complete: a
+ * finished task waiting on its reviewer may still be rejected, and a dependent
+ * started on it would build on work that does not stand. A RETIRED dependency
+ * is out of the way too: the lead decided the goal does not need it, so what
+ * waited on it does not wait forever.
  */
 export function readyTasks(board: TeamBoard): TeamTask[] {
-  const done = new Set(board.tasks.filter((t) => t.status === "complete" || t.status === "retired").map((t) => t.task_id));
-  return board.tasks.filter((t) => t.status === "pending" && t.depends_on.every((d) => done.has(d)));
+  return board.tasks.filter((t) => t.status === "pending" && waitingOn(board, t).length === 0);
+}
+
+/** The dependencies of `task` that are not out of the way yet (`readyTasks`), in its own order. */
+export function waitingOn(board: Pick<TeamBoard, "tasks">, task: Pick<TeamTask, "depends_on">): string[] {
+  return task.depends_on.filter((d) => {
+    const dep = board.tasks.find((t) => t.task_id === d);
+    return !dep || (dep.status !== "retired" && !isAccepted(dep));
+  });
+}
+
+/**
+ * The dependencies of `task` that will never be accepted — failed, or rejected
+ * for good — with their status: what a pending task that never ran was waiting
+ * on, said when the team ends.
+ */
+export function blockedBy(board: Pick<TeamBoard, "tasks">, task: Pick<TeamTask, "depends_on">): Array<{ task_id: string; status: TaskStatus }> {
+  return task.depends_on.flatMap((d) => {
+    const dep = board.tasks.find((t) => t.task_id === d);
+    return dep && (dep.status === "failed" || dep.status === "rejected") ? [{ task_id: d, status: dep.status }] : [];
+  });
+}
+
+/**
+ * The tasks a reopened `taskId` sets back: every task that depends on it
+ * directly and that has STARTED (running, or finished whatever its review
+ * said), in posting order. A task further down the chain is set back when the
+ * one it depends on is held — the hold is itself a reopening.
+ */
+export function startedDependents(board: Pick<TeamBoard, "tasks">, taskId: string): TeamTask[] {
+  return board.tasks.filter((t) => t.depends_on.includes(taskId) && (t.status === "in_progress" || t.status === "complete"));
 }
 
 /** True when no task can make progress any more: every task is settled, or the only pending ones wait on a failed task. */
@@ -856,10 +1432,8 @@ export function allComplete(board: TeamBoard): boolean {
     && board.tasks.every((t) => t.status === "retired" || (t.status === "complete" && t.review?.verdict !== "rejected"));
 }
 
-/** Done, failed or stopped: nothing more happens to the team. */
-export function isSettledTeamStatus(status: TeamStatus): boolean {
-  return status === "done" || status === "failed" || status === "stopped";
-}
+/** Done, failed or stopped: nothing more happens to the team (src/lib/coding-team-status.ts, disk-free so the client can ask too). */
+export { isSettledTeamStatus };
 
 /** Tools that only look. */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"]);
@@ -1128,11 +1702,22 @@ export function boardDigest(board: TeamBoard, forTaskId: string | readonly strin
   return text.length > max ? clip(text, max) : text;
 }
 
+/** Every provider at nothing spent. */
+function noProviderTokens(): ProviderTokens {
+  return Object.fromEntries(CODING_PROVIDERS.map((p) => [p, 0])) as ProviderTokens;
+}
+
+/** Every role at nothing spent, by kind. */
+function noRoleBreakdown(): RoleTokenBreakdown {
+  return { planner: emptyTokenBreakdown(), worker: emptyTokenBreakdown(), reviewer: emptyTokenBreakdown(), lead: emptyTokenBreakdown() };
+}
+
 /** Nothing counted yet: the figures of a board that has only just been made. */
 const EMPTY_METRICS: TeamMetrics = {
   plannerRuns: 0, workerRuns: 0, reviewerRuns: 0, leadRuns: 0,
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
-  tokensUsed: 0, wallMs: 0,
+  tokensUsed: 0, tokensByRole: { planner: 0, worker: 0, reviewer: 0, lead: 0 }, tokensByProvider: noProviderTokens(), wallMs: 0,
+  tokenBreakdown: emptyTokenBreakdown(), tokenBreakdownByRole: noRoleBreakdown(),
   messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
   readOnlyRefusals: 0,
 };
@@ -1156,9 +1741,14 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksPlanned: board.tasks.filter((t) => t.origin !== "lead").length,
     tasksAdded: board.tasks.filter((t) => t.origin === "lead").length,
     tasksRetired: board.tasks.filter((t) => t.status === "retired").length,
-    tasksAcceptedFirstTry: board.tasks.filter((t) => t.status === "complete" && t.review?.verdict === "accepted" && t.attempts === 1).length,
+    tasksAcceptedFirstTry: board.tasks.filter((t) => t.status === "complete" && t.review?.verdict === "accepted" && countedAttempts(t) === 1).length,
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
-    tokensUsed: board.runs.reduce((sum, r) => sum + (typeof r.tokens === "number" && Number.isFinite(r.tokens) ? r.tokens : 0), 0),
+    tokensUsed: board.runs.reduce((sum, r) => sum + runTokens(r), 0),
+    tokensByRole: board.runs.reduce<RoleTokens>((by, r) => ({ ...by, [r.role]: by[r.role] + runTokens(r) }), { planner: 0, worker: 0, reviewer: 0, lead: 0 }),
+    tokenBreakdown: board.runs.reduce((sum, r) => withRunBreakdown(sum, r), emptyTokenBreakdown()),
+    tokenBreakdownByRole: board.runs.reduce<RoleTokenBreakdown>((by, r) => ({ ...by, [r.role]: withRunBreakdown(by[r.role], r) }), noRoleBreakdown()),
+    // Each run on the account it was paid from; one from before the field is on none.
+    tokensByProvider: board.runs.reduce<ProviderTokens>((by, r) => (r.provider ? { ...by, [r.provider]: by[r.provider] + runTokens(r) } : by), noProviderTokens()),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
     messagesSent: messages.length + unreached.length,
     messagesToLead: payloads.filter((p) => p?.to === "lead").length + unreached.filter((u) => u.to === "lead").length,
@@ -1169,6 +1759,207 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
       return sum + (typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0);
     }, 0),
   };
+}
+
+/** One run's tokens as the figures count them: what its record said once it settled, 0 before. */
+function runTokens(r: TeamRunRef): number {
+  return typeof r.tokens === "number" && Number.isFinite(r.tokens) && r.tokens >= 0 ? r.tokens : 0;
+}
+
+/** A sum with one run's breakdown added: each finite, non-negative figure it holds; none, or a bad one, adds 0. */
+function withRunBreakdown(sum: TokenBreakdown, r: TeamRunRef): TokenBreakdown {
+  const own = readTokenBreakdown(r.tokenBreakdown);
+  return { input: sum.input + own.input, output: sum.output + own.output, cacheCreation: sum.cacheCreation + own.cacheCreation, cacheRead: sum.cacheRead + own.cacheRead };
+}
+
+/** Path hints compared: no `./`, no trailing slash, forward slashes. */
+function hintKey(hint: string): string {
+  return hint.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/** Do two hints name overlapping files: the same path, or one a folder holding the other? */
+function hintsOverlap(a: string, b: string): boolean {
+  const x = hintKey(a);
+  const y = hintKey(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+}
+
+/**
+ * Whether a SINGLE run would be cheaper than this team, and why — or null.
+ *
+ * A team pays for a planner, a reviewer per task and a worktree per worker on
+ * top of the work; that is money well spent only when the work splits. Two
+ * plans where it does not: ONE task (the team's whole machinery around one
+ * run's worth of work — which is why such a plan now runs as one run), and
+ * tasks whose `files_hint` mostly overlap (OVERLAP_ADVICE_SHARE of the hinted
+ * files named by another task too): they cannot run side by side without
+ * merging into each other, so they run in a queue, each worker re-reading what
+ * the last one changed. Judged on the PLAN — the tasks the planner posted, not
+ * the ones a lead added later — and only where at least two tasks name files.
+ */
+export function teamAdvice(board: Pick<TeamBoard, "tasks">): TeamAdvice | null {
+  const planned = board.tasks.filter((t) => t.origin !== "lead");
+  if (planned.length === 1) return { reason: "one_task", overlap: 100 };
+  const share = overlapShare(planned);
+  if (share === null || share < OVERLAP_ADVICE_SHARE) return null;
+  const catchAll = catchAllTasks(planned);
+  return { reason: "overlap", overlap: Math.round(share * 100), ...(catchAll.length ? { catchAll } : {}) };
+}
+
+/** The share of the hinted files of `tasks` that another of them names too — null where fewer than two tasks name files. */
+function overlapShare(tasks: readonly Pick<TeamTask, "files_hint">[]): number | null {
+  const hinted = tasks.filter((t) => t.files_hint.some((h) => hintKey(h)));
+  if (hinted.length < 2) return null;
+  let total = 0;
+  let shared = 0;
+  for (const task of hinted) {
+    const others = hinted.filter((t) => t !== task).flatMap((t) => t.files_hint);
+    for (const hint of task.files_hint) {
+      if (!hintKey(hint)) continue;
+      total += 1;
+      if (others.some((o) => hintsOverlap(hint, o))) shared += 1;
+    }
+  }
+  return total === 0 ? null : shared / total;
+}
+
+/** Does hint `a` name what hint `b` names: the same path, or a folder holding it? */
+function hintCovers(a: string, b: string): boolean {
+  const x = hintKey(a);
+  const y = hintKey(b);
+  return Boolean(x && y) && (x === y || y.startsWith(`${x}/`));
+}
+
+/**
+ * The planned tasks whose `files_hint` names every file each OTHER hinted
+ * planned task names — with at least two such others. A task like that makes
+ * every file of the plan "shared" on its own, whatever the rest split into: a
+ * planner that could not tell the work apart hedged with one (a blind plan's
+ * "integrate everything" task), and so does an honest plan whose last task
+ * ties the others together. Which of the two it is, `catchAllLeftOut` says.
+ */
+export function catchAllTasks(tasks: readonly TeamTask[]): string[] {
+  const hinted = tasks.filter((t) => t.origin !== "lead" && t.files_hint.some((h) => hintKey(h)));
+  return hinted
+    .filter((task) => {
+      const others = hinted.filter((t) => t !== task);
+      return others.length >= 2 && others.every((o) => o.files_hint.every((h) => !hintKey(h) || task.files_hint.some((mine) => hintCovers(mine, h))));
+    })
+    .map((t) => t.task_id);
+}
+
+/**
+ * The plan measured with its catch-all tasks (`catchAllTasks`) left out:
+ * `overlapWithout` is the overlap of the rest in percent (null where too few
+ * tasks are left to judge), `runsLast` says every catch-all task waits —
+ * directly or through another task — on every other planned task. Both
+ * together (`leftOut`) is an INTEGRATION step: it runs after the work it
+ * names, never beside it, so its files conflict with nothing, and the plan
+ * runs as the team it is.
+ */
+export function catchAllLeftOut(board: Pick<TeamBoard, "tasks">, catchAll: readonly string[]): { overlapWithout: number | null; runsLast: boolean; leftOut: boolean } {
+  const planned = board.tasks.filter((t) => t.origin !== "lead");
+  const share = overlapShare(planned.filter((t) => !catchAll.includes(t.task_id)));
+  const runsLast = catchAll.length > 0 && catchAll.every((id) => {
+    const waits = waitsOnTransitively(planned, id);
+    return planned.every((t) => t.task_id === id || waits.has(t.task_id));
+  });
+  return {
+    overlapWithout: share === null ? null : Math.round(share * 100),
+    runsLast,
+    leftOut: runsLast && (share === null || share < OVERLAP_ADVICE_SHARE),
+  };
+}
+
+/** Every task `taskId` waits on, directly or through another. */
+function waitsOnTransitively(tasks: readonly Pick<TeamTask, "task_id" | "depends_on">[], taskId: string): Set<string> {
+  const seen = new Set<string>();
+  const next = [...(tasks.find((t) => t.task_id === taskId)?.depends_on ?? [])];
+  while (next.length) {
+    const id = next.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    next.push(...(tasks.find((t) => t.task_id === id)?.depends_on ?? []));
+  }
+  return seen;
+}
+
+/**
+ * What a planner says when it could not read the project: the words its brief
+ * tells it to write then ("source not inspected" — a contract with
+ * coding-team-planner.ts PLANNER_BRIEF), and the ways a model says so unasked.
+ */
+const BLIND_PLAN = /source not inspected|not inspected|no source (was )?read|could not (read|inspect)|unable to (read|inspect)|tools? (were|was|are) unavailable/i;
+
+/**
+ * Why a parsed plan reads as written WITHOUT reading the project — or null.
+ * Its repo map, its shape's rationale and the prose around its JSON are read;
+ * the tasks are not (a task may well ask its worker to inspect something).
+ * A plan like that hedges: every repo-map entry "source not inspected", and a
+ * catch-all task naming every file because the planner could not tell the
+ * work apart.
+ */
+export function blindPlanReason(answer: string | null | undefined, repoMap: RepoMap | null, shape: TeamShape | null): string | null {
+  const said: string[] = [];
+  const entries = repoMap ? [...repoMap.files, ...repoMap.entryPoints, ...repoMap.testCommands, ...repoMap.gotchas] : [];
+  const hits = entries.map((e) => BLIND_PLAN.exec(e)?.[0]).filter((m): m is string => Boolean(m));
+  if (hits.length) said.push(`its repo map says "${hits[0]}" (${hits.length} of ${entries.length} entries)`);
+  const rationale = shape ? BLIND_PLAN.exec(shape.rationale) : null;
+  if (rationale) said.push(`its shape's rationale says "${rationale[0]}"`);
+  const prose = BLIND_PLAN.exec(planProse(answer ?? ""));
+  if (prose) said.push(`its answer says "${prose[0]}"`);
+  return said.length ? said.join("; ") : null;
+}
+
+/** A planner's answer without its JSON: fenced blocks out, and every top-level bracket that parses as JSON. */
+function planProse(answer: string): string {
+  const text = answer.replace(/```[\s\S]*?(?:```|$)/g, " ");
+  let prose = "";
+  let from = 0;
+  for (const [start, end] of jsonSpans(text)) {
+    prose += `${text.slice(from, start)} `;
+    from = end + 1;
+  }
+  return prose + text.slice(from);
+}
+
+/**
+ * The top-level `[…]` and `{…}` spans of `text` that parse as JSON, in order.
+ * Strings are skipped only INSIDE a bracket: a quote in the prose around the
+ * plan must not swallow the plan's own opening bracket.
+ */
+function jsonSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const open: string[] = [];
+  let start = -1;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"' && open.length) inString = true;
+    else if (ch === "[" || ch === "{") {
+      if (!open.length) start = i;
+      open.push(ch);
+    } else if ((ch === "]" || ch === "}") && open.length) {
+      if ((ch === "]") !== (open.pop() === "[")) {
+        open.length = 0;
+        continue;
+      }
+      if (open.length) continue;
+      try {
+        JSON.parse(text.slice(start, i + 1));
+        spans.push([start, i]);
+      } catch {
+        // Prose in brackets, not JSON: it stays prose.
+      }
+    }
+  }
+  return spans;
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

@@ -1534,29 +1534,21 @@ describe("/setup-api/monitors", () => {
       expect(res.status).toBe(200);
     });
 
-    it("GET answers another ClawBox user the monitors' geometry only, and a cookie for a user that is gone 401", async () => {
-      // Signed in on the monitor-mode window, their desktop lays itself out
-      // over the same row: where each monitor is, and which is the main one.
+    it("GET answers another ClawBox user the whole status — they get the owner's Settings — and a cookie for a user that is gone 401", async () => {
       const guest = await get({ cookie: GUEST });
       expect(guest.status).toBe(200);
       expect(guest.headers.get("cache-control")).toBe("no-store");
       const body = (await guest.json()) as MonitorStatus;
-      expect(body).toMatchObject({ available: true, order: [HDMI, DP2, EDP], main: HDMI, box: { width: 5120, height: 1440 }, pending: null, mirror: false });
-      const dp2 = body.monitors.find((m) => m.id === DP2)!;
-      expect(dp2).toEqual({
-        id: DP2, name: "DP-2", label: "AOC Q27B3MA", builtIn: false, enabled: true, modes: [], current: null,
-        scale: 1, transform: "normal", rect: { x: 2560, y: 0, width: 2560, height: 1440 }, physicalSize: null, adaptiveSync: null,
-      });
-      expect(body.monitors.every((m) => m.modes.length === 0 && m.physicalSize === null && m.current === null)).toBe(true);
+      const owners = (await (await get()).json()) as MonitorStatus;
+      expect(body).toEqual(owners);
 
       const gone = await get({ cookie: mintCookie({ u: "nobody", sv: "0123abcd" }) });
       expect(gone.status).toBe(401);
     });
 
-    it("GET hides a trial from another ClawBox user", async () => {
+    it("GET shows another ClawBox user a trial too, so their Settings can keep or revert it", async () => {
       await applyMonitorLayout(DP2_1080_LEFT);
-      expect(((await (await get()).json()) as MonitorStatus).pending).not.toBeNull();
-      expect(((await (await get({ cookie: GUEST })).json()) as MonitorStatus).pending).toBeNull();
+      expect(((await (await get({ cookie: GUEST })).json()) as MonitorStatus).pending).not.toBeNull();
     });
 
     it("GET on a box with no kiosk is a 200 `available: false`, not an error", async () => {
@@ -1569,7 +1561,6 @@ describe("/setup-api/monitors", () => {
     it.each([
       ["no session", {}],
       ["the MCP bearer", { cookie: "", authorization: `Bearer ${MCP_TOKEN}` }],
-      ["another ClawBox user", { cookie: GUEST }],
       ["an expired owner cookie", { cookie: mintCookie({ exp: Math.floor(Date.now() / 1000) - 10 }) }],
       ["a revoked owner cookie", { cookie: mintCookie({ gen: 7 }) }],
     ])("POST refuses %s as owner_only before reading the body", async (_label, headers) => {

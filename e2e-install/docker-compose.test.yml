@@ -38,6 +38,9 @@ services:
       # .update-branch, .next build cache) survives container restarts — this
       # is what lets us simulate "reboot after update" in tests.
       - clawbox-home:/home/clawbox/clawbox
+      # The build cache the entrypoint seeds a fresh project's .next/cache
+      # from (see cache-seed/README.md): CI's restored cache, or nothing.
+      - ${CLAWBOX_E2E_CACHE_DIR:-./cache-seed}:/var/cache/clawbox-e2e:ro
       # .env.test is NOT mounted into the container. Tests read it from the
       # host (see happy-path.spec.ts:loadEnvTest) and pass credentials through
       # /setup-api/ai-models/configure, which writes them into the container's

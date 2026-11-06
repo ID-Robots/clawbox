@@ -12,13 +12,16 @@ unit tests, etc.) can run on a host that has not yet installed boto3.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 
 from .api import Credentials
+
+T = TypeVar("T")
 
 # Sidecar object that annotates snapshots with a human label + lock flag.
 # Lives in the SAME prefix as the backups but is NEVER itself a snapshot:
@@ -33,6 +36,20 @@ MANIFEST_VERSION = 1
 MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
 MULTIPART_THRESHOLD_BYTES = 64 * 1024 * 1024
 MAX_UPLOAD_CONCURRENCY = 2
+
+# botocore's timeouts are per socket operation and its retries multiply them:
+# a store that takes the connection and never answers costs MAX_ATTEMPTS x
+# READ_TIMEOUT (plus backoff) before the call fails — about 19 minutes.
+CONNECT_TIMEOUT = 10.0
+READ_TIMEOUT = 120.0
+MAX_ATTEMPTS = 8
+# A LIST is one small request, not a multi-gigabyte transfer: one that had no
+# answer in READ_TIMEOUT is no likelier to get one on the eighth try. Listing
+# calls stop sooner, and callers that must not wait long give them a
+# `timeout` on top (`stats`).
+LIST_MAX_ATTEMPTS = 3
+# The floor under a socket timeout cut down to fit a `timeout`.
+MIN_SOCKET_TIMEOUT = 1.0
 
 
 class S3Error(Exception):
@@ -69,7 +86,13 @@ def _join(prefix: str, name: str) -> str:
     return f"{prefix}/{name}"
 
 
-def _client(creds: Credentials) -> Any:
+def _client(
+    creds: Credentials,
+    *,
+    max_attempts: int = MAX_ATTEMPTS,
+    connect_timeout: float = CONNECT_TIMEOUT,
+    read_timeout: float = READ_TIMEOUT,
+) -> Any:
     """Build an S3 client pointed at the portal-issued R2 endpoint.
 
     Imported lazily so callers that never reach upload() (tests, dry-runs)
@@ -91,9 +114,9 @@ def _client(creds: Credentials) -> Any:
         # presigned URLs. "auto" is the documented value.
         region_name="auto",
         signature_version="s3v4",
-        retries={"max_attempts": 8, "mode": "adaptive"},
-        connect_timeout=10,
-        read_timeout=120,
+        retries={"max_attempts": max_attempts, "mode": "adaptive"},
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
         tcp_keepalive=True,
         s3={"addressing_style": "path"},
     )
@@ -133,8 +156,13 @@ def upload(
     the *delta* bytes transferred since the last call — the runner accumulates
     those into the live upload-progress fields in state.json so the UI can
     show MB/s.
+
+    The transfer manager re-raises a refused put (`ClientError`) as boto3's
+    own `S3UploadFailedError`, a `Boto3Error` and not a botocore one, so that
+    family is caught too: the runner handles only `S3Error`.
     """
     try:
+        from boto3.exceptions import Boto3Error
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
@@ -157,7 +185,7 @@ def upload(
             Callback=progress_cb,
             Config=transfer,
         )
-    except (BotoCoreError, ClientError, OSError) as e:
+    except (Boto3Error, BotoCoreError, ClientError, OSError) as e:
         raise S3Error(f"upload failed for s3://{creds.bucket}/{key}: {e}") from e
     return key
 
@@ -271,39 +299,124 @@ def _last_modified_ms(value: object) -> int:
     return 0
 
 
-def stats(creds: Credentials) -> CloudStats:
-    """Sum sizes + count objects under the prefix.
+def _bounded(call: Callable[[], T], timeout: float, what: str) -> T:
+    """`call()`'s answer, or `S3Error` once `timeout` seconds pass without one.
 
-    This — not any counter the portal keeps — is what the account actually
-    holds. One LIST answers it, which is why the runner can afford to ask on
-    every heartbeat instead of trusting a number that only ever goes stale.
+    botocore has no deadline of its own (see READ_TIMEOUT), so the call runs on
+    a daemon thread the caller stops waiting for. Only for read-only calls: an
+    abandoned one finishes or fails on its own — its client's timeouts are cut
+    down to the same budget — and whatever it returns then is dropped.
+    """
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as e:  # noqa: BLE001 — re-raised in the caller below
+            outcome["error"] = e
+
+    worker = threading.Thread(target=run, name="clawkeep-s3-bounded", daemon=True)
+    worker.start()
+    worker.join(max(0.0, timeout))
+    if worker.is_alive():
+        raise S3Error(f"{what} did not finish within {timeout:.3g}s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def _snapshot_objects(
+    creds: Credentials, *, timeout: float | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Every snapshot object under the prefix as `(name, listing entry)`, or
+    `S3Error` — never part of the answer.
+
+    The one walk `stats` and `list_snapshots` share, so the two readings of
+    "what is in the prefix" apply the same exclusions in the same order and
+    can never disagree: the sidecar manifest is bookkeeping, not a backup, and
+    a zero-byte "directory marker" (MinIO and some R2 lifecycles emit them) is
+    not a snapshot either.
+
+    All of it or nothing, because both callers act on the total. A backup is
+    admitted against the usage this adds up to, and retention forgets the
+    manifest entry — the lock included — of every name it does not return; a
+    listing that stopped early would under-count the one and unlock snapshots
+    for the other. The paginator follows `NextContinuationToken` and raises on
+    a failed page, but it ENDS QUIETLY on a page that says `IsTruncated` and
+    carries no token, so that page is refused here. An entry without a usable
+    size is refused for the same reason: counted as 0 it is usage that was
+    never added up.
+
+    Listing calls get LIST_MAX_ATTEMPTS, not MAX_ATTEMPTS. `timeout` bounds the
+    whole walk — every page, every retry — in seconds, and a walk still going
+    then is an `S3Error` like any other unfinished one (`_bounded`).
     """
     try:
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
 
-    cli = _client(creds)
+    where = f"s3://{creds.bucket}/{creds.prefix}"
+    # Cut to the budget too, so a walk `_bounded` gave up on ends soon after.
+    cap = READ_TIMEOUT if timeout is None else max(MIN_SOCKET_TIMEOUT, timeout)
+    # Built here, not on `_bounded`'s thread: boto3 builds clients from one
+    # shared default session, which is not safe to use from two threads at once.
+    cli = _client(
+        creds,
+        max_attempts=LIST_MAX_ATTEMPTS,
+        connect_timeout=min(CONNECT_TIMEOUT, cap),
+        read_timeout=min(READ_TIMEOUT, cap),
+    )
+
+    def walk() -> list[tuple[str, dict[str, Any]]]:
+        out: list[tuple[str, dict[str, Any]]] = []
+        truncated = False
+        try:
+            paginator = cli.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
+                truncated = bool(page.get("IsTruncated"))
+                for obj in page.get("Contents", []) or []:
+                    name = _strip_prefix(creds.prefix, str(obj.get("Key", "")))
+                    if not name or name.endswith("/"):
+                        continue
+                    if name == MANIFEST_OBJECT:
+                        continue
+                    size = obj.get("Size")
+                    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                        raise S3Error(
+                            f"list_objects_v2 for {where} returned an entry without a usable "
+                            "size; the listing cannot be added up",
+                        )
+                    out.append((name, obj))
+        except (BotoCoreError, ClientError) as e:
+            raise S3Error(f"list_objects_v2 failed for {where}: {e}") from e
+        if truncated:
+            raise S3Error(
+                f"list_objects_v2 for {where} ended on a truncated page with no continuation "
+                "token; the listing is incomplete",
+            )
+        return out
+
+    if timeout is None:
+        return walk()
+    return _bounded(walk, timeout, f"list_objects_v2 for {where}")
+
+
+def stats(creds: Credentials, *, timeout: float | None = None) -> CloudStats:
+    """Sum sizes + count objects under the prefix.
+
+    This — not any counter the portal keeps — is what the account actually
+    holds. One LIST answers it, which is why the runner can afford to ask on
+    every heartbeat instead of trusting a number that only ever goes stale.
+    A listing that cannot be read to its end is an `S3Error`, not a smaller
+    number (`_snapshot_objects`) — and so is one that has not ended within
+    `timeout` seconds, when one is given.
+    """
     total = 0
     count = 0
-    try:
-        paginator = cli.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
-            for obj in page.get("Contents", []) or []:
-                name = _strip_prefix(creds.prefix, str(obj.get("Key", "")))
-                # Same two exclusions `list_snapshots` applies, in the same
-                # order, so the usage the panel derives from a listing and the
-                # usage a backup run reports can never disagree:
-                # the sidecar manifest is bookkeeping, not a backup, and a
-                # zero-byte "directory marker" is not a snapshot either.
-                if not name or name.endswith("/"):
-                    continue
-                if name == MANIFEST_OBJECT:
-                    continue
-                total += int(obj.get("Size", 0))
-                count += 1
-    except (BotoCoreError, ClientError) as e:
-        raise S3Error(f"list_objects_v2 failed for s3://{creds.bucket}/{creds.prefix}: {e}") from e
+    for _name, obj in _snapshot_objects(creds, timeout=timeout):
+        total += obj["Size"]
+        count += 1
     return CloudStats(cloud_bytes=total, snapshot_count=count)
 
 
@@ -331,50 +444,28 @@ def list_snapshots(creds: Credentials) -> list[Snapshot]:
     restores the most recent backup, so it goes at the top of the list and
     we don't need a client-side sort.
     """
-    try:
-        from botocore.exceptions import BotoCoreError, ClientError
-    except ImportError as e:  # pragma: no cover
-        raise S3Error("boto3/botocore not installed") from e
-
     # Manifest annotations are merged in below. A read failure here would be
     # surfaced as S3Error; a *missing* manifest yields an empty mapping so
     # every snapshot reads back as unnamed + unlocked (back-compat).
     manifest = read_manifest(creds)
     entries = manifest.get("snapshots", {})
 
-    cli = _client(creds)
     out: list[Snapshot] = []
-    try:
-        paginator = cli.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
-            for obj in page.get("Contents", []) or []:
-                key = str(obj.get("Key", ""))
-                if not key:
-                    continue
-                name = _strip_prefix(creds.prefix, key)
-                # Skip "directory marker" objects (zero-byte, key ends with /) —
-                # MinIO/some R2 lifecycles emit them, but they're not snapshots.
-                if not name or name.endswith("/"):
-                    continue
-                # The sidecar manifest is never itself a snapshot.
-                if name == MANIFEST_OBJECT:
-                    continue
-                entry = entries.get(name) if isinstance(entries, dict) else None
-                label: Optional[str] = None
-                locked = False
-                if isinstance(entry, dict):
-                    raw_label = entry.get("label")
-                    label = raw_label if isinstance(raw_label, str) and raw_label else None
-                    locked = bool(entry.get("locked", False))
-                out.append(Snapshot(
-                    name=name,
-                    size_bytes=int(obj.get("Size", 0)),
-                    last_modified_ms=_last_modified_ms(obj.get("LastModified")),
-                    label=label,
-                    locked=locked,
-                ))
-    except (BotoCoreError, ClientError) as e:
-        raise S3Error(f"list_objects_v2 failed for s3://{creds.bucket}/{creds.prefix}: {e}") from e
+    for name, obj in _snapshot_objects(creds):
+        entry = entries.get(name) if isinstance(entries, dict) else None
+        label: Optional[str] = None
+        locked = False
+        if isinstance(entry, dict):
+            raw_label = entry.get("label")
+            label = raw_label if isinstance(raw_label, str) and raw_label else None
+            locked = bool(entry.get("locked", False))
+        out.append(Snapshot(
+            name=name,
+            size_bytes=obj["Size"],
+            last_modified_ms=_last_modified_ms(obj.get("LastModified")),
+            label=label,
+            locked=locked,
+        ))
 
     out.sort(key=lambda s: s.last_modified_ms, reverse=True)
     return out
@@ -387,8 +478,11 @@ def download(
     dest_path: Path,
 ) -> None:
     """GET an object into dest_path. Uses boto3's `download_file` so multipart
-    transfer kicks in for the >300MB tarballs we routinely produce."""
+    transfer kicks in for the >300MB tarballs we routinely produce. Exhausted
+    retries come out of the transfer manager as boto3's `RetriesExceededError`
+    (a `Boto3Error`), so that family is an `S3Error` too, as in `upload`."""
     try:
+        from boto3.exceptions import Boto3Error
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
@@ -398,5 +492,5 @@ def download(
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         cli.download_file(creds.bucket, key, str(dest_path))
-    except (BotoCoreError, ClientError, OSError) as e:
+    except (Boto3Error, BotoCoreError, ClientError, OSError) as e:
         raise S3Error(f"download failed for s3://{creds.bucket}/{key}: {e}") from e

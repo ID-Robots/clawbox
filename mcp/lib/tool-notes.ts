@@ -39,6 +39,14 @@ export const TOOL_NOTES: readonly ToolNote[] = [
     note: "A part it cannot read says \"unknown\" rather than failing the whole call.",
   },
   {
+    tool: "docs_search",
+    note: "When something on this box fails — an update, the network, a login, the assistant itself — docs_search the symptom first, then follow support/troubleshooting: `docs_read` the section a hit named and work through its steps in order; support/recovery, support/updating and support/faq are the other pages to reach for. The pages are the ones installed with this version of ClawBox, read offline, and a hit's `path` is exactly what `docs_read` takes.",
+  },
+  {
+    tool: "docs_read",
+    note: "A long page is cut under the cap and the note lists its sections: ask for one with `section`. Paths under docs-site (support/…, guides/…, technical/…) are the owner's manual; agents/… pages are the engineering notes behind the code, for when the manual does not say how something works.",
+  },
+  {
     tool: "system_stats",
     note: "An empty `cpu.perCore` means the per-core figures have not been measured yet (the first read after a restart has nothing to diff against), not that the cores are idle — call again for them.",
   },
@@ -60,11 +68,39 @@ export const TOOL_NOTES: readonly ToolNote[] = [
   },
   {
     tool: "memory_shard_status",
-    note: "Starting a reindex is the owner's, in the Memory Shard app.",
+    note: "Run incremental passes yourself (memory_shard_reindex); a full re-embed, a provider change or a reset waits for the owner's yes in chat (confirm: true).",
   },
   {
     tool: "memory_shard_search",
     note: "It holds the owner's PDFs, Word files and Markdown. Ask a question or a phrase (\"what does the lease say about the deposit\") rather than one keyword.",
+  },
+  {
+    tool: "prime_radiant_status",
+    note: "Prime Radiant is the owner's wiki: pages with YAML frontmatter, each fact a claim with a global id `<domain>/<entity>/<fact>`. Every change you make through the `prime_radiant_*` tools is one commit authored \"ClawBox assistant\", which the owner sees in Prime Radiant → History and can undo.",
+  },
+  {
+    tool: "prime_radiant_page_edit",
+    note: "`summary` replaces only the first paragraph; `body` replaces everything (its first paragraph becomes the summary). Read the page with `prime_radiant_page` first so you do not drop what is there.",
+  },
+  {
+    tool: "prime_radiant_page_merge",
+    note: "Run it with `dry_run: true` first and tell the user what would move and which pages' links would change; merge once they agree. The page that stays keeps its text exactly as it is (pick the fuller page as `into`); a link in it to a page being merged refuses the merge until it is taken out, or until the user lets its text change (`keep_into_body: false`).",
+  },
+  {
+    tool: "prime_radiant_pages_bulk_edit",
+    note: "For a change of domain, owner, privacy or status on more than one page — re-tagging pages with a new domain, say — use this instead of one `prime_radiant_page_edit` per page: up to 500 pages in one commit. Run it with `dry_run: true` first and tell the user how many pages would change; a refused page says why, and the others still change.",
+  },
+  {
+    tool: "prime_radiant_claim_verify",
+    note: "A verification is final for the wiki: a later import never overwrites the page, and only verifying again changes the text. Verify only what the user confirmed; when you are unsure, `prime_radiant_review_raise` asks the owner instead.",
+  },
+  {
+    tool: "prime_radiant_undo",
+    note: "Only the commits you made can be undone here — the answer refuses any other as the owner's. A later commit that touched the same lines blocks the undo: undo that one first. A verification — a `verify:` commit, a settled review question — is never undone, whole or one page of it, by you or the owner: to change the fact, verify the right answer once the user confirms it.",
+  },
+  {
+    tool: "prime_radiant_ingest_start",
+    note: "Run `prime_radiant_ingest_preview` on folders first and tell the user how many documents it would read: a large import spends a lot of the owner's ClawBox AI allowance.",
   },
   {
     tool: "skill_list",
@@ -108,7 +144,7 @@ export const TOOL_NOTES: readonly ToolNote[] = [
   },
   {
     tool: "coding_agent_run",
-    note: "A one-line change is your own tools' job. Work only in a `project_id` from `code_project_list` or a `directory` inside the owner's project folder, preferring one the owner already has to scaffolding a new one; the run cannot ask questions. `input_files` are copied where the run can read them — it cannot open your media folder, so a path only mentioned in the task is never read. Name `deliverable_files` for any concrete output: the run is not finished until they exist and are not empty. `delivery_pipeline` adds review and improvement laps; this box cannot deploy, so the deploy and check stages are skipped.",
+    note: "A one-line change is your own tools' job. Work only in a `project_id` from `code_project_list` or a `directory` inside the owner's project folder, preferring one the owner already has to scaffolding a new one; the run cannot ask questions. `input_files` are copied where the run can read them — it cannot open your media folder, so a path only mentioned in the task is never read. Name `deliverable_files` for any concrete output: the run is not finished until they exist and are not empty.",
   },
   {
     tool: "coding_agent_status",

@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
+import { CLAWAI_PLAN_CHANGED_EVENT, VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
+import { refreshClawboxPlanNow } from "@/lib/use-clawbox-login";
 import SpokenReplyPlayer from "@/components/SpokenReplyPlayer";
 import type {
   VoiceChoice,
@@ -11,6 +12,9 @@ import type {
   VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { cloudVoicesFor, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
+import { findRunningBackgroundTask, followBackgroundTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
+import { KOKORO_INSTALL_KIND } from "@/lib/background-task-kinds";
+import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
 
 /**
  * Settings → Voice: three dropdowns and a sentence to hear.
@@ -53,16 +57,27 @@ function isDisclosure(value: unknown): boolean {
  * Settings window down (TASK-398); a panel that cannot read the box keeps its
  * last good reading instead.
  */
-/** The tts route's answer: the status, plus the owner's switch for spoken replies. */
-export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean };
+/**
+ * The tts route's answer: the status, plus the owner's switch for spoken
+ * replies and the two switches under it — auto-play, and short spoken answers.
+ */
+export type VoiceStatusAnswer = VoiceOutputStatus & {
+  autoReply?: boolean;
+  autoPlayAll?: boolean;
+  shortSpoken?: boolean;
+  /** The box is still following a plan change (the tts route's `cloudPending`). */
+  cloudPending?: boolean;
+};
 
 export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
   if (!value || typeof value !== "object") return false;
   const s = value as Record<string, unknown>;
   if (!["auto", "local", "cloud"].includes(s.choice as string)) return false;
-  // Optional: a status from before the switch existed still renders, with
-  // the switch shown in its default position (on).
+  // Optional: a status from before a switch existed still renders, with that
+  // switch shown in its default position (off).
   if (s.autoReply != null && typeof s.autoReply !== "boolean") return false;
+  if (s.autoPlayAll != null && typeof s.autoPlayAll !== "boolean") return false;
+  if (s.shortSpoken != null && typeof s.shortSpoken !== "boolean") return false;
   if (!Array.isArray(s.engines) || !s.engines.every(isEngine)) return false;
   if (typeof s.drifted !== "boolean") return false;
   if (s.warning !== null && typeof s.warning !== "string") return false;
@@ -154,6 +169,13 @@ const REFUSAL_KEYS: Record<string, string> = {
 /** How long a local sample may take before the panel says the voice is warming up. */
 const WARMING_AFTER_SECONDS = 3;
 
+/**
+ * How often the panel looks again while the box follows a plan change. On
+ * OpenClaw that is a gateway restart to arm the cloud voice — 20-50 s on a
+ * board — so a few reads cover it without a stream of them.
+ */
+const PLAN_FOLLOW_RECHECK_MS = 5_000;
+
 const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
 const ROW = "flex items-center justify-between gap-4";
 const SELECT = "min-w-[12rem] max-w-[60%] rounded-lg border border-white/10 bg-[var(--bg-elevated)] px-3 py-2 text-sm text-[var(--text-primary)] disabled:opacity-50";
@@ -171,6 +193,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [installing, setInstalling] = useState(false);
   const [installFailed, setInstallFailed] = useState(false);
   const [installingFor, setInstallingFor] = useState(0);
+  // The background task the repair follows (src/lib/background-tasks.ts), once
+  // the stream's first line named it: what the inline progress is drawn from.
+  const [installTaskId, setInstallTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The box settled on the default instead of the pick, and said so (the
   // tts route's `fallback`). Amber, not red: nothing is broken, the owner's
@@ -187,23 +212,36 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const playerRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef<string | null>(null);
+  // Counts the settings events that moved a switch (see the listener below).
+  // A read that was in flight when one landed is OLDER than it — the event
+  // is sent only once the box has taken the change — so `load` reads again
+  // rather than put back a position the owner has just moved.
+  const switchEventsRef = useRef(0);
 
   // Answers what it read, so a caller that CHANGED the box can publish the
   // refreshed facts (see installVoiceNotes); null whenever nothing readable
   // came back and the panel kept its last reading.
   const load = useCallback(async (): Promise<VoiceStatusAnswer | null> => {
     try {
-      const res = await fetch("/setup-api/tts", { cache: "no-store" });
-      const data = await res.json();
-      // Both pieces of state follow the same "keep the last good reading" rule.
-      // Set before the guard, an error body — `res.ok` is never checked — would
-      // read as `channelsUnavailable: false` and quietly clear a note the box
-      // had already given us, while `status` correctly kept its last value.
-      if (!isVoiceStatus(data)) return null;
-      setNoChannelSpeech(channelsUnavailable(data));
-      setNoVoiceNotes(channelVoiceNotesMissing(data));
-      setStatus(data);
-      return data;
+      // Bounded: a read overtaken by an event is asked again, and only a
+      // storm of events could overtake three in a row — then the panel keeps
+      // the reading it has, which the events themselves keep current.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const eventsAtStart = switchEventsRef.current;
+        const res = await fetch("/setup-api/tts", { cache: "no-store" });
+        const data = await res.json();
+        // Both pieces of state follow the same "keep the last good reading" rule.
+        // Set before the guard, an error body — `res.ok` is never checked — would
+        // read as `channelsUnavailable: false` and quietly clear a note the box
+        // had already given us, while `status` correctly kept its last value.
+        if (!isVoiceStatus(data)) return null;
+        if (switchEventsRef.current !== eventsAtStart) continue;
+        setNoChannelSpeech(channelsUnavailable(data));
+        setNoVoiceNotes(channelVoiceNotesMissing(data));
+        setStatus(data);
+        return data;
+      }
+      return null;
     } catch {
       /* keep the last good reading rather than blanking the panel */
       return null;
@@ -212,8 +250,36 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
 
   useEffect(() => {
     if (!active) return;
+    // The box's reading is external state the panel synchronises to, and
+    // `load` sets it only once its fetch has answered — never in this tick.
     load();
+    // And the plan behind it: the cloud voice comes with Max, and an account
+    // upgraded on the portal is seen by the status poll. Asked now, so opening
+    // Voice does not wait out the poll's interval to find the new plan.
+    refreshClawboxPlanNow();
   }, [active, load]);
+
+  /**
+   * Follow the PLAN, not only the switches: when the poll records a new plan
+   * the box starts following it (src/lib/clawai-plan-follow.ts), and while it
+   * does — a gateway restart to arm the cloud voice, on OpenClaw — the box says
+   * so (`cloudPending`) and the panel looks again until it is done. Before,
+   * the panel read the box once per visit, and the cloud voice of a new Max
+   * plan stayed "not available" on screen however long the owner waited.
+   */
+  useEffect(() => {
+    if (!active) return;
+    const onPlanChanged = () => void load();
+    window.addEventListener(CLAWAI_PLAN_CHANGED_EVENT, onPlanChanged);
+    return () => window.removeEventListener(CLAWAI_PLAN_CHANGED_EVENT, onPlanChanged);
+  }, [active, load]);
+
+  const followingPlan = status?.cloudPending === true;
+  useEffect(() => {
+    if (!active || !followingPlan) return;
+    const timer = window.setInterval(() => void load(), PLAN_FOLLOW_RECHECK_MS);
+    return () => window.clearInterval(timer);
+  }, [active, followingPlan, load]);
 
   /**
    * Follow the switch when it is moved somewhere else.
@@ -228,9 +294,16 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
    */
   useEffect(() => {
     const onChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ autoReply?: unknown }>).detail;
-      if (typeof detail?.autoReply !== "boolean") return;
-      setStatus((prev) => (prev ? { ...prev, autoReply: detail.autoReply as boolean } : prev));
+      const detail = (event as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown; shortSpoken?: unknown }>).detail;
+      // Each switch on its own: a writer that names only one (or an older
+      // one that predates the others) must not move the rest.
+      const moved: Partial<VoiceStatusAnswer> = {};
+      if (typeof detail?.autoReply === "boolean") moved.autoReply = detail.autoReply;
+      if (typeof detail?.autoPlayAll === "boolean") moved.autoPlayAll = detail.autoPlayAll;
+      if (typeof detail?.shortSpoken === "boolean") moved.shortSpoken = detail.shortSpoken;
+      if (Object.keys(moved).length === 0) return;
+      switchEventsRef.current += 1;
+      setStatus((prev) => (prev ? { ...prev, ...moved } : prev));
     };
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
     return () => window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
@@ -293,29 +366,30 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
    * not rendered here (a repair is one fact, not a build log), so the whole
    * body is read and only its last decision is kept; the panel then re-reads
    * the box, which is what makes the amber block disappear.
+   *
+   * The install is a background task of the server, so it runs on with
+   * Settings closed; `follow` is a task already running, which a reopened tab
+   * follows again (below) instead of showing the button as idle over it.
    */
-  const installVoiceNotes = useCallback(async () => {
+  const installVoiceNotes = useCallback(async (follow?: string) => {
     setInstallingFor(0);
     setInstalling(true);
     setInstallFailed(false);
     try {
-      const res = await fetch("/setup-api/tts/install", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
+      const res = follow
+        ? await followBackgroundTask(follow)
+        : await fetch("/setup-api/tts/install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+      // A refusal answers JSON, which the reader takes as its closing line.
+      const outcome = await readTaskStream(res, () => {}, (taskId) => {
+        setInstallTaskId(taskId);
+        // The desktop's corner card asks at once rather than at its next poll.
+        notifyBackgroundTaskStarted(taskId);
       });
-      const lines = (await res.text()).split("\n").map((l) => l.trim()).filter(Boolean);
-      let ok = false;
-      for (const line of lines) {
-        try {
-          const payload = JSON.parse(line) as { success?: unknown; error?: unknown };
-          if (payload.success === true) ok = true;
-          if (typeof payload.error === "string") ok = false;
-        } catch {
-          // A torn write: the stream is read for its verdict, and a line that
-          // is not JSON carries none.
-        }
-      }
+      const ok = outcome.ok;
       setInstallFailed(!ok);
       const refreshed = await load();
       // This button INSTALLS the voice, so it changes the one fact the chat
@@ -325,15 +399,35 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       // box answered afterwards — the same rule `post` follows below.
       if (ok && refreshed) {
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: refreshed.autoReply === true, engines: refreshed.engines },
+          detail: {
+            autoReply: refreshed.autoReply === true,
+            autoPlayAll: refreshed.autoPlayAll === true,
+            shortSpoken: refreshed.shortSpoken === true,
+            engines: refreshed.engines,
+          },
         }));
       }
     } catch {
       setInstallFailed(true);
     } finally {
       setInstalling(false);
+      setInstallTaskId(null);
     }
   }, [load]);
+
+  // RE-ATTACH: an install this tab (or the Local AI row) started before
+  // Settings closed is followed again on the repair button. Once per mount.
+  const attachedRef = useRef(false);
+  useEffect(() => {
+    if (attachedRef.current) return;
+    let alive = true;
+    void findRunningBackgroundTask([KOKORO_INSTALL_KIND]).then((task) => {
+      if (!alive || !task || attachedRef.current) return;
+      attachedRef.current = true;
+      void installVoiceNotes(task.id);
+    });
+    return () => { alive = false; };
+  }, [installVoiceNotes]);
 
   /**
    * A refusal in the owner's language when the box sent a code for it, its
@@ -391,9 +485,17 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         // speak with — so it hears about every write, not only about
         // `autoReply`. `select` and the ffmpeg repair are what install or
         // retire this box's voice, and a chat docked beside this page kept
-        // showing the old answer until it was closed and reopened.
+        // showing the old answer until it was closed and reopened. The
+        // auto-play and short-answer switches ride along for the same reason:
+        // the chat reads them the moment the next reply lands, with no reopen
+        // in between.
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: data.autoReply === true, engines: data.engines },
+          detail: {
+            autoReply: data.autoReply === true,
+            autoPlayAll: data.autoPlayAll === true,
+            shortSpoken: data.shortSpoken === true,
+            engines: data.engines,
+          },
         }));
       }
       if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
@@ -486,6 +588,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   // whose option is greyed out — and a Play that then asked the box to speak
   // with it only produced a refusal to read.
   const canSpeak = engineById(source)?.configured === true;
+  // Auto-play has nothing to play, and short answers nothing to shorten,
+  // while spoken replies are off.
+  const spokenRepliesOn = status.autoReply === true;
 
   const optionLabel = (engine: VoiceEngine | null, nameKey: string, missingKey: string) =>
     engine?.configured ? t(nameKey) : `${t(nameKey)} — ${t(missingKey)}`;
@@ -525,7 +630,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             onChange={(e) => chooseSource(e.target.value as VoiceEngineId)}
           >
             <option value="cloud" disabled={!cloud?.configured}>
-              {optionLabel(cloud, "settings.voice.source.cloud", "settings.voice.source.cloudMissing")}
+              {optionLabel(
+                cloud,
+                "settings.voice.source.cloud",
+                followingPlan ? "settings.voice.source.cloudPending" : "settings.voice.source.cloudMissing",
+              )}
             </option>
             <option value="local" disabled={!local?.configured}>
               {optionLabel(local, "settings.voice.source.local", "settings.voice.source.localMissing")}
@@ -640,32 +749,106 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       </div>
 
       {/* Spoken replies, and the ONLY control for them: the composer's speaker
-          button was taken back out at the owner's word (TASK-782). On by
+          button was taken back out at the owner's word (TASK-782). Off by
           default. The gateway answers the channels (`tts.auto: "inbound"`);
           in the desktop chat the reply's clip is made on the box on every
           harness — asked for by the chat on OpenClaw, attached by the chat
           route on Hermes — so a typed question's reply has a player here too
           and a spoken one plays on its own. The hint says exactly that, which
           is why it is not the one-line label it looks like it could be. */}
-      <div className={`${CARD} ${ROW}`}>
-        <div className="min-w-0">
-          <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>
-          <p className={`${MUTED} mt-0.5`}>{t("settings.voice.autoReplyHint")}</p>
+      <div className={`${CARD} space-y-4`}>
+        <div className={ROW}>
+          <div className="min-w-0">
+            <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>
+            <p className={`${MUTED} mt-0.5`}>{t("settings.voice.autoReplyHint")}</p>
+          </div>
+          <button
+            id="voice-auto-reply"
+            type="button"
+            role="switch"
+            aria-checked={status.autoReply === true}
+            disabled={disabled}
+            onClick={() => void post({ action: "autoReply", enabled: status.autoReply !== true })}
+            data-testid="voice-auto-reply"
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
+              status.autoReply === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply === true ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
         </div>
-        <button
-          id="voice-auto-reply"
-          type="button"
-          role="switch"
-          aria-checked={status.autoReply === true}
-          disabled={disabled}
-          onClick={() => void post({ action: "autoReply", enabled: status.autoReply !== true })}
-          data-testid="voice-auto-reply"
-          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
-            status.autoReply === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-          }`}
-        >
-          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply === true ? "translate-x-6" : "translate-x-1"}`} />
-        </button>
+
+        {/* Auto-play, under the switch it depends on and in the same card.
+            That a typed question's reply waits on its player is the DEFAULT,
+            not a rule: on, the chat plays it the moment it exists, exactly
+            as it plays a spoken question's. With spoken replies off there is
+            no clip to play, so the switch is greyed out and says why — and
+            keeps its position, so turning spoken replies back on brings the
+            owner's choice back with it. */}
+        <div className={`${ROW} border-t border-[var(--border-subtle)] pt-4`} data-testid="voice-auto-play-all-row">
+          <div className="min-w-0">
+            <label
+              htmlFor="voice-auto-play-all"
+              className={`${LABEL} ${spokenRepliesOn ? "" : "opacity-60"}`}
+            >
+              {t("settings.voice.autoPlayAll")}
+            </label>
+            <p id="voice-auto-play-all-hint" className={`${MUTED} mt-0.5`} data-testid="voice-auto-play-all-hint">
+              {spokenRepliesOn ? t("settings.voice.autoPlayAllHint") : t("settings.voice.autoPlayAllNeedsSpokenReplies")}
+            </p>
+          </div>
+          <button
+            id="voice-auto-play-all"
+            type="button"
+            role="switch"
+            aria-checked={status.autoPlayAll === true}
+            aria-describedby="voice-auto-play-all-hint"
+            disabled={disabled || !spokenRepliesOn}
+            onClick={() => void post({ action: "autoPlayAll", enabled: status.autoPlayAll !== true })}
+            data-testid="voice-auto-play-all"
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+              status.autoPlayAll === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoPlayAll === true ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+
+        {/* Short spoken answers, the third switch on spoken replies. Off by
+            default, and off means exactly what the voice did before it
+            existed: the whole reply is spoken. On, the voice says only the
+            main answer, so it starts sooner; the written reply in the chat
+            keeps every word either way. Greyed out under the same rule as
+            auto-play, and for the same reason — with spoken replies off there
+            is nothing spoken to shorten — keeping its position meanwhile. */}
+        <div className={`${ROW} border-t border-[var(--border-subtle)] pt-4`} data-testid="voice-short-spoken-row">
+          <div className="min-w-0">
+            <label
+              htmlFor="voice-short-spoken"
+              className={`${LABEL} ${spokenRepliesOn ? "" : "opacity-60"}`}
+            >
+              {t("settings.voice.shortSpoken")}
+            </label>
+            <p id="voice-short-spoken-hint" className={`${MUTED} mt-0.5`} data-testid="voice-short-spoken-hint">
+              {spokenRepliesOn ? t("settings.voice.shortSpokenHint") : t("settings.voice.autoPlayAllNeedsSpokenReplies")}
+            </p>
+          </div>
+          <button
+            id="voice-short-spoken"
+            type="button"
+            role="switch"
+            aria-checked={status.shortSpoken === true}
+            aria-describedby="voice-short-spoken-hint"
+            disabled={disabled || !spokenRepliesOn}
+            onClick={() => void post({ action: "shortSpoken", enabled: status.shortSpoken !== true })}
+            data-testid="voice-short-spoken"
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+              status.shortSpoken === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.shortSpoken === true ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
       </div>
 
       {/* Which VOICE the channels will use, when the box's own cannot reach
@@ -697,6 +880,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
               ? t("settings.voice.channelVoiceNotesInstalling", { seconds: installingFor })
               : t("settings.voice.channelVoiceNotesFix")}
           </button>
+          {installing && installTaskId && (
+            <BackgroundTaskInline taskId={installTaskId} testId="voice-channel-voice-notes-task" />
+          )}
         </div>
       )}
 

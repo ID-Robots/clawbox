@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanVersion, parseHermesVersion } from "@/lib/version-utils";
+import { cleanVersion, parseHermesVersion, shipsOpenclaw, updateNoticeComponents } from "@/lib/version-utils";
 
 describe("version-utils", () => {
   it("returns null for empty values", () => {
@@ -94,5 +94,37 @@ describe("parseHermesVersion", () => {
     const parsed = parseHermesVersion(long);
     expect(parsed).toHaveLength(65);
     expect(parsed?.endsWith("…")).toBe(true);
+  });
+});
+
+describe("the desktop's update card names OpenClaw only where the update keeps it current", () => {
+  const stale = { current: "OpenClaw 2026.10.7 (aaaaaaa)", target: "2026.10.9", updateAvailable: true };
+  const current = { current: "v4.3.0", target: null, updateAvailable: false };
+
+  it("never on the Hermes edition, even when the payload carries a stale core", () => {
+    expect(shipsOpenclaw({ edition: "hermes" })).toBe(false);
+    expect(updateNoticeComponents({ clawbox: current, openclaw: stale, edition: "hermes" }))
+      .toEqual({ clawbox: false, openclaw: false });
+  });
+
+  it("on dual and on openclaw, and from a server too old to say its edition", () => {
+    for (const edition of ["dual", "openclaw", undefined]) {
+      expect(shipsOpenclaw({ edition })).toBe(true);
+      expect(updateNoticeComponents({ clawbox: current, openclaw: stale, edition }).openclaw).toBe(true);
+    }
+    expect(shipsOpenclaw(null)).toBe(true);
+  });
+
+  it("keeps ClawBox's half on the Hermes edition", () => {
+    const clawbox = { current: "v4.3.0", target: "beta@98ae3ba", updateAvailable: true };
+    expect(updateNoticeComponents({ clawbox, openclaw: stale, edition: "hermes" }))
+      .toEqual({ clawbox: true, openclaw: false });
+  });
+
+  it("compares versions where the flag is absent or null, as the card always did", () => {
+    expect(updateNoticeComponents({ openclaw: { current: "2026.10.7", target: "2026.10.9" } }).openclaw).toBe(true);
+    expect(updateNoticeComponents({ openclaw: { current: "2026.10.9", target: "2026.10.9", updateAvailable: null } }).openclaw).toBe(false);
+    expect(updateNoticeComponents({ clawbox: { current: "v4.3.0", target: null, updateAvailable: null } }).clawbox).toBe(false);
+    expect(updateNoticeComponents(null)).toEqual({ clawbox: false, openclaw: false });
   });
 });

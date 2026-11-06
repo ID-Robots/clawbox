@@ -193,7 +193,7 @@ describe("what a run is given", () => {
 
   it("gives a run nothing at all while the owner's switch is off", async () => {
     switchOn(false);
-    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [] });
+    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} });
   });
 
   it("gives a run nothing while the switch has never been answered", async () => {
@@ -289,7 +289,7 @@ describe("what a run is given", () => {
     // tells the owner a credential did not arrive.
     fs.writeFileSync(secretsPath(), "{ not json");
     switchOn(true);
-    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [] });
+    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} });
   });
 
   it("re-checks the name on the way out, so an older build's row cannot reach a run", async () => {
@@ -439,5 +439,282 @@ describe("the switch", () => {
     configGet.mockResolvedValue("true");
     // A string is not a yes: only the boolean the switch writes is.
     expect(await store.getInjectSecrets()).toBe(false);
+  });
+});
+
+describe("a copy from the assistant (importSecret)", () => {
+  it("files a NEW entry, never ticked, whatever the caller asked", async () => {
+    const view = await store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" });
+    expect(view).toMatchObject({ name: "GITHUB_TOKEN", scope: store.BOX_SCOPE, inject: false, readable: true });
+    expect(fileText()).not.toContain(TOKEN);
+    // Un-ticked means no run gets it, even with the owner's switch on.
+    switchOn(true);
+    expect((await store.resolveSecretsForRun({ project: null })).names).toEqual([]);
+  });
+
+  it("refuses to replace an entry already there, and leaves it exactly as it was", async () => {
+    await store.setSecret({ name: "GITHUB_TOKEN", value: "the-owners-own-value-0000", scope: store.BOX_SCOPE, inject: true });
+    const before = rows();
+    await expect(store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" }))
+      .rejects.toMatchObject({ code: "exists" });
+    expect(rows()).toEqual(before);
+    // The same name in another scope is a different entry, and is fine.
+    await expect(store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: "shop", source: "hermes" }))
+      .resolves.toMatchObject({ scope: "shop", inject: false });
+  });
+
+  it("writes a row of the ordinary shape, so an older build reads it unchanged", async () => {
+    await store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" });
+    expect(Object.keys(rows()[0]).sort()).toEqual(["createdAt", "inject", "iv", "keyId", "name", "scope", "tag", "updatedAt", "value"]);
+  });
+
+  it("applies the store's own rules to the copied value", async () => {
+    await expect(store.importSecret({ name: "SHORT_TOKEN", value: "abc", scope: store.BOX_SCOPE, source: "hermes" }))
+      .rejects.toMatchObject({ code: "value_too_short" });
+    await expect(store.importSecret({ name: "LD_PRELOAD", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" }))
+      .rejects.toMatchObject({ code: "reserved_name" });
+    expect(fs.existsSync(secretsPath())).toBe(false);
+  });
+});
+
+describe("a copy that expires", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** An imported, ticked entry with the given expiry, and the owner's switch on. */
+  async function importTicked(expiresAt: unknown, scope = store.BOX_SCOPE): Promise<void> {
+    const view = await store.importSecret({ name: "IMPORT_ME_TOKEN", value: TOKEN, scope, source: "hermes", expiresAt });
+    expect(view.inject).toBe(false);
+    await store.setSecretInject({ name: "IMPORT_ME_TOKEN", scope, inject: true });
+    switchOn(true);
+  }
+
+  it("lands un-ticked, with no expiry unless one was asked for", async () => {
+    expect(await store.importSecret({ name: "IMPORT_ME_TOKEN", value: TOKEN, scope: "@box", source: "hermes" }))
+      .toMatchObject({ name: "IMPORT_ME_TOKEN", scope: "@box", inject: false });
+    expect((await store.listSecrets())[0]).not.toHaveProperty("expiresAt");
+  });
+
+  it("reaches a run until its date, and never after it", async () => {
+    const until = new Date(Date.now() + DAY).toISOString();
+    await importTicked(until);
+    expect((await store.listSecrets())[0]).toMatchObject({ expiresAt: until, expired: false });
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" })).names).toEqual(["IMPORT_ME_TOKEN"]);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * DAY);
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000bbbb" })).names).toEqual([]);
+    // Still listed, so the owner sees why runs stopped getting it.
+    expect((await store.listSecrets())[0]).toMatchObject({ name: "IMPORT_ME_TOKEN", expired: true });
+  });
+
+  it("treats a stored date in the past, or an expiry it cannot read, as expired", async () => {
+    await importTicked(new Date(Date.now() + DAY).toISOString());
+    const [row] = rows();
+    fs.writeFileSync(secretsPath(), JSON.stringify([
+      { ...row, expiresAt: "2001-01-01T00:00:00.000Z" },
+    ]));
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" })).names).toEqual([]);
+    fs.writeFileSync(secretsPath(), JSON.stringify([{ ...row, expiresAt: "next tuesday" }]));
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" })).names).toEqual([]);
+    // …while a row with no expiry at all, as every older build writes, still works.
+    const plain = { ...row };
+    delete plain.expiresAt;
+    fs.writeFileSync(secretsPath(), JSON.stringify([plain]));
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" })).names).toEqual(["IMPORT_ME_TOKEN"]);
+  });
+
+  it("goes to ONE run, and is gone once that run has ended", async () => {
+    await importTicked("run", "shop");
+    const first = await store.resolveSecretsForRun({ project: "shop", runId: "run-0000aaaa" });
+    expect(first.names).toEqual(["IMPORT_ME_TOKEN"]);
+    // The same run, resumed, still has it; any other run does not.
+    expect((await store.resolveSecretsForRun({ project: "shop", runId: "run-0000aaaa" })).names).toEqual(["IMPORT_ME_TOKEN"]);
+    expect((await store.resolveSecretsForRun({ project: "shop", runId: "run-0000bbbb" })).names).toEqual([]);
+    // A resolve that names no run cannot claim it.
+    expect((await store.resolveSecretsForRun({ project: "shop" })).names).toEqual([]);
+
+    expect(await store.releaseRunSecrets((runId) => runId === "run-0000aaaa")).toEqual(["IMPORT_ME_TOKEN"]);
+    expect(await store.listSecrets()).toEqual([]);
+    expect((await store.resolveSecretsForRun({ project: "shop", runId: "run-0000aaaa" })).names).toEqual([]);
+  });
+
+  it("leaves a one-run copy nobody has been handed, and one whose run is still going", async () => {
+    await importTicked("run");
+    expect(await store.releaseRunSecrets(() => true)).toEqual([]);
+    await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(await store.releaseRunSecrets((runId) => runId === "run-0000bbbb")).toEqual([]);
+    expect((await store.listSecrets()).map((s) => s.name)).toEqual(["IMPORT_ME_TOKEN"]);
+  });
+
+  it("hands nothing when the owner's switch went off between the first look and the hand-out", async () => {
+    await importTicked(new Date(Date.now() + DAY).toISOString());
+    // ON for the look before the store's chain, OFF by the time the chain runs.
+    let asked = 0;
+    configGet.mockImplementation(async (key: string) => (key === store.SECRET_INJECT_CONFIG_KEY ? ++asked === 1 : undefined));
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" })).names).toEqual([]);
+  });
+
+  it("drops a dated copy from values carried on to a later spawn once its day has gone by", async () => {
+    await importTicked(new Date(Date.now() + DAY).toISOString());
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: "deploy-value-00000000", scope: store.BOX_SCOPE, inject: true });
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(Object.keys(resolved.env).sort()).toEqual(["DEPLOY_TOKEN", "IMPORT_ME_TOKEN"]);
+    expect(await store.withoutExpiredSecrets(resolved.env, resolved.scopes)).toEqual(resolved.env);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * DAY);
+    expect(await store.withoutExpiredSecrets(resolved.env, resolved.scopes)).toEqual({ DEPLOY_TOKEN: "deploy-value-00000000" });
+  });
+
+  it("records when a dated copy stops being handed, so the retry that cannot read the store drops it past its day", async () => {
+    const until = Date.now() + DAY;
+    await importTicked(new Date(until).toISOString());
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: "deploy-value-00000000", scope: store.BOX_SCOPE, inject: true });
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(resolved.expiresAt).toEqual({ IMPORT_ME_TOKEN: until });
+    expect(store.withoutPastDueSecrets(resolved.env, resolved.expiresAt, until - 1)).toEqual(resolved.env);
+    expect(store.withoutPastDueSecrets(resolved.env, resolved.expiresAt, until)).toEqual({ DEPLOY_TOKEN: "deploy-value-00000000" });
+  });
+
+  it("records no expiry for a one-run copy: its end is its run's, not a date", async () => {
+    await importTicked("run");
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(resolved.names).toEqual(["IMPORT_ME_TOKEN"]);
+    expect(resolved.expiresAt).toEqual({});
+  });
+
+  it.skipIf(process.getuid?.() === 0)("names a one-run copy it could not claim, and hands it to nobody", async () => {
+    await importTicked("run");
+    // A store this box can read but not write: the claim cannot be recorded.
+    fs.chmodSync(dataDir, 0o500);
+    try {
+      const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+      expect(resolved.names).toEqual([]);
+      expect(resolved.unreadable).toEqual(["IMPORT_ME_TOKEN"]);
+    } finally {
+      fs.chmodSync(dataDir, 0o700);
+    }
+    // Still unclaimed, so a later run with a writable store gets it.
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000bbbb" })).names).toEqual(["IMPORT_ME_TOKEN"]);
+  });
+
+  it("refuses an expiry that is already over, or is not one", async () => {
+    for (const expiresAt of ["2001-01-01T00:00:00.000Z", "soon", 42, "2026-13-45"]) {
+      await expect(store.importSecret({ name: "IMPORT_ME_TOKEN", value: TOKEN, scope: "@box", source: "hermes", expiresAt }))
+        .rejects.toMatchObject({ code: "invalid_expiry" });
+    }
+    expect(fs.existsSync(secretsPath())).toBe(false);
+  });
+});
+
+describe("the audit trail", () => {
+  function audit(): Record<string, unknown>[] {
+    const file = path.join(dataDir, "secrets-audit.log");
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf-8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  }
+
+  it("records every change by name and scope, and never a value", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE });
+    await store.importSecret({ name: "GITHUB_TOKEN", value: "imported-value-0000", scope: "shop", source: "hermes" });
+    await store.setSecretInject({ name: "GITHUB_TOKEN", scope: "shop", inject: true });
+    await store.setSecretInject({ name: "GITHUB_TOKEN", scope: "shop", inject: false });
+    await store.deleteSecret({ name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE });
+    await store.deleteSecretsForScope("shop");
+
+    expect(audit().map(({ at, ...rest }) => (typeof at === "string" ? rest : { at, ...rest }))).toEqual([
+      { action: "save", name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE },
+      { action: "import", name: "GITHUB_TOKEN", scope: "shop", source: "hermes" },
+      { action: "tick", name: "GITHUB_TOKEN", scope: "shop" },
+      { action: "untick", name: "GITHUB_TOKEN", scope: "shop" },
+      { action: "delete", name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE },
+      { action: "delete", names: ["GITHUB_TOKEN"], scope: "shop", reason: "project_deleted" },
+    ]);
+    const text = fs.readFileSync(path.join(dataDir, "secrets-audit.log"), "utf-8");
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("imported-value-0000");
+    expect((fs.statSync(path.join(dataDir, "secrets-audit.log")).mode & 0o777).toString(8)).toBe("600");
+  });
+
+  it("records what a run was handed only once it was handed, by name and run id", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "SHOP_TOKEN", value: "shop-token-value-0000", scope: "shop", inject: true });
+    switchOn(true);
+    const resolved = await store.resolveSecretsForRun({ project: "shop", runId: "run-0000abcd" });
+    // Resolving is not handing: the child may still fail to start.
+    expect(audit().filter((line) => line.action === "inject")).toEqual([]);
+    await store.recordRunSecretsHanded({ runId: "run-0000abcd", names: resolved.names, scopes: resolved.scopes, handed: true });
+
+    // One line per scope the values came from: the box-wide key handed to the
+    // shop's run is still filed under the box, not under the shop.
+    const injects = audit().filter((line) => line.action === "inject");
+    expect(injects).toHaveLength(2);
+    expect(injects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ names: ["DEPLOY_TOKEN"], scope: store.BOX_SCOPE, runId: "run-0000abcd" }),
+      expect.objectContaining({ names: ["SHOP_TOKEN"], scope: "shop", runId: "run-0000abcd" }),
+    ]));
+    // And nothing at all for a run that was handed none.
+    await store.recordRunSecretsHanded({ runId: "run-0000beef", names: [], scopes: {}, handed: true });
+    expect(audit().filter((line) => line.runId === "run-0000beef")).toEqual([]);
+  });
+
+  it("records a child that never started as NOT handed", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    switchOn(true);
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000dead" });
+    await store.recordRunSecretsHanded({ runId: "run-0000dead", names: resolved.names, scopes: resolved.scopes, handed: false });
+    expect(audit().filter((line) => line.runId === "run-0000dead")).toEqual([
+      expect.objectContaining({ action: "not_handed", names: ["DEPLOY_TOKEN"], scope: store.BOX_SCOPE, reason: "spawn_failed" }),
+    ]);
+  });
+
+  it("files a project's override of a box-wide name under the project it came from", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: "shop-deploy-value-0000", scope: "shop", inject: true });
+    switchOn(true);
+    const resolved = await store.resolveSecretsForRun({ project: "shop", runId: "run-0000cafe" });
+    await store.recordRunSecretsHanded({ runId: "run-0000cafe", names: resolved.names, scopes: resolved.scopes, handed: true });
+
+    const injects = audit().filter((line) => line.action === "inject");
+    expect(injects).toEqual([expect.objectContaining({ names: ["DEPLOY_TOKEN"], scope: "shop", runId: "run-0000cafe" })]);
+  });
+
+  it("records the owner's switch when it actually changes, and the expiry of a copy", async () => {
+    await store.setInjectSecrets(true);
+    configGet.mockImplementation(async (key: string) => (key === store.SECRET_INJECT_CONFIG_KEY ? true : undefined));
+    await store.setInjectSecrets(true);
+    await store.setInjectSecrets(false);
+    await store.importSecret({ name: "IMPORT_ME_TOKEN", value: TOKEN, scope: "@box", source: "hermes", expiresAt: "run" });
+    expect(audit().map(({ at, ...rest }) => (typeof at === "string" ? rest : { at, ...rest }))).toEqual([
+      { action: "switch_on" },
+      { action: "switch_off" },
+      { action: "import", name: "IMPORT_ME_TOKEN", scope: "@box", source: "hermes", expiresAt: "run" },
+    ]);
+  });
+
+  it("records nothing for a switch the config store would not save", async () => {
+    configSet.mockRejectedValueOnce(new Error("disk full"));
+    await expect(store.setInjectSecrets(true)).rejects.toThrow();
+    expect(audit()).toEqual([]);
+  });
+
+  it("records a one-run copy's removal when its run ends", async () => {
+    await store.importSecret({ name: "IMPORT_ME_TOKEN", value: TOKEN, scope: "shop", source: "hermes", expiresAt: "run" });
+    await store.setSecretInject({ name: "IMPORT_ME_TOKEN", scope: "shop", inject: true });
+    switchOn(true);
+    await store.resolveSecretsForRun({ project: "shop", runId: "run-0000f00d" });
+    await store.releaseRunSecrets((runId) => runId === "run-0000f00d");
+    expect(audit().at(-1)).toMatchObject({ action: "delete", names: ["IMPORT_ME_TOKEN"], scope: "shop", runId: "run-0000f00d", reason: "run_ended" });
+    expect(fs.readFileSync(path.join(dataDir, "secrets-audit.log"), "utf-8")).not.toContain(TOKEN);
+  });
+
+  it("records nothing for a change the store refused", async () => {
+    await expect(store.setSecret({ name: "PATH", value: TOKEN })).rejects.toMatchObject({ code: "reserved_name" });
+    await expect(store.deleteSecret({ name: "MISSING_TOKEN" })).rejects.toMatchObject({ code: "not_found" });
+    expect(audit()).toEqual([]);
   });
 });

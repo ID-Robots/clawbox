@@ -1,3 +1,5 @@
+import { CHANNEL_SETUP_GROUP, CHANNEL_SETUP_KIND } from "@/lib/background-task-kinds";
+import { routeAsSettingsJob } from "@/lib/settings-jobs";
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
@@ -315,7 +317,44 @@ async function syncGuilds(harness: string): Promise<NextResponse> {
   });
 }
 
+/**
+ * POST — the save, the member allowlist, or an invite-wait tick (`sync`). The
+ * save and the allowlist, asked with `background: true` (Settings, TASK-2148),
+ * run as a job of the box (src/lib/settings-jobs.ts) ending with this route's
+ * own answer; the tick is the invite wait's own and is never asked that way.
+ */
 export async function POST(request: Request) {
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/discord/configure",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: (body) => {
+      const token = typeof body.botToken === "string" && body.botToken.trim() !== "";
+      return token || body.allowedUserIds === undefined
+        ? {
+          subject: "discord",
+          action: "configure",
+          label: "Discord",
+          title: "Setting up Discord",
+          status: "Checking the Discord bot and restarting the assistant…",
+          done: "Discord is set up.",
+        }
+        : {
+          subject: "discord",
+          action: "members",
+          label: "Discord",
+          title: "Saving who may talk to the Discord bot",
+          status: "Saving the members and restarting the assistant…",
+          done: "Discord members saved.",
+        };
+    },
+    handler: configureDiscord,
+  });
+  return job ?? configureDiscord(request);
+}
+
+async function configureDiscord(request: Request): Promise<Response> {
   // Kept out of the try so the outer catch can scrub it from anything it logs.
   let tokenForScrub = "";
   try {

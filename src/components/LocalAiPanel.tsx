@@ -5,10 +5,12 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
-import { readInstallStream } from "@/lib/install-stream";
+import { fetchBackgroundTasks, followBackgroundTask, isLiveTask, notifyBackgroundTaskStarted, readTaskStream } from "@/lib/background-task-client";
+import { EMBED_MODEL_DOWNLOAD_KIND, KOKORO_INSTALL_KIND, LLAMACPP_INSTALL_KIND, WHISPER_ENGINE_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { isConfigBusyPayload } from "@/lib/config-conflict";
 import { ConfirmDialog } from "@/components/clawkeep-ui";
 import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
+import { BackgroundTaskInline, queuedLine } from "@/components/BackgroundTaskProgress";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
 
@@ -132,6 +134,15 @@ function rowText(t: Translate, prefix: string, code: string | undefined, params:
   return text === key ? english : text;
 }
 
+/**
+ * Memory search pointed at an embedder that is not this box — with or without
+ * a note that the one on this box failed to start. Either way the row is the
+ * cloud's, and there is nothing of this box's for it to install or remove.
+ */
+function isCloudEmbedding(entry: LocalModelEntry): boolean {
+  return entry.detailCode === "embeddingsCloud" || entry.detailCode === "embeddingsCloudLocalFailed";
+}
+
 /** The on-device roles by kind, each read from the surface that decides it. */
 type Roles = Partial<Record<Kind, Role>>;
 
@@ -141,8 +152,14 @@ interface Action {
   run: () => Promise<Response>;
   /** Red, for an action that takes a configured model away. */
   destructive?: boolean;
-  /** The route streams progress (see readInstallStream) instead of answering JSON. */
+  /** The route streams progress (see readTaskStream) instead of answering JSON. */
   streams?: true;
+  /**
+   * Shown, but not available yet — and the sentence (a catalogue key) saying
+   * what to do first. A verb the owner cannot find reads as missing; one that
+   * says why it is greyed out reads as a step.
+   */
+  blockedKey?: string;
 }
 
 /**
@@ -164,6 +181,27 @@ const NO_CONTROLS: RowControls = { install: null, toggle: null, uninstall: null,
 const post = (url: string, body: unknown) =>
   fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 const del = (url: string) => fetch(url, { method: "DELETE" });
+
+/**
+ * The installs that run as background tasks of the server, and the row each
+ * belongs to: a Settings reopened while one runs follows it again on that row.
+ */
+const BACKGROUND_TASK_ROWS: Record<string, string> = {
+  [LLAMACPP_INSTALL_KIND]: "llamacpp",
+  [WHISPER_ENGINE_INSTALL_KIND]: "whisper",
+  [KOKORO_INSTALL_KIND]: "kokoro",
+  // The memory model's first download is this row's Install; "Download again"
+  // on a model that is here is the card under the row, which follows its own.
+  [EMBED_MODEL_DOWNLOAD_KIND]: "embeddings",
+};
+
+/** `record` without `key`, or `record` itself when it has none (no re-render for nothing). */
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const rest = { ...record };
+  delete rest[key];
+  return rest;
+}
 
 /** An engine whose extra settings are worth drawing: here, and not switched off. */
 const usable = (entry: LocalModelEntry) => entry.installed && entry.enabled !== false;
@@ -210,12 +248,13 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   // Three writers, one channel — a voice pick that settled on the default (the
   // tts route's `fallback`), "Use as fallback" posting
   // /setup-api/providers/default, and the local-only switch posting
-  // /setup-api/local-ai/exclusive. The last two restart the gateway on OpenClaw
-  // and answer `ok` with a `warning` for either of two causes: the restart has
-  // not finished, or it was refused (a unit masked by an update in flight). Its
-  // own channel, because the red box below is for changes that did NOT happen:
-  // a failure painted over a landed change sends the owner to repeat it, and
-  // the repeat costs another restart. Amber, and cleared by the next action.
+  // /setup-api/local-ai/exclusive. The last two apply live on OpenClaw, without
+  // a gateway restart (TASK-1535), and answer `ok` with a `warning` when they
+  // could not: the gateway is restarting to apply the change, or that restart
+  // was refused (a unit masked by an update in flight). Its own channel,
+  // because the red box below is for changes that did NOT happen: a failure
+  // painted over a landed change sends the owner to repeat it. Amber, and
+  // cleared by the next action.
   const [notice, setNotice] = useState<string | null>(null);
   // Only the FIRST read has nothing to fall back on; a later failed poll keeps
   // the last good reading. So this is only ever true while there is no snapshot.
@@ -225,6 +264,16 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // The last progress line of a streaming action, by row.
   const [progress, setProgress] = useState<Record<string, string>>({});
+  // Rows whose install is waiting its turn behind another (TASK-2128), with
+  // what it waits for — kept as facts and said at render time, so the line is
+  // in the owner's language whenever the catalogue arrives.
+  const [queuedRows, setQueuedRows] = useState<Record<string, { kind: string; label: string } | null>>({});
+  // Rows whose action is a background task of the server, with the task: it
+  // runs on with Settings closed, the row says so, and draws the task's steps,
+  // time left and log (BackgroundTaskInline).
+  const [backgroundRows, setBackgroundRows] = useState<ReadonlyMap<string, string>>(() => new Map());
+  // Tasks this mount already followed, so a re-read never follows one twice.
+  const followedTasksRef = useRef(new Set<string>());
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [focusedItem, setFocusedItem] = useState(0);
   // The Uninstall waiting on the owner's yes. The action is kept with the
@@ -267,18 +316,31 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const sttRole: Role = !localStt ? null : stt?.primary === "local" ? "primary" : "fallback";
     // Explicitly `!== false`, so a server that predates the field — or one whose
     // read failed — leaves the action where it has always been rather than
-    // hiding it on a box that can use it.
-    setSttCloudReady(stt?.engines?.cloud?.configured !== false);
+    // hiding it on a box that can use it. And the cloud has to be IN the chain:
+    // a token the transcribe route will not send (an owner's own DeepSeek key,
+    // a sign-in whose profile is recorded as OAuth) still reads `configured`,
+    // and falling back to it put the only working engine behind one that hears
+    // nothing.
+    const sttChain: unknown[] | null = Array.isArray(stt?.chain) ? stt.chain : null;
+    setSttCloudReady(stt?.engines?.cloud?.configured !== false && (sttChain === null || sttChain.includes("cloud")));
     setRoles({ llm, tts: ttsRole, stt: sttRole });
   }, []);
 
   const refresh = useCallback(async () => {
-    if (pendingRef.current.size > 0) return;
     try {
       const res = await fetch("/setup-api/local-models", { cache: "no-store" });
       const data = res.ok ? await res.json() : null;
       if (isSnapshot(data)) {
-        applySnapshot(data);
+        // A row with an action in flight keeps what it showed — the poll must
+        // not flip it mid-flight. Every OTHER row takes the new reading: with
+        // several installs going at once (one running, others queued), the one
+        // that just finished has to read "installed" now, not when the last of
+        // them ends — or its Install button comes back and starts it again.
+        const busy = pendingRef.current;
+        const prev = snapshotRef.current;
+        applySnapshot(busy.size > 0 && prev
+          ? { ...data, models: data.models.map((m) => (busy.has(m.id) ? prev.models.find((p) => p.id === m.id) ?? m : m)) }
+          : data);
         return;
       }
     } catch {
@@ -389,10 +451,24 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         return;
       }
       if (action.streams) {
-        const outcome = await readInstallStream(res, (line) => {
+        // Follows the task again if the stream is cut short (a restart).
+        const outcome = await readTaskStream(res, (line) => {
+          // Waiting its turn behind another install: the row names what it
+          // waits for. Once it starts, the work's own lines take over.
+          if (line.queued === true) {
+            setQueuedRows((q) => ({ ...q, [entry.id]: line.behind ?? null }));
+            return;
+          }
+          if (line.queued === false || line.status) setQueuedRows((q) => withoutKey(q, entry.id));
           if (line.status) setProgress((p) => ({ ...p, [entry.id]: line.status as string }));
+        }, (taskId) => {
+          followedTasksRef.current.add(taskId);
+          setBackgroundRows((rows) => new Map(rows).set(entry.id, taskId));
+          // The desktop's corner card asks at once rather than at its next poll.
+          notifyBackgroundTaskStarted(taskId);
         });
-        if (!outcome.ok) setError(outcome.error ?? t("localModels.error.changeFailed"));
+        // A Cancel the owner pressed is not a failure to paint red.
+        if (!outcome.ok && !outcome.cancelled) setError(outcome.error ?? t("localModels.error.changeFailed"));
         // A successful install/activation changes the device pairing. Tell
         // already-mounted chat and provider pickers only after the terminal
         // success line, not the initial HTTP 200 of a still-running stream.
@@ -423,17 +499,57 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         next.delete(entry.id);
         return next;
       });
-      setProgress((p) => {
-        if (!(entry.id in p)) return p;
-        const rest = { ...p };
-        delete rest[entry.id];
-        return rest;
+      setProgress((p) => withoutKey(p, entry.id));
+      setQueuedRows((q) => withoutKey(q, entry.id));
+      setBackgroundRows((rows) => {
+        if (!rows.has(entry.id)) return rows;
+        const next = new Map(rows);
+        next.delete(entry.id);
+        return next;
       });
-      // refresh() waits for the last in-flight action; roles are cheap.
+      // This row is no longer in flight, so the re-read updates it even while
+      // other rows still are (refresh keeps only theirs); roles are cheap.
       void refresh();
       void refreshRoles();
     }
   }, [applySnapshot, failureText, locale, refresh, refreshRoles, t]);
+
+  // RE-ATTACH. An install started here runs as a background task of the
+  // server (src/lib/background-tasks.ts), so a Settings closed mid-install comes
+  // back to a row that is still installing: each running task is followed again
+  // on its row, through the same reader, spinner and verdict as the click that
+  // started it. Once the inventory has arrived, because the row is drawn from it.
+  const hasSnapshot = snapshot !== null;
+  // The memory model's row flips to "not installed" while "Download again"
+  // has the old copy set aside — the card under it, which was following the
+  // download, unmounts with it — so the row looks again then and carries on.
+  const embeddingsInstalled = snapshot?.models.find((m) => m.id === "embeddings")?.installed ?? null;
+  useEffect(() => {
+    if (!active || !hasSnapshot) return;
+    let cancelled = false;
+    void fetchBackgroundTasks().then((tasks) => {
+      if (cancelled || !tasks) return;
+      for (const task of tasks) {
+        const rowId = BACKGROUND_TASK_ROWS[task.kind];
+        // Running, or still queued behind another install: either way the
+        // row is busy with it and shows it.
+        if (!isLiveTask(task) || !rowId) continue;
+        if (followedTasksRef.current.has(task.id) || pendingRef.current.has(rowId)) continue;
+        const entry = snapshotRef.current?.models.find((m) => m.id === rowId);
+        if (!entry) continue;
+        // An installed memory model's download is the card's to follow.
+        if (rowId === "embeddings" && entry.installed) continue;
+        followedTasksRef.current.add(task.id);
+        void runAction(entry, {
+          id: "install",
+          labelKey: "localModels.menu.install",
+          streams: true,
+          run: () => followBackgroundTask(task.id),
+        });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [active, hasSnapshot, embeddingsInstalled, runAction]);
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
@@ -534,8 +650,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         }
         // Not while Gemma is the model the box answers with: the route refuses
         // that (409 `in_use`), and the menu's "Use as fallback" is the step
-        // that comes first. A button that can only be refused is a dead end.
-        if (roles.llm !== "primary") uninstall = removal("/setup-api/llamacpp/models?engine=1");
+        // that comes first. A button that can only be refused is a dead end —
+        // and a button that is simply missing reads as "this cannot be
+        // uninstalled", so it is shown greyed out, saying what to do first.
+        uninstall = roles.llm === "primary"
+          ? { ...removal("/setup-api/llamacpp/models?engine=1"), blockedKey: "localModels.uninstall.switchChatFirst" }
+          : removal("/setup-api/llamacpp/models?engine=1");
         break;
       }
       case "tts": {
@@ -577,7 +697,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       }
       case "embedding": {
         // An embedder somewhere else has nothing on this box to remove.
-        if (entry.detailCode === "embeddingsCloud") break;
+        if (isCloudEmbedding(entry)) break;
         if (entry.installed) uninstall = removal("/setup-api/embed/install");
         else install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/embed/install", {}) };
         break;
@@ -606,7 +726,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const engine = entries.find((e) => e.kind === kind);
     if (!engine || !usable(engine)) return null;
     if (kind === "stt") return <WhisperSizesCard onChanged={afterInstall} />;
-    if (kind === "embedding" && engine.detailCode !== "embeddingsCloud") return <EmbeddingModelCard onChanged={afterInstall} />;
+    if (kind === "embedding" && !isCloudEmbedding(engine)) return <EmbeddingModelCard onChanged={afterInstall} />;
     return null;
   };
 
@@ -742,10 +862,32 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                         {memory ? ` · ${t("localModels.memoryInUse", { size: memory })}` : ""}
                       </p>
                       <p className="text-xs text-[var(--text-secondary)] mt-1">{detail}</p>
-                      {busy && progress[entry.id] && (
-                        <p className="text-xs text-[var(--text-secondary)] mt-1 break-words" data-testid={`local-model-progress-${entry.id}`}>
-                          {progress[entry.id]}
+                      {controls.uninstall?.blockedKey && (
+                        <p
+                          id={`local-model-blocked-${entry.id}`}
+                          className="text-xs text-[var(--text-secondary)] mt-1"
+                          data-testid={`local-model-blocked-${entry.id}`}
+                        >
+                          {t(controls.uninstall.blockedKey)}
                         </p>
+                      )}
+                      {busy && (entry.id in queuedRows || progress[entry.id]) && (
+                        <p className="text-xs text-[var(--text-secondary)] mt-1 break-words" data-testid={`local-model-progress-${entry.id}`}>
+                          {entry.id in queuedRows ? queuedLine(t, queuedRows[entry.id]) : progress[entry.id]}
+                        </p>
+                      )}
+                      {busy && backgroundRows.has(entry.id) && (
+                        <>
+                          <p className="text-xs text-[var(--text-secondary)] mt-0.5" data-testid={`local-model-background-${entry.id}`}>
+                            {t("backgroundTasks.closeHint")}
+                          </p>
+                          <BackgroundTaskInline
+                            taskId={backgroundRows.get(entry.id) ?? null}
+                            testId={`local-model-task-${entry.id}`}
+                            showHeadline={false}
+                            showHint={false}
+                          />
+                        </>
                       )}
                     </div>
 
@@ -804,8 +946,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                       {controls.uninstall && (
                         <button
                           type="button"
-                          aria-disabled={busy}
-                          onClick={() => { if (!busy && controls.uninstall) setConfirm({ entry, action: controls.uninstall }); }}
+                          aria-disabled={busy || !!controls.uninstall.blockedKey}
+                          aria-describedby={controls.uninstall.blockedKey ? `local-model-blocked-${entry.id}` : undefined}
+                          title={controls.uninstall.blockedKey ? t(controls.uninstall.blockedKey) : undefined}
+                          onClick={() => {
+                            if (!busy && controls.uninstall && !controls.uninstall.blockedKey) setConfirm({ entry, action: controls.uninstall });
+                          }}
                           className={`${BUTTON} text-red-300 aria-disabled:opacity-50 aria-disabled:cursor-default`}
                           data-testid={`local-model-action-${entry.id}-uninstall`}
                         >

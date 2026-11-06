@@ -39,9 +39,10 @@
 import fs from "fs";
 import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
-import { excludeWorktrees, gitIn, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
+import { writeRunMarker } from "./coding-folder-kind";
 
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
@@ -71,7 +72,7 @@ const asBox = (dir: string): Promise<{ ok: true; args: string[] } | { ok: false;
   codingGitIdentityArgs(dir);
 
 /** Why a run works in the project folder itself rather than in a worktree of its own. */
-export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "failed";
+export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "no_base_branch" | "failed";
 
 /**
  * Why a run's branch could not be brought home into the project.
@@ -81,9 +82,11 @@ export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protec
  * the card words each one in the owner's language with the next step that
  * clears it. Three of the four are the owner's own project standing in the
  * way and are fixable from the desk; `failed` is git refusing for a reason
- * only its own sentence can give.
+ * only its own sentence can give. `stopped` is never `mergeRunBranch`'s: the
+ * settle does not try a stopped run's merge at all — half-finished work stays
+ * on its branch for the owner to decide on.
  */
-export type MergeHomeBlocker = "not_on_base" | "dirty" | "conflict" | "failed";
+export type MergeHomeBlocker = "not_on_base" | "dirty" | "conflict" | "failed" | "stopped";
 
 export interface RunWorktreeAdded {
   ok: true;
@@ -99,6 +102,8 @@ export interface RunWorktreeRefused {
   ok: false;
   reason: NoWorktreeReason;
   detail: string;
+  /** On `not_repository_root`: the repository the folder turned out to be part of. */
+  root?: string;
 }
 
 /** `<project>/.clawbox/worktrees/<runId>` — the path, without touching the disk. */
@@ -111,7 +116,8 @@ export { runBranchName };
 
 /**
  * Give this run a worktree and a branch of its own, forked from whatever the
- * project checkout is on now.
+ * project checkout is on now — unless that is a coding team's branch, which
+ * a team leaves checked out: then from the project's base (`forkBase`).
  *
  * `protectedRoot` is the ClawBox checkout — never branched, never forked.
  */
@@ -119,14 +125,17 @@ export function addRunWorktree(input: {
   projectDir: string;
   runId: string;
   protectedRoot: string;
+  /** Fork from this branch (local, else `origin/<name>`) instead of the checkout's own. */
+  baseBranch?: string | null;
 }): Promise<RunWorktreeAdded | RunWorktreeRefused> {
   return withDirLock(input.projectDir, () => addRunWorktreeNow(input));
 }
 
-async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
+async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch }: {
   projectDir: string;
   runId: string;
   protectedRoot: string;
+  baseBranch?: string | null;
 }): Promise<RunWorktreeAdded | RunWorktreeRefused> {
   const dir = path.resolve(projectDir);
   const top = await gitIn(dir, ["rev-parse", "--show-toplevel"]);
@@ -154,6 +163,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
     return {
       ok: false,
       reason: "not_repository_root",
+      root,
       detail: `This folder is part of the repository at ${root} rather than being one, so a worktree of it would be a different folder.`,
     };
   }
@@ -168,8 +178,13 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
     const seeded = await gitIn(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, reason: "failed", detail: failureDetail(seeded, "Making the first commit") };
   }
-  const current = await gitIn(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const base = ok(current) && out(current) && out(current) !== "HEAD" ? out(current) : "main";
+  // A base the caller named wins; otherwise never a coding team's branch a
+  // team left checked out (`forkBase`). A named branch that is checked out is
+  // the ordinary fork; one that is not merges home only by pull request (the
+  // settle's not_on_base), which is what a fork from elsewhere is for.
+  const fork = baseBranch ? await namedBase(dir, baseBranch) : await forkBase(dir);
+  if (!fork.ok) return { ok: false, reason: baseBranch ? "no_base_branch" : "failed", detail: fork.detail };
+  const base = fork.base;
   const branch = runBranchName(runId);
   const target = runWorktreePath(dir, runId);
   try {
@@ -177,11 +192,23 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   } catch (err) {
     return { ok: false, reason: "failed", detail: `Could not make the worktrees folder: ${err instanceof Error ? err.message : String(err)}` };
   }
-  const added = await gitIn(dir, ["worktree", "add", "-b", branch, target, base]);
+  const added = await gitIn(dir, ["worktree", "add", ...(fork.from ? ["--no-track", "-b", branch, target, fork.from] : ["-b", branch, target, base])]);
   if (!ok(added)) return { ok: false, reason: "failed", detail: failureDetail(added, `Making a worktree for ${runId}`) };
   await excludeWorktrees(dir);
   linkSharedNodeModules(dir, target);
+  // Under `.clawbox/`, which excludeWorktrees keeps out of `git status`: a
+  // copy of this tree is then still known for one (coding-folder-kind.ts).
+  writeRunMarker(target, { kind: "run", id: runId, project: dir });
   return { ok: true, path: target, branch, base };
+}
+
+/** The caller's named base: the local branch, else the remote's, else a refusal naming it. */
+async function namedBase(dir: string, name: string): Promise<{ ok: true; base: string; from: string | null } | { ok: false; detail: string }> {
+  const on = await currentBranch(dir);
+  if (on === name) return { ok: true, base: name, from: null };
+  if (ok(await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]))) return { ok: true, base: name, from: name };
+  if (ok(await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]))) return { ok: true, base: name, from: `origin/${name}` };
+  return { ok: false, detail: `There is no branch "${name}" in this project, locally or on its origin, to fork the run from.` };
 }
 
 /**
@@ -269,7 +296,12 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
  *     out now is a guess;
  *   - only when the checkout is clean. The team's merge commits what it finds
  *     lying there first; that is right for a tree only the team uses and
- *     wrong for the owner's own folder, where uncommitted work is theirs;
+ *     wrong for the owner's own folder, where uncommitted work is theirs.
+ *     The favicons the box itself draws at the root are not theirs and do not
+ *     count (`readCheckout`): drawn there while the run is out in its
+ *     worktree, they refused the merge home of every run that had pictures
+ *     on. One the branch brings its own of is moved aside for the merge, so
+ *     the run's file wins and git does not refuse to write over it;
  *   - a conflict is ABORTED and named, never resolved by guess. The worktree
  *     then stays, which is what the card's Remove worktree is for.
  */
@@ -290,13 +322,15 @@ export function mergeRunBranch(input: {
     }
     const ahead = await commitsAhead(dir, input.branch, input.base);
     if (ahead === 0) return { ok: true, merged: false, commit: null };
-    const dirty = await gitIn(dir, ["status", "--porcelain", "--untracked-files=normal"]);
-    if (!ok(dirty)) return { ok: false, reason: "failed", detail: failureDetail(dirty, "Reading the project before the merge") };
-    if (out(dirty)) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
+    const seen = await readCheckout(dir, "normal");
+    if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project before the merge") };
+    if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
     const as = await asBox(dir);
     if (!as.ok) return { ok: false, reason: "failed", detail: as.detail };
+    const aside = await setAsideFavicons(dir, input.branch, seen.favicons);
     const merged = await gitIn(dir, [...as.args, "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
     if (ok(merged)) {
+      putBackFavicons(aside);
       // The merge commit, for the record and for the card's "the work is now
       // in <base>, as <sha>". Best-effort: a rev-parse that will not answer
       // does not turn a landed merge into a failed one.
@@ -305,6 +339,7 @@ export function mergeRunBranch(input: {
     }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await gitIn(dir, ["merge", "--abort"]);
+    putBackFavicons(aside);
     return {
       ok: false,
       reason: conflict ? "conflict" : "failed",
@@ -354,6 +389,21 @@ export async function commitsAhead(projectDir: string, branch: string, base: str
   if (!ok(r)) return null;
   const n = Number(out(r));
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Does the worktree hold changes its branch does not — staged, modified, or
+ * untracked and not ignored? `commitsAhead` cannot see them (a commit that
+ * failed after its `git add -A` leaves the work staged and the branch where
+ * it was), and `removeRunWorktree` forces them away. The `node_modules` at its
+ * root is left out: that is the project's own, linked in by
+ * `linkSharedNodeModules`, and git lists a link as untracked whatever a
+ * `node_modules/` ignore line says. Null means git could not say.
+ */
+export async function worktreeHasChanges(worktreePath: string): Promise<boolean | null> {
+  const r = await gitIn(path.resolve(worktreePath), ["status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude)node_modules"]);
+  if (!ok(r)) return null;
+  return out(r) !== "";
 }
 
 /**
@@ -423,75 +473,6 @@ export async function listRunWorktrees(projectDir: string): Promise<LinkedWorktr
   }
   flush();
   return found;
-}
-
-/** How old a worktree has to be before the sweep will even look at it. */
-export const WORKTREE_SWEEP_AGE_MS = 14 * 24 * 60 * 60_000;
-
-export interface SweepOutcome {
-  removed: string[];
-  kept: string[];
-}
-
-/**
- * Prune the run worktrees this project has accumulated: older than
- * `olderThanMs`, and only where the branch is merged or gone.
- *
- * The age is the WORKTREE's own mtime, not the run record's: records are
- * trimmed to thirty and a worktree can outlive the run that made it, so the
- * folder is the only thing that can still say when it was last touched. A
- * worktree with unmerged commits is never removed however old it is — that is
- * work nobody has looked at, and disk is cheaper than losing it.
- */
-export async function sweepRunWorktrees(projectDir: string, options: {
-  olderThanMs?: number;
-  /** Paths a live run is working in right now; never touched whatever their age. */
-  inUse?: ReadonlySet<string>;
-  now?: number;
-} = {}): Promise<SweepOutcome> {
-  const { olderThanMs = WORKTREE_SWEEP_AGE_MS, inUse, now = Date.now() } = options;
-  const dir = path.resolve(projectDir);
-  const outcome: SweepOutcome = { removed: [], kept: [] };
-  const trees = await listRunWorktrees(dir);
-  if (trees.length === 0) return outcome;
-  const base = await currentBranch(dir);
-  for (const tree of trees) {
-    const resolved = path.resolve(tree.path);
-    if (inUse?.has(resolved)) {
-      outcome.kept.push(resolved);
-      continue;
-    }
-    let age: number;
-    try {
-      age = now - fs.statSync(resolved).mtimeMs;
-    } catch {
-      // The files are gone and only git's record of them is left: prune it.
-      // `removeRunWorktree` answers true for a path that is not there, so a
-      // git that refuses the stale registration is still a removal.
-      await removeRunWorktree(dir, resolved);
-      outcome.removed.push(resolved);
-      continue;
-    }
-    if (age < olderThanMs) {
-      outcome.kept.push(resolved);
-      continue;
-    }
-    if (tree.branch) {
-      const merged = await branchIsMerged(dir, tree.branch, base);
-      // `null` is "git could not say", which is not permission to delete.
-      if (merged !== true) {
-        outcome.kept.push(resolved);
-        continue;
-      }
-    }
-    if (!(await removeRunWorktree(dir, resolved))) {
-      outcome.kept.push(resolved);
-      continue;
-    }
-    if (tree.branch) await deleteRunBranch(dir, tree.branch);
-    outcome.removed.push(resolved);
-  }
-  return outcome;
 }
 
 /** What the main checkout is on, or "main" when git will not say (a detached HEAD, a fresh repository). */

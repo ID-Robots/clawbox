@@ -233,7 +233,9 @@ export async function latestSelectPhase(sinceMs: number): Promise<SelectPhase | 
   try {
     ({ stdout } = await execFile(
       "/usr/bin/journalctl",
-      [...rootStepJournalArgs(EDITION_SELECT_STEP, { sinceMs, lines: SELECT_PHASES.length * 2 }), "-g", PHASE_GREP],
+      // The whole window: the markers are a handful, and `-n` beside `-g`
+      // would count lines before the pattern on the device's journalctl.
+      [...rootStepJournalArgs(EDITION_SELECT_STEP, { sinceMs }), "-g", PHASE_GREP],
       { timeout: 10_000 },
     ));
   } catch {
@@ -258,6 +260,8 @@ export async function latestSelectPhase(sinceMs: number): Promise<SelectPhase | 
 export interface SelectPhaseFollower {
   /** A journal line from the follow: the phase it named, or null for a plain line. */
   onLine(line: string): SelectPhase | null;
+  /** The route KNOWS the step got this far (it ended with the lock and the marker as asked): every phase up to it the scans missed is announced. */
+  reach(phase: SelectPhase): void;
   /** Resolves once every scan a line started has finished. */
   settled(): Promise<void>;
 }
@@ -303,6 +307,7 @@ export function selectPhaseFollower(
         .catch(() => {});
       return null;
     },
+    reach: advanceTo,
     settled: () => chain,
   };
 }

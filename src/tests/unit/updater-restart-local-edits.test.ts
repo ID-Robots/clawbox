@@ -55,7 +55,11 @@ vi.mock("@/lib/root-step-runner", async (orig) => ({
   }),
 }));
 
-vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: vi.fn(() => false) }));
+vi.mock("@/lib/x64-integration", () => ({
+  hasX64DesktopIntegration: vi.fn(() => false),
+  hasX64Install: vi.fn(() => false),
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000, X64_DESKTOP_GATEWAY_READY_WAIT_MS: 240_000,
+}));
 
 vi.mock("@/lib/port-probe", async (orig) => ({
   ...(await orig<typeof import("@/lib/port-probe")>()),
@@ -145,6 +149,7 @@ beforeEach(async () => {
   restoreEnv = saveEnv(
     "CLAWBOX_ROOT", "CLAWBOX_LOCAL_EDITS_DIR", "CLAWBOX_PRESERVE_LOCAL_EDITS_SH", "HOME", "GIT_CONFIG_NOSYSTEM",
     "GATEWAY_HEALTH_WAIT_MS", "GATEWAY_RECOVERY_WAIT_MS", "GATEWAY_WAIT_INTERVAL_MS",
+    "GATEWAY_START_LIMIT_MS", "GATEWAY_START_POLL_MS", "GATEWAY_START_POLL_MAX_MS",
   );
   store.clear();
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-restart-edits-")));
@@ -170,6 +175,9 @@ beforeEach(async () => {
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+  process.env.GATEWAY_START_LIMIT_MS = "1";
+  process.env.GATEWAY_START_POLL_MS = "1";
+  process.env.GATEWAY_START_POLL_MAX_MS = "1";
   // What next.config.ts bakes into a real build; each case says otherwise when it means to.
   process.env.CLAWBOX_PRESERVE_LOCAL_EDITS_SH = SCRIPT_TEXT;
   vi.resetModules();

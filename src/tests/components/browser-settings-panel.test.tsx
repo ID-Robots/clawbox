@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, waitFor, within } from "@/tests/helpers/test-utils";
 import BrowserSettingsPanel, { type BrowserStatus } from "@/components/BrowserSettingsPanel";
 
 /**
@@ -110,6 +110,94 @@ describe("BrowserSettingsPanel", () => {
     });
 
     expect(getByTestId("browser-settings-snap-warning")).toBeInTheDocument();
+  });
+
+  /**
+   * TASK-1480: which browser "the browser" is comes from the device — the
+   * owner may have pointed it at a profile and port of their own — and a
+   * browser they started is opened (brought forward), never closed, from here.
+   */
+  it("names the configured profile and port, and offers Open for a browser the owner started", () => {
+    const { getByText, getByTestId, props } = renderPanel({
+      ...STATUS,
+      cdpPort: 9222,
+      profileDir: "/home/clawbox/.config/google-chrome-debug",
+      ownProfile: false,
+      browser: { running: true, pid: 4242, cdpReady: true, external: true },
+    });
+
+    expect(getByText("CDP :9222")).toBeInTheDocument();
+    expect(getByText("/home/clawbox/.config/google-chrome-debug/")).toBeInTheDocument();
+    fireEvent.click(getByTestId("browser-settings-power"));
+    expect(props.onAction).toHaveBeenCalledWith("open-browser");
+  });
+
+  /**
+   * One browser per box: the window is the assistant's browser too and is kept
+   * running, so the panel says so, offers Open (bring it forward) and never
+   * Close, and drops the open-by-itself switch that no longer decides anything.
+   */
+  it("says the browser is shared with the assistant and offers no Close for it", () => {
+    const { getByTestId, queryByTestId, props } = renderPanel({
+      ...STATUS,
+      sharedWithAssistant: true,
+      browser: { running: true, pid: 4242, cdpReady: true, shared: true },
+    });
+
+    expect(getByTestId("browser-settings-shared")).toHaveTextContent("browser.settings.sharedHint");
+    expect(queryByTestId("browser-settings-legacy-profile")).toBeNull();
+    expect(queryByTestId("browser-settings-auto-open")).toBeNull();
+    fireEvent.click(getByTestId("browser-settings-power"));
+    expect(props.onAction).toHaveBeenCalledWith("open-browser");
+  });
+
+  it("tells the owner where the assistant's old profile is when its sign-ins did not come along", () => {
+    const { getByTestId } = renderPanel({
+      ...STATUS,
+      sharedWithAssistant: true,
+      legacyAgentProfile: "/home/clawbox/.openclaw/browser/openclaw/user-data",
+      browser: { running: true, pid: 4242, cdpReady: true, shared: true },
+    });
+
+    expect(getByTestId("browser-settings-legacy-profile")).toHaveTextContent("browser.settings.legacyProfileNote");
+  });
+
+  it("keeps Close and the open-by-itself switch where the assistant has a browser of its own", () => {
+    const { getByTestId, queryByTestId, props } = renderPanel({
+      ...STATUS,
+      sharedWithAssistant: false,
+      browser: { running: true, pid: 4242, cdpReady: true },
+    });
+
+    expect(queryByTestId("browser-settings-shared")).toBeNull();
+    expect(getByTestId("browser-settings-auto-open")).toBeInTheDocument();
+    fireEvent.click(getByTestId("browser-settings-power"));
+    expect(props.onAction).toHaveBeenCalledWith("close-browser");
+  });
+
+  it("still names ClawBox's own profile on a box that reports none", () => {
+    const { getByText } = renderPanel();
+    expect(getByText("~/.config/clawbox-browser/")).toBeInTheDocument();
+  });
+
+  /**
+   * The remote-desktop resolution lives with the screen it sizes: in the card
+   * that opens that screen in VNC, not in Settings → Appearance any more. It
+   * reads the stored value from the same route and offers the same three sizes.
+   */
+  it("puts the remote-desktop resolution beside Open in VNC, showing the stored value", async () => {
+    fetchMock.mockImplementation(async (input?: RequestInfo | URL) =>
+      String(input).includes("/setup-api/vnc/resolution")
+        ? json({ resolution: "1600x900" })
+        : json({ ok: true }));
+    const { getByTestId } = renderPanel();
+
+    const card = getByTestId("browser-settings-vnc-resolution").parentElement as HTMLElement;
+    expect(within(card).getByTestId("browser-settings-open-vnc")).toBeInTheDocument();
+    const select = within(card).getByRole("combobox", { name: "settings.vncResolution" }) as HTMLSelectElement;
+    expect(Array.from(select.options, (o) => o.value)).toEqual(["1280x720", "1600x900", "1920x1080"]);
+    await waitFor(() => expect(select.value).toBe("1600x900"));
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/setup-api/vnc/resolution")).toBe(true);
   });
 
   it("offers no agent-link switch where the link is permanent", () => {

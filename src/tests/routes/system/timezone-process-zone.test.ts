@@ -30,7 +30,7 @@ const { getMock, setMock } = vi.hoisted(() => ({
   setMock: vi.fn<(key: string, value: unknown) => Promise<void>>(async () => {}),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => true) }));
 vi.mock("@/lib/root-step-runner", () => ({
   ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",

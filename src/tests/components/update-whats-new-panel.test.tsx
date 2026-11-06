@@ -120,9 +120,10 @@ describe("UpdateWhatsNewPanel", () => {
     expect(panel).toHaveAttribute("data-kind", "bundled");
     const list = within(panel).getByRole("list");
     expect(list).not.toHaveAttribute("lang");
-    expect(within(list).getAllByRole("listitem")).toHaveLength(7);
-    expect(within(list).getByText(de["whatsNew.multiUserTitle"])).toBeInTheDocument();
-    expect(within(list).getByText(de["whatsNew.hardwareFixesBody"])).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(11);
+    expect(within(list).getByText(de["whatsNew.screenshotTitle"])).toBeInTheDocument();
+    expect(within(list).getByText(de["whatsNew.agentChartBody"])).toBeInTheDocument();
+    expect(within(list).getByText(de["whatsNew.primeRadiantTitle"])).toBeInTheDocument();
     expect(within(panel).getByRole("link")).toHaveAttribute("href", releasePageUrl(NONE_ON_LINE.version));
   });
 
@@ -152,7 +153,7 @@ describe("UpdateWhatsNewPanel", () => {
 
     render(<UpdateWhatsNewPanel panel={updateWhatsNewPanel(NONE_ON_LINE)} />);
     expect(screen.getByRole("region", { name: `Highlights of ClawBox ${WHATS_NEW_RELEASE}` })).toBeInTheDocument();
-    expect(screen.getByText("Several people, one ClawBox")).toBeInTheDocument();
+    expect(screen.getByText("Screenshots, built in")).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/update\.whatsNew|whatsNew\./);
   });
 
@@ -295,12 +296,14 @@ describe("the /updating screen", () => {
     render(<UpdatingPage />);
 
     const panel = await screen.findByRole("region", { name: "What's new in ClawBox 4.2.0" });
-    const step = await screen.findByText("Applying system fixups");
-    expect(screen.getByText("Verifying gateway health")).toBeInTheDocument();
-    expect(screen.getByText("Faster updates")).toBeInTheDocument();
+    const steps = await screen.findByTestId("update-steps-panel");
+    expect(within(steps).getAllByText("Applying system fixups").length).toBeGreaterThan(0);
+    expect(within(steps).getByText("Verifying gateway health")).toBeInTheDocument();
+    expect(within(panel).getByText("Faster updates")).toBeInTheDocument();
     // The steps come first in the document: a phone reads them before the panel.
-    expect(step.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByTestId("reconnect-stage-with-aside")).toContainElement(panel);
+    expect(steps.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Inside the run view, as in the System Update window (TASK-2111).
+    expect(screen.getByTestId("update-run")).toContainElement(panel);
   });
 
   it("re-asks the server that comes back after an outage, and draws its answer", async () => {
@@ -321,7 +324,7 @@ describe("the /updating screen", () => {
 
     // The rebuild takes the server down for a poll or two, then it answers again.
     serverUp = false;
-    await screen.findByText(/The device is restarting/, undefined, { timeout: 5_000 });
+    await screen.findByText(/ClawBox is restarting/, undefined, { timeout: 5_000 });
     serverUp = true;
     await screen.findByRole("region", { name: "What's new in ClawBox 4.2.0" }, { timeout: 5_000 });
     expect(fetchMock.mock.calls.filter(([url]) => url === UPDATE_WHATS_NEW_ENDPOINT)).toHaveLength(2);
@@ -331,7 +334,8 @@ describe("the /updating screen", () => {
     stubRoutes(async () => { throw new TypeError("Failed to fetch"); });
     render(<UpdatingPage />);
 
-    await screen.findByText("Applying system fixups");
+    const steps = await screen.findByTestId("update-steps-panel");
+    expect(within(steps).getAllByText("Applying system fixups").length).toBeGreaterThan(0);
     const panel = await screen.findByRole("region", { name: "What's new in this update" });
     await waitFor(() => expect(panel).toHaveAttribute("data-kind", "generic"));
     expect(within(panel).getByRole("link")).toHaveAttribute("href", CLAWBOX_RELEASES_URL);

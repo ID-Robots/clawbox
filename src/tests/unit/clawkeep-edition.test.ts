@@ -10,10 +10,11 @@ import path from "path";
 // works, but WHICH agent it captures and whether anything is still missing
 // before it can run.
 
-vi.mock("@/lib/harness", () => ({ getEdition: vi.fn() }));
+vi.mock("@/lib/harness", () => ({ getEdition: vi.fn(), getActiveHarness: vi.fn(async () => "openclaw") }));
 
-import { getEdition } from "@/lib/harness";
+import { getActiveHarness, getEdition } from "@/lib/harness";
 const mockGetEdition = vi.mocked(getEdition);
+const mockGetActiveHarness = vi.mocked(getActiveHarness);
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-clawkeep-edition-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "clawkeep");
@@ -54,6 +55,14 @@ describe("clawkeep getStatus — which agent this box archives", () => {
     // contents would be describing a backup nobody makes.
     mockGetEdition.mockReturnValue("dual");
     expect((await clawkeep.getStatus()).agent).toBe("openclaw");
+  }, STATUS_TIMEOUT_MS);
+
+  it("names hermes on a dual box the owner switched to hermes", async () => {
+    // The daemon's `device_agent()` reads the same `active_harness` choice and
+    // archives Hermes there; the status must not describe an OpenClaw backup.
+    mockGetEdition.mockReturnValue("dual");
+    mockGetActiveHarness.mockResolvedValueOnce("hermes");
+    expect((await clawkeep.getStatus()).agent).toBe("hermes");
   }, STATUS_TIMEOUT_MS);
 });
 

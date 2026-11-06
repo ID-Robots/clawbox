@@ -22,7 +22,7 @@ vi.mock("@/lib/auth", () => ({
 // so every login here is the owner's single-password login.
 vi.mock("@/lib/clawbox-users", () => ({
   findUser: vi.fn().mockResolvedValue(null),
-  verifyUserPassword: vi.fn().mockResolvedValue(false),
+  checkUserPassword: vi.fn().mockResolvedValue("wrong"),
 }));
 
 vi.mock("@/lib/system-password", () => ({

@@ -29,7 +29,6 @@ export const MAX_PLAN_FEATURES = [
 
 export const MAX_PLAN_BONUSES = [
   "Free 3 months of Max with your ClawBox purchase",
-  "Extended warranty bonus",
 ] as const;
 
 export const PURCHASE_EMAIL_NOTE =

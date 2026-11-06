@@ -4,9 +4,14 @@ import {
   DEFAULT_LIMIT_MS,
   detectAnthropicAuthFailure,
   detectAnthropicLimit,
+  detectAnthropicLimitNotice,
   effectiveStatus,
   formatResetClock,
+  isUsableFor,
   limitUntil,
+  modelFamily,
+  modelLimitedUntil,
+  nextResetFor,
   parseLimitReset,
   pickAccount,
   pickForSpawn,
@@ -167,6 +172,9 @@ describe("detectAnthropicAuthFailure", () => {
     'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
     '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
     "OAuth token has been revoked",
+    // Field wordings (TASK-1235, TASK-1271): bare, with no JSON around them and no "/login".
+    "OAuth access token has been revoked",
+    "Your organization has disabled Claude subscription access for Claude Code",
   ])("recognises %j as Anthropic refusing the credential", (text) => {
     expect(detectAnthropicAuthFailure(text)).toBe(true);
   });
@@ -195,6 +203,16 @@ describe("classifyAnthropicFailure", () => {
   it("answers auth for a refused credential and null for anything else", () => {
     expect(classifyAnthropicFailure("Invalid API key · Please run /login", AT_2227_SOFIA)).toEqual({ type: "auth" });
     expect(classifyAnthropicFailure("The agent run failed before producing a reply.", AT_2227_SOFIA)).toBeNull();
+  });
+
+  it("answers an account its organisation has switched off as refused for good, and a revoked token as one to ask about", () => {
+    // The token behind it renews perfectly well, so asking Anthropic about the
+    // credential would keep the account in; it cannot serve until the owner acts.
+    expect(classifyAnthropicFailure("Your organization has disabled Claude subscription access for Claude Code", AT_2227_SOFIA))
+      .toEqual({ type: "auth", permanent: true });
+    expect(classifyAnthropicFailure('API Error: 403 {"type":"error","error":{"type":"permission_error","message":"Your organization has disabled Claude subscription access for Claude Code"}}', AT_2227_SOFIA))
+      .toEqual({ type: "auth", permanent: true });
+    expect(classifyAnthropicFailure("OAuth access token has been revoked", AT_2227_SOFIA)).toEqual({ type: "auth" });
   });
 
   it("takes the gateway's failover reason when its own copy carries no provider words", () => {
@@ -249,6 +267,57 @@ describe("the active account", () => {
   });
 });
 
+describe("the owner's pick: their order, or the most room", () => {
+  const NOW_P = Date.UTC(2026, 9, 21, 12, 0);
+  const of = (id: string, kind: string, status: PoolMember["status"] = "ok"): PoolMember => ({ id, status, limitedUntil: status === "limited" ? NOW_P + 60_000 : null, kind });
+  const room = (entries: Record<string, number>) => new Map(Object.entries(entries));
+
+  it("is exactly the owner's order with no mode set — an API key the owner put first stays first, whatever the readings", () => {
+    const pool = [of("key", "api_key"), of("a", "oauth"), of("b", "oauth")];
+    const full = room({ a: 90, b: 10 });
+    expect(pickAccount(pool, NOW_P)?.id).toBe("key");
+    expect(pickAccount(pool, NOW_P, new Set(), { fullness: full })?.id).toBe("key");
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "order", fullness: full })?.id).toBe("key");
+    expect(pickAccount(pool, NOW_P, new Set(["key"]), { fullness: full })?.id).toBe("a");
+    expect(resolveActiveAccount(pool, null, NOW_P, { fullness: full })?.id).toBe("key");
+    expect(pickForSpawn(pool, "key", NOW_P, new Set(["key"]), { fullness: full })?.id).toBe("a");
+  });
+
+  it("takes the subscription whose fullest window has the most room, the owner's order breaking a tie", () => {
+    const pool = [of("a", "oauth"), of("b", "oauth"), of("c", "oauth")];
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 80, b: 35, c: 60 }) })?.id).toBe("b");
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 40, b: 40, c: 60 }) })?.id).toBe("a");
+    // A limited account is no candidate, however empty its reading.
+    expect(pickAccount([of("a", "oauth", "limited"), ...pool.slice(1)], NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 0, b: 70, c: 60 }) })?.id).toBe("c");
+  });
+
+  it("never puts an API key ahead of a subscription, and takes an account with no reading after those with one, in the owner's order", () => {
+    const pool = [of("key", "api_key"), of("login", "login"), of("a", "oauth"), of("b", "oauth")];
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ b: 99 }) })?.id).toBe("b");
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room" })?.id).toBe("login");
+    expect(pickAccount(pool, NOW_P, new Set(["login", "a", "b"]), { mode: "most-room" })?.id).toBe("key");
+  });
+
+  it("takes an account Anthropic reports spent after every subscription it knows nothing about, and still ahead of an API key", () => {
+    const pool = [of("key", "api_key"), of("a", "oauth"), of("b", "oauth"), of("login", "login")];
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("b");
+    expect(pickAccount(pool, NOW_P, new Set(["b"]), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("login");
+    expect(pickAccount(pool, NOW_P, new Set(["b", "login"]), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("a");
+    expect(pickAccount(pool, NOW_P, new Set(["a", "b", "login"]), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("key");
+  });
+
+  it("stays sticky: the most room decides only when the active account has to move, and the owner's reorder means the account they put first", () => {
+    const pool = [of("a", "oauth"), of("b", "oauth"), of("c", "oauth")];
+    const opts = { mode: "most-room" as const, fullness: room({ a: 90, b: 50, c: 5 }) };
+    expect(resolveActiveAccount(pool, "a", NOW_P, opts)?.id).toBe("a");
+    expect(resolveActiveAccount([of("a", "oauth", "limited"), pool[1], pool[2]], "a", NOW_P, opts)?.id).toBe("c");
+    expect(resolveActiveAccount(pool, "b", NOW_P, { ...opts, reselect: true })?.id).toBe("a");
+    expect(resolveActiveAccount(pool, "b", NOW_P, { ...opts, returnToPrimary: true })?.id).toBe("a");
+    expect(pickForSpawn(pool, "a", NOW_P, new Set(), opts)?.id).toBe("a");
+    expect(pickForSpawn(pool, "a", NOW_P, new Set(["a"]), opts)?.id).toBe("c");
+  });
+});
+
 describe("a bare rate limit from something that does not retry it (TASK-1260 review)", () => {
   it("is a throttle, not yet a limit, when neither the words nor the reason give a reset time", () => {
     expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA, { transientRate: true }))
@@ -267,5 +336,156 @@ describe("a bare rate limit from something that does not retry it (TASK-1260 rev
   it("is still a limit for Claude Code, which has already backed off and retried it", () => {
     expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA))
       .toEqual({ type: "limit", limit: { kind: "rate", resetsAt: null } });
+  });
+});
+
+/**
+ * The CLI's words of the usage scheme of 2026-11 (CLI 2.1.317, TASK-2141):
+ * a full window it CARRIES ON past is no stop; the monthly spend limit is a
+ * kind of its own; a model's own week caps only runs on that model.
+ */
+describe("the CLI's limit words of 2026-11", () => {
+  it.each([
+    ["Usage limit reached · continuing automatically", "continuing"],
+    ["Usage limit reached again · continuing automatically", "continuing"],
+    ["Usage limit reached — grace window active", "grace"],
+  ] as const)("does not take %j for a stop", (line, notice) => {
+    expect(detectAnthropicLimit(line, AT_2227_SOFIA, SOFIA)).toBeNull();
+    expect(detectAnthropicLimitNotice(line)).toBe(notice);
+    // Not even with the rate-limit reason a gateway files it under.
+    expect(classifyAnthropicFailure(line, AT_2227_SOFIA, { timeZone: SOFIA, reason: "rate_limit" })).toBeNull();
+    expect(classifyAnthropicFailure(line, AT_2227_SOFIA, { timeZone: SOFIA })).toBeNull();
+  });
+
+  it("still stops on a real limit that follows a carrying-on line", () => {
+    const text = "Usage limit reached · continuing automatically\nYou've hit your limit · resets 10:50pm";
+    expect(detectAnthropicLimitNotice(text)).toBeNull();
+    expect(detectAnthropicLimit(text, AT_2227_SOFIA, SOFIA)).toEqual({ kind: "session", resetsAt: Date.UTC(2026, 8, 18, 19, 50) });
+  });
+
+  it("reads \"You've hit your monthly spend limit\" as a limit of its own kind", () => {
+    expect(detectAnthropicLimit("You've hit your monthly spend limit", AT_2227_SOFIA, SOFIA)).toEqual({ kind: "spend", resetsAt: null });
+    expect(classifyAnthropicFailure("You’ve hit your monthly spend limit · resets Dec 1, 12am", AT_2227_SOFIA, { timeZone: SOFIA }))
+      .toMatchObject({ type: "limit", limit: { kind: "spend" } });
+  });
+
+  it("reads the bare \"You've hit your limit\" as a stop with no time, for Anthropic's answer to date", () => {
+    expect(detectAnthropicLimit("You've hit your limit", AT_2227_SOFIA, SOFIA)).toEqual({ kind: "session", resetsAt: null });
+  });
+
+  it.each([
+    ["Opus weekly limit reached ∙ resets Oct 9 at 10am", "opus"],
+    ["You've hit your Fable limit · resets Mon 9am", "fable"],
+    ["You’ve hit your Fable weekly limit", "fable"],
+    ["Sonnet limit reached ∙ resets 3pm", "sonnet"],
+  ])("reads %j as the %s week only", (line, family) => {
+    expect(detectAnthropicLimit(line, AT_2227_SOFIA, SOFIA)).toMatchObject({ kind: "weekly", model: family });
+  });
+
+  it.each([
+    "You've hit your weekly limit · resets Mon 9am",
+    "You've hit your session limit · resets 10:50pm",
+    "Weekly limit reached ∙ resets Oct 9, 10am",
+    "5-hour limit reached ∙ resets 3pm",
+    "Claude AI usage limit reached|1790000000",
+  ])("keeps %j the account's own window", (line) => {
+    expect(detectAnthropicLimit(line, AT_2227_SOFIA, SOFIA)?.model).toBeUndefined();
+  });
+
+  it.each(["Context limit reached", "Output token limit reached for this turn", "Step limit reached"])("does not take %j for any usage limit", (line) => {
+    expect(detectAnthropicLimit(line, AT_2227_SOFIA, SOFIA)).toBeNull();
+  });
+
+  it("takes a plan's name for no model: \"You've hit your Max limit\" is the account's stop, for Anthropic's answer to place", () => {
+    expect(detectAnthropicLimit("You've hit your Max limit · resets Mon 9am", AT_2227_SOFIA, SOFIA)).toMatchObject({ kind: "session" });
+    expect(detectAnthropicLimit("You've hit your Max limit · resets Mon 9am", AT_2227_SOFIA, SOFIA)?.model).toBeUndefined();
+  });
+
+  it("reads \"reached\" as it reads \"hit\"", () => {
+    expect(detectAnthropicLimit("You've reached your weekly limit · resets Mon 9am", AT_2227_SOFIA, SOFIA)?.kind).toBe("weekly");
+    expect(detectAnthropicLimit("You've reached your Opus limit", AT_2227_SOFIA, SOFIA)).toMatchObject({ kind: "weekly", model: "opus" });
+  });
+
+  it("keeps a real stop that shares its line with a carrying-on notice", () => {
+    const merged = "Usage limit reached · continuing automatically You've hit your limit · resets 10:50pm";
+    expect(detectAnthropicLimitNotice(merged)).toBeNull();
+    expect(detectAnthropicLimit(merged, AT_2227_SOFIA, SOFIA)).toEqual({ kind: "session", resetsAt: Date.UTC(2026, 8, 18, 19, 50) });
+  });
+});
+
+describe("modelFamily", () => {
+  it.each([
+    ["claude-fable-5-1", "fable"],
+    ["claude-opus-5-5", "opus"],
+    ["claude-sonnet-5-5", "sonnet"],
+    ["claude-3-5-sonnet-20241022", "sonnet"],
+    ["opus[1m]", "opus"],
+    ["Fable", "fable"],
+    ["Claude Opus 4.1", "opus"],
+    ["claude-haiku-5-5", "haiku"],
+    ["openrouter/anthropic/claude-haiku-4.5", "haiku"],
+    ["global.anthropic.claude-newname-6-0", "newname"],
+  ])("%s is %s", (model, family) => {
+    expect(modelFamily(model)).toBe(family);
+  });
+
+  it("is null for nothing to go on", () => {
+    expect(modelFamily(null)).toBeNull();
+    expect(modelFamily("")).toBeNull();
+    expect(modelFamily("claude")).toBeNull();
+  });
+});
+
+describe("a model's own week on the pool (TASK-2141)", () => {
+  const NOW = Date.UTC(2026, 10, 3, 12, 0);
+  const H = 3_600_000;
+  const fableSpent = (id: string, kind = "oauth"): PoolMember => ({ id, status: "ok", limitedUntil: null, kind, modelLimits: [{ family: "fable", name: "Fable", until: NOW + 30 * H }] });
+  const ok = (id: string, kind = "oauth"): PoolMember => ({ id, status: "ok", limitedUntil: null, kind });
+
+  it("keeps a run on THAT model off the account, and every other run on it", () => {
+    const a = fableSpent("a");
+    expect(modelLimitedUntil(a, "claude-fable-5-1", NOW)).toBe(NOW + 30 * H);
+    expect(isUsableFor(a, NOW, "claude-fable-5-1")).toBe(false);
+    expect(isUsableFor(a, NOW, "claude-opus-5-5")).toBe(true);
+    expect(isUsableFor(a, NOW, null)).toBe(true);
+    // The account itself is not limited: it is healthy, the active account stays.
+    expect(effectiveStatus(a, NOW)).toBe("ok");
+    expect(poolHealth([a], NOW)).toMatchObject({ healthy: 1, limited: 0, allLimited: false });
+    expect(resolveActiveAccount([a, ok("b")], "a", NOW)?.id).toBe("a");
+  });
+
+  it("gives the account to runs on other models and the next one to runs on the spent model", () => {
+    const accounts = [fableSpent("a"), ok("b")];
+    expect(pickForSpawn(accounts, "a", NOW, new Set(), { model: "claude-opus-5-5" })?.id).toBe("a");
+    expect(pickForSpawn(accounts, "a", NOW, new Set(), { model: "claude-fable-5-1" })?.id).toBe("b");
+    expect(pickAccount(accounts, NOW, new Set(), { model: "claude-fable-5-1" })?.id).toBe("b");
+    expect(pickAccount([fableSpent("a"), fableSpent("b")], NOW, new Set(), { model: "fable" })).toBeNull();
+  });
+
+  it("says when the first account is back for a run on that model", () => {
+    const limited: PoolMember = { id: "c", status: "limited", limitedUntil: NOW + 2 * H, kind: "oauth" };
+    expect(nextResetFor([fableSpent("a"), limited], NOW, "claude-fable-5-1")).toBe(NOW + 2 * H);
+    expect(nextResetFor([fableSpent("a"), fableSpent("b")], NOW, "claude-fable-5-1")).toBe(NOW + 30 * H);
+    // A run on another model waits for no model week.
+    expect(nextResetFor([fableSpent("a"), fableSpent("b")], NOW, "claude-opus-5-5")).toBeNull();
+    // An account limited AND past its model week is back for it only once both are over.
+    const both: PoolMember = { ...fableSpent("d"), status: "limited", limitedUntil: NOW + H };
+    expect(nextResetFor([both], NOW, "claude-fable-5-1")).toBe(NOW + 30 * H);
+    expect(nextResetFor([both], NOW, null)).toBe(NOW + H);
+  });
+
+  it("ends by itself at the week's reset", () => {
+    const a = fableSpent("a");
+    expect(isUsableFor(a, NOW + 31 * H, "claude-fable-5-1")).toBe(true);
+    expect(modelLimitedUntil(a, "claude-fable-5-1", NOW + 31 * H)).toBeNull();
+  });
+
+  it("ranks \"most room\" by the fullness the caller read for that model — the week of 2026-11 with no five-hour window", () => {
+    // A: account week 56 %, its Fable week 95 %; B: account week 70 %, Fable 20 %.
+    const accounts = [ok("a"), ok("b")];
+    const forFable = new Map([["a", 95], ["b", 70]]);
+    const forOpus = new Map([["a", 56], ["b", 70]]);
+    expect(pickAccount(accounts, NOW, new Set(), { mode: "most-room", fullness: forFable, model: "claude-fable-5-1" })?.id).toBe("b");
+    expect(pickAccount(accounts, NOW, new Set(), { mode: "most-room", fullness: forOpus, model: "claude-opus-5-5" })?.id).toBe("a");
   });
 });

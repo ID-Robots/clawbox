@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { classifyTunnelDestination, fetchTunnelDestination } from "@/lib/voice-tunnel";
+import { classifyTunnelDestination, fetchTunnelDestination, tunnelPageUrl } from "@/lib/voice-tunnel";
 
 /**
  * The mic popup's offer is only honest when it is backed by the LIVE tunnel
@@ -84,5 +84,36 @@ describe("fetchTunnelDestination", () => {
   it("maps a non-2xx status to failed", async () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, json: async () => ({}) })) as unknown as typeof fetch;
     expect(await fetchTunnelDestination(fetchImpl)).toEqual({ kind: "failed" });
+  });
+});
+
+/**
+ * TASK-2058. "Take me there" landed on the tunnel's root, losing the page the
+ * owner was on. The tunnel serves the same box, so the same page is the same
+ * path, query and hash at the tunnel's origin — and only its origin.
+ */
+describe("tunnelPageUrl", () => {
+  const TUNNEL = "https://lively-crab.trycloudflare.com/";
+
+  it("keeps the path, query and hash of the page the owner is on", () => {
+    expect(tunnelPageUrl(TUNNEL, { pathname: "/apps/chat", search: "?tab=2", hash: "#voice" }))
+      .toBe("https://lively-crab.trycloudflare.com/apps/chat?tab=2#voice");
+  });
+
+  it("is the tunnel's root for the desktop itself", () => {
+    expect(tunnelPageUrl(TUNNEL, { pathname: "/", search: "", hash: "" })).toBe(TUNNEL);
+  });
+
+  it("takes only the tunnel's origin, whatever path the published URL carries", () => {
+    expect(tunnelPageUrl("https://lively-crab.trycloudflare.com/old/path?x=1", { pathname: "/", search: "", hash: "#a" }))
+      .toBe("https://lively-crab.trycloudflare.com/#a");
+  });
+
+  it("never lets the current path name another host", () => {
+    // Concatenated, `//elsewhere.example/x` would read as a protocol-relative
+    // address and leave the tunnel.
+    const url = new URL(tunnelPageUrl(TUNNEL, { pathname: "//elsewhere.example/x", search: "", hash: "" }));
+    expect(url.host).toBe("lively-crab.trycloudflare.com");
+    expect(url.protocol).toBe("https:");
   });
 });

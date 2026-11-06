@@ -15,7 +15,10 @@ const heartbeat = { pushHeartbeatTick: vi.fn() };
 const liveness = { checkTunnelLiveness: vi.fn(), mayRestart: vi.fn(), markRestarted: vi.fn() };
 const named = { readTunnelMode: vi.fn() };
 
-vi.mock("@/lib/language-persona", () => ({ applyDeferredLanguagePersona: vi.fn(async () => false) }));
+vi.mock("@/lib/language-persona", () => ({
+  applyDeferredLanguagePersona: vi.fn(async () => false),
+  retireOnboardingRitual: vi.fn(async () => false),
+}));
 vi.mock("@/lib/hermes-model-options", () => ({ refreshCatalogIfDue: vi.fn(async () => undefined) }));
 vi.mock("@/lib/cloudflared", () => cloudflared);
 vi.mock("@/lib/portal-heartbeat", () => heartbeat);

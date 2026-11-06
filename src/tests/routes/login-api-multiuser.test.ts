@@ -19,7 +19,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/clawbox-users", () => ({
   findUser: vi.fn(),
-  verifyUserPassword: vi.fn(),
+  checkUserPassword: vi.fn(),
 }));
 
 vi.mock("@/lib/system-password", () => ({
@@ -36,7 +36,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
 
 import * as config from "@/lib/config-store";
 import { createSessionCookie, getSessionGeneration, getSessionSigningSecret, getSystemUsername, verifyPassword } from "@/lib/auth";
-import { findUser, verifyUserPassword } from "@/lib/clawbox-users";
+import { checkUserPassword, findUser } from "@/lib/clawbox-users";
 import { checkLockout, recordFailure, recordSuccess } from "@/lib/login-rate-limit";
 
 const ALICE = { username: "alice", createdAt: "2026-09-27T10:00:00.000Z", sv: "a1b2c3d4e5f60718" };
@@ -61,7 +61,7 @@ describe("/login-api — multi-user", () => {
     vi.mocked(getSessionSigningSecret).mockResolvedValue("secret");
     vi.mocked(getSessionGeneration).mockResolvedValue(0);
     vi.mocked(verifyPassword).mockResolvedValue(false);
-    vi.mocked(verifyUserPassword).mockResolvedValue(false);
+    vi.mocked(checkUserPassword).mockResolvedValue("wrong");
     vi.mocked(findUser).mockImplementation(async (name: string) => (name === "alice" ? ALICE : null));
     vi.mocked(checkLockout).mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
     vi.mocked(recordFailure).mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
@@ -70,13 +70,13 @@ describe("/login-api — multi-user", () => {
   });
 
   it("signs a second user in against THEIR Linux password and names them in the cookie", async () => {
-    vi.mocked(verifyUserPassword).mockResolvedValue(true);
+    vi.mocked(checkUserPassword).mockResolvedValue("ok");
 
     const res = await POST(login({ username: "alice", password: "alices-password" }));
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true, username: "alice" });
-    expect(verifyUserPassword).toHaveBeenCalledWith("alice", "alices-password");
+    expect(checkUserPassword).toHaveBeenCalledWith("alice", "alices-password");
     expect(verifyPassword).not.toHaveBeenCalled();
     expect(createSessionCookie).toHaveBeenCalledWith(43200, "secret", 0, { u: "alice", sv: ALICE.sv });
     expect(res.headers.get("set-cookie")).toContain("clawbox_session=session.cookie");
@@ -89,7 +89,7 @@ describe("/login-api — multi-user", () => {
 
     expect(res.status).toBe(200);
     expect(verifyPassword).toHaveBeenCalledWith("owner-password");
-    expect(verifyUserPassword).not.toHaveBeenCalled();
+    expect(checkUserPassword).not.toHaveBeenCalled();
     expect(createSessionCookie).toHaveBeenCalledWith(43200, "secret", 0, { u: "clawbox" });
   });
 
@@ -115,12 +115,12 @@ describe("/login-api — multi-user", () => {
 
     expect(unknown.status).toBe(wrong.status);
     expect(await unknown.json()).toEqual(await wrong.json());
-    expect(verifyUserPassword).toHaveBeenCalledTimes(1); // alice's, not mallory's
-    expect(verifyUserPassword).toHaveBeenCalledWith("alice", "whatever1");
+    expect(checkUserPassword).toHaveBeenCalledTimes(1); // alice's, not mallory's
+    expect(checkUserPassword).toHaveBeenCalledWith("alice", "whatever1");
   });
 
   it("never signs in a system account that is not a ClawBox user", async () => {
-    vi.mocked(verifyUserPassword).mockResolvedValue(true);
+    vi.mocked(checkUserPassword).mockResolvedValue("ok");
     vi.mocked(verifyPassword).mockResolvedValue(true);
     for (const name of ["root", "ubuntu", "daemon"]) {
       const res = await POST(login({ username: name, password: "anything1" }));
@@ -146,21 +146,43 @@ describe("/login-api — multi-user", () => {
     vi.mocked(checkLockout).mockImplementation(async (key: string) =>
       key === "user:alice" ? { locked: true, retryAfterSeconds: 120 } : { locked: false, retryAfterSeconds: 0 },
     );
-    vi.mocked(verifyUserPassword).mockResolvedValue(true);
+    vi.mocked(checkUserPassword).mockResolvedValue("ok");
 
     const res = await POST(login({ username: "alice", password: "alices-password" }));
 
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("120");
     expect(await res.json()).toMatchObject({ code: "locked" });
-    expect(verifyUserPassword).not.toHaveBeenCalled();
+    expect(checkUserPassword).not.toHaveBeenCalled();
   });
 
   it("clears the user's bucket along with the others on success", async () => {
-    vi.mocked(verifyUserPassword).mockResolvedValue(true);
+    vi.mocked(checkUserPassword).mockResolvedValue("ok");
     await POST(login({ username: "alice", password: "alices-password" }));
     const cleared = vi.mocked(recordSuccess).mock.calls.map(([key]) => key);
     expect(cleared).toEqual(expect.arrayContaining(["global", "user:alice"]));
+  });
+
+  it("says the box cannot check a second user's password, instead of calling it incorrect, on the LAN", async () => {
+    vi.mocked(checkUserPassword).mockResolvedValue("unavailable");
+    const res = await POST(login({ username: "alice", password: "alices-password" }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: "signin_unavailable" });
+    // No password was tried, so no guess is charged and nobody is signed in.
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(createSessionCookie).not.toHaveBeenCalled();
+  });
+
+  it("keeps the same answer as an unknown name over the tunnel, so the internet cannot tell which names exist", async () => {
+    vi.mocked(checkUserPassword).mockResolvedValue("unavailable");
+    const tunnel = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.9" },
+      body: JSON.stringify({ duration: 43200, username: "alice", password: "alices-password" }),
+    });
+    const res = await POST(tunnel);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: "bad_credentials" });
   });
 
   it("a second user's lockout does not lock the owner", async () => {

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { withProviderChangeLock } from "@/lib/provider-change-lock";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
+import { ownerOnlyResponse, sessionIdentity } from "@/lib/route-auth";
 import {
   gatewayIsAbsent,
   inferConfiguredLocalModel,
@@ -22,8 +24,16 @@ import {
   isConfigMutationConflict,
 } from "@/lib/config-conflict";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
+import {
+  disarmLocalCompactionModel,
+  localCompactionModelArmOps,
+  localCompactionModelDisarmNeeded,
+  noteLocalCompactionModel,
+} from "@/lib/local-compaction-model";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { DEFAULT_LLAMACPP_CONTEXT_WINDOW, getLlamaCppContextWindow } from "@/lib/llamacpp";
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
@@ -32,16 +42,20 @@ import {
   ANTHROPIC_DEFAULT_MODEL_ID,
   GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
+  XAI_DEFAULT_MODEL_ID,
   isValidModelId,
   parseModelSlug,
 } from "@/lib/provider-models";
 import {
   DISABLED_PROVIDERS_KEY,
+  claudeSignInFenced,
+  credentialedProviders,
   normalizeProviderId,
   parseDisabledProviders,
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { readNewestModelRefs } from "@/lib/provider-model-availability";
 import { GatewayWsUnavailableError, gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import {
@@ -73,7 +87,6 @@ import {
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
   isCodexSupportedModelId,
-  isKeyModeProfile,
   offSurfaceClaudeModelMessage,
   offSurfaceCodexModelMessage,
   readSubscriptionSurfaceIds,
@@ -101,8 +114,10 @@ interface ChatModelOption {
    */
   disabledByOwner?: true;
   /**
-   * The ChatGPT sign-in on this box predates the installed OpenClaw and cannot
-   * be routed until the owner signs in again (src/lib/chatgpt-subscription.ts).
+   * The sign-in is on the box and the gateway cannot use it until the owner
+   * signs in again: a ChatGPT one that predates the installed OpenClaw
+   * (src/lib/chatgpt-subscription.ts), or a Claude one whose stored credential
+   * is a dead refresh marker (`claudeSignInFenced` in src/lib/provider-status.ts).
    */
   reauthRequired?: true;
   /**
@@ -183,19 +198,25 @@ const PROVIDER_LABELS: Record<string, string> = {
   codex: "OpenAI Codex",
   google: "Google Gemini",
   openrouter: "OpenRouter",
+  xai: "xAI Grok",
   ollama: "Ollama Local",
   llamacpp: "Gemma 4 Local",
   deepseek: "ClawBox AI",
 };
 
-const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
+const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter", "xai"] as const;
 // Providers ClawBox configures as explicit openai-completions entries (see
 // ai-models/configure). Their `models.providers.<p>.models` list must contain
 // the chosen id or the gateway silently falls back, so the chat-header switch
 // below auto-extends that list when a freshly-picked model isn't seeded.
+//
+// NOT xai: ai-models/configure leaves it to the core's bundled `xai` plugin,
+// whose own catalogue resolves any id — the same reason clawai/openai/codex
+// are absent. There is no `models.providers.xai` entry to extend, and adding
+// it here would answer every Grok pick with the "isn't fully configured" 409.
 const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthropic"]);
 // ClawBox AI chat uses the existing Flash alias. The former Pro alias also
-// serves Flash 4.1, so remembered plan choices do not select another model.
+// serves DeepSeek V4 Flash, so remembered plan choices do not select another model.
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: CLAWBOX_AI_MODEL_BY_TIER.flash,
   deepseek: CLAWBOX_AI_MODEL_BY_TIER.flash,
@@ -203,6 +224,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openai: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
   google: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
+  xai: `xai/${XAI_DEFAULT_MODEL_ID}`,
 };
 
 // The ChatGPT allowlist lives in @/lib/subscription-surface: the wizard/
@@ -217,6 +239,25 @@ function isLocalModel(model: string | null | undefined): boolean {
 }
 
 const OLLAMA_PREFIX = "ollama/";
+
+/**
+ * The window OpenClaw sizes a turn on the local model against: the `contextWindow`
+ * of its row under `models.providers`, else what the box gives llama-server
+ * (`.env`, src/lib/llamacpp.ts), else the window ClawBox writes for both local
+ * backends. The chat compares a conversation's size to it before sending
+ * (TASK-2127, src/lib/chat-local-fit.ts). Null with no local model.
+ */
+function localModelContextWindow(config: OpenClawConfig, localModel: string | null): number | null {
+  if (!localModel || !isLocalModel(localModel)) return null;
+  const slash = localModel.indexOf("/");
+  const provider = localModel.slice(0, slash);
+  const id = localModel.slice(slash + 1);
+  const rows = config.models?.providers?.[provider]?.models;
+  const row = Array.isArray(rows) ? rows.find((entry) => entry?.id === id) : undefined;
+  const fromRow = row?.contextWindow;
+  if (typeof fromRow === "number" && Number.isFinite(fromRow) && fromRow > 0) return fromRow;
+  return provider === "llamacpp" ? getLlamaCppContextWindow() : DEFAULT_LLAMACPP_CONTEXT_WINDOW;
+}
 
 function normalizeProvider(provider: unknown): string | null {
   if (typeof provider !== "string" || !provider.trim()) return null;
@@ -242,7 +283,15 @@ function canonicalChatModel(model: string): string {
     : model;
 }
 
-function defaultModelForProvider(provider: string | null): string | null {
+function defaultModelForProvider(
+  provider: string | null,
+  // `provider/<id>` for each provider whose default follows the newest model
+  // (src/lib/provider-newest-model.ts), read off the box's own enumeration once
+  // per state load. Ahead of the table, whose entry for such a provider is only
+  // the cold-start answer — and this row's model is what
+  // `POST /setup-api/providers/default` writes as the primary.
+  newestRefs?: ReadonlyMap<string, string>,
+): string | null {
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   // The ChatGPT subscription is written under `openai/` — see
@@ -251,7 +300,8 @@ function defaultModelForProvider(provider: string | null): string | null {
   if (isLegacyChatgptProvider(normalized)) {
     return chatgptModelRef(chatgptDefaultModelId());
   }
-  return DEFAULT_PROVIDER_MODELS[normalized]
+  return newestRefs?.get(normalized)
+    ?? DEFAULT_PROVIDER_MODELS[normalized]
     ?? DEFAULT_PROVIDER_MODELS[normalizeProvider(provider) ?? ""]
     ?? null;
 }
@@ -289,10 +339,15 @@ function subscriptionProvidersForUi(profiles: AuthProfileEntries): string[] {
   return providers;
 }
 
-function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
-  return Object.entries(config.auth?.profiles ?? {}).some(
-    ([key, entry]) => isKeyModeProfile(entry) && profileProviderId(key, entry) === CHATGPT_PROVIDER,
-  );
+/**
+ * An OpenAI API key — a non-OAuth `openai` profile, or a real key under
+ * `models.providers.openai` (never the claw_ token ClawBox AI's images ride
+ * there on). Asked of {@link credentialedProviders}, the reader the picker's
+ * rows are filtered by, so a request is routed on the API key exactly when the
+ * `openai` row is offered.
+ */
+function hasOpenAiApiKey(config: OpenClawConfig): boolean {
+  return credentialedProviders(config, normalizeProvider).has(CHATGPT_PROVIDER);
 }
 
 /**
@@ -317,7 +372,7 @@ async function readOpenAiCredentials(
   const config = await getConfig();
   const profiles = config?.auth?.profiles;
   return {
-    hasApiKey: !!config && hasOpenAiApiKeyProfile(config),
+    hasApiKey: !!config && hasOpenAiApiKey(config),
     hasChatgptSignIn: hasChatgptOauthProfile(profiles),
     hasStaleChatgptProfile: hasLegacyChatgptProfile(profiles),
   };
@@ -340,6 +395,88 @@ function refuseStaleChatgptProfile(): NextResponse {
     },
     { status: 409 },
   );
+}
+
+/**
+ * The 409 for a model named on a row greyed with `reauthRequired` — today the
+ * Claude sign-in whose stored credential is a dead refresh marker (the ChatGPT
+ * one has `refuseStaleChatgptProfile`, which answers before any row is
+ * consulted). The picker does not post such a row, but the header's MODEL pill
+ * does, and without this the answer was "Selected AI provider is not
+ * configured": a sentence that sends the owner to set up a provider that is
+ * set up. Same shape as the other refusals.
+ */
+function refuseDeadSignIn(option: ChatModelOption): NextResponse {
+  return NextResponse.json(
+    {
+      error: `The ${option.label} sign-in on this box has stopped working and cannot be used for chat. `
+        + "Sign in again in Settings, then pick the model.",
+      kind: "provider_reauth_required",
+      provider: option.provider,
+    },
+    { status: 409 },
+  );
+}
+
+/**
+ * The 400 for a pick on a provider row this box holds no credential for, or
+ * null when it holds one (or the pick is local, or malformed — the validators
+ * further down answer that). TASK-2055: the picker offered such rows and the
+ * refusal was "Selected AI provider is not configured", or for the OpenAI
+ * row on a ChatGPT-only box "<model> requires OpenAI API-key mode" — neither
+ * names the provider, nor what the box is missing.
+ *
+ * Decided on the ROW the pick stands on, because the two OpenAI rows share the
+ * `openai/<id>` namespace: the row the picker named, else the one the
+ * reference resolves to on this box's OpenAI credentials — the same fallback
+ * `resolveChatgptPick` routes by. Asked of {@link credentialedProviders}, the
+ * reader the rows were filtered by, so an offered row is never refused here.
+ *
+ * Not the answer for a sign-in that exists and cannot be used: a stale
+ * ChatGPT one is `refuseStaleChatgptProfile`'s 409, a fenced Claude one
+ * `refuseDeadSignIn`'s — both hold a credential and need a re-sign-in.
+ */
+function refuseMissingCredential(
+  model: string | null,
+  pickedUiProvider: string | null,
+  credentialed: Set<string>,
+  openAi: OpenAiCredentials,
+): NextResponse | null {
+  if (!model || isLocalModel(model)) return null;
+  const parsed = parseModelSlug(model);
+  const modelProvider = normalizeProvider(parsed?.provider);
+  if (!modelProvider) return null;
+  const openAiRef = modelProvider === CHATGPT_PROVIDER || isLegacyChatgptProvider(modelProvider);
+  const pickedOpenAiRow = pickedUiProvider === CHATGPT_PROVIDER || pickedUiProvider === CHATGPT_UI_PROVIDER;
+  const row = openAiRef && pickedOpenAiRow
+    ? pickedUiProvider
+    : isLegacyChatgptProvider(modelProvider)
+      || (modelProvider === CHATGPT_PROVIDER && !openAi.hasApiKey
+        && (openAi.hasChatgptSignIn || openAi.hasStaleChatgptProfile))
+      ? CHATGPT_UI_PROVIDER
+      : modelProvider;
+  if (row === CHATGPT_UI_PROVIDER) {
+    if (openAi.hasChatgptSignIn || openAi.hasStaleChatgptProfile) return null;
+  } else if (credentialed.has(row)) {
+    return null;
+  }
+  const label = labelForProvider(row, row);
+  const apiRow = labelForProvider(CHATGPT_PROVIDER, CHATGPT_PROVIDER);
+  const chatgptRow = labelForProvider(CHATGPT_UI_PROVIDER, CHATGPT_UI_PROVIDER);
+  let error: string;
+  if (row === CHATGPT_PROVIDER && openAi.hasChatgptSignIn) {
+    error = `${label} needs an OpenAI API key, and this box has none — it is signed in with ChatGPT only. `
+      + `Pick the model on the ${chatgptRow} row, or add an OpenAI API key in Settings.`;
+  } else if (row === CHATGPT_UI_PROVIDER) {
+    error = `${label} needs a ChatGPT sign-in, and this box has none. `
+      + (openAi.hasApiKey
+        ? `Pick the model on the ${apiRow} row, which uses this box's API key, or sign in with ChatGPT in Settings.`
+        : "Sign in with ChatGPT in Settings, then pick the model.");
+  } else {
+    error = `${label} is not connected on this box — it has no API key or sign-in for it. `
+      + `Connect ${label} in Settings, then pick the model.`;
+  }
+  return NextResponse.json({ error, kind: "provider_credential_missing", provider: row }, { status: 400 });
 }
 
 /**
@@ -559,11 +696,12 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
  * on a slow gateway, cost the connect and method deadlines twice over.
  */
 async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean } = {}) {
-  const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels] = await Promise.all([
+  const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels, newestRefs] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
     read.gatewayLevels === false ? new Map<string, string[]>() : readGatewayThinkingLevels(),
+    readNewestModelRefs().catch(() => new Map<string, string>()),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
   // Subscription-only providers, computed ONCE: the row attribution below and
@@ -578,7 +716,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // (src/lib/chatgpt-subscription.ts). Without the second half, a dual-
   // credential box flipped its header pill from ChatGPT to OpenAI on the very
   // next poll after the owner picked ChatGPT.
-  const chatgptSubscriptionOnly = hasChatgptOauthProfile(authProfiles) && !hasOpenAiApiKeyProfile(openclawConfig);
+  const chatgptSubscriptionOnly = hasChatgptOauthProfile(authProfiles) && !hasOpenAiApiKey(openclawConfig);
   const uiProviderForModel = (model: string | null | undefined): string | null => {
     const provider = normalizeProviderFromModel(model);
     if (provider !== CHATGPT_PROVIDER) return provider;
@@ -735,7 +873,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
     } else {
-      model = defaultModelForProvider(rawProvider);
+      model = defaultModelForProvider(rawProvider, newestRefs);
     }
 
     if (model) rememberPrimaryOption(model, rawProvider);
@@ -749,8 +887,30 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // row and writes it to `agents.defaults.model.primary`, so the mismatch is
   // not display-only.
   if (primaryProvider && primaryProvider !== "ollama" && primaryProvider !== "llamacpp") {
-    const model = defaultModelForProvider(primaryProvider);
+    const model = defaultModelForProvider(primaryProvider, newestRefs);
     if (model) rememberPrimaryOption(model, primaryProvider);
+  }
+
+  // Only a row the box holds a credential for is offered (TASK-2055). Three of
+  // the calls above build a row from a MODEL — the live primary, the remembered
+  // one, the config store's provider hint — and none of them asks whether the
+  // box can authenticate to it: a ChatGPT-only box was offered "OpenAI GPT"
+  // (the API-key row) off a stored `openai` hint, and every pick on it was
+  // refused. Decided by the reader the Providers strip asks, so the two agree.
+  //
+  // The provider the box is RUNNING stays, greyed: the header pill names its
+  // model, and a list without it shows a model that is in no list. Greyed with
+  // no reason flag reads "Set up in Settings", which is the next step. The
+  // ChatGPT and Claude rows a dead sign-in greys are judged just below.
+  const credentialed = credentialedProviders(openclawConfig, normalizeProvider);
+  const runningProvider = activeModel && !isLocalModel(activeModel) ? uiProviderForModel(activeModel) : null;
+  for (const [provider, option] of configuredPrimaryOptions) {
+    if (credentialed.has(provider)) continue;
+    if (provider === runningProvider) {
+      configuredPrimaryOptions.set(provider, { ...option, available: false });
+    } else {
+      configuredPrimaryOptions.delete(provider);
+    }
   }
 
   // A ChatGPT sign-in OpenClaw 2 cannot use (filed as `codex:default` by an
@@ -771,6 +931,17 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       settingsSection: "ai",
       isLocal: false,
     });
+  }
+
+  // A Claude sign-in the gateway will never use is greyed the same way, for
+  // the same reason: the gateway's store holds a dead refresh marker where the
+  // credential was, so an available row is one every turn dies on ("No API key
+  // found for provider anthropic") — and a vanished one reads as "never
+  // connected". Decided by the function the Providers strip asks, so the
+  // header and the strip cannot disagree about it.
+  const claudeOption = configuredPrimaryOptions.get("anthropic");
+  if (claudeOption && claudeSignInFenced(openclawConfig)) {
+    configuredPrimaryOptions.set("anthropic", { ...claudeOption, available: false, reauthRequired: true });
   }
 
   // When Local-only mode is on, the cloud providers are intentionally
@@ -888,6 +1059,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       available: localOption.available,
       label: localLabel,
       model: localModel,
+      contextWindow: localModelContextWindow(openclawConfig, localModel),
     },
     subscriptionProviders,
   };
@@ -1039,7 +1211,24 @@ export async function GET() {
   }
 }
 
+/**
+ * One write of the default at a time with the provider sign-out
+ * (src/lib/provider-change-lock.ts): a sign-out checks that its provider is
+ * not the default and removes the credential under the same lock, so a pick
+ * made in between waits, and then reads the box as the sign-out left it.
+ */
 export async function POST(request: Request) {
+  return withProviderChangeLock(() => postChatModel(request));
+}
+
+async function postChatModel(request: Request) {
+  // The model the WHOLE box chats on is the owner's to change. Middleware
+  // refuses a signed-in user's write already (src/lib/non-owner-scope.ts);
+  // asked here as well because a user's first desktop load is what moved it.
+  // Only a person's cookie is asked about: the box's own in-process switches
+  // (src/lib/automatic-model-switch.ts) carry none.
+  const who = await sessionIdentity(request);
+  if (who && !who.isOwner) return ownerOnlyResponse();
   // The write half of the same store. A switch here spends `openclaw config
   // set` on a key the Hermes agent never reads, and answered 200 for it.
   if (!(await chatModelLivesHere())) {
@@ -1118,6 +1307,13 @@ export async function POST(request: Request) {
       return surfaceIds;
     };
     const openAiCredentials = await readOpenAiCredentials(getAuthConfig);
+    // Null when openclaw.json could not be read: "not connected" would then be
+    // a claim about a file nobody saw, and the row checks below already
+    // refuse in their own words.
+    const credentialed = preloadedConfig ? credentialedProviders(preloadedConfig, normalizeProvider) : null;
+    const missingCredential = (model: string | null) => credentialed
+      ? refuseMissingCredential(model, pickedUiProvider, credentialed, openAiCredentials)
+      : null;
 
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
@@ -1153,6 +1349,10 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
+        // Before the ChatGPT routing just below: a keyless box would otherwise
+        // move a pick made on the API-key row onto the ChatGPT account.
+        const uncredentialed = missingCredential(requestedModel);
+        if (uncredentialed) return uncredentialed;
         let effectiveModel = canonicalChatModel(requestedModel);
         let effectiveProvider = normalizeProvider(parsed.provider) === "clawai" ? "deepseek" : parsed.provider;
         const effectiveModelId = parsed.modelId;
@@ -1196,6 +1396,10 @@ export async function POST(request: Request) {
           (option) => option.provider === parsedProviderNormalized && option.available,
         );
         if (!providerConfigured) {
+          const deadSignIn = state.options.find(
+            (option) => option.provider === parsedProviderNormalized && option.reauthRequired,
+          );
+          if (deadSignIn) return refuseDeadSignIn(deadSignIn);
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
         // OpenAI-compat providers (OPENAI_COMPAT_PROVIDERS: openrouter, google,
@@ -1312,6 +1516,10 @@ export async function POST(request: Request) {
       }
 
       targetModel = body.source === "primary" ? state.primary.model : state.local.model;
+      // The remembered primary can be the greyed row of a provider the box
+      // runs on and holds no credential for.
+      const uncredentialed = missingCredential(targetModel);
+      if (uncredentialed) return uncredentialed;
     }
 
     if (!targetModel) {
@@ -1483,11 +1691,27 @@ export async function POST(request: Request) {
     // EACCES exactly as it does to a box with no config at all. An absent flag
     // IS enabled, so `{}` must stay silent; "could not read" must not.
     const configBeforeBatch = await readConfigStrict().catch(() => null);
+    // Compaction on the cloud model the owner is leaving while the primary is
+    // on the box (TASK-2127, src/lib/local-compaction-model.ts): the model that
+    // held the conversation summarizes it in seconds, where the on-device one
+    // took minutes. The primary being left, or the last cloud one remembered.
+    const previousCloudPrimary = !isLocalModel(state.activeModel) && state.activeModel
+      ? canonicalChatModel(state.activeModel)
+      : await sqliteGet(PRIMARY_MODEL_KEY).catch(() => null);
+    const compactionArmOps = await localCompactionModelArmOps(
+      configBeforeBatch,
+      targetModel,
+      typeof previousCloudPrimary === "string" ? previousCloudPrimary : null,
+    );
     try {
       await runOpenclawConfigSetBatch([
         ...enableProviderPluginOps([targetModel]),
         ["agents.defaults.model.primary", targetModel],
         ...armOps,
+        // Tool Search off while the primary is the on-device model, in the
+        // batch it describes (src/lib/local-tool-search.ts).
+        ...(await localToolSearchArmOps(configBeforeBatch, targetModel)),
+        ...compactionArmOps,
       ]);
     } catch (err) {
       // OpenClaw 2 validates the reference against the catalogs it can see and
@@ -1540,6 +1764,16 @@ export async function POST(request: Request) {
     let disarmWarning: string | undefined;
     if (!chatgptRouted && chatgptRuntimeArmed(preloadedConfig, targetModel)) {
       disarmWarning = await disarmChatgptRuntime(targetModel);
+    }
+    // 1d. Off the device: OpenClaw's own Tool Search back, as it ships.
+    let toolSearchWarning: string | undefined;
+    if (localToolSearchDisarmNeeded(configBeforeBatch, targetModel)) {
+      toolSearchWarning = await disarmLocalToolSearch("chat/model");
+    }
+    // 1e. ...and OpenClaw's own compaction model back, when ClawBox set it.
+    await noteLocalCompactionModel(compactionArmOps);
+    if (await localCompactionModelDisarmNeeded(configBeforeBatch, targetModel)) {
+      await disarmLocalCompactionModel("chat/model");
     }
 
     // 2. Full sweep including sessions previously tagged
@@ -1621,7 +1855,7 @@ export async function POST(request: Request) {
     const nextState = await loadChatModelState();
     // One `warning` field, both producers: the disarm failure and the sweep,
     // joined the way the configure route joins its own.
-    const warning = [disarmWarning, sweepWarning].filter(Boolean).join(" ");
+    const warning = [disarmWarning, toolSearchWarning, sweepWarning].filter(Boolean).join(" ");
     return NextResponse.json(
       { ...nextState, ...(warning ? { warning } : {}) },
       { headers: { "Cache-Control": "no-store" } },

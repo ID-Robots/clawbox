@@ -122,6 +122,18 @@ describe("the inputs tree", () => {
     expect(deniedFor(rules, "Read", pathMod.join(root, "data", "config.json"))).toBe(true);
     expect(deniedFor(rules, "Read", pathMod.join(root, "data", "secrets", "x"))).toBe(true);
   });
+
+  it("denies the secret store and its audit trail by name, before either exists", async () => {
+    // Neither file is on disk in this fixture: the first save or the first
+    // copy creates them, after a run's rules may already have been computed.
+    const lib = await import("@/lib/coding-agent");
+    const rules = lib.fileDenyRules();
+    for (const file of ["secrets.json", "secrets-audit.log"]) {
+      for (const tool of ["Read", "Grep"]) {
+        expect(deniedFor(rules, tool, pathMod.join(root, "data", file)), `${tool} ${file}`).toBe(true);
+      }
+    }
+  });
 });
 
 describe("what the run is told", () => {
@@ -160,7 +172,7 @@ describe("what the run is told", () => {
   it("tells the brief where inputs are, so a run stops hunting for the original", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(lib.HEADLESS_BRIEF).toContain("CLAWBOX_RUN_INPUTS_DIR");
-    expect(lib.HEADLESS_BRIEF).toContain("assistant's own media folder is NOT readable");
+    expect(lib.HEADLESS_BRIEF).toContain("if one is missing, say so rather than look elsewhere");
   });
 
   it("puts the folder in the run's own environment", async () => {

@@ -48,3 +48,45 @@ export function parseHermesVersion(raw: string | null | undefined): string | nul
   // answer — but cap it so a runaway line can't blow out the row.
   return line.length > 64 ? `${line.slice(0, 64)}…` : line;
 }
+
+/** One component of the `/setup-api/update/versions` payload, as a browser reads it. */
+export interface UpdateComponentVersion {
+  current?: string | null;
+  target?: string | null;
+  updateAvailable?: boolean | null;
+}
+
+/**
+ * Whether an OpenClaw row is about software this device has and the update
+ * keeps current. The `hermes` SKU has none — not even when a swap from
+ * OpenClaw left the old core on its disk, which nothing there runs or updates;
+ * `dual` has one even while Hermes is the harness answering. A payload from a
+ * server that predates the `edition` field reads as OpenClaw, which is what
+ * those builds were.
+ *
+ * Here rather than in a component so every screen that offers an OpenClaw
+ * update asks the same question: the desktop's "Update available" card did
+ * not, and offered a Hermes box an OpenClaw update its updater never performs.
+ */
+export function shipsOpenclaw(versions: { edition?: string } | null | undefined): boolean {
+  return versions?.edition !== "hermes";
+}
+
+/**
+ * Which components the desktop's "Update available" card names. A component
+ * whose `updateAvailable` is absent or null (an older server, or one that could
+ * not check) is compared on its versions, as the card always did; OpenClaw
+ * counts only where {@link shipsOpenclaw} says the device has one.
+ */
+export function updateNoticeComponents(versions: {
+  clawbox?: UpdateComponentVersion | null;
+  openclaw?: UpdateComponentVersion | null;
+  edition?: string;
+} | null | undefined): { clawbox: boolean; openclaw: boolean } {
+  const needs = (c: UpdateComponentVersion | null | undefined): boolean =>
+    c?.updateAvailable ?? (!!c?.target && c.target !== c.current);
+  return {
+    clawbox: needs(versions?.clawbox),
+    openclaw: shipsOpenclaw(versions) && needs(versions?.openclaw),
+  };
+}

@@ -123,7 +123,7 @@ async function latest(): Promise<FakeSocket> {
 async function connect(
   overrides: Record<string, unknown> = {},
   info: Record<string, unknown> | null = { model: "deepseek-v4-flash", provider: "custom" },
-  switchReply: "ok" | "refused" | "soft-refused" = "ok",
+  switchReply: "ok" | "refused" | "soft-refused" | "noted" | "confirm" = "ok",
 ) {
   let settled = false;
   const opening = openDashboardTurn({
@@ -169,6 +169,29 @@ async function connect(
         answered.add(sent.id);
         if (switchReply === "ok") {
           socket.deliver({ jsonrpc: "2.0", id: sent.id, result: { output: "  ✓ Model switched" } });
+        } else if (switchReply === "noted" || switchReply === "confirm") {
+          // Both verbatim in shape from a board (v0.22.5): a switch that TOOK
+          // and still carries a note — announced first, the way
+          // `_commit_agent_switch` writes its `session.info` before the reply
+          // — and the deferred-confirm answer, which switches nothing and so
+          // announces nothing.
+          const target = String((overrides.model as string | undefined) ?? "deepseek-v4-flash");
+          const note = `Note: \`${target}\` was not found in this custom endpoint's model listing `
+            + "(https://example.invalid/models). It may still work if the server supports hidden or aliased models.";
+          // The confirm answer is preceded by the session announcing the model
+          // it is STILL on — the resume's own late `session.info`, which on the
+          // board arrived after the switch had been sent.
+          socket.event("session.info", switchReply === "noted"
+            ? { model: target, provider: "clawai" }
+            : { model: String(info?.model ?? ""), provider: "custom:clawai" });
+          socket.deliver({
+            jsonrpc: "2.0",
+            id: sent.id,
+            result: {
+              output: `  ✓ Model switched: ${target}\n    Provider: clawai\n    ⚠ ${note}\n    (session only — add --global to persist)`,
+              warning: note,
+            },
+          });
         } else if (switchReply === "refused") {
           socket.deliver({ jsonrpc: "2.0", id: sent.id, error: { message: "session busy" } });
         } else {
@@ -259,24 +282,31 @@ describe("carrying the picked model onto a conversation already in progress", ()
     expect(socket.method("slash.exec")).toBeDefined();
   });
 
-  it("gives this transport up when the switch is refused outright", async () => {
-    // Null is the caller's signal to spawn the CLI, which passes -m/--provider
-    // as argv to a fresh process and is proven to run both correctly. Slower and
-    // unstreamed beats answering as a model the customer did not pick.
+  it("answers on the conversation's own model when the switch is refused outright (TASK-2152)", async () => {
+    // Giving the transport up used to hand the turn to the CLI, which passed
+    // -m/--provider and answered on the picked model. From Hermes v0.22.4 that
+    // CLI is refused a conversation the dashboard started, so giving up lost
+    // the turn — every time it was sent. The conversation's own model answers
+    // instead, as the product says a resumed conversation does, and the handle
+    // says which model that is and which one was asked for.
     const { turn, socket } = await connect(
       { sessionId: "20260823_185842_1eabd5", model: "claude-fable-5", provider: "anthropic" },
       { model: "deepseek-v4-flash", provider: "custom" },
       "refused",
     );
     expect(socket.method("slash.exec")).toBeDefined();
-    expect(turn).toBeNull();
+    expect(turn).not.toBeNull();
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider).not.toBe("anthropic");
+    expect(turn?.refusedModel).toBe("claude-fable-5");
   });
 
   it("reads a refusal that arrives inside a SUCCESSFUL reply", async () => {
-    // The shape that actually occurs on the box, and the bug this had: no
-    // `error` member anywhere, the refusal carried in `warning` with an output
-    // opening on the failure marker. Reading only the JSON-RPC envelope counted
-    // that as a switch and reported a model the session was never running.
+    // The shape that actually occurs on the box: no `error` member anywhere,
+    // the refusal carried in `warning` with an output opening on the failure
+    // marker. Reading only the JSON-RPC envelope counted that as a switch and
+    // reported a model the session was never running — so the handle must
+    // still name the conversation's own model, not the refused one.
     //
     // The real case is switching TO a user-defined provider: the switch
     // validates the model against the target provider's listing, and a
@@ -289,7 +319,69 @@ describe("carrying the picked model onto a conversation already in progress", ()
       { model: "gpt-5.6-sol", provider: "openai-codex" },
       "soft-refused",
     );
+    expect(turn?.model).toBe("gpt-5.6-sol");
+    expect(turn?.provider).toBe("openai-codex");
+    expect(turn?.refusedModel).toBe("deepseek-v4-flash");
+  });
+
+  it("gives the turn up when a switch is refused and nothing says what the conversation runs", async () => {
+    // With no `info` there is no honest model to answer as, so this is still
+    // a failure — and the caller is told why.
+    const failures: unknown[] = [];
+    const { turn } = await connect(
+      {
+        sessionId: "20260823_185842_1eabd5",
+        model: "claude-fable-5",
+        provider: "anthropic",
+        onOpenFailure: (f: unknown) => failures.push(f),
+      },
+      null,
+      "refused",
+    );
     expect(turn).toBeNull();
+    expect(failures).toEqual([expect.objectContaining({ reason: "refused" })]);
+  });
+
+  it("does not re-assert the asked-for reasoning onto the conversation's own model after a refusal", async () => {
+    // The level was chosen for the model that was refused; the conversation's
+    // own model keeps its own rather than take one it may not support.
+    const { turn, socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "claude-fable-5", provider: "anthropic", reasoning: "high" },
+      { model: "deepseek-v4-flash", provider: "custom", reasoning_effort: "medium" },
+      "refused",
+    );
+    expect(turn?.refusedModel).toBe("claude-fable-5");
+    expect(socket.method("config.set")).toBeUndefined();
+  });
+
+  it("keeps a switch that took and only carries a note (TASK-2152)", async () => {
+    // The first-message failure after a provider switch: Hermes switched the
+    // live agent, answered `✓ Model switched` with a "not in the listing"
+    // note in `warning`, and the turn was given up on that note — to a CLI
+    // fallback that cannot resume the conversation (`permission_denied`).
+    const { turn, socket } = await connect(
+      { sessionId: "20261104_090334_5e1f0a", model: "deepseek-v4-flash", provider: "clawai" },
+      { model: "deepseek-v4-pro", provider: "custom" },
+      "noted",
+    );
+    expect(socket.method("slash.exec")).toBeDefined();
+    expect(turn).not.toBeNull();
+    expect(turn?.model).toBe("deepseek-v4-flash");
+    expect(turn?.provider).toBe("clawai");
+  });
+
+  it("does not report a warning Hermes did not announce as a switch", async () => {
+    // The deferred-confirm answer (an expensive model): a warning, no switch,
+    // and the only `session.info` names the model the session is still on.
+    // Reporting the asked-for model would claim one the session is not
+    // running; the conversation's own model is what answers.
+    const { turn } = await connect(
+      { sessionId: "20261104_090334_5e1f0a", model: "deepseek-v4-flash", provider: "clawai" },
+      { model: "deepseek-v4-pro", provider: "custom" },
+      "confirm",
+    );
+    expect(turn?.model).toBe("deepseek-v4-pro");
+    expect(turn?.refusedModel).toBe("deepseek-v4-flash");
   });
 
   it("refuses to put an unsafe id on the command line", async () => {
@@ -298,13 +390,16 @@ describe("carrying the picked model onto a conversation already in progress", ()
     // is `--global`, which writes config.yaml and changes the model for every
     // other session, for Telegram and for cron. The route charset-checks both
     // values already; this module must not rely on that.
+    const failures: unknown[] = [];
     const { turn, socket } = await connect({
       sessionId: "20260823_185842_1eabd5",
       model: "claude-fable-5 --global",
       provider: "anthropic",
+      onOpenFailure: (f: unknown) => failures.push(f),
     });
     expect(socket.method("slash.exec")).toBeUndefined();
     expect(turn).toBeNull();
+    expect(failures).toEqual([expect.objectContaining({ reason: "refused" })]);
   });
 
   it("leaves a FRESH session to the create call, which already takes the override", async () => {

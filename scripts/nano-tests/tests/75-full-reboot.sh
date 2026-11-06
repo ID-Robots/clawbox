@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# timeout: 900
+# covers: config/clawbox-gateway.service config/clawbox-setup.service config/clawbox-sudoers
+# covers: scripts/gateway-pre-start.sh scripts/gateway-restart-when-online.sh src/lib/power-approval.ts
+# covers: src/lib/boot-migrations.ts src/lib/gateway-restart-tracker.ts src/lib/gateway-start-guard.ts src/lib/gateway-unit-job.ts
+#
+# The box survives a restart of its gateway and a REAL reboot, in ONE pass, so
+# the board reboots once (this was 70-reboot-survival and 75-full-reboot).
+#
+# 1. The gateway restart. `sudo -n reboot` is not available to the clawbox
+#    user, so the gateway is restarted the way the box itself does it —
+#    restartGateway() in src/lib/openclaw-config.ts: `sudo -n systemctl
+#    reset-failed` + `restart clawbox-gateway.service`, the grants in
+#    config/clawbox-sudoers — or, where the gateway is a legacy USER unit,
+#    `systemctl --user restart`. Then:
+#      * the gateway comes back as a NEW process and /setup-api/gateway/health
+#        answers available:true within 120 s of the restart, and
+#      * the chat turn of 30-chat-turn passes again (chat_turn in lib.sh).
+# 2. The reboot: power menu "Restart", which is `sudo -n systemctl reboot`
+#    (power-approval.ts, the grant in config/clawbox-sudoers), and the box
+#    comes back ready on its own.
+#      * The board goes down and comes back with a new boot id within 6 min.
+#      * A file in /tmp is gone (it really rebooted) and a file in the clawbox
+#        home survived.
+#      * clawbox-gateway and clawbox-setup come up by themselves, enabled and
+#        active; no clawbox-* unit is left failed.
+#      * Boot-time readiness: right after boot the gateway reports its event
+#        loop degraded (`cpu`) while it warms up. That is waited out, not
+#        reported — the gateway must be started AND settled within 5 min of the
+#        board answering again (wait_gateway_settled in lib.sh). How long the
+#        box took from `reboot` to answering, to the dashboard, and to settled
+#        is noted.
+#      * Still on the same commit, the dashboard serves /login, and a real chat
+#        turn answers (chat_turn in lib.sh).
+# A restart that fails is reported and the reboot still runs: the two halves
+# are separate verdicts, as they were as two tests.
+# On a Hermes box (OpenClaw gateway masked on purpose) the gateway pass and the
+# `openclaw agent` turn do not apply: the reboot is checked with Hermes' own
+# health (/setup-api/harness/status), its dashboard units coming back by
+# themselves, and the gateway staying masked.
+# shellcheck source=scripts/nano-tests/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+
+# ---- 1. the gateway restart ----------------------------------------------------
+restart_gateway_pass() {
+  local before scope old_pid unit start deadline new_pid="" state active left
+  # Answer: "<system|user> <MainPID before>", or "none".
+  # shellcheck disable=SC2016  # expanded on the board
+  before=$(board '
+    if [ -n "$(systemctl list-unit-files clawbox-gateway.service --no-legend 2>/dev/null)" ]; then
+      echo "system $(systemctl show clawbox-gateway.service -p MainPID --value)"
+    elif [ -n "$(systemctl --user list-unit-files openclaw-gateway.service --no-legend 2>/dev/null)" ]; then
+      echo "user $(systemctl --user show openclaw-gateway.service -p MainPID --value)"
+    else
+      echo "none"
+    fi
+  ')
+  read -r scope old_pid <<<"$before"
+  case "${scope:-}" in
+    system) unit=clawbox-gateway.service ;;
+    user) unit=openclaw-gateway.service ;;
+    *) not_ok "no gateway unit on this board (answer: '${before:-nothing}')"; return 1 ;;
+  esac
+  note "gateway: $scope unit $unit, MainPID $old_pid"
+
+  start=$(date +%s)
+  # shellcheck disable=SC2016  # expanded on the board
+  if board '
+    if [ "$1" = system ]; then
+      sudo -n /usr/bin/systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
+      sudo -n /usr/bin/systemctl restart clawbox-gateway.service
+    else
+      systemctl --user restart openclaw-gateway.service
+    fi
+  ' "$scope"; then
+    ok "restarted $unit"
+  else
+    not_ok "could not restart $unit"
+    return 1
+  fi
+
+  # Back within 120 s of the restart: a new MainPID, active, and healthy.
+  deadline=$((start + 120))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    # shellcheck disable=SC2016  # expanded on the board
+    state=$(board '
+      if [ "$1" = system ]; then c=(systemctl); else c=(systemctl --user); fi
+      echo "$("${c[@]}" is-active "$2") $("${c[@]}" show "$2" -p MainPID --value)"
+    ' "$scope" "$unit")
+    read -r active new_pid <<<"$state"
+    if [ "$active" = active ] && [ -n "$new_pid" ] && [ "$new_pid" != 0 ] && [ "$new_pid" != "$old_pid" ]; then
+      break
+    fi
+    new_pid=""
+    sleep 3
+  done
+  if [ -z "$new_pid" ]; then
+    not_ok "$unit was not active as a new process within 120 s (last: ${state:-no answer})"
+    return 1
+  fi
+  left=$((deadline - $(date +%s)))
+  [ "$left" -gt 0 ] || left=1
+  if wait_gateway_health "$left"; then
+    ok "gateway back as PID $new_pid and healthy $(( $(date +%s) - start ))s after the restart"
+  else
+    not_ok "/setup-api/gateway/health not available within 120 s of the restart: $(api_error)"
+    return 1
+  fi
+
+  chat_turn
+}
+
+RUNTIME=$(board_runtime)
+note "agent runtime: $RUNTIME"
+if [ "$RUNTIME" = hermes ]; then
+  # The OpenClaw gateway is masked on a Hermes box: there is nothing to restart
+  # and no `openclaw agent` turn. The reboot below checks Hermes instead.
+  note "the gateway restart pass is OpenClaw's; this box runs the Hermes agent runtime"
+else
+  restart_gateway_pass || note "the gateway restart pass did not hold (above); the reboot runs anyway"
+fi
+
+# ---- 2. the reboot -------------------------------------------------------------
+MARK="nano-ci-reboot-$NANO_RUN_ID"
+# shellcheck disable=SC2016  # expanded on the board
+BEFORE=$(board '
+  echo kept > "$HOME/.$1" && echo gone > "/tmp/$1"
+  echo "$(cat /proc/sys/kernel/random/boot_id) $(git -C "$REPO" rev-parse HEAD)"
+' "$MARK" | tail -n 1)
+read -r BOOT0 HEAD0 <<<"$BEFORE"
+if [ -z "${HEAD0:-}" ]; then
+  not_ok "could not read the board's boot id and commit before the reboot"
+  finish
+fi
+
+START=$(date +%s)
+# Detached, so the ssh session returns before the box tears it down.
+# shellcheck disable=SC2016  # expanded on the board
+if board 'nohup bash -c "sleep 2; sudo -n /usr/bin/systemctl reboot" >/dev/null 2>&1 & echo dispatched' | grep -q dispatched; then
+  ok "reboot dispatched (sudo -n systemctl reboot)"
+else
+  not_ok "could not dispatch the reboot"
+  finish
+fi
+
+# Wait for it to go away, then to come back with another boot id. Asked every
+# 5 s: the answer is the reboot-to-ssh time noted below, and the boot itself
+# takes a minute or more.
+BOOT1=""
+while [ $(( $(date +%s) - START )) -lt 360 ]; do
+  sleep 5
+  BOOT1=$(board 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null | tail -n 1 | tr -d '[:space:]')
+  [ -n "$BOOT1" ] && [ "$BOOT1" != "$BOOT0" ] && break
+  BOOT1=""
+done
+if [ -z "$BOOT1" ]; then
+  not_ok "the board did not come back with a new boot id within 6 min"
+  finish
+fi
+UP=$(( $(date +%s) - START ))
+ok "board back after a real reboot (${UP}s to answer ssh)"
+UPTIME=$(board 'cut -d. -f1 /proc/uptime' | tail -n 1)
+note "board uptime when first reached: ${UPTIME:-?}s"
+
+if [ "$RUNTIME" = hermes ]; then
+  HEALTHY=
+  while [ $(( $(date +%s) - START )) -lt $(( UP + 300 )) ]; do
+    board_api GET /setup-api/harness/status
+    HEALTHY=$(api_json -r '[.harnesses[]? | select(.id == "hermes") | .healthy] | first // empty')
+    [ "$HEALTHY" = true ] && break
+    sleep 5
+  done
+  if [ "$HEALTHY" = true ]; then
+    ok "Hermes healthy $(( $(date +%s) - START ))s after reboot (/setup-api/harness/status)"
+  else
+    not_ok "Hermes not healthy 300 s after boot: $(printf '%s' "$API_BODY" | head -c 200)"
+  fi
+else
+# First probe as early as the box answers: this is where `degraded: cpu` shows.
+gateway_probe /readyz
+note "first /readyz after boot: HTTP $PROBE_STATUS $(printf '%s' "$PROBE_BODY" | jq -c '{ready, degraded: .eventLoop.degraded, reasons: .eventLoop.reasons, uptimeMs}' 2>/dev/null)"
+
+if wait_gateway_settled 300; then
+  ok "gateway started and settled ${SETTLE_WAITED}s after the board answered ($(( $(date +%s) - START ))s after reboot)"
+  [ -z "$SETTLE_SEEN" ] || note "boot-time states waited out: $SETTLE_SEEN"
+else
+  not_ok "gateway not settled 300 s after boot: ${SETTLE_STATE:-unknown} (seen: ${SETTLE_SEEN:-nothing})"
+fi
+fi
+
+# shellcheck disable=SC2016  # expanded on the board
+AFTER=$(board '
+  units="clawbox-gateway.service clawbox-setup.service"
+  [ "$2" = hermes ] && units="clawbox-setup.service clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service"
+  [ "$2" = hermes ] && echo "masked clawbox-gateway.service $(systemctl is-active clawbox-gateway.service 2>/dev/null)"
+  for u in $units; do
+    for _ in $(seq 1 24); do [ "$(systemctl is-active "$u")" = active ] && break; sleep 5; done
+    echo "unit $u $(systemctl is-enabled "$u" 2>/dev/null) $(systemctl is-active "$u")"
+  done
+  echo "failed $(systemctl list-units --state=failed --no-legend --plain "clawbox*" 2>/dev/null | awk "{print \$1}" | tr "\n" " ")"
+  echo "files $([ -f "$HOME/.$1" ] && echo kept || echo lost) $([ -f "/tmp/$1" ] && echo stayed || echo gone)"
+  rm -f "$HOME/.$1" "/tmp/$1"
+  echo "head $(git -C "$REPO" rev-parse HEAD)"
+  echo "login $(curl -sS -o /dev/null -w "%{http_code}" --max-time 30 "$DASHBOARD/login")"
+' "$MARK" "$RUNTIME")
+while read -r kind a b c; do
+  case "$kind" in
+    masked)
+      if [ "$b" = active ]; then not_ok "$a is running after reboot on a Hermes box (it should stay masked)"; else ok "$a stays $b after reboot on a Hermes box"; fi ;;
+    unit)
+      if [ "$b" = enabled ] && [ "$c" = active ]; then ok "$a came back by itself"; else not_ok "$a after reboot: $b, $c"; fi ;;
+    failed)
+      if [ -z "$a" ]; then ok "no clawbox unit failed during boot"; else not_ok "failed after boot: $a $b $c"; fi ;;
+    files)
+      if [ "$a" = kept ]; then ok "files in the clawbox home survive a reboot"; else not_ok "a file in the clawbox home was lost across the reboot"; fi
+      if [ "$b" = gone ]; then ok "/tmp was cleared: a real reboot"; else not_ok "/tmp kept its file: the board did not really reboot"; fi ;;
+    head)
+      if [ "$a" = "$HEAD0" ]; then ok "same commit after reboot"; else not_ok "commit changed across the reboot: ${HEAD0:0:12} -> ${a:0:12}"; fi ;;
+    login)
+      if [ "$a" = 200 ]; then ok "dashboard serves /login after reboot"; else not_ok "dashboard answered /login with ${a:-nothing} after reboot"; fi ;;
+  esac
+done <<<"$AFTER"
+
+if [ "$RUNTIME" = hermes ]; then
+  note "no openclaw agent turn on a Hermes box; Hermes health after the reboot is checked above"
+else
+  chat_turn
+  note "reboot to chat answer: $(( $(date +%s) - START ))s"
+fi
+finish

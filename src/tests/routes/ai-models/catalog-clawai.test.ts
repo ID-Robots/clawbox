@@ -38,4 +38,13 @@ describe("ClawBox AI static catalog", () => {
       expect(model.input).toBe("text");
     }
   });
+
+  // The proxy answers deepseek-v4-pro with the same V4 Flash model as
+  // deepseek-v4-flash. The Max row is a plan gate, not a bigger model.
+  it("claims no bigger model than the V4 Flash that serves both tiers", () => {
+    for (const model of CLAWAI_STATIC_MODELS) {
+      expect(`${model.label} ${model.hint ?? ""}`, model.id).not.toMatch(/V4[ -]?Pro|1[.,]6\s?T|frontier/i);
+    }
+    expect(CLAWAI_STATIC_MODELS.find((m) => m.id === "deepseek-v4-pro")?.hint).toContain("DeepSeek V4 Flash");
+  });
 });

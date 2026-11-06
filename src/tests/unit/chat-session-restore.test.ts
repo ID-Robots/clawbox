@@ -39,6 +39,19 @@ describe("isRetryableRestoreRefusal", () => {
     }))).toBe(true);
   });
 
+  it("waits out an agent still finishing its startup inspection, whatever its retryable flag says", () => {
+    // Right after a restart the history read can land before the agent is
+    // ready. That is the restore's "Restoring this conversation…", not its
+    // failure panel — and not the core's `openclaw doctor --fix` advice.
+    const notReady = "Agent main has not completed startup inspection and preparation. If this persists, run `openclaw doctor --fix`.";
+    expect(isRetryableRestoreRefusal(wrapped(gatewayFrameError({ message: notReady })))).toBe(true);
+    expect(isRetryableRestoreRefusal(wrapped(gatewayFrameError({ code: "INVALID_REQUEST", retryable: false, message: notReady })))).toBe(true);
+    expect(isRetryableRestoreRefusal(gatewayFrameError({
+      code: "UNAVAILABLE", message: "agent unavailable", details: { code: "agent-database-inspection-pending" },
+    }))).toBe(true);
+    expect(classifyRestoreFailure(wrapped(gatewayFrameError({ code: "INVALID_REQUEST", retryable: false, message: notReady })))).toBe("busy");
+  });
+
   it("does not retry what waiting will not change", () => {
     // UNAVAILABLE with retryable:false is the gateway's word for "never" (a
     // build mismatch answers that way) — retrying it is a loop.

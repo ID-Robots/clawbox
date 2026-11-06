@@ -1,0 +1,125 @@
+[
+  {
+    "agentId": "main",
+    "status": {
+      "backend": "builtin",
+      "files": 1,
+      "chunks": 11,
+      "dirty": true,
+      "workspaceDir": "/home/clawbox/.openclaw/workspace",
+      "dbPath": "/home/clawbox/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+      "storage": {
+        "databaseBytes": 806912,
+        "walBytes": 0,
+        "reusableBytes": 0,
+        "embeddingCacheBytes": 0,
+        "embeddingCacheEntries": 0
+      },
+      "provider": "openai-compatible",
+      "model": "text-embedding-3-small",
+      "requestedProvider": "openai-compatible",
+      "sources": [
+        "memory"
+      ],
+      "extraPaths": [],
+      "sourceCounts": [
+        {
+          "source": "memory",
+          "files": 1,
+          "chunks": 11,
+          "chunkBytes": 1127,
+          "dirty": true,
+          "eligible": 4,
+          "issues": []
+        }
+      ],
+      "cache": {
+        "enabled": true,
+        "entries": 0,
+        "maxEntries": 50000
+      },
+      "fts": {
+        "enabled": true,
+        "available": true
+      },
+      "vector": {
+        "enabled": true,
+        "index": {
+          "state": "empty"
+        },
+        "storeAvailable": true,
+        "semanticAvailable": true,
+        "available": true,
+        "extensionPath": "/home/clawbox/.npm-global/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0.so"
+      },
+      "batch": {
+        "enabled": false,
+        "failures": 0,
+        "limit": 2,
+        "wait": true,
+        "concurrency": 2,
+        "pollIntervalMs": 2000,
+        "timeoutMs": 3600000
+      },
+      "custom": {
+        "searchMode": "hybrid",
+        "providerState": {
+          "mode": "active",
+          "providerId": "openai-compatible"
+        },
+        "indexIdentity": {
+          "status": "mismatched",
+          "reason": "index was built for model fts-only, expected text-embedding-3-small",
+          "code": "model",
+          "owner": "configuration"
+        },
+        "automaticRebuildNotice": {
+          "sequence": 0,
+          "warning": ""
+        }
+      }
+    },
+    "embeddingProbe": {
+      "ok": true
+    },
+    "scan": {
+      "sources": [
+        {
+          "source": "memory",
+          "totalFiles": 4,
+          "issues": []
+        }
+      ],
+      "totalFiles": 4,
+      "issues": []
+    },
+    "audit": {
+      "storePath": "plugin-state:memory-core/short-term-recall/c85dd886df3f3ef21b922a8e680fab4877ebadd08b8f27eb8953a9e060107cb6",
+      "lockPath": "plugin-state:memory-core/short-term-locks/c85dd886df3f3ef21b922a8e680fab4877ebadd08b8f27eb8953a9e060107cb6",
+      "updatedAt": "2026-10-23T03:00:03.461Z",
+      "exists": true,
+      "entryCount": 2,
+      "promotedCount": 0,
+      "spacedEntryCount": 0,
+      "conceptTaggedEntryCount": 2,
+      "conceptTagScripts": {
+        "latinEntryCount": 2,
+        "cjkEntryCount": 0,
+        "mixedEntryCount": 0,
+        "otherEntryCount": 0
+      },
+      "invalidEntryCount": 0,
+      "danglingEntryCount": 0,
+      "issues": []
+    },
+    "dreamingAudit": {
+      "sessionCorpusDir": "/home/clawbox/.openclaw/workspace/memory/.dreams/session-corpus",
+      "sessionCorpusFileCount": 1,
+      "suspiciousSessionCorpusFileCount": 0,
+      "suspiciousSessionCorpusLineCount": 0,
+      "sessionIngestionPath": "/home/clawbox/.openclaw/workspace/memory/.dreams/session-ingestion.json",
+      "sessionIngestionExists": true,
+      "issues": []
+    }
+  }
+]

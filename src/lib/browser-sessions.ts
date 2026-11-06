@@ -44,6 +44,17 @@ export interface BrowserSession<P extends SessionPage = SessionPage> {
   lastActivity: number;
   /** The coding run that opened this page, or null for the owner/assistant. */
   runId: string | null;
+  /**
+   * The `codingRunId` the launch itself carried, or null when it carried none.
+   *
+   * Not the same as `runId`: a launch without one while a run is live is
+   * TAGGED with that run (activeRunId), so its pages close when the run
+   * settles — but it was opened by the assistant, the owner or the desktop,
+   * not by the run's own tools. A request that names a run may only drive a
+   * page launched under that name; anything else would let a run capture, and
+   * report as its own work, a tab it never opened.
+   */
+  codingRunId: string | null;
   /** The browser this page is actually in — see BrowserKind. */
   browser: BrowserKind;
 }
@@ -62,14 +73,21 @@ export const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // `browser` is required, with no default: the one answer worth refusing to
 // guess at is this one. A caller that forgot would claim the owner's screen
 // for a page nobody can see, which is the lie this field exists to prevent.
+// `codingRunId` may default: null fails closed — no run's request can use it.
 export function openSession<P extends SessionPage>(
   page: P,
   runId: string | null,
   browser: BrowserKind,
+  codingRunId: string | null = null,
 ): string {
   const id = `browser-${++sessionCounter}`;
-  sessions.set(id, { page, lastActivity: Date.now(), runId, browser });
+  sessions.set(id, { page, lastActivity: Date.now(), runId, codingRunId, browser });
   return id;
+}
+
+/** Forget a session WITHOUT closing its page — for a page that is already gone. */
+export function dropSession(id: string): void {
+  sessions.delete(id);
 }
 
 /** The live session for an id, or null. Does NOT stamp the activity clock. */

@@ -316,6 +316,8 @@ describe("BrowserApp", () => {
     }
     // The title bar repeated the window's own title; it is gone.
     expect(queryByText("Browser Integration")).toBeNull();
+    // Its mark is the app's own desktop icon, not a Chrome-style roundel.
+    expect(header.contains(getByTestId("agent-browser-icon"))).toBe(true);
     // The paste button no longer floats over the screen.
     expect(document.querySelectorAll('[title="vnc.pasteToRemote"]')).toHaveLength(1);
   });
@@ -375,5 +377,119 @@ describe("BrowserApp", () => {
     fireEvent.click(await findByTestId("browser-open"));
     // The stable code, said in the owner's language — not the route's English.
     expect((await findAllByText("Only the snap build is installed.")).length).toBeGreaterThan(0);
+  });
+
+  /**
+   * TASK-1480: the owner's own signed-in browser, on a profile and port they
+   * configured, opened by them rather than by ClawBox. It is Running — and it
+   * is not ClawBox's to close, so the header offers Open (which brings it
+   * forward) where Close would have been.
+   */
+  describe("the owner's own browser", () => {
+    const OWNER_STATUS = {
+      ...READY_STATUS,
+      cdpPort: 9222,
+      profileDir: "/home/clawbox/.config/google-chrome-debug",
+      ownProfile: false,
+      browser: { running: true, pid: 4242, cdpReady: true, external: true },
+    };
+
+    it("is Running, offers Open rather than Close, and is never auto-launched over", async () => {
+      const fetchMock = stubDevice(OWNER_STATUS);
+      const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-state")).toHaveTextContent("Running · PID 4242");
+      expect(await findByTestId("browser-open")).toBeEnabled();
+      expect(queryByTestId("browser-close")).toBeNull();
+      expect(postedActions(fetchMock)).toEqual([]);
+
+      fireEvent.click(await findByTestId("browser-open"));
+      await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
+    });
+
+    it("says it is running without remote debugging rather than 'Starting' for ever", async () => {
+      stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: false, external: true, noRemoteDebugging: true } });
+      const { findByTestId, queryByText } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-state")).toHaveTextContent("browser.runningNoDebugging");
+      expect(queryByText("Starting Chromium…")).toBeNull();
+    });
+
+    it("offers Open, never Close, for the box's one browser shared with the assistant", async () => {
+      const fetchMock = stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: true, shared: true } });
+      const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-open")).toBeEnabled();
+      expect(queryByTestId("browser-close")).toBeNull();
+      expect(postedActions(fetchMock)).toEqual([]);
+    });
+
+    it("still offers Close for the owner's browser when ClawBox started it", async () => {
+      stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: true } });
+      const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-close")).toBeInTheDocument();
+      expect(queryByTestId("browser-open")).toBeNull();
+    });
+  });
+});
+
+describe("BrowserApp setup on a box that has never been asked", () => {
+  beforeEach(() => {
+    resetHarnessCache();
+    resetBrowserAutoLaunch();
+  });
+
+  /**
+   * The device as the manage route really answers it: with no stored flag,
+   * setup counts as finished once the browser works (Chromium there AND the
+   * link on — getBrowserSetupComplete). Step 2 is what turns the link on, so a
+   * wizard that never stored "not finished" flipped to the home face on the
+   * very next status read and step 3 was never shown.
+   */
+  function stubFreshDevice() {
+    let flag: boolean | null = null;
+    let enabled = false;
+    const status = () => ({
+      chromium: { installed: true, path: "/opt/cft/chrome", version: "Google Chrome for Testing 153", serviceSafe: true },
+      browser: { running: false, pid: null, cdpReady: false },
+      enabled,
+      cdpPort: 18800,
+      setupComplete: flag ?? enabled,
+      autoOpen: true,
+      startUrl: "about:blank",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+      if (url.includes("/setup-api/harness/active")) return json({ active: "openclaw", edition: "openclaw" });
+      if (url.includes("/setup-api/browser/manage")) {
+        if (init?.method === "POST" && body?.action === "enable") enabled = true;
+        return json(init?.method === "POST" ? { ok: true } : status());
+      }
+      if (url.includes("/setup-api/browser/setup")) {
+        if (typeof body?.setupComplete === "boolean") flag = body.setupComplete;
+        return json({ setupComplete: flag ?? false, autoOpen: true, startUrl: "about:blank" });
+      }
+      if (url.includes("/setup-api/vnc")) return json({ available: true, wsPort: 6080 });
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("shows step 3 after step 2 turns the link on", async () => {
+    stubFreshDevice();
+    const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+    fireEvent.click(await findByTestId("browser-wizard-start"));
+    fireEvent.click(await findByTestId("browser-wizard-next"));
+    fireEvent.click(await findByTestId("browser-wizard-link"));
+    // The link is on (the device now "works"), and the window is still the wizard.
+    await findByTestId("browser-wizard-link-done");
+    fireEvent.click(await findByTestId("browser-wizard-next-open"));
+
+    expect(await findByTestId("browser-wizard-open")).toBeInTheDocument();
+    expect(queryByTestId("browser-state")).toBeNull();
   });
 });

@@ -19,6 +19,10 @@
  *
  * A plain object with no imports, because a client component, the middleware
  * and a route handler all read it.
+ *
+ * With no session the answer is the box default (the owner's language); with
+ * a ClawBox user's session the same request answers that user's own pick
+ * (src/lib/user-language.ts), so every signed-in person renders in theirs.
  */
 const PATHNAME = "/setup-api/preferences";
 

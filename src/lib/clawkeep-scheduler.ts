@@ -24,10 +24,12 @@
 
 import {
   backupExitError,
+  backupRefusalFor,
   computeNextRunMs,
   readScheduleSnapshot,
   releaseQuotaHoldIfCredentialsWork,
   runBackup,
+  type BackupResult,
   type ClawKeepSchedule,
 } from "@/lib/clawkeep";
 
@@ -148,6 +150,32 @@ async function probeQuotaHold(): Promise<void> {
   if (check.outcome === "held" && lastGood) armHoldProbe(lastGood, lastGoodHold, QUOTA_HOLD_PROBE_MS);
 }
 
+/**
+ * Say in the log why a scheduled run did not back the box up — the same
+ * classification the route answers with (TASK-672), so an operator reading
+ * this log and an owner reading the panel are told the same thing about the
+ * same run, sizes included when the daemon refused the upload. Never throws.
+ */
+async function reportFailedRun(result: BackupResult, startedAtMs: number): Promise<void> {
+  const refusal = await backupRefusalFor(result.exitCode, startedAtMs).catch(() => null);
+  // Non-null by construction: the only exit code it answers `null` for is 0.
+  const classified = backupExitError(result.exitCode, refusal)!;
+  if (classified.code === "already_running") {
+    // Not a failure and not worth the daemon's tail: the backup this slot
+    // wanted is the one already running.
+    console.warn(
+      "[clawkeep-scheduler] auto-backup skipped this slot: another backup was already running",
+    );
+    return;
+  }
+  const tail = result.stderr.trim().slice(-500);
+  console.warn(
+    "[clawkeep-scheduler] auto-backup failed:",
+    `clawkeepd exited ${result.exitCode} (${classified.code}: ${classified.message})`
+      + (tail ? ` — ${tail}` : ""),
+  );
+}
+
 function fireBackup(): void {
   // The slot is being consumed now, so stop claiming it is still ahead:
   // without this, `armedFor` names a time in the past for as long as the
@@ -155,21 +183,19 @@ function fireBackup(): void {
   // "next run" — reports it. Same reason `clawkeep-memory-scheduler.ts`
   // clears at the top of its own `fire()`.
   clear();
-  // NOT gated on a run already being in flight, and the reason given here
-  // used to be false: "the daemon will serialise via its own heartbeat lock".
-  // There is no such lock — no pidfile, no flock, nothing in `daemon.py`,
-  // `runner.py` or `state.py` — so two `clawkeepd` processes will happily
-  // stage two multi-GB archives and upload both. It has been survivable
-  // because the window is small; raising the run cap to four hours for
-  // TASK-675's 12 GB archives widens it, since a manual backup started late
-  // in the evening can still be running when the nightly slot fires. Closing
-  // it properly is the daemon's own single-instance guard rather than a
-  // check here, which could only ever narrow the race.
+  // NOT gated here on a run already being in flight: a check in this process
+  // could only narrow the race with a "Back up now" in another worker. The
+  // daemon closes it itself — `runner.run_once` holds a `flock` on
+  // `backup-run.lock` in the data dir for the whole run — so when a manual
+  // backup started late in the evening is still uploading as the nightly slot
+  // fires, this run exits 14 (`already_running`) having touched nothing, and
+  // the one in flight is the night's backup.
   //
   // A scheduled run must create + upload a REAL backup — `idle: true` only
   // sends a heartbeat ping (and short-circuits within the heartbeat interval),
   // so it would silently never back anything up. The manual "Backup now" path
   // uses idle:false; the scheduler must too.
+  const startedAtMs = Date.now();
   void runBackup({ idle: false })
     .then((result) => {
       // `runBackup` rejects only for an unpaired box; every other failure —
@@ -180,19 +206,10 @@ function fireBackup(): void {
       // were a nightly no-op. For the missing-daemon case this is the ONLY
       // thing that can report it at all: the Settings card's backup button is
       // disabled on `!daemonInstalled`, so nobody can even try by hand.
-      if (result.exitCode !== 0) {
-        const tail = result.stderr.trim().slice(-500);
-        // Same classification the route answers with (TASK-672), so an
-        // operator reading this log and an owner reading the panel are told the
-        // same thing about the same run. Non-null by construction here — the
-        // only exit code it answers `null` for is 0.
-        const classified = backupExitError(result.exitCode)!;
-        console.warn(
-          "[clawkeep-scheduler] auto-backup failed:",
-          `clawkeepd exited ${result.exitCode} (${classified.code}: ${classified.message})`
-            + (tail ? ` — ${tail}` : ""),
-        );
-      }
+      //
+      // Not awaited: saying why a run failed reads state.json, and the next
+      // slot must not wait on a file read to be armed.
+      if (result.exitCode !== 0) void reportFailedRun(result, startedAtMs);
     })
     .catch((err) => {
       console.warn("[clawkeep-scheduler] auto-backup failed:", err instanceof Error ? err.message : err);

@@ -244,6 +244,13 @@ describe("a streamed chat turn", () => {
     });
   });
 
+  it("records the session the answer ran on, so a reloaded page can resume it", async () => {
+    openTurnMock.mockResolvedValue(fakeTurn({ sessionId: "20260823_185842_1eabd5", deltas: ["ok"] }).handle);
+    await readEvents(await POST(post({ message: "remember 42" })));
+    const assistant = appendMock.mock.calls.map((c) => c[0]).find((r) => r.role === "assistant");
+    expect(assistant).toMatchObject({ text: "ok", sessionId: "20260823_185842_1eabd5" });
+  });
+
   it("reports a failed turn inside the stream, since the status code is spent", async () => {
     openTurnMock.mockResolvedValue(
       fakeTurn({ deltas: ["…"], status: "error", error: "the provider is rate limiting" }).handle,
@@ -253,6 +260,36 @@ describe("a streamed chat turn", () => {
     expect(events[events.length - 1][1]).toEqual({ error: "the provider is rate limiting" });
     // And the failure is in the transcript, so a refresh shows the box tried.
     expect(appendMock.mock.calls.map((c) => c[0]).some((r) => r.variant === "error")).toBe(true);
+  });
+
+  it("records a stopped turn: what was streamed, then a stopped marker", async () => {
+    // 2026-10-13 smoke test: after a Stop the transcript held only the
+    // question, so a reload showed a reply that looked lost.
+    const made = fakeTurn({ deltas: [] });
+    made.handle.run = async (onDelta: (chunk: string) => void) => {
+      onDelta("Once upon ");
+      onDelta("a time");
+      throw new DOMException("aborted", "AbortError");
+    };
+    openTurnMock.mockResolvedValue(made.handle);
+    const events = await readEvents(await POST(post({ message: "Tell me a story" })));
+    // Not a failure: no `error` frame, and no error record.
+    expect(events.some(([name]) => name === "error")).toBe(false);
+    const records = appendMock.mock.calls.map((c) => c[0]);
+    expect(records.some((r) => r.variant === "error")).toBe(false);
+    const tail = records.slice(-2);
+    expect(tail[0]).toMatchObject({ role: "assistant", text: "Once upon a time" });
+    expect(tail[1]).toMatchObject({ role: "system", variant: "stopped" });
+    expect(made.closed.value).toBe(true);
+  });
+
+  it("records only the marker when the turn was stopped before any answer", async () => {
+    const made = fakeTurn({ fail: new DOMException("aborted", "AbortError") as unknown as Error });
+    openTurnMock.mockResolvedValue(made.handle);
+    await readEvents(await POST(post({ message: "Tell me a story" })));
+    const records = appendMock.mock.calls.map((c) => c[0]);
+    expect(records.filter((r) => r.role === "assistant")).toEqual([]);
+    expect(records[records.length - 1]).toMatchObject({ role: "system", variant: "stopped" });
   });
 
   it("closes the turn even when it threw", async () => {
@@ -289,6 +326,9 @@ describe("when the box cannot stream", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     expect(await res.json()).toMatchObject({ text: "spawned instead", harness: "hermes" });
     expect(spawnMock).toHaveBeenCalled();
+    // The spawned turn records its session beside the answer too.
+    const assistant = appendMock.mock.calls.map((c) => c[0]).find((r) => r.role === "assistant");
+    expect(assistant).toMatchObject({ sessionId: "20260823_190508_ce85d3" });
   });
 
   it("does not even try to stream a turn carrying a picture", async () => {
@@ -310,20 +350,17 @@ describe("when the box cannot stream", () => {
     expect(spawnMock).toHaveBeenCalled();
   });
 
-  it("does not stream to a caller that did not ask to be streamed to", async () => {
+  it("does not stream to a caller that did not ask, but still takes the turn through the dashboard", async () => {
+    // `Accept` decides only how the answer comes back (TASK-2152). Gating the
+    // dashboard on it sent every text turn of a page whose probe had said "no"
+    // to the CLI, which cannot continue a conversation the dashboard started.
     openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["ok"] }).handle);
-    readTurnMock.mockResolvedValue({ text: "blocking" });
-    spawnMock.mockImplementation(() => ({
-      stdout: { on: (e: string, cb: (c: Buffer) => void) => e === "data" && cb(Buffer.from("blocking")) },
-      stderr: { on: () => {} },
-      on: (e: string, cb: (code: number) => void) => {
-        if (e === "close") setTimeout(() => cb(0), 0);
-      },
-      kill: () => {},
-    }));
+    readTurnMock.mockResolvedValue(null);
     const res = await POST(post({ message: "Hey" }, "application/json"));
-    expect(openTurnMock).not.toHaveBeenCalled();
+    expect(openTurnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).not.toHaveBeenCalled();
     expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toMatchObject({ text: "ok", harness: "hermes" });
   });
 });
 

@@ -1,0 +1,592 @@
+/**
+ * The nightly pass end to end over a REAL git vault: the dream branch in its
+ * own worktree, the nightly ingest with the model replaced, the lint hold, the
+ * contradiction pass, the gate, the merge and the owner's merge of a held
+ * night. Offline and "no vault yet" never throw. Fixtures are synthetic.
+ */
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHashEmbedder, fullComparisonDone, readComparedThrough, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
+import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
+import { git, headCommit } from "@/lib/prime-radiant/git";
+import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
+import { readGoldenItems } from "@/lib/prime-radiant/golden";
+import { getIngestJob } from "@/lib/prime-radiant/ingest";
+import { sourceLabel } from "@/lib/prime-radiant/ingest-sources";
+import { goldenStatus } from "@/lib/prime-radiant/golden-score";
+import { addGoldenQuestion } from "@/lib/prime-radiant/golden-store";
+import { readJudgeItems } from "@/lib/prime-radiant/judge";
+import {
+  dreamBranchName,
+  HeldNightError,
+  listNightlyRuns,
+  localDate,
+  mergeHeldNight,
+  NightlyBusyError,
+  runNightly,
+  safeDreamBranch,
+  startNightly,
+  worktreePath,
+  type NightlySummary,
+} from "@/lib/prime-radiant/nightly";
+import { stateDbPath, vaultDir } from "@/lib/prime-radiant/paths";
+import { setVaultReindexHook } from "@/lib/prime-radiant/reindex-hook";
+import { resolveReviewItem } from "@/lib/prime-radiant/review";
+import { listReviewItems } from "@/lib/prime-radiant/review-store";
+import { defaultSettings, type PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
+import { withStateDb } from "@/lib/prime-radiant/state-db";
+import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
+import { verifyClaim } from "@/lib/prime-radiant/verify";
+import { readWriterItems } from "@/lib/prime-radiant/writer";
+import { claim, pageText } from "../helpers/prime-radiant-fixtures";
+
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
+
+const base = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-nightly-"));
+const prev = { dir: process.env.PRIME_RADIANT_DIR, files: process.env.FILES_ROOT };
+let n = 0;
+let filesRoot = "";
+const NOW = new Date(2026, 4, 20, 3, 0);
+
+/** The writer: one card per document; the judge: prices of the same widget that differ contradict. */
+const client: FlashClient = {
+  model: "deepseek-v4-flash",
+  async complete(request) {
+    const pairs = readJudgeItems(request.user);
+    if (pairs) {
+      const text = JSON.stringify(pairs.map((p) => ({ i: p.i, verdict: /widget costs/.test(p.a) && /widget costs/.test(p.b) ? "contradiction" : "compatible", why: "prices differ" })));
+      return { text, model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 20, cacheHitTokens: 0 } };
+    }
+    const items = readWriterItems(request.user) ?? [];
+    const cards = items.map((it) => ({
+      i: it.i,
+      useful: true,
+      type: "concept",
+      title: `Acme ${path.basename(it.path).replace(/\.\w+$/, "")}`,
+      domain: "acme-sales",
+      summary: "A synthetic Acme document.",
+      facts: [{ fact: it.text.trim().slice(0, 200), confidence: 0.7 }],
+      sensitivity: "internal",
+      confidence: 0.7,
+    }));
+    return { text: JSON.stringify(cards), model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 50, cacheHitTokens: 0 } };
+  },
+};
+
+function settings(extra: Partial<PrimeRadiantSettings> = {}): PrimeRadiantSettings {
+  const s = defaultSettings();
+  return { ...s, ...extra, ingest: { ...s.ingest, folders: [path.join(filesRoot, "Documents")], ...(extra.ingest ?? {}) } };
+}
+
+const deps = (extra: Record<string, unknown> = {}) => ({
+  client,
+  embedder: createHashEmbedder(),
+  online: async () => true,
+  now: () => NOW,
+  settings: settings(),
+  ...extra,
+});
+
+beforeEach(() => {
+  const caseDir = path.join(base, `case-${++n}`);
+  filesRoot = path.join(caseDir, "home");
+  fs.mkdirSync(path.join(filesRoot, "Documents"), { recursive: true });
+  fs.writeFileSync(path.join(filesRoot, "Documents", "pricing.md"), "The blue widget costs 10 EUR per unit.");
+  fs.writeFileSync(path.join(filesRoot, "Documents", "catalogue.txt"), "The blue widget costs 12 EUR per unit.");
+  process.env.FILES_ROOT = filesRoot;
+  process.env.PRIME_RADIANT_DIR = path.join(caseDir, "prime-radiant");
+});
+
+afterEach(() => setVaultReindexHook(null));
+
+afterAll(() => {
+  for (const [key, value] of [["PRIME_RADIANT_DIR", prev.dir], ["FILES_ROOT", prev.files]] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+async function branches(): Promise<string[]> {
+  return (await git(vaultDir(), ["branch", "--format=%(refname:short)"])).stdout.split("\n").filter(Boolean).sort();
+}
+
+describe("nightly pass", () => {
+  it("does nothing, creates nothing and never throws before the vault exists", async () => {
+    expect(await runNightly("schedule", deps())).toBeNull();
+    expect(fs.existsSync(stateDbPath())).toBe(false);
+    expect(listNightlyRuns()).toEqual([]);
+  });
+
+  it("builds the structure layer on the branch, offline too, and merges it; a second night has nothing left to do", async () => {
+    await ensureVault();
+    await vaultOperation("seed: invoices", async (tx) => {
+      for (let d = 1; d <= 3; d++) {
+        const title = `Invoice INV-2026-00000${d} Globex Ltd`;
+        await tx.write(
+          `concepts/invoice-inv-2026-00000${d}.md`,
+          pageText({ type: "reference", title, domain: "acme-sales", claims: [claim(`acme-sales/invoice-inv-2026-00000${d}/total`, `The invoice total is EUR ${d}00.00, dated 2026-04-0${d}.`)] }, `${title}.\n`),
+        );
+      }
+    });
+    const withStructure = settings({ domains: [{ name: "acme-sales", owner: "Sales team" }], structure: { ...defaultSettings().structure, company: "Acme Widgets Ltd" } });
+    const run = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(run?.status).toBe("merged");
+    expect((run!.summary as unknown as NightlySummary).structure).toMatchObject({ recordHubs: 1, domainHubs: 1, root: true, leavesInHubs: 3, model: { skipped: "offline" } });
+    const snap = await readVaultSnapshot(vaultDir());
+    const hub = snap.pages.find((p) => p.path === "syntheses/invoices-2026-04.md");
+    expect(hub?.parsed.ok && hub.parsed.frontmatter.structure).toMatchObject({ kind: "record-hub", type: "invoice", month: "2026-04", leaves: 3 });
+    expect(snap.pages.map((p) => p.path)).toEqual(expect.arrayContaining(["syntheses/acme-widgets-ltd.md", "syntheses/acme-sales-domain-hub.md"]));
+    const leaf = snap.pages.find((p) => p.path === "concepts/invoice-inv-2026-000001.md");
+    expect(leaf?.parsed.ok && leaf.parsed.frontmatter.record).toEqual({ type: "invoice", month: "2026-04", hub: "syntheses/invoices-2026-04.md", by: "rules" });
+
+    const again = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(again?.status).toBe("nothing");
+    expect((again!.summary as unknown as NightlySummary).structure).toMatchObject({ written: 0 });
+  });
+
+  it("names its branch dream/<local date>, and the next free one on a second run that day", async () => {
+    await ensureVault();
+    expect(localDate(NOW)).toBe("2026-05-20");
+    expect(await dreamBranchName(vaultDir(), NOW)).toBe("dream/2026-05-20");
+    await git(vaultDir(), ["branch", "dream/2026-05-20"]);
+    expect(await dreamBranchName(vaultDir(), NOW)).toBe("dream/2026-05-20-2");
+    expect(safeDreamBranch("dream/2026-05-20-02")).toBe("dream/2026-05-20-2");
+    for (const bad of ["main", "dream/x", "dream/2026-05-20;rm", "../dream/2026-05-20"]) expect(safeDreamBranch(bad)).toBeNull();
+  });
+
+  it("ingests on the branch, finds the contradiction, merges, cleans up and tells the reindex hook", async () => {
+    await ensureVault();
+    const hook = vi.fn();
+    setVaultReindexHook(hook);
+    const before = (await headCommit(vaultDir()))!.sha;
+    const run = await runNightly("manual", deps());
+    expect(run).toMatchObject({ status: "merged", trigger: "manual", branch: "dream/2026-05-20" });
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.ingest).toMatchObject({ status: "done", pages: 2 });
+    expect(summary.merged).toBe(true);
+    expect(summary.contradictions.findings).toBe(1);
+    expect(summary.gate.touched).toEqual([]);
+    expect(run!.usdEstimate).toBeGreaterThan(0);
+    // Step 4b: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them, not marked tried).
+    expect(summary.summaries).toMatchObject({ planned: 2, written: 2, byModel: 0, byFacts: 2, rejectedPages: 0, model: { calls: 1 } });
+
+    // main has the pages; the branch and the worktree are gone.
+    const snap = await readVaultSnapshot();
+    expect(snap.pages).toHaveLength(2);
+    expect((await headCommit(vaultDir()))!.sha).not.toBe(before);
+    expect(await branches()).toEqual(["main"]);
+    expect(fs.existsSync(worktreePath(vaultDir()))).toBe(false);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(hook.mock.calls[0][0]).toEqual(snap.pages.map((p) => p.path));
+
+    const items = listReviewItems(vaultDir());
+    expect(items.items.map((i) => i.kind)).toEqual(["contradiction"]);
+    expect(items.items[0].runId).toBe(run!.id);
+    expect(listNightlyRuns()[0]).toMatchObject({ id: run!.id, status: "merged" });
+
+    // A second night with nothing new: no branch is left behind.
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect(second?.status).toBe("nothing");
+    expect(await branches()).toEqual(["main"]);
+  });
+
+  // The live test: memory-wiki compiled into main's checkout — a Related
+  // block on every page, its own <folder>/index.md with no frontmatter — and
+  // the night was held. Now the first night repairs it, and a block the
+  // plugin writes later never makes main "dirty".
+  it("is not held by what memory-wiki wrote into main, and repairs it once", async () => {
+    await ensureVault();
+    const page = pageText({ title: "Terms", claims: [claim("acme-sales/terms/net", "Acme Widgets Ltd pays suppliers within 30 days.")] }, "Acme terms.\n");
+    await vaultOperation("seed: terms", async (tx) => {
+      await tx.write("concepts/terms.md", page);
+      await tx.write("index.md", "# Index\n\n- [[concepts/terms]]\n");
+    });
+    const v = vaultDir();
+    const related = (text: string) =>
+      `${text.trimEnd()}\n\n## Related\n<!-- openclaw:wiki:related:start -->\n- [Index](../index.md)\n<!-- openclaw:wiki:related:end -->\n`;
+    const compile = () => {
+      fs.writeFileSync(path.join(v, "concepts", "terms.md"), related(page));
+      fs.mkdirSync(path.join(v, "entities"), { recursive: true });
+      fs.writeFileSync(path.join(v, "entities", "index.md"), "# Entities\n\n## Generated\n<!-- openclaw:wiki:entities:index:start -->\n- No entities yet.\n<!-- openclaw:wiki:entities:index:end -->\n");
+    };
+    compile();
+
+    // The summaries pass would add a summary to the page: off, these nights are about the repair alone.
+    const noSummaries = settings({ summaries: { ...defaultSettings().summaries, enabled: false } });
+    const run = await runNightly("manual", deps({ settings: noSummaries }));
+    expect(run).toMatchObject({ status: "merged" });
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.held).toEqual([]);
+    expect(summary.notes.join(" ")).toMatch(/memory-wiki's generated blocks and files were taken out of the vault \(1 page\(s\), 1 file\(s\)\)/);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).toBe(page);
+    expect(fs.existsSync(path.join(v, "entities", "index.md"))).toBe(false);
+
+    // The plugin compiles again during the day; the next night still merges.
+    compile();
+    fs.writeFileSync(path.join(filesRoot, "Documents", "shipping.md"), "Orders ship within three working days.");
+    const second = await runNightly("schedule", deps({ settings: noSummaries, now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect(second).toMatchObject({ status: "merged" });
+    expect((second!.summary as unknown as NightlySummary).notes.join(" ")).not.toMatch(/memory-wiki/);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).toBe(page);
+    expect((await git(v, ["status", "--porcelain"])).stdout.trim()).toBe("");
+  });
+
+  it("offline: skips the ingest and the judge, still lints and gates, and finds nothing to merge", async () => {
+    await ensureVault();
+    const run = await runNightly("schedule", deps({ online: async () => false }));
+    expect(run?.status).toBe("nothing");
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.ingest).toEqual({ skipped: "offline" });
+    expect(summary.contradictions.skipped).toBe("offline");
+    expect(summary.notes.join(" ")).toMatch(/not reachable/);
+  });
+
+  it("a page whose summary the lint refuses is left as it was; every other summary is still saved and merged", async () => {
+    await ensureVault();
+    const card = pageText({ title: "Deposit", claims: [claim("acme-sales/deposit/paid", "Acme Widgets Ltd received the deposit on 2026-05-02.")] }, "Paid with card 4111 1111 1111 1111.\n");
+    const terms = pageText({ title: "Terms", claims: [claim("acme-sales/terms/net", "Acme Widgets Ltd pays suppliers within 30 days.")] }, "Acme terms.\n");
+    // Written before the secret check could refuse it (lint off): no rewrite of it may land.
+    await vaultOperation(
+      "seed: pages",
+      async (tx) => {
+        await tx.write("concepts/deposit.md", card);
+        await tx.write("concepts/terms.md", terms);
+        await tx.write("index.md", "# Index\n\n- [[concepts/deposit]]\n- [[concepts/terms]]\n");
+      },
+      { lint: false },
+    );
+    const s = settings({ structure: { ...defaultSettings().structure, enabled: false } });
+    const run = await runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false }));
+    expect(run?.status).toBe("merged");
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.summaries).toMatchObject({ written: 1, refused: [{ path: "concepts/deposit.md", reason: "secret-pattern (CARD)" }] });
+    expect(summary.notes.join(" ")).toMatch(/The lint refused the new summary of 1 page, each left as it was: concepts\/deposit\.md \(secret-pattern \(CARD\)\)\./);
+    expect(summary.notes.join(" ")).not.toMatch(/could not be saved/);
+    const v = vaultDir();
+    expect(fs.readFileSync(path.join(v, "concepts", "deposit.md"), "utf8")).toBe(card);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).not.toBe(terms);
+  });
+
+  it("holds a night whose change carries a lint error; the owner merges it once its items are resolved", async () => {
+    await ensureVault();
+    // A page over the hard size cap: any change to it is a lint error.
+    await vaultOperation("seed: long page", async (tx) => {
+      await tx.write("concepts/long.md", pageText({ title: "Long", claims: [claim("acme-sales/long/fact", "A long page fact.")] }, `${"Acme widgets. ".repeat(1000)}\n`));
+      await tx.write("index.md", "# Index\n\n- [[concepts/long]]\n");
+    });
+    const s = settings();
+    const run = await runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false }));
+    expect(run?.status).toBe("held");
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.held).toEqual(["lint"]);
+    expect(await branches()).toEqual(["dream/2026-05-20", "main"]);
+    expect(fs.existsSync(worktreePath(vaultDir()))).toBe(false);
+    const lint = listReviewItems(vaultDir(), { kind: "lint" }).items;
+    expect(lint.length).toBeGreaterThan(0);
+
+    await expect(mergeHeldNight("dream/2026-05-20")).rejects.toMatchObject({ code: "open_items" });
+    for (const item of lint) await resolveReviewItem(item.id, { action: "dismiss" }, { by: "owner" });
+    const merged = await mergeHeldNight("dream/2026-05-20");
+    expect(merged.changed).toEqual(["concepts/long.md"]);
+    expect(await branches()).toEqual(["main"]);
+    expect(listNightlyRuns()[0]).toMatchObject({ status: "merged" });
+    await expect(mergeHeldNight("dream/2026-05-20")).rejects.toBeInstanceOf(HeldNightError);
+  });
+
+  it("a second held night gets its own lint items: an item an earlier night raised cannot clear it", async () => {
+    await ensureVault();
+    await vaultOperation("seed: long page", async (tx) => {
+      await tx.write("concepts/long.md", pageText({ title: "Long", claims: [claim("acme-sales/long/fact", "A long page fact.")] }, `${"Acme widgets. ".repeat(1000)}\n`));
+      await tx.write("index.md", "# Index\n\n- [[concepts/long]]\n");
+    });
+    const s = settings();
+    const night = (day: number) =>
+      runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false, now: () => new Date(2026, 4, day, 3, 0) }));
+    const first = await night(20);
+    const second = await night(21);
+    expect(first?.status).toBe("held");
+    expect(second?.status).toBe("held");
+    const lint = listReviewItems(vaultDir(), { kind: "lint" }).items;
+    expect(lint.some((i) => i.runId === first!.id)).toBe(true);
+    expect(lint.some((i) => i.runId === second!.id)).toBe(true);
+    // The first night's items are still open; the second night's are its own.
+    await expect(mergeHeldNight("dream/2026-05-21")).rejects.toMatchObject({ code: "open_items" });
+  });
+
+  it("holds a night that rewrites a page verified as a whole, and says its new text is not verified", async () => {
+    await ensureVault();
+    const d = defaultSettings();
+    const s = settings({ contradictions: { ...d.contradictions, enabled: false }, structure: { ...d.structure, enabled: false }, summaries: { ...d.summaries, enabled: false } });
+    const label = sourceLabel(path.join(filesRoot, "Documents", "pricing.md"));
+    await vaultOperation("seed: verified as a whole", async (tx) => {
+      await tx.write(
+        "concepts/acme-pricing.md",
+        pageText({ title: "Acme pricing", sources: [label], verified: { at: "2026-05-01T00:00:00.000Z", by: "owner" }, claims: [claim("acme-sales/acme-pricing/old", "The blue widget costs 9 EUR per unit.")] }),
+      );
+      await tx.write("index.md", "# Index\n\n- [[concepts/acme-pricing]]\n");
+    });
+    const night = await runNightly("manual", deps({ settings: s }));
+    expect(night).toMatchObject({ status: "held" });
+    expect((night!.summary as unknown as NightlySummary).gate.touched).toEqual(["concepts/acme-pricing.md"]);
+    const [item] = listReviewItems(vaultDir(), { kind: "verified-touch" }).items;
+    const said = item.evidence.map((e) => `${e.kind}: ${e.note ?? ""}`).join("\n");
+    expect(said).toMatch(/gate: .*It was verified as a whole; the night's version is not, until you verify it again\./);
+    expect(said).toMatch(/nightly-removes: The blue widget costs 9 EUR per unit\./);
+    // The branch's page carries no stamp on the whole (it would vouch for the new claims), only the old text on main does.
+    const onBranch = await git(vaultDir(), ["show", `${night!.branch}:concepts/acme-pricing.md`]);
+    expect(onBranch.stdout).toMatch(/^verified: null$/m);
+  });
+
+  // TASK-2180 B2: the owner verified a page, its document changed, Run now merged a night that had silently
+  // skipped it (no review item, nothing held, no note). Now the change waits on the held branch and Review asks.
+  it("holds a night whose import changes a verified page's document; Review asks, and Merge takes it once settled", async () => {
+    await ensureVault();
+    const d = defaultSettings();
+    const s = settings({
+      contradictions: { ...d.contradictions, enabled: false },
+      structure: { ...d.structure, enabled: false },
+      summaries: { ...d.summaries, enabled: false },
+    });
+    expect((await runNightly("manual", deps({ settings: s })))?.status).toBe("merged");
+    const v = vaultDir();
+    const pricing = (await readVaultSnapshot(v)).pages.find((p) => p.parsed.ok && p.parsed.frontmatter.sources.some((src) => src.endsWith("pricing.md")));
+    if (!pricing?.parsed.ok) throw new Error("expected the pricing page");
+    const fact = pricing.parsed.frontmatter.claims[0];
+    // Review's "Keep this answer": the fact becomes verified by the owner.
+    await verifyClaim({ claimId: fact.id, text: fact.text, by: "owner", page: pricing.path, vault: v });
+    const onMain = fs.readFileSync(path.join(v, pricing.path), "utf8");
+
+    fs.writeFileSync(path.join(filesRoot, "Documents", "pricing.md"), "The blue widget costs 10 EUR per unit.\n\nAddendum: orders over 100 units ship free.");
+    const night = await runNightly("manual", deps({ settings: s, now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect(night).toMatchObject({ status: "held", branch: "dream/2026-05-21" });
+    const summary = night!.summary as unknown as NightlySummary;
+    expect(summary.held).toEqual(["verified"]);
+    expect(summary.gate.touched).toEqual([pricing.path]);
+    expect(summary.reviewItems.raised).toBe(1);
+    expect(summary.ingest).toMatchObject({ status: "done", pages: 1 });
+    expect(summary.notes.join(" ")).toMatch(/The night is held: it changes 1 page\(s\) you verified/);
+    const job = getIngestJob((summary.ingest as { jobId: string }).jobId, v)!;
+    expect(job.notes.join(" ")).toMatch(/1 page\(s\) you verified were updated from their changed documents, their verified facts kept as they are/);
+
+    // main still has the page as the owner verified it; the change waits on the branch.
+    expect(fs.readFileSync(path.join(v, pricing.path), "utf8")).toBe(onMain);
+    expect(await branches()).toEqual(["dream/2026-05-21", "main"]);
+    const items = listReviewItems(v, { kind: "verified-touch" }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ runId: night!.id, pages: [pricing.path], claimId: null });
+    const said = items[0].evidence.map((e) => `${e.kind}: ${e.note ?? ""}`).join("\n");
+    expect(said).toMatch(/source-changed: Its document .*pricing\.md changed/);
+    expect(said).toMatch(/nightly-proposal: .*ship free/);
+    expect(said).toMatch(/gate: .*Its verified facts stay as they are\. To take the change, dismiss this item, then Merge the night/);
+
+    await expect(mergeHeldNight("dream/2026-05-21", v)).rejects.toMatchObject({ code: "open_items" });
+    await resolveReviewItem(items[0].id, { action: "dismiss" }, { by: "owner", vault: v });
+    const merged = await mergeHeldNight("dream/2026-05-21", v);
+    expect(merged.changed).toContain(pricing.path);
+    expect(await branches()).toEqual(["main"]);
+    expect(listNightlyRuns(v)[0]).toMatchObject({ id: night!.id, status: "merged" });
+
+    // The new content reached the wiki, and the owner's verification is still there.
+    const page = (await readVaultSnapshot(v)).pages.find((p) => p.path === pricing.path);
+    if (!page?.parsed.ok) throw new Error("expected the page");
+    const claims = page.parsed.frontmatter.claims;
+    expect(claims.find((c) => c.id === fact.id)).toMatchObject({ text: fact.text, status: "verified", verified: { by: "owner" } });
+    expect(claims.some((c) => !c.verified && /ship free/.test(c.text))).toBe(true);
+  });
+
+  it("a night whose judge failed is not the full comparison: the next night judges its pairs and raises the item", async () => {
+    await ensureVault();
+    // The judge answers prose with no verdict; the writer still works, so the pages land on main.
+    const brokenJudge: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete(request) {
+        if (readJudgeItems(request.user)) return { text: "I could not decide.", model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 5, cacheHitTokens: 0 } };
+        return client.complete(request);
+      },
+    };
+    const first = await runNightly("schedule", deps({ client: brokenJudge }));
+    expect(first?.status).toBe("merged");
+    const s1 = first!.summary as unknown as NightlySummary;
+    expect(s1.contradictions.queried).toBeGreaterThan(0);
+    expect(s1.contradictions.deferredPairs).toBeGreaterThan(0);
+    expect(s1.contradictions.complete).toBe(false);
+    expect(s1.notes.join(" ")).toMatch(/judged next pass/);
+    expect(readDeferredClaims(vaultDir()).size).toBeGreaterThan(0);
+    expect(fullComparisonDone(vaultDir())).toBe(false);
+    expect(listReviewItems(vaultDir(), { kind: "contradiction" }).items).toEqual([]);
+
+    // The next night changes no page (the same documents are skipped), and still judges what was owed.
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.skipped).toBeNull();
+    expect(s2.contradictions.queried).toBeGreaterThan(0);
+    expect(s2.contradictions.findings).toBe(1);
+    expect(s2.contradictions.deferredPairs).toBe(0);
+    expect(s2.contradictions.complete).toBe(true);
+    expect(listReviewItems(vaultDir(), { kind: "contradiction" }).items).toHaveLength(1);
+    expect(readDeferredClaims(vaultDir()).size).toBe(0);
+    expect(fullComparisonDone(vaultDir())).toBe(true);
+
+    // Now the nights are scoped: a quiet one compares nothing.
+    const third = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 22, 3, 0) }));
+    const s3 = third!.summary as unknown as NightlySummary;
+    expect(s3.contradictions).toMatchObject({ queried: 0, carried: 0, skipped: "nothing_to_compare" });
+  });
+
+  it("compares what reached main by day: the scope is everything changed since the last finished comparison", async () => {
+    await ensureVault();
+    // The structure pass would keep the domain hub's open review items current, a commit of its own; this is about the comparison's scope.
+    const quiet = settings({ structure: { ...defaultSettings().structure, enabled: false }, summaries: { ...defaultSettings().summaries, enabled: false } });
+    const first = await runNightly("schedule", deps({ settings: quiet }));
+    expect((first!.summary as unknown as NightlySummary).contradictions.complete).toBe(true);
+    const mark = readComparedThrough(vaultDir());
+    const items = () => listReviewItems(vaultDir(), { kind: "contradiction" }).items;
+    expect(items()).toHaveLength(1);
+
+    // By day: Add documents (or an edit) commits straight to main, not to a dream branch.
+    await vaultOperation("ingest: 1 document", async (tx) => {
+      await tx.write("concepts/daytime-price.md", pageText({ title: "Daytime price", claims: [claim("acme-sales/daytime-price/blue", "The blue widget costs 15 EUR per unit.")] }));
+    });
+    // An offline night compares nothing and does not move the mark.
+    const offline = await runNightly("schedule", deps({ settings: quiet, online: async () => false, now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect((offline!.summary as unknown as NightlySummary).contradictions.skipped).toBe("offline");
+    expect(readComparedThrough(vaultDir())).toBe(mark);
+
+    // The next night ingests nothing new (its branch changes nothing), and still compares the daytime page.
+    const second = await runNightly("schedule", deps({ settings: quiet, now: () => new Date(2026, 4, 22, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.commits).toBe(0);
+    expect(s2.contradictions.queried).toBe(1);
+    expect(s2.contradictions.findings).toBeGreaterThan(0);
+    expect(s2.notes.join(" ")).toMatch(/1 page\(s\) changed since the last comparison outside this night's branch were compared too/);
+    expect(items().filter((i) => i.pages.includes("concepts/daytime-price.md")).length).toBeGreaterThan(0);
+    expect(mark).toMatch(/^[0-9a-f]{40}$/);
+    const after = readComparedThrough(vaultDir());
+    expect(after).not.toBe(mark);
+    expect(after).toBe((await headCommit(vaultDir()))!.sha);
+
+    // Compared once is compared: the night after is quiet again.
+    const third = await runNightly("schedule", deps({ settings: quiet, now: () => new Date(2026, 4, 23, 3, 0) }));
+    expect((third!.summary as unknown as NightlySummary).contradictions).toMatchObject({ queried: 0, skipped: "nothing_to_compare" });
+  });
+
+  it("compares every claim when the recorded comparison's commit is gone", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps());
+    withStateDb(vaultDir(), (db) => db.prepare("UPDATE pass_state SET value = ? WHERE key = 'compared_through'").run("0".repeat(40)));
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.queried).toBe(s2.contradictions.claims);
+    expect(s2.contradictions.queried).toBeGreaterThan(0);
+    expect(readComparedThrough(vaultDir())).toBe((await headCommit(vaultDir()))!.sha);
+  });
+
+  it("never hands git a recorded mark that is no commit id, and compares every claim instead", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps());
+    for (const bad of ["HEAD", "--all", "main~1", "0123456789abcdef", ""]) {
+      withStateDb(vaultDir(), (db) => db.prepare("UPDATE pass_state SET value = ? WHERE key = 'compared_through'").run(bad));
+      expect(readComparedThrough(vaultDir())).toBeNull();
+    }
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.queried).toBe(s2.contradictions.claims);
+    expect(readComparedThrough(vaultDir())).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("an offline night does not count as the full comparison", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps({ online: async () => false }));
+    expect(fullComparisonDone(vaultDir())).toBe(false);
+  });
+
+  it("checks the golden questions against main once the night is merged, under the night's run", async () => {
+    await ensureVault();
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR per unit", domain: "acme-sales" }, { domains: [] });
+    const asked: string[] = [];
+    const withGolden: FlashClient = {
+      model: client.model,
+      async complete(request) {
+        const golden = readGoldenItems(request.user);
+        if (!golden) return client.complete(request);
+        asked.push(...golden.map((g) => g.question));
+        const text = JSON.stringify(golden.map((g) => ({ i: g.i, verdict: stubGoldenVerdict(g.expected, g.facts), why: "fake" })));
+        return { text, model: client.model, usage: { promptTokens: 80, completionTokens: 10, cacheHitTokens: 0 } };
+      },
+    };
+    const search = vi.fn(async () => []);
+    const run = await runNightly("manual", deps({ client: withGolden, goldenSearch: search }));
+    expect(run?.status).toBe("merged");
+    const summary = run!.summary as unknown as NightlySummary;
+    // The night's own import is on main by then: the wiki answers with it.
+    expect(summary.golden).toMatchObject({ scoreId: run!.id, tally: { asked: 1, correct: 1, percent: 100 }, capped: 0, calls: 1, regressions: [] });
+    expect(asked).toEqual(["What does the blue widget cost?"]);
+    expect(search).toHaveBeenCalledTimes(1);
+    expect((await goldenStatus()).last).toMatchObject({ runId: run!.id, percent: 100 });
+  });
+
+  it("skips the golden check offline or when it is switched off, and says why", async () => {
+    await ensureVault();
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales" }, { domains: [] });
+    const offline = await runNightly("schedule", deps({ online: async () => false }));
+    expect((offline!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "offline" });
+    const off = await runNightly("schedule", deps({ online: async () => false, settings: { ...settings(), golden: { enabled: false, maxQuestions: 50 } } }));
+    expect((off!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "disabled" });
+    expect((await goldenStatus()).last).toBeNull();
+  });
+
+  it("a spent ClawBox AI allowance stops each model step after one call, recorded as 'allowance spent'; the next night takes what waited", async () => {
+    await ensureVault();
+    await vaultOperation("seed: prices", async (tx) => {
+      await tx.write("concepts/price-list.md", pageText({ type: "concept", title: "Price list", domain: "acme-sales", claims: [claim("acme-sales/price-list/widget", "The blue widget costs 10 EUR per unit.")] }, "Price list.\n"));
+      await tx.write("concepts/catalogue.md", pageText({ type: "concept", title: "Catalogue", domain: "acme-sales", claims: [claim("acme-sales/catalogue/widget", "The blue widget costs 12 EUR per unit.")] }, "Catalogue.\n"));
+    });
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR per unit", domain: "acme-sales" }, { domains: [] });
+    const RESET = "2026-05-23T00:00:00.000Z";
+    const asked: string[] = [];
+    const spent: FlashClient = {
+      model: client.model,
+      async complete(request) {
+        asked.push(readJudgeItems(request.user) ? "judge" : readGoldenItems(request.user) ? "golden" : readWriterItems(request.user) ? "writer" : "summaries");
+        throw new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429, null, { kind: "weekly", resetAt: RESET, message: null });
+      },
+    };
+    const run = await runNightly("schedule", deps({ client: spent, goldenSearch: async () => [] }));
+    expect(run?.status).not.toBe("failed");
+    const summary = run!.summary as unknown as NightlySummary;
+    // One request a step, never retried.
+    expect([...asked].sort()).toEqual(["golden", "judge", "summaries", "writer"]);
+    expect(summary.allowance).toEqual({ kind: "weekly", resetAt: RESET, steps: ["ingest", "contradictions", "summaries", "golden"] });
+    expect(summary.ingest).toMatchObject({ status: "interrupted", stopped: "allowance_spent", queued: 2, failed: 0, pages: 0 });
+    expect(summary.contradictions).toMatchObject({ skipped: "allowance_spent", allowance: { kind: "weekly", resetAt: RESET }, judged: 0, complete: false });
+    expect(summary.summaries).toMatchObject({ model: { skipped: "allowance_spent" } });
+    expect(summary.golden).toEqual({ skipped: "allowance_spent" });
+    const notes = summary.notes.join("\n");
+    expect(notes).toMatch(/The ingest step stopped: ClawBox AI allowance spent, frees up at .+\. 2 document\(s\) wait for the next night\./);
+    expect(notes).toMatch(/The summaries step stopped: ClawBox AI allowance spent, frees up at /);
+    expect(notes).toMatch(/The judge stopped: ClawBox AI allowance spent, frees up at /);
+    expect(notes).toMatch(/The golden-question judge stopped: ClawBox AI allowance spent, frees up at /);
+    expect(fullComparisonDone(vaultDir())).toBe(false);
+    expect(readDeferredClaims(vaultDir()).size).toBeGreaterThan(0);
+
+    // Once it frees up, the next night writes the documents that waited and judges the pairs that were deferred.
+    const next = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 23, 3, 0), goldenSearch: async () => [] }));
+    const after = next!.summary as unknown as NightlySummary;
+    expect(after.allowance).toBeNull();
+    expect(after.ingest).toMatchObject({ status: "done", pages: 2, failed: 0 });
+    expect(after.contradictions.skipped).toBeNull();
+    expect(after.contradictions.judged).toBeGreaterThan(0);
+  });
+
+  it("runs one pass at a time", async () => {
+    await ensureVault();
+    const first = await startNightly("manual", deps({ online: async () => false }));
+    await expect(startNightly("manual", deps())).rejects.toBeInstanceOf(NightlyBusyError);
+    await first.done;
+    const next = await startNightly("manual", deps({ online: async () => false }));
+    await next.done;
+  });
+});

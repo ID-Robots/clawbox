@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
 import { noteGitHubAccountChanged } from "@/lib/project-import";
 import { openProjectPullRequest } from "@/lib/coding-pr";
@@ -80,7 +80,7 @@ export async function GET(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Disconnecting GitHub needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },
@@ -104,7 +104,7 @@ export async function DELETE(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Backing up to GitHub needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

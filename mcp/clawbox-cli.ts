@@ -12,14 +12,17 @@
  *   clawbox notify <message>
  *   clawbox system stats
  *   clawbox system info
+ *   clawbox tokens [--days N] [--agent ID] [--json]
+ *   clawbox db-maintenance status [--json] | run [--dry-run] [--all] [--no-idle-check]
  *   clawbox update
  */
 
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
 import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
-import { builtInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
+import { liveBuiltInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
 import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
@@ -246,7 +249,7 @@ async function main() {
     // other harness's apps — a false success on the CLI sibling of the list
     // `app list` below prints from.
     const harness = await openHarness();
-    const builtIn = builtInApps(harness);
+    const builtIn = await liveBuiltInApps(harness);
     const openable = builtIn.map((a) => a.id);
     const isInstalled = appId.startsWith("installed-");
     if (isInstalled) {
@@ -321,7 +324,7 @@ async function main() {
           ? `Built-in apps (${edition} edition):`
           : `Built-in apps (${edition} edition, running ${harness}):`,
     );
-    for (const app of builtInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
+    for (const app of await liveBuiltInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
     if (harness === null) console.log(`  (${UNKNOWN_HARNESS_NOTE})`);
 
   } else if (cmd === "edition") {
@@ -458,6 +461,41 @@ async function main() {
     await apiPost("/setup-api/code", { action: "delete-project", projectId });
     console.log(`✅ Deleted project "${projectId}".`);
 
+  } else if (cmd === "tokens") {
+    // Token usage per OpenClaw agent and model, read-only. Node, not bun: the
+    // report needs node:sqlite and node:zlib's zstd (scripts/openclaw-token-usage.mjs).
+    const script = fileURLToPath(new URL("../scripts/openclaw-token-usage.mjs", import.meta.url));
+    const res = spawnSync("node", ["--disable-warning=ExperimentalWarning", script, ...args.slice(1)], { stdio: "inherit" });
+    if (res.error) {
+      console.error(`clawbox tokens needs node on PATH: ${res.error.message}`);
+      process.exit(1);
+    }
+    process.exit(res.status ?? 1);
+
+  } else if (cmd === "db-maintenance") {
+    // OpenClaw's agent databases: `status` reads them (read-only); `run`
+    // compacts the ones that need it with the core's own `doctor ... compact`,
+    // stopping the gateway for it only once the core says it is idle
+    // (scripts/openclaw-db-maintenance.py `maintain`, the nightly slot's job).
+    // The operator's own call: it runs whether or not the owner turned the
+    // nightly slot on in Settings.
+    if (sub !== "status" && sub !== "run") {
+      console.error("Usage: clawbox db-maintenance status [--json] | run [--dry-run] [--all] [--no-idle-check]");
+      process.exit(1);
+    }
+    if (installEdition() === "hermes") {
+      console.error("This is a Hermes-edition ClawBox: there are no OpenClaw databases to maintain.");
+      process.exit(1);
+    }
+    const script = fileURLToPath(new URL("../scripts/openclaw-db-maintenance.py", import.meta.url));
+    const helperArgs = sub === "run" ? ["maintain", "--trigger", "cli", ...args.slice(2)] : ["status", ...args.slice(2)];
+    const res = spawnSync("python3", ["-I", script, ...helperArgs], { stdio: "inherit" });
+    if (res.error) {
+      console.error(`clawbox db-maintenance needs python3 on PATH: ${res.error.message}`);
+      process.exit(1);
+    }
+    process.exit(res.status ?? 1);
+
   } else if (cmd === "update") {
     // Re-running install.sh on a Hermes device risks unmasking the OpenClaw
     // gateway and breaking the edition lock, which is a support call, not an
@@ -503,7 +541,13 @@ Usage:
   clawbox system stats
   clawbox system info
   clawbox edition                      Print this device's edition (openclaw | hermes | dual)
-  clawbox update                       Update ClawBox + OpenClaw in place (OpenClaw edition only; runs the installer, needs sudo)
+  clawbox tokens [--days N] [--agent ID] [--json]
+                                       Tokens per OpenClaw agent and model (read-only; default: last 7 days)
+  clawbox db-maintenance status [--json]
+                                       OpenClaw agent database sizes, what needs compacting, the last run (read-only)
+  clawbox db-maintenance run [--dry-run] [--all] [--no-idle-check]
+                                       Compact the databases that need it; stops the gateway while it runs, once it is idle
+  clawbox update                     Update ClawBox + OpenClaw in place (OpenClaw edition only; runs the installer, needs sudo)
 
 Code Projects:
   clawbox code init <projectId> <name> [template] [color]

@@ -25,6 +25,11 @@ import type { PetDescriptor } from '@/lib/pet-client'
 // changes), holds the first frame under reduced motion, and sleeps while the
 // desktop is hidden.
 //
+// A SLEEPING pet steps only its sleep frames (petLayout's `sequence`: the
+// pack's `sleepFrames`, or the row's first frame held). The crab sleeps on
+// `waiting`, whose frame 3 opens its eyes — stepped whole, it blinked awake
+// once a loop.
+//
 // Two things the naive version of this got wrong, both fixed by the per-row
 // measurements in the descriptor (see src/lib/pet-sheet-metrics.ts):
 //

@@ -41,6 +41,7 @@ import { ApiError } from "../../../mcp/lib/errors";
 import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
 import { MAX_SECRETS } from "../../../src/lib/project-secrets-shape";
+import { OPENAI_MODELS } from "../../../src/lib/coding-provider";
 import { capText } from "../../../mcp/lib/guard";
 
 // `coding_secret_list` registers under the same switch: it is about what a
@@ -50,6 +51,10 @@ const NAMES = [
   // TASK-899: every run at a glance, resuming one, the project matrix, and the
   // project matrix (src/tests/unit/mcp-coding-agent-state-tools.test.ts).
   "coding_run_list", "coding_agent_resume", "coding_project_status",
+  // 2026-10-30: the app's Import panel as a tool (src/tests/unit/mcp-coding-project-import.test.ts).
+  "coding_project_import",
+  // 2026-10-30: the coding team's settings (src/tests/unit/mcp-coding-settings-tools.test.ts).
+  "coding_settings_get", "coding_settings_set",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
@@ -119,6 +124,23 @@ describe("registration", () => {
 });
 
 describe("coding_agent_run", () => {
+  it("tells the assistant the chat shows the run as a card, and carries the same facts as structuredContent", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/The chat shows this as a card .* do not describe progress yourself and do not poll/);
+    expect(out.result.structuredContent).toEqual({
+      kind: "coding_run", id: "run-k3x9q2ab", projectId: "site", directory: RUN.directory,
+      title: "Add a dark mode toggle", status: "running",
+    });
+    apiPost.mockResolvedValue({ started: false, queued: true, run: { ...RUN, status: "queued", queued: { at: 1, position: 3 } } });
+    const queued = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(queued.isError).toBe(false);
+    if (queued.isError) return;
+    expect(queued.result.structuredContent).toMatchObject({ kind: "coding_run", status: "queued", queuePosition: 3 });
+  });
+
   it("starts a run and hands back the id with the follow-up step", async () => {
     apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
     const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
@@ -131,6 +153,37 @@ describe("coding_agent_run", () => {
       { task: "Add a dark mode toggle", projectId: "site" },
       expect.objectContaining({ timeoutMs: 20_000 }),
     );
+  });
+
+  it("answers the box's owner_stopped refusal with CONFLICT ahead of busy, and sends userAskedAgain only for user_asked_again true", async () => {
+    apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "The owner stopped coding team team-k3x9q2ab on this work.", kind: "busy", code: "owner_stopped" })));
+    const out = await harness().call("coding_agent_run", { task: "Finish the invoice app", project_id: "site" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/owner stopped a coding team on this work/);
+    expect(out.error.next).toMatch(/Do not start it again, as a team or a run/);
+    expect(out.error.next).toMatch(/user_asked_again true/);
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    await harness().call("coding_agent_run", { task: "Finish the invoice app", project_id: "site", user_asked_again: true });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "Finish the invoice app", projectId: "site", userAskedAgain: true }, expect.anything());
+    await harness().call("coding_agent_run", { task: "Finish the invoice app", project_id: "site" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "Finish the invoice app", projectId: "site" }, expect.anything());
+  });
+
+  it("coding_agent_resume: answers owner_stopped with CONFLICT, and sends userAskedAgain only for user_asked_again true", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "gave_up", source: "agent" } });
+    apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "The owner stopped coding team team-k3x9q2ab on this work.", kind: "busy", code: "owner_stopped" })));
+    const out = await harness().call("coding_agent_resume", { run_id: RUN.id });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/user_asked_again true/);
+    apiPost.mockResolvedValue({ run: { ...RUN, status: "running", source: "agent" } });
+    await harness().call("coding_agent_resume", { run_id: RUN.id, user_asked_again: true });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/resume", { runId: RUN.id, userAskedAgain: true }, expect.anything());
+    await harness().call("coding_agent_resume", { run_id: RUN.id });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/resume", { runId: RUN.id }, expect.anything());
   });
 
   it("splits input_files into the list the device judges, and reports what actually arrived", async () => {
@@ -207,6 +260,17 @@ describe("coding_agent_run", () => {
     if (!out.isError) return;
     expect(out.error.code).toBe("CONFLICT");
     expect(out.error.next).toMatch(/coding_agent_status/);
+  });
+
+  it("names the run that holds the folder when the route says which one", async () => {
+    apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({
+      error: "Another coding run (run-abc12345) is already working in that folder.", kind: "busy",
+    })));
+    const out = await harness().call("coding_agent_run", { task: "x", project_id: "site" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/run-abc12345/);
   });
 
   it("points a missing project at code_project_list", async () => {
@@ -469,18 +533,37 @@ describe("coding_run_message", () => {
       { runId: "run-k3x9q2ab", text: "use tabs, not spaces" },
       expect.anything(),
     );
+    expect(out.text).toMatch(/^Delivered:/);
     expect(out.text).toMatch(/current session/);
     expect(out.text).toMatch(/do not poll/i);
   });
 
-  it("says it is only QUEUED when the device could not hand it over mid-turn", async () => {
+  it("says it is only QUEUED when the run cannot take it before its next start", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false, delivery: "next_start" });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued:/);
+    expect(out.text).toMatch(/next start/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("says QUEUED for the end of the tool call under way when the message is in the run's inbox", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false, delivery: "after_tool_call" });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued:/);
+    expect(out.text).toMatch(/mid-turn, the moment the tool call it is running now ends/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("reads an older device's answer, which has only the boolean", async () => {
     apiPost.mockResolvedValue({ queued: true, delivered: false });
     const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
     expect(out.isError).toBe(false);
     if (out.isError) return;
-    expect(out.text).toMatch(/queued/i);
-    expect(out.text).toMatch(/next step/);
-    expect(out.text).toMatch(/do not send it again/i);
+    expect(out.text).toMatch(/^Queued:.*next start/);
   });
 
   it("explains an owner-started run instead of reporting a rejected token", async () => {
@@ -551,11 +634,14 @@ describe("coding_agent_run — provider and model", () => {
     const shape = harness().get("coding_agent_run").shape as Record<string, { safeParse: (v: unknown) => { success: boolean } }>;
     expect(shape.provider.safeParse("anthropic").success).toBe(true);
     expect(shape.provider.safeParse("clawbox-ai").success).toBe(true);
-    expect(shape.provider.safeParse("openai").success).toBe(false);
+    expect(shape.provider.safeParse("openai").success).toBe(true);
+    expect(shape.provider.safeParse("mistral").success).toBe(false);
     // The new default and the one it replaced: a follow-up run re-states the
     // model of the run it continues, so both have to survive the enum.
     expect(shape.model.safeParse("claude-opus-5-5").success).toBe(true);
     expect(shape.model.safeParse("claude-opus-5").success).toBe(true);
+    // Every OpenAI model the Codex runner offers, and nothing it does not.
+    for (const model of OPENAI_MODELS) expect(shape.model.safeParse(model).success, model).toBe(true);
     expect(shape.model.safeParse("gpt-5").success).toBe(false);
     // Both optional: omitting them means the owner's default.
     expect(shape.provider.safeParse(undefined).success).toBe(true);
@@ -585,6 +671,22 @@ describe("coding_agent_run — provider and model", () => {
     expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", model: "claude-opus-5" });
   });
 
+  it("passes an OpenAI run and its model to the device", async () => {
+    apiPost.mockResolvedValue({ started: true, run: RUN });
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "openai", model: "gpt-5.6-luna" });
+    expect(out.isError).toBe(false);
+    expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", provider: "openai", model: "gpt-5.6-luna" });
+  });
+
+  it("refuses an Anthropic model on OpenAI without calling the device", async () => {
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "openai", model: "claude-opus-5-5" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/Unknown model for openai/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
   it("refuses a model named for ClawBox AI without calling the device", async () => {
     const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "clawbox-ai", model: "claude-opus-5" });
     expect(out.isError).toBe(true);
@@ -600,6 +702,15 @@ describe("coding_agent_run — provider and model", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toMatch(/owner's anthropic account/i);
+  });
+
+  it("says when a run was on the owner's OpenAI account, by the company's name", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, provider: "openai", requestedModel: "gpt-6-astra", model: "gpt-6-astra" } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/owner's OpenAI account/);
+    expect(out.text).toMatch(/model gpt-6-astra/);
   });
 
   it("says nothing about the account for an ordinary ClawBox AI run", async () => {
@@ -678,7 +789,6 @@ describe("the deliverable", () => {
         deliverable: { kind: "paths", paths: ["app.js"] },
         deliverableCheck: { ok: true, missing: null, checkedAt: Date.now() },
         attempts: [{ startedAt: 1, endedAt: 2, reason: null }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
@@ -698,14 +808,13 @@ describe("the deliverable", () => {
         deliverable: { kind: "paths", paths: ["app.js"] },
         deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
         attempts: [{ startedAt: 1, endedAt: 2, reason: "app.js was not created." }, { startedAt: 3, endedAt: 4, reason: "app.js was not created." }, { startedAt: 5, endedAt: 6, reason: "app.js was not created." }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("app.js was not created.");
-    expect(out.text).toContain("after 3 of 3 attempts");
+    expect(out.text).toContain("after 3 attempts");
     // The advice that matters: the session holds the work, so Resume is the way
     // on and a fresh run would start the task over.
     expect(out.text).toMatch(/Do NOT start a fresh run/);
@@ -743,7 +852,6 @@ describe("what a command deliverable's failure tells the AGENT", () => {
           checkedAt: Date.now(),
         },
         attempts: [{ startedAt: 1, endedAt: 2, reason: "x" }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
@@ -771,7 +879,6 @@ describe("what a command deliverable's failure tells the AGENT", () => {
         deliverable: { kind: "paths", paths: ["app.js"] },
         deliverableCheck: { ok: false, missing: "app.js was not created.", checkedAt: Date.now() },
         attempts: [{ startedAt: 1, endedAt: 2, reason: "app.js was not created." }],
-        completionAttempts: 3,
       },
     });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
@@ -848,5 +955,113 @@ describe("coding_secret_list", () => {
     // And it takes no parameters at all: there is nothing to ask it for but
     // the list, and certainly no name whose value it could be asked to read.
     expect(Object.keys(harness().get("coding_secret_list").shape)).toEqual([]);
+  });
+});
+
+describe("a run beyond the box's limit: queued, not refused", () => {
+  it("coding_agent_run says QUEUED with its place, and not to start it again", async () => {
+    apiPost.mockResolvedValue({ started: false, queued: true, run: { ...RUN, status: "queued", queued: { at: 1, position: 2 } } });
+    const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued coding run "run-k3x9q2ab"/);
+    expect(out.text).toMatch(/number 2 in line/);
+    expect(out.text).toMatch(/starts by itself/);
+    expect(out.text).toMatch(/only the owner can cancel it/);
+    expect(out.text).toMatch(/Do NOT start it again/);
+  });
+
+  it("coding_agent_stop leaves a queued run alone: cancelling one is the owner's", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "queued", queued: { at: 1, position: 1 } } });
+    const out = await harness().call("coding_agent_stop", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/is queued and has not started/);
+    expect(out.text).toMatch(/Only the owner can take it out of the queue/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("coding_agent_status says where a queued run stands", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "queued", completedAt: null, queued: { at: 1, position: 3 } } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/Run run-k3x9q2ab: queued \(not started\) — number 3 in line for a slot/);
+  });
+});
+
+describe("a run whose pull request's CI failed", () => {
+  const CI = { prNumber: 7, checks: ["test (20.x)"], tests: ["cart.test.ts > adds the tax"], files: ["src/lib/cart.ts"], unread: [], attempt: 0, fixRunId: null };
+
+  it("coding_agent_status names what failed and says to OFFER a Fix CI run, with the exact call", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, ci: CI } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/CI failed on pull request #7: test \(20\.x\)\. Failing tests: cart\.test\.ts > adds the tax\./);
+    expect(out.text).toMatch(/Offer the user a Fix CI run \(attempt 1 of 2\): coding_agent_run with resume_run_id "run-k3x9q2ab", fix_ci true/);
+  });
+
+  it("says the attempts are used up rather than offering a third", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, ci: { ...CI, attempt: 2 }, ciFixOf: { runId: "run-aaaaaaaa", attempt: 2 } } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(out.text).toMatch(/Its 2 Fix CI attempts are used up/);
+    expect(out.text).not.toMatch(/Offer the user a Fix CI/);
+    expect(out.text).toMatch(/A Fix CI continuation of run-aaaaaaaa \(attempt 2 of 2\)/);
+  });
+
+  it("coding_agent_run with fix_ci sends fixCi, and needs resume_run_id", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "Fix the CI.", resume_run_id: "run-k3x9q2ab", fix_ci: true });
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalledWith("/setup-api/coding-agent/run", { task: "Fix the CI.", resumeRunId: "run-k3x9q2ab", fixCi: true }, expect.anything());
+    apiPost.mockClear();
+    const refused = await harness().call("coding_agent_run", { task: "Fix the CI.", fix_ci: true });
+    expect(refused.isError).toBe(true);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `effort` (2026-10-30): the per-request level, offered as the app's own list,
+ * sent only when named, and the route's refusal of one turned into advice on
+ * that argument rather than on the folder.
+ */
+describe("coding_agent_run effort", () => {
+  it("offers exactly the levels the app offers, and sends only a named one", async () => {
+    const { OFFERED_EFFORT_LEVELS } = await import("../../../src/lib/coding-effort");
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    for (const effort of OFFERED_EFFORT_LEVELS) {
+      const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", effort });
+      expect(out.isError, effort).toBe(false);
+      expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "x", projectId: "site", effort }, expect.anything());
+    }
+    await harness().call("coding_agent_run", { task: "x", project_id: "site", effort: "ultracode" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "x", projectId: "site", effort: "ultracode" }, expect.anything());
+    await harness().call("coding_agent_run", { task: "x", project_id: "site" });
+    expect(apiPost).toHaveBeenLastCalledWith("/setup-api/coding-agent/run", { task: "x", projectId: "site" }, expect.anything());
+  });
+
+  it("declares the parameter as an enum of the offered levels — the dispatcher's schema refuses the rest", async () => {
+    // The test registrar calls the handler directly (see its header); the
+    // schema itself is what a device validates with, so it is pinned here.
+    const { z } = await import("zod");
+    const shape = harness().get("coding_agent_run").shape;
+    const schema = z.object(shape);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "medium" }).success).toBe(false);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "ultracode" }).success).toBe(true);
+    expect(schema.safeParse({ task: "x", project_id: "site" }).success).toBe(true);
+  });
+
+  it("turns the route's effort refusal into advice on the effort, not the folder", async () => {
+    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "medium". Use one of: low, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
+    const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", effort: "max" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/Unknown effort/);
+    expect(out.error.next).toMatch(/low, xhigh, max, ultracode/);
+    expect(out.error.next).not.toMatch(/folder/);
   });
 });

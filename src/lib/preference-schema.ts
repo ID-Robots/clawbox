@@ -49,6 +49,8 @@
 //     that still do not pass (`setPreferences` in src/lib/preference-store.ts),
 //     so a stray character in an app-store listing cannot fail an install.
 
+import { VNC_RESOLUTIONS, VNC_RESOLUTION_PREF } from "./vnc-resolution";
+
 export const PREFERENCE_LANGUAGES = [
   "en",
   "bg",
@@ -148,6 +150,7 @@ export function safePreferenceKey(key: unknown): string | null {
 const CLOSED_DOMAINS = new Map<string, readonly string[]>([
   ["ui_language", PREFERENCE_LANGUAGES],
   ["wp_fit", WALLPAPER_FITS],
+  [VNC_RESOLUTION_PREF, VNC_RESOLUTIONS],
 ]);
 
 export function isPreferenceLanguage(value: unknown): value is PreferenceLanguage {

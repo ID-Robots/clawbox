@@ -37,13 +37,14 @@ import {
 import { CLAWAI_TIER_INFO, type ClawaiTier } from "@/lib/clawbox-ai-tiers";
 import { CONFIG_ROOT, DATA_DIR, get } from "@/lib/config-store";
 import type { EditionSource } from "@/lib/edition-source";
+import { waitForGatewayStartBeforeStop } from "@/lib/gateway-start-guard";
 import { HARNESSES, type Harness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
 import { memAvailableMb } from "@/lib/mem-available";
 import { carryMemorySourcesTo } from "@/lib/memory-index-local";
-import { findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
+import { GATEWAY_COLD_START_WAIT_MS, findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
 import { freeBytes } from "@/lib/project-import";
 import { rootStepUnit } from "@/lib/root-step-journal";
 import { isUpdateLocked } from "@/lib/update-lock";
@@ -119,6 +120,8 @@ export const SWAP_NOTES = {
     "The folders Memory Shard reads could not be carried over — add them again in Memory Shard → Settings",
   hermesGatewayLeft:
     "Hermes' message gateway may still be running — run `hermes gateway uninstall` in the Terminal so it does not fight OpenClaw for the Telegram bot",
+  localAiCarried: "Local AI carried over",
+  localAiNotCarried: "Local AI could not be carried over — turn it on again in Settings → Local AI",
 } as const;
 
 // ── Which way, and for whom ──────────────────────────────────────────────────
@@ -367,9 +370,15 @@ export async function latestSwapPhase(invocationId: string): Promise<SwapPhase |
   const match = `_SYSTEMD_INVOCATION_ID=${invocationId}`;
   let stdout: string;
   try {
+    // No `-n` beside `-g`: the grep is bounded already — the step prints one
+    // marker per phase — and an older journalctl (the device's is systemd
+    // 249) positions on the invocation's last N entries BEFORE the pattern
+    // filters them, which would leave out a marker its sub-step followed with
+    // a dozen lines of its own. The route no longer depends on it either:
+    // `reach` fills in what a finished step passed through.
     ({ stdout } = await execFile(
       "/usr/bin/journalctl",
-      [match, "-o", "cat", "--no-pager", "-g", PHASE_GREP, "-n", String(SWAP_PHASES.length * 2)],
+      [match, "-o", "cat", "--no-pager", "-g", PHASE_GREP],
       { timeout: 10_000 },
     ));
   } catch {
@@ -394,6 +403,12 @@ export async function latestSwapPhase(invocationId: string): Promise<SwapPhase |
 export interface SwapPhaseFollower {
   /** A journal line from the follow: the phase it named, or null for a plain line. */
   onLine(line: string): SwapPhase | null;
+  /**
+   * The route KNOWS the step got this far — it returned with the lock
+   * flipped — so every phase up to it is announced that the journal scans
+   * missed. Forward-only, like a marker.
+   */
+  reach(phase: SwapPhase): void;
   /** Resolves once every scan a line started has finished — before the route speaks after the follow. */
   settled(): Promise<void>;
 }
@@ -451,6 +466,7 @@ export function swapPhaseFollower(
         .catch(() => {});
       return null;
     },
+    reach: advanceTo,
     settled: () => chain,
   };
 }
@@ -712,6 +728,23 @@ function errorText(err: unknown): string {
 }
 
 /**
+ * A restart of a gateway that is still starting waits out the unit's whole
+ * stop timeout (`waitForGatewayStartBeforeStop` says why), and both restarts of
+ * a swap to OpenClaw land in that window by construction: the step returns once
+ * the new gateway has bound its port, seconds before it has started, and the
+ * Telegram carry follows the persona refresh's own restart.
+ */
+async function letOpenclawGatewayFinishStarting(emit: SwapEmit): Promise<void> {
+  const outcome = await waitForGatewayStartBeforeStop({
+    onHold: (waitedMs, first) => emit(first
+      ? "Waiting for the OpenClaw gateway to finish starting…"
+      : `Still waiting for the OpenClaw gateway to finish starting (${Math.round(waitedMs / 1000)} s)…`),
+  });
+  if (outcome === "settled") emit("The OpenClaw gateway has finished starting.");
+  else if (outcome === "timed-out") emit("The OpenClaw gateway is still starting; restarting it anyway.");
+}
+
+/**
  * Move the per-harness credentials the root step cannot: the ClawBox AI
  * sign-in and the Telegram bot, each into the TARGET harness's own store
  * through the writer that harness's Settings page already uses.
@@ -787,6 +820,9 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
     // this is the runtime switcher's own refresh — the script guards the
     // introduction ritual itself and leaves a never-introduced workspace alone.
     emit("Refreshing the agent's persona for OpenClaw…");
+    // The sync restarts the gateway, which the step has just started and only
+    // seen bind its port: see letOpenclawGatewayFinishStarting.
+    await letOpenclawGatewayFinishStarting(emit);
     try {
       await execFile("bash", [path.join(CONFIG_ROOT, "scripts", "clawbox-identity-sync.sh"), "openclaw"], {
         timeout: 60_000,
@@ -850,7 +886,13 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
       const status = await ensureHermesGateway();
       serving = status.running && status.applied;
     } else {
-      await restartGateway();
+      // A COLD start: the step has just installed and provisioned this
+      // gateway, so it gets the installer's own readiness budget, not the
+      // 30 s a warm restart does — that wait called a gateway that was up
+      // 35.5 s later "did not come back" (2026-10-14). The persona refresh
+      // above has just restarted it, so its start is let finish first.
+      await letOpenclawGatewayFinishStarting(emit);
+      await restartGateway({ readyWaitMs: GATEWAY_COLD_START_WAIT_MS });
       serving = true;
     }
   } catch (err) {

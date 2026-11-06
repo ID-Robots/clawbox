@@ -578,7 +578,7 @@ function SwapDialog({
       // over the whole desktop on every frame anything beneath it moves — the
       // mascot always does. At 70% black the blur was a small part of what showed
       // through; one step darker keeps the look.
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75"
+      className="main-screen-scrim fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75"
       onClick={dismiss}
     >
       {/* The role sits on the PANEL, where the trap is attached: on the

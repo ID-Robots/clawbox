@@ -28,6 +28,7 @@
 #   /usr/local/bin/clawbox-desktop-session     GDM's Exec
 #   /usr/local/bin/clawbox-desktop-browser     the Chrome launcher + watchdog
 #   /usr/local/lib/clawbox/clawbox-desktop-span.mjs
+#   /usr/local/lib/clawbox/browser-clean-start.sh  the launchers' shared clean start
 #   /etc/clawbox/labwc/rc.xml.in               the labwc config template
 #   /usr/share/wayland-sessions/clawbox-desktop.desktop
 # and makes it the autologin user's session. The cage session ("ClawBox
@@ -115,9 +116,11 @@ for f in clawbox-desktop-session clawbox-desktop-browser clawbox-desktop-span.mj
   [ -f "$HERE/$f" ] || { echo "$HERE/$f not found; run from the clawbox checkout" >&2; exit 1; }
 done
 [ -f "$REPO/kiosk/labwc/rc.xml.in" ] || { echo "$REPO/kiosk/labwc/rc.xml.in not found" >&2; exit 1; }
+[ -f "$REPO/scripts/lib/browser-clean-start.sh" ] || { echo "$REPO/scripts/lib/browser-clean-start.sh not found" >&2; exit 1; }
 [ -f "$EXT/manifest.json" ] || { echo "$EXT/manifest.json not found" >&2; exit 1; }
 bash -n "$HERE/clawbox-desktop-session"
 bash -n "$HERE/clawbox-desktop-browser"
+bash -n "$REPO/scripts/lib/browser-clean-start.sh"
 
 missing=()
 command -v labwc >/dev/null || missing+=(labwc)
@@ -131,6 +134,7 @@ fi
 install -D -o root -g root -m 0755 "$HERE/clawbox-desktop-session" /usr/local/bin/clawbox-desktop-session
 install -D -o root -g root -m 0755 "$HERE/clawbox-desktop-browser" /usr/local/bin/clawbox-desktop-browser
 install -D -o root -g root -m 0644 "$HERE/clawbox-desktop-span.mjs" /usr/local/lib/clawbox/clawbox-desktop-span.mjs
+install -D -o root -g root -m 0644 "$REPO/scripts/lib/browser-clean-start.sh" /usr/local/lib/clawbox/browser-clean-start.sh
 rm -f /usr/local/lib/clawbox/clawbox-desktop-fullscreen.mjs
 install -D -o root -g root -m 0644 "$REPO/kiosk/labwc/rc.xml.in" /etc/clawbox/labwc/rc.xml.in
 

@@ -16,13 +16,31 @@ export async function GET() {
   if (blocked) return blocked;
 
   try {
-    const skills = await enumerateInstalledSkills();
+    // Hermes ships skills for every platform it runs on, and the disk walk
+    // finds them all: on a Jetson the Installed tab listed apple-notes,
+    // apple-reminders and the rest of the macOS-only bundle as installed, and
+    // the agent was told they were available (2026-10-13 smoke test). Hermes
+    // itself never loads a skill whose `platforms` leaves this OS out, so a
+    // BUNDLED skill that cannot run here is not something this box has. One
+    // the owner installed themselves stays listed, with its "macOS only" tag:
+    // they put it there, and they need the row to remove it.
+    const all = await enumerateInstalledSkills();
+    const skills = all.filter((s) => !(s.incompatible && s.origin === "builtin"));
     const categories = new Map<string, number>();
     // `disabled` is counted alongside the origins so the tab can say how many
     // of the installed skills are actually live. It used to be a hardcoded
     // `enabled: true` on every row, which made the MCP tool's "disabled" mark
     // unreachable and told the agent a switched-off skill was available.
-    const counts = { total: skills.length, builtin: 0, hub: 0, local: 0, incompatible: 0, disabled: 0 };
+    const counts = {
+      total: skills.length,
+      builtin: 0,
+      hub: 0,
+      local: 0,
+      incompatible: 0,
+      disabled: 0,
+      // Bundled skills left out because they cannot run on this device.
+      unavailable: all.length - skills.length,
+    };
     for (const s of skills) {
       categories.set(s.category, (categories.get(s.category) || 0) + 1);
       counts[s.origin]++;

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # timeout: 600
+# covers: src/lib/coding-*.ts src/lib/code-projects.ts src/app/setup-api/coding-agent/* src/app/setup-api/code/*
+# covers: scripts/coding-run-hook.mjs scripts/coding-run-preview mcp/tools/coding-agent.ts mcp/tools/coding.ts mcp/tools/media.ts
 #
 # The media tools a coding run is given, on the real box: when the coding
 # agent's status reports generateImages on, one run is asked to draw a picture

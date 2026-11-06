@@ -17,6 +17,12 @@ import path from "path";
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 let root: string;
+/**
+ * A project folder that exists (under `root`), for the cases whose files are
+ * looked at: a plan run as a single run has each task's named files checked.
+ * Every other case keeps the fixture path, which nothing reads from disk.
+ */
+let site: string;
 vi.mock("@/lib/config-store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/config-store")>();
   return { ...actual, get DATA_DIR() { return path.join(root, "data"); } };
@@ -32,6 +38,8 @@ const runner = vi.hoisted(() => ({
   getTeamDynamic: vi.fn(),
   teamSpawnSlot: vi.fn(),
   suiteSandbox: vi.fn(),
+  teamRoleModelMap: vi.fn(),
+  getMaxParallelRuns: vi.fn(),
 }));
 /** How many runs a team may have going at once: the box's own number unless a case says otherwise (read on every use, reset before each case). */
 const teamSlots = vi.hoisted(() => ({ value: null as number | null }));
@@ -42,6 +50,14 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => {
 // A roomy box: the spawn slot reads it once a worker is starting, and the
 // host's own meminfo is neither the fixture nor the same on every runner.
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
+// Plugged in, unless a case unplugs it: the host's own charger is neither the
+// fixture nor the same on every runner (a laptop on battery would serialise
+// every team in this file).
+const power = vi.hoisted(() => ({ onBattery: false }));
+vi.mock("@/lib/coding-run-cpu", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-run-cpu")>();
+  return { ...actual, onBatteryPower: vi.fn(async () => power.onBattery) };
+});
 // The git plumbing, faked: a branch is "made", a worktree "added", a merge
 // "done" — scripted per call so a conflict can be staged.
 const plumbing = vi.hoisted(() => ({
@@ -57,9 +73,60 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
   return { ...actual, ...plumbing };
 });
+// GitHub, faked where the orchestrator reaches it: a team whose goal asks for
+// a pull request opens, reads, pushes and merges through these. A team whose
+// goal asks for none never calls them.
+const github = vi.hoisted(() => ({
+  openPullRequest: vi.fn(),
+  readPullRequest: vi.fn(),
+  mergePullRequest: vi.fn(),
+  markPullRequestReady: vi.fn(),
+  pushBranch: vi.fn(),
+  readReviewSnapshot: vi.fn(),
+  readFailedCheckLogs: vi.fn(),
+}));
+vi.mock("@/lib/coding-pr", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-pr")>();
+  return { ...actual, openPullRequest: github.openPullRequest, readPullRequest: github.readPullRequest, mergePullRequest: github.mergePullRequest, markPullRequestReady: github.markPullRequestReady };
+});
+// The notices, mocked: ONE team notice per settle is what is under test, not
+// the owner-notice ring or Telegram (coding-agent-notify.test.ts has those).
+const notify = vi.hoisted(() => ({
+  announceCodingAgent: vi.fn(async () => undefined),
+  announceCodingTeam: vi.fn<(board: import("@/lib/coding-team-board").TeamBoard) => Promise<undefined>>(async () => undefined),
+  announceAnthropicLimit: vi.fn(async () => undefined),
+}));
+vi.mock("@/lib/coding-agent-notify", () => notify);
+// The edition and the gateway link the settle's chat line goes over: an
+// OpenClaw box unless a case says Hermes, and a gateway that takes the line.
+const harness = vi.hoisted(() => ({ getActiveHarness: vi.fn(async () => "openclaw" as const) }));
+vi.mock("@/lib/harness", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/harness")>()), ...harness }));
+const gateway = vi.hoisted(() => ({ gatewayWsChatSendMain: vi.fn(async () => ({ sessionKey: "main" })) }));
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()), ...gateway }));
+vi.mock("@/lib/coding-review", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-review")>();
+  return { ...actual, pushBranch: github.pushBranch, readReviewSnapshot: github.readReviewSnapshot, readFailedCheckLogs: github.readFailedCheckLogs };
+});
 
 type Team = typeof import("@/lib/coding-team");
 let team: Team;
+
+type RoleModelMap = import("@/lib/coding-agent").TeamRoleModelMap;
+type TokenBreakdown = import("@/lib/coding-agent").TokenBreakdown;
+/**
+ * What each role starts on, as `teamRoleModelMap` answers: every role on
+ * ClawBox AI and ready — the box every case here ran on before there were
+ * role models — unless a case says otherwise.
+ */
+function roleMap(over: { [R in keyof RoleModelMap]?: Partial<RoleModelMap[R]> } = {}): RoleModelMap {
+  const base = { provider: "clawbox-ai" as const, model: null, effort: "high" as const, auto: true, ready: true, problems: [], relativeCost: null };
+  const flash = { model: "deepseek-v4-flash", relativeCost: 1 };
+  return {
+    planner: { ...base, ...flash, ...over.planner },
+    worker: { ...base, ...over.worker },
+    reviewer: { ...base, ...flash, ...over.reviewer },
+  };
+}
 
 /** The runs the fake runner "spawns", settled by the test. */
 let runs: Map<string, Record<string, unknown>>;
@@ -67,7 +134,7 @@ let starts: Array<Record<string, unknown>>;
 let seq: number;
 /** Worker/planner runs take the scripted `outcomes` in order; reviewer runs take `reviews`, accepting by default. */
 let workerSeq: number;
-let reviews: Array<{ summary?: string; status?: string; error?: string; tokensUsed?: number }>;
+let reviews: Array<{ summary?: string; status?: string; error?: string; tokensUsed?: number; tokenBreakdown?: TokenBreakdown }>;
 /** Lead runs take these in order; a lead with nothing scripted answers `{}` (the plan stands). */
 let leadAnswers: Array<{ summary?: string; status?: string; error?: string; tokensUsed?: number }>;
 let merges: Array<{ ok: boolean; conflict?: boolean }>;
@@ -100,10 +167,12 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; tokenBreakdown: TokenBreakdown; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown>; writes: Record<string, string>; worktree: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
+  site = path.join(root, "Projects", "site");
+  fs.mkdirSync(site, { recursive: true });
   runs = new Map();
   starts = [];
   seq = 0;
@@ -115,6 +184,7 @@ beforeEach(async () => {
   waitsBeforeSettle = 1;
   liveWorkersAtStart = {};
   teamSlots.value = null;
+  power.onBattery = false;
   vi.resetModules();
   vi.clearAllMocks();
   plumbing.ensureTeamBranch.mockImplementation(async (_dir: string, teamId: string) => ({ ok: true, branch: `clawbox/${teamId}`, base: "master" }));
@@ -135,6 +205,10 @@ beforeEach(async () => {
   // The lead's switch: OFF, as on every box that never touched it.
   runner.getTeamDynamic.mockResolvedValue(false);
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/site", projectId: null });
+  // Every role ready on the box's own provider: the host's readiness probe is not the fixture.
+  runner.teamRoleModelMap.mockImplementation(async () => roleMap());
+  // The owner's limit on runs at once: roomy, so a team's own shape is what bounds it, unless a case says otherwise.
+  runner.getMaxParallelRuns.mockResolvedValue(16);
   // The project's own suite runs through `env` instead of `setpriv`, which a
   // test runner cannot use; only a case with a suite on disk ever asks.
   runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: ["PYTHONDONTWRITEBYTECODE=1"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
@@ -153,6 +227,12 @@ beforeEach(async () => {
           ? (leadAnswers.shift() ?? { summary: "{}" })
           : (outcomes[at] ?? { status: "completed", summary: "done" });
       Object.assign(run, { status: outcome.status ?? "completed", completedAt: Date.now() }, outcome);
+      // What the run wrote, in its folder, as the settle finds it.
+      for (const [file, content] of Object.entries((outcome as { writes?: Record<string, string> }).writes ?? {})) {
+        const at = path.join(String(run.directory), file);
+        fs.mkdirSync(path.dirname(at), { recursive: true });
+        fs.writeFileSync(at, content);
+      }
     } else if (run.status === "paused" && run.resumesAs) {
       // The owner came back. Only reached if the orchestrator LOOKED again —
       // a settle that took the pause as an outcome never would — so this is
@@ -194,6 +274,11 @@ function committedOn(branch: string): string[] {
   return team.getTeam(teamId)?.tasks.find((t) => t.task_id === taskId)?.files_hint ?? [];
 }
 
+/** The team's project is `site`, a folder on disk: what a single run's tasks name is looked for there. */
+function inSite(): void {
+  runner.resolveWorkingDirectory.mockResolvedValue({ directory: site, projectId: null });
+}
+
 const PLAN = JSON.stringify([
   { task_description: "Scaffold index.html", files_hint: ["index.html"] },
   { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
@@ -229,7 +314,9 @@ describe("a planner that wrote prose", () => {
     expect(done.status).toBe("done");
     const planners = starts.filter((s) => (s.team as { role: string }).role === "planner");
     expect(planners).toHaveLength(2);
-    expect(planners[1]).toMatchObject({ readOnly: true });
+    // In the planner's own session, read-only as it was: the folder is read already.
+    expect(planners[1]).toMatchObject({ readOnly: true, resumeRunId: "run-00000001" });
+    expect(planners[1].directory).toBeUndefined();
     expect(String(planners[1].task)).toContain("was not a plan the team can read");
     expect(String(planners[1].task)).toContain("no array here");
     expect(String(planners[1].task)).toContain("ONLY the JSON plan");
@@ -238,6 +325,26 @@ describe("a planner that wrote prose", () => {
     expect(done.plannerRunId).toBe("run-00000001");
     expect(done.agents.planner).toBe(2);
     expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)[0]).toMatch(/asking once more for the JSON plan \(attempt 2 of 3\)/);
+  });
+
+  it("asks in a fresh run when the planner's session cannot be continued, and says so on the log", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    const start = runner.startRun.getMockImplementation()!;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      if (input.resumeRunId) throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+      return start(input);
+    });
+    outcomes = [{ summary: "prose" }, { summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const planners = starts.filter((s) => (s.team as { role: string }).role === "planner");
+    expect(planners).toHaveLength(2);
+    expect(planners[1]).toMatchObject({ readOnly: true, directory: "/home/clawbox/Projects/site" });
+    expect(planners[1].resumeRunId).toBeUndefined();
+    expect(String(planners[1].task)).toContain("was not a plan the team can read");
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^The planner's session \(run-00000001\) could not be continued \(That run never started a Claude Code session.*asking in a fresh run\.$/)]));
+    expect(done.alerts).toBe(1);
   });
 
   it("asks a third time when the second answer is no plan either", async () => {
@@ -290,12 +397,13 @@ function prose(n: number): string {
 
 describe("a plan with text over its bound", () => {
   it("is cut, not refused: the team goes on from the first answer, with one note on the log and no alert", async () => {
+    const { MAX_TASK_DESCRIPTION_CHARS } = await import("@/lib/coding-team-board");
     outcomes = [
       { summary: JSON.stringify({
         shape: { parallelism: 1, review: "final", rationale: `${"One page, then its script. ".repeat(8).slice(0, 204)}z` },
         tasks: [
           { task_description: "Scaffold index.html", files_hint: ["index.html"] },
-          { task_description: prose(2313), depends_on: ["t1"], files_hint: ["app.js"] },
+          { task_description: prose(MAX_TASK_DESCRIPTION_CHARS + 313), depends_on: ["t1"], files_hint: ["app.js"] },
         ],
       }) },
       { summary: "index done", filesTouched: ["index.html"] },
@@ -308,30 +416,33 @@ describe("a plan with text over its bound", () => {
     expect(done.alerts).toBe(0);
     expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
     const cut = done.tasks[1].task_description;
-    expect(cut.length).toBeLessThanOrEqual(2000);
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
     expect(cut.endsWith("renders.")).toBe(true);
     expect(done.shape!.rationale.length).toBeLessThanOrEqual(200);
     const notes = done.log.filter((e) => e.type === "note");
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toMatchObject({ actor: { kind: "system" }, message: `The shape's rationale was cut from 205 to ${done.shape!.rationale.length} characters. Task t2's description was cut from 2313 to ${cut.length} characters.` });
+    expect(notes[0]).toMatchObject({ actor: { kind: "system" }, message: `The shape's rationale was cut from 205 to ${done.shape!.rationale.length} characters. Task t2's description was cut from ${MAX_TASK_DESCRIPTION_CHARS + 313} to ${cut.length} characters.` });
   });
 
   it("from the lead is cut too: the task is added, with a note and no alert", async () => {
+    const { MAX_TASK_DESCRIPTION_CHARS } = await import("@/lib/coding-team-board");
     runner.getTeamDynamic.mockResolvedValue(true);
+    // t1 rejected twice: t2 can never start, and the lead is called with the board broken.
     outcomes = [
       { summary: PLAN },
-      { summary: "Built index.html.\nMISSING: favicon.ico — no task makes one.", filesTouched: ["index.html"] },
-      { summary: "app", filesTouched: ["app.js"] },
+      { summary: "index", filesTouched: ["index.html"] },
+      { summary: "index again", filesTouched: ["index.html"] },
       { summary: "favicon", filesTouched: ["favicon.ico"] },
     ];
-    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: prose(2110), depends_on: ["t1"], files_hint: ["favicon.ico"] }], note: "t1 found no favicon" }) }];
+    reviews = Array.from({ length: 2 }, () => ({ summary: JSON.stringify({ verdict: "rejected", notes: "No <title>." }) }));
+    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: prose(MAX_TASK_DESCRIPTION_CHARS + 110), files_hint: ["favicon.ico"] }], note: "a favicon needs no title" }) }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.tasks[2]).toMatchObject({ task_id: "t3", origin: "lead", status: "complete" });
     const cut = done.tasks[2].task_description;
-    expect(cut.length).toBeLessThanOrEqual(2000);
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
     expect(done.alerts).toBe(0);
-    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([`Task t3's description was cut from 2110 to ${cut.length} characters.`]);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([`Task t3's description was cut from ${MAX_TASK_DESCRIPTION_CHARS + 110} to ${cut.length} characters.`]);
   });
 });
 
@@ -591,6 +702,85 @@ describe("a worker the owner PAUSED", () => {
   });
 });
 
+describe("dependency gating: a dependent starts only on an ACCEPTED dependency", () => {
+  it("does not dispatch a dependent while its dependency's reviewer is still reading it — and builds it on the accepted redo", async () => {
+    // Seen live (2026-10-10): t2 finished while t1's reviewer was still at
+    // work, the loop woke, found t1 "complete" and started t3 on it — and the
+    // reviewer then rejected t1. t3 had been built on work that did not stand.
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Write styles.css", files_hint: ["styles.css"] },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
+      ]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "index redone", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    // t1's reviewer is slow — HELD for a poll — and rejects; every later review accepts.
+    reviews = [
+      { status: "paused", resumesAs: { summary: JSON.stringify({ verdict: "rejected", notes: "The form does not submit." }) } } as (typeof reviews)[number],
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    const order = done.log.map((e) => e.message);
+    const accepted = order.findIndex((m) => m.startsWith("Task t1 accepted"));
+    const t3Assigned = order.findIndex((m) => /^Task t3 assigned/.test(m));
+    expect(order.findIndex((m) => m.startsWith("Task t1 rejected"))).toBeGreaterThan(-1);
+    // t3 was handed out only after t1's redo was accepted — exactly once.
+    expect(accepted).toBeGreaterThan(-1);
+    expect(t3Assigned).toBeGreaterThan(accepted);
+    expect(done.tasks.find((t) => t.task_id === "t3")).toMatchObject({ status: "complete", attempts: 1, holds: 0 });
+    expect(starts.filter((s) => (s.team as { role: string; taskId: string }).role === "worker").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t1", "t3"]);
+  });
+
+  it("holds a finished dependent the suite did not point at when its dependency is sent back, and runs it again on the new merged state", async () => {
+    const dir = path.join(root, "site");
+    fs.mkdirSync(path.join(dir, "tests"), { recursive: true });
+    const MODULE = "FACTORS = {('mi', 'km'): 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+    const FIXED = "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+    fs.writeFileSync(path.join(dir, "convert.py"), MODULE);
+    fs.writeFileSync(path.join(dir, "tests/test_convert.py"), "import unittest\nfrom convert import convert\n\nclass TestConvert(unittest.TestCase):\n    def test_km_to_mi(self):\n        self.assertEqual(convert(1.609344, 'km', 'mi'), 1.0)\n");
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: dir, projectId: null });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "each", rationale: "" }, JSON.stringify([
+        { task_description: "Write the converter, convert.py", files_hint: ["convert.py"] },
+        { task_description: "Document it in README.md", depends_on: ["t1"], files_hint: ["README.md"] },
+      ])) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the README.", filesTouched: ["README.md"] },
+      { summary: "Added km → mi.", filesTouched: ["convert.py"] },
+      { summary: "README checked against the new pairs.", filesTouched: ["README.md"] },
+    ];
+    let t1Workers = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const who = input.team as { role: string; taskId: string | null };
+      if (who.role === "worker" && who.taskId === "t1" && ++t1Workers === 2) fs.writeFileSync(path.join(dir, "convert.py"), FIXED);
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    // The traceback named convert.py: t1 went back as the suite's suspect, and
+    // t2 — accepted, but built on the t1 that was sent back — was HELD: set
+    // back without a rejection, its try not spent, and run again after t1.
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.holds])).toEqual([["t1", "complete", 2, 1, 0], ["t2", "complete", 2, 0, 1]]);
+    const hold = done.log.find((e) => e.type === "hold");
+    expect(hold).toMatchObject({ actor: { kind: "system" }, task_id: "t2" });
+    expect(hold!.message).toMatch(/^Task t2 held: its dependency t1 was reopened \(rejected — The project's own tests fail on the merged result.*\)\. Its result is set aside; it starts again on the new merged state once t1 is accepted\.$/);
+    const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
+    expect(workers.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t1", "t2"]);
+    expect(String(workers[3].task)).toContain("This task was done before on top of t1, which has since been reopened");
+    expect(String(workers[3].task)).toContain("What that attempt merged is already in the files");
+    // A hold is not a guardrail: no alert.
+    expect(done.alerts).toBe(0);
+  });
+});
+
 describe("a stop that lands while a worker is being made", () => {
   it("starts no worker and gives the worktree back", async () => {
     outcomes = [{ summary: PARALLEL_PLAN }];
@@ -609,10 +799,146 @@ describe("a stop that lands while a worker is being made", () => {
   });
 });
 
+describe("a stop that lands while the team branch is being made", () => {
+  it("stays stopped — never written back to working — starts no worker, and frees the box", async () => {
+    outcomes = [{ summary: PLAN }];
+    let release: () => void = () => {};
+    let branching = false;
+    plumbing.ensureTeamBranch.mockImplementationOnce(async (_dir: string, teamId: string) => {
+      branching = true;
+      await new Promise<void>((r) => { release = r; });
+      return { ok: true, branch: `clawbox/${teamId}`, base: "master" };
+    });
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "agent" });
+    for (let i = 0; i < 200 && !branching; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(branching).toBe(true);
+    expect(team.stopTeam(board.id).status).toBe("stopped");
+    release();
+    // The orchestrator goes on from the branch and settles the team: the
+    // owner hears of the stop once, and the box is free for the next team.
+    // Written back to `working`, it never settled and held the box.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
+    expect(team.getTeam(board.id)?.status).toBe("stopped");
+    expect(team.activeTeamId()).toBeNull();
+    expect(starts.filter((s) => (s.team as { role: string }).role === "worker")).toHaveLength(0);
+  });
+});
+
+describe("a team the owner stopped stays stopped", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /** A team the assistant started in `directory`, stopped by the owner `agoMs` ago. */
+  async function stoppedTeam(over: { goal?: string; directory?: string; source?: "agent" | "owner"; agoMs?: number } = {}): Promise<Board> {
+    const { createBoard, saveBoard, setTeamStatus } = await import("@/lib/coding-team-board");
+    const board = createBoard(
+      { goal: over.goal ?? "Build the invoice app", projectId: null, directory: over.directory ?? "/home/clawbox/Projects/site", source: over.source ?? "agent" },
+      over.source === "owner" ? { kind: "owner" } : { kind: "system" },
+    );
+    setTeamStatus(board, { kind: "owner" }, "stopped", "Stopped by the owner");
+    const at = Date.now() - (over.agoMs ?? 60_000);
+    board.createdAt = at - 60_000;
+    board.finishedAt = at;
+    board.updatedAt = at;
+    saveBoard(board);
+    return board;
+  }
+
+  it("never posts the owner's stop into the assistant's chat — that turn is where it started the team again", async () => {
+    outcomes = [{ summary: PLAN }];
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementation(async (id: string) => {
+      const run = runs.get(id)!;
+      if (id === "run-00000001") { Object.assign(run, { status: "completed", summary: PLAN }); return run; }
+      await new Promise<void>((r) => { release = r; });
+      return runs.get(id);
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
+    for (let i = 0; i < 100 && !runs.has("run-00000002"); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(team.stopTeam(board.id).status).toBe("stopped");
+    release();
+    expect((await finished(board.id)).status).toBe("stopped");
+    // The owner hears, once; the assistant's chat is not handed a turn.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(harness.getActiveHarness).not.toHaveBeenCalled();
+    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+  });
+
+  it("refuses the assistant's new team in that folder, or on that goal anywhere — 409 owner_stopped, before anything is made", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    const stopped = await stoppedTeam();
+    const err = await team.startTeam({ goal: "Finish the invoice app", directory: "site", source: "agent" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CodingAgentError);
+    expect(err).toMatchObject({ kind: "busy", code: "owner_stopped", teamId: stopped.id });
+    expect((err as Error).message).toContain(stopped.id);
+    // The same goal in another folder is the same work.
+    runner.resolveWorkingDirectory.mockResolvedValueOnce({ directory: "/home/clawbox/Projects/invoice-2", projectId: null });
+    await expect(team.startTeam({ goal: "  build the INVOICE app ", directory: "invoice-2", source: "agent" })).rejects.toMatchObject({ code: "owner_stopped" });
+    expect(team.listTeams().map((t) => t.id)).toEqual([stopped.id]);
+    expect(starts).toHaveLength(0);
+  });
+
+  it("never holds the owner's own start — and the owner's own work there does not lift the assistant's hold", async () => {
+    const stopped = await stoppedTeam();
+    outcomes = [{ summary: PLAN }];
+    const owners = await team.startTeam({ goal: "Build the invoice app", directory: "site", source: "owner" });
+    expect((await finished(owners.id)).status).toBe("done");
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" })).toMatchObject({ teamId: stopped.id });
+  });
+
+  it("lets the assistant start the work again when the user asked in a new message (userAskedAgain), and that lifts the hold", async () => {
+    const stopped = await stoppedTeam();
+    outcomes = [{ summary: PLAN }];
+    const again = await team.startTeam({ goal: "Build the invoice app", directory: "site", source: "agent", userAskedAgain: true });
+    expect((await finished(again.id)).status).toBe("done");
+    const { loadBoard } = await import("@/lib/coding-team-board");
+    expect(loadBoard(stopped.id)?.holdReleasedAt).toEqual(expect.any(Number));
+    expect(loadBoard(stopped.id)?.status).toBe("stopped");
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Next part" })).toBeNull();
+  });
+
+  it("holds on, however long ago the stop was, until the user asks again", async () => {
+    const stopped = await stoppedTeam({ agoMs: 30 * 24 * 60 * 60_000 });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Build the invoice app" })).toMatchObject({ teamId: stopped.id });
+  });
+
+  it("holds the team's folder, the worktrees inside it, its goal and its own runs — and nothing else", async () => {
+    const stopped = await stoppedTeam();
+    const { loadBoard, saveBoard } = await import("@/lib/coding-team-board");
+    const board = loadBoard(stopped.id)!;
+    board.runs.push({ id: "run-0000000w", role: "worker", taskId: "t1" } as (typeof board.runs)[number]);
+    saveBoard(board);
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site", text: "Add a README" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", text: "carry on" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/elsewhere", text: "carry on", runId: "run-0000000w" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/other", text: "  BUILD the invoice app" })).toMatchObject({ teamId: stopped.id });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/other", text: "Add a README" })).toBeNull();
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/site-2", text: "Add a README" })).toBeNull();
+  });
+
+  it("an owner's stopped team holds nothing: the assistant cannot read it, and its id and goal are the owner's", async () => {
+    await stoppedTeam({ source: "owner", directory: "/home/clawbox/Projects/mine", goal: "Owner work" });
+    expect(team.ownerStopRefusal({ directory: "/home/clawbox/Projects/mine", text: "Owner work" })).toBeNull();
+  });
+
+  it("places a run's work the way startRun will (ownerStopWorkForRun): the run it resumes, else the folder named", async () => {
+    expect(await team.ownerStopWorkForRun({ task: "Finish the last part", projectId: null, directory: "site", resumeRunId: null }))
+      .toEqual({ directory: "/home/clawbox/Projects/site", text: "Finish the last part", runId: null });
+    runner.getRun.mockReturnValueOnce({ id: "run-0000000w", directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1" } as never);
+    expect(await team.ownerStopWorkForRun({ task: "continue", projectId: null, directory: null, resumeRunId: "run-0000000w" }))
+      .toEqual({ directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", text: "continue", runId: "run-0000000w" });
+    // A folder the run route cannot place holds nothing here: startRun refuses it itself.
+    runner.resolveWorkingDirectory.mockRejectedValueOnce(new Error("That folder is off limits."));
+    expect(await team.ownerStopWorkForRun({ task: "x", projectId: null, directory: "/etc", resumeRunId: null })).toBeNull();
+  });
+});
+
 describe("many agents at once", () => {
   it("starts every task whose dependencies are done side by side, each in its own worktree, and merges each home", async () => {
-    // A worker settles on its third wait, so two of them overlap.
-    waitsBeforeSettle = 3;
+    // A worker settles on its sixth wait, so two of them overlap: every worker
+    // asks the spawn slot first (the box is shared), and that look is long
+    // enough for a worker settling on its third to be gone already.
+    waitsBeforeSettle = 6;
     outcomes = [
       { summary: PARALLEL_PLAN },
       { summary: "index done", filesTouched: ["index.html"] },
@@ -735,7 +1061,7 @@ describe("a reviewer that answered without a JSON verdict (TASK-1323)", () => {
   const reviewerStarts = () => starts.filter((s) => (s.team as { role: string }).role === "reviewer");
 
   it("is asked once more in its own session, with the short nudge, and its second answer is the verdict — a note, no alert", async () => {
-    const { REVIEWER_BRIEF, REVIEWER_NUDGE } = await import("@/lib/coding-team-reviewer");
+    const { SHELL_REVIEWER_BRIEF, REVIEWER_NUDGE } = await import("@/lib/coding-team-reviewer");
     outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
     reviews = [
       { summary: "I read index.html against the task.\n\nIt has the heading and the form the task asked for, and nothing else changed. Accepting." },
@@ -746,13 +1072,13 @@ describe("a reviewer that answered without a JSON verdict (TASK-1323)", () => {
     expect(done.status).toBe("done");
     // The first answer's reviewer, its re-ask, then t2's reviewer: ONE re-ask.
     expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t1", "t2"]);
+    // In the reviewer's own session — the shell one, in its checkout: not read-only, the same brief.
     expect(starts[3]).toEqual({
       task: REVIEWER_NUDGE,
       resumeRunId: "run-00000003",
       source: "owner",
       team: { id: board.id, role: "reviewer", taskId: "t1" },
-      readOnly: true,
-      extraBrief: REVIEWER_BRIEF,
+      extraBrief: SHELL_REVIEWER_BRIEF,
     });
     expect(REVIEWER_NUDGE).toContain("Answer with the JSON verdict object only, nothing else");
     expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "Heading and form are there." });
@@ -853,6 +1179,174 @@ describe("a reviewer that answered without a JSON verdict (TASK-1323)", () => {
     expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
       'ALERT: The reviewer of t1 gave no verdict: The reviewer\'s verdict is not accepted or rejected ("maybe").',
     ]);
+  });
+});
+
+/**
+ * A team refused outright beside ANY live run that was not its own — the
+ * automatic review pass the box starts after every run among them — died at
+ * its first second, while single runs went side by side up to the owner's
+ * limit. A team shares the box now: a full box is a wait the orchestrator
+ * sits out, for its planner as for its workers, and the board says so.
+ */
+describe("a team that shares the box", () => {
+  const FULL = "This ClawBox is already starting or running 2 coding runs at once, which is all it allows; the team waits for a free slot.";
+  const roleOf = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  /** The board, polled until `ready` holds for it — up to ten seconds. */
+  async function boardWhen(id: string, ready: (b: NonNullable<ReturnType<Team["getTeam"]>>) => boolean) {
+    for (let i = 0; i < 1000; i++) {
+      const b = team.getTeam(id);
+      if (b && ready(b)) return b;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("the board never got there");
+  }
+
+  it("starts beside a live run that is not the team's, and every reviewer starts too — no refusal, no alert", async () => {
+    // A single run going on the box, as the real spawn slot reads the runs file.
+    fs.mkdirSync(path.join(root, "data"), { recursive: true });
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify([{
+      id: "run-stranger", task: "the owner's own run", directory: "/home/clawbox/Projects/other", projectId: null, source: "owner",
+      status: "running", startedAt: Date.now() - 60_000, completedAt: null, sessionId: null, model: null, summary: null, error: null,
+      progress: [], filesTouched: [], commands: [], permissionDenials: [], numTurns: 0, tokensUsed: 0, team: null,
+    }]));
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.map(roleOf)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.alerts).toBe(0);
+    expect(done.tasks.every((t) => !/Accepted by rule/.test(t.review?.notes ?? ""))).toBe(true);
+  });
+
+  it("waits for a free slot for its planner — on the look and on the spawn — instead of failing, and says so on the board", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    let looks = 0;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }) => (who.role === "planner" && ++looks === 1 ? { ok: false, wait: true, reason: FULL } : { ok: true }));
+    // The look admits it the second time; the spawn then loses a race for the slot until the box frees one.
+    let free = false;
+    let refusedSpawns = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      if (roleOf(input) === "planner" && !free) {
+        refusedSpawns += 1;
+        throw new CodingAgentError("busy", FULL, true);
+      }
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    // While it waits: planning, not failed — the wait on the board and in its log.
+    const waiting = await boardWhen(board.id, () => refusedSpawns >= 1);
+    expect(waiting.status).toBe("planning");
+    expect(waiting.error).toBeNull();
+    expect(waiting.slotWaits).toEqual([{ role: "planner", taskId: null, reason: FULL, since: expect.any(Number) }]);
+    free = true;
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(looks).toBeGreaterThanOrEqual(3);
+    expect(starts.filter((s) => roleOf(s) === "planner")).toHaveLength(1);
+    // One note for the one wait, however many looks it took; no alert; nothing left waiting.
+    expect(done.log.filter((e) => e.type === "note" && /Waiting for a free slot on the box before the planner starts/.test(e.message))).toHaveLength(1);
+    expect(done.alerts).toBe(0);
+    expect(done.slotWaits).toBeUndefined();
+  });
+
+  it("stops cleanly while its planner waits: stopped, no planner run, nothing failed", async () => {
+    runner.teamSpawnSlot.mockResolvedValue({ ok: false, wait: true, reason: FULL });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    await boardWhen(board.id, (b) => (b.slotWaits ?? []).length > 0);
+    team.stopTeam(board.id);
+    const done = await finished(board.id);
+    expect(done.status).toBe("stopped");
+    expect(starts).toHaveLength(0);
+    expect(done.slotWaits).toBeUndefined();
+  });
+
+  it("keeps no more tasks in flight than the owner's limit: a settled worker's reviewer keeps its seat, and each worker's CPU share is that limit", async () => {
+    // Three independent tasks, a team shaped for three, a box set to two at once.
+    runner.getMaxParallelRuns.mockResolvedValue(2);
+    waitsBeforeSettle = 6;
+    outcomes = [
+      { summary: shaped({ parallelism: 3, review: "each", rationale: "" }, JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Write styles.css", files_hint: ["styles.css"] },
+        { task_description: "Write about.html", files_hint: ["about.html"] },
+      ])) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "about done", filesTouched: ["about.html"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The planner was told the box's width, the shape line says it, and the
+    // task left waiting for a seat is said on the board — not stuck in silence.
+    expect(String(starts[0].extraBrief)).toContain("This box runs at most 2 of the team's runs at once");
+    expect(done.log.find((e) => e.type === "shape")?.message).toBe("Team shaped: 3 side by side (the box allows 2 at once), review each");
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toContain("Waiting for a free slot on the box before the worker of t3 starts: the box allows 2 runs at once (Settings); t3 starts when a task finishes its review");
+    expect(done.slotWaits).toBeUndefined();
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    expect(workers).toHaveLength(3);
+    // Sized for the two that can go together, not the three the shape asked for.
+    expect(workers.map((w) => w.cpuShare)).toEqual([2, 2, 2]);
+    // Two side by side, never a third worker beside them.
+    const live = Object.entries(liveWorkersAtStart).filter(([id]) => roleOf(runs.get(id)!) === "worker").map(([, n]) => n);
+    expect(Math.max(...live)).toBe(1);
+    // The third task's worker went only once a task left — after its review, not into its reviewer's seat.
+    const order = starts.map((s) => `${roleOf(s)}:${(s.team as { taskId: string | null }).taskId}`);
+    expect(order.indexOf("worker:t3")).toBeGreaterThan(Math.min(order.indexOf("reviewer:t1"), order.indexOf("reviewer:t2")));
+  });
+
+  it("keeps a wait's moving reason on the live board without rewriting the board file on every look", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    // The memory guard's figure moves on each look, as MemAvailable does.
+    let looks = 0;
+    const tight = (n: number) => `Not enough free memory for another run beside the 1 going (${900 + n} MB free, 1200 MB needed).`;
+    let free = false;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }) => {
+      if (who.role !== "planner" || free) return { ok: true };
+      looks += 1;
+      return { ok: false, wait: true, reason: tight(looks) };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const file = path.join(root, "data", "coding-team", `${board.id}.json`);
+    const live = await boardWhen(board.id, () => looks >= 3);
+    // The live board — what coding_team_status reads for a team at work — has the latest reason…
+    expect(live.slotWaits?.[0].reason).toBe(tight(looks));
+    // …and the file, written once when the wait began, still has the first.
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8")) as { slotWaits?: Array<{ reason: string }> };
+    expect(onDisk.slotWaits?.map((w) => w.reason)).toEqual([tight(1)]);
+    free = true;
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.log.filter((e) => e.type === "note" && /before the planner starts/.test(e.message))).toHaveLength(1);
+    expect((JSON.parse(fs.readFileSync(file, "utf8")) as { slotWaits?: unknown }).slotWaits).toBeUndefined();
+  });
+
+  it("makes its FIRST worker wait for room too, and puts a worker the spawn refused for room back unstarted — no alert, no failed task", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    let t1Looks = 0;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string; taskId: string | null }) => (who.role === "worker" && who.taskId === "t1" && ++t1Looks === 1 ? { ok: false, wait: true, reason: FULL } : { ok: true }));
+    let t1Spawns = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const who = input.team as { role: string; taskId: string | null };
+      if (who.role === "worker" && who.taskId === "t1" && ++t1Spawns === 1) throw new CodingAgentError("busy", FULL, true);
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Looked at before the first worker (refused, then admitted twice: before the refused spawn and the one that ran).
+    expect(t1Looks).toBe(3);
+    expect(t1Spawns).toBe(2);
+    expect(starts.map(roleOf)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+    // The refused spawn's worktree went back with its branch, so the next attempt is made afresh.
+    expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", { dropBranch: expect.stringMatching(/-t1-1$/) });
+    expect(done.tasks.map((t) => [t.status, t.attempts])).toEqual([["complete", 1], ["complete", 1]]);
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "note" && /before the worker of t1 starts/.test(e.message)).length).toBeGreaterThanOrEqual(1);
+    expect(done.slotWaits).toBeUndefined();
   });
 });
 
@@ -958,7 +1452,7 @@ describe("a reviewer that has to wait for room", () => {
       { summary: "app wired", filesTouched: ["app.js"] },
     ];
     runner.teamSpawnSlot.mockImplementation(async (who: { role: string }) => who.role === "reviewer"
-      ? { ok: false, wait: false, reason: "A coding run is already in progress (run-zzzzzzzz). Wait for it or stop it first." }
+      ? { ok: false, wait: false, reason: "The coding agent is switched off." }
       : { ok: true });
     const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
     const done = await finished(board.id);
@@ -966,8 +1460,8 @@ describe("a reviewer that has to wait for room", () => {
     expect(done.error).toBeNull();
     expect(done.alerts).toBe(4);
     const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
-    expect(alerts.filter((m) => /No reviewer for t\d: A coding run is already in progress \(run-zzzzzzzz\)/.test(m))).toHaveLength(3);
-    // Asked once each: a stranger's run is not waited on.
+    expect(alerts.filter((m) => /No reviewer for t\d: The coding agent is switched off\./.test(m))).toHaveLength(3);
+    // Asked once each: a refusal that is not a wait is not waited on.
     expect(runner.teamSpawnSlot.mock.calls.filter((c) => (c[0] as { role: string }).role === "reviewer")).toHaveLength(3);
     expect(starts.filter((s) => (s.team as { role: string }).role === "reviewer")).toHaveLength(0);
     expect(done.tasks.map((t) => t.review?.notes)).toEqual(Array(3).fill("Accepted by rule: the reviewer could not start."));
@@ -1009,7 +1503,8 @@ describe("a team that works", () => {
     expect(String(starts[0].extraBrief)).toContain("ONLY a JSON object");
     // Each worker in its own worktree off the team branch, with the team's
     // context around its own task; t2 waits for t1; after each, a REVIEWER
-    // (read-only, in the main checkout) rules on the merged work.
+    // (with a shell, in a throwaway checkout of the team's branch) rules on
+    // the merged work.
     expect(done.branch).toBe(`clawbox/${board.id}`);
     expect(done.base).toBe("master");
     expect(starts).toHaveLength(5);
@@ -1018,10 +1513,13 @@ describe("a team that works", () => {
     expect(String(starts[1].task)).toContain("Team goal: Build the invoice app");
     // Its own folder named, so the hint's paths are read there and not in the project.
     expect(String(starts[1].task)).toContain("Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
-    expect(starts[2]).toMatchObject({ team: { role: "reviewer", taskId: "t1" }, readOnly: true, directory: "/home/clawbox/Projects/site" });
+    expect(starts[2]).toMatchObject({ team: { role: "reviewer", taskId: "t1" }, directory: "/home/clawbox/Projects/site/.clawbox/worktrees/review-t1-1", projectId: null });
+    expect(starts[2].readOnly).toBeUndefined();
     expect(String(starts[2].task)).toContain("Review task t1: Scaffold index.html");
     expect(String(starts[2].task)).toContain("Built index.html; open it.");
+    expect(String(starts[2].task)).toContain(`Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/review-t1-1 — a throwaway checkout of the team's branch clawbox/${board.id}, forked from master. The project itself is at /home/clawbox/Projects/site;`);
     expect(String(starts[2].extraBrief)).toContain("ONLY a JSON object");
+    expect(String(starts[2].extraBrief)).toContain("with a shell");
     expect(starts[3]).toMatchObject({ team: { role: "worker", taskId: "t2" }, directory: `/home/clawbox/Projects/site/.clawbox/worktrees/t2-1` });
     // The board's digest, not a quote of finished results: every other task, one line each.
     expect(String(starts[3].task)).toContain("The team's board — every other task, then the latest alerts and messages:\nt1 [complete] — Scaffold index.html → Built index.html; open it.");
@@ -1029,7 +1527,10 @@ describe("a team that works", () => {
     expect(String(starts[3].extraBrief)).toContain("ONE WORKER");
     expect(starts[1].readOnly).toBeUndefined();
     expect(plumbing.mergeWorkerBranch).toHaveBeenCalledTimes(2);
-    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    // Two workers' worktrees and two reviewers' checkouts, each removed; the reviewer's with its branch.
+    expect(plumbing.addWorkerWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", board.id, "review-t1", 1);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(4);
+    expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", "/home/clawbox/Projects/site/.clawbox/worktrees/review-t1-1", { dropBranch: `clawbox/${board.id}-review-t1-1` });
 
     expect(done.tasks.map((t) => [t.task_id, t.status, t.assigned_to, t.review?.verdict, t.reviewRunId])).toEqual([
       ["t1", "complete", "run-00000002", "accepted", "run-00000003"],
@@ -1061,28 +1562,44 @@ describe("a team that works", () => {
     expect(JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${board.id}.json`), "utf8")).status).toBe("done");
   });
 
-  it("raises an alert when a worker is refused an action or strays, rejects that task once, and stops the team at MAX_ALERTS", async () => {
+  // 20 of 28 live rejections were strays — a test, a helper, the CLAUDE.md
+  // the goal asked for — of merged, correct work, and three teams died on the
+  // alert ceiling for them: a stray is a note the reviewer reads, never a
+  // rejection by rule or an alert.
+  it("rejects a refused worker once and only NOTES its strays — the reviewer is told of them, and none counts toward MAX_ALERTS", async () => {
     outcomes = [
-      { summary: PLAN },
-      // t1: strayed AND refused → two alerts, rejected, re-posted.
+      // One worker at a time: the order of the alerts is the order of the tasks.
+      { summary: shaped({ parallelism: 1, review: "each", rationale: "" }, PARALLEL_PLAN) },
+      // t1: strayed AND refused → the refusal rejects it (uncounted), the stray is a note.
       { summary: "did stuff", filesTouched: ["index.html", "secrets.env"], permissionDenials: 1, deniedActions: ["Bash: curl x"] },
-      // t1 again: refused again → third alert → the team stops.
-      { summary: "did more", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: ["Bash: sudo", "Bash: rm"] },
+      // t1 again: refused again → rejected for good; t3 waits on it and never runs.
+      { summary: "did more", filesTouched: ["index.html", "secrets.env"], permissionDenials: 2, deniedActions: ["Bash: sudo", "Bash: rm"] },
+      // t2 strays only: a note, and its reviewer judges the file.
+      { summary: "styles done", filesTouched: ["styles.css", "secrets.env"] },
     ];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toMatch(/after 3 alerts/);
-    expect(done.alerts).toBe(3);
+    expect(done.error).toBe("Tasks t1 failed; t3 (waiting on t1, rejected) never ran.");
+    // Two on the record, both refusals — rejections, not the team failing — and no stray among them.
+    expect(done.alerts).toBe(2);
     const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
     expect(alerts[0]).toMatch(/refused 1 action\(s\): Bash: curl x/);
-    expect(alerts[1]).toMatch(/outside its task: secrets\.env/);
-    expect(alerts[2]).toMatch(/refused 2 action/);
+    expect(alerts[1]).toMatch(/refused 2 action/);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+      "Worker run-00000002 touched files outside its task's hint: secrets.env — the reviewer judges whether they belong to the task.",
+      "Worker run-00000003 touched files outside its task's hint: secrets.env — the reviewer judges whether they belong to the task.",
+      "Worker run-00000004 touched files outside its task's hint: secrets.env — the reviewer judges whether they belong to the task.",
+    ]);
     const t1 = done.tasks[0];
     expect(t1.attempts).toBe(2);
-    expect(t1.review?.verdict).toBe("rejected");
-    expect(starts).toHaveLength(3);
+    expect(t1.review).toMatchObject({ verdict: "rejected", notes: "The worker was refused an action; the task is offered once more." });
     expect(String(starts[2].task)).toContain("A previous attempt was rejected");
+    // t2 went to its reviewer, told which file lay outside the hint, and was accepted.
+    const reviewer = starts.find((s) => role(s) === "reviewer" && (s.team as { taskId: string | null }).taskId === "t2");
+    expect(String(reviewer?.task)).toContain("Files outside the task's hint");
+    expect(String(reviewer?.task)).toContain("- secrets.env");
+    expect(done.tasks[1]).toMatchObject({ status: "complete", attempts: 1, rejections: 0, review: { verdict: "accepted" } });
   });
 
   // Bench, 2026-09-22/23: a worker in its worktree globbed or read the project
@@ -1272,25 +1789,26 @@ describe("a team that works", () => {
       expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
     });
 
-    it("never softens a refused look into the harness's own state: an alert and a rejection, hinted refusals beside it or not", async () => {
+    // A refused READ outside the project changed nothing, wherever it looked
+    // — the harness's state included: a note, like any other look.
+    it("softens a refused look into the harness's own state like any read: a note and a clean task, hinted refusals beside it or not", async () => {
       const t1 = [plain(`Read: /home/clawbox/.claude-ds/projects/-home-clawbox-Projects-site/sess-1.jsonl`), hinted(`Read: ${P}/index.html`, `${W1}/index.html`)];
       outcomes = [
         { summary: PLAN },
         { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, worktreeHints: 1, deniedActions: t1.map((d) => d.text), denials: t1 },
-        // Its second attempt through the shell: read-only, and still the harness's state.
-        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: ["Bash: cat ~/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md"] },
+        // Through the shell: read-only, and still only a look at the harness's state.
+        { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: ["Bash: cat ~/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md"] },
       ];
       const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
       const done = await finished(board.id);
-      expect(done.status).toBe("failed");
-      expect(done.alerts).toBe(2);
-      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
-        `ALERT: Worker run-00000002 was refused 2 action(s): Read: /home/clawbox/.claude-ds/projects/-home-clawbox-Projects-site/sess-1.jsonl; Read: ${P}/index.html`,
-        "ALERT: Worker run-00000003 was refused 1 action(s): Bash: cat ~/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md",
+      expect(done.status).toBe("done");
+      expect(done.alerts).toBe(0);
+      expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+        `Worker run-00000002 was refused 2 action(s) that changed nothing — 1 aimed at the project instead of its worktree, each answered with a retry hint at the worktree path; the rest read-only outside its folder: Read: /home/clawbox/.claude-ds/projects/-home-clawbox-Projects-site/sess-1.jsonl; Read: ${P}/index.html → ${W1}/index.html`,
+        "Worker run-00000004 was refused 1 read-only action(s) outside its folder: Bash: cat ~/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md",
       ]);
-      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
-      expect(done.tasks[0]).toMatchObject({ status: "rejected", attempts: 2, rejections: 2, review: { verdict: "rejected", notes: expect.stringMatching(/refused an action/) } });
-      expect(done.metrics.readOnlyRefusals).toBe(0);
+      expect(done.tasks.map((t) => [t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["complete", 1, 0, "accepted"], ["complete", 1, 0, "accepted"]]);
+      expect(done.metrics.readOnlyRefusals).toBe(3);
     });
   });
 
@@ -1324,41 +1842,42 @@ describe("a team that works", () => {
       expect(done.metrics).toMatchObject({ readOnlyRefusals: 3, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
     });
 
-    it("stays an alert beside another project's state, and for a write to the harness's settings", async () => {
+    it("is a note beside another project's state too — a look changed nothing — while a write to the harness's settings stays an alert", async () => {
       outcomes = [
         { summary: PLAN },
-        // Its own memory, and another project's: the other one decides.
+        // Its own memory, and another project's: both only looked.
         { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`, `Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`] },
         // A write outside every folder — but into the harness's own settings.
-        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Write: ${STATE}/settings.json`] },
-      ];
-      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
-      const done = await finished(board.id);
-      expect(done.status).toBe("failed");
-      expect(done.alerts).toBe(2);
-      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
-        `ALERT: Worker run-00000002 was refused 2 action(s): Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md; Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`,
-        `ALERT: Worker run-00000003 was refused 1 action(s): Write: ${STATE}/settings.json`,
-      ]);
-      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
-      expect(done.tasks[0]).toMatchObject({ status: "rejected", attempts: 2, rejections: 2 });
-      expect(done.metrics.readOnlyRefusals).toBe(0);
-    });
-
-    it("stays an alert for another session's transcript beside its own", async () => {
-      outcomes = [
-        { summary: PLAN },
-        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`] },
-        { summary: "index done", filesTouched: ["index.html"] },
+        { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: [`Write: ${STATE}/settings.json`] },
         { summary: "app done", filesTouched: ["app.js"] },
       ];
       const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
       const done = await finished(board.id);
+      expect(done.status).toBe("done");
       expect(done.alerts).toBe(1);
       expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
-        `ALERT: Worker run-00000002 was refused 1 action(s): Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`,
+        `ALERT: Worker run-00000004 was refused 1 action(s): Write: ${STATE}/settings.json`,
       ]);
-      expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+      expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+        `Worker run-00000002 was refused 2 read-only action(s) outside its folder: Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md; Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`,
+      ]);
+      expect(done.tasks.map((t) => [t.status, t.attempts, t.rejections])).toEqual([["complete", 1, 0], ["complete", 2, 1]]);
+      expect(done.metrics.readOnlyRefusals).toBe(2);
+    });
+
+    it("is a note for another session's transcript beside its own: a look there changed nothing either", async () => {
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`] },
+        { summary: "app done", filesTouched: ["app.js"] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.alerts).toBe(0);
+      expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+        `Worker run-00000002 was refused 1 read-only action(s) outside its folder: Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`,
+      ]);
+      expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
     });
   });
 
@@ -1393,7 +1912,7 @@ describe("a team that works", () => {
     const P = path.join(root, "site");
     runner.resolveWorkingDirectory.mockResolvedValue({ directory: P, projectId: null });
     // Each worktree on disk as its worker left it.
-    const left: Record<string, string[]> = { "t1-1": ["index.html"], "t1-2": ["index.html"], "t2-1": ["app.js", "notes.md"], "t2-2": ["app.js"] };
+    const left: Record<string, string[]> = { "t1-1": ["index.html"], "t2-1": ["app.js", "notes.md"] };
     plumbing.addWorkerWorktree.mockImplementation(async (dir: string, teamId: string, taskId: string, attempt: number) => {
       const wt = path.join(dir, ".clawbox", "worktrees", `${taskId}-${attempt}`);
       fs.mkdirSync(wt, { recursive: true });
@@ -1416,21 +1935,25 @@ describe("a team that works", () => {
     });
     outcomes = [
       { summary: PLAN },
-      { summary: "index done", filesTouched: ["index.html"] },
-      // Committed nothing; its check page is gone from the worktree.
+      // Its check page is gone from the worktree; its branch deleted a stylesheet.
       { summary: "index done", filesTouched: ["index.html", "check.html"] },
-      // Left its notes behind.
+      // Committed nothing, and left its notes behind: harvested, and the notes a stray.
       { summary: "app done", filesTouched: ["app.js", "notes.md"] },
-      { summary: "app done", filesTouched: ["app.js", "check.html"] },
     ];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
-    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
-      "ALERT: Worker run-00000002 touched files outside its task: old.css",
-      "ALERT: Worker run-00000005 touched files outside its task: notes.md",
+    // A stray is a note the reviewer reads, never an alert or a rejection.
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+      "Worker run-00000002 touched files outside its task's hint: old.css — the reviewer judges whether they belong to the task.",
+      "Committed 2 uncommitted file(s) the worker left behind (run-00000004): app.js, notes.md",
+      "Worker run-00000004 touched files outside its task's hint: notes.md — the reviewer judges whether they belong to the task.",
     ]);
-    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["t1", "complete", 2, 1, "accepted"], ["t2", "complete", 2, 1, "accepted"]]);
+    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+    expect(String(starts[4].task)).toContain("Files outside the task's hint");
+    expect(String(starts[4].task)).toContain("- notes.md");
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["t1", "complete", 1, 0, "accepted"], ["t2", "complete", 1, 0, "accepted"]]);
   });
 
   it("fails the team when a worker fails and its dependants can never run, naming both", async () => {
@@ -1438,7 +1961,7 @@ describe("a team that works", () => {
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toBe("Tasks t1 failed; t2 never ran.");
+    expect(done.error).toBe("Tasks t1 failed; t2 (waiting on t1, failed) never ran.");
     expect(done.tasks[0]).toMatchObject({ status: "failed", result: "Stopped at the cost ceiling", review: null });
     expect(starts).toHaveLength(2);
   });
@@ -1456,8 +1979,88 @@ describe("a team that works", () => {
   });
 });
 
+describe("the settle notice", () => {
+  it("tells the owner ONCE when the team is done, and the assistant's chat on OpenClaw for a team IT started — a fixed line, never the error", async () => {
+    outcomes = [{ summary: PLAN }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done", branch: `clawbox/${board.id}` });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    const [line, opts] = gateway.gatewayWsChatSendMain.mock.calls[0] as unknown as [string, { idempotencyKey: string; timeoutMs: number }];
+    // The merge is said to be the owner's: never an invitation to merge or tidy their folder.
+    expect(line).toBe(`[Coding team ${board.id}] finished: done — 2 of 2 tasks done, on branch clawbox/${board.id}. Whether to merge clawbox/${board.id} is the owner's decision: tell them, and do not merge it, delete or move files, or clean up their project folder yourself unless they ask you to. Read coding_team_status for the result and tell the user.`);
+    expect(opts.timeoutMs).toBe(team.OWNER_AGENT_TIMEOUT_MS);
+    expect(opts.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("keeps an owner's team out of the assistant's chat — the owner hears, the assistant's bearer cannot read that board", async () => {
+    outcomes = [{ summary: PLAN }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done" });
+    // The notice and the chat line leave the same synchronous step, so once
+    // the notice has gone, a chat line that was going to be sent is in flight
+    // already: a macrotask later it would have reached the gateway.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(harness.getActiveHarness).not.toHaveBeenCalled();
+    expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+  });
+
+  it("says a failed team failed — the counts, not the reason — and a Hermes box gets no chat line", async () => {
+    harness.getActiveHarness.mockResolvedValue("hermes" as never);
+    try {
+      outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("failed");
+      await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+      expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
+      // The chat line is OpenClaw's: Hermes gives the box no way into its chat.
+      // The settle path asks the edition before it would send — so once it has
+      // asked, and its answer has been awaited (a macrotask later), the
+      // absence of a send is its decision, not the clock's.
+      await vi.waitFor(() => expect(harness.getActiveHarness).toHaveBeenCalled());
+      await new Promise((r) => setTimeout(r, 0));
+      expect(gateway.gatewayWsChatSendMain).not.toHaveBeenCalled();
+    } finally {
+      // Restored whatever the assertions above did: the rest of the file is OpenClaw's.
+      harness.getActiveHarness.mockResolvedValue("openclaw" as never);
+    }
+  });
+
+  it("waits for the team with waitForTeam — at once when told not to wait, and answered settled once it is", async () => {
+    outcomes = [{ summary: PLAN }];
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementation(async (id: string) => {
+      const run = runs.get(id)!;
+      if (id === "run-00000001") { Object.assign(run, { status: "completed", summary: PLAN }); return run; }
+      await new Promise<void>((r) => { release = r; });
+      Object.assign(run, { status: "completed", completedAt: Date.now(), summary: "done" });
+      return run;
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    for (let i = 0; i < 100 && !runs.has("run-00000002"); i++) await new Promise((r) => setTimeout(r, 5));
+    expect((await team.waitForTeam(board.id, 0))?.status).toBe("working");
+    const waiting = team.waitForTeam(board.id, 5_000);
+    release();
+    // The worker, then its reviewer, then the next task: every run after the first is let go as it comes.
+    const letGo = setInterval(() => release(), 5);
+    try {
+      const settled = await waiting;
+      expect(settled?.status).toBe("done");
+    } finally {
+      clearInterval(letGo);
+    }
+    expect(await team.waitForTeam("team-nope0000", 1)).toBeNull();
+  });
+});
+
 describe("the gates", () => {
-  it("refuses while the switch is off, an empty goal, and a second team at once", async () => {
+  it("refuses while the switch is off and an empty goal, and QUEUES a second team at once", async () => {
     runner.isCodingAgentEnabled.mockResolvedValueOnce(false);
     await expect(team.startTeam({ goal: "g", source: "agent" })).rejects.toMatchObject({ kind: "disabled" });
     await expect(team.startTeam({ goal: "   ", source: "agent" })).rejects.toMatchObject({ kind: "invalid" });
@@ -1466,7 +2069,11 @@ describe("the gates", () => {
     runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
     const first = await team.startTeam({ goal: "g", source: "agent" });
     expect(team.activeTeamId()).toBe(first.id);
-    await expect(team.startTeam({ goal: "another", source: "agent" })).rejects.toMatchObject({ kind: "busy" });
+    const second = await team.startTeam({ goal: "another", source: "agent" });
+    expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
+    expect(team.activeTeamId()).toBe(first.id);
+    // Taken out again by the owner, so this case goes on as it always did.
+    expect(team.cancelQueuedTeam(second.id).status).toBe("stopped");
     outcomes = [{ summary: "nope" }];
     Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
     release();
@@ -1493,6 +2100,9 @@ describe("the gates", () => {
     const done = await finished(board.id);
     expect(done.status).toBe("stopped");
     expect(team.activeTeamId()).toBeNull();
+    // The owner hears of the stop once, as a team notice.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
   });
 
   it("settles a team the web server restarted under as failed, on the next read", async () => {
@@ -1504,6 +2114,334 @@ describe("the gates", () => {
     expect(team.listTeams().map((b) => b.id)).toEqual([orphan.id]);
     expect(team.getTeam("team-nope")).toBeNull();
     expect(team.getTeam("../x")).toBeNull();
+  });
+});
+
+describe("the closing sweep at boot (closeOrphanedTeams)", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /**
+   * What a restart leaves of a team mid-work: a `working` board with a team
+   * branch, t1 finished by its worker (run-00000002) with its worktree still
+   * there, t2 in progress with its worker (run-00000003) going on in its
+   * scope, and nobody in this process running it.
+   */
+  async function interrupted(source: "owner" | "agent" = "owner"): Promise<Board> {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    const dir = path.join(root, "site");
+    const board = createBoard({ goal: "Build it", projectId: null, directory: dir, source }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Scaffold index.html", files_hint: ["index.html"] });
+    const t2 = postTask(board, { kind: "planner" }, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    board.status = "working";
+    board.branch = `clawbox/${board.id}`;
+    for (const [task, n] of [[t1, 2], [t2, 3]] as const) {
+      task.worktree = path.join(dir, ".clawbox", "worktrees", `${task.task_id}-1`);
+      task.branch = `clawbox/${board.id}-${task.task_id}-1`;
+      task.attempts = 1;
+      task.assigned_to = `run-0000000${n}`;
+      fs.mkdirSync(task.worktree, { recursive: true });
+    }
+    t1.status = "complete";
+    t2.status = "in_progress";
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" }, { id: "run-00000003", role: "worker", taskId: "t2" });
+    saveBoard(board);
+    // The runs as the reconciliation left them: the planner and t1's worker
+    // settled, t2's worker reattached and still running.
+    seq = 3;
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PLAN, directory: dir, tokensUsed: 10 });
+    runs.set("run-00000002", { id: "run-00000002", status: "completed", summary: "index done", directory: t1.worktree, filesTouched: ["index.html"], tokensUsed: 20 });
+    runs.set("run-00000003", { id: "run-00000003", status: "running", summary: null, directory: t2.worktree, filesTouched: [], waits: 0, outcomeAt: 0 });
+    return board;
+  }
+
+  it("waits for the worker still going, merges the finished branch, removes the worktrees without their branches, settles failed naming the branches, and tells the owner once", async () => {
+    const board = await interrupted("agent");
+    // t2's worker settles on its second wait, completed — it was the box's work, not the restart's.
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "app done", filesTouched: ["app.js"], tokensUsed: 30 }];
+    plumbing.harvestWorktree.mockImplementation(async (wt: string) => (wt.endsWith("t1-1") ? { ok: true, files: ["index.html"] } : { ok: true, files: [] }));
+    const sweep = team.closeOrphanedTeams();
+    // Under the sweep the board is the team at work and is read as it stands, never settled by the lazy read.
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    expect(team.activeTeamId()).toBe(board.id);
+    expect(team.getTeam(board.id)?.status).toBe("working");
+    expect(team.listTeams().find((t) => t.id === board.id)?.status).toBe("working");
+    expect(await sweep).toBe(1);
+
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The web server restarted while the team was working. Finished work was merged into clawbox/${board.id}: clawbox/${board.id}-t1-1, clawbox/${board.id}-t2-1.`);
+    // Both worktrees were harvested and merged — t2's only once its run had settled — and removed, their branches kept.
+    expect(plumbing.harvestWorktree.mock.calls.map((c) => c[0])).toEqual([path.join(root, "site/.clawbox/worktrees/t1-1"), path.join(root, "site/.clawbox/worktrees/t2-1")]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t1-1`, `clawbox/${board.id}-t2-1`]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    for (const call of plumbing.removeWorktree.mock.calls) expect(call[2]).toBeUndefined();
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    // The tokens of the worker it waited for are on the cast list; the log says what happened.
+    expect(done.runs.find((r) => r.id === "run-00000003")?.tokens).toBe(30);
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^The web server restarted while the team was working\. Closing it/),
+      "Waiting for run-00000003 to finish (still running in their own scopes), up to 30 minutes.",
+      `Committed 1 uncommitted file(s) run-00000002 left behind on clawbox/${board.id}-t1-1: index.html`,
+      `Merged clawbox/${board.id}-t1-1 into clawbox/${board.id} (run-00000002).`,
+    ]));
+    // ONE team notice, and — the assistant's team, on OpenClaw — the chat line.
+    expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1);
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "failed" });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    expect(team.activeTeamId()).toBeNull();
+    // Nothing left to close.
+    expect(await team.closeOrphanedTeams()).toBe(0);
+  });
+
+  it("leaves a worker still going at the deadline in place, keeps an unmerged branch out of the team branch, and aborts a conflict rather than guess", async () => {
+    const board = await interrupted();
+    team._setSweepWaitForTests(50);
+    // t2's worker never settles inside the sweep's wait; t1's merge conflicts.
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    merges = [{ ok: false, conflict: true }];
+    expect(await team.closeOrphanedTeams()).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The web server restarted while the team was working. Unmerged work is on clawbox/${board.id}-t1-1. Left in place: clawbox/${board.id}-t2-1 (run-00000003, still running).`);
+    // Only t1's worktree was touched; t2's — a live run's — was not, and its run was not stopped.
+    expect(plumbing.harvestWorktree.mock.calls.map((c) => c[0])).toEqual([path.join(root, "site/.clawbox/worktrees/t1-1")]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(plumbing.removeWorktree.mock.calls[0][1]).toBe(path.join(root, "site/.clawbox/worktrees/t1-1"));
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Merge conflict for clawbox\/team-[a-z0-9]{8}-t1-1, left unmerged: CONFLICT/),
+    ]));
+    expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1);
+  });
+
+  it("is stopped by the owner while it waits: the workers are stopped, their work harvested, and the team settles stopped", async () => {
+    const board = await interrupted();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    const sweep = team.closeOrphanedTeams();
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    const stopped = team.stopTeam(board.id);
+    expect(stopped.status).toBe("working");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    expect(await sweep).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("stopped");
+    expect(done.error).toBeNull();
+    // The branches are on the log, since a stop keeps no error.
+    expect(done.log.slice(-2)).toMatchObject([
+      { type: "note", message: `Finished work was merged into clawbox/${board.id}: clawbox/${board.id}-t1-1. Unmerged work is on clawbox/${board.id}-t2-1.` },
+      { actor: { kind: "owner" }, message: "Team → stopped: Stopped by the owner" },
+    ]);
+    // The stopped worker's branch is kept unmerged, its worktree removed.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t1-1`]);
+    expect(plumbing.removeWorktree).toHaveBeenCalledTimes(2);
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "stopped" });
+  });
+
+  it("closes nothing that is queued, settled or at work in this process", async () => {
+    const { createBoard, saveBoard, setTeamStatus } = await import("@/lib/coding-team-board");
+    const queued = createBoard({ goal: "g", projectId: null, directory: "/srv/p", source: "owner" }, { kind: "owner" });
+    setTeamStatus(queued, { kind: "system" }, "queued", "Waiting");
+    saveBoard(queued);
+    expect(await team.closeOrphanedTeams()).toBe(0);
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+    expect(notify.announceCodingTeam).not.toHaveBeenCalled();
+  });
+});
+
+describe("picking a team back up after a restart (claimOrphanedTeams, resumeOrphanedTeams)", () => {
+  type Board = import("@/lib/coding-team-board").TeamBoard;
+  /**
+   * A restart with two workers live, as on the bench: a `working` board with a
+   * team branch, t1's worker (run-00000002) finished while the box was down,
+   * t2's (run-00000003) still going in its scope, and nobody in this process
+   * driving the team.
+   */
+  async function twoWorkersOut(): Promise<Board> {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    const dir = path.join(root, "site");
+    const board = createBoard({ goal: "Build it", projectId: null, directory: dir, source: "agent" }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Scaffold index.html", files_hint: ["index.html"] });
+    const t2 = postTask(board, { kind: "planner" }, { task_description: "Write styles.css", files_hint: ["styles.css"] });
+    board.status = "working";
+    board.branch = `clawbox/${board.id}`;
+    board.base = "main";
+    for (const [task, n] of [[t1, 2], [t2, 3]] as const) {
+      task.worktree = path.join(dir, ".clawbox", "worktrees", `${task.task_id}-1`);
+      task.branch = `clawbox/${board.id}-${task.task_id}-1`;
+      task.attempts = 1;
+      task.assigned_to = `run-0000000${n}`;
+      task.status = "in_progress";
+      fs.mkdirSync(task.worktree, { recursive: true });
+    }
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" }, { id: "run-00000003", role: "worker", taskId: "t2" });
+    saveBoard(board);
+    seq = 3;
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PARALLEL_PLAN, directory: dir, tokensUsed: 10 });
+    runs.set("run-00000002", { id: "run-00000002", status: "completed", summary: "index done", directory: t1.worktree, filesTouched: ["index.html"], permissionDenials: 0, deniedActions: [], tokensUsed: 20 });
+    runs.set("run-00000003", { id: "run-00000003", status: "running", summary: null, directory: t2.worktree, filesTouched: [], permissionDenials: 0, deniedActions: [], waits: 0, outcomeAt: 0 });
+    return board;
+  }
+
+  it("goes on with the workers that kept running: merges and reviews their work, and finishes done — never failed for the restart", async () => {
+    const board = await twoWorkersOut();
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "styles done", filesTouched: ["styles.css"], tokensUsed: 30 }];
+    // Claimed at boot, before the runs are reconciled: a read meanwhile leaves it as it is.
+    expect(team.claimOrphanedTeams()).toEqual([board.id]);
+    expect(team.getTeam(board.id)?.status).toBe("working");
+    expect(team.listTeams().find((t) => t.id === board.id)?.status).toBe("working");
+    expect(team.activeTeamId()).toBe(board.id);
+
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    expect(team.activeTeamId()).toBe(board.id);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.error).toBeNull();
+    // Both workers' branches came home and their worktrees went; nothing was
+    // started again for either task, and nothing was stopped.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]).sort()).toEqual([`clawbox/${board.id}-t1-1`, `clawbox/${board.id}-t2-1`]);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "worker")).toEqual([]);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "planner")).toEqual([]);
+    expect(runner.stopRun).not.toHaveBeenCalled();
+    // Each task reviewed as usual, and accepted.
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "reviewer")).toHaveLength(2);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.review?.verdict])).toEqual([["t1", "complete", "accepted"], ["t2", "complete", "accepted"]]);
+    expect(done.runs.find((r) => r.id === "run-00000003")?.tokens).toBe(30);
+    expect(done.log.map((e) => e.message)).toContain("The web server restarted while the team was working. It goes on from where it was; run-00000003 kept working in their own scopes.");
+    expect(done.log.map((e) => e.message).join("\n")).not.toMatch(/Team → failed/);
+    // One notice, for the finished team.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ id: board.id, status: "done" });
+  });
+
+  it("takes back a review the restart interrupted: the reviewer's own verdict, once it settles", async () => {
+    const board = await twoWorkersOut();
+    const { saveBoard, loadBoard } = await import("@/lib/coding-team-board");
+    const b = loadBoard(board.id)!;
+    // t1 was merged and under review by run-00000004 when the box went; t2's worker is done.
+    b.tasks[0].status = "complete";
+    b.tasks[0].result = "index done";
+    b.tasks[0].worktree = null;
+    b.tasks[0].reviewRunId = "run-00000004";
+    b.runs.push({ id: "run-00000004", role: "reviewer", taskId: "t1" });
+    saveBoard(b);
+    seq = 4;
+    runs.set("run-00000003", { ...runs.get("run-00000003")!, status: "completed", summary: "styles done", filesTouched: ["styles.css"] });
+    runs.set("run-00000004", { id: "run-00000004", status: "completed", summary: JSON.stringify({ verdict: "accepted", notes: "index is right" }), directory: path.join(root, "site") });
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "index is right" });
+    // Only t2 needed a reviewer of its own; t1's verdict was the one already given.
+    expect(starts.filter((s) => (s.team as { role?: string; taskId?: string } | null)?.role === "reviewer").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t2"]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toEqual([`clawbox/${board.id}-t2-1`]);
+  });
+
+  it("goes on from the plan when the restart came while planning, with the planner the last server started", async () => {
+    const { createBoard, saveBoard } = await import("@/lib/coding-team-board");
+    inSite();
+    const board = createBoard({ goal: "Build it", projectId: null, directory: site, source: "owner" }, { kind: "owner" });
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null });
+    saveBoard(board);
+    seq = 1;
+    // The planner settled while the box was down; its answer is the plan.
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: PLAN, resultText: PLAN, directory: site, tokensUsed: 10 });
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks.map((t) => t.task_id)).toEqual(["t1", "t2"]);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "planner")).toEqual([]);
+  });
+
+  it("takes back a single run that kept going, and judges it when it settles", async () => {
+    const { createBoard, postTask, saveBoard } = await import("@/lib/coding-team-board");
+    inSite();
+    const board = createBoard({ goal: "Fix the typo", projectId: null, directory: site, source: "owner" }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: "Fix the typo in README.md", files_hint: ["README.md"] });
+    board.singleRun = true;
+    board.status = "working";
+    t1.status = "in_progress";
+    t1.assigned_to = "run-00000002";
+    t1.attempts = 1;
+    board.plannerRunId = "run-00000001";
+    board.runs.push({ id: "run-00000001", role: "planner", taskId: null }, { id: "run-00000002", role: "worker", taskId: "t1" });
+    saveBoard(board);
+    seq = 2;
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    runs.set("run-00000001", { id: "run-00000001", status: "completed", summary: "[]", directory: site });
+    runs.set("run-00000002", { id: "run-00000002", status: "running", summary: null, directory: site, filesTouched: [], permissionDenials: 0, deniedActions: [], waits: 0, outcomeAt: 0, worktree: null });
+    waitsBeforeSettle = 2;
+    outcomes = [{ summary: "Fixed the typo.", filesTouched: [path.join(site, "README.md")] }];
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0]).toMatchObject({ status: "complete", review: { verdict: "accepted" } });
+    expect(starts).toEqual([]);
+  });
+
+  it("takes back the final reviewer the restart interrupted, rather than start a second", async () => {
+    const board = await twoWorkersOut();
+    const { saveBoard, loadBoard } = await import("@/lib/coding-team-board");
+    const b = loadBoard(board.id)!;
+    b.shape = { parallelism: 2, review: "final", rationale: "one look at the whole" };
+    for (const t of b.tasks) {
+      t.status = "complete";
+      t.result = "done";
+      t.worktree = null;
+      t.review = { verdict: "accepted", notes: "Accepted by rule: the team's final review checks the merged result.", at: Date.now() };
+    }
+    b.status = "reviewing";
+    b.runs.push({ id: "run-00000004", role: "reviewer", taskId: null });
+    saveBoard(b);
+    seq = 4;
+    runs.set("run-00000003", { ...runs.get("run-00000003")!, status: "completed", summary: "styles done" });
+    runs.set("run-00000004", { id: "run-00000004", status: "completed", summary: JSON.stringify({ verdict: "accepted", notes: "the whole is right" }), directory: path.join(root, "site") });
+    team.claimOrphanedTeams();
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.finalReview).toMatchObject({ verdict: "accepted", notes: "the whole is right" });
+    expect(starts).toEqual([]);
+  });
+
+  it("is one team to every copy of the module in the process: a route's read never settles the team the boot hook took back", async () => {
+    // Next compiles the boot hook apart from the routes, so the process holds
+    // two copies of this module. With module-level maps the route's copy read
+    // the boot copy's live team as an orphan and settled it failed.
+    const board = await twoWorkersOut();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    team.claimOrphanedTeams();
+    vi.resetModules();
+    const routeCopy = await import("@/lib/coding-team");
+    expect(routeCopy.getTeam(board.id)?.status).toBe("working");
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    expect(routeCopy.getTeam(board.id)?.status).toBe("working");
+    expect(routeCopy.activeTeamId()).toBe(board.id);
+    // And the owner's Stop through the route reaches the team at work.
+    await vi.waitFor(() => expect(runner.waitForRun).toHaveBeenCalledWith("run-00000003", expect.any(Number)));
+    expect(routeCopy.stopTeam(board.id).status).toBe("stopped");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    expect((await finished(board.id)).status).toBe("stopped");
+  });
+
+  it("closes, rather than resumes, a claimed team the owner stopped before it was picked up", async () => {
+    const board = await twoWorkersOut();
+    waitsBeforeSettle = Number.POSITIVE_INFINITY;
+    team.claimOrphanedTeams();
+    expect(team.stopTeam(board.id).status).toBe("working");
+    expect(runner.stopRun).toHaveBeenCalledWith("run-00000003");
+    runs.set("run-00000003", { ...runs.get("run-00000003")!, status: "stopped" });
+    expect(await team.resumeOrphanedTeams()).toBe(1);
+    const done = team.getTeam(board.id)!;
+    expect(done.status).toBe("stopped");
+    expect(starts).toEqual([]);
   });
 });
 
@@ -1559,7 +2497,7 @@ describe("the words", () => {
     expect(text.split(folder).join("").split(`${project}-old`).join("")).not.toContain(project);
   });
 
-  it("gives the reviewer the project's paths for what a worker wrote in its worktree, gone by the time it reads", async () => {
+  it("gives the reviewer its own checkout's paths for what a worker wrote in its worktree, gone by the time it reads", async () => {
     outcomes = [
       { summary: PLAN },
       { summary: "Built /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/index.html; open it.", filesTouched: ["index.html"] },
@@ -1569,26 +2507,73 @@ describe("the words", () => {
     const done = await finished(board.id);
     expect(done.status).toBe("done");
     const reviewer = starts.find((s) => (s.team as { role: string }).role === "reviewer")!;
-    expect(reviewer.directory).toBe("/home/clawbox/Projects/site");
-    expect(String(reviewer.task)).toContain("Built /home/clawbox/Projects/site/index.html; open it.");
-    expect(String(reviewer.task)).not.toContain(".clawbox/worktrees");
+    const folder = "/home/clawbox/Projects/site/.clawbox/worktrees/review-t1-1";
+    expect(reviewer.directory).toBe(folder);
+    expect(String(reviewer.task)).toContain(`Built ${folder}/index.html; open it.`);
+    expect(String(reviewer.task)).not.toContain("worktrees/t1-1");
+    // The project's own path is named once: where its node_modules are.
+    expect(String(reviewer.task).split("/home/clawbox/Projects/site/").length - 1).toBe(String(reviewer.task).split(folder).length - 1 + 1);
   });
 
-  it("keeps the worker's folder when a long goal pushes the task text past its cut", async () => {
-    const { createBoard, postTask, MAX_GOAL_CHARS } = await import("@/lib/coding-team-board");
-    const { MAX_TASK_CHARS } = await import("@/lib/coding-agent");
-    // A goal at the limit a team accepts, and a long task under it.
+  it("keeps the worker's folder, files hint, rejection and teammates when the goal is long: the goal is cut, down to its floor, never them", async () => {
+    const { createBoard, postTask, MAX_GOAL_CHARS, MAX_TASK_DESCRIPTION_CHARS } = await import("@/lib/coding-team-board");
+    const { TEAM_TASK_CHARS, MAX_TASK_CHARS } = await import("@/lib/coding-agent");
+    // A goal at the limit a team accepts, and a task at ITS limit: past the typed cap by themselves.
     const board = createBoard({ goal: "g".repeat(MAX_GOAL_CHARS), projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
-    const task = postTask(board, { kind: "planner" }, { task_description: "d".repeat(1_500), files_hint: ["styles.css"] });
+    const task = postTask(board, { kind: "planner" }, { task_description: "d".repeat(MAX_TASK_DESCRIPTION_CHARS), files_hint: ["styles.css"] });
+    const sibling = postTask(board, { kind: "planner" }, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    Object.assign(sibling, { status: "in_progress", assigned_to: "run-bbbbbbbb" });
+    Object.assign(task, { attempts: 1, review: { verdict: "rejected", notes: `Missing: ${"n".repeat(1_900)}`, at: 1 } });
     const text = team.workerTask(board, task, "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
-    expect(text.length).toBe(MAX_TASK_CHARS);
+    expect(text.length).toBeGreaterThan(MAX_TASK_CHARS);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
     expect(text).toContain("Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+    expect(text).toContain("Files this task is expected to touch: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/styles.css");
+    expect(text).toContain(`A previous attempt was rejected: Missing: ${"n".repeat(1_900)}`);
+    expect(text).toContain("- run-bbbbbbbb on t2: Wire app.js");
+    // The goal gave way — to no less than its floor.
+    expect(text).toMatch(/Team goal: g{799,}…\n/);
+    expect(text).not.toContain("g".repeat(MAX_GOAL_CHARS));
+    // Room to spare: the whole goal, and the rest still there.
+    const short = postTask(board, { kind: "planner" }, { task_description: "Add the footer", files_hint: ["footer.css"] });
+    const whole = team.workerTask(board, short, "/home/clawbox/Projects/site/.clawbox/worktrees/t3-1");
+    expect(whole).toContain(`Team goal: ${"g".repeat(MAX_GOAL_CHARS)}`);
+    expect(whole).toContain("- run-bbbbbbbb on t2: Wire app.js");
   });
 
   it("names files outside a task's hint, folders included, and nothing when there is no hint", () => {
     expect(team.outsideHint(["src/a.js", "src/lib/b.js", "README.md"], ["src"])).toEqual(["README.md"]);
     expect(team.outsideHint(["./index.html"], ["index.html"])).toEqual([]);
     expect(team.outsideHint(["anything"], [])).toEqual([]);
+  });
+
+  // Live planners write `src/app/setup-api/**` and `**`; read as literal
+  // names they matched nothing, and every file the worker touched was a stray.
+  it("reads a planner's `folder/**` as the folder and `**` as anywhere", () => {
+    expect(team.outsideHint(["src/app/setup-api/x/route.ts", "src/lib/y.ts"], ["src/app/setup-api/**", "src/lib/y.ts"])).toEqual([]);
+    expect(team.outsideHint(["src/app/setup-api/x/route.ts", "README.md"], ["src/app/setup-api/**"])).toEqual(["README.md"]);
+    expect(team.outsideHint(["anything/at/all.ts", "README.md"], ["**"])).toEqual([]);
+    expect(team.outsideHint(["anything/at/all.ts"], ["src/**", "**"])).toEqual([]);
+  });
+
+  it("finds the root the harness files a project's memory under: its own `.git`, or the shared one a worktree's `.git` file points at", () => {
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(path.join(repo, ".git", "worktrees", "wt"), { recursive: true });
+    fs.mkdirSync(path.join(repo, "sub", "deep"), { recursive: true });
+    expect(team.gitCommonRoot(repo)).toBe(repo);
+    expect(team.gitCommonRoot(path.join(repo, "sub", "deep"))).toBe(repo);
+    // A worktree: `.git` is a file naming its gitdir, whose commondir is the shared `.git`.
+    const wt = path.join(root, "wt");
+    fs.mkdirSync(wt, { recursive: true });
+    fs.writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(repo, ".git", "worktrees", "wt")}\n`);
+    fs.writeFileSync(path.join(repo, ".git", "worktrees", "wt", "commondir"), "../..\n");
+    expect(team.gitCommonRoot(wt)).toBe(repo);
+    // No repository up the tree (the temp root is not one), or a `.git` file that names nothing.
+    const bare = path.join(root, "bare");
+    fs.mkdirSync(bare, { recursive: true });
+    expect(team.gitCommonRoot(bare)).toBe(team.gitCommonRoot(root));
+    fs.writeFileSync(path.join(bare, ".git"), "not a gitdir line\n");
+    expect(team.gitCommonRoot(bare)).toBeNull();
   });
 
   // team-6rgz8cyx and team-5oxkp7a9 (2026-09-06): every alert of both runs was
@@ -1660,6 +2645,9 @@ describe("the words", () => {
     // Named by none of them, or no attempt left for the one it names: every task with an attempt left.
     expect(ids(["__probe_test.py"])).toEqual(["t1", "t2"]);
     expect(ids(["cli.py"])).toEqual(["t1", "t2"]);
+    // …unless the caller says not everyone — a suite that only ran out of time points at nobody that way.
+    expect(team.suiteSuspects([calc, tests, done], ["cli.py"], { everyone: false }).map((t) => t.task_id)).toEqual([]);
+    expect(team.suiteSuspects([calc, tests, done], ["calc.py"], { everyone: false }).map((t) => t.task_id)).toEqual(["t1"]);
     expect(team.outsideHint(["__probe_test.py"], ["calc.py"])).toEqual([]);
     expect(team.outsideHint(["__probe_test.py"], ["calc.py"], { scratch: false })).toEqual(["__probe_test.py"]);
   });
@@ -1685,9 +2673,11 @@ const THREE = JSON.stringify([
   { task_description: "Write the README", depends_on: ["t1"], files_hint: ["README.md"] },
 ]);
 const RETIRE_T3 = JSON.stringify({ retire: ["t3"], note: "t1 already wrote the README" });
-/** t1's result, naming a blocker: what calls the lead after an accepted task. */
+/** t1's result, naming a blocker: what used to call the lead after an accepted task, and no longer does. */
 const BLOCKED_INDEX = "Built index.html.\nMISSING: a favicon — no task makes one.";
 const shaped = (shape: Record<string, unknown>, plan: string) => JSON.stringify({ shape, tasks: JSON.parse(plan) });
+/** t1 rejected twice: for good, so t2 (waiting on it) can never start — the board is exhausted and not complete. */
+const rejectT1Twice = () => Array.from({ length: 2 }, () => ({ summary: JSON.stringify({ verdict: "rejected", notes: "No <title>." }) }));
 
 describe("the lead (coding_team_dynamic)", () => {
   it("is never started while the switch is off — through a rejection, a retry and a failure alike", async () => {
@@ -1711,15 +2701,16 @@ describe("the lead (coding_team_dynamic)", () => {
     expect(done.tasks.map((t) => t.status)).not.toContain("retired");
   });
 
-  it("retires a pending task the goal no longer needs, before anything new starts, and the team finishes without it", async () => {
+  it("runs once nothing left can start and the goal is not complete, and retires a pending task the goal no longer needs", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [
       { summary: THREE },
-      { summary: "Built index.html, and a README while I was at it.", filesTouched: ["index.html"] },
-      { summary: "Wired app.js.", filesTouched: ["app.js"] },
+      { summary: "Built index.html, no title yet.", filesTouched: ["index.html"] },
+      { summary: "Built index.html, and a README while I was at it — still no title.", filesTouched: ["index.html"] },
     ];
+    reviews = rejectT1Twice();
     leadAnswers = [{ summary: `Having read the folder:\n${RETIRE_T3}` }];
-    // t1's worker tells the lead while it works: the message is what calls the lead back.
+    // t1's worker tells the lead while it works: the message waits for the lead's next turn.
     const wait = runner.waitForRun.getMockImplementation()!;
     let told = false;
     runner.waitForRun.mockImplementation(async (id: string, ms?: number) => {
@@ -1733,87 +2724,81 @@ describe("the lead (coding_team_dynamic)", () => {
     });
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(done.status).toBe("done");
+    expect(done.status).toBe("failed");
     expect(done.dynamic).toBe(true);
-    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "complete"], ["t3", "retired"]]);
-    // One lead turn, after t1 and before t2 started; after t2 nothing was left to decide.
-    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "lead", "worker", "reviewer"]);
-    const lead = starts[3];
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "rejected"], ["t2", "pending"], ["t3", "retired"]]);
+    // No turn after the first rejection (t1 was offered again); ONE once t1
+    // was rejected for good and t2, t3 could never start.
+    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer", "lead"]);
+    const lead = starts[5];
     expect(lead).toMatchObject({ readOnly: true, team: { id: board.id, role: "lead", taskId: "t1" }, directory: "/home/clawbox/Projects/site", projectId: null });
     expect(String(lead.extraBrief)).toContain("You are the LEAD");
-    expect(String(lead.task)).toMatch(/^Task t1 just settled \(complete, accepted\): Scaffold index\.html/);
-    expect(String(lead.task)).toContain("Built index.html, and a README");
+    expect(String(lead.task)).toMatch(/^Task t1 just settled \(rejected, rejected: No <title>\.\): Scaffold index\.html/);
+    expect(String(lead.task)).toContain("and a README while I was at it");
     expect(String(lead.task)).toContain("pending now: t2, t3");
     // Its inbox: the message, whole, on one line; the turn that read it is on the board.
     expect(String(lead.task)).toContain("Messages to the lead since your last turn:\n- worker run-00000002 (task t1): I wrote README.md as well; t3 is not needed.");
     expect(done.lastLeadAt).toBeGreaterThan(0);
     // In the planner's name, with the lead's note; the cast list and the figures count it.
     expect(done.log.find((e) => e.type === "retire")).toMatchObject({ actor: { kind: "planner" }, task_id: "t3", message: "Task t3 retired by the lead: t1 already wrote the README" });
-    expect(done.runs.filter((r) => r.role === "lead")).toEqual([{ id: "run-00000004", role: "lead", taskId: "t1" }]);
+    expect(done.runs.filter((r) => r.role === "lead")).toEqual([{ id: "run-00000006", role: "lead", taskId: "t1" }]);
     expect(done.agents).toEqual({ planner: 1, workers: 2, reviewers: 2, leads: 1, total: 6 });
-    expect(done.metrics).toMatchObject({ leadRuns: 1, tasksPlanned: 3, tasksAdded: 0, tasksRetired: 1, tasksAcceptedFirstTry: 2, tasksRejected: 0 });
-    expect(done.alerts).toBe(0);
+    expect(done.metrics).toMatchObject({ leadRuns: 1, tasksPlanned: 3, tasksAdded: 0, tasksRetired: 1, tasksAcceptedFirstTry: 0, tasksRejected: 1 });
+    expect(done.error).toBe("Tasks t1 failed; t2 (waiting on t1, rejected) never ran.");
   });
 
-  it("adds a task a finished one revealed; it runs like any other and is counted as the lead's", async () => {
+  it("adds a task when the chain broke; it runs like any other and is counted as the lead's", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [
       { summary: PLAN },
-      { summary: "Built index.html.\nMISSING: favicon.ico — no task makes one.", filesTouched: ["index.html"] },
-      { summary: "app", filesTouched: ["app.js"] },
+      { summary: "Built index.html.", filesTouched: ["index.html"] },
+      { summary: "Built index.html again.", filesTouched: ["index.html"] },
       { summary: "favicon", filesTouched: ["favicon.ico"] },
     ];
-    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: "Add a favicon and link it from index.html", depends_on: ["t1"], files_hint: ["favicon.ico", "index.html"] }], note: "t1 found no favicon" }) }];
+    reviews = rejectT1Twice();
+    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: "Add a favicon; index.html is t1's", files_hint: ["favicon.ico"] }], note: "the favicon needs no title" }) }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    expect(done.tasks[2]).toMatchObject({ task_id: "t3", origin: "lead", status: "complete", depends_on: ["t1"], files_hint: ["favicon.ico", "index.html"] });
+    expect(done.status).toBe("failed");
+    expect(done.tasks[2]).toMatchObject({ task_id: "t3", origin: "lead", status: "complete", depends_on: [], files_hint: ["favicon.ico"] });
     const worker3 = starts.find((s) => role(s) === "worker" && (s.team as { taskId: string }).taskId === "t3");
     expect(String(worker3?.task)).toMatch(/^Your task \(t3 of 3\): Add a favicon/);
-    expect(done.log.some((e) => e.type === "task" && e.actor.kind === "planner" && e.message === "Task t3 added by the lead: Add a favicon and link it from index.html — t1 found no favicon")).toBe(true);
+    expect(done.log.some((e) => e.type === "task" && e.actor.kind === "planner" && e.message === "Task t3 added by the lead: Add a favicon; index.html is t1's — the favicon needs no title")).toBe(true);
     expect(done.metrics).toMatchObject({ tasksPlanned: 2, tasksAdded: 1, tasksRetired: 0 });
-    // The blocker called it; t2 and t3 settled clean and called no one.
-    expect(done.metrics.leadRuns).toBe(1);
+    // The broken chain called it once; t3, settled clean with the board still broken, called it once more — and it stood.
+    expect(done.metrics.leadRuns).toBe(2);
   });
 
   it.each([
     ["an answer that is not one", { summary: "The plan looks fine to me!" }, /^ALERT: The lead after t1 gave no usable answer: The lead's answer holds no JSON object\. The plan is unchanged\.$/],
-    ["an answer past a bound", { summary: '{"retire": ["t1"]}' }, /^ALERT: The lead after t1 gave no usable answer: It retires t1, which is complete; only a pending task may be retired\. The plan is unchanged\.$/],
-    ["a lead that did not finish", { status: "failed", error: "boom" }, /^ALERT: The lead after t1 \(run-00000004\) ended failed; the plan is unchanged\.$/],
-  ])("takes %s as an alert, and the team goes on with the plan it had", async (_what, answer, alert) => {
+    ["an answer past a bound", { summary: '{"retire": ["t1"]}' }, /^ALERT: The lead after t1 gave no usable answer: It retires t1, which is rejected; only a pending task may be retired\. The plan is unchanged\.$/],
+    ["a lead that did not finish", { status: "failed", error: "boom" }, /^ALERT: The lead after t1 \(run-00000006\) ended failed; the plan is unchanged\.$/],
+  ])("takes %s as an alert, and the team ends with the plan it had", async (_what, answer, alert) => {
     runner.getTeamDynamic.mockResolvedValue(true);
-    outcomes = [{ summary: PLAN }, { summary: BLOCKED_INDEX, filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
+    outcomes = [{ summary: PLAN }, { summary: "index", filesTouched: ["index.html"] }, { summary: "index again", filesTouched: ["index.html"] }];
+    reviews = rejectT1Twice();
     leadAnswers = [answer];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    expect(done.alerts).toBe(1);
+    expect(done.status).toBe("failed");
     expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([expect.stringMatching(alert)]);
-    expect(done.tasks.map((t) => [t.task_id, t.status, t.origin])).toEqual([["t1", "complete", "plan"], ["t2", "complete", "plan"]]);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.origin])).toEqual([["t1", "rejected", "plan"], ["t2", "pending", "plan"]]);
     expect(done.metrics.leadRuns).toBe(1);
     // A turn that decided nothing read nothing: the inbox is still unread.
     expect(done.lastLeadAt).toBe(0);
   });
 
-  it.each([
-    ["did not finish", { status: "failed", error: "boom" }],
-    ["gave no usable answer", { summary: "The plan looks fine to me!" }],
-  ])("keeps the inbox unread when the lead %s — the next turn reads the message again; a usable {} marks it read", async (_what, first) => {
+  it("marks the inbox read on a usable answer: the next turn is not shown the message again", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [
-      { summary: JSON.stringify([
-        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
-        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
-        { task_description: "Write the README", depends_on: ["t2"], files_hint: ["README.md"] },
-        { task_description: "Add a licence", depends_on: ["t3"], files_hint: ["LICENSE"] },
-      ]) },
+      { summary: PLAN },
       { summary: "Built index.html.", filesTouched: ["index.html"] },
-      { summary: "Wired app.js.", filesTouched: ["app.js"] },
-      { summary: "Wrote the README.", filesTouched: ["README.md"] },
+      { summary: "Built index.html again.", filesTouched: ["index.html"] },
       { summary: "Added the licence.", filesTouched: ["LICENSE"] },
     ];
-    leadAnswers = [first, { summary: "{}" }];
-    // t1's worker tells the lead while it works; every task then settles clean.
+    reviews = rejectT1Twice();
+    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: "Add a licence", files_hint: ["LICENSE"] }], note: "asked for" }) }, { summary: "{}" }];
+    // t1's worker tells the lead while it works.
     const wait = runner.waitForRun.getMockImplementation()!;
     let told = false;
     runner.waitForRun.mockImplementation(async (id: string, ms?: number) => {
@@ -1827,38 +2812,31 @@ describe("the lead (coding_team_dynamic)", () => {
     });
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "complete"], ["t3", "complete"], ["t4", "complete"]]);
-    // The message calls the lead after t1; that turn decides nothing, so the
-    // same message calls it again after t2, clean as t2 is. That turn's {}
-    // reads it, and t3 — clean, nothing new said — calls no one.
-    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "lead", "worker", "reviewer", "lead", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.status).toBe("failed");
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "rejected"], ["t2", "pending"], ["t3", "complete"]]);
+    // The broken chain calls the lead after t1's last try; its add reads the
+    // inbox. t3 settles clean on a board still broken: one more turn, shown no message.
+    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer", "lead", "worker", "reviewer", "lead"]);
     const leads = starts.filter((s) => role(s) === "lead");
-    expect(leads.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
-    for (const lead of leads) {
-      expect(String(lead.task)).toContain("Messages to the lead since your last turn:\n- worker run-00000002 (task t1): The licence is the owner's call.");
-    }
+    expect(leads.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t3"]);
+    expect(String(leads[0].task)).toContain("Messages to the lead since your last turn:\n- worker run-00000002 (task t1): The licence is the owner's call.");
+    expect(String(leads[1].task)).toContain("Messages to the lead since your last turn: (none)");
     expect(done.metrics.leadRuns).toBe(2);
-    expect(done.alerts).toBe(1);
+    expect(done.alerts).toBe(0);
     expect(done.lastLeadAt).toBeGreaterThan(0);
   });
 
-  it("calls the lead back ONCE on a message it could not decide — a lead that never answers must not spend the team's alerts", async () => {
+  it("is not called by a message, a blocker or a rejection with a try left — the work goes on, and the message waits for its next turn", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [
-      { summary: JSON.stringify([
-        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
-        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
-        { task_description: "Write the README", depends_on: ["t2"], files_hint: ["README.md"] },
-        { task_description: "Add a licence", depends_on: ["t3"], files_hint: ["LICENSE"] },
-      ]) },
-      { summary: "Built index.html.", filesTouched: ["index.html"] },
+      { summary: THREE },
+      { summary: "Built index.html, no title.", filesTouched: ["index.html"] },
+      { summary: BLOCKED_INDEX, filesTouched: ["index.html"] },
       { summary: "Wired app.js.", filesTouched: ["app.js"] },
       { summary: "Wrote the README.", filesTouched: ["README.md"] },
-      { summary: "Added the licence.", filesTouched: ["LICENSE"] },
     ];
-    // Prose, every time it is asked.
-    leadAnswers = Array.from({ length: 4 }, () => ({ summary: "The plan looks fine to me!" }));
+    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "No <title>." }) }];
+    leadAnswers = [{ summary: RETIRE_T3 }];
     const wait = runner.waitForRun.getMockImplementation()!;
     let told = false;
     runner.waitForRun.mockImplementation(async (id: string, ms?: number) => {
@@ -1872,48 +2850,31 @@ describe("the lead (coding_team_dynamic)", () => {
     });
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    // Once after t1, once more after t2 — then t3 and t4, clean with nothing
-    // new said, call no one, and the team is not stopped at MAX_ALERTS.
     expect(done.status).toBe("done");
-    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete", "complete", "complete"]);
-    expect(starts.filter((s) => role(s) === "lead").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
-    expect(done.metrics.leadRuns).toBe(2);
-    expect(done.alerts).toBe(2);
-    // Never read: a lead that does run later, for a reason of its own, is still shown it.
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete", "complete"]);
+    // t2 and t3 go side by side once t1 is in: four workers and their reviewers, no lead among them.
+    expect(starts.map(role).sort()).toEqual([...Array<string>(4).fill("reviewer"), "planner", ...Array<string>(4).fill("worker")].sort());
+    expect(done.metrics.leadRuns).toBe(0);
+    expect(leadAnswers).toHaveLength(1);
+    // The message is on the board for the lead's next turn, whenever that is; nobody answers it.
+    expect(done.log.find((e) => e.type === "message")).toMatchObject({ payload: { to: "lead", text: "The licence is the owner's call." } });
     expect(done.lastLeadAt).toBe(0);
-  });
-
-  it("counts a worker still being started when the lead asks for a seat — it would take that worker's place otherwise", async () => {
-    runner.getTeamDynamic.mockResolvedValue(true);
-    outcomes = [{ summary: PARALLEL_PLAN }, { summary: BLOCKED_INDEX, filesTouched: ["index.html"] }, { summary: "styles", filesTouched: ["styles.css"] }, { summary: "app", filesTouched: ["app.js"] }];
-    // t2's worktree is still being added when t1 settles and the lead asks.
-    let releaseT2: () => void = () => {};
-    const t2Worktree = new Promise<void>((resolve) => { releaseT2 = resolve; });
-    plumbing.addWorkerWorktree.mockImplementation(async (dir: string, teamId: string, taskId: string, attempt: number) => {
-      if (taskId === "t2") await t2Worktree;
-      return { ok: true, path: `${dir}/.clawbox/worktrees/${taskId}-${attempt}`, branch: `clawbox/${teamId}-${taskId}-${attempt}` };
-    });
-    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }) => {
-      if (who.role === "lead") releaseT2();
-      return { ok: true };
-    });
-    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
-    const done = await finished(board.id);
-    expect(done.status).toBe("done");
-    const leadAsks = runner.teamSpawnSlot.mock.calls.filter(([who]) => (who as { role: string }).role === "lead");
-    expect(leadAsks[0]).toEqual([{ id: board.id, role: "lead", taskId: "t1" }, 1]);
+    expect(done.alerts).toBe(0);
   });
 
   it("spends no run when nothing is left to decide: every task left is complete", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
-    outcomes = [{ summary: JSON.stringify([{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }]) }, { summary: "fixed", filesTouched: ["README.md"] }];
+    inSite();
+    outcomes = [{ summary: JSON.stringify([{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }]) }, { summary: "fixed", filesTouched: ["README.md"], writes: { "README.md": "fixed\n" } }];
     const board = await team.startTeam({ goal: "Fix the typo", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
-    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer"]);
+    // A one-task plan is one ordinary run (no team role): no reviewer, no lead.
+    expect(starts.map((s) => (s.team as { role: string } | null)?.role ?? "run")).toEqual(["planner", "run"]);
+    expect(done.metrics.leadRuns).toBe(0);
   });
 
-  it("spends no run on a task accepted clean — no blocker, no message to the lead — and logs nothing for the skip", async () => {
+  it("spends no run on a task accepted clean, and logs nothing for the skip", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [{ summary: PLAN }, { summary: "Built index.html.", filesTouched: ["index.html"] }, { summary: "Wired app.js.", filesTouched: ["app.js"] }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
@@ -1928,69 +2889,69 @@ describe("the lead (coding_team_dynamic)", () => {
     expect(done.log.filter((e) => /\blead\b/i.test(e.message))).toEqual([]);
   });
 
-  it("gives every worker that settled while it thought ONE further turn — not one each", async () => {
-    // Four side by side, so three are still going when the first one calls the
-    // lead: the box's three slots would leave only two beside it. The batch is
-    // the same rule for any number.
+  it("gives every task that settled since its last look ONE turn, the batch named — not a turn each", async () => {
+    // Four side by side; t1 is rejected for good while the others finish, so the
+    // board is exhausted and broken only once all of them are in.
     teamSlots.value = 4;
     runner.getTeamDynamic.mockResolvedValue(true);
     runner.teamSpawnSlot.mockResolvedValue({ ok: true });
-    outcomes = [{ summary: shaped({ parallelism: 4, review: "none", rationale: "" }, JSON.stringify([
+    outcomes = [{ summary: shaped({ parallelism: 4, review: "each", rationale: "" }, JSON.stringify([
       { task_description: "Scaffold index.html", files_hint: ["index.html"] },
       { task_description: "Write styles.css", files_hint: ["styles.css"] },
       { task_description: "Write about.html", files_hint: ["about.html"] },
       { task_description: "Write the README", files_hint: ["README.md"] },
-      { task_description: "Check every page links styles.css", depends_on: ["t1", "t2", "t3", "t4"], files_hint: ["index.html", "about.html"] },
+      // One page named, not both: a plan whose tasks mostly name the same files runs as one run.
+      { task_description: "Check every page links styles.css", depends_on: ["t1", "t2", "t3", "t4"], files_hint: ["index.html"] },
     ])) }];
-    // Each worker's outcome by its task, whatever order they start in.
+    // Each worker's outcome by its task, whatever order they start in; t1's reviewer rejects it each time, the others' accept.
     const byTask: Record<string, Record<string, unknown>> = {
-      t1: { summary: BLOCKED_INDEX, filesTouched: ["index.html"] },
+      t1: { summary: "index", filesTouched: ["index.html"] },
       t2: { summary: "Wrote styles.css.", filesTouched: ["styles.css"] },
       t3: { summary: "Wrote about.html.", filesTouched: ["about.html"] },
-      t4: { summary: "Wrote the README.\nBLOCKED: the licence is the owner's call.", filesTouched: ["README.md"] },
-      t5: { summary: "Every page links it.", filesTouched: [] },
+      t4: { summary: "Wrote the README.", filesTouched: ["README.md"] },
     };
-    // t2–t4 finish only once the lead after t1 has started, and that lead
-    // answers only once all three are on the board.
-    let leadUp: () => void = () => {};
-    const leadStarted = new Promise<void>((resolve) => { leadUp = resolve; });
+    const verdictFor = (taskId: string) => JSON.stringify(taskId === "t1" ? { verdict: "rejected", notes: "No <title>." } : { verdict: "accepted", notes: "" });
+    // t2–t4 finish only once t1's second worker is up.
+    let secondT1: () => void = () => {};
+    const secondT1Up = new Promise<void>((resolve) => { secondT1 = resolve; });
+    let t1Starts = 0;
     const start = runner.startRun.getMockImplementation()!;
     runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
-      if (role(input) === "lead") leadUp();
+      if (role(input) === "worker" && (input.team as { taskId: string }).taskId === "t1" && ++t1Starts === 2) secondT1();
       return start(input);
     });
     const wait = runner.waitForRun.getMockImplementation()!;
-    const onBoard = (teamId: string, ids: string[]) => ids.every((t) => team.getTeam(teamId)?.tasks.find((x) => x.task_id === t)?.review?.verdict === "accepted");
     runner.waitForRun.mockImplementation(async (id: string, ms?: number) => {
       const run = runs.get(id);
       const who = run?.team as { id: string; role: string; taskId: string } | null;
       if (run && who?.role === "worker" && run.status === "running") {
-        if (["t2", "t3", "t4"].includes(who.taskId)) await leadStarted;
+        if (["t2", "t3", "t4"].includes(who.taskId)) await secondT1Up;
         return Object.assign(run, { status: "completed", completedAt: Date.now() }, byTask[who.taskId]);
       }
-      if (who?.role === "lead" && who.taskId === "t1") {
-        while (!onBoard(who.id, ["t2", "t3", "t4"])) await new Promise((resolve) => setTimeout(resolve, 5));
+      if (run && who?.role === "reviewer" && run.status === "running") {
+        return Object.assign(run, { status: "completed", completedAt: Date.now(), summary: verdictFor(who.taskId) });
       }
       return wait(id, ms);
     });
     const board = await team.startTeam({ goal: "Build the site", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(done.status).toBe("done");
+    expect(done.status).toBe("failed");
     const leads = runner.startRun.mock.calls.map(([input]) => input as Record<string, unknown>).filter((input) => role(input) === "lead");
-    // The lead after t1, then ONE more for t2, t3 and t4 — the old loop ran three.
-    expect(leads).toHaveLength(2);
-    expect(leads[0]).toMatchObject({ team: { role: "lead", taskId: "t1" } });
-    const batch = String(leads[1].task);
-    for (const t of ["t2", "t3", "t4"]) expect(batch).toContain(`Task ${t} just settled (complete, accepted)`);
-    expect(batch).toContain("BLOCKED: the licence is the owner's call.");
-    expect(batch).not.toContain("Task t1 just settled");
-    expect(done.metrics.leadRuns).toBe(2);
-    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete", "complete", "complete", "complete"]);
+    // ONE turn, once nothing could start — not one after each of the five
+    // settles — with the board as it stands: t5 is what is left to decide on.
+    expect(leads).toHaveLength(1);
+    const batch = String(leads[0].task);
+    expect(batch).toMatch(/Task t[1-4] just settled \((rejected|complete)/);
+    expect(batch).toContain("pending now: t5");
+    expect(done.metrics.leadRuns).toBe(1);
+    expect(done.alerts).toBe(0);
+    expect(done.tasks.map((t) => t.status)).toEqual(["rejected", "complete", "complete", "complete", "pending"]);
   });
 
   it("reads the switch once, when the team starts", async () => {
     runner.getTeamDynamic.mockResolvedValueOnce(true).mockResolvedValue(false);
-    outcomes = [{ summary: PLAN }, { summary: BLOCKED_INDEX, filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
+    outcomes = [{ summary: PLAN }, { summary: "index", filesTouched: ["index.html"] }, { summary: "index again", filesTouched: ["index.html"] }];
+    reviews = rejectT1Twice();
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.dynamic).toBe(true);
@@ -2114,17 +3075,21 @@ describe("the planner's shape", () => {
     expect(done.finalReview).toBeNull();
   });
 
-  it("still rejects by rule under review \"none\": a worker that strayed is offered the task once more", async () => {
+  it("still rejects by rule under review \"none\" for a refused write — a stray alone is a note and the task is accepted", async () => {
     outcomes = [
       { summary: shaped({ parallelism: 1, review: "none", rationale: "" }, PLAN) },
-      { summary: "index", filesTouched: ["index.html", "secrets.env"] },
-      { summary: "index again", filesTouched: ["index.html"] },
+      { summary: "index", filesTouched: ["index.html", "secrets.env"], permissionDenials: 1, deniedActions: ["Write: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/secrets.env"] },
+      { summary: "index again", filesTouched: ["index.html", "secrets.env"] },
       { summary: "app", filesTouched: ["app.js"] },
     ];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
-    expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
+    expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1, review: { verdict: "accepted" } });
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+      "Worker run-00000002 touched files outside its task's hint: secrets.env — the reviewer judges whether they belong to the task.",
+      "Worker run-00000003 touched files outside its task's hint: secrets.env — the reviewer judges whether they belong to the task.",
+    ]);
     expect(done.metrics).toMatchObject({ tasksRejected: 1, tasksAcceptedFirstTry: 1 });
   });
 });
@@ -2295,7 +3260,7 @@ describe("the project's own tests on the merged result (TASK-1321)", () => {
     expect(done.finalReview).toMatchObject({ verdict: "accepted" });
   });
 
-  it("puts a red suite before the lead first, when the team has one", async () => {
+  it("sends a red suite's suspect straight back to a worker — a re-offer with a try left calls no lead, even on a dynamic team", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     project({ "convert.py": CLI, "tests/test_convert.py": CLI_TESTS });
     outcomes = [
@@ -2308,11 +3273,11 @@ describe("the project's own tests on the merged result (TASK-1321)", () => {
     const done = await finished(board.id);
 
     expect(done.status).toBe("failed");
-    // Both workers were accepted clean, so the lead had nothing to decide until the suite spoke.
-    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "lead", "worker"]);
-    expect(starts[3].team).toMatchObject({ role: "lead", taskId: "t2" });
-    expect(String(starts[3].task)).toContain("rejected: The project's own tests fail on the merged result");
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "worker"]);
+    expect(starts[3].team).toMatchObject({ role: "worker", taskId: "t2" });
+    expect(String(starts[3].task)).toContain("A previous attempt was rejected: The project's own tests fail on the merged result");
     expect(String(starts[3].task)).toContain("test_convert.TestConvert.test_mi_to_km");
+    expect(done.metrics.leadRuns).toBe(0);
   });
 });
 
@@ -2346,6 +3311,41 @@ describe("the team's figures", () => {
     const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${board.id}.json`), "utf8"));
     expect(onDisk.metrics).toEqual(done.metrics);
   });
+
+  it("copies each run's tokens by kind from its own record onto the cast list and adds them up, in total and by role", async () => {
+    const kind = (input: number, output: number, cacheCreation: number, cacheRead: number) => ({ input, output, cacheCreation, cacheRead });
+    outcomes = [
+      { summary: PLAN, tokensUsed: 1_100, tokenBreakdown: kind(600, 100, 400, 0) },
+      { summary: "index", filesTouched: ["index.html"], tokensUsed: 20_000, tokenBreakdown: kind(2_000, 500, 1_500, 16_000) },
+      { summary: "app", filesTouched: ["app.js"], tokensUsed: 30_000, tokenBreakdown: kind(3_000, 700, 1_300, 25_000) },
+    ];
+    reviews = [
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 5_000, tokenBreakdown: kind(1_000, 200, 0, 3_800) },
+      // A record without the field: its total counts, its kinds stay off the cast list.
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 6_000 },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.runs.map((r) => [r.role, r.tokens, r.tokenBreakdown])).toEqual([
+      ["planner", 1_100, kind(600, 100, 400, 0)],
+      ["worker", 20_000, kind(2_000, 500, 1_500, 16_000)],
+      ["reviewer", 5_000, kind(1_000, 200, 0, 3_800)],
+      ["worker", 30_000, kind(3_000, 700, 1_300, 25_000)],
+      ["reviewer", 6_000, undefined],
+    ]);
+    expect(done.metrics.tokensUsed).toBe(62_100);
+    expect(done.metrics.tokenBreakdown).toEqual(kind(6_600, 1_500, 3_200, 44_800));
+    expect(done.metrics.tokenBreakdownByRole).toEqual({
+      planner: kind(600, 100, 400, 0),
+      worker: kind(5_000, 1_200, 2_800, 41_000),
+      reviewer: kind(1_000, 200, 0, 3_800),
+      lead: kind(0, 0, 0, 0),
+    });
+    const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${board.id}.json`), "utf8"));
+    expect(onDisk.runs.map((r: { tokenBreakdown?: unknown }) => r.tokenBreakdown)).toEqual(done.runs.map((r) => r.tokenBreakdown));
+    expect(onDisk.metrics).toEqual(done.metrics);
+  });
 });
 
 describe("the worker's brief: when to use team_message", () => {
@@ -2374,5 +3374,847 @@ describe("the worker's brief: when to use team_message", () => {
 
   it("puts scratch files in the evidence folder only — never in /tmp, never beside the project", () => {
     expect(team.WORKER_BRIEF).toContain("Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.");
+  });
+});
+
+describe("a second team: queued, not refused", () => {
+  const ONE_TASK = JSON.stringify([{ task_description: "Scaffold index.html", files_hint: ["index.html"] }]);
+
+  it("waits on disk with its place while one works, and starts by itself when that one settles", async () => {
+    inSite();
+    outcomes = [
+      { summary: ONE_TASK },
+      { summary: "index done", filesTouched: ["index.html"], writes: { "index.html": "<h1>1</h1>\n" } },
+      { summary: ONE_TASK },
+      { summary: "index done again", filesTouched: ["index.html"], writes: { "index.html": "<h1>2</h1>\n" } },
+    ];
+    // The first team's planner holds until the second has been asked for.
+    const hold: { release?: () => void } = {};
+    const plain = runner.waitForRun.getMockImplementation()!;
+    runner.waitForRun.mockImplementationOnce((id: string) => new Promise((r) => { hold.release = () => r(plain(id, 0)); }));
+    const first = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const second = await team.startTeam({ goal: "Build it again", directory: "site", source: "agent" });
+    expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
+    // Read back from disk, a queued team is not an orphan of a restart.
+    expect(team.getTeam(second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
+    expect(team.listTeams().find((t) => t.id === second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
+    // The planner reaches its wait a few ticks after the start: release it once it is there.
+    for (let i = 0; i < 500 && !hold.release; i++) await new Promise((r) => setTimeout(r, 10));
+    hold.release!();
+
+    expect((await finished(first.id)).status).toBe("done");
+    const done = await finished(second.id);
+    expect(done.status).toBe("done");
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([
+      `Team → queued: Waiting for team ${first.id} to finish`,
+      "Team → planning: Its turn in the queue came",
+    ]));
+    expect(done.queuePosition).toBeUndefined();
+  });
+
+  it("is taken out of the queue by the owner's cancel alone, never by a stop", async () => {
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
+    const first = await team.startTeam({ goal: "g", source: "owner" });
+    const second = await team.startTeam({ goal: "h", source: "agent" });
+    expect(() => team.stopTeam(second.id)).toThrow(/Only the owner can cancel a queued team/);
+    const canceled = team.cancelQueuedTeam(second.id);
+    expect(canceled.status).toBe("stopped");
+    expect(canceled.log[canceled.log.length - 1]).toMatchObject({ actor: { kind: "owner" }, message: "Team → stopped: Canceled by the owner before it started" });
+    Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
+    outcomes = [{ summary: "nope" }];
+    release();
+    await finished(first.id);
+    // Canceled stays canceled: nothing started it when the box came free.
+    expect(team.getTeam(second.id)?.status).toBe("stopped");
+  });
+
+  it("is started at boot when it was waiting at a restart", async () => {
+    // What a restart leaves: a queued board on disk and no team in this process.
+    const board = await import("@/lib/coding-team-board");
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: site, source: "owner" }, { kind: "owner" });
+    board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting for team team-00000000 to finish");
+    board.saveBoard(queued);
+    outcomes = [{ summary: ONE_TASK }, { summary: "index done", filesTouched: ["index.html"], writes: { "index.html": "<h1>1</h1>\n" } }];
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+    const started = await team.startNextQueuedTeam();
+    expect(started?.id).toBe(queued.id);
+    expect((await finished(queued.id)).status).toBe("done");
+  });
+
+  it("waits while the coding agent is switched off rather than failing", async () => {
+    const board = await import("@/lib/coding-team-board");
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting");
+    board.saveBoard(queued);
+    runner.isCodingAgentEnabled.mockResolvedValue(false);
+    expect(await team.startNextQueuedTeam()).toBeNull();
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+  });
+});
+
+
+describe("the pull request the goal asks for: the orchestrator's, never a worker's", () => {
+  const GREEN = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 2, failed: 0, pending: 0 }, noChecks: false, isDraft: false, labels: [] };
+  const RED = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 1, failed: 1, pending: 0 }, noChecks: false, isDraft: false, labels: [] };
+  const PENDING = { ...GREEN, checks: { total: 2, passed: 1, failed: 0, pending: 1 } };
+  const FAILING = { name: "test (20.x)", state: "fail", url: "https://github.com/o/r/actions/runs/9/job/1" };
+  const LOG = "test (20.x)\tRun\t2026-10-11T10:00:00.1Z  FAIL  app.test.js > the form > submits\ntest (20.x)\tRun\t2026-10-11T10:00:00.2Z  ❯ app.js:3:1";
+
+  beforeEach(() => {
+    team._setTeamPrTimingForTests(5, 60_000);
+    github.openPullRequest.mockResolvedValue({ ok: true, number: 41, url: "https://github.com/o/r/pull/41" });
+    github.mergePullRequest.mockResolvedValue({ ok: true });
+    github.pushBranch.mockResolvedValue({ ok: true });
+    github.readReviewSnapshot.mockResolvedValue({ checks: [FAILING] });
+    github.readFailedCheckLogs.mockResolvedValue([{ check: FAILING, log: LOG }]);
+  });
+
+  it("opens it only once every task is accepted, and merges it when the goal asks and every check passes", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValueOnce(PENDING).mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it, open a pull request and merge it when CI is green", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(github.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(github.openPullRequest.mock.calls[0][0]).toMatchObject({ directory: "/home/clawbox/Projects/site", branch: `clawbox/${board.id}`, base: "master", title: "Coding team: Build it, open a pull request and merge it when CI is green" });
+    expect(github.mergePullRequest).toHaveBeenCalledTimes(1);
+    expect(github.mergePullRequest).toHaveBeenCalledWith("/home/clawbox/Projects/site", 41);
+    expect(done.pr).toMatchObject({ number: 41, phase: "merged", merge: true, ciRounds: 0 });
+    // After both acceptances, never before.
+    const messages = done.log.map((e) => e.message);
+    const opened = messages.findIndex((m) => m.startsWith("Opened pull request #41"));
+    expect(opened).toBeGreaterThan(messages.findIndex((m) => m.startsWith("Task t2 accepted")));
+    expect(messages).toContain("Merged pull request #41: every task accepted, the suite green, the final review passed and every check green.");
+  });
+
+  it("leaves it open, green, when the goal asked for a pull request and no merge", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it and open a PR", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "green", merge: false });
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("opens none for a goal that asks for none", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    expect((await finished(board.id)).pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("re-offers the task a red CI points at, with the failure, pushes the fix and watches again", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "app fixed", filesTouched: ["app.js"] },
+    ];
+    github.readPullRequest.mockResolvedValueOnce(RED).mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it, open a PR and merge it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "merged", ciRounds: 1 });
+    expect(done.pr?.failure).toMatchObject({ tests: ["app.test.js > the form > submits"], files: ["app.test.js", "app.js"] });
+    // t2's hint is app.js: it — and only it — went back, not counted against its tries.
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.ciReoffers])).toEqual([["t1", "complete", 1, 0], ["t2", "complete", 2, 1]]);
+    const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
+    expect(workers.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t2"]);
+    const retry = String(workers[2].task);
+    expect(retry).toContain("A previous attempt was rejected: CI failed on pull request #41: test (20.x); failing tests: app.test.js > the form > submits.");
+    expect(retry).toMatch(/Do not push: the team's orchestrator pushes the fix/);
+    expect(github.pushBranch).toHaveBeenCalledTimes(1);
+    expect(github.pushBranch).toHaveBeenCalledWith("/home/clawbox/Projects/site", `clawbox/${board.id}`);
+    expect(done.log.find((e) => e.type === "ci")).toMatchObject({ actor: { kind: "system" }, task_id: "t2" });
+    // A red CI is not a guardrail: no alert.
+    expect(done.alerts).toBe(0);
+  });
+
+  it("fails the team, naming what still fails, after MAX_TEAM_CI_ROUNDS rounds of red", async () => {
+    outcomes = [{ summary: PLAN }, ...Array.from({ length: 6 }, (_, i) => ({ summary: `work ${i}`, filesTouched: [i === 0 ? "index.html" : "app.js"] }))];
+    github.readPullRequest.mockResolvedValue(RED);
+    const board = await team.startTeam({ goal: "Build it and open a PR", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The pull request's CI is still red after 2 rounds of fixes: CI failed on pull request #41: test (20.x); failing tests: app.test.js > the form > submits.");
+    expect(done.pr).toMatchObject({ phase: "failed", ciRounds: 2 });
+    expect(github.pushBranch).toHaveBeenCalledTimes(2);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("marks a draft ready once, and leaves it open — never polling for ever — when GitHub refuses", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValue({ ...GREEN, isDraft: true });
+    github.markPullRequestReady.mockResolvedValue({ ok: false, detail: "gh: could not mark it ready." });
+    const board = await team.startTeam({ goal: "Build it, open a pull request and merge it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "left_open", detail: "gh: could not mark it ready." });
+    expect(github.markPullRequestReady).toHaveBeenCalledTimes(1);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("fails the team with GitHub's reason when the pull request cannot be opened", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.openPullRequest.mockResolvedValue({ ok: false, detail: "This project has no GitHub remote yet." });
+    const board = await team.startTeam({ goal: "Build it and open a pull request", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The goal asks for a pull request, and it could not be opened: This project has no GitHub remote yet.");
+  });
+});
+
+describe("a goal that asks for a pull request, in a project with no branch of its own", () => {
+  it("says on the board that none is opened, rather than skipping it in silence", async () => {
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/clawbox/data/code-projects/site", projectId: "site" });
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it and open a PR", projectId: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+    expect(done.log.map((e) => e.message)).toContain("The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project.");
+  });
+});
+
+
+describe("cost: run or team, the repo map, tokens per role, and the battery", () => {
+  const roleOf = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  const MAP = { files: ["index.html — the page", "app.js — its script"], entry_points: ["index.html"], test_commands: ["npm test -- --maxWorkers=1"], gotchas: ["app.js is loaded as a module"] };
+
+  it("runs a ONE-task plan as one ordinary run — no team branch, worktree or reviewer — and the board follows it", async () => {
+    inSite();
+    outcomes = [
+      { summary: JSON.stringify({ repo_map: MAP, tasks: [{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }] }), tokensUsed: 9_000 },
+      { summary: "Fixed the typo in README.md.", filesTouched: [`${site}/README.md`], tokensUsed: 41_000, writes: { "README.md": "# Site\n" } },
+    ];
+    const board = await team.startTeam({ goal: "Fix the typo in the readme", directory: "site", source: "agent" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    const single = starts[1];
+    // An ordinary run: in the project, the owner's goal first, the planner's map in its brief.
+    expect(single).toMatchObject({ directory: site, source: "agent" });
+    expect(single.team).toBeUndefined();
+    expect(single.readOnly).toBeUndefined();
+    expect(String(single.task).split("\n")[0]).toBe("Fix the typo in the readme");
+    expect(String(single.task)).toContain("The team's planner wrote it up as: Fix the typo in README.md");
+    expect(String(single.extraBrief)).toContain("Test commands: npm test -- --maxWorkers=1");
+    expect(plumbing.ensureTeamBranch).not.toHaveBeenCalled();
+    expect(plumbing.addWorkerWorktree).not.toHaveBeenCalled();
+    expect(done.branch).toBeNull();
+    expect(done.singleRun).toBe(true);
+    // The run settled the owner's usual way, with its own card: no second notice for the team — the chat still hears.
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam).not.toHaveBeenCalled();
+    expect(done.advice).toEqual({ reason: "one_task", overlap: 100 });
+    expect(done.tasks[0]).toMatchObject({ status: "complete", assigned_to: "run-00000002", result: "Fixed the typo in README.md.", review: { verdict: "accepted", notes: expect.stringMatching(/^Ran as a single run, and the files it names are present \(README\.md\)/) } });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/one task, so it runs as one ordinary run/)]));
+    expect(done.metrics.tokensByRole).toEqual({ planner: 9_000, worker: 41_000, reviewer: 0, lead: 0 });
+  });
+
+  it("fails the team with the run when that one run does not finish", async () => {
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }]) },
+      { status: "failed", error: "The harness exited." },
+    ];
+    const board = await team.startTeam({ goal: "Fix the typo", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toMatch(/did not finish: The harness exited/);
+    expect(done.tasks[0].status).toBe("failed");
+  });
+
+  it("hands the planner's repo map to every worker, said in its own worktree, and to every reviewer", async () => {
+    outcomes = [
+      { summary: JSON.stringify({ repo_map: { ...MAP, files: ["/home/clawbox/Projects/site/index.html — the page"] }, tasks: JSON.parse(PLAN) }) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.repoMap?.testCommands).toEqual(["npm test -- --maxWorkers=1"]);
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    const reviewers = starts.filter((s) => roleOf(s) === "reviewer");
+    expect(workers).toHaveLength(2);
+    expect(reviewers).toHaveLength(2);
+    for (const w of workers) {
+      expect(String(w.extraBrief)).toContain(team.WORKER_BRIEF);
+      expect(String(w.extraBrief)).toContain("Repo map — the team planner's map");
+      // The project's path, said in the worker's own copy of it.
+      expect(String(w.extraBrief)).toMatch(/\/\.clawbox\/worktrees\/t\d-1\/index\.html — the page/);
+    }
+    for (const r of reviewers) expect(String(r.extraBrief)).toContain("Test commands: npm test -- --maxWorkers=1");
+  });
+
+  it("starts ONE worker at a time on battery, says so, and shares no CPU budget it does not have", async () => {
+    power.onBattery = true;
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    expect(workers).toHaveLength(3);
+    // Nobody started beside a worker still going.
+    const workerIds = [...runs.values()].filter((r) => (r.team as { role?: string } | null)?.role === "worker").map((r) => String(r.id));
+    expect(workerIds.map((id) => liveWorkersAtStart[id])).toEqual([0, 0, 0]);
+    expect(workers.every((w) => w.cpuShare === 1)).toBe(true);
+    expect(done.log.map((e) => e.message)).toContain("The box is on battery: one worker at a time until it is plugged in again.");
+  });
+
+  it("on mains, shares the CPU budget between the workers the plan allows side by side", async () => {
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    expect(workers.every((w) => w.cpuShare === 3)).toBe(true);
+    expect(done.log.map((e) => e.message).filter((m) => /battery/.test(m))).toEqual([]);
+  });
+
+  it("puts each role's tokens on the figures", async () => {
+    outcomes = [
+      { summary: PLAN, tokensUsed: 10_000 },
+      { summary: "index done", filesTouched: ["index.html"], tokensUsed: 60_000 },
+      { summary: "app done", filesTouched: ["app.js"], tokensUsed: 30_000 },
+    ];
+    reviews = [
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 4_000 },
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 5_000 },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.metrics.tokensByRole).toEqual({ planner: 10_000, worker: 90_000, reviewer: 9_000, lead: 0 });
+    expect(done.metrics.tokensUsed).toBe(109_000);
+  });
+
+  it("runs a plan whose tasks mostly touch the same files as ONE ordinary run, says so up front, and keeps the advice", async () => {
+    inSite();
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Add the header to index.html", files_hint: ["index.html", "styles.css"] },
+        { task_description: "Add the footer to index.html", depends_on: ["t1"], files_hint: ["index.html", "styles.css"] },
+      ]) },
+      { summary: "Header and footer done.", filesTouched: ["index.html"], writes: { "index.html": "<header></header><footer></footer>\n", "styles.css": "header{}\n" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    expect(plumbing.ensureTeamBranch).not.toHaveBeenCalled();
+    expect(String(starts[1].task)).toContain("1. Add the header to index.html (files: index.html, styles.css)\n2. Add the footer to index.html");
+    expect(done.singleRun).toBe(true);
+    expect(done.advice).toEqual({ reason: "overlap", overlap: 100 });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too: side by side they would only conflict, so its 2 tasks run as one ordinary run/)]));
+    expect(done.tasks.map((t) => [t.status, t.assigned_to, t.review?.verdict])).toEqual([["complete", "run-00000002", "accepted"], ["complete", "run-00000002", "accepted"]]);
+  });
+});
+
+describe("per-role models: each run's own account, the cost by provider", () => {
+  const roleOfStart = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  const NOT_CONNECTED = "Anthropic is not connected on this ClawBox.";
+  /** A team on two accounts: its workers on ClawBox AI's flash tier, everything else on Anthropic. */
+  const MIXED = roleMap({
+    planner: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
+    worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false },
+    reviewer: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
+  });
+  /** The runner as it starts a team's fresh run: on its role's provider and model, the record saying so. */
+  function startsOnRole(map: RoleModelMap) {
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const t = input.team as { role: string };
+      const modelRole = t.role === "lead" ? "planner" : (t.role as "planner" | "worker" | "reviewer");
+      const r = map[modelRole];
+      return Object.assign(fakeRun(input), { provider: r.provider, requestedModel: r.model, modelRole, model: null, modelsUsed: [] });
+    });
+  }
+  /** A plan still writing the task `role` of before 2026-10-30: the words are not read. */
+  const PLAN = JSON.stringify([
+    { task_description: "Scrape the catalogue into data/items.json", files_hint: ["data/items.json"], role: "bulk" },
+    { task_description: "Build the page from data/items.json", depends_on: ["t1"], files_hint: ["index.html"], role: "worker" },
+  ]);
+  const ACCEPTED = JSON.stringify({ verdict: "accepted", notes: "" });
+
+  it("keeps every run's own provider and model, splits the cost by provider, and reads no task role off a plan", async () => {
+    runner.teamRoleModelMap.mockImplementation(async () => MIXED);
+    startsOnRole(MIXED);
+    outcomes = [
+      { summary: PLAN, tokensUsed: 5_000 },
+      { summary: "Scraped 400 items.\nCould not finish: two pages timed out.", filesTouched: ["data/items.json"], tokensUsed: 80_000, model: "deepseek-v4-flash" },
+      { summary: "Built the page.", filesTouched: ["index.html"], tokensUsed: 30_000, model: "deepseek-v4-flash" },
+    ];
+    reviews = [{ summary: ACCEPTED, tokensUsed: 2_000 }, { summary: ACCEPTED, tokensUsed: 3_000 }];
+    const board = await team.startTeam({ goal: "Scrape the catalogue and build a page from it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.map(roleOfStart)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+    // The plan's `role` words reach neither the board nor a worker's start.
+    expect(done.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
+    expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => w.team)).toEqual([
+      { id: board.id, role: "worker", taskId: "t1" },
+      { id: board.id, role: "worker", taskId: "t2" },
+    ]);
+    // The planner's brief carries no cost table and no word of bulk.
+    expect(String(starts[0].extraBrief)).not.toMatch(/Team models|bulk|~\d+x/);
+    // Every run keeps its own account and model — what answered, once it settled.
+    const cast = done.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole]);
+    expect(cast).toEqual([
+      ["planner", null, "anthropic", "claude-sonnet-5", "planner"],
+      ["worker", "t1", "clawbox-ai", "deepseek-v4-flash", "worker"],
+      ["reviewer", "t1", "anthropic", "claude-sonnet-5", "reviewer"],
+      ["worker", "t2", "clawbox-ai", "deepseek-v4-flash", "worker"],
+      ["reviewer", "t2", "anthropic", "claude-sonnet-5", "reviewer"],
+    ]);
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 110_000, anthropic: 10_000, openai: 0 });
+    expect(done.metrics.tokensUsed).toBe(120_000);
+    // And the same off disk.
+    const { loadBoard } = await import("@/lib/coding-team-board");
+    const disk = loadBoard(board.id)!;
+    expect(disk.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole])).toEqual(cast);
+    expect(disk.metrics.tokensByProvider).toEqual(done.metrics.tokensByProvider);
+    expect(disk.tasks.map((t) => Object.hasOwn(t, "role"))).toEqual([false, false]);
+  });
+
+  it("refuses the team before any spawn when its planner, workers or reviewers cannot run — not_ready, naming the role, the provider and why", async () => {
+    runner.teamRoleModelMap.mockImplementation(async () => roleMap({
+      planner: { provider: "anthropic", model: "claude-sonnet-5", ready: false, problems: [NOT_CONNECTED] },
+      reviewer: { provider: "anthropic", model: "claude-sonnet-5", ready: false, problems: [NOT_CONNECTED] },
+    }));
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner" })).rejects.toMatchObject({
+      kind: "not_ready",
+      message: `The team's planner and reviewer run on Anthropic (anthropic), which cannot run right now: ${NOT_CONNECTED} Connect it, or choose another provider for the planner and reviewer under Team models in the Coding Agent settings.`,
+    });
+    // The workers, on the box's own account: refused the same way, in their own words.
+    runner.teamRoleModelMap.mockImplementation(async () => roleMap({ worker: { ready: false, problems: ["Claude Code is not installed.", "ClawBox AI is not connected."] } }));
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "agent" })).rejects.toMatchObject({
+      kind: "not_ready",
+      message: expect.stringMatching(/^The team's worker runs on ClawBox AI \(clawbox-ai\), which cannot run right now: Claude Code is not installed\. ClawBox AI is not connected\. Connect it/),
+    });
+    // Nothing was made, queued or spawned.
+    expect(runner.startRun).not.toHaveBeenCalled();
+    expect(team.listTeams()).toEqual([]);
+    expect(team.activeTeamId()).toBeNull();
+  });
+
+  it("starts the team when only the role models cannot be read: every run is still judged at its own spawn", async () => {
+    runner.teamRoleModelMap.mockRejectedValue(new Error("config unreadable"));
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    quiet.mockRestore();
+    expect(done.status).toBe("done");
+    expect(String(starts[0].extraBrief)).not.toContain("Team models");
+    // Runs whose records name no provider keep the cast list as it was.
+    expect(done.runs.every((r) => !("provider" in r) && !("model" in r))).toBe(true);
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0, openai: 0 });
+  });
+});
+
+/**
+ * The team's asked-for effort (2026-10-30, the Create card's Ultracode
+ * toggle): validated at the start, kept on the board, and handed to EVERY
+ * member run as its input effort — the runner's role caps and read-only clamp
+ * are what keep a planner at xhigh, not the orchestrator.
+ */
+describe("the team's effort", () => {
+  it("is kept on the board and handed to every run the team starts", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "ultracode" });
+    expect(board.effort).toBe("ultracode");
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.effort).toBe("ultracode");
+    expect(starts.length).toBeGreaterThanOrEqual(3);
+    const roles = new Set(starts.map((s) => ((s.team as { role?: string } | null)?.role ?? "single")));
+    expect(roles.has("planner")).toBe(true);
+    expect(roles.has("worker")).toBe(true);
+    for (const start of starts) expect(start.effort, String(start.team)).toBe("ultracode");
+  });
+
+  it("leaves every run's effort to the owner's setting when none was asked for", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done).not.toHaveProperty("effort");
+    for (const start of starts) expect(start.effort).toBeUndefined();
+  });
+
+  it("refuses a level the app does not offer before anything is made", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toBeInstanceOf(CodingAgentError);
+    expect(runner.startRun).not.toHaveBeenCalled();
+    expect(team.listTeams()).toEqual([]);
+  });
+});
+
+/** A planner that could not read the project hedged, and its plan was taken in silence (D2). */
+describe("a planner that planned without reading the project", () => {
+  const plannerStarts = () => starts.filter((s) => (s.team as { role?: string } | null)?.role === "planner");
+  const MAP = (files: string[]) => ({ files, entry_points: [], test_commands: [], gotchas: [] });
+  const BLIND = JSON.stringify({ repo_map: MAP(["index.html — source not inspected", "app.js — source not inspected"]), tasks: JSON.parse(PLAN) });
+  const READ = JSON.stringify({ repo_map: MAP(["index.html — the page", "app.js — its script"]), tasks: JSON.parse(PLAN) });
+  const WORK = [{ summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+  const notes = (done: { log: Array<{ type: string; message: string }> }) => done.log.filter((e) => e.type === "note").map((e) => e.message);
+  const alerts = (done: { log: Array<{ type: string; message: string }> }) => done.log.filter((e) => e.type === "alert").map((e) => e.message);
+
+  it("is asked once more in a FRESH read-only run, and the team goes on from the plan that read the project", async () => {
+    outcomes = [{ summary: BLIND }, { summary: READ }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(2);
+    // Not the first planner's session: that one believes it cannot read.
+    expect(plannerStarts()[1]).toMatchObject({ readOnly: true, directory: "/home/clawbox/Projects/site", team: { id: board.id, role: "planner", taskId: null } });
+    expect(plannerStarts()[1].resumeRunId).toBeUndefined();
+    expect(String(plannerStarts()[1].task)).toMatch(/^Build it\n/);
+    expect(String(plannerStarts()[1].task)).toContain("said you read no source");
+    expect(String(plannerStarts()[1].task)).toContain("Read, Grep, Glob and read-only git");
+    expect(plannerStarts()[1].extraBrief).toBe(plannerStarts()[0].extraBrief);
+    expect(notes(done)).toContain("The planner's plan was written without reading the project (its repo map says \"source not inspected\" (2 of 2 entries)); asking once more in a fresh read-only run.");
+    expect(done.alerts).toBe(0);
+    expect(done.agents.planner).toBe(2);
+    expect(done.plannerRunId).toBe("run-00000001");
+    expect(done.repoMap?.files).toEqual(["index.html — the page", "app.js — its script"]);
+  });
+
+  it("stands with ONE alert when the second plan is blind too, and the team goes on with it", async () => {
+    outcomes = [{ summary: BLIND }, { summary: `Source not inspected: the tools were unavailable.\n${BLIND}` }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(2);
+    expect(done.alerts).toBe(1);
+    expect(alerts(done)).toEqual(["ALERT: The planner planned without reading the project twice (its repo map says \"source not inspected\" (2 of 2 entries); its answer says \"Source not inspected\"); the plan stands with that caveat."]);
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete"]);
+  });
+
+  it("keeps the first plan, with an alert, when the fresh run gives none", async () => {
+    outcomes = [{ summary: BLIND }, { status: "failed", error: "The harness exited." }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.alerts).toBe(1);
+    expect(alerts(done)[0]).toMatch(/^ALERT: The planner was asked again and gave no plan \(The planner did not finish its answer: The harness exited\.\); the first plan, written without reading the project \(its repo map says "source not inspected"/);
+    expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
+  });
+
+  /** The box refuses every planner start after the first `allowed` for good — the way a switch turned off mid-team is refused. */
+  function refusePlannerAfter(allowed: number): void {
+    const slot = runner.teamSpawnSlot.getMockImplementation()!;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }, starting?: number) =>
+      who.role === "planner" && plannerStarts().length >= allowed ? { ok: false, wait: false, reason: "The coding agent is switched off." } : slot(who, starting));
+  }
+  const FIRST_STANDS = "the first plan, written without reading the project (its repo map says \"source not inspected\" (2 of 2 entries)), stands with that caveat.";
+
+  it("keeps the first plan, with ONE alert, when the fresh run cannot be started, and the team goes on with it", async () => {
+    refusePlannerAfter(1);
+    outcomes = [{ summary: BLIND }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(1);
+    expect(done.alerts).toBe(1);
+    expect(alerts(done)).toEqual([`ALERT: The planner could not be asked again (The coding agent is switched off); ${FIRST_STANDS}`]);
+    expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete"]);
+  });
+
+  it("keeps the first plan, with an alert, when a re-ask of the fresh run's answer cannot be started", async () => {
+    refusePlannerAfter(2);
+    outcomes = [{ summary: BLIND }, { summary: "I read both files; the plan is to write the page, then its script." }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(2);
+    expect(alerts(done).at(-1)).toBe(`ALERT: The planner could not be asked again (The coding agent is switched off); ${FIRST_STANDS}`);
+    expect(done.repoMap?.files).toEqual(["index.html — source not inspected", "app.js — source not inspected"]);
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete"]);
+  });
+
+  it("posts no plan when the owner stopped the team while the fresh run was being refused", async () => {
+    const slot = runner.teamSpawnSlot.getMockImplementation()!;
+    let boardId = "";
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }, starting?: number) => {
+      if (who.role !== "planner" || plannerStarts().length < 1) return slot(who, starting);
+      team.stopTeam(boardId);
+      return { ok: false, wait: false, reason: "The coding agent is switched off." };
+    });
+    outcomes = [{ summary: BLIND }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    boardId = board.id;
+    const done = await finished(board.id);
+    expect(done.status).toBe("stopped");
+    expect(done.tasks).toEqual([]);
+    expect(done.alerts).toBe(0);
+    expect(starts.filter((s) => (s.team as { role?: string } | null)?.role === "worker")).toHaveLength(0);
+  });
+
+  it("asks nothing more of a plan that read the project", async () => {
+    outcomes = [{ summary: READ }, ...WORK];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plannerStarts()).toHaveLength(1);
+    expect(done.alerts).toBe(0);
+    expect(done.log.map((e) => e.message).filter((m) => /without reading the project/.test(m))).toEqual([]);
+  });
+});
+
+/** A task naming every file the others own made every task overlap, and the team one run, in silence (D2). */
+describe("a plan with a catch-all task", () => {
+  const roleOf = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  const plan = (thirdDependsOn: string[]) => JSON.stringify([
+    { task_description: "Write index.html", files_hint: ["index.html"] },
+    { task_description: "Write app.js", files_hint: ["app.js"] },
+    { task_description: "Wire the page to its script", depends_on: thirdDependsOn, files_hint: ["index.html", "app.js"] },
+  ]);
+
+  it("runs as planned when the catch-all is the integration step that waits for every other task, and says why", async () => {
+    outcomes = [
+      { summary: plan(["t1", "t2"]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "wired", filesTouched: ["index.html", "app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(false);
+    expect(starts.filter((s) => roleOf(s) === "worker")).toHaveLength(3);
+    expect(done.log.map((e) => e.message)).toContain("Task t3 names every file the other tasks own; it is the integration step and runs after them, so it is left out of the overlap measure and the team runs as planned.");
+    // The card says nothing it just decided against.
+    expect(done.advice).toBeNull();
+  });
+
+  it("still runs as one run when the catch-all does not wait for the others — and the note names it as the reason", async () => {
+    inSite();
+    outcomes = [
+      { summary: plan(["t1"]) },
+      { summary: "All three done.", writes: { "index.html": "<script src=app.js></script>\n", "app.js": "go();\n" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(true);
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    expect(done.advice).toEqual({ reason: "overlap", overlap: 100, catchAll: ["t3"] });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too \(Task t3 names every file the other tasks own, and it does not wait for all of them, so it is no integration step\): side by side they would only conflict, so its 3 tasks run as one ordinary run/)]));
+  });
+
+  it("still runs as one run when the others overlap without it, and says so", async () => {
+    inSite();
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "The header", files_hint: ["index.html", "styles.css"] },
+        { task_description: "The logo", files_hint: ["index.html", "styles.css", "logo.svg"] },
+        { task_description: "Wire it all", depends_on: ["t1", "t2"], files_hint: ["index.html", "styles.css", "logo.svg", "app.js"] },
+      ]) },
+      { summary: "Done.", writes: { "index.html": "<h1></h1>\n", "styles.css": "h1{}\n", "logo.svg": "<svg/>\n", "app.js": "go();\n" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(true);
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/\(Task t3 names every file the other tasks own, and the others still overlap 80% without it\)/)]));
+  });
+});
+
+/** One run doing several planned tasks: each task is judged on the files it named (D3). */
+describe("a plan run as a single run: each task's named files", () => {
+  it("rejects — for good — a task whose named files are missing or empty, accepts the one whose files are there, and fails the team naming them", async () => {
+    inSite();
+    // A folder that is there but holds nothing.
+    fs.mkdirSync(path.join(site, "docs"));
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "The page", files_hint: ["./index.html", "styles.css", "app.js"] },
+        { task_description: "The page's docs", depends_on: ["t1"], files_hint: ["index.html", "styles.css", "app.js", "docs/", "notes.md", "CHANGELOG.md"] },
+      ]) },
+      { summary: "Page and docs done.", writes: { "index.html": "<h1></h1>\n", "styles.css": "h1{}\n", "app.js": "go();\n", "notes.md": "" } },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.singleRun).toBe(true);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The run for the plan's tasks finished, but named deliverables are missing — t2: docs (empty), notes.md (empty), CHANGELOG.md (missing).");
+    const [t1, t2] = done.tasks;
+    expect(t1).toMatchObject({ status: "complete", review: { verdict: "accepted", notes: expect.stringMatching(/^Ran as a single run, and the files it names are present \(index\.html, styles\.css, app\.js\)/) } });
+    // Not left pending on a settled board: this run was every attempt it gets.
+    expect(t2).toMatchObject({ status: "rejected", review: { verdict: "rejected", notes: "Deliverable missing: docs (empty), notes.md (empty), CHANGELOG.md (missing)" } });
+    expect(done.log.map((e) => e.message)).toContain("Task t2 rejected: Deliverable missing: docs (empty), notes.md (empty), CHANGELOG.md (missing)");
+  });
+
+  /**
+   * A project with the run's work on its OWN branch only — `clawbox/run-00000002`,
+   * the single run's — and not on `main`, which the project folder is on.
+   */
+  async function workOnRunBranch(file: string): Promise<{ tree: string; git: (...args: string[]) => string }> {
+    const { execFileSync } = await import("child_process");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: site, encoding: "utf8", env });
+    git("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    git("add", "-A");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "clawbox/run-00000002");
+    fs.mkdirSync(path.dirname(path.join(site, file)), { recursive: true });
+    fs.writeFileSync(path.join(site, file), "export const page = 1;\n");
+    git("add", "-A");
+    git("commit", "-qm", "work");
+    git("checkout", "-q", "main");
+    return { tree: path.join(site, ".clawbox", "worktrees", "run-00000002"), git };
+  }
+
+  it("is not done when the run's work did not land in the project: it fails naming the branch and the reason, and says the merge is the owner's", async () => {
+    // A one-task team on a bench: "accepted: the files it names are present"
+    // (they were, on the run's branch), team done — while the project had
+    // refused the merge home (the box's own favicons made it dirty) and held
+    // none of the work. The assistant then merged it into the owner's folder.
+    inSite();
+    const { tree } = await workOnRunBranch("src/paginate.js");
+    expect(fs.existsSync(path.join(site, "src", "paginate.js"))).toBe(false);
+    const detail = "the project folder has uncommitted changes of its own";
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Add a pagination helper", files_hint: ["src/paginate.js"] }]) },
+      {
+        summary: "Added the pagination helper.",
+        filesTouched: [path.join(tree, "src", "paginate.js")],
+        worktree: { path: tree, branch: "clawbox/run-00000002", base: "main", project: site, removed: true, branchRemoved: false, result: { kind: "unmerged", reason: "dirty", detail, base: null, commit: null } },
+      },
+    ];
+    const board = await team.startTeam({ goal: "Add a pagination helper", directory: "site", source: "agent" });
+    const done = await finished(board.id);
+    expect(done.singleRun).toBe(true);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(`The run for the plan's one task finished, but its work did not land in the project folder: ${detail}. The work is on branch clawbox/run-00000002; the owner decides whether to merge it.`);
+    expect(done.unlanded).toEqual({ branch: "clawbox/run-00000002", reason: detail });
+    // Never accepted on files that are only on the branch.
+    expect(done.tasks[0].review ?? null).toBeNull();
+    expect(done.log.map((e) => e.message).join("\n")).not.toMatch(/files it names are present/);
+    expect(done.log.map((e) => e.message)).toContain(`t1's work is on clawbox/run-00000002, not in the project folder: ${detail}.`);
+    // The owner hears it as it is — the run's own card only said it finished —
+    // and the assistant is told whose call the merge is.
+    await vi.waitFor(() => expect(notify.announceCodingTeam).toHaveBeenCalledTimes(1));
+    expect(notify.announceCodingTeam.mock.calls[0][0]).toMatchObject({ status: "failed", unlanded: { branch: "clawbox/run-00000002" } });
+    await vi.waitFor(() => expect(gateway.gatewayWsChatSendMain).toHaveBeenCalledTimes(1));
+    const line = String((gateway.gatewayWsChatSendMain.mock.calls[0] as unknown[])[0]);
+    expect(line).toContain("The work is on branch clawbox/run-00000002, not in the project folder.");
+    expect(line).toContain("Whether to merge clawbox/run-00000002 is the owner's decision");
+    expect(line).not.toMatch(/uncommitted|favicon/);
+  });
+
+  it("judges a merged run's files in the project folder, and is done when they are there", async () => {
+    inSite();
+    const { tree, git } = await workOnRunBranch("src/paginate.js");
+    git("merge", "-q", "--no-ff", "-m", "home", "clawbox/run-00000002");
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Add a pagination helper", files_hint: ["src/paginate.js"] }]) },
+      {
+        summary: "Added the pagination helper.",
+        worktree: { path: tree, branch: "clawbox/run-00000002", base: "main", project: site, removed: true, branchRemoved: false, result: { kind: "merged", reason: null, detail: null, base: "main", commit: "abc1234" } },
+      },
+    ];
+    const board = await team.startTeam({ goal: "Add a pagination helper", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.unlanded ?? null).toBeNull();
+    expect(done.tasks[0].review?.notes).toMatch(/^Ran as a single run, and the files it names are present \(src\/paginate\.js\) in the project folder \(merged into main\): /);
+  });
+
+  it("accepts as before a task that names no file it could look for", async () => {
+    // The fixture folder is not on disk: nothing is looked at.
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Tidy whatever needs it", files_hint: ["**", "src/*.ts", "./"] }]) },
+      { summary: "Tidied." },
+    ];
+    const board = await team.startTeam({ goal: "Tidy up", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0]).toMatchObject({ status: "complete", review: { verdict: "accepted", notes: expect.stringMatching(/^Ran as a single run: the run's own settle judged it/) } });
+  });
+
+  it("reads a hint the way the stray check does: no ./, no trailing / or /** or /*, and no pattern", () => {
+    expect(team.namedDeliverables(["./src/app.ts", "docs/", "assets/**", "lib/*", "src/**/*.ts", "**", "a?.md", " ./README.md ", "README.md", "./", ""])).toEqual(["src/app.ts", "docs", "assets", "lib", "README.md"]);
+  });
+
+  it("looks on the run's branch when its work did not come home, and in the project when the branch is gone", async () => {
+    const { execFileSync } = await import("child_process");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: site, encoding: "utf8", env });
+    git("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    git("add", "-A");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "clawbox/run-aaaaaaaa");
+    fs.mkdirSync(path.join(site, "docs"));
+    fs.writeFileSync(path.join(site, "docs", "new.md"), "new\n");
+    fs.writeFileSync(path.join(site, "empty.md"), "");
+    git("add", "-A");
+    git("commit", "-qm", "work");
+    git("checkout", "-q", "main");
+    expect(fs.existsSync(path.join(site, "docs", "new.md"))).toBe(false);
+    const tree = path.join(site, ".clawbox", "worktrees", "run-aaaaaaaa");
+    const worktree = { path: tree, branch: "clawbox/run-aaaaaaaa", base: "main", project: site, removed: true, branchRemoved: false };
+    const place = team.deliverablePlace({ directory: tree, worktree }, "/unused");
+    expect(place).toEqual({ dir: site, branch: { repo: site, name: "clawbox/run-aaaaaaaa", roots: [tree, site] } });
+    expect(await team.missingDeliverables(place, ["README.md", "docs/new.md", "docs", `${tree}/docs/new.md`, "empty.md", "gone.md", "../outside.md"])).toEqual(["empty.md (empty)", "gone.md (missing)", "../outside.md (missing)"]);
+    // The branch went with the tree (it held nothing): only the project is looked at.
+    const bare = team.deliverablePlace({ directory: tree, worktree: { ...worktree, branchRemoved: true } }, "/unused");
+    expect(await team.missingDeliverables(bare, ["README.md", "docs/new.md"])).toEqual(["docs/new.md (missing)"]);
+    // No worktree: the run's own folder.
+    expect(team.deliverablePlace({ directory: site, worktree: null }, "/unused")).toEqual({ dir: site, branch: null });
+  });
+
+  it("never takes a file outside the folder as the run's work, and still finds one the branch's roots hold", async () => {
+    // Beside the project and far from it, both on disk with bytes in them: not the run's work.
+    fs.writeFileSync(path.join(site, "..", "beside.md"), "not the run's\n");
+    const far = path.join(root, "far.md");
+    fs.writeFileSync(far, "nor this\n");
+    fs.writeFileSync(path.join(site, "README.md"), "# Site\n");
+    const plain = { dir: site, branch: null };
+    expect(await team.missingDeliverables(plain, ["README.md", `${site}/README.md`, "../beside.md", `${site}/../beside.md`, far, "docs/../../beside.md"]))
+      .toEqual(["../beside.md (missing)", `${site}/../beside.md (missing)`, `${far} (missing)`, "docs/../../beside.md (missing)"]);
+
+    // The worktree is the folder; the project is outside it, but it is one of
+    // the branch's roots: what the branch holds there is present, nothing else is.
+    const { execFileSync } = await import("child_process");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" };
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: site, encoding: "utf8", env });
+    git("init", "-q", "-b", "main");
+    git("add", "README.md");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "clawbox/run-bbbbbbbb");
+    fs.mkdirSync(path.join(site, "docs"));
+    fs.writeFileSync(path.join(site, "docs", "new.md"), "new\n");
+    git("add", "docs");
+    git("commit", "-qm", "work");
+    git("checkout", "-q", "main");
+    const tree = path.join(root, "tree");
+    fs.mkdirSync(tree);
+    const place = { dir: tree, branch: { repo: site, name: "clawbox/run-bbbbbbbb", roots: [tree, site] } };
+    expect(await team.missingDeliverables(place, [`${site}/docs/new.md`, `${site}/README.md`, `${site}/gone.md`, "../beside.md", far]))
+      .toEqual([`${site}/gone.md (missing)`, "../beside.md (missing)", `${far} (missing)`]);
   });
 });

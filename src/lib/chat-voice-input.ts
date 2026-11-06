@@ -38,6 +38,12 @@ export type VoiceError =
   | "insecure"
   /** The recording never captured any audio. */
   | "empty"
+  /**
+   * The hold-to-talk key was let go of too soon to be a message
+   * (chat-hold-to-talk.ts). Nothing was uploaded; the line says how long to
+   * hold it, because a key that did nothing visible reads as a broken key.
+   */
+  | "short"
   /** The box or the proxy failed. Retryable — the audio still exists. */
   | "transcribe";
 

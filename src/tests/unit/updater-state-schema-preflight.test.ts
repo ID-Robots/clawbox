@@ -46,6 +46,9 @@ vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/openclaw-state-store", () => ({
   statePath: vi.fn(),
   readStateSchemaVersion: vi.fn(),
+  // No agent databases: this suite is about the state store alone
+  // (updater-harness-downgrade.test.ts has the agent databases).
+  readAgentSchemaVersions: vi.fn(() => []),
 }));
 
 import { get, setMany } from "@/lib/config-store";
@@ -133,6 +136,22 @@ describe("the schema each pinned core supports", () => {
     expect(updater.openclawStateSchemaFor("2026.8.1")).toBe(15);
     expect(updater.openclawStateSchemaFor("2026.9.3")).toBe(16);
     expect(updater.openclawStateSchemaFor("2026.9.4")).toBe(17);
+    // From 2026.10 the number is read off the package's own
+    // `openclaw.schemaVersions.state`, which the harness-contract job checks.
+    expect(updater.openclawStateSchemaFor("2026.10.3")).toBe(20);
+    expect(updater.openclawStateSchemaFor("2026.10.6")).toBe(20);
+    expect(updater.openclawStateSchemaFor("2026.10.7")).toBe(20);
+    expect(updater.openclawStateSchemaFor("2026.10.9")).toBe(20);
+  });
+
+  it("records the agent databases' schema beside it, which moves on its own", () => {
+    // `openclaw.schemaVersions.agent` of the same packages: 2026.10.6 moved the
+    // agent databases to 25 with the state database still on 20, so a wrong
+    // row here would pass every state assertion above.
+    expect(updater.openclawAgentSchemaFor("2026.10.3")).toBe(24);
+    expect(updater.openclawAgentSchemaFor("2026.10.6")).toBe(25);
+    expect(updater.openclawAgentSchemaFor("2026.10.7")).toBe(25);
+    expect(updater.openclawAgentSchemaFor("2026.10.9")).toBe(25);
   });
 
   it("answers null rather than guessing for a version it has not been told about", () => {

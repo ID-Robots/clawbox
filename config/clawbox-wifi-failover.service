@@ -1,0 +1,13 @@
+[Unit]
+Description=ClawBox supervised WiFi failover
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/clawbox/network.env
+ExecStart=/usr/local/libexec/clawbox/wifi-failover.sh
+ExecStopPost=/usr/local/libexec/clawbox/wifi-radio.sh --recover
+TimeoutStartSec=320
+TimeoutStopSec=200
+KillMode=control-group

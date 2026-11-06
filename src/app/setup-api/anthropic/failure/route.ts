@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { startAnthropicSwap, type FailureOutcome } from "@/lib/anthropic-swap";
 import { reportChatFailure, startGatewaySwap } from "@/lib/anthropic-gateway";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
@@ -15,19 +15,19 @@ export const dynamic = "force-dynamic";
  * sees the `chat` error frame, the server does not. So the chat hands the
  * failure over — the gateway's words, the provider's words it passed on, its
  * failover reason, the session and the turn's text — and this route lets the
- * box act on it (src/lib/anthropic-gateway.ts `reportChatFailure`): mark the
- * account the gateway was on, move every Claude consumer to the next account,
- * and send the turn again into its session, once, when the gateway is back on
- * the new account. With every account limited the turn is held and sent at the
- * earliest reset.
+ * box act on it (src/lib/anthropic-gateway.ts `reportChatFailure`): read which
+ * of the pool's accounts the gateway had to leave in that turn (core's own
+ * record), move every Claude consumer to the next account, and send the turn
+ * again into its session, once, on the account the pool moved to. With every
+ * account limited the turn is held and sent at the earliest reset.
  *
  * OWNER-ONLY AND OUR PAGE ONLY, like the accounts route's writes: a report
  * takes an account out of rotation, and the MCP bearer or another site must
  * not be able to do that with a made-up limit line.
  *
  * Answers as soon as the swap is known, and at the latest after a few
- * seconds — the gateway's restart and the retry carry on behind it; the chat
- * says what it can (`pending: true` when it could not wait).
+ * seconds — the move and the retry carry on behind it; the chat says what it
+ * can (`pending: true` when it could not wait).
  */
 
 function refusal(error: string, code: string, status: number) {
@@ -38,7 +38,7 @@ function refusal(error: string, code: string, status: number) {
 const ANSWER_WITHIN_MS = 4_000;
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return refusal("Reporting a failed turn needs a signed-in browser session.", "owner_only", 403);
+  if (!(await hasPersonSession(request))) return refusal("Reporting a failed turn needs a signed-in browser session.", "owner_only", 403);
   if (!isSameOriginRequest(request)) return refusal("A failed turn can only be reported from this ClawBox's own pages.", "cross_origin", 403);
 
   let body: Record<string, unknown>;

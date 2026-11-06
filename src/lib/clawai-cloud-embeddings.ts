@@ -57,6 +57,37 @@ export const CLOUD_EMBEDDING_MODEL = (() => {
 /** What the model above answers with, for the index-rebuild rule. */
 export const CLOUD_EMBEDDING_DIMENSIONS = 3072;
 
+/** What OpenClaw's own memory index embeds with on the cloud when nothing overrides it. */
+const DEFAULT_OPENCLAW_EMBEDDING_MODEL = "text-embedding-3-small";
+
+/**
+ * The cloud model OPENCLAW's memory index is pointed at (`memory.search.model`).
+ *
+ * Not {@link CLOUD_EMBEDDING_MODEL}: OpenClaw keeps its index inside each agent's
+ * SQLite database beside the sessions, and on a customer box with ~10 GB agent
+ * databases that index was 82 % of a 9.4 GB file — ~155 KB a chunk with
+ * 3,072-dimension vectors (stored as 64-bit floats, twice over with the
+ * embedding cache). `text-embedding-3-small` answers 1,536 dimensions through
+ * the same ClawBox AI proxy, half of every vector. OpenClaw documents a
+ * dimension setting (`outputDimensionality`) only for its Gemini and Bedrock
+ * adapters, so the smaller model is how the width comes down on the
+ * OpenAI-compatible route rather than a `dimensions` field it may not forward.
+ * ClawBox's OWN index (the edition without OpenClaw) keeps
+ * {@link CLOUD_EMBEDDING_MODEL}: it is capped by `maxIndexChunks`, and moving it
+ * would turn every index already built there "mismatched".
+ *
+ * The same env override as the shared model (a staging proxy that serves
+ * something else serves it to both); boxes already on the large model are moved
+ * once by scripts/gateway-pre-start.sh.
+ */
+export const OPENCLAW_CLOUD_EMBEDDING_MODEL = (() => {
+  const override = process.env.CLAWBOX_AI_EMBEDDING_MODEL?.trim();
+  return override && MODEL_ID.test(override) ? override : DEFAULT_OPENCLAW_EMBEDDING_MODEL;
+})();
+
+/** What {@link OPENCLAW_CLOUD_EMBEDDING_MODEL} answers with. */
+export const OPENCLAW_CLOUD_EMBEDDING_DIMENSIONS = 1536;
+
 /** The OpenClaw provider id the cloud embedder is reached through. */
 export const CLOUD_EMBEDDING_PROVIDER = "openai-compatible";
 

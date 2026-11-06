@@ -218,16 +218,28 @@ d("step_polkit_rules keeps the old grant exactly as long as the web build needs 
 // ── 2. step_rebuild_reboot ──────────────────────────────────────────────────
 
 d("step_rebuild_reboot removes the grant only after a verified rebuild", () => {
-  function runRebuildReboot(rebuildRc: number, testMode: boolean): { status: number; events: string[] } {
+  // `rebootReason`: what update_reboot_reasons answers on a real box (the
+  // decision itself has its own file, install-update-reboot-decision.test.ts).
+  function runRebuildReboot(
+    rebuildRc: number,
+    testMode: boolean,
+    rebootReason = "a kernel was installed",
+  ): { status: number; events: string[] } {
     const events = path.join(tmp, "events");
     const log = (name: string) => `${name}() { echo ${name} >> ${JSON.stringify(events)}; }`;
     const script = [
       "set -euo pipefail",
       ...["step_directories_permissions", "step_systemd_services", "step_ollama_install", "step_openclaw_patch",
-        "step_openclaw_config", "step_clawkeep_install", "step_polkit_rules", "reboot"].map(log),
+        "step_openclaw_config", "step_clawkeep_install", "step_polkit_rules", "reboot",
+        "restart_services_after_update"].map(log),
       `do_rebuild() { echo "do_rebuild $*" >> ${JSON.stringify(events)}; return ${rebuildRc}; }`,
       `systemctl() { echo "systemctl $*" >> ${JSON.stringify(events)}; }`,
       `is_test_mode() { return ${testMode ? 0 : 1}; }`,
+      `update_reboot_reasons() { printf '%s' ${JSON.stringify(rebootReason)}; }`,
+      "served_build_commit() { :; }",
+      // The checkout guard (TASK-1427) has its own test file.
+      "arm_rebuild_checkout_guard() { :; }",
+      "disarm_rebuild_checkout_guard() { :; }",
       fn("step_rebuild_reboot"),
       "step_rebuild_reboot",
     ].join("\n");
@@ -245,11 +257,24 @@ d("step_rebuild_reboot removes the grant only after a verified rebuild", () => {
     expect(at("reboot")).toBeGreaterThan(at("step_polkit_rules"));
   });
 
-  it("leaves the old build's grant alone when the rebuild fails", () => {
-    const r = runRebuildReboot(137, false);
-    expect(r.status).toBe(137);
-    expect(r.events).not.toContain("step_polkit_rules");
+  it("rebuilds, THEN narrows polkit, then restarts the services when nothing needs a boot", () => {
+    const r = runRebuildReboot(0, false, "");
+    expect(r.status).toBe(0);
+    const at = (e: string) => r.events.findIndex((l) => l.startsWith(e));
+    expect(at("step_polkit_rules")).toBeGreaterThan(at("do_rebuild"));
+    expect(at("restart_services_after_update")).toBeGreaterThan(at("step_polkit_rules"));
     expect(r.events).not.toContain("reboot");
+  });
+
+  it("leaves the old build's grant alone when the rebuild fails", () => {
+    for (const reason of ["a kernel was installed", ""]) {
+      const r = runRebuildReboot(137, false, reason);
+      expect(r.status).toBe(137);
+      expect(r.events).not.toContain("step_polkit_rules");
+      expect(r.events).not.toContain("reboot");
+      expect(r.events).not.toContain("restart_services_after_update");
+      fs.rmSync(path.join(tmp, "events"), { force: true });
+    }
   });
 
   it("does the same on the test-mode arm, before the restart", () => {

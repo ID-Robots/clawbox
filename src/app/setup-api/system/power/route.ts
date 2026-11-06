@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { dispatchPowerAction, isPowerAction, requestPowerApproval, PowerApprovalConflict } from "@/lib/power-approval";
 
 export const dynamic = "force-dynamic";
@@ -30,7 +30,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    if (!(await hasOwnerSession(req))) {
+    if (!(await hasPersonSession(req))) {
       const prompt = await requestPowerApproval(action, typeof reason === "string" ? reason : "Requested in chat");
       return NextResponse.json({ pendingApproval: true, action, id: prompt.id,
         expiresAt: prompt.expiresAt, telegramPromptSent: prompt.messages.length > 0 }, { status: 202 });

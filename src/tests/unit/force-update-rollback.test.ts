@@ -505,3 +505,103 @@ d("scripts/force-update.sh on a build that works", () => {
     await vi.waitFor(() => expect(fs.existsSync(path.join(box, ".next-old"))).toBe(false), { timeout: 30_000, interval: 50 });
   });
 });
+
+d("scripts/force-update.sh keeps what a rebuild only repeats", () => {
+  /** The origin moves on with package.json and bun.lock in it; the box has a node_modules. */
+  function withDependencies(lock = "lock v1\n"): void {
+    fs.writeFileSync(path.join(seed, "package.json"), '{"name":"box"}\n');
+    fs.writeFileSync(path.join(seed, "bun.lock"), lock);
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", `dependencies ${lock.trim()}`);
+    newHead = git(seed, "rev-parse", "HEAD");
+    fs.mkdirSync(path.join(box, "node_modules"), { recursive: true });
+  }
+  const installs = () => logOf("bun.log").split("\n").filter((l) => l === "install").length;
+  /** A fresh stub log for the next run, so its counters are that run's alone. */
+  const nextRun = () => {
+    fs.rmSync(stubLog, { recursive: true, force: true });
+    fs.mkdirSync(stubLog);
+  };
+
+  it("skips bun install when package.json, bun.lock and bun are what node_modules was installed from", () => {
+    withDependencies();
+    const first = runForceUpdate("succeeds");
+    expect(first.status, first.output).toBe(0);
+    expect(installs()).toBe(1);
+    expect(fs.existsSync(path.join(box, "node_modules", ".clawbox-deps-stamp"))).toBe(true);
+
+    nextRun();
+    commit(seed, "a change that is not a dependency");
+    newHead = git(seed, "rev-parse", "HEAD");
+    const second = runForceUpdate("succeeds");
+    expect(second.status, second.output).toBe(0);
+    expect(installs(), second.output).toBe(0);
+    expect(second.output).toContain("Dependencies unchanged since the last install");
+    expect(git(box, "rev-parse", "HEAD")).toBe(newHead);
+    expect(read(".next/standalone/server.js")).toBe("new build\n");
+    expectIdentityChecked(second.output);
+  });
+
+  it("installs again when the lockfile changed, or node_modules went away", () => {
+    withDependencies();
+    expect(runForceUpdate("succeeds").status).toBe(0);
+
+    nextRun();
+    withDependencies("lock v2\n");
+    expect(runForceUpdate("succeeds").status).toBe(0);
+    expect(installs()).toBe(1);
+
+    nextRun();
+    fs.rmSync(path.join(box, "node_modules"), { recursive: true, force: true });
+    const r = runForceUpdate("succeeds");
+    expect(r.status, r.output).toBe(0);
+    expect(installs()).toBe(1);
+    expect(r.output).not.toContain("Dependencies unchanged");
+  });
+
+  it("always installs where there is no lockfile to compare", () => {
+    runForceUpdate("succeeds");
+    nextRun();
+    runForceUpdate("succeeds");
+    expect(installs()).toBe(1);
+  });
+
+  it("gives a build that failed with the install skipped the install and one more build before rolling back", () => {
+    withDependencies();
+    expect(runForceUpdate("succeeds").status).toBe(0);
+    const served = git(box, "rev-parse", "HEAD");
+
+    nextRun();
+    commit(seed, "a commit whose build fails");
+    const r = runForceUpdate("fails");
+    expect(r.status, r.output).toBe(1);
+    expect(r.output).toContain("with the dependency install skipped — installing, then building once more");
+    expect(logOf("builds").trim()).toBe("2");
+    // The repair install, then the one for the commit the checkout went back to.
+    expect(installs()).toBe(2);
+    expect(git(box, "rev-parse", "HEAD")).toBe(served);
+    expect(r.output).toContain("Checkout rolled back to beta");
+  });
+
+  it("moves .next/cache into the new build instead of deleting it with the old one", () => {
+    fs.mkdirSync(path.join(box, ".next", "cache"), { recursive: true });
+    fs.writeFileSync(path.join(box, ".next", "cache", "entry"), "warm\n");
+
+    const r = runForceUpdate("succeeds");
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain("Keeping the build cache (.next/cache) for this build");
+    expect(read(".next/cache/entry")).toBe("warm\n");
+    expect(read(".next/standalone/server.js")).toBe("new build\n");
+    expect(fs.existsSync(path.join(box, ".next-old"))).toBe(false);
+  });
+
+  it("puts the cache back with the previous build when the new one fails", () => {
+    fs.mkdirSync(path.join(box, ".next", "cache"), { recursive: true });
+    fs.writeFileSync(path.join(box, ".next", "cache", "entry"), "warm\n");
+
+    const r = runForceUpdate("fails");
+    expect(r.status, r.output).toBe(1);
+    expectPreviousBuildServed();
+    expect(read(".next/cache/entry")).toBe("warm\n");
+  });
+});

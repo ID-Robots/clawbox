@@ -74,8 +74,10 @@ export const localModelsEn: Record<string, string> = {
   "localModels.detail.embeddingsNotInstalled": "Not installed. Set it up in Memory Shard.",
   "localModels.detail.embeddingsReady": "Ready. Wakes when you search, then sleeps to save memory.",
   "localModels.detail.embeddingsFailed": "Stopped after an error. It starts again on the next search.",
+  "localModels.detail.embeddingsFailedBecause": "Stopped after an error: {reason}",
   "localModels.detail.embeddingsLocal": "Searching your memory on this box.",
   "localModels.detail.embeddingsCloud": "Searching your memory in the cloud.",
+  "localModels.detail.embeddingsCloudLocalFailed": "Searching your memory in the cloud. The model on this box stopped after an error: {reason}",
 
   // === Errors ===
   "localModels.error.changeFailed": "Could not change that model.",
@@ -109,6 +111,8 @@ export const localModelsEn: Record<string, string> = {
   // sentence that sends somebody to look at the wrong disk.
   "localModels.install.diskShort": "Not enough room: needs {need}, only {free} free.",
   "localModels.install.refusal.busy": "Something else is being downloaded right now.",
+  "localModels.install.refusal.removing": "That is being removed right now. Try again in a moment.",
+  "localModels.uninstall.switchChatFirst": "Switch the chat to another model first",
   "localModels.install.refusal.notInstalled": "That part is not installed on this box yet.",
   "localModels.install.refusal.noDownloader": "The downloader is not on this box yet. Install the local model first.",
   "localModels.install.refusal.alreadyHere": "That is already on this box.",
@@ -131,4 +135,29 @@ export const localModelsEn: Record<string, string> = {
   "localModels.embed.present": "{model} is on this box ({size}).",
   "localModels.embed.missing": "{model} is not on this box.",
   "localModels.embed.again": "Download again",
+
+  // === Chat while Local AI answers ===
+  // The note at the top of the chat, until the owner closes it, and the
+  // status line's words while the turn waits for its first token: a local
+  // model is loaded into memory on the first reply, which can take a minute.
+  "localModels.chatBannerTitle": "Running on this box.",
+  "localModels.chatBannerBody": "The first reply can take up to a minute while the local model loads. After that it's faster.",
+  "localModels.chatBannerDismiss": "Dismiss this note",
+  "localModels.chatLoading": "Loading the local model…",
+  "localModels.chatCompacting": "Shortening the conversation for the local model…",
+
+  // === A long conversation switched to Local AI (TASK-2127) ===
+  // The card in the chat when the conversation is larger than the local
+  // model's window: a new chat (one click, the waiting message goes with it)
+  // or a summary first. {tokens} and {window} are short counts such as "100k".
+  "localModels.longChat.title": "This conversation is too long for the local model",
+  "localModels.longChat.body": "It holds about {tokens} tokens; the local model reads up to {window}. A new chat answers in seconds. Shortening this one summarizes it first, which takes longer.",
+  "localModels.longChat.pending": "Your message waits here and goes to the chat you pick.",
+  "localModels.longChat.newChat": "Start a new chat with Local AI",
+  "localModels.longChat.recommended": "Recommended",
+  "localModels.longChat.shorten": "Shorten this conversation first",
+  "localModels.longChat.timeoutTitle": "Still shortening after {seconds} seconds",
+  "localModels.longChat.timeoutBody": "The local model could not shorten this long conversation in time, so the reply was stopped. Start a new chat with Local AI to get an answer in seconds.",
+  "localModels.longChat.failed": "This conversation could not be shortened. A new chat with Local AI answers in seconds.",
+  "localModels.longChat.shortened": "Conversation shortened for the local model.",
 };

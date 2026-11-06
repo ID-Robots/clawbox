@@ -7,31 +7,63 @@
  * Pause. An owner who spotted the run heading the wrong way at minute three
  * could stop it and start over, or wait twenty minutes for the wrong answer.
  *
- * So a run carries a QUEUE of messages, and there are two ways one reaches the
- * harness:
+ * So a run carries a QUEUE of messages, and there are three ways one reaches
+ * the harness, tried in this order:
  *
- *  - STREAMING (`--input-format stream-json`): the CLI keeps reading stdin for
- *    the life of the process, so a message is written as the next user turn and
- *    the run picks it up when its current turn ends. This is the real thing.
+ *  - MID-TURN (coding-run-inbox.ts): the run's own PostToolUse hook hands
+ *    whatever is in its inbox to the model as `additionalContext` right after
+ *    the tool call it is in — minutes into a forty-minute turn, not at its end,
+ *    and for a run reattached after a restart as much as for one this server
+ *    spawned. This is the real thing.
+ *  - NEXT TURN (`--input-format stream-json`): the CLI keeps reading stdin for
+ *    the life of the process, so what the hook did not take before a turn
+ *    ended is written as the next user turn.
  *  - AT A BOUNDARY: an attempt at the deliverable, or the owner's own Resume,
  *    already hands the session a continuation on stdin. Anything still queued
- *    rides along with it. This is the fallback for a box whose Claude Code
- *    does not take streaming input, and it is also what catches a message that
- *    arrived after the harness had already been told to finish.
+ *    rides along with it — a run that was paused, a draft, one whose turn had
+ *    already been told to finish.
  *
- * Everything here is pure: the queue's shape, its bounds, what a message may
- * contain, and how it is worded to the harness. The delivery itself — who
- * holds the pipe, when a turn ends — is coding-agent.ts's.
+ * Each message goes exactly one of those ways (`via`), and says which on the
+ * run's own feed. Everything here is pure: the queue's shape, its bounds, what
+ * a message may contain, and how it is worded to the harness. The delivery
+ * itself — who holds the pipe, when a turn ends — is coding-agent.ts's.
  */
+
+/** How a message reached the harness: after a tool call (the hook), as the next turn (stdin), or with a spawn's first turn. */
+export type RunMessageVia = "mid_turn" | "next_turn" | "with_start";
+
+/**
+ * How a message just sent will reach the run — what the route and the MCP
+ * tool answer: the harness HAS it (`delivered`), it is in the run's inbox for
+ * the end of the tool call under way (`after_tool_call`), or it waits for the
+ * run's next start — an attempt, a resume (`next_start`).
+ */
+export type RunMessageDelivery = "delivered" | "after_tool_call" | "next_start";
+
+/** A message's id on the record and its file name in the run's inbox. */
+export const RUN_MESSAGE_ID_RE = /^m-[a-z0-9]{8,16}$/;
+
+/** A fresh message id — Web Crypto, which the browser and Node both have. */
+export function newRunMessageId(): string {
+  const bytes = new Uint8Array(6);
+  globalThis.crypto.getRandomValues(bytes);
+  let n = 0;
+  for (const b of bytes) n = n * 256 + b;
+  return `m-${n.toString(36).padStart(8, "0").slice(-10)}`;
+}
 
 /** One thing somebody told a run, and whether the harness has had it yet. */
 export interface RunMessage {
+  /** Stable for the message's life: how the inbox's receipt finds it again. */
+  id: string;
   /** When it was queued (ms since the epoch). */
   at: number;
   /** What to say. Plain text, already validated and capped. */
   text: string;
   /** When the harness was given it, or null while it is still waiting. */
   deliveredAt: number | null;
+  /** Which way it went, once delivered; absent on a record from before. */
+  via?: RunMessageVia;
   /**
    * `"box"` for a note the RUNNER wrote itself — the retry hint a run in a
    * worktree gets (coding-worktree-paths.ts) — and absent for everything a
@@ -162,7 +194,7 @@ export function appendRunMessage(messages: readonly RunMessage[], text: string, 
       `This run already has ${MAX_QUEUED_RUN_MESSAGES} messages waiting for it. Wait for it to read them.`,
     );
   }
-  return trimRunMessages([...messages, { at: now, text, deliveredAt: null, ...(from === "box" ? { from } : {}) }]);
+  return trimRunMessages([...messages, { id: newRunMessageId(), at: now, text, deliveredAt: null, ...(from === "box" ? { from } : {}) }]);
 }
 
 /**
@@ -205,10 +237,14 @@ export function parseRunMessages(raw: unknown): RunMessage[] {
     } catch {
       continue;
     }
+    const deliveredAt = typeof m.deliveredAt === "number" && Number.isFinite(m.deliveredAt) ? m.deliveredAt : null;
     out.push({
+      // A record from before ids: one now, which only ever names it from here on.
+      id: typeof m.id === "string" && RUN_MESSAGE_ID_RE.test(m.id) ? m.id : newRunMessageId(),
       at: m.at,
       text,
-      deliveredAt: typeof m.deliveredAt === "number" && Number.isFinite(m.deliveredAt) ? m.deliveredAt : null,
+      deliveredAt,
+      ...(deliveredAt !== null && (m.via === "mid_turn" || m.via === "next_turn" || m.via === "with_start") ? { via: m.via } : {}),
       // Only the one value the runner writes; anything else is a caller's message.
       ...(m.from === "box" ? { from: "box" as const } : {}),
     });
@@ -323,8 +359,8 @@ export function runMessagesNote(messages: readonly RunMessage[]): string {
  * which scrubs the owner's secrets out of it and caps the line, like every
  * other step.
  */
-export function runMessageProgressLine(text: string): string {
-  return `Message to the run: ${text}`;
+export function runMessageProgressLine(text: string, via?: RunMessageVia): string {
+  return via === "mid_turn" ? `Message to the run, mid-turn: ${text}` : `Message to the run: ${text}`;
 }
 
 // ── Whether this box's harness takes a message mid-run ───────────────────────

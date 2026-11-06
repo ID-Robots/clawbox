@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
+import { OPEN_CLAWAI_OFFER_EVENT } from "@/lib/ui-events";
 
 /**
  * Settings → Providers on a box with NO ClawBox AI subscription.
@@ -162,6 +163,39 @@ describe("Settings → Providers: the ClawBox AI pitch on an unlinked box", () =
     expect(await screen.findByTestId("clawai-plan-summary")).toBeInTheDocument();
     // …and nothing was started behind the owner's back on the other edition's
     // route, which has no card here to show its code.
+    expect(
+      (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .some(([input]) => String(input ?? "").startsWith("/setup-api/ai-models/clawai/start")),
+    ).toBe(false);
+  });
+
+  // The chat's "Sign in to ClawBox AI again" asks for the same offer through a
+  // window event (`dispatchClawaiSignIn`), and it must land the same way on
+  // each edition.
+  it("starts the ClawBox AI sign-in when a chat asks for it", async () => {
+    render(<SettingsApp ui={defaultUi} />);
+    openProviders();
+    await screen.findByTestId("clawai-pitch-card");
+
+    act(() => { window.dispatchEvent(new Event(OPEN_CLAWAI_OFFER_EVENT)); });
+
+    await waitFor(() =>
+      expect(
+        (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
+          .some(([input]) => String(input ?? "").startsWith("/setup-api/ai-models/clawai/start")),
+      ).toBe(true),
+    );
+  });
+
+  it("puts a Hermes box in front of its own ClawBox AI sign-in when a chat asks for it", async () => {
+    serve(false, "hermes");
+    render(<SettingsApp ui={defaultUi} />);
+    openProviders();
+    await screen.findByTestId("clawai-pitch-card");
+
+    act(() => { window.dispatchEvent(new Event(OPEN_CLAWAI_OFFER_EVENT)); });
+
+    expect(await screen.findByTestId("clawai-plan-summary")).toBeInTheDocument();
     expect(
       (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
         .some(([input]) => String(input ?? "").startsWith("/setup-api/ai-models/clawai/start")),

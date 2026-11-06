@@ -13,7 +13,7 @@ specs depend on state set up by earlier ones:
 | ---- | ------ |
 | `10-happy-path.spec.ts`       | `install.sh` → setup wizard end to end → desktop loads |
 | `20-settings.spec.ts`         | System info/stats, preferences, hotspot, password rotate, update-branch |
-| `22-anthropic-accounts.spec.ts` | Anthropic account pool: owner-only writes, two Claude accounts through the sign-in handoff (no token in the clear under data/), a simulated session limit, and the Settings → Providers card (limited chip, reorder, two-tap remove) |
+| `22-anthropic-accounts.spec.ts` | Anthropic account pool: owner-only writes, two Claude accounts through the sign-in handoff (no token in the clear under data/), a simulated session limit, no accounts UI on Settings → Providers without an Anthropic sign-in, and with one (a staged `auth.profiles.anthropic:default`, unset afterwards) the card behind the Anthropic row's disclosure (limited chip, reorder, two-tap remove) |
 | `30-files.spec.ts`            | mkdir, upload, list, read, delete — verified both via API and on-disk |
 | `40-terminal.spec.ts`         | `/terminal-ws` PTY round-trip (`uname -a`) |
 | `50-webapps.spec.ts`          | Code-assistant init → file write → build → `/setup-api/webapps` serves |
@@ -129,6 +129,12 @@ locally, and unset runs every spec on one box as before):
 | ----- | ----- | ------- |
 | `core` | every spec except the upgrade | every run, every PR (~7 min) |
 | `upgrade` | `10-setup-wizard`, then `90-upgrade-main-to-beta` | the schedule, a dispatch, and every PR that touches a path in `UPGRADE_PATHS`, or whose file list cannot be read (~13 min) |
+
+Each shard's install builds with the framework's build cache (`.next/cache`)
+of the last push to `beta` or `main` when the Actions cache has one — see
+[cache-seed/README.md](cache-seed/README.md) — and in-app updates carry the
+cache of the build they replace into the new one (`carry_build_cache` in
+`install.sh`), so the upgrade's rebuild of the PR head starts warm too.
 
 `UPGRADE_PATHS` is the installer, `scripts/`, `config/`, the lockfiles and
 build config, the updater and its root steps, the setup state it carries

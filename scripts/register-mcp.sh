@@ -294,6 +294,31 @@ else
   log "WARNING: $EMAIL_HOOK_SRC is not a complete plugin — skipping the EMAIL: directive hook"
 fi
 
+# ── 2b. Install the on-device model's lean-mode plugin. ─────────────────────
+# scripts/hermes-plugins/clawbox_local_lean: `llm_request` middleware that gives
+# each model call on the box's own llama.cpp model a short system prompt, six
+# tools and thinking off unless asked (its __init__.py says why middleware). The
+# same rules as the hook plugin above: the sources are read before anything on
+# disk is touched, the copy is unconditional, stale bytecode goes, and a copy
+# that died half-way is removed rather than left for Hermes to import. Never
+# fatal: without it a turn on the local model runs on Hermes' full prompt.
+LEAN_PLUGIN="clawbox_local_lean"
+LEAN_PLUGIN_SRC="$PROJECT_DIR/scripts/hermes-plugins/$LEAN_PLUGIN"
+LEAN_PLUGIN_DST="$HERMES_PLUGINS_DIR/$LEAN_PLUGIN"
+LEAN_PLUGIN_SOURCES=("$LEAN_PLUGIN_SRC/__init__.py" "$LEAN_PLUGIN_SRC/plugin.yaml" "$LEAN_PLUGIN_SRC/local_lean.py")
+LEAN_PLUGIN_INSTALLED=0
+
+if ! cat "${LEAN_PLUGIN_SOURCES[@]}" >/dev/null 2>&1; then
+  log "WARNING: $LEAN_PLUGIN_SRC is not a complete, readable plugin — leaving whatever is already installed in place; turns on the local model keep Hermes' full prompt"
+elif mkdir -p "$LEAN_PLUGIN_DST" 2>/dev/null && cp -f "${LEAN_PLUGIN_SOURCES[@]}" "$LEAN_PLUGIN_DST/" 2>/dev/null; then
+  rm -rf "$LEAN_PLUGIN_DST/__pycache__" 2>/dev/null || true
+  LEAN_PLUGIN_INSTALLED=1
+elif rm -rf "$LEAN_PLUGIN_DST" 2>/dev/null; then
+  log "WARNING: could not install the $LEAN_PLUGIN plugin into $LEAN_PLUGIN_DST — anything partial there has been removed; turns on the local model keep Hermes' full prompt until the next boot repairs it"
+else
+  log "WARNING: could not install the $LEAN_PLUGIN plugin into $LEAN_PLUGIN_DST AND could not remove what is there — Hermes may import a partial copy"
+fi
+
 # ── 3. Reconcile mcp_servers.clawbox in ~/.hermes/config.yaml. ──────────────
 # Done in Python/PyYAML for the same reason gateway-pre-start.sh does its
 # openclaw.json pass in Python: read-modify-write with an atomic rename, and a
@@ -316,6 +341,9 @@ export CLAWBOX_MCP_API_BASE="$API_BASE"
 # false success this whole step exists to avoid.
 export CLAWBOX_EMAIL_HOOK_PLUGIN=""
 [ "$EMAIL_HOOK_INSTALLED" = "1" ] && export CLAWBOX_EMAIL_HOOK_PLUGIN="$EMAIL_HOOK_PLUGIN"
+# Likewise for the lean-mode plugin (2b).
+export CLAWBOX_LOCAL_LEAN_PLUGIN=""
+[ "$LEAN_PLUGIN_INSTALLED" = "1" ] && export CLAWBOX_LOCAL_LEAN_PLUGIN="$LEAN_PLUGIN"
 # The ClawAI image backend, for the re-arm below. Its files are written by the
 # LINK path (src/lib/hermes-image-plugin.ts), not by this script — this is only
 # where they would be if the box has ever been linked.
@@ -627,6 +655,21 @@ else:
 # table. The failure that leaves is a deny slightly wider than the current
 # table, which is the safe direction; the failure it prevents is this script
 # silently deleting a rule someone added on purpose.
+def path_guard_switched_off():
+    """`clawbox_path_guard_enabled` in the device store, the rule of
+    src/lib/path-guard-switch.ts: only the boolean false is off. A store that
+    cannot be read counts as ON here, because this block only ever adds when
+    on, so the unknown case keeps the safe direction."""
+    store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or os.path.join(
+        os.environ.get("PROJECT_DIR", ""), "data", "config.json")
+    try:
+        with open(store_path, encoding="utf-8") as fh:
+            store = json.load(fh)
+    except Exception:
+        return False
+    return isinstance(store, dict) and store.get("clawbox_path_guard_enabled") is False
+
+
 try:
     with open(os.environ["CLAWBOX_PROTECTED_PATHS"]) as f:
         protected = json.load(f)
@@ -705,7 +748,18 @@ else:
             print("[register-mcp] WARNING: approvals.deny is not a list; leaving it "
                   "alone — the model folder and the ClawBox tree are NOT deny-listed.",
                   file=sys.stderr)
-        if current is not None:
+        if current is not None and path_guard_switched_off():
+            # The owner's switch (Settings -> "Protect ClawBox files from the
+            # agent", TASK-1661). Off removes ONLY the globs this table renders,
+            # exact matches; an owner's own deny rule is still not ours to drop.
+            ours = set(desired_deny)
+            kept = [g for g in current if g not in ours]
+            if len(kept) != len(current):
+                approvals_cfg["deny"] = kept
+                changed = True
+                print(f"[register-mcp] removed {len(current) - len(kept)} approvals.deny rules — "
+                      "the owner switched the ClawBox file protection off in Settings")
+        elif current is not None:
             missing = [g for g in desired_deny if g not in current]
             if missing:
                 approvals_cfg["deny"] = current + missing
@@ -784,12 +838,14 @@ def config_name_list(value):
 # string is exactly the box that loads no plugins at all with nothing else on
 # it to put the type back. TASK-701.
 hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
+# The on-device model's lean-mode plugin (2b), merged the same way, after the hook.
+lean_plugin = os.environ.get("CLAWBOX_LOCAL_LEAN_PLUGIN") or ""
 # Set only where a STRING became a real list — the state a withdrawn image
 # claim is paired with. See the re-arm below.
 repaired_enabled = False
 names = None
 plugins_cfg = cfg.get("plugins")
-if plugins_cfg is None and hook_plugin:
+if plugins_cfg is None and (hook_plugin or lean_plugin):
     # Created only when there is a name to write into it; an absent key with
     # nothing to add is not a repair, it is a needless config rewrite.
     plugins_cfg = {}
@@ -835,6 +891,15 @@ elif isinstance(plugins_cfg, dict):
         repaired_enabled = True
         print("[register-mcp] rewrote plugins.enabled as a list — it was stored as text, "
               "which loads no plugins at all")
+    # After both branches above, so `names` is the list they left (a string
+    # residue is already a real list by now when either of them ran).
+    if names is not None and lean_plugin and lean_plugin not in names:
+        names = names + [lean_plugin]
+        plugins_cfg["enabled"] = names
+        changed = True
+        repaired_enabled = repaired_enabled or isinstance(raw_enabled, str)
+        print("[register-mcp] enabled the " + lean_plugin
+              + " plugin — model calls on the box's own model get the lean prompt and tools")
 
 # ── Re-arm the ClawAI image backend the repair above made loadable. ─────────
 # `enableHermesImageGeneration` (src/lib/hermes-clawai.ts) unsets
@@ -1091,6 +1156,48 @@ else
   BROWSER_DISABLE_RC=$?
   log "could not disable the built-in browser toolset (exit $BROWSER_DISABLE_RC) — continuing"
 fi
+
+# The owner's computer_use switch (src/lib/computer-use-switch.ts), applied with
+# the same native command, lock, bound, brace group and non-fatal refusal as the
+# browser step above. `clawbox_computer_use` in the device store is TRI-STATE:
+# only a boolean is a decision, and ABSENT MEANS UNMANAGED — no call at all, so
+# a box whose owner never touched the switch keeps the toolset Hermes ships
+# with, exactly as before the switch existed. A store that is missing or cannot
+# be read is unmanaged too: this step only ever repeats a choice someone made.
+# Reconciled every boot for the same reason as the browser step: the state lives
+# in Hermes' store, and a reinstalled ~/.hermes must not silently undo the
+# owner's off. The verbs are spelled out, not computed, so the harness-contract
+# scan checks each against the pinned CLI.
+computer_use_switch() {
+  python3 - <<'PY' 2>/dev/null || true
+import json, os
+try:
+    with open(os.environ.get("CLAWBOX_DEVICE_STORE") or "", encoding="utf-8") as fh:
+        store = json.load(fh)
+except Exception:
+    store = None
+value = store.get("clawbox_computer_use") if isinstance(store, dict) else None
+print("on" if value is True else "off" if value is False else "")
+PY
+}
+hermes_computer_use() {
+  if [ "$1" = on ]; then
+    timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools enable computer_use >/dev/null 2>&1
+  else
+    timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" tools disable computer_use >/dev/null 2>&1
+  fi
+}
+COMPUTER_USE_SWITCH="$(computer_use_switch)"
+case "$COMPUTER_USE_SWITCH" in
+  on|off)
+    if { hermes_computer_use "$COMPUTER_USE_SWITCH"; } 2>/dev/null; then
+      log "computer_use toolset $COMPUTER_USE_SWITCH (Settings switch)"
+    else
+      COMPUTER_USE_RC=$?
+      log "could not switch the computer_use toolset $COMPUTER_USE_SWITCH (exit $COMPUTER_USE_RC) — continuing"
+    fi
+    ;;
+esac
 
 # ── 4a. The ClawBox AI cloud voice: armed AND withdrawn, every boot. ────────
 # BEFORE §4b, deliberately. §4b's read-back is written to be "the last word on

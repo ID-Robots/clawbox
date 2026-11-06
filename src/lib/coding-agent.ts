@@ -64,7 +64,7 @@ import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-wo
  * restart is reported as failed rather than "still running" forever.
  */
 
-import { spawn, type ChildProcess } from "child_process";
+import { execFile, spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
@@ -87,20 +87,15 @@ import {
   stageRunInputs,
 } from "@/lib/coding-run-inputs";
 import {
-  type ArchiveReason,
   type HistoryPolicy,
   type HistoryRecord,
   type HistoryRetentionMode,
   type OlderRunEntry,
-  CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY,
   CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY,
-  HISTORY_EXTENDED_LIMITS,
   HISTORY_LIVE_RUNS_KEPT,
   HISTORY_MIN_FREE_BYTES,
   HISTORY_RETENTION_MODES,
   STANDARD_HISTORY_POLICY,
-  archiveIndex,
-  archiveRun,
   diskSpace,
   harnessTranscriptState,
   hasOlderRuns,
@@ -112,12 +107,11 @@ import {
   type DiskSpace,
   type HarnessTranscriptState,
   type HistoryUsage,
-  isHistoryExtendedLimit,
   isHistoryRetentionMode,
   keepHarnessTranscripts,
   keepsOlderRuns,
   olderRunIndex,
-  olderRunsCap,
+  readModelRole,
   readOlderRunRecord,
   releaseHarnessTranscripts,
   removeOlderRun,
@@ -125,6 +119,7 @@ import {
   type TranscriptPinResult,
 } from "@/lib/coding-run-history";
 import type { ZipSource } from "@/lib/zip-writer";
+import { STATE_FLUSH_MS, STREAM_FLUSH_MS, flushDeadline } from "@/lib/run-flush-cadence";
 import {
   type CodingPauseMeter,
   type CodingPauseReason,
@@ -138,12 +133,14 @@ import {
   parsePauseReason,
 } from "@/lib/coding-agent-status";
 import { parseClawaiAllowanceRefusal } from "@/lib/clawai-allowance";
+import { contextOverflowError, contextRecoveryContinuation, MAX_CONTEXT_RECOVERIES, parseContextOverflow, planContextRecovery, type ContextOverflow } from "@/lib/coding-context-window";
 import {
   HARNESS_FAULT_CONFIG_KEY,
   type HarnessFault,
   classifyHarnessFailure,
   harnessFaultMessage,
   harnessFaultProblem,
+  modelAnswered,
   parseHarnessFault,
 } from "@/lib/coding-harness-fault";
 // The runner writes its fixed lines from this table so the surfaces that draw
@@ -153,33 +150,66 @@ import { memAvailableMb } from "@/lib/mem-available";
 // Why the runs and the handles on them do not live in module-level `let`: this
 // file is compiled twice into the one web-server process. See the store below.
 import { processStore } from "@/lib/process-store";
+import { beginCodingStart, endCodingStart, failCodingStart, stepCodingStart } from "@/lib/coding-run-starts";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import {
+  CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY,
   CODING_AGENT_PROVIDER_CONFIG_KEY,
   CODING_PROVIDERS,
   DEFAULT_CODING_PROVIDER,
   codingProviderFrom,
+  connectedProvidersFrom,
   defaultModelForProvider,
   isCodingProvider,
+  isRecordableModel,
   modelsForProvider,
+  offeredProviders,
   resolveRunProvider,
+  runsOnCodex,
+  DEFAULT_OPENAI_MODEL,
   type CodingProvider,
 } from "@/lib/coding-provider";
 import { getAnthropicConnection, verifyAnthropicKey, type AnthropicSource } from "@/lib/coding-anthropic";
+import {
+  buildCodexArgs,
+  codexEventActions,
+  codexLimitUntil,
+  codexRulesText,
+  CODEX_API_KEY_ENV,
+  CODEX_COMMAND,
+  isCodexAuthFailure,
+  isCodexLimit,
+  type CodexMcpServer,
+} from "@/lib/coding-codex";
+import {
+  clearOpenAILimit,
+  codexBinary,
+  codexHome,
+  ensureCodexHome,
+  getOpenAIConnection,
+  noteOpenAILimit,
+  openAILimitedUntil,
+  readOpenAIKey,
+  type OpenAISource,
+} from "@/lib/coding-openai";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { chosenProjectFolderFrom, defaultProjectFolder, ensureDefaultProjectFolder, PROJECT_FOLDER_CONFIG_KEY, projectFolderFrom } from "@/lib/project-folder";
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
+import { registerOrStartServerApp } from "@/lib/app-server-start";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
 import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { CLAWAI_PLAN_TIER_KEY, clawaiEntitlementTier } from "@/lib/clawai-plan-tier";
 import {
+  concretePrefix,
   deriveAllowRule,
   isAllowRuleRefusal,
   MAX_ALLOW_RULES,
   normalizeAllowRules,
   SOFT_HOME_SUBTREES,
+  softProjectDir,
   unlockedSoftPaths,
   validateAllowRule,
   type AllowRuleContext,
@@ -188,23 +218,34 @@ import {
 } from "@/lib/coding-permission-rules";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import {
+  getInjectSecrets,
   isReservedSecretName,
   MAX_SECRETS,
+  recordRunSecretsHanded,
+  releaseRunSecrets,
   resolveSecretsForRun,
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
+  withoutExpiredSecrets,
+  withoutPastDueSecrets,
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
+import { appendSecretAudit, SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit";
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
+import { CLAWBOX_READ_ONLY_TOOLS, RUN_READ_PROFILE } from "@/lib/clawbox-run-read-tools";
+import { CLAWBOX_READ_ONLY_ENTRY, resolveRunMcpPlan, type RunMcpPlan } from "@/lib/project-mcp-servers";
 import {
   anotherAccountLikely,
   accountsSnapshot,
   activeAccountSnapshot,
+  markCredentialProblem,
   markLimited,
+  markModelLimited,
   onLimitReset,
   prepareAccount,
   probeAccountCredential,
+  readAccountUsage,
   readAccounts,
   removeCredentialHandoffs,
   startAnthropicAccounts,
@@ -215,19 +256,26 @@ import {
   type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
 import {
+  detectAnthropicAccountDisabled,
   detectAnthropicAuthFailure,
   detectAnthropicLimit,
+  detectAnthropicLimitNotice,
   formatResetClock,
   isUsable,
+  isUsableFor,
   limitUntil,
+  modelFamily,
+  modelLimitedUntil,
+  nextResetFor,
   pickAccount,
   poolHealth,
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
-import { registerSwapConsumer } from "@/lib/anthropic-swap";
+import { modelWeekOf, nearestFull, usageForModel } from "@/lib/anthropic-usage";
+import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
-import { announceCodingAgent } from "@/lib/coding-agent-notify";
+import { announceCodingAgent, announceCodingRunToChat } from "@/lib/coding-agent-notify";
 import {
   collectVisualEvidence,
   renderEvidenceSection,
@@ -271,6 +319,7 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
+import { adoptOwnBranchWork, ownBranchWork, readCheckout } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
@@ -278,10 +327,11 @@ import {
   mergeRunBranch,
   removeRunWorktree,
   restoreRunWorktree,
-  sweepRunWorktrees,
+  worktreeHasChanges,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
-import { worktreeHintFor, worktreeHintText } from "@/lib/coding-worktree-paths";
+import { worktreeHintFor, worktreeHintText, worktreeProject } from "@/lib/coding-worktree-paths";
+import { classifyFolders } from "@/lib/coding-folder-kind";
 import {
   autoMergeOutstanding,
   buildReviewFeedback,
@@ -292,8 +342,6 @@ import {
   describeProblems,
   findOpenPullRequestForBranch,
   isReviewPending,
-  MAX_REVIEW_ROUNDS,
-  MIN_REVIEW_ROUNDS,
   parseReviewLoop,
   pushBranch,
   readFailedCheckLogs,
@@ -303,16 +351,15 @@ import {
   REVIEW_NO_CHECKS_GRACE_MS,
   reviewPollIntervalMs,
   reviewProblems,
+  type ReviewCheck,
   type ReviewLoop,
   type ReviewSnapshot,
 } from "@/lib/coding-review";
 import {
-  completionAttemptsFrom,
   completionNudge,
   gaveUpReason,
   MAX_COMPLETION_ATTEMPTS,
   MAX_MISSING_CHARS,
-  MIN_COMPLETION_ATTEMPTS,
   parseAttempts,
   parseDeliverable,
   parseDeliverableVerdict,
@@ -322,39 +369,19 @@ import {
   type RunAttempt,
 } from "@/lib/coding-deliverable";
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
-import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
+import { commitRunWork, headCommitShort, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import {
   CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
   CODING_AGENT_GIT_NAME_CONFIG_KEY,
   CODING_GIT_EMAIL_REFUSAL,
   CODING_GIT_NAME_REFUSAL,
+  CODING_GIT_PLACEHOLDER,
   MAX_GIT_IDENTITY_CHARS,
   normalizeCodingGitEmail,
   normalizeCodingGitName,
+  resolveCodingGitIdentity,
+  type CodingGitIdentity,
 } from "@/lib/coding-git-identity";
-import { readPipelineDefault } from "@/lib/coding-pipeline-store";
-import {
-  addEvidence,
-  clonePipeline,
-  decidePipeline,
-  enterStage,
-  improvementNudge,
-  isPipelineLive,
-  newPipeline,
-  parsePipeline,
-  defaultPipelineInput,
-  readPipelineInput,
-  stageNoun,
-  stepFor,
-  stopPipeline,
-  type PipelineInput,
-  type PipelineInputRefusal,
-  type PipelineStage,
-  type PipelineState,
-  type PipelineTransition,
-  type PipelineVerify,
-  type StageOutcome,
-} from "@/lib/coding-pipeline";
 import {
   EXPERIENCE_BLOCK_MAX_CHARS,
   EXPERIENCE_RULE_ID,
@@ -367,17 +394,37 @@ import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
 import {
+  findRunScopeUnit,
   isRunScopeUnit,
   noteScopeRefused,
   noteScopeWorked,
   probeSystemdRun,
+  RUN_UNIT_PREFIX,
   runScopeUnit,
   SCOPE_REFUSED,
   scopeEnv,
   stopUnit,
   unitActive,
   buildScopeArgv,
+  RUN_NICE,
 } from "@/lib/coding-run-unit";
+import { cpuBudgetBrief, hostCpuCount, MAX_CPU_BUDGET, onBatteryPower, RUN_CPU_BUDGET_ENV, runCpuBudget } from "@/lib/coding-run-cpu";
+import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } from "@/lib/coding-run-notes";
+import { looksVisual, mentionsPullRequest } from "@/lib/coding-diet";
+import {
+  applyRoleModelsPatch,
+  CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
+  MODEL_ROLES,
+  modelRoleOf,
+  relativeModelCost,
+  resolveRoleRun,
+  ROLE_AUTO,
+  roleMaxTurns,
+  roleModelsFrom,
+  roleModelsView,
+  type ModelRole,
+  type RoleModels,
+} from "@/lib/coding-role-models";
 import {
   appendRunMessage,
   noteStreamInputRefused,
@@ -393,62 +440,54 @@ import {
   streamJsonUserTurn,
   STREAM_INPUT_REFUSED,
   type RunMessage,
+  type RunMessageDelivery,
+  type RunMessageVia,
 } from "@/lib/coding-run-messages";
+import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
+import {
+  clearReceipts,
+  commandClockAnswers,
+  commandClockPath,
+  createCommandClock,
+  ensureRunInbox,
+  inboxPending,
+  inboxReceipts,
+  postToInbox,
+  reclaimInbox,
+  removeRunInbox,
+  runHookScriptPath,
+  runHookSettings,
+} from "@/lib/coding-run-inbox";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
-/** config.json key of the owner's switch. Absent means OFF. */
+/**
+ * config.json key of the owner's switch. Absent means ON (TASK-1639: the box
+ * works from chat out of the box, so the main agent can delegate a coding task
+ * without the owner opening the app first). Only an explicit `false` — what
+ * switching it off writes — is OFF. Runs still work in their own copy on a
+ * branch, auto pull requests stay off by default, and the tools are only
+ * offered once the harness reports ready.
+ */
 export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
 /**
- * config.json key of the folder a run works in when the caller names neither a
- * project nor a directory. Absent means "no default": a run must then say
- * where it works, as it always had to.
+ * config.json key of the owner's project folder: the shelf a run's folder name
+ * is looked up on, the Store installs into and the app lists. Absent means the
+ * owner has not chosen one, and ~/Projects is in force (src/lib/project-folder.ts)
+ * — never written here, so a folder they chose is never overwritten by it.
  *
  * It is stored as the owner typed it and re-validated on EVERY use, never
  * trusted because it was validated once when it was set. The containment rules
  * are the same ones an explicit directory faces — a default is a convenience,
  * not a way around them.
  */
-export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
+export const CODING_AGENT_DIR_CONFIG_KEY = PROJECT_FOLDER_CONFIG_KEY;
 
-/**
- * How hard Claude Code thinks per turn. The first five are the levels the
- * installed CLI accepts for `--effort` and the wrapper pins through
- * CLAUDE_DS_EFFORT — it warns and falls back to its default on anything
- * else, so the set is validated here rather than passed through.
- *
- * Higher is slower and costs more; on a Jetson the difference is felt.
- *
- * "ultracode" is not a thinking level but Claude Code's own mode on top of
- * one: xhigh effort plus a standing opt-in to orchestrate the work with its
- * Workflow tool (fan-out, adversarial verification). It is the default
- * because a delegated run is unattended — the owner is not watching to notice
- * it gave up early — and it is the most thorough setting the harness has.
- * The wrapper requests it with `--effort ultracode` instead of the env pin
- * the fixed levels use, because a pinned CLAUDE_CODE_EFFORT_LEVEL blocks the
- * mode ("clear it and ultracode takes over"). Checked on this box: a -p run
- * under the flag reports "Ultracode is on" and carries the Workflow tool.
- */
-export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
-/**
- * The levels the app offers, as opposed to the ones the CLI accepts.
- *
- * Measured on this box, same prompt, deepseek-v4-pro[1m], reasoning tokens:
- *
- *     low 82   medium 94   high 102   xhigh 139   max 414
- *
- * The effort does reach the model — the request carries
- * output_config {"effort": "..."} and it changes with the flag — but low,
- * medium and high land within noise of each other. Offering six buttons
- * where three do the same thing teaches a false model of the machine, so the
- * picker shows the three that measurably differ, plus ultracode. All six stay
- * valid for anyone setting the config key directly.
- */
-export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max", "ultracode"];
-export type CodingEffort = (typeof EFFORT_LEVELS)[number];
-export const DEFAULT_EFFORT: CodingEffort = "ultracode";
-/** The one level the wrapper cannot pin through the environment — see EFFORT_LEVELS. */
-export const ULTRACODE_EFFORT: CodingEffort = "ultracode";
+// The effort levels live in src/lib/coding-effort.ts (pure, so the MCP server
+// can offer the same list); re-exported here under the names every caller
+// already imports.
+import { DEFAULT_EFFORT, EFFORT_LEVELS, effortRefusal, isEffort, isOfferedEffort, OFFERED_EFFORT_LEVELS, ULTRACODE_EFFORT, type CodingEffort } from "@/lib/coding-effort";
+export { DEFAULT_EFFORT, EFFORT_LEVELS, isOfferedEffort, OFFERED_EFFORT_LEVELS, ULTRACODE_EFFORT, type CodingEffort };
 export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
 
 
@@ -484,34 +523,56 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
  * So the question is no longer "how long has it been alive" but "is it doing
  * anything". Every stream event stamps lastActivityAt, and only silence
  * counts against a run. Runaway cost is bounded separately and properly, by
- * the owner's step and token ceilings; this is only here so a wedged process cannot
+ * the owner's step ceiling; this is only here so a wedged process cannot
  * hold the one-run-at-a-time slot forever.
  */
 export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** How often the idle check runs. */
 const IDLE_CHECK_MS = 60_000;
-/** Default agent turns before Claude Code stops itself (`error_max_turns`).
- *  The owner can change it; a long project needs more than a short one.
- *  400, raised from 150 (owner's decision, 2026-09-15): a delivery run that
- *  builds, verifies in the browser and opens a pull request was hitting the
- *  ceiling on ordinary tasks. */
-export const DEFAULT_MAX_TURNS = 400;
+/** The step ceiling a writing run gets (`--max-turns`; Claude Code stops
+ *  itself with `error_max_turns`). A SAFETY NET, not a setting (owner's
+ *  ruling, SCA3): the control left the settings panel and the enable route,
+ *  and the number is the one a runaway cannot pass rather than the one a
+ *  long task should fit under — a run that reaches it settles `failed` +
+ *  `resumable`, and Continue gives it a fresh ceiling in the same session.
+ *  History: 150 → 400 (2026-09-15, delivery runs hit it on ordinary tasks)
+ *  → 200 (TASK-1749, measured 72 turns on the longest of nine bench specs)
+ *  → 2,000 (SCA3): the 200 was a knob the owner raised when a run needed
+ *  more, and the longest legitimate run on this box so far was 383 turns
+ *  (team-ac2dlilw's worker), which 200 would have failed; 2,000 is
+ *  MAX_MAX_TURNS, so a stored `coding_agent_max_turns` can only LOWER it.
+ *  Reading roles (planner, reviewer) keep their own cap of 100 through
+ *  `roleMaxTurns`. */
+export const DEFAULT_MAX_TURNS = 2_000;
+
+/** A run's tokens by the four ways a provider bills them — see CodingRun.tokenBreakdown. */
+export interface TokenBreakdown {
+  input: number;
+  output: number;
+  cacheCreation: number;
+  cacheRead: number;
+}
+
+export function emptyTokenBreakdown(): TokenBreakdown {
+  return { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+}
+
+/** A stored breakdown, leniently: a missing or bad figure is 0. */
+export function readTokenBreakdown(raw: unknown): TokenBreakdown {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  return { input: n(o.input), output: n(o.output), cacheCreation: n(o.cacheCreation), cacheRead: n(o.cacheRead) };
+}
+
+/** How many per-spawn figures a record keeps. */
+export const MAX_SPAWN_TOKENS_KEPT = 20;
+/** The range a STORED `coding_agent_max_turns` is clamped into: the key is
+ *  honoured on read for a box that set it while the control existed, is
+ *  cleared by Start over (CODING_AGENT_RESET_KEYS), and is written by nothing
+ *  since SCA3. */
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
-
-/**
- * Optional ceiling on the tokens one run may spend. Null means no ceiling.
- *
- * Claude Code has no flag for this — only --max-budget-usd, which prices an
- * unknown model name and so meant nothing here — so the device enforces it
- * from the usage the stream already reports, and stops the run itself.
- *
- * Counted the way a bill is: every request pays for the input it carries, so
- * input is summed per turn even though the conversation repeats. Cache reads
- * are cheaper than fresh input but are not free, so they count too.
- */
-export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
 
 /**
  * The owner's switch for the automatic review pass: when on, a run that
@@ -603,39 +664,75 @@ export const CODING_AGENT_AUTO_MERGE_CONFIG_KEY = "coding_agent_auto_merge";
  * becomes what it should always have been — a question about the BOX's
  * memory rather than about the filesystem.
  *
- * Two by default, and at most four: measured on this Orin (2026-09-05) a
- * `claude -p` run with its MCP server is ~270 MB resident two minutes in and
- * grows with its context, and the box is also carrying the web server, the
- * gateway and the desktop's Chromium. A team keeps its OWN rule
- * (MAX_TEAM_WORKERS and the memory guard): its workers share a goal and a
- * board, and the orchestrator waits rather than failing.
+ * Two by default. The ceiling scales with the host (`hostMaxParallelRuns`):
+ * four on a Jetson or anything under 16 GB of RAM — measured on an 8 GB Orin
+ * (2026-09-05) a `claude -p` run with its MCP server is ~270 MB resident two
+ * minutes in and grows with its context, and the box is also carrying the web
+ * server, the gateway and the desktop's Chromium — and on a bigger host one
+ * run per 4 GB, at most sixteen. The ceiling is only what the setting offers;
+ * the free-memory guard (`TEAM_SPAWN_MIN_AVAILABLE_MB`) stays the real safety.
+ * The automatic review pass does not take one of these slots: it has its own
+ * small pool (`REVIEW_PASS_POOL_RUNS`), so a box at its limit still reviews
+ * what it delivered and the reviews never crowd out the owner's own runs. A
+ * team's runs take these slots like anyone's (`parallelSlotHolders`), within
+ * a ceiling of the team's own (MAX_TEAM_WORKERS) and the memory guard, and a
+ * team refused one waits for it rather than failing (`teamSpawnSlot`).
  */
 export const CODING_AGENT_MAX_PARALLEL_CONFIG_KEY = "coding_agent_max_parallel_runs";
 export const DEFAULT_MAX_PARALLEL_RUNS = 2;
 export const MIN_MAX_PARALLEL_RUNS = 1;
+/** The ceiling on a Jetson or any host under `BIG_HOST_MIN_RAM_GB`. */
 export const MAX_MAX_PARALLEL_RUNS = 4;
+/** The ceiling on the biggest host, whatever its RAM. */
+export const MAX_MAX_PARALLEL_RUNS_BIG_HOST = 16;
+export const BIG_HOST_MIN_RAM_GB = 16;
+/** RAM a host needs per run before the ceiling grows past four. */
+export const RAM_GB_PER_PARALLEL_RUN = 4;
+/** Automatic review passes allowed at once, beside the owner's runs. */
+export const REVIEW_PASS_POOL_RUNS = 2;
 
-/** How many runs at once this box allows, from the raw config value. */
-export function maxParallelRunsFrom(raw: unknown): number {
-  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_PARALLEL_RUNS;
-  const rounded = Math.round(raw);
-  if (rounded < MIN_MAX_PARALLEL_RUNS || rounded > MAX_MAX_PARALLEL_RUNS) return DEFAULT_MAX_PARALLEL_RUNS;
-  return rounded;
+function isJetsonHost(): boolean {
+  try {
+    return fs.existsSync("/etc/nv_tegra_release");
+  } catch {
+    return false;
+  }
 }
 
 /**
- * How many ATTEMPTS at its deliverable a run gets, the original included.
- *
- * Only ever spent by a run that HAS a deliverable (src/lib/coding-deliverable.ts):
- * one the caller named, or the pull request the auto-PR switch already implies.
- * A run with neither settles exactly as it always did, so this setting costs a
- * box that does not use deliverables nothing at all.
- *
- * Three by default, and the count includes the run's own first turn — so the
- * default buys two resumes. One is a real setting and means "check it, tell me,
- * spend nothing more".
+ * The most runs at once THIS host may be set to: four on a Jetson or under
+ * 16 GB of RAM, otherwise floor(RAM GB / 4), capped at sixteen.
  */
-export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY = "coding_agent_completion_attempts";
+export function hostMaxParallelRuns(
+  totalMemBytes: number = os.totalmem(),
+  jetson: boolean = isJetsonHost(),
+): number {
+  const gb = totalMemBytes / 1024 ** 3;
+  if (jetson || !Number.isFinite(gb) || gb < BIG_HOST_MIN_RAM_GB) return MAX_MAX_PARALLEL_RUNS;
+  return Math.min(
+    MAX_MAX_PARALLEL_RUNS_BIG_HOST,
+    Math.max(MAX_MAX_PARALLEL_RUNS, Math.floor(gb / RAM_GB_PER_PARALLEL_RUN)),
+  );
+}
+
+/**
+ * The live runs that hold one of the owner's `coding_agent_max_parallel_runs`
+ * slots: every one but the automatic review passes, which have their own pool
+ * (`REVIEW_PASS_POOL_RUNS`) — a team's runs, any team's, included. ONE count
+ * for the ordinary gate and for a team's (`teamSpawnSlot`), so the two never
+ * disagree about how full the box is.
+ */
+function parallelSlotHolders<R extends Pick<CodingRun, "reviewOf">>(live: readonly R[]): R[] {
+  return live.filter((r) => !r.reviewOf);
+}
+
+/** How many runs at once this box allows, from the raw config value. */
+export function maxParallelRunsFrom(raw: unknown, ceiling: number = hostMaxParallelRuns()): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_PARALLEL_RUNS;
+  const rounded = Math.round(raw);
+  if (rounded < MIN_MAX_PARALLEL_RUNS || rounded > ceiling) return DEFAULT_MAX_PARALLEL_RUNS;
+  return rounded;
+}
 
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
@@ -668,8 +765,10 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
  * Does a run verify its work in the Chromium on the owner's own SCREEN?
  *
  * /setup-api/browser can drive either of two browsers: the desktop window the
- * owner can watch (attached over CDP on port 18800, started if it is not
- * running) or a headless Chromium of the web server's own. The screen is the
+ * owner can watch (attached over CDP on its configured port — 18800 unless the
+ * owner pointed it at a browser of their own, src/lib/desktop-browser-config.ts
+ * — started if it is not running) or a headless Chromium of the web server's
+ * own. The screen is the
  * point — the owner watches the page the run is checking, live, and the run
  * screenshots exactly what they see.
  *
@@ -736,18 +835,15 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_DIR_CONFIG_KEY,
   CODING_AGENT_EFFORT_CONFIG_KEY,
   CODING_AGENT_TURNS_CONFIG_KEY,
-  CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
   CODING_AGENT_PR_BODY_TASK_CONFIG_KEY,
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
-  CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
   CODING_AGENT_MAX_PARALLEL_CONFIG_KEY,
   // The retention setting goes back to standard; resetCodingAgentSetup also
   // hands Claude Code's transcript period back to whoever set it before.
   CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY,
-  CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
@@ -786,7 +882,6 @@ export const CODING_AGENT_RESET_KEYS = [
  */
 export const MAX_IMAGES_PER_RUN = 20;
 export const MAX_AUDIO_PER_RUN = 40;
-export const MIN_TOKEN_LIMIT = 10_000;
 /** The longest task a person — the owner, or the assistant on their behalf — may type. */
 export const MAX_TASK_CHARS = 4_000;
 /**
@@ -804,6 +899,17 @@ export const MAX_TASK_CHARS = 4_000;
  * never the reason a follow-up does not start.
  */
 export const MAX_BOX_TASK_CHARS = 32_000;
+/**
+ * The ceiling the coding TEAM's own task texts are built to — a worker's, a
+ * reviewer's, the lead's (`workerTask`, `reviewerTask`,
+ * `finalReviewerTask`, `leadTask`). Box-written like a review round, so
+ * MAX_TASK_CHARS does not apply; built to THIS rather than MAX_BOX_TASK_CHARS
+ * because the text is a brief, not a log. At the typed 4,000 a team's
+ * worker got its goal cut mid-sentence with no files hint, no rejection
+ * reason and no teammates behind it (5 of 6 task descriptions, 7 of 8
+ * worker texts of one live team); the hint's absence then cost it a stray.
+ */
+export const TEAM_TASK_CHARS = 12_000;
 export const MAX_DIRECTORY_CHARS = 512;
 
 /**
@@ -813,9 +919,14 @@ export const MAX_DIRECTORY_CHARS = 512;
  * the first. Measured on this Orin Nano (2026-09-05): a `claude -p` run is
  * ~210 MB resident two minutes in with its MCP server at ~60 MB, and grows
  * with its context; the guard is set for three of them beside the web
- * server, the gateway and the desktop's Chromium on a 7.6 GB board. A run
- * that is not the team's still waits for the team, and the team waits for
- * it: the one-run-at-a-time rule is between STRANGERS.
+ * server, the gateway and the desktop's Chromium on a 7.6 GB board.
+ *
+ * The team SHARES the box: its runs count against the owner's
+ * `coding_agent_max_parallel_runs` like any run's, and a run that is not the
+ * team's — a single run, the automatic review pass the box starts after one,
+ * another team's — is a slot taken, never a reason to fail. Refusing the team
+ * outright beside any of them killed it at its first second while single runs
+ * went on side by side up to the limit.
  */
 export const MAX_TEAM_WORKERS = 3;
 export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
@@ -824,31 +935,72 @@ export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
 })();
 
 /**
- * Whether one more run of `team` may start beside the runs already live.
- * The orchestrator asks this before it dispatches a worker, so a full board
- * or a tight box makes it WAIT rather than fail; assertCanSpawn asks it
- * again at the spawn, which is the gate. `starting` is how many of the
- * team's workers the orchestrator has dispatched that have not reached
- * their run yet (a worktree is being added): they hold a slot and a share
- * of the memory already, and a count of persisted runs alone would admit a
- * third worker beside two that are seconds from spawning.
+ * Whether one more run of `team` may start beside the runs already live: the
+ * team's own runs under MAX_TEAM_WORKERS, every run's under the owner's limit
+ * (`getMaxParallelRuns`, counted as the ordinary gate counts it), and — once
+ * anything at all is going on the box — the memory guard. Every refusal is a
+ * WAIT: each of them clears as runs settle, so the orchestrator asks again
+ * rather than failing the team. The orchestrator asks this before it starts a
+ * planner, a worker, a reviewer or a lead; assertCanSpawn asks it again at
+ * the spawn, which is the gate.
+ *
+ * `starting` is how many of the team's workers the orchestrator has
+ * dispatched that have not reached their run yet (a worktree is being
+ * added): they hold a slot and a share of the memory already, and a count of
+ * persisted runs alone would admit a third worker beside two that are
+ * seconds from spawning.
  */
 export async function teamSpawnSlot(team: RunTeam, starting = 0): Promise<{ ok: true } | { ok: false; reason: string; wait: boolean }> {
-  const active = loadRuns().filter((r) => isLive(r.status));
-  const stranger = active.find((r) => r.team?.id !== team.id);
-  if (stranger) return { ok: false, wait: false, reason: `A coding run is already in progress (${stranger.id}). Wait for it or stop it first.` };
-  const going = active.length + Math.max(0, starting);
-  if (going >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${going} runs going.` };
-  if (going >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
-    const mb = await memAvailableMb();
-    // No reading is no evidence of room: a box that cannot say how much
-    // memory it has left is not one to start a second run on.
-    if (mb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${going} going.` };
-    if (mb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
-      return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${going} going (${mb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
+  const slot = await judgeTeamSlot(team, starting, false);
+  return slot.ok ? { ok: true } : slot;
+}
+
+/**
+ * teamSpawnSlot's verdict; with `take`, the slot is HELD (`holdSpawnSlot`) in
+ * the same synchronous step as the counts it was judged on — the shape the
+ * ordinary gate has, for the same reason: a hold taken after this resolved
+ * would race every other start that read the same counts meanwhile.
+ *
+ * The team's own starts are the orchestrator's `starting` or the ones past
+ * the gate (`startingTeams`), whichever is more — never the two added, since
+ * a worker that is spawning is in both. Everyone else's starts past the gate
+ * are the rest of `startingRuns`.
+ */
+async function judgeTeamSlot(
+  team: RunTeam,
+  starting: number,
+  take: boolean,
+): Promise<{ ok: true; release: () => void } | { ok: false; reason: string; wait: true }> {
+  const limit = await getMaxParallelRuns();
+  // Read only once something is going, and then the counts are read again
+  // after it: the verdict and the hold must sit after the LAST await.
+  let freeMb: number | null | undefined;
+  for (;;) {
+    const live = loadRuns().filter((r) => isLive(r.status));
+    const atGate = store.startingTeams?.get(team.id) ?? 0;
+    const ownStarting = Math.max(0, starting, atGate);
+    const othersStarting = Math.max(0, store.startingRuns - atGate);
+    const own = live.filter((r) => r.team?.id === team.id).length + ownStarting;
+    if (own >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${own} runs going.` };
+    const holding = parallelSlotHolders(live).length + othersStarting + ownStarting;
+    if (holding >= limit) {
+      return { ok: false, wait: true, reason: `This ClawBox is already starting or running ${holding} coding runs at once, which is all it allows; the team waits for a free slot.` };
     }
+    const going = live.length + othersStarting + store.startingReviews + ownStarting;
+    if (going >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
+      if (freeMb === undefined) {
+        freeMb = await memAvailableMb();
+        continue;
+      }
+      // No reading is no evidence of room: a box that cannot say how much
+      // memory it has left is not one to start a second run on.
+      if (freeMb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${going} going.` };
+      if (freeMb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
+        return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${going} going (${freeMb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
+      }
+    }
+    return { ok: true, release: take ? holdSpawnSlot(false, team.id) : () => {} };
   }
-  return { ok: true };
 }
 /** Longest a status request may block waiting for a run to finish. */
 export const MAX_WAIT_MS = 120_000;
@@ -892,7 +1044,7 @@ const MAX_STDERR_CHARS = 8_000;
 const MAX_STDOUT_LINE_CHARS = 1_000_000;
 const STOP_GRACE_MS = 3_000;
 /** How often progress is flushed to disk while a run is busy. */
-const FLUSH_INTERVAL_MS = 1_000;
+const FLUSH_INTERVAL_MS = STATE_FLUSH_MS;
 /**
  * How long a settling run waits for its project picture. The generation itself
  * is allowed two minutes upstream, which is the right budget while a run works
@@ -947,6 +1099,67 @@ function stderrLogPath(runId: string): string {
   return path.join(STREAM_DIR, `${runId}.err`);
 }
 
+/**
+ * A run's MCP config when its project opted into more than today's server
+ * (src/lib/project-mcp-servers.ts): the harness server entries WITH their
+ * env and headers, so a FILE — 0600, beside the stream logs — and never argv,
+ * which is world-readable in /proc, nor the evidence folder, which the run
+ * itself reads through --add-dir. Beside the stream logs because that folder
+ * is already denied to every run by name (DATA_SECRET_FILES), so the file
+ * adds no entry under data/ for any other run's deny list to discover — and a
+ * team's runs are live together. One file per spawn; the settle deletes it
+ * (cleanupRunResources), and the boot hook takes what a crash left.
+ */
+const RUN_MCP_CONFIG_RE = /^(run-[A-Za-z0-9_-]+)\.mcp-[0-9a-f]+\.json$/;
+
+/** Write one spawn's MCP config; answers the path for `--mcp-config`. Synchronous — the spawn is. */
+export function writeRunMcpConfig(runId: string, json: string): string {
+  // The id itself, not the basename of what it joins to: a separator in it
+  // would put the file somewhere the deny list does not name.
+  if (!/^run-[A-Za-z0-9_-]+$/.test(runId)) throw new Error("invalid run id for an MCP config");
+  fs.mkdirSync(STREAM_DIR, { recursive: true, mode: 0o700 });
+  const file = path.join(STREAM_DIR, `${runId}.mcp-${randomBytes(6).toString("hex")}.json`);
+  // `wx`: never over the top of something already there.
+  fs.writeFileSync(file, json, { mode: 0o600, flag: "wx" });
+  fs.chmodSync(file, 0o600);
+  return file;
+}
+
+/** Best effort: a file that will not go is logged, and the next one is still tried. `force` covers only ENOENT. */
+function removeRunMcpConfigFile(name: string): void {
+  try {
+    fs.rmSync(path.join(STREAM_DIR, name), { force: true });
+  } catch (err) {
+    console.warn(`[coding-agent] could not remove MCP config ${name}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** Remove every MCP config this run's spawns were given. */
+export function removeRunMcpConfigs(runId: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(STREAM_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (RUN_MCP_CONFIG_RE.exec(name)?.[1] === runId) removeRunMcpConfigFile(name);
+  }
+}
+
+/** At boot: every MCP config a server that died left behind. A harness reads its config once, at start, so even a run that is reattached no longer needs its file. */
+function sweepRunMcpConfigs(): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(STREAM_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (RUN_MCP_CONFIG_RE.test(name)) removeRunMcpConfigFile(name);
+  }
+}
+
 /** How often the tail of a live run's stream log is read. */
 const STREAM_POLL_MS = 200;
 /** At most this many bytes are read from the log in one go. */
@@ -960,6 +1173,8 @@ const SETTLE_DRAIN_DELAY_MS = 250;
  * init now — so the unit is the only thing that can say the run is over.
  */
 const UNIT_POLL_MS = 3_000;
+/** How long after a natural settle the run's scope is asked whether anything escaped into it — see noteScopeLeftover. */
+const SCOPE_LEFTOVER_CHECK_MS = 1_500;
 
 /**
  * The run is spawned through this, not directly, so it starts with an empty
@@ -1126,14 +1341,30 @@ export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
 export const HELPER_MODEL: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "deepseek-v4-flash",
   anthropic: "haiku",
+  // A Codex run is never handed `--agents` (Codex has no such flag); the entry
+  // is the provider's economy model so the table stays whole.
+  openai: "gpt-5.6-luna",
 };
 
-/** The `--agents` payload for a run on this provider. */
-export function subagentDefinitionsFor(provider: CodingProvider): Record<string, unknown> {
+/** The helpers that run a command: a read-only run has no shell to hand them. */
+const SHELL_HELPERS: ReadonlySet<string> = new Set(["tester", "workflow-subagent"]);
+
+/**
+ * The `--agents` payload for a run on this provider. A read-only run gets no
+ * tester and no workflow-subagent: both carry Bash, and three read-only team
+ * runs sent the tester when they had no Bash of their own. They have read-only
+ * git now (READ_ONLY_GIT_RULES), and that is the one road to git a reading run
+ * has: its helpers stay Bash-less. The two no-Bash decoys (`general-purpose`, `claude`)
+ * stay: they exist to catch a name the brief cannot stop a model from typing.
+ */
+export function subagentDefinitionsFor(provider: CodingProvider, opts: { readOnly?: boolean } = {}): Record<string, unknown> {
   const model = HELPER_MODEL[provider] ?? HELPER_MODEL[DEFAULT_CODING_PROVIDER];
-  if (model === HELPER_MODEL["clawbox-ai"]) return SUBAGENT_DEFINITIONS;
+  const definitions = opts.readOnly
+    ? Object.fromEntries(Object.entries(SUBAGENT_DEFINITIONS).filter(([name]) => !SHELL_HELPERS.has(name)))
+    : SUBAGENT_DEFINITIONS;
+  if (model === HELPER_MODEL["clawbox-ai"]) return definitions;
   return Object.fromEntries(
-    Object.entries(SUBAGENT_DEFINITIONS).map(([name, def]) => [name, { ...def, model }]),
+    Object.entries(definitions).map(([name, def]) => [name, { ...def, model }]),
   );
 }
 
@@ -1157,7 +1388,6 @@ export function subagentDefinitionsFor(provider: CodingProvider): Record<string,
  */
 export const WORKFLOW_TOOL = "Workflow";
 
-/** The tools of a run that may only read — a team's planner. */
 /**
  * The one place outside its folder a run may read: /tmp, where it puts what
  * it curls out of its own server or a build's log. Claude Code asks before
@@ -1185,7 +1415,84 @@ export function inputsReadRule(): string {
   return `Read(/${inputsRoot()}/**)`;
 }
 
+/**
+ * The reading tools of a run that may only read — a team's planner, reviewer
+ * and lead. Its `--tools` adds Bash beside them, approved for
+ * READ_ONLY_GIT_RULES and nothing else; its `--allowedTools` names these four
+ * bare, so a read outside the folder never waits on a prompt nobody answers.
+ */
 export const READ_ONLY_TOOLS = `Read,Grep,Glob,${SUBAGENT_TOOL}`;
+
+/**
+ * The commands a read-only run may run: read-only git, by prefix. A team's
+ * planner once had no shell at all, so no git history to read either, and
+ * with its reading tools unapproved it planned blind. In headless -p mode a
+ * Bash call no rule approves is refused, so this list IS a reading run's
+ * shell — never `Bash(*)`.
+ *
+ * The diff family's `--output=<file>` (git log, show, diff) still writes
+ * wherever it is told, and git diff and blame can read a file outside the
+ * repository: MUTATING_GIT_DENYLIST refuses those forms. `git branch` is
+ * approved only as the exact listings below, never by prefix: it creates,
+ * deletes, moves or forces a branch with a flag anywhere in the line
+ * (`git branch -r -D origin/main`), which no prefix or deny rule tells apart
+ * from a listing.
+ */
+export const READ_ONLY_GIT_RULES: readonly string[] = [
+  "Bash(git log:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git show:*)",
+  "Bash(git branch)", "Bash(git branch -a)", "Bash(git branch -r)", "Bash(git branch --list)",
+  "Bash(git branch --show-current)", "Bash(git branch -v)", "Bash(git branch -vv)",
+  "Bash(git rev-parse:*)", "Bash(git ls-files:*)", "Bash(git blame:*)", "Bash(git shortlog:*)", "Bash(git describe:*)",
+];
+
+/** A rule of READ_ONLY_GIT_RULES as the command it approves: `git log` for `Bash(git log:*)`, `git branch -a` for `Bash(git branch -a)`. */
+export function readOnlyGitCommand(rule: string): string {
+  return /^Bash\((.*?)(?::\*)?\)$/.exec(rule)?.[1] ?? rule;
+}
+
+/**
+ * Every git command that changes the repository, its work tree, its config or
+ * a remote, and the GitHub CLI's pull-request and API roads: refused to a
+ * read-only run by rule. None of them is approved (READ_ONLY_GIT_RULES) and
+ * -p refuses what is not, but a deny rule outranks any allow, so no future
+ * widening of the approvals can reach them. With them, the forms of an
+ * approved read that read a file OUTSIDE the repository, which the file deny
+ * rules (`fileDenyRules`) never see because git, not a file tool, opens it.
+ */
+export const MUTATING_GIT_DENYLIST: readonly string[] = [
+  "Bash(git push:*)", "Bash(git commit:*)", "Bash(git add:*)", "Bash(git rm:*)", "Bash(git mv:*)",
+  "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)", "Bash(git reset:*)",
+  "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git cherry-pick:*)", "Bash(git revert:*)", "Bash(git stash:*)",
+  "Bash(git branch -D:*)", "Bash(git branch -d:*)", "Bash(git branch --delete:*)",
+  "Bash(git branch -m:*)", "Bash(git branch -M:*)", "Bash(git branch --move:*)",
+  "Bash(git branch -c:*)", "Bash(git branch -C:*)", "Bash(git branch --copy:*)",
+  "Bash(git branch -f:*)", "Bash(git branch --force:*)", "Bash(git branch -u:*)", "Bash(git branch --set-upstream-to:*)",
+  "Bash(git branch --unset-upstream:*)", "Bash(git branch --edit-description:*)",
+  "Bash(git worktree:*)", "Bash(git tag:*)", "Bash(git remote add:*)", "Bash(git remote set-url:*)",
+  "Bash(git remote remove:*)", "Bash(git remote rename:*)", "Bash(git config:*)", "Bash(git clean:*)",
+  "Bash(git am:*)", "Bash(git apply:*)", "Bash(git fetch:*)", "Bash(git pull:*)", "Bash(git gc:*)",
+  "Bash(git init:*)", "Bash(git clone:*)", "Bash(git update-ref:*)", "Bash(git submodule:*)", "Bash(git notes:*)",
+  // The `*` mid-rule is the wildcard-anywhere grammar of the pinned Claude
+  // Code (2.1); a CLI that reads only the `:*` suffix takes it as one literal
+  // command nobody types, which denies nothing and breaks nothing.
+  "Bash(git *--output*)",
+  // Reads past the repository. `git diff --no-index` diffs any two files, and
+  // so does a plain `git diff` given two paths when one of them lies outside
+  // the repository (an absolute, home or parent path, quoted or not, or one
+  // the shell builds from a variable such as `$HOME`); `git blame --contents`
+  // takes any file as the blamed one's text; `git blame -S` (an argument of
+  // its own, its file attached or not: a file name such as `Foo-Service.ts`
+  // stays readable) and `--ignore-revs-file` read a list file and echo its
+  // lines in their error;
+  // `--stdin` (git log, show) reads revisions from a redirected file the same
+  // way. Git takes any unambiguous abbreviation of a long option, so each is
+  // refused from its shortest prefix up (`--no-i`, `--con`, `--ignore-revs`).
+  "Bash(git diff *--no-i*)", "Bash(git diff /*)", "Bash(git diff * /*)", "Bash(git diff ~*)", "Bash(git diff * ~*)",
+  "Bash(git diff *\"/*)", "Bash(git diff *'/*)", "Bash(git diff *$*)",
+  "Bash(git diff *../*)", "Bash(git diff .. *)", "Bash(git diff * ..)",
+  "Bash(git blame *--con*)", "Bash(git blame -S*)", "Bash(git blame * -S*)", "Bash(git blame *--ignore-revs*)", "Bash(git *--stdin*)",
+  "Bash(gh pr:*)", "Bash(gh api:*)",
+];
 
 export function toolsFor(subagents: boolean, effort?: CodingEffort): string {
   const tools = subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
@@ -1365,6 +1672,13 @@ export interface CodingRun {
    */
   requestedModel: string | null;
   /**
+   * The role whose provider and model choice this run started under
+   * (src/lib/coding-role-models.ts): `planner` for a team's planner and its
+   * lead. Frozen at start like `provider`. Null for a run that is not a
+   * team's, and on a record from before the field.
+   */
+  modelRole: ModelRole | null;
+  /**
    * The Anthropic ACCOUNT — an id in the box's pool (src/lib/anthropic-accounts.ts)
    * — the run's current process is on. Null for a ClawBox AI run and for a
    * record from before the pool. Deliberately NOT frozen the way `provider` is:
@@ -1377,7 +1691,13 @@ export interface CodingRun {
   accountSwitches: AccountSwitch[];
   /** The run's final message: what changed, how to verify, what is left. */
   summary: string | null;
-  /** Full final result for machine consumers; never parse the clipped display summary. */
+  /**
+   * Full final result for machine consumers; never parse the clipped display
+   * summary. Set only when the result is LONGER than `summary` holds
+   * (MAX_SUMMARY_CHARS): a copy of a result the summary already carries whole
+   * was a fifth of every flush of the runs file. Readers take
+   * `resultText ?? summary`.
+   */
   resultText?: string | null;
   /** Actual Workflow children; legacy subagent counters count containers. */
   workflowTelemetry?: WorkflowTelemetry;
@@ -1401,6 +1721,18 @@ export interface CodingRun {
   readOnly: boolean;
   /** Words the team appended to the brief — the planner's or a worker's role. */
   extraBrief: string | null;
+  /**
+   * How many parallel jobs this run's builds and tests may use
+   * (src/lib/coding-run-cpu.ts): worked out at start from the box's CPUs, the
+   * runs sharing them and whether it is on battery, then frozen like the
+   * effort, so a retry or a resume keeps to the same number. In
+   * its environment as CLAWBOX_RUN_CPU_BUDGET and in its brief.
+   *
+   * Optional in the type so a record built before it existed still
+   * type-checks; normalizeRun and newRunRecord always set it (null on an old
+   * record, which then gets the lone-run budget at its next spawn).
+   */
+  cpuBudget?: number | null;
   /**
    * The lessons from the training cluster's experience store this run's system
    * prompt carried (TASK-1348, src/lib/coding-experience.ts): which rules
@@ -1464,22 +1796,6 @@ export interface CodingRun {
    * `review.round` stays the loop's counter; this is one run's place in it.
    */
   reviewRound: number | null;
-  /**
-   * The DELIVERY PIPELINE this run is the build stage of, when it has one.
-   *
-   * The owner's ask of 2026-09-13: "From prompt -> coding agent -> review ->
-   * improvement -> deploy dev -> review -> deploy prod -> review -> task
-   * complete. The full run needs to be auto from start to finish." Every one of
-   * those stages already existed and each ended on its own; this is the record
-   * that joins them up, and it lives on the run that started the whole thing —
-   * the review pass and the improvement laps are turns in ITS session, and the
-   * deployments are of ITS work.
-   *
-   * Null on every run that was not asked to go through one, which is the
-   * unchanged path: such a run settles exactly as it always did. See
-   * src/lib/coding-pipeline.ts for the machine and what each stage means.
-   */
-  pipeline: PipelineState | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -1579,6 +1895,15 @@ export interface CodingRun {
   subagentsTotal: number;
   /** The commit this run's work was recorded as, when it changed anything. */
   commit: string | null;
+  /**
+   * The folder's HEAD when the run first spawned — `git log -1 --format=%h`,
+   * the spelling `newestCommitSince` answers in — or null where there was no
+   * commit to name. `noteOwnCommit` ignores an answer equal to it: with that
+   * helper's minute of clock slack, a worktree forked or a team's base merged
+   * seconds before the spawn had 29 of 52 read-only runs on the owner's box
+   * recorded as having "committed themselves" — as the base commit.
+   */
+  headAtStart: string | null;
   /** How many of each kind — explorer, tester, reviewer. */
   subagentsByType: Record<string, number>;
   /** Every model that did work for this run, main and sub-agents alike. */
@@ -1587,8 +1912,22 @@ export interface CodingRun {
   maxTurns: number;
   /** Tokens spent so far, summed the way a bill is — see the config key. */
   tokensUsed: number;
-  /** The ceiling that applied, or null when the run was uncapped. */
-  tokenLimit: number | null;
+  /**
+   * `tokensUsed` split the way a provider bills it: fresh input, output, and
+   * the cached prefix written and read back. Cache reads are most of a long
+   * run's total and cost a fraction of fresh input, so a total alone could not
+   * be compared with another tool's input/output figures (TASK-1749). Summed
+   * over every spawn of this record; a record from before the field reads as
+   * all zeros.
+   */
+  tokenBreakdown: TokenBreakdown;
+  /**
+   * The tokens each spawn of this record cost, in order: the first is the run
+   * itself, every later one a Fix CI lap or a resume.
+   * A review pass is a record of its own (`reviewOf`). Capped at
+   * MAX_SPAWN_TOKENS_KEPT, the newest kept.
+   */
+  spawnTokens: number[];
   /**
    * Reasoning tokens Claude Code reports so far.
    *
@@ -1599,6 +1938,13 @@ export interface CodingRun {
    * progress" and called coding_agent_stop at 295 seconds.
    */
   thinkingTokens: number;
+  /**
+   * An `openai` run's thread usage as Codex last reported it — its CUMULATIVE
+   * figure for the whole thread, not this record's share. Kept so a later
+   * spawn that continues the same thread (a resume) can
+   * bill only what it added: see codexUsageBaseline. Absent on every other run.
+   */
+  codexThreadUsage?: CodexThreadUsage;
   /** When the run last showed ANY sign of life. The answer to "is it stuck?". */
   lastActivityAt: number;
   /**
@@ -1607,6 +1953,13 @@ export interface CodingRun {
    * convergent package-manager setup — see TRANSIENT_FAILURE_RE.
    */
   retries: number;
+  /**
+   * Times this record was carried on, in its own session, after the provider
+   * refused a request past the model's context window (TASK-2203, see
+   * src/lib/coding-context-window.ts). At most MAX_CONTEXT_RECOVERIES; absent
+   * on a record that never needed it.
+   */
+  contextRecoveries?: number;
   /**
    * Whether RESUMING this run's session could help.
    *
@@ -1681,6 +2034,17 @@ export interface CodingRun {
    * run no review at all, or two.
    */
   reviewPass: boolean;
+  /**
+   * Does this run hold the browser and media tools? Decided ONCE, at the
+   * first spawn (`looksVisual` over the task and the folder's top-level
+   * entries), and kept for every respawn so the tools and the prompt prefix
+   * stay the same — the provider's prefix cache is lost and the run's tools
+   * move under it otherwise. Null until that spawn; a resume inherits a `true`
+   * (a run that had the tools keeps them) and decides afresh otherwise. A
+   * record written before the decision existed reads as `true`: it was
+   * started with every tool, and its resumes keep them.
+   */
+  visual: boolean | null;
   /** Pictures and clips this run has already been given, against the caps. */
   mediaGenerated: { images: number; audio: number };
   /**
@@ -1771,12 +2135,6 @@ export interface CodingRun {
    */
   attempts: RunAttempt[];
   /**
-   * The attempt ceiling this run started with, frozen for the reason every
-   * other run setting is: the owner changing the number while a run works must
-   * not change the promise that run was started under.
-   */
-  completionAttempts: number;
-  /**
    * Things the owner (or the assistant) has told this run while it works, and
    * whether the harness has had each of them yet.
    *
@@ -1787,10 +2145,71 @@ export interface CodingRun {
    * scoped run outlives it, and its queue must outlive it too.
    *
    * Empty on every record written before this field. See
-   * src/lib/coding-run-messages.ts for the bounds and the two ways one is
+   * src/lib/coding-run-messages.ts for the bounds and the three ways one is
    * delivered.
    */
   messages: RunMessage[];
+  /**
+   * The current spawn was given its inbox hook (src/lib/coding-run-inbox.ts):
+   * a message sent now reaches it after the tool call it is in. On the record
+   * rather than only in memory, because a run reattached after a restart still
+   * has its hook and its inbox, and only the record can say so. Absent (false)
+   * on a record from before, and for a spawn whose hook script was missing.
+   */
+  midTurn?: boolean;
+  /**
+   * A QUEUED run's place in the queue: since when it waits, and what it is
+   * started with when its turn comes. Null on every other record. A clone
+   * (`cloneRun`) carries the 1-based `position` instead of the request.
+   */
+  queued?: RunQueueEntry | null;
+  /**
+   * The pull request's FAILED CI, read when its watcher stopped on failing
+   * checks (src/lib/coding-ci.ts): which checks, which tests, which files, the
+   * tail of the failed logs. What the run's page and coding_agent_status offer
+   * a "Fix CI" continuation from. `attempt` is how many Fix CI continuations
+   * led to this run (0 for the one that opened the pull request); `fixRunId`
+   * the continuation started from it, once one was. Absent on every other run.
+   */
+  ci?: RunCi | null;
+  /** This run is a "Fix CI" continuation of `runId`, attempt n of MAX_CI_FIX_ATTEMPTS. */
+  ciFixOf?: { runId: string; attempt: number } | null;
+}
+
+export interface RunCi extends CiFailure {
+  attempt: number;
+  fixRunId: string | null;
+}
+
+/**
+ * What a QUEUED run is started with when its turn comes: the caller's own
+ * request as the run route took it (`new`), or the owner's Start on a draft
+ * (`draft`, which is the record itself). Kept as asked and validated again at
+ * the start, by the one reader every start goes through.
+ */
+export interface QueuedStart {
+  kind: "new" | "draft";
+  /** A Fix CI continuation — see StartRunInput.fixCi. */
+  fixCi?: boolean;
+  task?: string;
+  projectId?: string | null;
+  directory?: string | null;
+  resumeRunId?: string | null;
+  provider?: unknown;
+  model?: unknown;
+  deliverable?: unknown;
+  inputs?: unknown;
+  experience?: unknown;
+  baseBranch?: unknown;
+}
+
+export interface RunQueueEntry {
+  /** When it was queued: the order the queue starts runs in. */
+  at: number;
+  /** Absent from a clone: the request stays on the record. */
+  start?: QueuedStart;
+  /** 1-based, worked out when a clone is made — never stored. */
+  position?: number;
 }
 
 /**
@@ -1876,6 +2295,15 @@ export interface RunMedia {
 }
 
 /** One item of the run's plan, as Claude Code's TodoWrite tool reports it. */
+/** Codex's cumulative token figures for one thread (`turn.completed` usage). */
+export interface CodexThreadUsage {
+  /** Every input token, the cached prefix included. */
+  input: number;
+  /** The part of `input` served from the prompt cache. */
+  cachedInput: number;
+  output: number;
+}
+
 export interface CodingTodo {
   content: string;
   status: CodingTodoStatus;
@@ -1969,6 +2397,12 @@ export interface CodingHarnessReadiness {
   anthropicConnected: boolean;
   /** Which of the two a run would use, or null when there is neither. Never the credential. */
   anthropicSource: AnthropicSource | null;
+  /** Is the Codex CLI an `openai` run needs where install.sh puts it? */
+  codexInstalled: boolean;
+  /** Has the owner's own OpenAI access — a saved key or a ChatGPT sign-in for coding runs? */
+  openaiConnected: boolean;
+  /** Which of the two an `openai` run would use, or null. Never the credential. */
+  openaiSource: OpenAISource | null;
   /**
    * Whether `setpriv` is here to strip the web server's inherited network
    * capabilities off the run. False means no run may start: see the header.
@@ -2018,6 +2452,25 @@ export interface CodingHarnessReadiness {
   anyProviderReady: boolean;
 }
 
+/** One role of a coding team as its next fresh run would start: the answer `startRun` gives it. */
+export interface TeamRoleModel {
+  provider: CodingProvider;
+  /** The model on that provider, or null where the provider's plan decides. */
+  model: string | null;
+  effort: CodingEffort;
+  /** Nothing stored chose the provider or the model: the role's default on the team's own provider. */
+  auto: boolean;
+  /** Could a run be started on that provider right now? The same verdict the spawn gate reaches. */
+  ready: boolean;
+  /** Why not, in the owner's words — the box's own missing pieces, then the provider's. Empty when ready. */
+  problems: string[];
+  /** What a token costs on that model, the plan's flash tier = 1 (`relativeModelCost`); null where nobody can say. */
+  relativeCost: number | null;
+}
+
+/** Every role a choice is made for — see MODEL_ROLES. */
+export type TeamRoleModelMap = Record<ModelRole, TeamRoleModel>;
+
 export interface CodingAgentStatus {
   /** The owner's switch. */
   enabled: boolean;
@@ -2031,9 +2484,9 @@ export interface CodingAgentStatus {
    * discover it at the button.
    */
   planGate: PlanGate;
-  /** The owner's default working folder, or null when they have not set one. */
-  defaultDirectory: string | null;
-  /** What the device proposes when they have not chosen one: ~/Projects. */
+  /** The owner's project folder: the one they chose, else the ~/Projects default. */
+  defaultDirectory: string;
+  /** The default in force when they have not chosen one: ~/Projects. */
   suggestedDirectory: string;
   /** enabled AND the harness is installed and connected — i.e. a run can start. */
   ready: boolean;
@@ -2045,11 +2498,6 @@ export interface CodingAgentStatus {
   autoPr: boolean;
   /** How much of the task that pull request carries, always redacted. */
   prBodyIncludesTask: PrBodyTaskMode;
-  /** How many follow-up turns a pull request's review loop gets. 0 = off. */
-  reviewRounds: number;
-  /** The range the app offers, so it does not have to guess the bounds. */
-  minReviewRounds: number;
-  maxReviewRounds: number;
   /** May the box merge a pull request its review loop cleared? */
   autoMerge: boolean;
   /** How many coding runs may be going at once — see the config key. */
@@ -2059,20 +2507,11 @@ export interface CodingAgentStatus {
   maxMaxParallelRuns: number;
   /** What the box keeps of finished runs — see src/lib/coding-run-history.ts. */
   historyRetention: HistoryRetentionMode;
-  /** The extended mode's N, and the choices the app offers for it. */
-  historyLimit: number;
-  historyLimits: number[];
   /** Runs the live list holds in every mode (the thirty it always held). */
   historyLiveKept: number;
-  /** Attempts a run with a deliverable gets at it, its own first turn included. */
-  completionAttempts: number;
-  /** The range the app offers, so it does not have to guess the bounds. */
-  minCompletionAttempts: number;
-  maxCompletionAttempts: number;
-  /** May a run draw pictures, and may the box draw the project's icon? */
-  generateImages: boolean;
-  /** May a run have this box speak a clip into its project? */
-  generateAudio: boolean;
+  /** May a run have this box draw pictures and speak clips into its project
+   *  (and the box draw the project's icon)? One switch over the two keys. */
+  generateMedia: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
   /** May a coding team's lead add or retire tasks while the team runs? Off unless the owner said so. */
@@ -2100,20 +2539,21 @@ export interface CodingAgentStatus {
   provider: CodingProvider;
   /** The providers this build knows, for the picker. */
   providers: readonly CodingProvider[];
+  /** The providers the owner connected to the coding agent (a subset of `providers`, never empty): what a team's roles may be pinned to. */
+  connectedProviders: CodingProvider[];
   /** How hard a run thinks per turn. */
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
   effortLevels: readonly CodingEffort[];
+  /** A team's per-role provider, model and effort, "auto" for the role's default (src/lib/coding-role-models.ts). */
+  roleModels: ReturnType<typeof roleModelsView>;
+  /** What each of those roles resolves to right now, whether its provider can run, and what it costs — see TeamRoleModelMap. */
+  roleModelMap: TeamRoleModelMap;
   /** Folders in the default project folder the assistant may work in. */
   projectFolders: string[];
-  /** The ceilings a run stops at, so the app can show them without guessing. */
-  /** Agent steps a run gets, and the range the owner may choose from. */
+  /** The step ceiling a writing run gets — DEFAULT_MAX_TURNS, a safety net
+   *  the owner does not set (SCA3), so no range comes with it. */
   maxTurns: number;
-  minMaxTurns: number;
-  maxMaxTurns: number;
-  /** Token ceiling the device enforces, or null for none. */
-  tokenLimit: number | null;
-  minTokenLimit: number;
   /** Silence, not total time, is what ends a run. */
   runIdleTimeoutMs: number;
   /** False until the owner finishes the setup wizard — the app shows the
@@ -2127,6 +2567,33 @@ export interface StartRunInput {
   directory?: string | null;
   resumeRunId?: string | null;
   source: CodingRunSource;
+  /**
+   * Internal: the queue's own start (`startQueuedRun`). The run takes the
+   * QUEUED record's id, place and messages, so whoever was told "run-x is
+   * queued" goes on following run-x.
+   */
+  queuedRunId?: string | null;
+  /**
+   * Internal: the id this start was ANNOUNCED under (`startOrQueueRun`, the
+   * runs list's `starting`), so the record that lands — or the queued one —
+   * carries the id the card already shows. Ignored when a record has it.
+   */
+  runId?: string | null;
+  /**
+   * A "Fix CI" continuation of `resumeRunId`: that run's pull request failed
+   * its checks (CodingRun.ci), and the box appends what failed to this task.
+   * Refused without a recorded failure, and past MAX_CI_FIX_ATTEMPTS along
+   * the chain — never a loop pushing fixes at a red CI for ever.
+   */
+  fixCi?: boolean;
+  /**
+   * The branch this run's own copy of the project forks from, instead of the
+   * branch the project folder has checked out. For a checkout that sits on an
+   * unrelated branch: forking from it carried that branch's commits into the
+   * run's pull request. Read through `requireBaseBranch`; refused when the
+   * branch does not exist, and when the run would get no worktree to fork.
+   */
+  baseBranch?: unknown;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
   /** Internal: set only by the review loop, naming the run whose pull request
@@ -2158,6 +2625,12 @@ export interface StartRunInput {
   /** Internal: appended to the headless brief — the role the team gave this run. */
   extraBrief?: string | null;
   /**
+   * Internal: how many runs share the box's CPU budget with this one — a
+   * team's workers side by side. The runs live on the box when it starts are
+   * counted anyway; this is for the siblings that have not started yet.
+   */
+  cpuShare?: number | null;
+  /**
    * Absolute paths of files this run is to be GIVEN — the pictures the
    * assistant generated for the task, an attachment that arrived in chat.
    *
@@ -2174,6 +2647,18 @@ export interface StartRunInput {
   /** Which model, for a provider that lets one be named. Validated together with `provider`. */
   model?: unknown;
   /**
+   * How hard to think on THIS run, as the CALLER sent it — unvalidated. One of
+   * OFFERED_EFFORT_LEVELS stands in for the owner's stored effort when the
+   * run's settings are read (the assistant's `coding_agent_run` `effort`, a
+   * team's board — the Create card's Ultracode toggle asks for it); anything
+   * else is `invalid`, before the slot or the folder is held. It replaces the
+   * owner's SETTING and nothing downstream of it: a reading role's cap
+   * (`ROLE_DEFAULTS.effortCap`), the owner's per-role choice and the read-only
+   * clamp (ultracode → xhigh) all still apply to it, so "ultracode" on a
+   * planner is still a planner at xhigh. Absent or null, the owner's setting.
+   */
+  effort?: unknown;
+  /**
    * What this run has to leave behind before the box calls it finished, as the
    * CALLER sent it — unvalidated. `startRun` reads it through
    * `readDeliverableInput` and throws `invalid` with the reason when it cannot,
@@ -2186,18 +2671,6 @@ export interface StartRunInput {
    * not otherwise have. See readDeliverableInput.
    */
   deliverable?: unknown;
-  /**
-   * Whether this run goes through the DELIVERY PIPELINE, as the CALLER sent it
-   * — unvalidated, read through `readPipelineInput`, which throws `invalid`
-   * with a stable code rather than repairing. `true` is the shorthand for the
-   * usual one; an object may name the path to check and what the page must
-   * contain, and may switch the production half off.
-   *
-   * Absent, the project's own default decides (`coding_pipeline_projects`), so
-   * a project the owner ships from every day does not need the switch typed
-   * into every prompt.
-   */
-  pipeline?: unknown;
   /**
    * Lessons from earlier verified runs — the training cluster's experience
    * store, as its dispatcher selected it for this task — as the CALLER sent
@@ -2240,6 +2713,32 @@ export class CodingAgentError extends Error {
 }
 
 /**
+ * Refused ONLY because the box is already running every run the owner allows
+ * (`coding_agent_max_parallel_runs`): the one refusal the run queue turns into
+ * a QUEUED run instead (`startOrQueueRun`). Still a `busy` CodingAgentError for
+ * every caller that does not queue — a team's run, the review pass.
+ */
+export class SlotsFullError extends CodingAgentError {
+  constructor(message: string) {
+    super("busy", message);
+    this.name = "SlotsFullError";
+  }
+}
+
+/**
+ * A start by the assistant refused because the owner stopped a team of its
+ * own on that work (coding-team.ts `ownerStopRefusal`): a 409 whose `code`
+ * the MCP tools turn into "tell the user and stop".
+ */
+export class OwnerStoppedTeamError extends CodingAgentError {
+  readonly code = "owner_stopped";
+  constructor(readonly teamId: string, message: string) {
+    super("busy", message);
+    this.name = "OwnerStoppedTeamError";
+  }
+}
+
+/**
  * The HTTP status a route answers a CodingAgentError with — ONE table, so the
  * five routes that catch one cannot disagree. The three refusals are 409:
  * "the request cannot be satisfied as things stand" — the switch is off, the
@@ -2258,7 +2757,7 @@ export function httpStatusForCodingError(kind: CodingAgentErrorKind): number {
 // ─── The owner's switch ──────────────────────────────────────────────────────
 
 export async function isCodingAgentEnabled(): Promise<boolean> {
-  return (await configGet(CODING_AGENT_CONFIG_KEY)) === true;
+  return codingAgentEnabledFrom(await configGet(CODING_AGENT_CONFIG_KEY));
 }
 
 // Each setting is derived from its raw config value by a pure function, so a
@@ -2266,8 +2765,14 @@ export async function isCodingAgentEnabled(): Promise<boolean> {
 // used to open the file eight times per poll) while the one-key getters below
 // keep their names.
 
-function defaultDirectoryFrom(raw: unknown): string | null {
-  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+/** Absent (or anything but an explicit `false`) is ON — see CODING_AGENT_CONFIG_KEY. */
+export function codingAgentEnabledFrom(raw: unknown): boolean {
+  return raw !== false;
+}
+
+/** The project folder in force: the owner's choice, else ~/Projects. */
+function defaultDirectoryFrom(raw: unknown): string {
+  return projectFolderFrom(raw);
 }
 
 function effortFrom(raw: unknown): CodingEffort {
@@ -2279,24 +2784,21 @@ function maxTurnsFrom(raw: unknown): number {
   return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
 }
 
-function tokenLimitFrom(raw: unknown): number | null {
-  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
-}
-
 export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
   await configSet(CODING_AGENT_CONFIG_KEY, enabled === true);
 }
 
-/** The owner's default working folder, or null when they have not set one. */
 /**
- * The folder this device proposes for a run's work: ~/Projects.
+ * The project folder in force when the owner has not chosen one: ~/Projects.
  *
- * It is a SUGGESTION, not a default that silently takes effect — the wizard
- * pre-fills its field with this so the common case is one tap, and the owner
- * can browse to anything else before saving.
+ * It used to be only a SUGGESTION the wizard pre-filled, and a box whose owner
+ * never saved it had no project folder at all — so a Store install of a server
+ * app was refused until they found the setting. It is now the default every
+ * reader resolves (src/lib/project-folder.ts); the wizard still pre-fills it,
+ * and the owner can still choose anything else.
  */
 export function suggestedDefaultDirectory(): string {
-  return path.join(homeDir(), "Projects");
+  return defaultProjectFolder();
 }
 
 /**
@@ -2352,12 +2854,29 @@ async function existingAncestorInside(target: string, home: string): Promise<boo
   }
 }
 
-export async function getDefaultDirectory(): Promise<string | null> {
+/** The owner's project folder: the one they chose, else ~/Projects. Never null. */
+export async function getDefaultDirectory(): Promise<string> {
   return defaultDirectoryFrom(await configGet(CODING_AGENT_DIR_CONFIG_KEY));
 }
 
+/** The folder the owner CHOSE, or null while the ~/Projects default is in force. */
+export async function getChosenDirectory(): Promise<string | null> {
+  return chosenProjectFolderFrom(await configGet(CODING_AGENT_DIR_CONFIG_KEY));
+}
+
 /**
- * Set (or clear, with null/"") the default working folder.
+ * `getDefaultDirectory`, for a caller about to put something INTO the folder
+ * (a Store install, an import): the ~/Projects default is created first, so a
+ * fresh box never answers "that folder does not exist" for a folder it chose
+ * itself. A folder the owner chose is returned as it is.
+ */
+export async function ensureProjectFolder(): Promise<string> {
+  return (await getChosenDirectory()) ?? ensureDefaultProjectFolder();
+}
+
+/**
+ * Set (or clear, with null/"") the owner's project folder. Clearing puts the
+ * ~/Projects default back in force.
  *
  * Validated here rather than only at the route so there is one answer to "is
  * this folder allowed", and it is the same answer a run gets. Returns the
@@ -2454,10 +2973,6 @@ export async function setCodingGitAuthor(input: { name?: string | null; email?: 
   return saved;
 }
 
-function isEffort(value: unknown): value is CodingEffort {
-  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
-}
-
 /**
  * The folder Claude Code keeps its state in for a run on this provider,
  * mirroring scripts/claude-ds exactly. A ClawBox AI run gets
@@ -2469,6 +2984,9 @@ function isEffort(value: unknown): value is CodingEffort {
  */
 export function harnessStateDir(provider: CodingProvider): string {
   if (provider === "anthropic") return path.join(homeDir(), ".claude");
+  // An `openai` run is Codex, whose state is the coding agent's own CODEX_HOME
+  // under the box's data folder (src/lib/coding-openai.ts) — never ~/.codex.
+  if (runsOnCodex(provider)) return codexHome();
   return process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
 }
 
@@ -2492,6 +3010,9 @@ export function harnessStateDir(provider: CodingProvider): string {
 export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory" | "provider">): string | null {
   if (!run.sessionId) return null;
   const provider = codingProviderFrom(run.provider);
+  // A Codex run keeps no Claude Code transcript: its session is the CLI's own
+  // rollout, and everything the box shows of it came through the stream log.
+  if (runsOnCodex(provider)) return null;
   const file = (p: CodingProvider) =>
     path.join(harnessStateDir(p), "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
   const own = file(provider);
@@ -2511,6 +3032,81 @@ export async function setEffort(effort: string): Promise<CodingEffort> {
   }
   await configSet(CODING_AGENT_EFFORT_CONFIG_KEY, effort);
   return effort;
+}
+
+/** The owner's per-role provider, model and effort choices for a team (src/lib/coding-role-models.ts); {} on a box that never chose. */
+export async function getRoleModels(): Promise<RoleModels> {
+  return roleModelsFrom(await configGet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY));
+}
+
+/**
+ * The owner's edit to the per-role choices, checked WHOLE before anything is
+ * written — the enable route calls `checkRoleModelsPatch` in its
+ * refuse-before-any-write block and this after it.
+ */
+export async function setRoleModels(patch: unknown): Promise<RoleModels> {
+  const next = applyRoleModelsPatch(await getRoleModels(), patch);
+  if (!next.ok) throw new CodingAgentError("invalid", next.error);
+  await configSet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY, next.value);
+  return next.value;
+}
+
+/**
+ * Why the patch would be refused, or null — the same check `setRoleModels`
+ * makes, against the same stored choices, without a write. Against what is
+ * stored rather than against nothing: a model named without its provider
+ * takes the role's stored one, so the verdict depends on it.
+ */
+export async function checkRoleModelsPatch(patch: unknown): Promise<string | null> {
+  const checked = applyRoleModelsPatch(await getRoleModels(), patch);
+  return checked.ok ? null : checked.error;
+}
+
+/**
+ * What every role of a coding team starts on right now — provider, model,
+ * effort — whether that provider can run, and roughly what a token costs
+ * there: what the settings draw and what a planner weighs a task's role by.
+ *
+ * The answer `startRun` gives a team's FRESH run, from the same three inputs
+ * (the owner's provider, its default model, the owner's effort) and the same
+ * stored choices; a resume keeps what its session was opened on instead.
+ * Readiness is the existing probe, read per provider, and `ready` is the
+ * verdict the spawn gate reaches for that provider — nothing new is checked.
+ */
+export async function teamRoleModelMap(): Promise<TeamRoleModelMap> {
+  const config = await configGetAll();
+  const readiness = await readinessWith(
+    config.clawai_token,
+    config[HARNESS_FAULT_CONFIG_KEY],
+    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+  );
+  return roleModelMapFrom(config, readiness);
+}
+
+/** The map off one config snapshot and the readiness already worked out from it — so the status pays for neither twice. */
+function roleModelMapFrom(config: Record<string, unknown>, readiness: CodingHarnessReadiness): TeamRoleModelMap {
+  const ownerProvider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
+  const ownerEffort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
+  const stored = roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY]);
+  const shared = sharedProblems(readiness);
+  const map = {} as TeamRoleModelMap;
+  for (const role of MODEL_ROLES) {
+    const run = resolveRoleRun(role, ownerProvider, defaultModelForProvider(ownerProvider), ownerEffort, stored);
+    const verdict = readiness.providers.find((p) => p.id === run.provider);
+    const ready = verdict?.ready === true;
+    map[role] = {
+      provider: run.provider,
+      model: run.model,
+      effort: run.effort,
+      auto: run.auto,
+      ready,
+      // The box's own half too: a provider refused because Claude Code is
+      // missing must still say why, not show as disabled with no reason.
+      problems: ready ? [] : [...shared, ...(verdict?.problems ?? [])],
+      relativeCost: relativeModelCost(run.provider, run.model),
+    };
+  }
+  return map;
 }
 
 /** The owner's switch for the automatic review pass. Absent means OFF. */
@@ -2549,28 +3145,11 @@ export async function setPrBodyIncludesTask(mode: unknown): Promise<PrBodyTaskMo
   return mode;
 }
 
-/** How many review rounds a pull request gets. Absent means the default. */
+/** How many review rounds a pull request gets. Absent means the default
+ *  (DEFAULT_REVIEW_ROUNDS); no route sets the key since SCA C3. */
 export async function getReviewRounds(): Promise<number> {
   const stored = await configGet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY);
   return typeof stored === "number" ? clampReviewRounds(stored) : DEFAULT_REVIEW_ROUNDS;
-}
-
-export async function setReviewRounds(rounds: unknown): Promise<number> {
-  // Integer, not merely finite: `clampReviewRounds` rounds, so 1.5 would have
-  // been SAVED as 2 — an answer to a question the caller did not ask, and the
-  // same reason the range below is refused rather than clamped.
-  if (typeof rounds !== "number" || !Number.isInteger(rounds)) {
-    throw new CodingAgentError("invalid", "The number of review rounds must be a whole number.");
-  }
-  if (rounds < MIN_REVIEW_ROUNDS || rounds > MAX_REVIEW_ROUNDS) {
-    // Refused rather than clamped: a caller that asked for 20 rounds meant
-    // something this box does not offer, and silently saving 6 would answer a
-    // question it did not ask.
-    throw new CodingAgentError("invalid", `The number of review rounds must be between ${MIN_REVIEW_ROUNDS} and ${MAX_REVIEW_ROUNDS}.`);
-  }
-  const saved = clampReviewRounds(rounds);
-  await configSet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, saved);
-  return saved;
 }
 
 /** How many runs at once this box allows. Absent means the default. */
@@ -2582,37 +3161,61 @@ export async function setMaxParallelRuns(runs: unknown): Promise<number> {
   if (typeof runs !== "number" || !Number.isInteger(runs)) {
     throw new CodingAgentError("invalid", "The number of runs at once must be a whole number.");
   }
-  if (runs < MIN_MAX_PARALLEL_RUNS || runs > MAX_MAX_PARALLEL_RUNS) {
+  const ceiling = hostMaxParallelRuns();
+  if (runs < MIN_MAX_PARALLEL_RUNS || runs > ceiling) {
     // Refused rather than clamped, like the review rounds and the attempts: a
-    // caller that asked for eight meant something this box does not offer.
-    throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`);
+    // caller that asked for more meant something this box does not offer.
+    throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${ceiling}.`);
   }
   await configSet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY, runs);
+  // A higher limit is room the queue may take at once.
+  void pumpRunQueue();
   return runs;
 }
 
-export { CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY, HISTORY_EXTENDED_LIMITS, HISTORY_RETENTION_MODES };
+export { CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY, HISTORY_RETENTION_MODES };
 export type { HistoryPolicy, HistoryRetentionMode };
+
+/** The extended mode's N, a key no build writes since SCA2 C1; cleared with the mode it belonged to. */
+const RETIRED_HISTORY_LIMIT_CONFIG_KEY = "coding_agent_history_limit";
 
 /**
  * Remember the owner's history setting where the SYNC paths can see it: the
- * settle decides whether a run's stream log is kept for the archive, and it
- * cannot await a config read. Refreshed by every read below and by the status
- * the app polls; empty only in a process that has read neither, where the
- * settle does what it always did.
+ * owner's Clear and the export run without a config read in hand. Refreshed by
+ * every read below and by the status the app polls; empty only in a process
+ * that has read neither, where standard is assumed.
  */
 function rememberHistoryPolicy(policy: HistoryPolicy): HistoryPolicy {
   store.historyPolicy = policy;
   return policy;
 }
 
+/**
+ * The stored value read as this build reads it — and, when the two differ (a
+ * mode this build retired: `extended` and `archive` read as `everything`,
+ * anything unknown as standard), the setting rewritten ONCE as what it now
+ * means, with the retired N beside it cleared. Resolves when the rewrite has
+ * landed; nothing to write resolves at once.
+ */
+function adoptHistoryPolicy(raw: unknown): { policy: HistoryPolicy; rewritten: Promise<void> } {
+  const policy = rememberHistoryPolicy(historyPolicyFrom(raw));
+  if (raw === undefined || raw === policy.mode) return { policy, rewritten: Promise.resolve() };
+  const rewritten = configSetMany({
+    [CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY]: policy.mode === "standard" ? undefined : policy.mode,
+    [RETIRED_HISTORY_LIMIT_CONFIG_KEY]: undefined,
+  }).then(() => {
+    console.error(`[coding-agent] run history setting rewritten as ${policy.mode} (a mode this build no longer offers read as it)`);
+  }).catch((err) => {
+    console.error("[coding-agent] could not rewrite the run history setting:", err instanceof Error ? err.message : err);
+  });
+  return { policy, rewritten };
+}
+
 /** What the box keeps of finished runs. Absent means standard — see coding-run-history.ts. */
 export async function getHistoryPolicy(): Promise<HistoryPolicy> {
-  const [mode, limit] = await Promise.all([
-    configGet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY),
-    configGet(CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY),
-  ]);
-  return rememberHistoryPolicy(historyPolicyFrom(mode, limit));
+  const { policy, rewritten } = adoptHistoryPolicy(await configGet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY));
+  await rewritten;
+  return policy;
 }
 
 /**
@@ -2631,26 +3234,21 @@ export interface HistoryRetentionChange {
 }
 
 /**
- * Change what the box keeps. Either half may be given; a value this box does
- * not offer is refused rather than clamped, like the other counted settings.
+ * Change what the box keeps. A value this box does not offer is refused
+ * rather than clamped, like the other counted settings.
  *
- * Nothing is deleted HERE: a lower limit is applied the next time a run joins
- * the list (insertRun), so a mis-tap on the select can be taken back before
- * it costs anything, and the settings card says what the next run will drop.
- * Claude Code's transcript period follows the mode now, though: kept while the
- * owner keeps everything, handed back to what it was as soon as they do not.
+ * Nothing is deleted HERE: a mode that keeps less is applied the next time a
+ * run joins the list (insertRun), so a mis-tap on the select can be taken back
+ * before it costs anything, and the settings card says what the next run will
+ * drop. Claude Code's transcript period follows the mode now, though: kept
+ * while the owner keeps everything, handed back to what it was as soon as
+ * they do not.
  */
-export async function setHistoryRetention(input: { mode?: unknown; limit?: unknown }): Promise<HistoryRetentionChange> {
-  if (input.mode !== undefined && !isHistoryRetentionMode(input.mode)) {
+export async function setHistoryRetention(mode: unknown): Promise<HistoryRetentionChange> {
+  if (!isHistoryRetentionMode(mode)) {
     throw new CodingAgentError("invalid", `The run history setting must be one of: ${HISTORY_RETENTION_MODES.join(", ")}.`);
   }
-  if (input.limit !== undefined && !isHistoryExtendedLimit(input.limit)) {
-    throw new CodingAgentError("invalid", `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`);
-  }
-  const entries: Record<string, unknown> = {};
-  if (input.mode !== undefined) entries[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY] = input.mode;
-  if (input.limit !== undefined) entries[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY] = input.limit;
-  if (Object.keys(entries).length > 0) await configSetMany(entries);
+  await configSet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY, mode);
   const policy = await getHistoryPolicy();
   const transcripts = policy.mode === "everything"
     ? await keepHarnessTranscripts(harnessSettingsFiles())
@@ -2671,26 +3269,6 @@ export async function setAutoMerge(on: unknown): Promise<boolean> {
   return on;
 }
 
-/** How many attempts at its deliverable a run gets. Absent means the default. */
-export async function getCompletionAttempts(): Promise<number> {
-  return completionAttemptsFrom(await configGet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY));
-}
-
-export async function setCompletionAttempts(attempts: unknown): Promise<number> {
-  // Whole numbers only, and the range refused rather than clamped — the rule
-  // `setReviewRounds` follows, for its reason: a caller that asked for 20
-  // attempts meant something this box does not offer, and quietly saving 6
-  // answers a question it did not ask.
-  if (typeof attempts !== "number" || !Number.isInteger(attempts)) {
-    throw new CodingAgentError("invalid", "The number of attempts must be a whole number.");
-  }
-  if (attempts < MIN_COMPLETION_ATTEMPTS || attempts > MAX_COMPLETION_ATTEMPTS) {
-    throw new CodingAgentError("invalid", `The number of attempts must be between ${MIN_COMPLETION_ATTEMPTS} and ${MAX_COMPLETION_ATTEMPTS}.`);
-  }
-  await configSet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY, attempts);
-  return attempts;
-}
-
 /** The two media switches. ON when absent — see their config keys. */
 function generateImagesFrom(raw: unknown): boolean {
   return raw !== false;
@@ -2704,23 +3282,21 @@ export async function getGenerateImages(): Promise<boolean> {
   return generateImagesFrom(await configGet(CODING_AGENT_GEN_IMAGES_CONFIG_KEY));
 }
 
-export async function setGenerateImages(on: unknown): Promise<boolean> {
-  if (typeof on !== "boolean") {
-    throw new CodingAgentError("invalid", "The picture switch must be true or false.");
-  }
-  await configSet(CODING_AGENT_GEN_IMAGES_CONFIG_KEY, on);
-  return on;
-}
-
 export async function getGenerateAudio(): Promise<boolean> {
   return generateAudioFrom(await configGet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY));
 }
 
-export async function setGenerateAudio(on: unknown): Promise<boolean> {
+/**
+ * The owner's ONE media switch (SCA C3), written to both keys at once. The
+ * keys stay separate underneath — a run still reads each, and the status
+ * reads the switch as on only when both are — so a box that had one of them
+ * off before reads as off until the owner flips the switch, which sets both.
+ */
+export async function setGenerateMedia(on: unknown): Promise<boolean> {
   if (typeof on !== "boolean") {
-    throw new CodingAgentError("invalid", "The voice switch must be true or false.");
+    throw new CodingAgentError("invalid", "The media switch must be true or false.");
   }
-  await configSet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY, on);
+  await configSetMany({ [CODING_AGENT_GEN_IMAGES_CONFIG_KEY]: on, [CODING_AGENT_GEN_AUDIO_CONFIG_KEY]: on });
   return on;
 }
 
@@ -2806,20 +3382,6 @@ export class ProviderChoiceError extends CodingAgentError {
  * has written down as never-allowed must not become allowable through this door
  * just because the current build grants `Bash(*)` and leans on the tool list.
  */
-/**
- * A pipeline request this box will not accept.
- *
- * `ProviderChoiceError`'s sibling and for its reason: both are `invalid`, and a
- * caller that cannot tell "that is not a path" from "that folder is off limits"
- * has no idea which argument to fix. The code travels beside the 400.
- */
-export class PipelineChoiceError extends CodingAgentError {
-  constructor(readonly code: PipelineInputRefusal, message: string) {
-    super("invalid", message);
-    this.name = "PipelineChoiceError";
-  }
-}
-
 /**
  * An `experience` field the box refused, with the reason's stable code beside
  * the shared 400 — so the dispatcher can tell "rule 3's id is malformed" from
@@ -2931,8 +3493,8 @@ export async function setSetupComplete(done: unknown): Promise<boolean> {
 
 /**
  * Put every coding-agent setting back to factory and send the owner to the
- * wizard: the switch off, no default folder, effort/ceilings/review back to
- * their defaults.
+ * wizard: the switch off, the project folder back to the ~/Projects default,
+ * effort/ceilings/review back to their defaults.
  *
  * The run history goes too. It was left alone at first — an audit trail is not
  * a setting — but "start over" that leaves last week's runs listed under a
@@ -2949,58 +3511,29 @@ export async function setSetupComplete(done: unknown): Promise<boolean> {
  * @returns how many finished runs were cleared, so the caller can say so.
  */
 export async function resetCodingAgentSetup(): Promise<number> {
+  const wasInjecting = await getInjectSecrets().catch(() => false);
   for (const key of CODING_AGENT_RESET_KEYS) {
     await configSet(key, undefined);
   }
+  // The list above withdraws the owner's consent for injection too — a
+  // switch-off the secrets' audit trail records like the owner's own, once the
+  // config has actually been cleared.
+  if (wasInjecting) await appendSecretAudit({ action: "switch_off", reason: "reset" });
   // The history setting is back to standard, so Claude Code's transcript
   // period goes back to whatever it was before "keep everything" changed it.
-  // The ARCHIVE is not touched: it is kept data with a Clear of its own, not
-  // a setting — and the owner who archived runs did so to keep them.
   await releaseHarnessTranscripts().catch((err) => {
     console.error("[coding-agent] could not hand back Claude Code's transcript period:", err instanceof Error ? err.message : err);
   });
-  // Standard from here on — the setting was just cleared — so the Clear below
-  // DELETES, as start-over always did, rather than filling the archive.
+  // Standard from here on — the setting was just cleared.
   rememberHistoryPolicy(STANDARD_HISTORY_POLICY);
   return clearFinishedRuns();
 }
 
-/** The owner's turn ceiling, clamped to something the CLI will accept. */
+/** The writing roles' step ceiling: DEFAULT_MAX_TURNS, or a stored
+ *  `coding_agent_max_turns` from before SCA3 clamped to what the CLI accepts.
+ *  There is no setter any more — see DEFAULT_MAX_TURNS. */
 export async function getMaxTurns(): Promise<number> {
   return maxTurnsFrom(await configGet(CODING_AGENT_TURNS_CONFIG_KEY));
-}
-
-export async function setMaxTurns(turns: unknown): Promise<number> {
-  if (typeof turns !== "number" || !Number.isFinite(turns)) {
-    throw new CodingAgentError("invalid", "Steps must be a number.");
-  }
-  const n = Math.round(turns);
-  if (n < MIN_MAX_TURNS || n > MAX_MAX_TURNS) {
-    throw new CodingAgentError("invalid", `Steps must be between ${MIN_MAX_TURNS} and ${MAX_MAX_TURNS}.`);
-  }
-  await configSet(CODING_AGENT_TURNS_CONFIG_KEY, n);
-  return n;
-}
-
-/** The owner's token ceiling, or null when they have not set one. */
-export async function getTokenLimit(): Promise<number | null> {
-  return tokenLimitFrom(await configGet(CODING_AGENT_TOKENS_CONFIG_KEY));
-}
-
-export async function setTokenLimit(limit: number | null): Promise<number | null> {
-  if (limit === null) {
-    await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
-    return null;
-  }
-  if (typeof limit !== "number" || !Number.isFinite(limit)) {
-    throw new CodingAgentError("invalid", "The token limit must be a number, or empty for no limit.");
-  }
-  const n = Math.round(limit);
-  if (n < MIN_TOKEN_LIMIT) {
-    throw new CodingAgentError("invalid", `A token limit below ${MIN_TOKEN_LIMIT.toLocaleString("en-US")} would stop almost every run before it started.`);
-  }
-  await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, n);
-  return n;
 }
 
 
@@ -3013,17 +3546,16 @@ export async function setTokenLimit(limit: number | null): Promise<number | null
  * Names only: this is a picker, not a file listing.
  */
 export async function listProjectFolders(): Promise<string[]> {
-  return (await readProjectFolders())?.names ?? [];
+  return (await readProjectFolders()).names;
 }
 
 /**
- * The owner's folder and the names in it. Null when no folder is set; a
- * folder that is set but cannot be read answers with no names, so the caller
- * can still say WHICH folder it looked in.
+ * The owner's folder (chosen, or the ~/Projects default) and the names in it.
+ * A folder that cannot be read — the default before anything created it —
+ * answers with no names, so the caller can still say WHICH folder it looked in.
  */
-async function readProjectFolders(): Promise<{ base: string; names: string[] } | null> {
+async function readProjectFolders(): Promise<{ base: string; names: string[] }> {
   const base = await getDefaultDirectory();
-  if (!base) return null;
   return { base, names: await readFolderNames(base) };
 }
 
@@ -3037,14 +3569,14 @@ async function readProjectFolders(): Promise<{ base: string; names: string[] } |
 /** The most folders a listing names — the readdir's and the run store's alike. */
 const MAX_PROJECT_FOLDERS = 100;
 
-async function readFolderNames(base: string): Promise<string[]> {
+async function readFolderNames(base: string, limit = MAX_PROJECT_FOLDERS): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(base, { withFileTypes: true });
     return entries
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name)
       .sort()
-      .slice(0, MAX_PROJECT_FOLDERS);
+      .slice(0, limit);
   } catch {
     return [];
   }
@@ -3098,6 +3630,14 @@ export interface CodingProject {
    * `port` here is what `/apps/<folder>/` is proxied to.
    */
   app: { name: string; description: string | null; kind: string | null; port: number | null } | null;
+  /** The run copies of this project beside it in the project folder, grouped here rather than listed (see listProjects). */
+  copies?: ProjectCopy[];
+  /**
+   * This project's git worktrees beside it in the project folder. Never rows
+   * of their own; a run in one is this project's, which is what a caller
+   * counting runs per project (the MCP table) needs the folders for.
+   */
+  worktrees?: string[];
 }
 
 /**
@@ -3106,6 +3646,36 @@ export interface CodingProject {
  * CodingAgentApp.tsx); the projects test holds the two together.
  */
 export const HARNESS_TEST_PROJECT_ID = "harness-test";
+
+/** A copy of a project that a run or an agent made beside it (coding-folder-kind.ts). */
+export interface ProjectCopy {
+  folder: string;
+  directory: string;
+  branch: string | null;
+}
+
+/** How many folders the listing classifies before it keeps its hundred projects. */
+const MAX_CLASSIFIED_FOLDERS = 2_000;
+
+/**
+ * The listing's classification, kept for a short while: the app polls the
+ * projects every few seconds while something runs, and a project folder of
+ * five hundred clones is a few thousand file reads a time. Keyed on the
+ * folder, its names and the box's own projects, so a folder appearing or
+ * going, or a new run's project, is seen at once; a branch switched inside a
+ * folder within the window, a few seconds late.
+ */
+const CLASSIFY_TTL_MS = 30_000;
+let classifyCache: { key: string; at: number; kinds: ReturnType<typeof classifyFolders> } | null = null;
+
+function classifiedFolders(base: string, names: string[], known: Set<string>): ReturnType<typeof classifyFolders> {
+  const key = [base, names.join("\0"), [...known].sort().join("\0")].join("\u0001");
+  const now = Date.now();
+  if (classifyCache && classifyCache.key === key && now - classifyCache.at < CLASSIFY_TTL_MS) return classifyCache.kinds;
+  const kinds = classifyFolders(base, names, known);
+  classifyCache = { key, at: now, kinds };
+  return kinds;
+}
 
 /** A folder that may be a project, before describeProject has looked. */
 interface ProjectCandidate {
@@ -3151,40 +3721,93 @@ interface ProjectCandidate {
  * and a hundred concurrent spawns on a Jetson is a stall, not a listing.
  */
 export async function listProjects(): Promise<{ directory: string | null; projects: CodingProject[] }> {
-  const [folders, codeProjects] = await Promise.all([readProjectFolders(), readFolderNames(CODE_PROJECTS_DIR)]);
+  const ownerFolder = await getDefaultDirectory();
+  const [allNames, codeProjects] = await Promise.all([readFolderNames(ownerFolder, MAX_CLASSIFIED_FOLDERS), readFolderNames(CODE_PROJECTS_DIR)]);
   const candidates: ProjectCandidate[] = [];
-  if (folders) {
-    // The folders runs have worked in, directly under the project folder: a
-    // project by that run alone, `.git` or not. A run records the folder it
-    // worked in symlink-resolved, so both spellings of the base are matched.
-    // Never a dot-folder: that is state, not a project.
-    const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
-    // Bounded like the readdir (readFolderNames keeps 100): the run store is
-    // not a hard bound — held runs are never trimmed — and every folder here
-    // costs a stat and a git log on every poll.
-    const workedIn = new Set<string>();
-    for (const run of loadRuns()) {
-      if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
-      if (typeof run.directory !== "string") continue;
-      const worked = projectDirectoryOf(run);
-      for (const base of new Set([folders.base, realBase])) {
-        if (!worked.startsWith(base + path.sep)) continue;
-        const first = path.relative(base, worked).split(path.sep)[0];
-        if (first && !first.startsWith(".")) workedIn.add(first);
-      }
+  // The folders runs have worked in, directly under the project folder: a
+  // project by that run alone, `.git` or not. A run records the folder it
+  // worked in symlink-resolved, so both spellings of the base are matched.
+  // Never a dot-folder: that is state, not a project.
+  const realBase = await fs.promises.realpath(ownerFolder).catch(() => ownerFolder);
+  // A git worktree of another project, or a run's copy of one, is not a
+  // project of its own (coding-folder-kind.ts): its runs are its parent's,
+  // a worktree is not listed at all, and a copy is grouped under its parent
+  // when the parent is listed. Classified BEFORE the hundred are kept, so a
+  // folder full of worktrees cannot push the owner's projects off the list.
+  // Originals the box knows: a project it made a run worktree or a team
+  // worker's tree in. A run that only worked IN a folder proves nothing —
+  // runs are pointed at copies too.
+  const knownProjects = new Set<string>();
+  for (const run of loadRuns()) {
+    if (typeof run.directory !== "string") continue;
+    const original = run.worktree?.project ?? worktreeProject(projectDirectoryOf(run));
+    if (original) knownProjects.add(path.resolve(original));
+  }
+  const kinds = classifiedFolders(ownerFolder, allNames, knownProjects);
+  // A folder's runs go to its parent only when the folder is not a row of its
+  // own: every worktree, and a copy once it is grouped under a listed parent
+  // (below). An ungrouped copy is listed, and its runs are its own row's.
+  const parentByName = new Map<string, string>();
+  const worktreesOf = new Map<string, string[]>();
+  const inOwnerFolder = (dir: string) => path.dirname(path.resolve(dir)) === path.resolve(ownerFolder);
+  for (const k of kinds.values()) {
+    if (k.kind !== "worktree" || !k.parent) continue;
+    parentByName.set(k.name, path.resolve(k.parent));
+    if (!inOwnerFolder(k.parent)) continue;
+    const list = worktreesOf.get(path.basename(k.parent)) ?? [];
+    list.push(k.dir);
+    worktreesOf.set(path.basename(k.parent), list);
+  }
+  const homeOf = (dir: string): string => {
+    const own = worktreeProject(dir) ?? dir;
+    for (const b of new Set([ownerFolder, realBase])) {
+      if (!own.startsWith(b + path.sep)) continue;
+      const parent = parentByName.get(path.relative(b, own).split(path.sep)[0]);
+      if (parent) return parent;
     }
-    for (const folder of folders.names) {
-      candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
+    return own;
+  };
+  const listedNames = new Set(allNames.filter((n) => kinds.get(n)?.kind === "project"));
+  const copiesOf = new Map<string, ProjectCopy[]>();
+  for (const k of kinds.values()) {
+    if (k.kind !== "copy" || !k.parent) continue;
+    const parentName = inOwnerFolder(k.parent) ? path.basename(k.parent) : null;
+    if (!parentName || !listedNames.has(parentName)) {
+      // A copy whose original is not in the list is the only trace of it: listed.
+      listedNames.add(k.name);
+      continue;
     }
-    for (const folder of workedIn) {
-      if (!folders.names.includes(folder)) candidates.push({ base: folders.base, folder, kind: "folder", fromRun: true });
+    const list = copiesOf.get(parentName) ?? [];
+    list.push({ folder: k.name, directory: k.dir, branch: k.branch });
+    copiesOf.set(parentName, list);
+    parentByName.set(k.name, path.resolve(k.parent));
+  }
+  const folders = { base: ownerFolder, names: allNames.filter((n) => listedNames.has(n)).slice(0, MAX_PROJECT_FOLDERS) };
+  // Bounded like the readdir (readFolderNames keeps 100): the run store is
+  // not a hard bound — held runs are never trimmed — and every folder here
+  // costs a stat and a git log on every poll.
+  const workedIn = new Set<string>();
+  for (const run of loadRuns()) {
+    if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
+    if (typeof run.directory !== "string") continue;
+    const worked = homeOf(projectDirectoryOf(run));
+    for (const base of new Set([folders.base, realBase])) {
+      if (!worked.startsWith(base + path.sep)) continue;
+      const first = path.relative(base, worked).split(path.sep)[0];
+      if (first && !first.startsWith(".") && kinds.get(first)?.kind !== "worktree" && !parentByName.has(first)) workedIn.add(first);
     }
+  }
+  for (const folder of folders.names) {
+    candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
+  }
+  for (const folder of workedIn) {
+    if (!folders.names.includes(folder)) candidates.push({ base: folders.base, folder, kind: "folder", fromRun: true });
   }
   for (const folder of codeProjects) {
     if (folder === HARNESS_TEST_PROJECT_ID) continue;
     candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
   }
-  const described = await mapLimit(candidates, 4, describeProject);
+  const described = await mapLimit(candidates, 4, (c) => describeProject(c, homeOf));
 
   // Once per real folder. config.json is a file the owner can edit, so the
   // project folder can be pointed at data/code-projects by hand, and every
@@ -3195,13 +3818,15 @@ export async function listProjects(): Promise<{ directory: string | null; projec
   for (const d of described) {
     if (!d || seen.has(d.real)) continue;
     seen.add(d.real);
-    projects.push(d.project);
+    const copies = d.project.kind === "folder" ? copiesOf.get(d.project.folder) : undefined;
+    const worktrees = d.project.kind === "folder" ? worktreesOf.get(d.project.folder) : undefined;
+    projects.push({ ...d.project, ...(copies?.length ? { copies } : {}), ...(worktrees?.length ? { worktrees } : {}) });
   }
   projects.sort((a, b) => (b.lastCommit?.date ?? 0) - (a.lastCommit?.date ?? 0) || a.name.localeCompare(b.name));
-  return { directory: folders?.base ?? null, projects };
+  return { directory: folders.base, projects };
 }
 
-async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
+async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate, homeOf: (dir: string) => string = (d) => d): Promise<{ project: CodingProject; real: string } | null> {
   const directory = path.join(base, folder);
   const [dotGit, metaName, self] = await Promise.all([
     fs.promises.stat(path.join(directory, ".git")).catch(() => null),
@@ -3230,8 +3855,9 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
   // given a project id recorded the id as well as the folder.
   const run = loadRuns().find((r) => {
     // The project the run belongs to — its own copy of it, for a run with a
-    // worktree, is two segments deeper and would match nothing here.
-    const worked = projectDirectoryOf(r);
+    // worktree, is two segments deeper and would match nothing here; a team
+    // worker's tree and a sibling worktree or copy are their parent's.
+    const worked = homeOf(projectDirectoryOf(r));
     return worked === real || worked === directory || (kind === "codeProject" && r.projectId === folder);
   }) ?? null;
   return {
@@ -3473,6 +4099,13 @@ const ANTHROPIC_MISSING =
 const CLAWAI_MISSING =
   "ClawBox AI is not connected. Open Settings → AI Models and sign in to ClawBox AI first.";
 
+/** Why an `openai` run cannot start, in the owner's words. */
+const OPENAI_MISSING =
+  "Your OpenAI account is not connected. Open the Coding Agent app → Settings and save an OpenAI API key, or sign in with ChatGPT there.";
+
+const CODEX_MISSING =
+  "The Codex CLI that OpenAI runs use is not installed on this ClawBox. Run: sudo bash install.sh --step codex_cli";
+
 /**
  * The readiness probe proper, given the config values the caller already read.
  *
@@ -3488,11 +4121,12 @@ const CLAWAI_MISSING =
  * provider's, because that is the run a caller who names nothing gets.
  */
 async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, anthropic, scope] = await Promise.all([
+  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
     getAnthropicConnection(),
+    getOpenAIConnection(),
     // Cached for a minute inside the module, so a status poll pays for the bus
     // round trip at most once a minute.
     probeSystemdRun(),
@@ -3501,11 +4135,16 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   const capabilityDropAvailable = setprivPath !== null;
   const clawaiConnected = typeof token === "string" && token.trim() !== "";
   const shared: string[] = [];
+  // Claude Code and its wrapper are in the way of every provider that runs on
+  // them — every one but `openai`, whose runs are the Codex CLI. They stay in
+  // the SHARED list (the panels and the MCP probe read it) unless an `openai`
+  // run is the only thing they would be stopping, which is said per provider.
+  const claudeProblems: string[] = [];
   if (!claudeInstalled) {
-    shared.push("Claude Code is not installed on this ClawBox. Run: sudo bash install.sh --step coding_harness");
+    claudeProblems.push("Claude Code is not installed on this ClawBox. Run: sudo bash install.sh --step coding_harness");
   }
   if (!wrapperInstalled) {
-    shared.push(`The ${CODING_HARNESS_COMMAND} wrapper is missing from ~/${CODING_HARNESS_WRAPPER_PATH}. Run: sudo bash install.sh --step coding_harness`);
+    claudeProblems.push(`The ${CODING_HARNESS_COMMAND} wrapper is missing from ~/${CODING_HARNESS_WRAPPER_PATH}. Run: sudo bash install.sh --step coding_harness`);
   }
   if (!capabilityDropAvailable) {
     shared.push(`${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`);
@@ -3522,21 +4161,42 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   // In the SHARED half, not a provider's: a harness that could not get a model
   // to answer is not a fact about which account was going to pay, and a box in
   // that state cannot run on either.
+  //
+  // Except for Codex: only a Claude Code run records a fault (finishRun), so
+  // it is a fact about Claude Code's harness, and an `openai` run is judged
+  // without it below.
   const fault: HarnessFault | null = parseHarnessFault(faultRaw) ?? parseHarnessFault(liveHarnessFault);
   const harnessHealthy = fault === null;
-  if (fault) shared.push(harnessFaultProblem(fault));
+  const faultProblem = fault ? harnessFaultProblem(fault) : null;
+  if (faultProblem) shared.push(faultProblem);
   const credentialProblem = (id: CodingProvider): string[] => {
     if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
+    if (id === "openai") {
+      // The CLI first: a connected account with nothing to run it on is the
+      // install's to fix, and saying "connect" would send the owner the wrong way.
+      if (!openai.codexInstalled) return [CODEX_MISSING];
+      return openai.connected ? [] : [OPENAI_MISSING];
+    }
     return clawaiConnected ? [] : [CLAWAI_MISSING];
   };
+  // The Claude Code half is shared by every provider but `openai`. Carried into
+  // `shared` when any of the providers it stops is one the box would run — the
+  // owner's default, or anything on a box with no OpenAI at all — so a
+  // Claude-less box still reports itself as not ready; an `openai` run alone is
+  // judged without it.
+  const claudeShared = claudeProblems.length > 0 && !(runsOnCodex(defaultProvider) && openai.connected && openai.codexInstalled);
+  if (claudeShared) shared.unshift(...claudeProblems);
   const providers: CodingProviderReadiness[] = CODING_PROVIDERS.map((id) => {
-    const problems = credentialProblem(id);
+    const own = runsOnCodex(id)
+      ? credentialProblem(id)
+      : [...(claudeShared ? [] : claudeProblems), ...credentialProblem(id)];
+    const blocking = runsOnCodex(id) ? shared.filter((m) => !claudeProblems.includes(m) && m !== faultProblem) : shared;
     return {
       id,
-      ready: shared.length === 0 && problems.length === 0,
+      ready: blocking.length === 0 && own.length === 0,
       models: modelsForProvider(id),
       defaultModel: defaultModelForProvider(id),
-      problems,
+      problems: own,
     };
   });
   const forDefault = providers.find((p) => p.id === defaultProvider) ?? providers[0];
@@ -3548,6 +4208,9 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     clawaiConnected,
     anthropicConnected: anthropic.connected,
     anthropicSource: anthropic.source,
+    codexInstalled: openai.codexInstalled,
+    openaiConnected: openai.connected,
+    openaiSource: openai.source,
     capabilityDropAvailable,
     harnessHealthy,
     detachedRuns: scope.available,
@@ -3559,6 +4222,14 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     providers,
     anyProviderReady,
   };
+}
+
+/**
+ * The BOX's half of a readiness answer — what is in every provider's way —
+ * out of the flat list, which also carries the default provider's credential.
+ */
+function sharedProblems(readiness: CodingHarnessReadiness): string[] {
+  return readiness.problems.filter((m) => !readiness.providers.some((p) => p.problems.includes(m)));
 }
 
 /** The owner's default provider. Anything unrecognised reads as ClawBox AI. */
@@ -3580,6 +4251,47 @@ export async function setCodingProvider(provider: string): Promise<CodingProvide
   }
   await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, provider);
   return provider;
+}
+
+/**
+ * The owner's CONNECTED providers (Settings → Coding agent → Connected
+ * providers): the accounts a team's roles may run on. Never empty — a run
+ * nobody names an account for needs one — so the last one cannot be
+ * disconnected. The default provider follows the list when it was dropped
+ * from it, and a role pinned to a provider that left the list goes back to
+ * its default (provider and, with it, a model only that provider offers), so
+ * no team starts on an account the owner just disconnected; `resetRoles`
+ * names them for the screen.
+ */
+export async function setConnectedProviders(raw: unknown): Promise<{ providers: CodingProvider[]; resetRoles: ModelRole[] }> {
+  if (!Array.isArray(raw) || raw.some((id) => !isCodingProvider(id))) {
+    throw new CodingAgentError("invalid", `providers must be a list of: ${CODING_PROVIDERS.join(", ")}.`);
+  }
+  const providers = connectedProvidersFrom(raw, DEFAULT_CODING_PROVIDER);
+  if (raw.length === 0) {
+    throw new CodingAgentError("invalid", "At least one provider must stay connected: runs need an account to start on.");
+  }
+  await configSet(CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY, providers);
+  const current = codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
+  if (!providers.includes(current)) await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, providers[0]);
+  const roles = await getRoleModels();
+  const resetRoles = MODEL_ROLES.filter((role) => {
+    const pinned = roles[role]?.provider;
+    return pinned !== undefined && !providers.includes(pinned);
+  });
+  if (resetRoles.length > 0) {
+    // `applyRoleModelsPatch` owns the rule: a provider put back to Default
+    // takes with it a model only that provider offered, and leaves a tier.
+    const next = applyRoleModelsPatch(roles, Object.fromEntries(resetRoles.map((role) => [role, { provider: ROLE_AUTO }])));
+    if (next.ok) await configSet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY, next.value);
+  }
+  return { providers, resetRoles };
+}
+
+/** The connected providers as stored (the default provider alone on a record from before the list). */
+export async function getConnectedProviders(): Promise<CodingProvider[]> {
+  const config = await configGetAll();
+  return connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]));
 }
 
 /**
@@ -3605,7 +4317,10 @@ const STORED_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._[\]-]{0,63}$/;
  */
 function normalizeRequestedModel(provider: unknown, raw: unknown): string | null {
   const resolved = codingProviderFrom(provider);
-  if (modelsForProvider(resolved).length === 0) return defaultModelForProvider(resolved);
+  // A provider whose plan picks the model carries none — except its economy
+  // model, which only the box itself sets, on a team's planner or reviewer
+  // (src/lib/coding-role-models.ts).
+  if (modelsForProvider(resolved).length === 0) return isRecordableModel(resolved, raw) ? raw : defaultModelForProvider(resolved);
   if (typeof raw === "string" && STORED_MODEL_RE.test(raw)) return raw;
   return defaultModelForProvider(resolved);
 }
@@ -3624,6 +4339,12 @@ async function assertProviderReady(provider: CodingProvider): Promise<void> {
     if (!anthropic.connected) throw new CodingAgentError("not_ready", ANTHROPIC_MISSING);
     return;
   }
+  if (provider === "openai") {
+    const openai = await getOpenAIConnection();
+    if (!openai.codexInstalled) throw new CodingAgentError("not_ready", CODEX_MISSING);
+    if (!openai.connected) throw new CodingAgentError("not_ready", OPENAI_MISSING);
+    return;
+  }
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || token.trim() === "") {
     throw new CodingAgentError("not_ready", CLAWAI_MISSING);
@@ -3634,14 +4355,15 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   // One read of config.json for every setting the status carries — the app
   // polls this, and each getter above opens and parses the file on its own.
   const config = await configGetAll();
-  const enabled = config[CODING_AGENT_CONFIG_KEY] === true;
+  const enabled = codingAgentEnabledFrom(config[CODING_AGENT_CONFIG_KEY]);
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
   const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
   const [readiness, projectFolders] = await Promise.all([
     readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
-    defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
+    readFolderNames(defaultDirectory),
   ]);
+  const connectedProviders = connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider);
   return {
     enabled,
     // Off the SAME config snapshot as everything else here — the app polls
@@ -3660,36 +4382,18 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // Absent means "summary": a box that predates the setting stops pasting a
     // whole task into a public pull request the day it updates.
     prBodyIncludesTask: prBodyTaskModeFrom(config[CODING_AGENT_PR_BODY_TASK_CONFIG_KEY]),
-    // Absent means the DEFAULT here, not zero: a box that predates the loop
-    // gets it, which is the point of shipping it on.
-    reviewRounds: typeof config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY] === "number"
-      ? clampReviewRounds(config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY])
-      : DEFAULT_REVIEW_ROUNDS,
-    minReviewRounds: MIN_REVIEW_ROUNDS,
-    maxReviewRounds: MAX_REVIEW_ROUNDS,
     autoMerge: config[CODING_AGENT_AUTO_MERGE_CONFIG_KEY] === true,
-    // Absent means the default, like the review rounds above: a box that
-    // predates the setting still gives a run with a deliverable its three goes.
-    completionAttempts: completionAttemptsFrom(config[CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY]),
-    minCompletionAttempts: MIN_COMPLETION_ATTEMPTS,
-    maxCompletionAttempts: MAX_COMPLETION_ATTEMPTS,
     // Absent means the default here too: a box that predates the setting runs
     // two at once, which is what shipping it on means.
     maxParallelRuns: maxParallelRunsFrom(config[CODING_AGENT_MAX_PARALLEL_CONFIG_KEY]),
     minMaxParallelRuns: MIN_MAX_PARALLEL_RUNS,
-    maxMaxParallelRuns: MAX_MAX_PARALLEL_RUNS,
+    maxMaxParallelRuns: hostMaxParallelRuns(),
     // Absent means standard — what every box did before the setting existed.
-    ...(() => {
-      const history = rememberHistoryPolicy(historyPolicyFrom(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY], config[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY]));
-      return {
-        historyRetention: history.mode,
-        historyLimit: history.limit,
-        historyLimits: [...HISTORY_EXTENDED_LIMITS],
-        historyLiveKept: MAX_RUNS_KEPT,
-      };
-    })(),
-    generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
-    generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
+    // A retired value is rewritten in the background; the status does not wait.
+    historyRetention: adoptHistoryPolicy(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY]).policy.mode,
+    historyLiveKept: MAX_RUNS_KEPT,
+    // One switch over the two keys: on only when both are.
+    generateMedia: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]) && generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
     teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels
@@ -3709,7 +4413,16 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     provider,
-    providers: CODING_PROVIDERS,
+    // What the panel draws — OpenAI only where the Codex CLI is, or where the
+    // owner already has the account (coding-provider.ts, offeredProviders).
+    // Off the readiness probe above: no second look at the disk.
+    providers: offeredProviders({
+      codexInstalled: readiness.codexInstalled,
+      openaiConnected: readiness.openaiConnected,
+      connected: connectedProviders,
+      defaultProvider: provider,
+    }),
+    connectedProviders,
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with
@@ -3717,12 +4430,15 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     effortLevels: OFFERED_EFFORT_LEVELS.includes(effort)
       ? OFFERED_EFFORT_LEVELS
       : (EFFORT_LEVELS.filter((l) => OFFERED_EFFORT_LEVELS.includes(l) || l === effort) as readonly CodingEffort[]),
+    // Every role, every half, "auto" where nothing is stored — a box that
+    // never chose answers all "auto" and runs on the role defaults.
+    roleModels: roleModelsView(roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY])),
+    // Off the same snapshot and the readiness above: no second probe per poll.
+    roleModelMap: roleModelMapFrom(config, readiness),
     projectFolders,
+    // The ceiling a writing run gets — a safety net the panel no longer
+    // edits (SCA3), so no range travels with it.
     maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
-    minMaxTurns: MIN_MAX_TURNS,
-    maxMaxTurns: MAX_MAX_TURNS,
-    tokenLimit: tokenLimitFrom(config[CODING_AGENT_TOKENS_CONFIG_KEY]),
-    minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
     // An EXPLICIT flag always wins; `enabled` only stands in when there is no
     // flag at all.
@@ -3735,7 +4451,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // home page about a second after it appeared.
     setupComplete: typeof config[CODING_AGENT_SETUP_CONFIG_KEY] === "boolean"
       ? config[CODING_AGENT_SETUP_CONFIG_KEY] === true
-      : enabled,
+      // An explicit `true` only: the switch is ON by default now, and an absent
+      // key is a box nobody has set up, not one set up before the wizard.
+      : config[CODING_AGENT_CONFIG_KEY] === true,
   };
 }
 
@@ -3780,7 +4498,12 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   // be resumed and settled as a project run — icon, review pass, pull
   // request — in a folder that is the team's.
   if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer" && t.role !== "lead") return null;
-  return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
+  return {
+    id: t.id,
+    role: t.role,
+    taskId: typeof t.taskId === "string" ? t.taskId : null,
+    // A record from before 2026-10-30 may carry `bulk: true`: not read back.
+  };
 }
 
 /**
@@ -3846,6 +4569,8 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // is what the default answers — there was nothing else to run on.
     provider: codingProviderFrom(raw.provider),
     requestedModel: normalizeRequestedModel(raw.provider, raw.requestedModel),
+    // Null on a record from before the field, a solo run's, or a hand edit.
+    modelRole: readModelRole((raw as { modelRole?: unknown }).modelRole),
     anthropicAccount: typeof raw.anthropicAccount === "string" && /^[0-9a-f]{8}$/.test(raw.anthropicAccount) ? raw.anthropicAccount : null,
     accountSwitches: normalizeAccountSwitches((raw as { accountSwitches?: unknown }).accountSwitches),
     summary: typeof raw.summary === "string" ? raw.summary : null,
@@ -3945,14 +4670,20 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsByType: (raw.subagentsByType && typeof raw.subagentsByType === "object")
       ? (raw.subagentsByType as Record<string, number>) : {},
     commit: typeof raw.commit === "string" ? raw.commit : null,
+    headAtStart: typeof (raw as { headAtStart?: unknown }).headAtStart === "string" ? (raw as { headAtStart: string }).headAtStart : null,
     modelsUsed: Array.isArray(raw.modelsUsed)
       ? raw.modelsUsed.filter((m): m is string => typeof m === "string") : [],
     maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
     tokensUsed: typeof raw.tokensUsed === "number" ? raw.tokensUsed : 0,
-    tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
+    tokenBreakdown: readTokenBreakdown((raw as { tokenBreakdown?: unknown }).tokenBreakdown),
+    spawnTokens: Array.isArray((raw as { spawnTokens?: unknown }).spawnTokens)
+      ? ((raw as { spawnTokens: unknown[] }).spawnTokens).filter((t): t is number => typeof t === "number" && Number.isFinite(t) && t >= 0).slice(-MAX_SPAWN_TOKENS_KEPT)
+      : [],
     thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
+    ...(readCodexThreadUsage((raw as { codexThreadUsage?: unknown }).codexThreadUsage) ?? {}),
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
     retries: typeof raw.retries === "number" ? raw.retries : 0,
+    ...(typeof raw.contextRecoveries === "number" && Number.isInteger(raw.contextRecoveries) && raw.contextRecoveries > 0 ? { contextRecoveries: raw.contextRecoveries } : {}),
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     // Only the one verdict this code writes counts; anything else on a
@@ -3965,6 +4696,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     team: normalizeTeam(raw.team),
     readOnly: raw.readOnly === true,
     extraBrief: typeof raw.extraBrief === "string" && raw.extraBrief ? raw.extraBrief : null,
+    cpuBudget: typeof raw.cpuBudget === "number" && Number.isInteger(raw.cpuBudget) && raw.cpuBudget >= 1 && raw.cpuBudget <= MAX_CPU_BUDGET ? raw.cpuBudget : null,
     experience: parseRunExperience(raw.experience),
     // No longer than the renderer ever writes: a longer one on a hand-edited
     // record is not a block this box rendered, and it travels into a prompt.
@@ -3986,9 +4718,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
       const n = (raw as { reviewRound?: unknown }).reviewRound;
       return typeof n === "number" && Number.isInteger(n) && n > 0 ? n : null;
     })(),
-    // Strict, and the safe direction to fall: a record whose pipeline this
-    // build cannot read has none, and settles the way a run without one does.
-    pipeline: parsePipeline((raw as { pipeline?: unknown }).pipeline),
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     // Only a list that matches the lines one for one is a list of their times;
     // a record from before the field has none, and the timeline says nothing.
@@ -4003,6 +4732,19 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // "off" is the truth about that run and not merely a safe default.
     media: normalizeMedia(raw.media),
     reviewPass: raw.reviewPass === true,
+    // The frozen visual decision (CodingRun.visual). A record from before the
+    // decision existed — neither the field nor the `diet` object that arrived
+    // with it — was started with every tool, so it reads as `true` and its
+    // resumes keep them; a newer record that never spawned is null and decides
+    // at its spawn. An EXPLICIT null (a draft, `newRunRecord`) stays null: read
+    // as `true` it skipped `decideRunVisual` at the draft's first spawn after
+    // a restart and gave every persisted draft the browser and media tools.
+    visual: (() => {
+      const r = raw as { visual?: unknown; diet?: unknown };
+      if (typeof r.visual === "boolean") return r.visual;
+      if (r.visual === null) return null;
+      return typeof r.diet === "object" && r.diet !== null ? null : true;
+    })(),
     mediaGenerated: {
       images: countOf(raw.mediaGenerated?.images),
       audio: countOf(raw.mediaGenerated?.audio),
@@ -4031,11 +4773,64 @@ function normalizeRun(raw: CodingRun): CodingRun {
     deliverable: parseDeliverable((raw as { deliverable?: unknown }).deliverable),
     deliverableCheck: parseDeliverableVerdict((raw as { deliverableCheck?: unknown }).deliverableCheck),
     attempts: parseAttempts((raw as { attempts?: unknown }).attempts),
-    completionAttempts: completionAttemptsFrom((raw as { completionAttempts?: unknown }).completionAttempts),
     // Re-validated rather than trusted, like every other list here: this text
     // is written to the harness's stdin and drawn on the run's page, and the
     // file it comes from is one a restore or a hand edit can have touched.
     messages: parseRunMessages((raw as { messages?: unknown }).messages),
+    midTurn: (raw as { midTurn?: unknown }).midTurn === true,
+    queued: (raw as { status?: unknown }).status === "queued" ? parseQueueEntry((raw as { queued?: unknown }).queued) : null,
+    ci: parseRunCi((raw as { ci?: unknown }).ci),
+    ciFixOf: parseCiFixOf((raw as { ciFixOf?: unknown }).ciFixOf),
+  };
+}
+
+/** A run's CI failure off disk, or null — rendered on its page and quoted to the next run, so re-read, never trusted. */
+function parseRunCi(raw: unknown): RunCi | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.prNumber !== "number" || !Number.isInteger(c.prNumber) || c.prNumber <= 0) return null;
+  const strings = (v: unknown, max: number) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, max) : []);
+  return {
+    prNumber: c.prNumber,
+    at: typeof c.at === "number" ? c.at : 0,
+    checks: strings(c.checks, 40),
+    tests: strings(c.tests, 40),
+    files: strings(c.files, 40),
+    excerpt: typeof c.excerpt === "string" ? c.excerpt.slice(0, 4_000) : "",
+    unread: strings(c.unread, 40),
+    attempt: typeof c.attempt === "number" && Number.isInteger(c.attempt) && c.attempt >= 0 ? c.attempt : 0,
+    fixRunId: typeof c.fixRunId === "string" && RUN_ID_RE.test(c.fixRunId) ? c.fixRunId : null,
+  };
+}
+
+function parseCiFixOf(raw: unknown): { runId: string; attempt: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const f = raw as Record<string, unknown>;
+  if (typeof f.runId !== "string" || !RUN_ID_RE.test(f.runId)) return null;
+  return { runId: f.runId, attempt: typeof f.attempt === "number" && Number.isInteger(f.attempt) && f.attempt > 0 ? f.attempt : 1 };
+}
+
+/** A queued run's entry off disk, or a bare one (its turn by when the file says it was asked, no request) — never a crash. */
+function parseQueueEntry(raw: unknown): RunQueueEntry {
+  const e = raw && typeof raw === "object" ? raw as { at?: unknown; start?: unknown } : {};
+  const start = e.start && typeof e.start === "object" ? e.start as Record<string, unknown> : {};
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    at: typeof e.at === "number" && Number.isFinite(e.at) ? e.at : 0,
+    start: {
+      kind: start.kind === "new" ? "new" : "draft",
+      ...(typeof start.task === "string" ? { task: start.task } : {}),
+      projectId: text(start.projectId),
+      directory: text(start.directory),
+      resumeRunId: text(start.resumeRunId),
+      provider: start.provider,
+      model: start.model,
+      deliverable: start.deliverable,
+      inputs: start.inputs,
+      experience: start.experience,
+      ...(typeof start.baseBranch === "string" ? { baseBranch: start.baseBranch } : {}),
+      ...(start.fixCi === true ? { fixCi: true } : {}),
+    },
   };
 }
 
@@ -4066,7 +4861,7 @@ function parseRunWorktree(raw: unknown): RunWorktree | null {
 }
 
 /** Every blocker this box words a next step for; anything else off disk is not one. */
-const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed"];
+const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed", "stopped"];
 
 /**
  * The merge verdict off disk, or null.
@@ -4188,7 +4983,9 @@ function writeAll(list: CodingRun[]): void {
   if (store.signature !== null && fileSignature() !== store.signature) keepSettledRecords(list);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = untraced(`${RUNS_PATH}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
+  // Compact: the file is rewritten every few seconds while a run streams, and
+  // nothing reads it by eye — the indentation was a fifth of every flush.
+  fs.writeFileSync(tmp, JSON.stringify(list), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);
   } catch {
@@ -4233,6 +5030,13 @@ interface LiveRun {
   unit: string | null;
   /** The process group — the only way to signal a reattached run. */
   pgid: number | null;
+  /**
+   * This spawn's command clock (coding-run-inbox.ts `commandClockPath`): when
+   * its first command began, which is what tells what the run started from
+   * what was already in its scope. Null for a spawn without the keep-alive
+   * hook (a read-only or Codex run) — those keep the old leftover rule.
+   */
+  commandClock: string | null;
   /** The stream log being tailed. Null only if the log could not be opened. */
   stream: StreamFollower | null;
   /** Reads the tail of the stream log while the run works. */
@@ -4257,6 +5061,19 @@ interface LiveRun {
   /** Whether this process still holds the harness's stdin open. */
   stdinOpen: boolean;
   /**
+   * The spawn has its inbox hook (CodingRun.midTurn): a message posted to its
+   * inbox is handed to the model after the tool call it is in.
+   */
+  midTurn: boolean;
+  /**
+   * A turn is under way, so the hook will run again: from the spawn to its
+   * result event, and again from a next turn written on stdin. A message sent
+   * outside one goes the next-turn or next-start way instead.
+   */
+  turnOpen: boolean;
+  /** Message ids this process put in the run's inbox and has no receipt for yet — what the tail looks for. */
+  inboxPosted: Set<string>;
+  /**
    * The harness turned `--input-format stream-json` away before it ever spoke.
    * Makes the one automatic retry apply — running plain, which is the whole
    * difference — the way `scopeRefused` does for a scope systemd refused.
@@ -4272,7 +5089,7 @@ interface LiveRun {
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
   /**
-   * What the owner (or the token ceiling) asked this run to do: end for good,
+   * What the owner asked this run to do: end for good,
    * or settle as paused with its session intact for resumeRun(). One field,
    * not two flags, because the two gestures are exclusive and the later
    * Stop overrides an earlier Pause — see requestEnd.
@@ -4307,6 +5124,18 @@ interface LiveRun {
   sawInit: boolean;
   /** Whether "Thinking…" has already been said once. */
   sawThinking: boolean;
+  /**
+   * A Codex run's last agent message — its closing words once the turn
+   * completes — and the last notice the CLI printed (a retry, a stream error),
+   * which is the best account of a run that ends with no verdict at all.
+   */
+  codexLastMessage?: string | null;
+  codexNotice?: string | null;
+  /** A Codex run's usage limit or refused credential, in the CLI's words. */
+  codexLimit?: string | null;
+  codexAuth?: string | null;
+  /** What the thread had already billed before this spawn — see codexUsageBaseline. */
+  codexBaseline?: CodexThreadUsage;
   /** The last thinking_tokens figure seen, to tell "more of this block"
    *  (add the difference) from "a new block began" (add it all). */
   thinkingSeen: number;
@@ -4349,13 +5178,24 @@ interface LiveRun {
   /**
    * `run.tokensUsed` when this spawn began, so the verdict above counts what
    * THIS spawn was billed. The record's bill alone would not do: a resume, an
-   * account switch and a pipeline lap all continue a record that already
+   * account switch and a Resume of a gave-up run all continue a record that already
    * carries earlier spawns' tokens, and a resumed spawn refused on its very
    * first request is the startup case again, not a model error mid-run. The
    * automatic retry inherits its first attempt's value — one run making a
    * second try seconds later, at the same work.
    */
   tokensAtSpawn: number;
+  /** `run.tokenBreakdown` when this process began: the CLI's modelUsage counts from zero per process. */
+  breakdownAtSpawn: TokenBreakdown;
+  /**
+   * This process continues an earlier session (`--resume`): a review pass, the
+   * owner's Resume. Its CLI reports modelUsage for the
+   * WHOLE session, history included (measured 2026-10-18: a review pass's
+   * record read 270,596 = the run's own 125,100 + its 145,496), so the
+   * raise-to-modelUsage below would bill the earlier spawns again. Such a
+   * process is billed from its own assistant events only.
+   */
+  resumedSession?: boolean;
   /**
    * tool_use ids of sub-agents that have started and not yet reported back.
    * Ids rather than a counter: a tool_result can arrive out of order, and a
@@ -4406,6 +5246,12 @@ interface LiveRun {
    * are the run's and a run can be writing ABOUT limits.
    */
   limitSignal: string | null;
+  /**
+   * The CLI's last "usage limit reached · continuing automatically" / "grace
+   * window active" line (TASK-2141): it carries on by itself, so this is NO
+   * limit — kept only so the run's feed says it once per line, not per event.
+   */
+  limitNotice: string | null;
   /**
    * The owner's test hook (`simulateAnthropicLimit`): the words of a limit to
    * settle this run with, set just before the hook ends the process.
@@ -4473,25 +5319,45 @@ interface RunStore {
   live: Map<string, LiveRun>;
   waiters: Map<string, Set<() => void>>;
   flushTimer: NodeJS.Timeout | null;
+  /** When `flushTimer` is due, so a later persist can only bring it forward. Optional: a store from an older module. */
+  flushDueAt?: number | null;
   dirty: boolean;
   exitHookInstalled: boolean;
   /** A run's injected secrets, kept off the record — see runSecretEnv. */
   runSecretEnv: Map<string, Record<string, string>>;
+  /** Which scope each of those came from, names only — see runSecretScopes. Optional: a store from an older module. */
+  runSecretScopes?: Map<string, Record<string, string>>;
+  /** When each dated one of those stops being handed — see runSecretExpiry. Optional: a store from an older module. */
+  runSecretExpiry?: Map<string, Record<string, number>>;
   /** The Anthropic account a run's next spawn uses, credential included — see runAnthropicCredential. */
   runAnthropicCredential: Map<string, RunAnthropicCredential>;
+  /** The MCP servers a run's project opted into, credentials included — see runMcpPlan. */
+  runMcpPlan: Map<string, RunMcpPlan>;
+  /** An `openai` run's API key — see runOpenAIKey. Optional: a store from an older module. */
+  runOpenAIKey?: Map<string, string>;
+  /** The reply a run's next spawn may ask for, after an outgrown window — see runContextReply. Optional: a store from an older module. */
+  runContextReply?: Map<string, number>;
+  /** Who a run's own `git commit` is authored as — see runGitIdentity. */
+  runGitIdentity?: Map<string, CodingGitIdentity>;
   /** The runs whose pull request or review is already being watched. */
   prWatchers: Set<string>;
   reviewWatchers: Set<string>;
   /** Settle chains a test can wait on — see trackSettleWork. */
   settling: Set<Promise<void>>;
+  /** Each run's own settle chain while it is in flight — see waitForRunSettled. */
+  settleChains?: Map<string, Promise<void>>;
+  /** Runs settled lost at boot whose scope nobody could ask about: their worktree is kept as it is (settleRunWorktree). */
+  keepTrees: Set<string>;
   /** Runs whose record says settled while their commit is still being made — see waitForRun. */
   unannounced: Set<string>;
   /** One lifecycle change at a time per run — see transitions. */
   transitions: Map<string, Promise<CodingRun>>;
-  /** One pipeline advance at a time per run — see advancePipeline. */
-  pipelineAdvancing: Map<string, Promise<void>>;
   /** Starts past the gate and not yet visible to loadRuns() — see startingRuns. */
   startingRuns: number;
+  /** The same, for automatic review passes — their own pool. */
+  startingReviews: number;
+  /** Of `startingRuns`, the ones that are a team's, by team id — see judgeTeamSlot. Made on first use. */
+  startingTeams?: Map<string, number>;
   /**
    * The runs file as this process last read or wrote it. A file that has moved
    * on since means somebody else writes it too; writeAll() checks rather than
@@ -4502,10 +5368,15 @@ interface RunStore {
   swapConsumerArmed?: boolean;
   /** The pass resuming the runs that waited for an Anthropic reset — one at a time. */
   anthropicResume?: Promise<string[]>;
-  /** How many times each run was carried on after a refused credential — see MAX_AUTH_SWITCHES. */
-  anthropicAuthRetries?: Map<string, number>;
+  /** What each run has been through with refused credentials — see AuthTrail. */
+  anthropicAuthTrail?: Map<string, AuthTrail>;
   /** The owner's history setting as last read — see rememberHistoryPolicy. */
   historyPolicy: HistoryPolicy | null;
+  /** The run queue's pass in flight, and whether a slot freed while it ran — see pumpRunQueue. */
+  queuePump?: Promise<string[]>;
+  queuePumpAgain?: boolean;
+  /** The queue's next look when it stopped for something that clears by itself (the switch, readiness). */
+  queueRetry?: NodeJS.Timeout | null;
 }
 
 const store = processStore<RunStore>(RUNS_PATH, () => ({
@@ -4517,18 +5388,46 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   exitHookInstalled: false,
   runSecretEnv: new Map<string, Record<string, string>>(),
   runAnthropicCredential: new Map<string, RunAnthropicCredential>(),
+  runMcpPlan: new Map<string, RunMcpPlan>(),
   prWatchers: new Set<string>(),
   reviewWatchers: new Set<string>(),
   settling: new Set<Promise<void>>(),
+  keepTrees: new Set<string>(),
   unannounced: new Set<string>(),
   transitions: new Map<string, Promise<CodingRun>>(),
-  pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
+  startingReviews: 0,
   signature: null,
   historyPolicy: null,
 }));
 
 const live = store.live;
+
+/**
+ * Called once a run's settle chain has ended — the folder janitor's
+ * after-run pass (coding-folder-janitor.ts) listens here. Per PROCESS, not
+ * per module copy: the boot hook that subscribes and the route that started
+ * the run load different copies of this module (process-store.ts).
+ */
+const runSettledHooks = processStore("coding-agent:run-settled-hooks", () => ({ hooks: new Set<() => void>() })).hooks;
+
+/** Subscribe to settled runs; answers the unsubscribe. */
+export function onRunSettled(hook: () => void): () => void {
+  runSettledHooks.add(hook);
+  return () => {
+    runSettledHooks.delete(hook);
+  };
+}
+
+function emitRunSettled(): void {
+  for (const hook of runSettledHooks) {
+    try {
+      hook();
+    } catch (err) {
+      console.error("[coding-agent] a run-settled hook failed:", err instanceof Error ? err.message : err);
+    }
+  }
+}
 const waiters = store.waiters;
 
 /**
@@ -4563,10 +5462,22 @@ const LOST_TO_RESTART = "The box restarted while the run was live, so it did not
  *    finished while nobody was watching, and it settles as what it said it was.
  *  - anything else: the box restarted while it was live, and it says so.
  *
- * A record with no unit at all — a plain child of the old server, or a run from
- * before this existed — can only ever be the third.
+ * A live record with no unit — written "running" before its spawn, by a server
+ * that went before the unit reached the disk — is looked for by NAME
+ * (`findRunScopeUnit`) and reattached when systemd has its scope up. Only a
+ * record with no unit and no such scope, a plain child of the old server or a
+ * run from before scopes existed, is the third outright.
+ *
+ * "systemd could not be asked" is asked again a few times, and a live record
+ * it still cannot answer for is REATTACHED rather than settled: the watch asks
+ * on, with the process group as its second opinion. Settling it here merged
+ * and removed the worktree of a run still working in it.
  */
 export async function reconcileAfterRestart(): Promise<number> {
+  // What a server that died mid-run left of its runs' MCP config files: each
+  // was read by its harness at start, and its credentials are not left lying
+  // about for the next settle to maybe find.
+  sweepRunMcpConfigs();
   const list = loadRuns();
   let repaired = 0;
   let changed = false;
@@ -4578,16 +5489,27 @@ export async function reconcileAfterRestart(): Promise<number> {
     const orphaned = run.status === "running" && !live.has(run.id);
     // Only a run that HAS a unit is asked about, which on a settled record means
     // only one that recorded a leftover (every other settle forgets its unit),
-    // so this is a handful of systemctl calls at boot and usually none.
+    // so this is a handful of systemctl calls at boot and usually none. A live
+    // record without one is looked for by name first.
     //
-    // A `null` answer — systemd could not be asked — counts as gone HERE, and
-    // deliberately not in the reattach watch. The difference is what else can be
-    // trusted: this process has held no handle on the run, so the recorded pid
-    // may since have been given to a stranger and cannot second the answer,
-    // while a reattach has already seen the scope alive with that pid in it. A
-    // record left "running" that nothing will ever settle is the worse outcome.
-    const unitStillUp = run.unit !== null && (await unitActive(run.unit)) === true;
-    if (orphaned && unitStillUp) {
+    // A `null` answer — systemd could not be asked, even after a few tries — on
+    // a LIVE record is reattached, not settled: settling is what merges and
+    // removes its worktree, and "could not look" is not "gone". The reattach
+    // watch keeps asking and has the process group as its second opinion, so
+    // the record is still settled once the run is over. A settled record's null
+    // is read as gone, as before: nothing is lost if its leftover goes unseen.
+    let scopeUnknown = false;
+    if (orphaned && run.unit === null) {
+      const found = await findRunScopeAtBoot(run.id);
+      if (found === undefined) scopeUnknown = true;
+      else if (found) {
+        run.unit = found;
+        changed = true;
+      }
+    }
+    const answer = run.unit !== null ? await unitActiveAtBoot(run.unit, orphaned) : false;
+    const unitStillUp = answer === true;
+    if (orphaned && (unitStillUp || (answer === null && run.unit !== null))) {
       // ALIVE. Its pgid and its unit are still the real handles on it, so
       // neither is forgotten below.
       reattach(run, tools);
@@ -4595,7 +5517,15 @@ export async function reconcileAfterRestart(): Promise<number> {
       changed = true;
       continue;
     }
-    if (unitStillUp) {
+    // ...and only what the RUN started in it is a leftover: the rule the
+    // settle decided it by (noteRunLeftover), for a spawn that ran a command.
+    let leftInScope = unitStillUp;
+    const clock = leftInScope ? commandClockOfUnit(run, run.unit) : null;
+    if (leftInScope && commandClockAnswers(clock)) {
+      const own = await askRunLeftovers(clock as string, { unit: run.unit, pgid: null });
+      if (own !== null && own.length === 0) leftInScope = false;
+    }
+    if (leftInScope) {
       // SETTLED, and its scope is still up — so something it left is still in
       // that cgroup. A unit name, unlike a pid, is never handed to anybody else,
       // so the Kill button still names exactly what it named before the restart:
@@ -4623,6 +5553,10 @@ export async function reconcileAfterRestart(): Promise<number> {
       changed = true;
     }
     if (orphaned) {
+      // Nobody could say whether its scope is still up: settled — there is no
+      // handle to watch it by — but its worktree is left exactly as it is,
+      // never merged or removed under a run that may still be working in it.
+      if (scopeUnknown) store.keepTrees.add(run.id);
       settleLostRun(run, tools);
       repaired += 1;
       changed = true;
@@ -4636,6 +5570,33 @@ export async function reconcileAfterRestart(): Promise<number> {
     }
   }
   return repaired;
+}
+
+/** How many times, and how far apart, the boot sweep asks again about a live run's scope systemd did not answer for. */
+const BOOT_UNIT_ASKS = 3;
+const BOOT_UNIT_RETRY_MS = 1_000;
+
+/**
+ * `unitActive` for the boot sweep: a LIVE record's unanswered question is asked
+ * again a few times before it counts as unanswered, since the user bus can be
+ * busy for a moment at boot. A settled record's is asked once — nothing is
+ * lost if its leftover goes unnoticed.
+ */
+async function unitActiveAtBoot(unit: string, live: boolean): Promise<boolean | null> {
+  for (let ask = 1; ; ask++) {
+    const answer = await unitActive(unit);
+    if (answer !== null || !live || ask >= BOOT_UNIT_ASKS) return answer;
+    await new Promise<void>((resolve) => setTimeout(resolve, BOOT_UNIT_RETRY_MS));
+  }
+}
+
+/** `findRunScopeUnit` for the boot sweep: an unanswered look is made again a few times, like `unitActiveAtBoot`. */
+async function findRunScopeAtBoot(runId: string): Promise<string | null | undefined> {
+  for (let ask = 1; ; ask++) {
+    const found = await findRunScopeUnit(runId);
+    if (found !== undefined || ask >= BOOT_UNIT_ASKS) return found;
+    await new Promise<void>((resolve) => setTimeout(resolve, BOOT_UNIT_RETRY_MS));
+  }
 }
 
 /** setpriv and systemd-run for the boot sweep — best effort, never a reason to refuse it. */
@@ -4656,15 +5617,20 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     child: null,
     unit: run.unit,
     pgid: run.pgid,
+    commandClock: commandClockOfUnit(run, run.unit),
     stream: null,
     streamTimer: null,
     unitWatch: null,
     stderrPath: null,
     scopeRefused: false,
-    // The pipes died with the server that opened them: a reattached run's
-    // queue waits for the next attempt or resume.
+    // The pipes died with the server that opened them — but not its hook: a
+    // reattached run with an inbox still takes a message mid-turn, and what
+    // was waiting in it when the last server went is still looked for.
     streamInput: false,
     stdinOpen: false,
+    midTurn: run.midTurn === true,
+    turnOpen: true,
+    inboxPosted: new Set<string>(run.midTurn === true ? safeInboxPending(run.id) : []),
     streamInputRefused: false,
     lostToRestart,
     openSubagents: new Map<string, ActiveSubagent>(),
@@ -4680,8 +5646,10 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     // the process being reattached is the spawn that billed it.
     sawModelAnswer: false,
     tokensAtSpawn: 0,
+    breakdownAtSpawn: { ...run.tokenBreakdown },
     sawThinking: false,
     thinkingSeen: 0,
+    ...(runsOnCodex(run.provider) ? { codexBaseline: codexUsageBaseline(run.sessionId) } : {}),
     tools,
     settings: { effort: run.effort, maxTurns: run.maxTurns },
     commandMayHaveSideEffects: false,
@@ -4696,6 +5664,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     allowanceRefusal: null,
     pauseReason: null,
     limitSignal: null,
+    limitNotice: null,
     simulatedLimit: null,
     forcedAccountPause: null,
     authSignal: null,
@@ -4736,6 +5705,8 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
   const state = detachedState(run, tools, false);
   live.set(run.id, state);
   followStream(run, state);
+  // What its hook handed over while no server was watching.
+  collectInboxReceipts(run, state);
   installExitHook();
   let settled = false;
   const settle = () => {
@@ -4761,8 +5732,11 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
       const active = run.unit ? await unitActive(run.unit) : false;
       if (active === true) return;
       // "Could not be asked" is not "gone": the process group is the second
-      // opinion, so a wedged user bus cannot settle a working run as lost.
-      if (active === null && groupAlive(state.pgid)) return;
+      // opinion, so a wedged user bus cannot settle a working run as lost. A
+      // run with no group on record (one found by its scope's name) has no
+      // second opinion and waits for the next answer — bounded by the idle
+      // watchdog, which ends it the honest way.
+      if (active === null && (groupAlive(state.pgid) || (state.pgid === null && !state.timedOut))) return;
       settle();
     })().catch(() => {});
   }, UNIT_POLL_MS);
@@ -4790,7 +5764,7 @@ function settleLostRun(run: CodingRun, tools: SpawnTools): void {
   finishRun(run, state, null);
 }
 
-function persist(immediate = false): void {
+function persist(immediate = false, delayMs: number = FLUSH_INTERVAL_MS): void {
   const list = loadRuns();
   if (immediate) {
     store.dirty = false;
@@ -4798,6 +5772,7 @@ function persist(immediate = false): void {
       clearTimeout(store.flushTimer);
       store.flushTimer = null;
     }
+    store.flushDueAt = null;
     try {
       writeAll(list);
     } catch (err) {
@@ -4806,9 +5781,19 @@ function persist(immediate = false): void {
     return;
   }
   store.dirty = true;
-  if (store.flushTimer) return;
+  const now = Date.now();
+  const due = flushDeadline(store.flushDueAt ?? null, now, delayMs);
+  if (store.flushTimer && (store.flushDueAt ?? Infinity) <= due) return;
+  if (store.flushTimer) {
+    // A nearer deadline than the one already scheduled: bring the flush
+    // forward rather than wait out the longer window.
+    clearTimeout(store.flushTimer);
+    store.flushTimer = null;
+  }
+  store.flushDueAt = due;
   const timer = setTimeout(() => {
     store.flushTimer = null;
+    store.flushDueAt = null;
     if (!store.dirty) return;
     store.dirty = false;
     try {
@@ -4816,7 +5801,7 @@ function persist(immediate = false): void {
     } catch (err) {
       console.error("[coding-agent] could not write the runs file:", err instanceof Error ? err.message : err);
     }
-  }, FLUSH_INTERVAL_MS);
+  }, Math.max(0, due - now));
   timer.unref();
   store.flushTimer = timer;
 }
@@ -4828,6 +5813,8 @@ function cloneRun(run: CodingRun): CodingRun {
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
     progressAt: [...run.progressAt],
+    tokenBreakdown: { ...run.tokenBreakdown },
+    spawnTokens: [...run.spawnTokens],
     deniedActions: [...run.deniedActions],
     denials: run.denials.map((d) => ({ ...d })),
     allowRules: [...run.allowRules],
@@ -4852,10 +5839,12 @@ function cloneRun(run: CodingRun): CodingRun {
     // Copied entry by entry: a route holding a clone must not be able to mark
     // a message delivered that the harness has never seen.
     messages: run.messages.map((m) => ({ ...m })),
-    // Nested two deep — steps, and the evidence under each — so a route holding
-    // a clone can neither see nor write the driver's later stages.
-    pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
     experience: run.experience ? { ...run.experience, ruleIds: [...run.experience.ruleIds] } : null,
+    // Where it stands, never what it asked for: the request (inputs, an
+    // experience block) is the runner's to start it with, not a reader's.
+    queued: run.queued ? { at: run.queued.at, position: queuePosition(run.id) ?? undefined } : null,
+    ci: run.ci ? { ...run.ci, checks: [...run.ci.checks], tests: [...run.ci.tests], files: [...run.ci.files], unread: [...run.ci.unread] } : null,
+    ciFixOf: run.ciFixOf ? { ...run.ciFixOf } : null,
   };
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
@@ -4906,11 +5895,9 @@ export function listOlderRuns(options: { offset?: number; limit?: number; projec
 /** Everything the settings card says about the run history, in one read. */
 export interface RunHistorySummary {
   mode: HistoryRetentionMode;
-  limit: number;
-  limits: number[];
   /** Runs the live list holds in every mode. */
   liveKept: number;
-  counts: { live: number; older: number; archived: number };
+  counts: { live: number; older: number };
   /** Null when the walk failed; the card then says it could not measure. */
   usage: HistoryUsage | null;
   disk: DiskSpace & { minFreeBytes: number; low: boolean };
@@ -4932,13 +5919,10 @@ export async function runHistorySummary(): Promise<RunHistorySummary> {
   const disk = diskSpace();
   return {
     mode: policy.mode,
-    limit: policy.limit,
-    limits: [...HISTORY_EXTENDED_LIMITS],
     liveKept: MAX_RUNS_KEPT,
     counts: {
       live: loadRuns().length,
       older: hasOlderRuns() ? olderRunIndex().length : 0,
-      archived: archiveIndex().length,
     },
     usage,
     disk: { ...disk, minFreeBytes: HISTORY_MIN_FREE_BYTES, low: isDiskLow(disk) },
@@ -4948,7 +5932,7 @@ export async function runHistorySummary(): Promise<RunHistorySummary> {
 
 /**
  * Every file of the run history, for "Export all history" — the live list,
- * the older runs, their evidence, inputs and transcripts, and the archive. See
+ * the older runs, their evidence, inputs and transcripts. See
  * historyExportSources for the layout inside the zip.
  */
 export function historyExportAll(): AsyncGenerator<ZipSource> {
@@ -4968,17 +5952,14 @@ export function historyExportAll(): AsyncGenerator<ZipSource> {
       version: 1,
       exportedAt: new Date().toISOString(),
       retention: policy.mode,
-      ...(policy.mode === "extended" ? { limit: policy.limit } : {}),
       runs: runs.length,
       olderRuns: older.length,
-      archivedRuns: archiveIndex().length,
       layout: {
         "runs.json": "the runs listed on the box, newest first",
-        "older-runs/<runId>.json": "runs kept past the newest thirty (Extended, Keep everything)",
+        "older-runs/<runId>.json": "runs kept past the newest thirty (Keep everything)",
         "evidence/<runId>/": "each run's evidence folder",
         "inputs/<runId>/": "the files each run was given",
         "transcripts/<runId>.jsonl": "Claude Code's transcript of the run, where it still exists",
-        "archive/<runId>/": "archived runs: run.json, archive.json, evidence/, inputs/, transcript.jsonl, stream logs",
       },
     },
     // A snapshot now: the export streams for minutes, and these records are
@@ -5000,7 +5981,7 @@ export function historyExportAll(): AsyncGenerator<ZipSource> {
  * are the account of what the assistant did with a delegated shell, and the
  * party they describe is not the party who should be able to erase them.
  */
-export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ?? STANDARD_HISTORY_POLICY): number {
+export function clearFinishedRuns(): number {
   const list = loadRuns();
   // Paused runs hold a resumable session and drafts never ran — neither is
   // "finished", so the owner's clear-history sweep leaves them alone. A run
@@ -5019,22 +6000,19 @@ export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ??
   // reason written above: it holds a resumable session, so it is not "finished"
   // either. The folder exception applies to it unchanged — `resumeRun` refuses a
   // run whose folder is gone, so such a record can neither go on nor finish.
-  const heldOn = (r: CodingRun) => holdsResumableSession(r.status) && (isLive(r.status) || folderPresent(r.directory));
   // ONE decision per run, used for both the record and its evidence folder:
   // judged twice, a folder that came or went between the two looks would
   // drop a record and keep its artifacts, or the other way round.
   const keep: CodingRun[] = [];
   const dropped: CodingRun[] = [];
   for (const r of list) (heldOn(r) || isPrPending(r.pr) ? keep : dropped).push(r);
-  // The older runs a history mode kept are finished runs of this same list,
-  // so the owner's Clear takes them too. Under archive they are ARCHIVED like
-  // everything else leaving the list, which is what that mode promises.
+  // The older runs "keep everything" kept are finished runs of this same list,
+  // so the owner's Clear takes them too.
   const older = hasOlderRuns() ? olderRunIndex() : [];
   const removed = dropped.length + older.length;
   if (removed === 0) return 0;
-  const low = policy.mode === "archive" && isDiskLow(diskSpace());
-  for (const r of dropped) dropRun(r, policy, "cleared", low);
-  for (const e of older) dropOlderRun(e, policy, "cleared", low);
+  for (const r of dropped) dropRun(r);
+  for (const e of older) dropOlderRun(e);
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
@@ -5043,7 +6021,7 @@ export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ??
   // The owner is looking at the figures this changes: a deleted evidence
   // folder must not be counted for another half-minute out of the cache.
   invalidateUsage();
-  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request${policy.mode === "archive" && !low ? " into the archive" : ""}`);
+  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request`);
   return removed;
 }
 
@@ -5119,7 +6097,7 @@ function wakeWaiters(id: string): void {
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
-function newRunId(): string {
+export function newRunId(): string {
   // 8 base36 characters: readable, short, and never a 32-hex run the MCP
   // redaction would blank.
   const bytes = randomBytes(6);
@@ -5136,11 +6114,12 @@ export const RUN_ID_RE = ARTIFACT_RUN_ID_RE;
  * Did the BOX write this task, rather than a person typing it?
  *
  * True for the follow-ups the runner starts itself — the review pass, a
- * review-loop round. Those fields are internal: no route
+ * review-loop round — and for every run of a coding team, whose task texts
+ * the team builds to TEAM_TASK_CHARS. Those fields are internal: no route
  * passes them through from a request body, so a typed task cannot claim this.
  */
-function isBoxWrittenTask(input: Pick<StartRunInput, "reviewOf" | "reviewLoopOf">): boolean {
-  return typeof input.reviewOf === "string" || typeof input.reviewLoopOf === "string";
+function isBoxWrittenTask(input: Pick<StartRunInput, "reviewOf" | "reviewLoopOf" | "team">): boolean {
+  return typeof input.reviewOf === "string" || typeof input.reviewLoopOf === "string" || (input.team !== undefined && input.team !== null);
 }
 
 const BOX_TASK_CLIPPED = "\n…(truncated)";
@@ -5240,31 +6219,21 @@ export async function resolveWorkingDirectory(input: {
   }
 
   if (!directory) {
-    // The owner's default, if they set one. Re-validated by falling through
-    // into the same checks below — a folder that stopped being allowed since
-    // it was set (deleted, moved, replaced by a symlink out of the home) is
-    // refused now, not trusted because it passed once.
-    const fallback = await getDefaultDirectory();
-    if (!fallback) {
-      throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
-    }
     // Every run happens in a folder INSIDE the project folder, never in the
     // project folder itself — a run's folder is a project the owner can find
     // again, and the project folder is the shelf they all sit on.
+    const fallback = await getDefaultDirectory();
     throw new CodingAgentError("invalid", `Give a folder inside your project folder (${fallback}) — its name is enough — or a code project id.`);
   }
   if (directory.length > MAX_DIRECTORY_CHARS) {
     throw new CodingAgentError("invalid", "The folder path is too long.");
   }
   if (!path.isAbsolute(directory)) {
-    // A bare name means a folder in the owner's default directory. Without
-    // this, working on a folder they already have — ~/Projects/my-app —
-    // required the assistant to know and type the whole absolute path, and
-    // nothing told it the folder existed.
+    // A bare name means a folder in the owner's project folder — the one they
+    // chose, else ~/Projects. Without this, working on a folder they already
+    // have — ~/Projects/my-app — required the assistant to know and type the
+    // whole absolute path, and nothing told it the folder existed.
     const base = await getDefaultDirectory();
-    if (!base) {
-      throw new CodingAgentError("invalid", "The folder must be an absolute path, or a folder name inside your default project folder.");
-    }
     if (directory.includes("/") || directory.includes("\\") || directory === "." || directory === "..") {
       throw new CodingAgentError("invalid", "Give a single folder name, or an absolute path.");
     }
@@ -5303,11 +6272,12 @@ export async function resolveWorkingDirectory(input: {
     }
   }
   // The owner's rule: every run happens in a folder inside the project
-  // folder, so every run's folder is listed under Projects. Only once a
-  // project folder is set (a box without one keeps the home rule above), and
-  // never for the setting that says where "inside" is (`asDefault`).
+  // folder, so every run's folder is listed under Projects. Only once the
+  // owner has CHOSEN a project folder: the ~/Projects default is where things
+  // go, not a new fence — a box that never chose keeps the home rule above, as
+  // it always had. Never for the setting that says where "inside" is (`asDefault`).
   if (!input.asDefault) {
-    const base = await getDefaultDirectory();
+    const base = await getChosenDirectory();
     if (base) {
       const realBase = await fs.promises.realpath(base).catch(() => path.resolve(base));
       if (real === realBase) {
@@ -5347,27 +6317,98 @@ async function projectFolder(dir: string, projectsRoot: string, id: string): Pro
 // ─── Spawning ────────────────────────────────────────────────────────────────
 
 /**
- * What Claude Code is told on top of its defaults. It is running unattended:
- * nobody can answer a question, and the final message IS the deliverable the
- * assistant relays to the person.
+ * How a run is told to use its helpers (TASK-1749's lean helper sentence, the
+ * only one now). Every helper is a separate context that re-reads what the run
+ * already read, so the cheap way to check work is the run's own shell; a helper
+ * earns its tokens only on a codebase too large to read, or as one last look
+ * at a large change — and never as a second review of a diff a separate pass
+ * will read. A run whose changes get a separate review — the owner's
+ * automatic review pass, a team's reviewer, or the review pass itself — must
+ * not ALSO send the reviewer over the same diff: on bench cycle 1 (2026-09-05)
+ * that helper cost m-02 45% of its wall time and m-04 a 200-second idle wait,
+ * for a diff the pass then reviewed again with Bash in hand.
  */
-/**
- * The place in the brief where the run is told what to do about review. A
- * run whose changes get a separate review — the owner's automatic review
- * pass, a team's reviewer, or the review pass itself — must not ALSO send
- * the flash reviewer over the same diff: on bench cycle 1 (2026-09-05) that
- * helper cost m-02 45% of its wall time and m-04 a 200-second idle wait,
- * for a diff the pass then reviewed again with Bash in hand. The rest of
- * the delegation sentence stays as it is — see the comment above it.
- */
-const REVIEWER_CLAUSE_SLOT = "{{REVIEWER_CLAUSE}}";
-const REVIEWER_CLAUSE_HELPER = "before your final report, send the reviewer over your changes (name the files) and fix what it finds.";
-const REVIEWER_CLAUSE_SEPARATE = "your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper over your own work; spend that time on the tester.";
-
-/** The brief for a run whose changes are (or are not) reviewed separately. */
-export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
-  return HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+export function leanHelpersBrief(reviewedSeparately: boolean): string {
+  return [
+    "Run the project's tests and builds yourself in your shell — cheaper than a helper.",
+    "Use the explorer only for a codebase too large to read directly, handing it the paths and the question.",
+    reviewedSeparately
+      ? "Do not send the reviewer: a separate review on this device reads your diff."
+      // Measured on bench/diet (2026-10-18): with the reviewer kept for
+      // "large" changes only, quality fell 0.65 of a point on the judge's
+      // ten — id reuse after a delete, a missing viewport tag, a circular
+      // import, all what one cheap last look catches. So: once, always.
+      : "When the work is done and your own checks pass, send the reviewer exactly once, handing it the changed files, the task's requirements and the edge cases to check instead of letting it re-read the project; fix what it finds, then finish.",
+    "Helpers never edit.",
+  ].join(" ");
 }
+
+/**
+ * The helper sentence of a run that has no helpers — a Codex run, which has no
+ * sub-agents to send. The same checks, done in its own shell.
+ */
+export const NO_HELPERS_BRIEF =
+  "You have no helper agents: read what you need yourself, run the project's tests and builds in your shell after each batch of changes, and read your own diff once before you finish.";
+
+/**
+ * The brief for a run whose changes are (or are not) reviewed separately:
+ * the head, the helper sentence, the middle, the browser block for a visual
+ * run only, the tail, the merge sentence where it applies, and the
+ * final-message rule. `visual` (omitted = visual) and `pullRequest` decide the
+ * two optional blocks: the browser block is there only for a visual run, the
+ * auto-merge sentence only for a run that can open a pull request or was
+ * asked about one.
+ */
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; visual?: boolean; pullRequest?: boolean; noHelpers?: boolean }): string {
+  const helpers = opts.noHelpers ? NO_HELPERS_BRIEF : leanHelpersBrief(opts.reviewedSeparately);
+  // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
+  // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
+  // at the end — never a worker's, whatever its task text quotes of the goal.
+  const merge = opts.team ? TEAM_NO_MERGE_BRIEF : opts.pullRequest ? PR_AUTO_MERGE_BRIEF : null;
+  return [
+    ...LEAN_BRIEF_HEAD,
+    helpers,
+    ...LEAN_BRIEF_MIDDLE,
+    ...(opts.visual !== false ? [LEAN_VISUAL_BRIEF] : []),
+    ...LEAN_BRIEF_TAIL,
+    ...(merge ? [merge] : []),
+    LEAN_FINAL_MESSAGE,
+  ].join(" ");
+}
+
+/**
+ * What a coding team's run is told about pull requests, instead of
+ * PR_AUTO_MERGE_BRIEF. Seen live: a worker whose task text quoted a goal
+ * ending "…and merge the PR" merged it itself, mid-team, before the other
+ * tasks were in. `TEAM_MERGE_DENYLIST` and the hook's merge guard refuse the
+ * commands; this says why, so the run does not spend its turns on them.
+ */
+export const TEAM_NO_MERGE_BRIEF =
+  "You are one run of a coding team. Never merge a pull request, never push, and never turn on auto-merge — whatever your task or the team's goal says. The team's orchestrator opens and merges the pull request itself, once every task is accepted, the project's tests pass, the final review passed and every check is green; `gh pr merge`, `gh api` and `git push` are refused to you. Commit your work in your own folder and say in your final message what is ready.";
+
+/**
+ * The commands a coding team's run is refused outright (`--disallowedTools`):
+ * merging a pull request, and the roads around it — the API (`gh api`, the
+ * REST merge endpoint and the GraphQL mutation alike) and a push, which is a
+ * merge by other means. A worker's branch reaches the team's branch through the
+ * orchestrator's local merge, so a team run has no use for any of them. The
+ * prefix rules are the first fence; the hook's PreToolUse merge guard
+ * (scripts/coding-run-hook.mjs) reads the whole command line for the same
+ * shapes inside `bash -c`, after `&&` or behind `env`.
+ */
+export const TEAM_MERGE_DENYLIST: readonly string[] = [
+  "Bash(gh pr merge:*)",
+  "Bash(gh api:*)",
+  "Bash(git push:*)",
+  "Bash(hub merge:*)",
+];
+
+/**
+ * The commands a read-only run is refused — which has Bash since it got
+ * read-only git: the kill list every run gets, the merge list, team or not,
+ * and every mutating git command. Each rule once, in that order.
+ */
+const READ_ONLY_BASH_DENYLIST: readonly string[] = [...new Set([...BASH_KILL_DENYLIST, ...TEAM_MERGE_DENYLIST, ...MUTATING_GIT_DENYLIST])];
 
 /**
  * What every run that can write is told about a pull request its task wants
@@ -5387,75 +6428,94 @@ export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
 export const PR_AUTO_MERGE_BRIEF =
   "If your task has you open a pull request and wants it merged, hand the merge to GitHub as soon as it is open instead of waiting on CI yourself: `gh pr merge <number> --auto --merge` merges it the moment its required checks pass, and the repository's own setting deletes the branch. Never do that for a pull request into main or one labelled hold or do-not-merge, and not on a draft (turn it on after `gh pr ready`). If a review leaves findings you are going to fix, turn it off first (`gh pr merge <number> --disable-auto`) and on again once the fix is pushed. If GitHub refuses it (auto-merge off for that repository, or nothing required on the branch), merge the way your task says.";
 
-const HEADLESS_BRIEF_TEMPLATE = [
-  "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
-  "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
-  // Learned from bench run run-g6vwqr9y (2026-08-27): the run's Edit on a
-  // path outside its folder was denied, so it made the same change with
-  // `sed -i` through Bash and reported success. A denial the tools enforce
-  // must not be a puzzle Bash solves.
-  "A denied file action is a DECISION by this device, not a flaky prompt: if Read, Write or Edit is refused for a path, do not touch that path by any other route — no sed, tee, redirection or scripts through Bash. Do the parts of the task that stay inside this folder, and report plainly which part was refused and why you left it undone.",
-  // The same s-02 run decided its in-folder edit at +13 s, then spent the
-  // rest of its time on the doubtful step and timed out with nothing on disk.
-  "Do the parts you are sure of and that are inside this folder FIRST — make those edits before you investigate anything doubtful, so a run stopped part-way has still delivered them. If the task names a file outside this folder, try that step once with Edit or Write — never through Bash — so the device's refusal is on the record, then carry on.",
-  "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
-  "Verify efficiently: use browser_fill to set a form field by selector and browser_click on controls; never navigate a page one Tab or arrow key at a time — a whole step budget was once spent that way.",
-  "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your own run record and any session files are not yours to inspect: reads there are refused, and every attempt costs a step. The one exception is your own evidence folder (CLAWBOX_RUN_ARTIFACTS_DIR), which lives under data/ and is yours to read and write. Work inside your project folder and your evidence folder only.",
-  // The failure this answers: the assistant generated four pictures for the
-  // task into its own media folder — inside the credential store every run is
-  // denied — and the run, refused by both Read and `cp`, drew them again. The
-  // box now copies what it was handed into CLAWBOX_RUN_INPUTS_DIR, so the run
-  // needs to know where that is and, just as much, that hunting for the
-  // original is a refusal it cannot argue with.
-  "Files you were GIVEN for this task — pictures, recordings, documents — are in the folder named by CLAWBOX_RUN_INPUTS_DIR, and you may read anything under it (its `shared` folder included). Copy what you need into your own folder from there. The assistant's own media folder is NOT readable by a run and never will be: if something you were promised is missing from your inputs folder, say so in your report rather than looking for it elsewhere.",
-  // Bench task s-02 (2026-09-05): the run listed two sibling projects and
-  // walked their .git internals looking for a file the task had misplaced.
-  "The folders beside yours under the project root are the owner's other projects: never list, search or read them.",
-  // The old sentence here said one command per call and that chaining was
-  // refused — true under the retired allow-list, false since runs got
-  // `Bash(*)` (see buildRunArgs), and every bench run of cycle 1 (2026-09-05)
-  // split its commands anyway. The one command rule that IS enforced is the
+/**
+ * What Claude Code is told on top of its defaults (TASK-1749's lean brief, the
+ * only one since the full brief was deleted): it is running unattended, nobody
+ * can answer a question, and the final message IS the deliverable the
+ * assistant relays to the person. Every rule here prevents a failure a bench
+ * run had, said in as few words as possible; the comments keep the reasons.
+ * Assembled by `headlessBrief`: the head, the helper sentence, the middle, the
+ * browser block for a visual run only, the tail, the merge sentence where it
+ * applies, and the final-message rule.
+ */
+const LEAN_BRIEF_HEAD = [
+  "You run unattended on a ClawBox, a small Linux device, in the folder you were started in, for the device's assistant.",
+  "Nobody can answer questions: make sensible assumptions and keep going. Stay in this folder; install no system packages, change no device settings.",
+  // Bench run run-g6vwqr9y (2026-08-27): the run's Edit on a path outside its
+  // folder was denied, so it made the same change with `sed -i` through Bash
+  // and reported success. A denial the tools enforce must not be a puzzle
+  // Bash solves.
+  "A refused Read, Write or Edit is a decision: never reach that path another way (no sed, tee, redirection or scripts through Bash) — report it undone.",
+  // Bench s-02 (2026-09-05): the run decided its in-folder edit at +13 s, then
+  // spent the rest of its time on the doubtful step and timed out with
+  // nothing on disk.
+  "Make the in-folder edits you are sure of FIRST. A step on a file outside this folder: try it once with Edit or Write, never Bash, then carry on.",
+  // The same s-02 run listed two sibling projects and walked their .git
+  // internals looking for a file the task had misplaced.
+  "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your run record and session files are off limits, except your evidence folder ($CLAWBOX_RUN_ARTIFACTS_DIR). Folders beside yours are the owner's other projects: never list, search or read them.",
+  // The assistant once generated the task's pictures into its own media folder,
+  // which every run is denied, and the run drew them again. The box copies
+  // what it was handed into CLAWBOX_RUN_INPUTS_DIR; hunting for the original
+  // is a refusal the run cannot argue with.
+  "Files you were given are in $CLAWBOX_RUN_INPUTS_DIR; if one is missing, say so rather than look elsewhere.",
+  // 2026-11-04: four runs started a long job (a board test matrix, an
+  // in-app update, a review workflow), ended their turn with "the evidence
+  // follows when it finishes" and were never woken: `claude -p` exits when
+  // the model stops. The Stop hook (scripts/coding-run-hook.mjs keepalive)
+  // now refuses that stop; this line is the same rule said up front.
+  "Never end your turn while work you started is still running (a test, a build, a board job, an update): once you stop, this run exits and nothing wakes you again. Wait for it in this turn by polling with sleep, a few minutes per step, and finish with its result. For a long job, write $CLAWBOX_RUN_ARTIFACTS_DIR/.run-jobs/<name>.json with {\"name\":\"…\",\"pid\":<pid>} and delete it when the job is done; only a server you leave running for the owner may outlive you, and only once it listens on a TCP port.",
+  // The old "one command per call, chaining is refused" was false since runs
+  // got `Bash(*)` (see buildRunArgs); the one enforced rule is the
   // kill-by-name list (BASH_KILL_DENYLIST).
-  "You may chain commands with && or ;, pipe, redirect, use a heredoc and start a server in the background inside one Bash call — keep each call to one purpose. End anything you started by its PID: pkill, killall and fuser are refused.",
-  // Measured on bench runs run-y3i3y1lk and run-35aq5yh2 (2026-09-03): with
-  // the softer "when sub-agents are available, use them" the tier model read,
-  // tested and reviewed everything in its own thread and reported
-  // subagentsTotal 0 every time — the helpers existed and were never named
-  // as a step. So the protocol is spelled out as steps, with the reason.
-  "Delegate instead of doing everything in one thread — the sub-agents are how a run stays fast and keeps its own context small: before you edit code that already exists here and you have not read, send the explorer to map it (an empty or freshly scaffolded folder has nothing to map — skip that); after each batch of changes, send the tester to run whatever check exists — the build, the tests, or a script you wrote; and " + REVIEWER_CLAUSE_SLOT + " Do the writing yourself: the explorer, tester and reviewer read, run and review, they never edit.",
+  "Bash may chain, pipe and background; end what you started by PID (pkill, killall and fuser are refused).",
+  // Every turn re-sends everything already in the context, so what enters it
+  // is paid for again on each later turn (bench/diet tabulate-refactor: a
+  // 2,700-line module read whole kept the context at ~150k for 40+ turns).
+  "Keep your context small — everything in it is re-sent every turn: Grep before you Read, read a large file in ranges (offset/limit) rather than whole, never re-read a file you already have, and keep command output short (quiet flags, `| tail -n 40` on long test or build output).",
+];
+
+const LEAN_BRIEF_MIDDLE = [
   // The -p mechanics, measured on this box (2026-09-03): a helper is launched
   // in the background, the model's turn ends, and the CLI restarts the same
   // session with each result. Left unsaid, the model spent its steps asking
   // itself how to wait.
-  "Sub-agents and workflows run in the background: launch independent ones together and keep working while they run; when nothing is left but waiting, end your turn with one line saying what is still out — you are restarted with each result as it arrives. Never poll for them, and never read their transcripts or session files.",
-  "Verify your work where you can (run the build or the tests you have).",
-  "For live web verification, start your app as a background child in this working folder and use browser_open on http://127.0.0.1:PORT (an unprivileged port). Only a listener owned by this run is allowed; other local services stay blocked. `node \"$CLAWBOX_PREVIEW\" --ttl 900` does this for you when the project has no server of its own — it builds, serves the folder on an ephemeral loopback port and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim. Stop test servers when finished; Team workers have their remaining process group cleaned up automatically.",
-  "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open its live app with browser_open, or use browser_view_local for a standalone HTML file and read the description of what actually renders before you report done.",
-  "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
-  "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
-  // Bench run run-droy3ws4 (2026-09-03) COPIED its checker into the evidence
-  // folder and left the original in the project: the grep patterns inside it
-  // ("TODO", "lorem ipsum") and the synopses it checked for then counted as
-  // the project's own, and a 96-point site scored 54.
-  "The folder named in CLAWBOX_RUN_ARTIFACTS_DIR is this run's evidence folder, shown to the owner with the run's details. Screenshots land there automatically; save test output there too, and MOVE any verification script you wrote there (mv, never a copy): a checker left behind in the project folder ships as part of the project.",
-  "A short task is not a small task: deliver the complete, polished result the task implies — real styling, sensible edge handling, a finished feel — never a minimal stub.",
-  // Bench run run-nmtf8v2o (2026-09-05): an eight-file site was written and
-  // working inside six minutes, then fourteen more went on a screenshot of
-  // every page and a review workflow over work already verified, and the
-  // run was cut off before its report — the work was there, the account of
-  // it never came, and two points went with it. One pass of verification is
-  // the finish line, not the start of another.
-  "Finish decisively: once the work is done and ONE verification pass — the tests you have, one visual pass of the states that matter, one review — has passed, write your report and stop. Do not review verified work a second time, re-screenshot pages already described, or start a workflow whose only job is to look again: a run that runs out of time before its report loses the report, and the report is what the owner reads.",
-  // The same run added a hero picture and left a checker script beside an
-  // "exactly these files" brief, and lost three points to files nobody asked
-  // for; s-02's run (2026-09-05) spent five minutes searching the disk for a
-  // file that was not where the task said it would be.
-  "Deliver what the task names and nothing beside it: when it lists the files to produce, produce exactly those — no extra assets, pictures, notes or scripts, however nice; anything you make only to check your work goes to the evidence folder. When a file or folder the task relies on is not where the task says, look once where it points, then treat that step as undoable and report it — never search the disk for it.",
-  PR_AUTO_MERGE_BRIEF,
-  "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, anything you could not finish, and every assumption you made where the task left a choice open — name the convention or default you picked and why.",
+  "Helpers run in the background: when only waiting is left, end your turn with one line on what is out — you are restarted with each result. Never poll them or read their transcripts.",
+];
+
+/** The lean brief's browser and visual-verification block — a visual run's only. */
+export const LEAN_VISUAL_BRIEF = [
+  "To check a web app, start it as a background child in this folder and browser_open http://127.0.0.1:PORT (an unprivileged port; only your own listener is reachable) — or run `node \"$CLAWBOX_PREVIEW\" --ttl 900`, which builds, serves and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim; stop test servers when done.",
+  "You cannot see images: browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with its description — read it before you report done.",
+  // Measured: one run spent 103 steps on single keypresses and was cut off;
+  // each reply is a step, however many tool calls it carries.
+  "Set fields with browser_fill and use browser_click; never drive a page key by key — prove logic with a small node script, and spend the browser on ONE pass, one screenshot per state that matters.",
 ].join(" ");
 
-/** The brief of a run with no separate review — the reviewer helper is its review. */
+const LEAN_BRIEF_TAIL = [
+  // Bench run run-droy3ws4 (2026-09-03) COPIED its checker into the evidence
+  // folder and left the original in the project: the grep patterns inside it
+  // ("TODO", "lorem ipsum") then counted as the project's own, and a 96-point
+  // site scored 54.
+  "Save test output to the evidence folder and MOVE (mv, never copy) any checker script you wrote there.",
+  // Bench run run-nmtf8v2o (2026-09-05) added a hero picture and left a
+  // checker beside an "exactly these files" brief and lost three points to
+  // files nobody asked for; s-02 spent five minutes searching the disk for a
+  // file that was not where the task said.
+  "Deliver complete, polished work: exactly the files the task names, nothing beside them. If a file the task relies on is not where it says, look once, then report that step undone — never search the disk.",
+  // The same run-nmtf8v2o wrote a working eight-file site in six minutes, then
+  // spent fourteen more on a screenshot of every page and a review workflow
+  // over verified work, and was cut off before its report — the report is what
+  // the owner reads.
+  "Finish decisively: once ONE verification pass (the build or tests you have) passes, report and stop.",
+];
+
+const LEAN_FINAL_MESSAGE =
+  "Your final message goes to the person who delegated: what you changed (file names), how to check it, what is unfinished, and every assumption you made where the task left a choice open, and why.";
+
+/**
+ * The brief of an ordinary run: no separate review (the reviewer helper is its
+ * review), visual, no pull request in sight. Exported for the tests.
+ */
 export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
 
 /**
@@ -5490,21 +6550,23 @@ export const PR_DRAFT_BRIEF =
  */
 /**
  * The brief for a run that may only READ — a team's planner. The headless
- * brief describes Bash, the browser tools, the evidence folder and the
- * workflow fan-out, none of which such a run has; a model told about them
- * spends its steps on calls that are refused.
+ * brief describes a free shell, the browser tools, the evidence folder and
+ * the workflow fan-out, none of which such a run has; a model told about them
+ * spends its steps on calls that are refused. Its Bash is named for what it
+ * is: the read-only git commands READ_ONLY_GIT_RULES approves, by name, and
+ * nothing else.
  */
 export const READ_ONLY_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
-  "Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob and the read-only helper agents, no shell, no browser and no way to write — do not try to edit, create or run anything; your ANSWER is your final message.",
-  "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps and every tool call spends one.",
+  `Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob, the read-only helper agents, and Bash for read-only git only (${READ_ONLY_GIT_RULES.map(readOnlyGitCommand).join(", ")}) — git branch exactly as listed, paths only inside the folder; any other command is refused and wastes a step. You have no browser and no way to write: do not try to edit, create, delete or push anything; your ANSWER is your final message.`,
+  "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps: each reply you send spends one step, however many tool calls it carries, so put independent calls in one message.",
   "The task text may carry copy-paste artifacts; read past them. Your final message is delivered to the party that started you and is read by a program as well as a person: answer in exactly the form the task asks for, with nothing before or after it.",
 ].join(" ");
 
 export const ULTRACODE_BRIEF = [
   "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
-  "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
+  "The owner's step ceiling applies to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
   "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
   // Every ultracode run of bench cycle 1 (2026-09-05) re-argued the CLI's
   // "use it on every substantive task" reminder against the brief, and m-04
@@ -5577,6 +6639,9 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // spawn, after that spawn's rules have already been computed from what was on
 // disk, so discovery alone would leave it open for one run — every other run's
 // log is deleted at its settle, but a team's three workers are live together.
+// It is also where a run's MCP config FILE waits (writeRunMcpConfig) when its
+// project opted into a harness server: that file holds the server's env and
+// headers, and is denied to every run — its own included — by this one name.
 //
 // secrets.json is the newest and the plainest of them: the owner's own
 // credentials, encrypted with a key derived from `.session-secret` — which is
@@ -5584,11 +6649,18 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // the secrets the owner ticked for it, as environment variables; reading the
 // file would hand it the ones they did not, including another project's.
 //
-// coding-agent-history/ and coding-agent-archive/ are every OTHER run's records,
-// inputs and transcripts (src/lib/coding-run-history.ts). Named rather than
-// discovered for the stream logs' reason: the first run to leave the live list
-// creates them, possibly while another run is already working.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME];
+// coding-agent-history/ is every OTHER run's record (src/lib/coding-run-history.ts),
+// and coding-agent-archive/ the records, inputs and transcripts an earlier
+// build's archive mode bundled — nothing writes it since SCA2 C1, but a box
+// that filled it still has it. Named rather than discovered for the stream
+// logs' reason: the first run to leave the live list creates the folder,
+// possibly while another run is already working.
+//
+// secrets-audit.log is the secret store's trail (src/lib/secrets-audit.ts):
+// names, scopes and run ids, never a value — but which projects hold which keys
+// and which runs were handed them is the owner's to read, not a run's. Named
+// for the same reason: the first copy, tick or injection creates it.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME, SECRETS_AUDIT_FILE_NAME];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -5779,6 +6851,23 @@ export const MCP_MEDIA_TOOLS: Record<keyof RunMedia, string> = {
  */
 export const MCP_TEAM_TOOL = "mcp__clawbox__team_message";
 
+/**
+ * The one tool a SINGLE run (no team, not read-only) gets beside the rest:
+ * `assistant_message`, its way back to the assistant that started it
+ * (src/lib/coding-run-report.ts). Every writing run has it, visual or not, so
+ * every such run gets the clawbox server.
+ */
+export const MCP_SOLO_TOOL = "mcp__clawbox__assistant_message";
+
+/**
+ * "ClawBox read-only tools", approved by name for a run whose project ticked
+ * them (src/lib/project-mcp-servers.ts) — the same readOnly set the run's
+ * server registers under the `run-read` profile (src/lib/clawbox-run-read-tools.ts).
+ * Never a whole-server `mcp__clawbox`: a write tool the profile ever let
+ * through would still wait for an approval nobody is there to give.
+ */
+export const MCP_READ_ONLY_TOOLS: readonly string[] = CLAWBOX_READ_ONLY_TOOLS.map((tool) => `mcp__clawbox__${tool}`);
+
 /** Every MCP tool this run may call: the browser family, plus what it may draw and say. */
 export function runMcpTools(media: RunMedia | undefined): string[] {
   const tools: string[] = [...MCP_BROWSER_TOOLS];
@@ -5804,78 +6893,229 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }): string {
-  const media = runMediaEnv(run.media);
-  return JSON.stringify({
-    mcpServers: {
-      clawbox: {
-        command: path.join(homeDir(), ".bun", "bin", "bun"),
-        args: ["run", path.join(CONFIG_ROOT, "mcp", "clawbox-mcp.ts")],
-        env: {
-          CLAWBOX_API_BASE: `http://127.0.0.1:${process.env.PORT || "80"}`,
-          CLAWBOX_ROOT: CONFIG_ROOT,
-          CLAWBOX_MCP_PROFILE: "browser",
-          CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
-          // Where the assets this run was handed were staged. Named the same
-          // way the evidence folder is, and for the same reason: the brief
-          // talks about it, so it has to be one string the run can read rather
-          // than a path it is expected to guess.
-          CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
-          CLAWBOX_RUN_DIR: run.directory,
-          ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
-          // Only for a run of a coding team, and all four or none: the server
-          // registers `team_message` from them (mcp/lib/run-context.ts), and
-          // the tool speaks as THIS run — the route then checks the claim
-          // against the team's board, so a variable is a name, not a pass.
-          // `none` for the planner, whose run has no task of its own.
-          ...(run.team
-            ? {
-                CLAWBOX_RUN_ID: run.id,
-                CLAWBOX_TEAM_ID: run.team.id,
-                CLAWBOX_TEAM_ROLE: run.team.role,
-                CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
-              }
-            : {}),
-        },
-      },
-    },
-  });
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual?: boolean } = {}): string {
+  return JSON.stringify({ mcpServers: { clawbox: runClawboxServer(run, { visual: opts.visual !== false, readOnlyTools: false }) } });
 }
 
-/** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+/**
+ * The MCP config FILE of a run whose project opted into more
+ * (writeRunMcpConfig): the run's own clawbox server — in the `run-read`
+ * profile when the read-only tools were ticked, and only when it has anything
+ * to register — beside the harness servers exactly as the plan carries them.
+ * Exported for the contract test.
+ */
+export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean; solo?: boolean }): string {
+  const clawbox = opts.visual || run.team || plan.readOnlyTools || opts.solo
+    ? { clawbox: runClawboxServer(run, { visual: opts.visual, readOnlyTools: plan.readOnlyTools }) }
+    : {};
+  return JSON.stringify({ mcpServers: { ...clawbox, ...plan.servers } }, null, 2);
+}
+
+/** The run's own clawbox server entry. */
+function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual: boolean; readOnlyTools: boolean }) {
+  // A run judged NOT visual (`looksVisual`) holds neither the browser family
+  // nor the media tools: its server is told so, and registers only what is
+  // left (a team run's `team_message`). Omitted, today's server.
+  const visual = opts.visual;
+  const media = visual ? runMediaEnv(run.media) : "";
+  return {
+    command: path.join(homeDir(), ".bun", "bin", "bun"),
+    args: ["run", path.join(CONFIG_ROOT, "mcp", "clawbox-mcp.ts")],
+    env: {
+      CLAWBOX_API_BASE: `http://127.0.0.1:${process.env.PORT || "80"}`,
+      CLAWBOX_ROOT: CONFIG_ROOT,
+      // `run-read` only for a project that ticked "ClawBox read-only
+      // tools": the browser family as below, plus every readOnly tool.
+      CLAWBOX_MCP_PROFILE: opts.readOnlyTools ? RUN_READ_PROFILE : "browser",
+      CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
+      // Where the assets this run was handed were staged. Named the same
+      // way the evidence folder is, and for the same reason: the brief
+      // talks about it, so it has to be one string the run can read rather
+      // than a path it is expected to guess.
+      CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
+      CLAWBOX_RUN_DIR: run.directory,
+      ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
+      // Absent means the browser family registers, as it always has; "0"
+      // is a run that holds none of it (mcp/lib/run-context.ts).
+      ...(visual ? {} : { CLAWBOX_RUN_BROWSER: "0" }),
+      // Only for a run of a coding team, and all four or none: the server
+      // registers `team_message` from them (mcp/lib/run-context.ts), and
+      // the tool speaks as THIS run — the route then checks the claim
+      // against the team's board, so a variable is a name, not a pass.
+      // `none` for the planner, whose run has no task of its own.
+      // Every run is named, so a single run's server registers
+      // `assistant_message` (mcp/lib/run-context.ts soloRunContext); the
+      // route checks the claim against the run record.
+      ...(run.team || !run.readOnly ? { CLAWBOX_RUN_ID: run.id } : {}),
+      ...(run.team
+        ? {
+            CLAWBOX_TEAM_ID: run.team.id,
+            CLAWBOX_TEAM_ROLE: run.team.role,
+            CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
+          }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Does this run hold the browser and media tools? Only a run judged visual
+ * (CodingRun.visual); an undecided run errs on the side of the tools. One rule
+ * for the argv and the run's MCP config file.
+ */
+export function runHoldsVisualTools(visual: boolean | null | undefined): boolean {
+  return visual !== false;
+}
+
+/** What a run whose project opted into more MCP servers adds to its argv (spawnRun). */
+export interface RunMcpArgs {
+  /** The 0600 file writeRunMcpConfig wrote for this spawn. */
+  configFile: string;
+  /** The harness servers' approvals: `mcp__<server>` or `mcp__<server>__<tool>`. */
+  allowedTools: readonly string[];
+  /** What the harness's own exclude filters name. */
+  disallowedTools: readonly string[];
+  /** The run's server is in the `run-read` profile: approve MCP_READ_ONLY_TOOLS. */
+  readOnlyTools: boolean;
+}
+
+/** What a run's argv — and its brief — are built from. */
+export interface RunArgsOptions { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null };
+  /** The run's frozen visual decision (CodingRun.visual); omitted = visual. */
+  visual?: boolean;
+  /** The task talks about a pull request — the lean brief's auto-merge sentence. */
+  pullRequestMentioned?: boolean;
+  /**
+   * The MCP servers the run's project opted into (src/lib/project-mcp-servers.ts).
+   * Omitted — every run whose project ticked nothing — is today's argv, byte
+   * for byte. Never for a read-only run.
+   */
+  mcp?: RunMcpArgs | null;
+  /**
+   * The run has no helper agents to delegate to — a Codex run (provider
+   * `openai`), which has no `--agents`. Its brief says so instead of the
+   * delegation sentence.
+   */
+  noHelpers?: boolean;
+}
+
+/**
+ * The run's system prompt: the device's brief, then the project's run notes and
+ * the lessons of earlier runs. Claude Code gets it as `--append-system-prompt`,
+ * Codex as `developer_instructions` — one text, so the two runners are told the
+ * same things. Exported for the contract test.
+ */
+export function buildRunSystemPrompt(opts: RunArgsOptions): string {
+  const visual = runHoldsVisualTools(opts.visual);
   // A run whose diff a separate review will read is told not to review it
-  // twice — see REVIEWER_CLAUSE_SLOT.
-  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
+  // twice — see leanHelpersBrief. A team's run is told it never merges.
+  const headless = headlessBrief({
+    reviewedSeparately: opts.reviewedSeparately === true,
+    team: Boolean(opts.run?.team),
+    visual,
+    pullRequest: opts.draftPullRequests === true || opts.pullRequestMentioned === true,
+    noHelpers: opts.noHelpers === true,
+  });
+  // The media the run actually holds: none for a run without the tools.
+  const media = visual ? opts.run?.media : undefined;
   const brief = [
-    // A read-only run has no Bash, no browser and no Write: the brief that
-    // describes them would spend its steps on calls that are refused.
+    // A read-only run has read-only git for a shell, no browser and no Write:
+    // the brief that describes more would spend its steps on calls that are
+    // refused.
     opts.readOnly
       ? READ_ONLY_BRIEF
       : (opts.effort === ULTRACODE_EFFORT ? `${headless} ${ULTRACODE_BRIEF}` : headless),
+    // The ceiling itself, so "a limited number of steps" is a figure the model
+    // can budget against. Appended, never written into the briefs above: the
+    // constants are compared byte for byte, and a caller without a ceiling
+    // (the contract tests) gets the brief unchanged.
+    ...(typeof opts.maxTurns === "number" ? [`This run has ${opts.maxTurns} steps.`] : []),
     // Only for the run that HAS the tool: a brief that described a picture
     // tool to a run without one would spend steps on a call that is not there.
     // A read-only run holds no media tool either (runMcpTools is skipped for
     // it below), so it hears nothing about drawing or speaking.
-    ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
-    ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
+    ...(media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
+    ...(media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
     ...(opts.draftPullRequests && !opts.readOnly ? [PR_DRAFT_BRIEF] : []),
+    // The run's share of the CPU (src/lib/coding-run-cpu.ts). Not for a
+    // read-only run: it runs nothing but read-only git, so no build to cap.
+    ...(typeof opts.cpuBudget === "number" && opts.cpuBudget >= 1 && !opts.readOnly ? [cpuBudgetBrief(opts.cpuBudget)] : []),
+    // How a writing run adds a lesson to its project's run notes
+    // (src/lib/coding-run-notes.ts); a read-only run cannot write one.
+    ...(opts.lessonChannel && !opts.readOnly ? [LESSON_CHANNEL_BRIEF] : []),
     // A team's role for this run — the planner's "answer with a JSON array",
     // a worker's "this is your task among these" — after the device's own
     // words, never instead of them.
     ...(opts.extraBrief ? [opts.extraBrief] : []),
   ].join(" ");
-  // The lessons from earlier verified runs (src/lib/coding-experience.ts), last
-  // and on their own lines: a delimited block the device rendered from a
-  // validated request, after every word of the device's own. In the system
+  // The project's run notes (src/lib/coding-run-notes.ts) — what earlier runs
+  // in this project learned and the owner kept — then the lessons from earlier
+  // verified runs (src/lib/coding-experience.ts), last and on their own lines:
+  // delimited blocks after every word of the device's own. In the system
   // prompt rather than the task, so the task stays what the caller typed. A
-  // run given none gets the brief above unchanged, byte for byte.
-  const systemPrompt = opts.experience ? `${brief}\n\n${opts.experience}` : brief;
+  // run given neither gets the brief above unchanged, byte for byte.
+  return [brief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
+}
+
+/**
+ * The owner's rules THIS run can use, out of the box-wide list.
+ *
+ * The list is one global key, filled over months from refusals in many
+ * projects, and every rule on it used to reach every run's argv: a `//` rule for
+ * a folder that has since been deleted still rode along, and ONE soft rule for
+ * another project's harness notes turned the wholesale `~/.claude-ds/**` deny
+ * into two entry-by-entry passes over every project the harness ever touched
+ * (measured on the box: 1,680 deny rules, 113 KB of argv, from six rules naming
+ * other projects and folders that no longer exist). So, per spawn:
+ *
+ *   - an absolute rule whose concrete folder (`concretePrefix`) is gone is left
+ *     out — it could match nothing, and it costs argv and evaluation on every
+ *     tool call;
+ *   - a SOFT rule (`softProjectDir`) is kept only when the project it names is
+ *     this run's own: the harness files a folder's state under
+ *     `projects/<slug>` of the folder it runs in (`transcriptPath`), and for a
+ *     run in a worktree under the project's root as well (`worktreeProject`).
+ *     Kept whether or not the folder exists yet — the harness creates it at its
+ *     first turn, and `fileDenyRules` denies nothing for an absent project.
+ *
+ * With no working folder to judge by (no `run`) a soft rule is kept: the
+ * caller is a contract test, not a spawn. The list stays stored whole; nothing
+ * here is written back. A relative rule is about the working folder and is
+ * kept as it is.
+ */
+export function runAllowRules(rules: readonly string[], directory: string | null): string[] {
+  const home = homeDir();
+  const slugOf = (dir: string) => dir.replace(/[^a-zA-Z0-9]/g, "-");
+  const project = directory ? worktreeProject(directory) : null;
+  const own = directory ? [directory, ...(project ? [project] : [])].map(slugOf) : null;
+  return rules.filter((rule) => {
+    const m = /^[A-Za-z][A-Za-z0-9_]*\((.+)\)$/.exec(rule);
+    const spec = m?.[1].trim() ?? "";
+    if (!spec.startsWith("//")) return true;
+    const folder = concretePrefix(spec);
+    const soft = softProjectDir(folder, home);
+    if (soft) return own === null || own.includes(path.basename(soft));
+    return fs.existsSync(folder);
+  });
+}
+
+/** The argv handed to the wrapper. Exported for the contract test. */
+export function buildRunArgs(opts: RunArgsOptions): string[] {
+  // Does this run hold the browser and media tools? See runHoldsVisualTools.
+  const visual = runHoldsVisualTools(opts.visual);
+  // The project's extra servers: a writing run's only (prepareRunMcp hands a
+  // read-only run none, and this is the last place before argv).
+  const mcp = opts.run && !opts.readOnly ? opts.mcp ?? null : null;
+  const systemPrompt = buildRunSystemPrompt(opts);
   const args = [
     "-p",
     "--verbose",
     "--output-format", "stream-json",
-    "--permission-mode", "acceptEdits",
+    // acceptEdits accepts file edits — and the CLI's common filesystem
+    // commands — in the folder without a rule. A read-only run holds Bash for
+    // read-only git, so it gets the default mode: what its rules do not
+    // approve, -p refuses.
+    "--permission-mode", opts.readOnly ? "default" : "acceptEdits",
     "--setting-sources", "user",
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", systemPrompt,
@@ -5898,20 +7138,36 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // servers an owner configured for their own interactive claude-ds
     // sessions (~/.claude-ds) never leak into a delegated run.
     args.push("--strict-mcp-config");
-    args.push("--mcp-config", buildRunMcpConfig(opts.run));
+    // A run without the visual tools that is not in a team has nothing left
+    // for our server to register, so it gets no server at all — and the
+    // strict flag alone still keeps the owner's own servers out.
+    // A run whose project opted into more names the FILE holding them —
+    // ours, plus the harness servers the owner ticked, with their
+    // credentials, which is why it is not inline. The strict flag above
+    // stays: still nothing the owner did not tick for THIS project.
+    if (mcp) args.push("--mcp-config", mcp.configFile);
+    // A read-only run holds none of the visual tools either: its server
+    // registers only what is left (a team's `team_message`), so no browser
+    // profile starts and no media allowance is handed to a run that reads.
+    // A single writing run always gets it: its server registers `assistant_message`.
+    else if (visual || opts.run.team || !opts.readOnly) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual: visual && !opts.readOnly }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
     args.push("--add-dir", artifactsDir(opts.run.id));
   }
+  // The run's hooks (src/lib/coding-run-inbox.ts): its inbox, read after every
+  // tool call, and a team run's merge guard. Inline JSON, like the MCP config:
+  // `--settings` is read whatever `--setting-sources` says.
+  if (opts.hookSettings) args.push("--settings", opts.hookSettings);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
-  args.push("--tools", opts.readOnly ? READ_ONLY_TOOLS : toolsFor(true, opts.effort));
+  args.push("--tools", opts.readOnly ? `${READ_ONLY_TOOLS},Bash` : toolsFor(true, opts.effort));
   // The Agent tool with nothing to delegate to is a tool that never fires.
   // Per provider: the helper models named in the definitions are the cheap
   // tier of the account that answers, and the two accounts do not share a
   // model name between them (see HELPER_MODEL).
-  args.push("--agents", JSON.stringify(subagentDefinitionsFor(opts.provider ?? DEFAULT_CODING_PROVIDER)));
+  args.push("--agents", JSON.stringify(subagentDefinitionsFor(opts.provider ?? DEFAULT_CODING_PROVIDER, { readOnly: opts.readOnly === true })));
   {
     // "Bash(*)" — allow EVERY command — rather than withholding the lists.
     // Withholding grants nothing: in headless -p mode the allow-list is what
@@ -5922,8 +7178,13 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // Full access is about commands, not secrets.
     // The Workflow tool is listed AND pre-approved under ultracode: listed
     // alone it is refused headlessly (see WORKFLOW_TOOL).
-    // A read-only run has no Bash to approve and no browser to drive: it
-    // reads, and the helpers it delegates to read.
+    // A read-only run gets no Bash(*) and no browser to drive: its reading
+    // tools are approved by name — a headless planner otherwise waits on a
+    // prompt for any read outside its folder, and a deny rule still outranks
+    // the bare name — and its Bash only for READ_ONLY_GIT_RULES. Nor the
+    // Workflow tool: startRun never leaves such a run on ultracode, and a
+    // resume of a record from before that clamp must not be handed the
+    // fan-out either.
     // `Read(//tmp/**)`: a run may READ what it put in /tmp — the HTML it
     // curled out of its own server, a build log — without a permission
     // prompt it cannot answer in headless mode. Reads only, and only there:
@@ -5942,10 +7203,17 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // feature exists to grant. The deny half cannot be passed here without
     // circularity — `fileDenyRules` below is built FROM this list — and does
     // not need to be: every deny rule it returns still outranks each allow.
-    const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
+    // Then THIS run's share of the list (`runAllowRules`): the same filtered
+    // list goes to both flags below, so the deny half is built from exactly
+    // what the allow half carries.
+    const allowRules = runAllowRules(normalizeAllowRules(opts.allowRules, allowRuleHomeContext()), opts.run?.directory ?? null);
     // A team run's `team_message` is approved whatever else the run may do —
     // read-only included (see MCP_TEAM_TOOL) — and only for a team run.
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    // The project's extra servers come right after the run's own MCP tools:
+    // the read-only ClawBox tools by name, a harness server as a whole or by
+    // the tools its own filter names.
+    const mcpAllowed = mcp ? [...(mcp.readOnlyTools ? MCP_READ_ONLY_TOOLS : []), ...mcp.allowedTools] : [];
+    args.push("--allowedTools", ...(opts.readOnly ? [...READ_ONLY_TOOLS.split(","), ...READ_ONLY_GIT_RULES] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT && !opts.readOnly ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : opts.run && !opts.readOnly ? [MCP_SOLO_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -5953,7 +7221,11 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // outranks an allow rule: without handing them over here, an owner rule for
     // the harness's own project notes would sit in argv underneath the
     // wholesale `~/.claude-ds/**` deny and grant exactly nothing.
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST));
+    // A harness server's exclude filter holds in the run too, and a deny
+    // outranks the whole-server approval above.
+    // A read-only run, which has Bash for read-only git, is refused all of it
+    // and every mutating git command too, in a team or not (READ_ONLY_BASH_DENYLIST).
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? READ_ONLY_BASH_DENYLIST : [...BASH_KILL_DENYLIST, ...(opts.run?.team ? TEAM_MERGE_DENYLIST : [])]), ...(mcp?.disallowedTools ?? []));
   }
   return args;
 }
@@ -5970,15 +7242,14 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
  * scope keyed on it would have left every folder project — the kind the owner's
  * own project folder holds — unable to have a secret of its own.
  *
- * Null when the run is in no project of the owner's (a bare absolute folder, or
- * a box with no project folder set). Such a run gets the box-scoped entries
+ * Null when the run is in no project of the owner's (a bare absolute folder
+ * outside the project folder). Such a run gets the box-scoped entries
  * alone; it is not a project, so no project's secrets are its own.
  */
 async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">): Promise<string | null> {
   if (typeof run.projectId === "string" && run.projectId) return run.projectId;
   if (typeof run.directory !== "string" || !run.directory) return null;
   const folders = await readProjectFolders();
-  if (!folders) return null;
   // Both spellings of the base, the way listProjects matches them: a run
   // records its folder symlink-resolved, and the owner's setting may not be.
   const realBase = await fs.promises.realpath(folders.base).catch(() => folders.base);
@@ -6010,6 +7281,81 @@ async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">):
 const runSecretEnv = store.runSecretEnv;
 
 /**
+ * The scope each injected name's value came from, by run id — names and scopes
+ * only, for the hand-off's audit line (`auditRunHandOff`). Set with the values
+ * by `prepareRunSecrets` and, unlike them, kept through a settle: the transient
+ * retry and the account switch respawn with the carried values, and their
+ * hand-off is filed under the same scopes. Dropped when the run ends
+ * (`endRunSecrets`).
+ */
+const runSecretScopes: Map<string, Record<string, string>> =
+  store.runSecretScopes ?? (store.runSecretScopes = new Map<string, Record<string, string>>());
+
+/**
+ * Run id → when each DATED copy it was handed stops being handed, as the resolve
+ * read it (`ResolvedRunSecrets.expiresAt`). For the transient retry alone, which
+ * respawns from the child's `close` handler and cannot re-read the store the way
+ * the account switch does (`withoutExpiredSecrets`). Dropped with the scopes.
+ */
+const runSecretExpiry: Map<string, Record<string, number>> =
+  store.runSecretExpiry ?? (store.runSecretExpiry = new Map<string, Record<string, number>>());
+
+/** Statuses a run can still be handed its one-run secrets in (again). */
+const SECRET_HOLDING_STATUSES: ReadonlySet<CodingRunStatus> = new Set(["running", "paused", "queued", "draft"]);
+
+/** True while a run may still use what it was handed: in flight, or held to resume. */
+function isRunGoing(runId: string): boolean {
+  if (runSecretEnv.has(runId) || live.has(runId)) return true;
+  const run = loadRuns().find((r) => r.id === runId);
+  return run !== undefined && SECRET_HOLDING_STATUSES.has(run.status);
+}
+
+/**
+ * The run is over — finished, failed, stopped, or never started — so the copies
+ * the owner limited to it go from the store, with their audit line. Tracked
+ * settle work: the store write is asynchronous and must not be lost to a reset.
+ */
+function endRunSecrets(run: CodingRun): void {
+  runSecretScopes.delete(run.id);
+  runSecretExpiry.delete(run.id);
+  trackSettleWork(releaseRunSecrets((runId) => runId === run.id));
+}
+
+/** What one spawn's environment carries of the owner's secrets: names and scopes, never a value. */
+interface RunHandOff {
+  names: string[];
+  scopes: Record<string, string>;
+}
+
+/** Taken just before the spawn: by the time its outcome is known, a failed child's settle has dropped the tables. */
+function runHandOffOf(runId: string): RunHandOff | null {
+  const names = Object.keys(runSecretEnv.get(runId) ?? {});
+  return names.length ? { names, scopes: { ...(runSecretScopes.get(runId) ?? {}) } } : null;
+}
+
+/**
+ * The hand-off's audit line, once it is known: written when the child has
+ * actually started ("inject"), or when it failed to ("not_handed"). Before that
+ * nothing was handed — the resolve alone is not a hand-off. Nothing is written
+ * for a spawn that carried none.
+ */
+function auditRunHandOff(runId: string, handOff: RunHandOff | null, handed: boolean): void {
+  if (!handOff) return;
+  trackSettleWork(recordRunSecretsHanded({ runId, ...handOff, handed }));
+}
+
+/**
+ * For a caller whose `spawnRun` THREW: "not handed", unless a child had already
+ * been registered (`live`), whose own "spawn" or "error" event says it instead.
+ * A throw anywhere before the child exists — the stream logs, the environment,
+ * the credential handoff, `spawn` itself — reaches the caller this way. Called
+ * before the caller drops the run's tables, while the names are still there.
+ */
+function auditUnstartedSpawn(runId: string): void {
+  if (!live.has(runId)) auditRunHandOff(runId, runHandOffOf(runId), false);
+}
+
+/**
  * Work out what this run may have, put it where the spawn can reach it, and
  * arm the redaction table for everything the run will say.
  *
@@ -6018,12 +7364,28 @@ const runSecretEnv = store.runSecretEnv;
  * would hand a run a token and then print it.
  */
 async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
-  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
+  // A one-run copy whose run ended while this server was not there to see it
+  // (a restart mid-run, a start that threw before its spawn) goes before
+  // anything is handed out. Never this run's own: it may be resuming with it.
+  await releaseRunSecrets((runId) => runId !== run.id && !isRunGoing(runId)).catch((err) => {
+    console.error("[coding-agent] could not clear spent one-run secrets:", err instanceof Error ? err.message : err);
+  });
+  const project = await projectScopeFor(run);
+  const resolved = await resolveSecretsForRun({ project, runId: run.id });
   runSecretEnv.set(run.id, resolved.env);
+  runSecretScopes.set(run.id, resolved.scopes);
+  runSecretExpiry.set(run.id, resolved.expiresAt);
   // The Anthropic account rides the same path: every async spawn comes through
   // here just before it, which is exactly where "which account is first in
   // line right now" should be asked (TASK-902).
   await prepareRunAccount(run);
+  // …and the OpenAI key, for an `openai` run.
+  await prepareRunOpenAIKey(run);
+  // …and the project's MCP servers, whose credentials the table below must
+  // know before the child that holds them exists.
+  await prepareRunMcp(run, project);
+  // …and who its own commits are authored as.
+  await prepareRunGitIdentity(run);
   registerRunRedaction(run.id);
   run.secretNames = resolved.names;
   if (resolved.names.length > 0) pushProgress(run, RUNNER_STEP.secretsInjected(resolved.names));
@@ -6049,6 +7411,104 @@ const runAnthropicCredential: Map<string, RunAnthropicCredential> =
   store.runAnthropicCredential ?? (store.runAnthropicCredential = new Map<string, RunAnthropicCredential>());
 
 /**
+ * The owner's OpenAI API key for an `openai` run's next spawn — in memory only,
+ * beside the owner's secrets and dropped with them, never on the record. No
+ * entry is a run on the ChatGPT sign-in in the coding agent's CODEX_HOME.
+ */
+const runOpenAIKey: Map<string, string> =
+  store.runOpenAIKey ?? (store.runOpenAIKey = new Map<string, string>());
+
+/**
+ * Who the HARNESS's own commits are authored as, resolved on the async path
+ * before each spawn (`prepareRunGitIdentity`) the way the box's own commits
+ * are: the project's git identity, else the owner's setting, else the
+ * placeholder. Without it a box with no global identity — every flashed board,
+ * once the factory one is cleared — answered the agent's `git commit` in its
+ * worktree with "Author identity unknown", and the agent made one up:
+ * `-c user.name="Claude Code" -c user.email=noreply@anthropic.com`.
+ */
+const runGitIdentity: Map<string, CodingGitIdentity> =
+  store.runGitIdentity ?? (store.runGitIdentity = new Map<string, CodingGitIdentity>());
+
+async function prepareRunGitIdentity(run: CodingRun): Promise<void> {
+  const found = await resolveCodingGitIdentity(run.directory).catch(() => null);
+  // A look git could not make leaves the placeholder (`gitIdentityFor`) rather
+  // than a name guessed from half an answer.
+  if (found?.ok) runGitIdentity.set(run.id, { name: found.identity.name, email: found.identity.email });
+  else runGitIdentity.delete(run.id);
+}
+
+/** The identity a spawn of this run commits as: resolved, or the box's placeholder. */
+function gitIdentityFor(runId: string): CodingGitIdentity {
+  return runGitIdentity.get(runId) ?? CODING_GIT_PLACEHOLDER;
+}
+
+/**
+ * The MCP servers a run's project opted into (src/lib/project-mcp-servers.ts),
+ * WITH the env and header values its config file carries — in memory beside
+ * the owner's secrets, dropped with them, never on the record, which names the
+ * servers in the run's feed and nothing else.
+ */
+const runMcpPlan: Map<string, RunMcpPlan> =
+  store.runMcpPlan ?? (store.runMcpPlan = new Map<string, RunMcpPlan>());
+
+/**
+ * The reply (CLAUDE_CODE_MAX_OUTPUT_TOKENS) the NEXT spawn of a run may ask
+ * for, set only when the run is carried on past an outgrown context window
+ * (TASK-2203): the compaction that spawn starts with is the whole context plus
+ * that reply, so it must fit beside the context. Taken by the spawn it was set
+ * for; every other spawn asks for Claude Code's own default.
+ */
+const runContextReply: Map<string, number> =
+  store.runContextReply ?? (store.runContextReply = new Map<string, number>());
+
+/** How the run's feed names an allowlist entry. */
+function mcpEntryLabel(name: string): string {
+  return name === CLAWBOX_READ_ONLY_ENTRY ? "ClawBox read-only tools" : name;
+}
+
+/**
+ * Read what this run's project ticked, against what this box's harness is
+ * configured with right now. Re-read at every spawn, like the secrets: a
+ * resume does not hand back a server the owner has since un-ticked.
+ *
+ * Never throws, and fails CLOSED: anything that cannot be read is a run with
+ * exactly today's tools. A read-only run gets none of it — it has no Bash, no
+ * Write and no browser, and a third-party server's own "read-only" hint is not
+ * something this box can check.
+ */
+async function prepareRunMcp(run: CodingRun, project: string | null): Promise<void> {
+  runMcpPlan.delete(run.id);
+  if (run.readOnly) return;
+  let plan: RunMcpPlan | null = null;
+  try {
+    plan = await resolveRunMcpPlan(project);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: the project's MCP servers could not be read:`, err instanceof Error ? err.message : err);
+  }
+  if (!plan) return;
+  // A Codex run is handed its MCP servers in argv (buildCodexRunArgs), which
+  // is world-readable: the ClawBox read-only tools travel (they carry no
+  // secret), the harness servers and their credentials do not — and the feed
+  // says which, rather than leaving the owner to wonder where a tool went.
+  if (runsOnCodex(run.provider)) {
+    const harness = Object.keys(plan.servers);
+    // One line for everything ticked this run will not have: the harness
+    // servers, and the ones the box could not find at all (said below for a
+    // Claude run).
+    const unavailable = [...harness, ...plan.missing];
+    if (unavailable.length > 0) pushProgress(run, RUNNER_STEP.mcpServersMissing(unavailable.map(mcpEntryLabel)));
+    if (!plan.readOnlyTools) return;
+    plan = { ...plan, servers: {}, names: plan.names.filter((n) => !harness.includes(n)), missing: [], secrets: [], allowedTools: [], disallowedTools: [] };
+  }
+  if (plan.names.length > 0) {
+    runMcpPlan.set(run.id, plan);
+    pushProgress(run, RUNNER_STEP.mcpServers(plan.names.map(mcpEntryLabel)));
+  }
+  if (plan.missing.length > 0) pushProgress(run, RUNNER_STEP.mcpServersMissing(plan.missing.map(mcpEntryLabel)));
+}
+
+/**
  * Choose the account for an `anthropic` run's next spawn: the first usable one
  * in the owner's order (src/lib/anthropic-accounts.ts).
  *
@@ -6058,6 +7518,9 @@ const runAnthropicCredential: Map<string, RunAnthropicCredential> =
  * read (the legacy key, else the `claude` sign-in) — and when every account is
  * limited the preferred one is handed over anyway (`fallback`), because its
  * refusal is what pauses the run until the reset.
+ *
+ * A run the box resumed after a reset skips the accounts it gave up on after
+ * refusals before the pause (AuthTrail, kept over that pause only).
  */
 async function prepareRunAccount(run: CodingRun): Promise<void> {
   runAnthropicCredential.delete(run.id);
@@ -6066,7 +7529,7 @@ async function prepareRunAccount(run: CodingRun): Promise<void> {
   armCodingSwapConsumer();
   let prepared: PreparedAccount | null = null;
   try {
-    ({ prepared } = await prepareAccount({ fallback: true }));
+    ({ prepared } = await prepareAccount({ fallback: true, exclude: store.anthropicAuthTrail?.get(run.id)?.refused, model: runModelOf(run) }));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
@@ -6074,6 +7537,22 @@ async function prepareRunAccount(run: CodingRun): Promise<void> {
   runAnthropicCredential.set(run.id, { accountId: prepared.account.id, label: prepared.account.label, credential: prepared.credential });
   if (run.anthropicAccount !== prepared.account.id) pushProgress(run, RUNNER_STEP.anthropicAccount(prepared.account.label));
   run.anthropicAccount = prepared.account.id;
+}
+
+/**
+ * The OpenAI key for an `openai` run's next spawn, when the owner saved one.
+ * Never throws: a store that cannot be read leaves the run on the ChatGPT
+ * sign-in, and Codex says so if there is none.
+ */
+async function prepareRunOpenAIKey(run: CodingRun): Promise<void> {
+  runOpenAIKey.delete(run.id);
+  if (!runsOnCodex(run.provider)) return;
+  try {
+    const key = await readOpenAIKey();
+    if (key) runOpenAIKey.set(run.id, key);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: the OpenAI key could not be read:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -6086,6 +7565,11 @@ function registerRunRedaction(runId: string): void {
   const list = Object.entries(runSecretEnv.get(runId) ?? {}).map(([name, value]) => ({ name, value }));
   const account = runAnthropicCredential.get(runId);
   if (account?.credential.secret) list.push({ name: "ANTHROPIC_ACCOUNT", value: account.credential.secret });
+  const openaiKey = runOpenAIKey.get(runId);
+  if (openaiKey) list.push({ name: "OPENAI_API_KEY", value: openaiKey });
+  // Every env and header value of the project's MCP servers: the run holds
+  // them through its config file, and one it echoes must not reach the record.
+  list.push(...(runMcpPlan.get(runId)?.secrets ?? []));
   registerRunSecrets(runId, list);
 }
 
@@ -6106,9 +7590,11 @@ function registerRunRedaction(runId: string): void {
  * the deliverable gate. Those are the paths where re-reading is the right
  * answer, because time has passed and the owner may have changed their mind.
  */
-function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential): void {
+function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential, mcp?: RunMcpPlan, openaiKey?: string): void {
   runSecretEnv.set(runId, env);
   if (account) runAnthropicCredential.set(runId, account);
+  if (openaiKey) runOpenAIKey.set(runId, openaiKey);
+  if (mcp) runMcpPlan.set(runId, mcp);
   registerRunRedaction(runId);
 }
 
@@ -6117,6 +7603,8 @@ function restoreRunSecrets(runId: string, env: Record<string, string>, account?:
 function dropRunSecrets(runId: string): void {
   runSecretEnv.delete(runId);
   runAnthropicCredential.delete(runId);
+  runOpenAIKey.delete(runId);
+  runMcpPlan.delete(runId);
   forgetRunSecrets(runId);
 }
 
@@ -6140,7 +7628,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; secrets?: Record<string, string> } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -6176,6 +7664,14 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // the other does not serve.
   if (opts.model) env.CLAUDE_DS_MODEL = opts.model;
   else if (modelsForProvider(provider).length > 0) delete env.CLAUDE_DS_MODEL;
+  // An `openai` run is the Codex CLI: none of the wrapper's knobs mean
+  // anything to it, and its state lives in the coding agent's own CODEX_HOME
+  // (src/lib/coding-openai.ts) — set here, ahead of the owner's secrets, so no
+  // stored secret can point a run's Codex at another home and another login.
+  if (runsOnCodex(provider)) {
+    for (const key of Object.keys(env)) if (key.startsWith("CLAUDE_") || key === "CLAWBOX_AI_PROXY_URL") delete env[key];
+    env.CODEX_HOME = codexHome();
+  }
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
@@ -6189,6 +7685,30 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // it is a CLAWBOX_ name, which setSecret refuses, so the owner's secret store
   // cannot point a run's preview at something else. See previewScriptPath.
   env.CLAWBOX_PREVIEW = previewScriptPath();
+  // How many parallel jobs the run's builds and tests may start
+  // (src/lib/coding-run-cpu.ts) — the number its brief tells it to pass to
+  // `--maxWorkers` and `-j`. A CLAWBOX_ name, so no stored secret can raise it.
+  if (typeof opts.cpuBudget === "number" && Number.isInteger(opts.cpuBudget) && opts.cpuBudget >= 1) {
+    env[RUN_CPU_BUDGET_ENV] = String(opts.cpuBudget);
+  }
+  // A spawn that carries a run on past an outgrown context window: the reply
+  // its compaction may ask for, so that request fits beside the context
+  // (runContextReply). Set ahead of the secrets, so none can undo it, and only
+  // for Claude Code — Codex has its own compaction and no such variable.
+  if (typeof opts.maxReplyTokens === "number" && Number.isInteger(opts.maxReplyTokens) && opts.maxReplyTokens > 0 && !runsOnCodex(provider)) {
+    env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(opts.maxReplyTokens);
+  }
+  // Who the run's own `git commit` is authored as (runGitIdentity). The
+  // environment rather than a written config: it reaches every git the harness
+  // starts, in its worktree or a worker's, and leaves nothing in the owner's
+  // repository. Set ahead of the secrets, so no stored entry can sign a run's
+  // commits as somebody else, and over any `-c user.name=` the agent passes.
+  if (opts.gitIdentity) {
+    env.GIT_AUTHOR_NAME = opts.gitIdentity.name;
+    env.GIT_AUTHOR_EMAIL = opts.gitIdentity.email;
+    env.GIT_COMMITTER_NAME = opts.gitIdentity.name;
+    env.GIT_COMMITTER_EMAIL = opts.gitIdentity.email;
+  }
   // The owner's secrets, LAST and never over the top of anything above.
   //
   // Resolved by the caller (`prepareRunSecrets`) because it is a disk read and
@@ -6208,6 +7728,11 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
     if (!SECRET_NAME_RE.test(name) || isReservedSecretName(name)) continue;
     env[name] = value;
   }
+  // On an `openai` run, the variable `codex exec` authenticates with is the
+  // box's to set, from the owner's saved key (spawnRun) — never an owner
+  // secret that happens to carry the name, which would move the run onto
+  // another bill. A Claude run's harness never reads it.
+  if (runsOnCodex(provider)) delete env[CODEX_API_KEY_ENV];
   return env;
 }
 
@@ -6357,13 +7882,13 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   }
   // The box's own plumbing, not evidence: the tail has been read by now, and a
   // log kept past the settle is disk the owner never asked to spend. A retry
-  // (finishRun) opens a fresh pair. EXCEPT under the archive mode, where the
-  // owner did ask: the log waits beside the run and goes into the archive with
-  // it (dropRun moves it there, or deletes it with the run's other parts).
-  if (store.historyPolicy?.mode !== "archive") removeStreamLogs(run.id);
+  // (finishRun) opens a fresh pair.
+  removeStreamLogs(run.id);
   // A credential handoff the wrapper never got to read (it died first, or
   // never started) goes with the process it was written for.
   removeCredentialHandoffs(run.id);
+  // …and so does the MCP config file with the project's server credentials.
+  removeRunMcpConfigs(run.id);
   // The run's own tab, never the owner's: browser sessions are tagged with the
   // run that opened them and a run always gets a new page (browser-sessions.ts).
   void closeSessionsForRun(run.id).catch(() => {});
@@ -6373,7 +7898,19 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // point can contain a value: the child is gone, and `secretNames` on the
   // record is names only.
   dropRunSecrets(run.id);
+  noteKeepAlive(run);
   if ((run.status === "completed" && !run.team) || run.status === "paused") {
+    // A spawn whose command clock can answer (it ran a command, or its own
+    // Stop hook ran with none) is judged by what the RUN started — the
+    // keep-alive hook's rule. Its group and its
+    // scope also hold whatever was there before its first command (the
+    // launcher's watcher, an MCP server still on its way out), which is not
+    // something "this run started" that the owner should be offered to end.
+    const clock = state?.commandClock ?? commandClockOfUnit(run, run.unit);
+    if (commandClockAnswers(clock) && (groupAlive(run.pgid) || run.unit)) {
+      noteRunLeftover(run, clock as string);
+      return;
+    }
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
       pushProgress(run, RUNNER_STEP.leftoverRunning);
@@ -6383,9 +7920,15 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
     // hand to anybody. Forget it here for the same reason reconcileAfterRestart
     // forgets it across a restart: a record that keeps a recycled pid would let
     // the Kill button signal a stranger's process group in this run's name.
-    // The scope goes with it: nothing is in it, so `--collect` has taken it.
     run.pgid = null;
-    run.unit = null;
+    // The scope is a separate question, and the unit stays until it answers:
+    // a Chromium a run started puts itself in a process group of its own, so
+    // the group was "gone" while clawbox-run-run-eagbnk6g-….scope stayed
+    // active for 42 hours with fifteen chrome processes in it, the record
+    // saying leftover: false (2026-10-29). A unit name is never handed to
+    // anybody else, so keeping it costs nothing, and it is what
+    // killRunLeftovers stops.
+    if (run.unit) noteScopeLeftover(run, run.unit);
     return;
   }
   run.leftover = false;
@@ -6398,6 +7941,147 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   run.pgid = null;
   run.unit = null;
 }
+
+/**
+ * Ask systemd, a moment after the settle, whether the run's scope still has
+ * anything in it. A moment, because `--collect` removes an emptied scope only
+ * once systemd has noticed the cgroup empty, which is not the instant the
+ * harness exited. Up: the run has a leftover, said on its timeline, and the
+ * unit stays on the record for the Kill button. Gone, or systemd cannot be
+ * asked: the unit is forgotten, as reconcileAfterRestart forgets one at boot.
+ * Held in the settle work, so a reset waits for it.
+ */
+function noteScopeLeftover(run: CodingRun, unit: string): void {
+  trackSettleWork((async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, SCOPE_LEFTOVER_CHECK_MS).unref());
+    // The owner's Kill, or a resume, may have moved on meanwhile.
+    if (run.unit !== unit || isLive(run.status)) return;
+    const up = await unitActive(unit).catch(() => null);
+    if (up === true) {
+      if (!run.leftover) {
+        run.leftover = true;
+        pushProgress(run, RUNNER_STEP.leftoverRunning);
+      }
+    } else {
+      run.unit = null;
+    }
+    persist(true);
+  })());
+}
+
+/** The command clock of the spawn a run's scope was named for — the token after the run id. */
+function commandClockOfUnit(run: CodingRun, unit: string | null): string | null {
+  const prefix = `${RUN_UNIT_PREFIX}${run.id}-`;
+  if (!unit || !unit.startsWith(prefix) || !unit.endsWith(".scope")) return null;
+  try {
+    return commandClockPath(artifactsDir(run.id), unit.slice(prefix.length, -".scope".length));
+  } catch {
+    return null;
+  }
+}
+
+/** How long the `leftovers` question is given; past it the settle keeps its old answer. */
+const LEFTOVER_ASK_TIMEOUT_MS = 10_000;
+
+/**
+ * What the run started that is still running in its scope or its process
+ * group — asked of scripts/coding-run-hook.mjs (`leftovers`), so the settle
+ * decides by the very rule the keep-alive Stop hook does, not a copy of it.
+ * Answers the processes' one-line descriptions, or null when it could not
+ * tell: the script failed, or saw nothing at all where systemd or the kernel
+ * say something is (a scope this side cannot look into) — the caller then
+ * keeps the old answer, "something is there, so it is the run's".
+ */
+function askRunLeftovers(clock: string, where: { unit: string | null; pgid: number | null }): Promise<string[] | null> {
+  if (!where.unit && !where.pgid) return Promise.resolve([]);
+  const args = [
+    runHookScriptPath(),
+    "leftovers",
+    `--first-command=${clock}`,
+    ...(where.unit ? [`--unit=${where.unit}`] : []),
+    ...(where.pgid ? [`--pgid=${where.pgid}`] : []),
+  ];
+  // Nothing of the server's own environment: the script reads /proc and one file.
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        process.execPath,
+        args,
+        { timeout: LEFTOVER_ASK_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: env as NodeJS.ProcessEnv },
+        (err, stdout) => {
+          if (err) return resolve(null);
+          try {
+            const answer = JSON.parse(String(stdout)) as { seen?: unknown; procs?: unknown };
+            if (typeof answer.seen !== "number" || answer.seen < 1 || !Array.isArray(answer.procs)) return resolve(null);
+            resolve(answer.procs.filter((p): p is string => typeof p === "string"));
+          } catch {
+            resolve(null);
+          }
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * The settle's leftover decision for a spawn whose command clock can answer
+ * (`commandClockAnswers`): a moment after the harness went — the same moment
+ * noteScopeLeftover waits, for the same reason, and long enough for its MCP
+ * servers to be on their way — the group and the scope are asked whether
+ * anything is still in them, and what is, is asked whether the RUN started
+ * it. Something it started: a leftover, kept on the record for the Kill
+ * button, exactly as before. Only what was there before its first command
+ * (a launcher's watcher sharing the scope until the session ends): no
+ * leftover, and neither handle is kept — the Kill button must not reach the
+ * launcher's process in the run's name. Could not tell: the old answer.
+ *
+ * Until it has asked, the record says "left running" whenever something may
+ * be — a live group, or a scope — so nothing that reads it meanwhile (the
+ * folder janitor) takes the folder from under a server the run left; the
+ * evidence prune and the worktree's settle wait for the answer
+ * (`leftoverChecks`: true or false, null when the owner's Kill or a resume
+ * moved on first).
+ */
+function noteRunLeftover(run: CodingRun, clock: string): void {
+  const { pgid, unit } = run;
+  run.leftover = groupAlive(pgid) || unit !== null;
+  const check = (async (): Promise<boolean | null> => {
+    await new Promise<void>((resolve) => setTimeout(resolve, SCOPE_LEFTOVER_CHECK_MS).unref());
+    // The owner's Kill, or a resume, may have moved on meanwhile.
+    const movedOn = () => run.pgid !== pgid || run.unit !== unit || isLive(run.status);
+    if (movedOn()) return null;
+    const group = groupAlive(pgid);
+    const active = unit ? await unitActive(unit).catch(() => null) : false;
+    if (movedOn()) return null;
+    let left = group || active === true;
+    if (left) {
+      const own = await askRunLeftovers(clock, { unit: active === true ? unit : null, pgid: group ? pgid : null });
+      if (movedOn()) return null;
+      if (own !== null) left = own.length > 0;
+    }
+    run.leftover = left;
+    if (left) {
+      pushProgress(run, RUNNER_STEP.leftoverRunning);
+      // A group that is gone is a number the kernel may hand to anybody.
+      if (!group) run.pgid = null;
+    } else {
+      run.pgid = null;
+      run.unit = null;
+    }
+    persist(true);
+    return left;
+  })();
+  leftoverChecks.set(run.id, check);
+  trackSettleWork(check.finally(() => {
+    if (leftoverChecks.get(run.id) === check) leftoverChecks.delete(run.id);
+  }), run.id);
+}
+
+/** The leftover question noteRunLeftover is still asking, by run: the worktree's settle waits for its answer. */
+const leftoverChecks = new Map<string, Promise<boolean | null>>();
 
 /**
  * The owner's Kill button: end whatever a settled run left behind.
@@ -6441,6 +8125,33 @@ function prunedPaths(pruned: PrunedArtifact[]): string {
   const names = pruned.map((p) => (p.reason === "interpreter" ? `${p.path}/` : p.path)).sort();
   const shown = names.slice(0, 4).join(", ");
   return names.length > 4 ? `${shown} (+${names.length - 4})` : shown;
+}
+
+/**
+ * What the keep-alive Stop hook did for this run (scripts/coding-run-hook.mjs
+ * writes `<evidence>/.run-jobs/stop-blocks.json`), said on the run's timeline:
+ * how often it kept the run working, and — when it ran out of refusals —
+ * that the run ENDED with its own work still live, so whoever reads the
+ * status never takes a half-done run for a finished one. Read once, at the
+ * settle; a missing or unreadable file says nothing.
+ */
+function noteKeepAlive(run: CodingRun): void {
+  let blocks: { count?: unknown; capped?: unknown; last?: { jobs?: unknown; procs?: unknown } | null } | null = null;
+  try {
+    blocks = JSON.parse(fs.readFileSync(path.join(artifactsDir(run.id), ".run-jobs", "stop-blocks.json"), "utf8"));
+  } catch {
+    return;
+  }
+  if (!blocks || typeof blocks !== "object") return;
+  const count = Number(blocks.count) || 0;
+  if (count > 0) pushProgress(run, RUNNER_STEP.keptAlive(count));
+  if (blocks.capped === true) {
+    const items = [
+      ...(Array.isArray(blocks.last?.jobs) ? blocks.last.jobs : []),
+      ...(Array.isArray(blocks.last?.procs) ? blocks.last.procs : []),
+    ].filter((x): x is string => typeof x === "string");
+    pushProgress(run, RUNNER_STEP.endedWithLiveWork(items.slice(0, 3).join("; ") || "unnamed work"));
+  }
 }
 
 function pushProgress(run: CodingRun, line: string): void {
@@ -6768,6 +8479,9 @@ function describeDenial(entry: unknown): string {
   return wholeDenial(entry).slice(0, MAX_DENIAL_CHARS);
 }
 
+/** `…/<session uuid>/tool-results/…` — one session's own spill folder. */
+const SESSION_TOOL_RESULTS = /\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/tool-results(?:\/|$)/i;
+
 /**
  * What this box would have to allow for a refused action to go through — the
  * narrowest such rule, already judged against the floor.
@@ -6782,7 +8496,11 @@ function describeDenial(entry: unknown): string {
  *
  * `{ rule: null, refusal: null }` is the third answer and the commonest: a Bash
  * command, a tool no rule may name, a refusal whose target could not be read.
- * Nothing to offer, and nothing to explain either.
+ * Nothing to offer, and nothing to explain either. A path under a session's
+ * own `<sessionId>/tool-results/` folder (the harness's spill of a large tool
+ * result) is in that set too: the folder rule `deriveAllowRule` would make
+ * carries the session UUID, so it could never match another run and would only
+ * sit on the list — six such rules were what inflated every spawn's argv.
  *
  * @param denial the refused action's tool and what it was pointed at
  * @param context what the device denies right now; read here when omitted
@@ -6791,6 +8509,7 @@ export function suggestAllowRule(
   denial: DenialInput,
   context?: AllowRuleContext,
 ): { rule: string | null; refusal: AllowRuleRefusal | null } {
+  if (SESSION_TOOL_RESULTS.test(denial.target ?? "")) return { rule: null, refusal: null };
   const candidate = deriveAllowRule(denial);
   if (!candidate) return { rule: null, refusal: null };
   // No `known` list: this is the rule the action NEEDS, and whether the owner
@@ -6862,42 +8581,54 @@ function parseTodos(raw: unknown): CodingTodo[] | null {
 export const parseTodosForTests = parseTodos;
 
 /**
- * Add to the run's bill and stop it at the owner's ceiling. The CLI has no
- * flag for a token limit, so the device enforces it from the usage the stream
- * reports. Marked resumable: the work is real, it simply ran out of room —
- * the same shape as a step ceiling.
+ * The breakdown raised to the CLI's own per-category bill for this process
+ * (modelUsage: every model, sub-agents and workflow agents included, counted
+ * from zero per process), never lowered — the live sum from the assistant
+ * events misses what a workflow's agents read from cache.
  */
-function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
-  if (!(tokens > 0)) return false;
-  run.tokensUsed += tokens;
-  if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
-    state.endRequested = "stop";
-    run.resumable = true;
-    run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
-    pushProgress(run, RUNNER_STEP.tokenLimit);
-    console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
-    endProcess(state);
-    return true;
+function raiseTokenBreakdown(run: CodingRun, base: TokenBreakdown, modelUsage: Record<string, unknown>): void {
+  const proc = emptyTokenBreakdown();
+  for (const m of Object.values(modelUsage)) {
+    if (!m || typeof m !== "object") continue;
+    const u = m as Record<string, unknown>;
+    const n = (k: string) => (typeof u[k] === "number" && Number.isFinite(u[k] as number) ? (u[k] as number) : 0);
+    proc.input += n("inputTokens");
+    proc.output += n("outputTokens");
+    proc.cacheCreation += n("cacheCreationInputTokens");
+    proc.cacheRead += n("cacheReadInputTokens");
   }
-  return false;
+  const b = run.tokenBreakdown;
+  b.input = Math.max(b.input, base.input + proc.input);
+  b.output = Math.max(b.output, base.output + proc.output);
+  b.cacheCreation = Math.max(b.cacheCreation, base.cacheCreation + proc.cacheCreation);
+  b.cacheRead = Math.max(b.cacheRead, base.cacheRead + proc.cacheRead);
+}
+
+/**
+ * Add to the run's bill. The device no longer stops a run on its spend (the
+ * token ceiling went in SCA A2): the step ceiling and the idle timeout bound a
+ * run, and the figure here is what the card and the bench read.
+ */
+function noteTokens(run: CodingRun, tokens: number): void {
+  if (tokens > 0) run.tokensUsed += tokens;
 }
 
 /**
  * A workflow's agents never appear on the stream; the CLI reports the
  * workflow's cumulative spend on every task_progress and once more on its
- * task_notification. Bill the delta each time, so the owner's ceiling holds
+ * task_notification. Bill the delta each time, so the record's spend is live
  * WHILE a fan-out runs rather than after it, and a workflow the run was
  * stopped under has still been billed for what it did.
  */
-function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): boolean {
+function billWorkflowProgress(run: CodingRun, state: LiveRun, id: string, usage: unknown): void {
   const helper = state.openSubagents.get(id);
-  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return false;
+  if (!helper || helper.type !== WORKFLOW_SUBAGENT_TYPE) return;
   const total = usage && typeof usage === "object" ? (usage as { total_tokens?: unknown }).total_tokens : undefined;
-  if (typeof total !== "number") return false;
+  if (typeof total !== "number") return;
   const billed = state.helperBilled.get(id) ?? 0;
-  if (total <= billed) return false;
+  if (total <= billed) return;
   state.helperBilled.set(id, total);
-  return noteTokens(run, state, total - billed);
+  noteTokens(run, total - billed);
 }
 
 /** The text of a tool_result, whether the CLI sent a string or text blocks. */
@@ -6979,22 +8710,50 @@ const FOLDER_LISTING_MAX = 30;
  * and a folder that cannot be read is simply not described.
  */
 export function folderListing(directory: string): string {
+  const names = folderEntries(directory);
+  if (names === null) return "the working folder could not be listed.";
+  if (names.length === 0) return "this folder is empty.";
+  if (names.length > FOLDER_LISTING_MAX) return `this folder has ${names.length} top-level entries.`;
+  return `this folder contains: ${names.join(", ")}`;
+}
+
+/**
+ * The working folder's top-level entries as `folderListing` names them —
+ * `.git` left out, folders with a trailing slash, sorted — or null when the
+ * folder cannot be read. Shared with the visual decision (`decideRunVisual`),
+ * so the run is judged on the folder it is told about.
+ */
+export function folderEntries(directory: string): string[] | null {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true }).filter((e) => e.name !== ".git");
   } catch {
-    return "the working folder could not be listed.";
+    return null;
   }
-  if (entries.length === 0) return "this folder is empty.";
-  if (entries.length > FOLDER_LISTING_MAX) return `this folder has ${entries.length} top-level entries.`;
   // Each name printable and short: a name is data the run would see in its
   // first `ls` regardless, but a newline or a control character in one
   // would break the ONE line this is, and a very long one is not a name.
-  const names = entries
+  return entries
     .map((e) => `${e.name.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 80)}${e.isDirectory() ? "/" : ""}`)
     .filter((n) => n !== "/" && n !== "")
     .sort((a, b) => a.localeCompare(b));
-  return `this folder contains: ${names.join(", ")}`;
+}
+
+/**
+ * The visual decision for a run (CodingRun.visual): `looksVisual` over the
+ * task and the working folder's top-level entries — plus `src/components`
+ * when `src/` holds one, the one nested folder the rule names.
+ */
+export function decideRunVisual(task: string, directory: string): boolean {
+  const entries = folderEntries(directory) ?? [];
+  if (entries.includes("src/")) {
+    try {
+      if (fs.statSync(path.join(directory, "src", "components")).isDirectory()) entries.push("src/components/");
+    } catch {
+      // no src/components — nothing to add
+    }
+  }
+  return looksVisual(task, entries);
 }
 
 /**
@@ -7043,13 +8802,26 @@ function firstEventText(event: StreamEvent): string | null {
 }
 
 /** See the call site in handleEvent. */
-function noteAnthropicLimitSignal(state: LiveRun, event: StreamEvent): void {
+function noteAnthropicLimitSignal(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   const tagged = event.error === "rate_limit" || event.error === "billing_error";
   const authTagged = event.error === "authentication_failed";
   const synthetic = event.message?.model === "<synthetic>";
   if (!tagged && !authTagged && !synthetic) return;
   const text = firstEventText(event);
   if (!text) return;
+  // "Usage limit reached · continuing automatically", "… — grace window
+  // active" (CLI 2.1.317, TASK-2141): the CLI carries on by itself, tagged or
+  // not. NOT a limit — the run is not ended and its account is not changed;
+  // the feed says so once.
+  const carryingOn = detectAnthropicLimitNotice(text);
+  if (carryingOn) {
+    if (state.limitNotice !== text) {
+      state.limitNotice = text;
+      pushProgress(run, RUNNER_STEP.usageLimitCarriesOn(carryingOn));
+      console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount ?? "(none)"} reached a usage limit and the CLI carries on by itself (${carryingOn}); not a stop`);
+    }
+    return;
+  }
   // A synthetic message is not always a limit (an interrupted request is one
   // too), so an untagged one must read as a limit in its own words; a tagged
   // one IS the CLI saying so, whatever its wording.
@@ -7156,9 +8928,12 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       const u = usage as Record<string, unknown>;
       const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
       state.outputBilledInSegment += n("output_tokens");
-      const stoppedNow = noteTokens(run, state, n("input_tokens") + n("output_tokens")
+      run.tokenBreakdown.input += n("input_tokens");
+      run.tokenBreakdown.output += n("output_tokens");
+      run.tokenBreakdown.cacheCreation += n("cache_creation_input_tokens");
+      run.tokenBreakdown.cacheRead += n("cache_read_input_tokens");
+      noteTokens(run, n("input_tokens") + n("output_tokens")
         + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
-      if (stoppedNow) return;
     }
     // A helper's own turns (parent_tool_use_id set) are billed above and
     // nothing more: its words are not the run's words, its Bash is not the
@@ -7171,7 +8946,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // "You've hit your session limit · resets 10:50pm". Remembered as the
     // HARNESS's words, so the settle path never has to take the run's own
     // closing sentence for a limit (TASK-902).
-    if (run.provider === "anthropic") noteAnthropicLimitSignal(state, event);
+    if (run.provider === "anthropic") noteAnthropicLimitSignal(run, state, event);
     // numTurns stays the CLI's own number from the final result event.
     // A live per-event count was tried and measured 291 events against the
     // CLI's 38 turns on run-5vt51ppv — no event arithmetic reproduces the
@@ -7305,7 +9080,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // The segment's output, less what its assistant events already billed.
     if (event.usage && typeof event.usage === "object") {
       const out = (event.usage as { output_tokens?: unknown }).output_tokens;
-      if (typeof out === "number" && out > state.outputBilledInSegment) noteTokens(run, state, out - state.outputBilledInSegment);
+      if (typeof out === "number" && out > state.outputBilledInSegment) {
+        run.tokenBreakdown.output += out - state.outputBilledInSegment;
+        noteTokens(run, out - state.outputBilledInSegment);
+      }
     }
     state.outputBilledInSegment = 0;
     // Which models actually did work — the main run and every sub-agent.
@@ -7330,9 +9108,14 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       // reported its outcome, and crossing the ceiling here must not turn a
       // finished run into a device stop (noteTokens would, and finishRun
       // would then discard the outcome and settle it as stopped, resumable).
-      if (total > run.tokensUsed) {
-        if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
-        else run.tokensUsed = total;
+      // Not for a resumed session: its modelUsage carries the session's
+      // history too (see LiveRun.resumedSession).
+      if (!state.resumedSession) {
+        if (total > run.tokensUsed) {
+          if (state.openSubagents.size > 0) noteTokens(run, total - run.tokensUsed);
+          else run.tokensUsed = total;
+        }
+        raiseTokenBreakdown(run, state.breakdownAtSpawn, usage);
       }
     }
     if (Array.isArray(event.permission_denials)) {
@@ -7366,7 +9149,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     const text = typeof event.result === "string" ? redactForRun(run.id, event.result).trim() : "";
     if (text) {
       run.summary = text.slice(0, MAX_SUMMARY_CHARS);
-      run.resultText = text;
+      run.resultText = text.length > MAX_SUMMARY_CHARS ? text : null;
     }
     switch (event.subtype) {
       case "success":
@@ -7382,14 +9165,14 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         state.outcome = {
           status: "failed",
           resumable: true,
-          error: `Stopped after ${run.numTurns || run.maxTurns} steps without finishing. Resume it with a narrower task, raise the step limit, or split the work.`,
+          error: `Stopped at the step limit (${run.numTurns || run.maxTurns} of ${run.maxTurns}) without finishing. Press Continue to carry on in the same session with a fresh limit, or split the work.`,
         };
         break;
       case "error_max_budget_usd":
         state.outcome = {
           status: "failed",
           resumable: true,
-          error: "Stopped at the cost ceiling for one run. Resume it with a narrower task, or split the work.",
+          error: "Stopped at the cost ceiling for one run without finishing. Press Continue to carry on in the same session, or split the work.",
         };
         break;
       default: {
@@ -7405,6 +9188,153 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // stdin: hand it whatever the owner has queued, or close the pipe so it
     // can exit and the run can settle.
     afterTurn(run, state);
+  }
+}
+
+/** A stored Codex thread usage, or null when the record carries none that reads. */
+function readCodexThreadUsage(raw: unknown): { codexThreadUsage: CodexThreadUsage } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const u = raw as Record<string, unknown>;
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  const input = n(u.input);
+  const cachedInput = n(u.cachedInput);
+  const output = n(u.output);
+  if (input === null || cachedInput === null || output === null) return null;
+  return { codexThreadUsage: { input, cachedInput, output } };
+}
+
+/**
+ * What a Codex thread had already billed before this spawn: the largest usage
+ * any record of the same thread carries — the run this one resumes, or this
+ * very record's earlier spawn, resumed after it gave up. Codex reports a
+ * thread's usage cumulatively, so a continuation's own share is its figure
+ * less this one. Zero for a fresh thread.
+ */
+function codexUsageBaseline(sessionId: string | null): CodexThreadUsage {
+  const base: CodexThreadUsage = { input: 0, cachedInput: 0, output: 0 };
+  if (!sessionId) return base;
+  for (const other of loadRuns()) {
+    if (other.sessionId !== sessionId || !other.codexThreadUsage) continue;
+    const u = other.codexThreadUsage;
+    if (u.input + u.output > base.input + base.output) Object.assign(base, u);
+  }
+  return base;
+}
+
+/**
+ * The usage of one Codex turn onto the record: this spawn's share of the
+ * thread's cumulative figure (codexUsageBaseline), split the way the record
+ * bills — fresh input, cached input read back, output. A figure BELOW the
+ * baseline is not cumulative after all (a CLI that counts per process): it is
+ * taken whole rather than read as a negative.
+ */
+function applyCodexUsage(run: CodingRun, state: LiveRun, usage: CodexThreadUsage): void {
+  const base = state.codexBaseline ?? { input: 0, cachedInput: 0, output: 0 };
+  const cumulative = usage.input >= base.input && usage.output >= base.output && usage.cachedInput >= base.cachedInput;
+  const input = cumulative ? usage.input - base.input : usage.input;
+  const cached = Math.min(input, cumulative ? usage.cachedInput - base.cachedInput : usage.cachedInput);
+  const output = cumulative ? usage.output - base.output : usage.output;
+  run.codexThreadUsage = { ...usage };
+  // The next turn of this same process (there is none in `codex exec` today)
+  // would report a figure that includes this one.
+  state.codexBaseline = { ...usage };
+  run.tokenBreakdown.input += input - cached;
+  run.tokenBreakdown.cacheRead += cached;
+  run.tokenBreakdown.output += output;
+  noteTokens(run, input + output);
+}
+
+/**
+ * One line of `codex exec --json`, onto the record — the Codex twin of
+ * handleEvent, for an `openai` run. What the event MEANS is read by
+ * codexEventActions (src/lib/coding-codex.ts, pure and tested on its own);
+ * this applies it with the same helpers the Claude path uses, so the run's
+ * feed, its changed files, its plan, its tokens and its verdict land in the
+ * same fields the card, the settle and the commit read.
+ */
+function handleCodexEvent(run: CodingRun, state: LiveRun, event: unknown): void {
+  run.lastActivityAt = Date.now();
+  for (const action of codexEventActions(event)) {
+    switch (action.kind) {
+      case "session":
+        if (!run.sessionId) run.sessionId = action.id;
+        if (!state.sawInit) {
+          // Codex does not name the model on the stream; the run asked for it
+          // by name (`-m`), so the record says the model it asked for.
+          run.model = run.requestedModel ?? defaultModelForProvider(run.provider);
+          run.modelsUsed = run.model ? [run.model] : [];
+          pushProgress(run, RUNNER_STEP.started(run.model));
+          if (state.unit) noteScopeWorked();
+          state.sawInit = true;
+        }
+        break;
+      case "reasoning":
+        state.sawModelAnswer = true;
+        if (!state.sawThinking) {
+          state.sawThinking = true;
+          pushProgress(run, RUNNER_STEP.thinking);
+        }
+        break;
+      case "message":
+        state.sawModelAnswer = true;
+        state.codexLastMessage = action.text;
+        pushProgress(run, action.text);
+        break;
+      case "command":
+        state.sawModelAnswer = true;
+        run.commandsRun += 1;
+        if (!isReadOnlyInspectionCommand(action.command) && !isRetrySafeSetupCommand(action.command)) state.commandMayHaveSideEffects = true;
+        pushProgress(run, `$ ${action.command}`);
+        break;
+      case "files":
+        state.sawModelAnswer = true;
+        // Reported once the CLI has APPLIED the change — the confirmation a
+        // Claude run's tool_result gives — so it counts at once.
+        state.sawWriteAttempt = true;
+        for (const raw of action.paths) {
+          const file = relativeToRun(run, raw);
+          if (file && !isEvidencePath(run, file)) noteFile(run, file);
+          pushProgress(run, `Edit ${file ?? raw}`);
+        }
+        break;
+      case "tool":
+        state.sawModelAnswer = true;
+        pushProgress(run, action.label);
+        break;
+      case "todos": {
+        const todos = parseTodos(action.items.map((t) => ({ content: t.text, status: t.completed ? "completed" : "pending" })));
+        if (!todos) break;
+        run.todos = todos;
+        const done = todos.filter((t) => t.status === "completed").length;
+        pushProgress(run, `Plan: ${todos.length} tasks, ${done} done`);
+        break;
+      }
+      case "usage":
+        applyCodexUsage(run, state, { input: action.input, cachedInput: action.cachedInput, output: action.output });
+        break;
+      case "completed": {
+        state.sawResult = true;
+        run.numTurns += 1;
+        const text = state.codexLastMessage ? redactForRun(run.id, state.codexLastMessage).trim() : "";
+        if (text) {
+          run.summary = text.slice(0, MAX_SUMMARY_CHARS);
+          run.resultText = text.length > MAX_SUMMARY_CHARS ? text : null;
+        }
+        state.outcome = { status: "completed", error: null, resumable: false };
+        break;
+      }
+      case "failed": {
+        state.sawResult = true;
+        const error = redactForRun(run.id, action.error).trim();
+        if (isCodexLimit(error)) state.codexLimit = error;
+        else if (isCodexAuthFailure(error)) state.codexAuth = error;
+        state.outcome = { status: "failed", error: (error || "Codex stopped with an error.").slice(0, MAX_ERROR_CHARS), resumable: false };
+        break;
+      }
+      case "notice":
+        state.codexNotice = action.text;
+        break;
+    }
   }
 }
 
@@ -7439,6 +9369,34 @@ export function isTransientFailure(error: string | null): boolean {
 }
 
 /**
+ * What a run with a worktree of its own committed on a branch it made itself
+ * (`git checkout -b fix/…`), brought onto the branch the box gave it — before
+ * the commit, the pull request and the merge home, which all read that one.
+ * Without it the run's branch counted as empty: the copy was removed, the
+ * branch deleted, and the run said "completed" with nothing merged home — the
+ * single-run side of a team worker rejected as NO CHANGE for the same move
+ * (team-sso0e0wq, 2026-10-29). See adoptOwnBranchWork. Never throws.
+ */
+async function adoptRunBranchWork(run: CodingRun): Promise<void> {
+  const wt = run.worktree;
+  if (!wt || wt.removed || run.readOnly || !fs.existsSync(wt.path)) return;
+  try {
+    const adopted = await adoptOwnBranchWork(wt.path, wt.branch);
+    if (!adopted.ok) {
+      // Said on the run, and the copy is kept by settleRunWorktree while
+      // the work is on a branch its own does not hold (`ownBranchWork`).
+      pushProgress(run, RUNNER_STEP.notCommitted(`the run committed on a branch of its own, which could not be brought onto ${wt.branch}: ${adopted.detail}`));
+      persist(true);
+      console.error(`[coding-agent] ${run.id} committed on a branch of its own, not brought onto ${wt.branch}: ${adopted.detail}`);
+    } else if (adopted.from) {
+      console.error(`[coding-agent] ${run.id} committed on ${adopted.from}; brought onto ${wt.branch}`);
+    }
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} own branch:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Commit what the run changed, in its own folder.
  *
  * Never throws: a run that did its work is finished whether or not the
@@ -7446,9 +9404,17 @@ export function isTransientFailure(error: string | null): boolean {
  * attempt is over, so what must follow the commit can wait for it.
  */
 async function recordRunWork(run: CodingRun): Promise<void> {
+  // A read-only run changed nothing and commits nothing: the only commit the
+  // folder's log could answer with is somebody else's.
+  if (run.readOnly) return;
   // No file the tools confirmed — but a run that wrote through its shell and
-  // committed there has a commit of its own to record all the same.
-  if (run.filesTouched.length === 0) {
+  // committed there has a commit of its own to record all the same. In a run's
+  // OWN worktree the shell's files are the run's too (a background job's
+  // output, a generated file): nobody else writes there, and leaving them
+  // uncommitted strands them in a copy the settle then has to keep. Only when
+  // the run made no commit of its own: one that committed some files and left
+  // others chose what its branch holds. The box's favicons do not count.
+  if (run.filesTouched.length === 0 && !(await worktreeHoldsShellWork(run))) {
     await noteOwnCommit(run);
     return;
   }
@@ -7490,10 +9456,29 @@ async function recordRunWork(run: CodingRun): Promise<void> {
  * is not "nothing was committed" (the angry-pigs run, 2026-09-05). Never
  * throws; a folder that is not its own repository answers nothing.
  */
+/**
+ * True when the run works in its own worktree, committed nothing there itself,
+ * and the tree holds changes beyond the box's favicons.
+ */
+async function worktreeHoldsShellWork(run: CodingRun): Promise<boolean> {
+  const wt = run.worktree;
+  if (!wt || wt.removed || run.team || path.resolve(run.directory) !== path.resolve(wt.path)) return false;
+  try {
+    if ((await commitsAhead(wt.project, wt.branch, wt.base)) !== 0) return false;
+    if ((await ownBranchWork(wt.path, wt.branch)).length) return false;
+    const seen = await readCheckout(wt.path, "normal");
+    return seen.ok && seen.changed;
+  } catch {
+    return false;
+  }
+}
+
 async function noteOwnCommit(run: CodingRun): Promise<void> {
   try {
     const own = await newestCommitSince(run.directory, run.startedAt);
-    if (!own || own === run.commit) return;
+    // Equal to where the folder stood at the spawn: not the run's (see
+    // CodingRun.headAtStart).
+    if (!own || own === run.commit || own === run.headAtStart) return;
     run.commit = own;
     run.commitError = null;
     pushProgress(run, RUNNER_STEP.committedByRun(own));
@@ -7567,10 +9552,6 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // for the `pr` deliverable the answer is only knowable once the step above
   // has had its go at opening one.
   await enforceDeliverable(run, ended, review);
-  // The delivery pipeline, AFTER the gate — which can put this very record
-  // back to work, and a pipeline that advanced past a run that is running
-  // again would be deploying a folder a live session is still writing in.
-  await pipelineAfterSettle(run, ended, review);
   // After ALL of it: the review pass, another go at the deliverable and the
   // review loop all work in this very tree, and `settleRunWorktree` steps
   // aside while any of them is live. Whichever record settles last is the one
@@ -7600,8 +9581,10 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  * A project whose clawbox.json declares a `port` goes on the desktop when a
  * run in it settles: its icon opens `/apps/<folder>/`, which the box proxies
  * to that port (src/lib/app-proxy.ts). The manifest IS the registration —
- * no tool call, no host or port in any link. A review pass or a team's run
- * re-reads nothing: the run that wrote the manifest did this.
+ * no tool call, no host or port in any link — and when it names a `start`
+ * command the box runs it for a server the run has already stopped. A review
+ * pass or a team's run re-reads nothing: the run that wrote the manifest did
+ * this.
  */
 async function registerProjectApp(run: CodingRun): Promise<void> {
   if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
@@ -7616,7 +9599,19 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
   try {
     const manifest = await readClawboxManifest(run.directory);
     if (!manifest?.port) return;
-    const outcome = await registerServerApp({ id, directory: project, manifest });
+    // A run ends what it started, its own server included, so "nothing is
+    // listening" is the ORDINARY state here, not a fault: the box starts the
+    // app from the manifest's `start` and registers it (app-server-start.ts).
+    // Only when the project folder carries the same manifest — a run that
+    // worked in a copy whose changes are not in the project yet has nothing
+    // there to start.
+    const inProject = project === run.directory ? manifest : await readClawboxManifest(project);
+    // What is started is the PROJECT's server, so what is registered for it is
+    // the project's manifest too (its name, its `stripBasePath`), not a copy's.
+    const startable = inProject && inProject.port === manifest.port && inProject.start === manifest.start;
+    const outcome = startable
+      ? await registerOrStartServerApp({ id, directory: project, manifest: inProject, searchPath: runnerPath() })
+      : await registerServerApp({ id, directory: project, manifest });
     pushProgress(run, outcome.ok
       ? RUNNER_STEP.onDesktop(manifest.name, id, manifest.port)
       : RUNNER_STEP.notOnDesktop(manifest.port, `${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`));
@@ -7751,6 +9746,10 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     let base = prBase;
     let foundBy: PrFoundBy;
     if (mine) {
+      // A Fix CI run's work is for the pull request that is already open: its
+      // branch goes up, or the checks it was started for never see the fix.
+      // The ORIGIN's mark — the run settling here may be its review pass.
+      if (origin.ciFixOf) await pushFixCiBranch(origin, prBranch);
       number = mine.number;
       url = mine.url;
       // GitHub's answer for the base, not the record's intention: a run that
@@ -7906,6 +9905,9 @@ async function adoptRunPullRequest(
 
   const mine = await findOpenPullRequestForBranch(origin.directory, branch);
   if (!mine) return;
+  // The same push the opening path makes for a Fix CI run: with the auto-PR
+  // switch off this is the one way its fix reaches the pull request.
+  if (origin.ciFixOf) await pushFixCiBranch(origin, branch);
 
   // Re-read: the `gh` call above is a subprocess, and the owner may have
   // cleared the run or a second settle of the chain may have got here first.
@@ -7971,6 +9973,68 @@ function visualEvidenceSection(last: CodingRun, origin: CodingRun): string | nul
 }
 
 /** Record a terminal PR phase on the run and persist it. */
+/**
+ * Push a Fix CI run's branch before its pull request is watched again, so the
+ * checks run on the fix. A push that fails is said in the log, never as a
+ * merge that did not happen: the watcher then reads what GitHub has.
+ */
+async function pushFixCiBranch(origin: CodingRun, branch: string): Promise<void> {
+  const pushed = await pushBranch(origin.directory, branch);
+  if (!pushed.ok) console.error(`[coding-agent] ${origin.id}: could not push the Fix CI branch ${branch}: ${pushed.detail}`);
+}
+
+/**
+ * The attempt a "Fix CI" continuation of `previous` would be (1-based), or the
+ * refusal: no failed CI on record, a Fix CI already started from this failure
+ * (but the queued one itself, when it starts), or the chain's attempts used
+ * up. Bounded: the failure of each fix is what offers the next, and only
+ * MAX_CI_FIX_ATTEMPTS of them.
+ */
+export function ciFixAttempt(previous: Pick<CodingRun, "ci" | "ciFixOf">, queuedRunId: string | null): number {
+  if (!previous.ci) {
+    throw new CodingAgentError("invalid", "That run's pull request has no failed CI on record, so there is nothing for a Fix CI run to fix.");
+  }
+  if (previous.ci.fixRunId && previous.ci.fixRunId !== queuedRunId) {
+    throw new CodingAgentError("invalid", `A Fix CI run was already started from that failure (${previous.ci.fixRunId}). Follow that one instead.`);
+  }
+  const attempt = (previous.ciFixOf?.attempt ?? 0) + 1;
+  if (attempt > MAX_CI_FIX_ATTEMPTS) {
+    throw new CodingAgentError("invalid", `That pull request has had its ${MAX_CI_FIX_ATTEMPTS} Fix CI runs; what still fails is the owner's to look at.`);
+  }
+  return attempt;
+}
+
+/**
+ * The pull request a run watched ended on FAILING checks: read the failing
+ * jobs' logs (bounded — readFailedCheckLogs), name the failing tests and the
+ * files, and put it on the record (CodingRun.ci) and its feed, for the run's
+ * page and coding_agent_status to offer a "Fix CI" continuation from. `known`
+ * is the checks list the caller already holds; without it GitHub is asked.
+ * Best effort: a failure that cannot be read leaves the run as it was.
+ */
+async function noteCiFailure(runId: string, prNumber: number, known?: readonly ReviewCheck[]): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run) return;
+    let checks = known?.length ? [...known] : null;
+    if (!checks) {
+      const snapshot = await readReviewSnapshot(run.directory, prNumber);
+      checks = "error" in snapshot ? [] : snapshot.checks;
+    }
+    const failed = checks.filter((c) => c.state === "fail");
+    if (!failed.length) return;
+    const logs = await readFailedCheckLogs(run.directory, failed);
+    const current = loadRuns().find((r) => r.id === runId);
+    if (!current) return;
+    const failure = readCiFailure(prNumber, logs);
+    current.ci = { ...failure, attempt: current.ciFixOf?.attempt ?? 0, fixRunId: null };
+    pushProgress(current, ciFailureLine(failure));
+    persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: could not read the failed CI:`, err instanceof Error ? err.message : err);
+  }
+}
+
 function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail: string | null): void {
   if (!run.pr) return;
   run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
@@ -8224,6 +10288,8 @@ function watchPullRequest(runId: string): void {
       return;
     }
     if (verdict.action === "block") {
+      // Failing checks: what failed is read and offered as a Fix CI first.
+      if (snapshot.checks.failed > 0) await noteCiFailure(runId, prNumber);
       // Re-read: reconcileAutoMerge may have waited on `gh`.
       const current = loadRuns().find((r) => r.id === runId);
       if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeState));
@@ -8327,6 +10393,11 @@ function settleReview(
   if (!run.review) return;
   const said = detail ?? (state === "clean" ? REVIEW_CLEAN_DETAIL : null);
   run.review = { ...run.review, state, detail: said, lastPolledAt: Date.now() };
+  // Over to the owner with checks still failing: what failed is read and
+  // offered as a Fix CI, the way the checks watcher's red ending is.
+  if (state === "needs_owner" && run.review.prNumber && run.review.checks.some((c) => c.state === "fail")) {
+    trackSettleWork(noteCiFailure(run.id, run.review.prNumber, run.review.checks));
+  }
   if (isPrPending(run.pr)) {
     // "blocked" is the pull request phase for BOTH endings that leave it open:
     // green-and-waiting-for-you and out-of-rounds. The review state beside it
@@ -8769,6 +10840,11 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // A team's worker is reviewed by the team's own reviewer, on the merged work.
   if (finished.team) return "skipped";
   if (finished.filesTouched.length === 0) return "skipped";
+  // The settle's own commit of this work failed (the folder belongs to another
+  // repository, git refusing): the box has already said it cannot keep what a
+  // pass would review, and the pass would resume into the same wall — 36 of
+  // them did on the owner's box.
+  if (finished.commitError) return "skipped";
   // The switch as it stood when THIS run started — the same decision its
   // brief was written from — never the switch as it stands now.
   if (!finished.reviewPass) return "skipped";
@@ -8840,8 +10916,8 @@ function deliverableGateApplies(run: CodingRun): boolean {
  * the one the gate has to ask to know whether it owes that notice. It cannot
  * simply re-read `deliverableFor`, because the implied pull-request bar can step
  * aside between the two (see the branch that uses this), and it must not assume
- * an attempt is still open, because an owner Resume at the attempt ceiling opens
- * none.
+ * an attempt is still open, because an owner Resume at MAX_COMPLETION_ATTEMPTS
+ * opens none.
  *
  * Exact, not a heuristic: a named deliverable is frozen on the record and never
  * removed, and a run that got the implied one always had `openAttempt` push an
@@ -8856,8 +10932,8 @@ function wasGated(run: CodingRun): boolean {
 function openAttempt(run: CodingRun): void {
   if (deliverableFor(run) === null) return;
   // Never two open at once: a record whose previous attempt was left open by a
-  // restart must not grow a second one, or the count that decides "no more
-  // attempts" would be the count of interruptions.
+  // restart must not grow a second one, or the count the card and the gave-up
+  // reason report would be the count of interruptions.
   if (run.attempts.some((a) => a.endedAt === null)) return;
   if (run.attempts.length >= MAX_COMPLETION_ATTEMPTS) return;
   run.attempts.push({ startedAt: Date.now(), endedAt: null, reason: null });
@@ -8867,9 +10943,9 @@ function openAttempt(run: CodingRun): void {
  * Close the open attempt with what was still missing (null when it was there).
  *
  * A judgement with no open entry to close still gets recorded — a record from
- * before the field, or one whose attempt a restart closed — because the count
- * of attempts is what decides whether to try again, and a judgement that
- * vanished would let a run be nudged for ever.
+ * before the field, or one whose attempt a restart closed — because the
+ * attempt list is the run's whole history at its bar, and a judgement that
+ * vanished would leave the card and the gave-up reason a go short.
  */
 function closeAttempt(run: CodingRun, missing: string | null): void {
   const reason = missing ? missing.slice(0, MAX_MISSING_CHARS) : null;
@@ -8896,7 +10972,9 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
   return {
     bin: setprivPath,
     args: CAPABILITY_DROP_ARGS,
-    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id) }),
+    // The run's own provider, like its harness's: never the default's wiring
+    // under a run that is paid from the other account.
+    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel }),
   };
 }
 
@@ -8952,16 +11030,24 @@ function reopenPullRequestStep(run: CodingRun): void {
 
 /**
  * The finish notice, once the gate has decided what this run actually is.
- *
- * Unless a DELIVERY PIPELINE is still going, which is the later authority on
- * what this run is: the deliverable being there means the build stage passed,
- * not that the work is deployed and checked. The pipeline sends the notice when
- * it settles, so the two never both send one and never both stay silent.
  */
 function announceGatedRun(run: CodingRun): void {
-  if (pipelineOwnsRun(run)) return;
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
+  });
+}
+
+/**
+ * An ending that never reaches finishRun — a stop on paper, a queued run
+ * canceled or refused its turn — told to the chat that asked for the run
+ * (TASK-2132). Only the chat: these endings sent no card and no Telegram
+ * before, and the notice module says why they still do not. A team's run is
+ * the team's to tell, as in finishRun.
+ */
+function announceEndingToChat(run: CodingRun): void {
+  if (run.team) return;
+  void announceCodingRunToChat(cloneRun(run)).catch((err: unknown) => {
+    console.error("[coding-agent] chat notice failed:", err instanceof Error ? err.message : err);
   });
 }
 
@@ -8974,11 +11060,12 @@ function announceGatedRun(run: CodingRun): void {
  * built the thing: both emit a success result event, and nothing on the box had
  * looked at the folder.
  *
- * Three endings, and the ATTEMPT is the middle one: the deliverable is there
- * (`completed` stands), it is not and there are attempts left (the same record
- * goes back in, same session, with a nudge naming what is missing), or it is
- * not and there are none (`gave_up`, with the missing thing as the reason and
- * Resume as the way on).
+ * Two endings: the deliverable is there (`completed` stands), or it is not
+ * (`gave_up`, with the missing thing as the reason and Resume as the way on —
+ * the owner's Resume carries on in the same session with a nudge naming what
+ * is missing, `completionNudge`). The box never spends a second go unasked:
+ * the automatic completion-attempt loop went in SCA A2, having fired once in
+ * 255 runs, at a file the task forbade creating.
  *
  * Never throws: it runs inside the settle chain, and a thrown error here would
  * leave a record whose notice was held back by `finishRun` and never sent.
@@ -9064,12 +11151,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     pushProgress(origin, RUNNER_STEP.deliverableMissing(verdict.missing ?? ""));
-    const made = origin.attempts.length;
-    if (made >= origin.completionAttempts) {
-      giveUp(origin, verdict.missing ?? "", made);
-      return;
-    }
-    await startCompletionAttempt(origin, deliverable, verdict.missing ?? "", made + 1);
+    giveUp(origin, verdict.missing ?? "", origin.attempts.length);
   } catch (err) {
     // The check itself broke. NOT a pass: that is the whole point of the
     // feature. The run is recorded as not having got there, with what went
@@ -9077,11 +11159,10 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     // than a tick over an unanswered question.
     const reason = `The deliverable could not be checked: ${err instanceof Error ? err.message : String(err)}`;
     console.error(`[coding-agent] ${origin.id} deliverable check failed:`, err instanceof Error ? err.message : err);
-    // Unless the run has ALREADY been settled by something inside the try — a
-    // `giveUp` from the attempt's own gates, or the spawn failure that settles
-    // the record as failed. Giving up a second time would push a second ending
-    // onto the timeline, announce the run twice and add a phantom attempt to
-    // the count the card shows.
+    // Unless the run has ALREADY been settled by something inside the try.
+    // Giving up a second time would push a second ending onto the timeline,
+    // announce the run twice and add a phantom attempt to the count the card
+    // shows.
     if (origin.status !== "completed") {
       persist(true);
       return;
@@ -9114,723 +11195,6 @@ function giveUp(run: CodingRun, missing: string, attempts: number): void {
   announceGatedRun(run);
 }
 
-/**
- * One more go at the deliverable: the SAME record, the SAME session, a nudge
- * naming what is missing.
- *
- * In place rather than as a fresh run, which is what the brief's "resume with
- * context" means and what the record needs: `attempts`, the deliverable and the
- * verdict all belong to one run, and the owner asked one question. Mechanically
- * it is `resumeRunOnce`'s spawn — `--resume` on the run's own session id with
- * the continuation on stdin — so the transcript of the attempt that just ended
- * is still in front of the harness, which is why the nudge can say "do not
- * start over" and be obeyed.
- */
-async function startCompletionAttempt(
-  run: CodingRun,
-  deliverable: Deliverable,
-  missing: string,
-  attempt: number,
-): Promise<void> {
-  // No session means there is nothing to CARRY ON from, and this loop's whole
-  // premise is that there is: the nudge says "do not start over" because the
-  // transcript of the attempt that just ended is still in front of the harness.
-  // Spawned without one it would be a fresh session handed a note about a
-  // missing file — the task redone from nothing, charged to the owner under the
-  // name of "one more attempt". So the honest ending is recorded instead.
-  if (!run.sessionId) {
-    giveUp(run, `${missing} There is no session to carry on in, so the box did not try again.`, run.attempts.length);
-    return;
-  }
-
-  let tools: SpawnTools;
-  // Held across the two awaits below and given back the moment the record is
-  // live again (the flip after this block is synchronous) — see `startingRuns`.
-  let releaseSlot: (() => void) | null = null;
-  try {
-    // The same gates a start passes — the owner's switch, readiness, the
-    // slot — because this IS a start, and the owner may have switched the
-    // agent off while the run worked.
-    releaseSlot = await assertCanSpawn(null);
-    tools = await requireSpawnTools();
-    run.directory = await realDirectory(run.directory);
-  } catch (err) {
-    releaseSlot?.();
-    // Another attempt cannot be made now. The ending is still the honest one:
-    // the deliverable is not there. The reason says both halves, so the owner
-    // is not left wondering why the attempts stopped short.
-    const why = err instanceof Error ? err.message : String(err);
-    giveUp(run, `${missing} Another attempt could not be started: ${why}`, run.attempts.length);
-    return;
-  }
-  releaseSlot?.();
-
-  reopenPullRequestStep(run);
-  run.status = "running";
-  run.completedAt = null;
-  run.exitCode = null;
-  run.error = null;
-  run.pauseReason = null;
-  // Judged again when this attempt settles; until then there is no verdict
-  // about a run that is still working.
-  run.leftover = false;
-  run.lastActivityAt = Date.now();
-  openAttempt(run);
-  pushProgress(run, RUNNER_STEP.anotherAttempt(attempt, run.completionAttempts));
-  // RE-RESOLVED for this attempt, like a resume's. The previous attempt's
-  // settle dropped the values out of memory (cleanupRunResources), so they have
-  // to be worked out again either way — and re-reading is the safer of the two
-  // answers: an entry the owner un-ticked while the run was working is not
-  // handed back to it, and the redaction table is armed again before the child
-  // that would echo one exists.
-  await prepareRunSecrets(run);
-  persist(true);
-  console.error(`[coding-agent] ${run.id} attempt ${attempt} of ${run.completionAttempts} at its deliverable`);
-  startProjectIcon(run);
-  try {
-    spawnOrSettle(
-      run,
-      run.sessionId,
-      tools,
-      { effort: run.effort, maxTurns: run.maxTurns },
-      completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
-      // The same record, continuing: its counters and its recorded refusals are
-      // the run's whole history, not the last attempt's.
-      true,
-    );
-  } catch {
-    // `spawnOrSettle` has already settled the record as failed and said why, and
-    // it rethrows for the benefit of a route's caller — of which there is none
-    // here, so the throw itself is not news. What IS left to do is the two
-    // things that path does not do: close the attempt this call opened (left
-    // open it would read as a turn still being made, and would stop any later
-    // Resume from opening one), and send the finish notice `finishRun` held for
-    // a gate that has now ended the run on its own.
-    closeAttempt(run, missing);
-    persist(true);
-    announceGatedRun(run);
-  }
-}
-
-
-// ─── The delivery pipeline ───────────────────────────────────────────────────
-
-/**
- * The DRIVER: what actually happens at each stage of src/lib/coding-pipeline.ts.
- *
- * WHY IT IS HERE AND NOT IN A MODULE OF ITS OWN. Every stage is a thing this
- * file already does — start a run in an existing session, watch a deployment,
- * settle a record, announce a run. The driver is the ORDER, and it is written
- * beside the machinery it orders for the same reason `watchReviewLoop` and
- * `watchDeployment` are: a module that had to be handed `loadRuns`, `persist`,
- * `startRun`, `pushProgress` and the live handles is a module that has the
- * wrong boundary. What it does NOT contain is the decision-making — that is the
- * pure machine, so the transitions can be walked in a unit test without a run,
- * a deployment or a browser.
- *
- * WHAT DRIVES IT. Three seams, and no timer of its own:
- *
- *  - a RUN settling (`pipelineAfterSettle`, from the end of `reviewAndShip`) —
- *    the build stage, the review stage and every improvement lap;
- *  - the OWNER pressing the production button (`approvePipelineProduction`).
- *
- * The verifications are the one thing it does itself, inline, because a fetch
- * and a screenshot are seconds rather than an event to wait for.
- */
-
-/** One advance at a time per run: two seams can fire on the same record. */
-const pipelineAdvancing = store.pipelineAdvancing;
-
-/**
- * True while a live pipeline still owns this run — its own, or the one
- * belonging to the origin a review pass was started for.
- *
- * TWO THINGS ARE HELD ON IT, and they are the same question asked twice:
- *
- *  - THE FINISH NOTICE. The same predicate `deliverableGateApplies` is, and for
- *    the same reason: "Coding agent finished run-x" over a run that is about to
- *    deploy to production is exactly the claim the gate exists to stop making.
- *    `finishRun` holds the notice on it and the pipeline sends it when it
- *    settles, so no run falls between them.
- *  - THE RUN'S WORKTREE. `settleRunWorktree` steps aside while a run is LIVE in
- *    the tree, which a pipeline BETWEEN stages is not: a deployment is building
- *    or a verification is fetching, and nothing holds the folder. So the settle
- *    merged the copy home and deleted it while the pipeline still needed it —
- *    the improvement lap re-spawns into that very folder and the deploy uploads
- *    it. `settlePipelineRun` is what settles the tree once the chain is over.
- */
-function pipelineOwnsRun(run: CodingRun): boolean {
-  if (isPipelineLive(run.pipeline)) return true;
-  // A turn INSIDE a pipeline's chain holds it too. The automatic review pass is
-  // a run record of its own, and nobody asked for it: announcing it would put
-  // "Coding agent finished run-x" on the desktop in the middle of a flow that
-  // is still deploying — the same claim, about a run the owner never started.
-  if (run.reviewOf) {
-    const origin = loadRuns().find((r) => r.id === run.reviewOf);
-    return isPipelineLive(origin?.pipeline);
-  }
-  return false;
-}
-
-/**
- * Queue an advance behind whatever else is advancing this run's pipeline.
- *
- * BOTH seams go through it, and that is the point: a deployment settling on its
- * watcher's timer and a run settling on its child's `close` handler are two
- * different call stacks reaching the same record, and each stage guard reads
- * `pipeline.stage` — which the other one is in the middle of moving.
- */
-function queuePipelineWork(runId: string, work: () => Promise<void>): Promise<void> {
-  const previous = pipelineAdvancing.get(runId) ?? Promise.resolve();
-  const mine = previous.then(work, work).then(
-    () => {},
-    (err: unknown) => {
-      console.error(`[coding-agent] pipeline for ${runId}:`, err instanceof Error ? err.message : err);
-    },
-  );
-  pipelineAdvancing.set(runId, mine);
-  // Dropped once it settles, and only when it is still the one in the map: the
-  // store is process-wide and lives as long as the web server, so without this
-  // every pipeline that ever ran leaves a settled promise behind.
-  const forget = () => {
-    if (pipelineAdvancing.get(runId) === mine) pipelineAdvancing.delete(runId);
-  };
-  void mine.then(forget, forget);
-  return mine;
-}
-
-/** The fire-and-forget form, for a caller with nothing to wait on. */
-function advancePipeline(runId: string, work: () => Promise<void>): void {
-  // Held like every other settle chain, so a suite can wait for it rather than
-  // remove the tree a deployment record is still being written into.
-  trackSettleWork(queuePipelineWork(runId, work));
-}
-
-/**
- * Can this box run the whole pipeline at all?
- *
- * Asked ONCE, when the run starts, and not at the stage that would need it.
- * The owner's rule: a pipeline that cannot finish must say so before the box
- * spends a build, a review pass and three improvement laps getting to the
- * stage that would have proved it.
- */
-export async function pipelinePreflight(
-  scope: string | null,
-  verify: PipelineVerify,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (!scope) {
-    return { ok: false, reason: "That folder is not one of this ClawBox's projects, so the pipeline has nothing to work in." };
-  }
-  // The other half: a verification this box could not make is not a pass, so a
-  // pipeline that could only ever reach that answer is refused here instead.
-  if (verify.expect.length === 0) {
-    const token = await configGet("clawai_token");
-    if (typeof token !== "string" || !token.trim()) {
-      return {
-        ok: false,
-        reason: "This ClawBox has no vision model to check a deployed page with, and the pipeline was not told what to look for. Connect ClawBox AI, or name what the page must contain.",
-      };
-    }
-  }
-  return { ok: true };
-}
-
-/** The review run that has just gone out for this origin, newest first. */
-function reviewRunFor(originId: string): CodingRun | null {
-  return loadRuns().find((r) => r.reviewOf === originId && isLive(r.status))
-    ?? loadRuns().find((r) => r.reviewOf === originId)
-    ?? null;
-}
-
-/**
- * A run has settled. Close whichever stage that was, and go on.
- *
- * Called at the END of `reviewAndShip`, after the deliverable gate — because
- * the gate can put the very same record back to work, and a pipeline that
- * advanced past a run that is running again would be deploying a folder a live
- * session is still writing in.
- */
-function pipelineAfterSettle(
-  finished: CodingRun,
-  ended: "stop" | "pause" | null,
-  review: ReviewPassOutcome,
-): Promise<void> {
-  // AWAITED by the settle chain, unlike the deployment seam: `settleRunWorktree`
-  // runs straight after and steps aside only while a run is LIVE in the tree, so
-  // an improvement lap that had not been spawned yet would have its folder
-  // merged home and removed out from under it.
-  return queuePipelineWork(finished.reviewOf ?? finished.id, () => settlePipelineStage(finished, ended, review));
-}
-
-async function settlePipelineStage(
-  finished: CodingRun,
-  ended: "stop" | "pause" | null,
-  review: ReviewPassOutcome,
-): Promise<void> {
-  const originId = finished.reviewOf ?? finished.id;
-  const origin = loadRuns().find((r) => r.id === originId);
-  const pipeline = origin?.pipeline;
-  if (!origin || !pipeline || !isPipelineLive(pipeline)) return;
-
-  // The owner's own gesture ends it. Judging a stage now would answer a
-  // question they have already closed.
-  if (ended !== null) {
-    stopPipeline(pipeline, ended === "pause"
-      ? "The run was paused, so the pipeline stopped here."
-      : "The run was stopped, so the pipeline stopped here.");
-    pushProgress(origin, RUNNER_STEP.pipelineStopped(pipeline.failure?.reason ?? "stopped"));
-    persist(true);
-    announcePipeline(origin);
-    return;
-  }
-  // A pause is not the end of a stage: the run resumes in place and its settle
-  // comes back here. Nor is a deliverable attempt that has just gone back in.
-  if (finished.status === "paused" || origin.status === "paused" || origin.status === "running") return;
-
-  if (pipeline.stage === "build" || pipeline.stage === "improvement") {
-    // Only the ORIGIN closes these: at stage `improvement` a stray review run
-    // from an earlier lap settling late must not be read as the lap's own end.
-    if (finished.id !== origin.id) return;
-    const outcome: StageOutcome = origin.status === "completed"
-      ? { kind: "passed" }
-      : { kind: "failed", reason: `The run did not finish (${origin.status}).${origin.error ? ` ${origin.error}` : ""}` };
-    await applyPipelineStage(origin.id, pipeline.stage, outcome, review);
-    return;
-  }
-
-  if (pipeline.stage === "review") {
-    if (finished.reviewOf !== origin.id) return;
-    const outcome: StageOutcome = finished.status === "completed"
-      ? { kind: "passed", detail: finished.filesTouched.length ? `The review pass changed ${finished.filesTouched.length} file(s).` : "The review pass found nothing to change." }
-      : { kind: "failed", reason: `The review pass did not finish (${finished.status}).${finished.error ? ` ${finished.error}` : ""}` };
-    await applyPipelineStage(origin.id, "review", outcome, review);
-  }
-  // Every other stage is settled by a deployment or by a verification this
-  // driver made itself; a run settling under one of them is a review-loop or
-  // deployment-fix turn, which belongs to its own watcher.
-}
-
-/** Record what a stage did, then carry on for as long as the machine says to. */
-async function applyPipelineStage(
-  runId: string,
-  stage: PipelineStage,
-  outcome: StageOutcome,
-  review?: ReviewPassOutcome,
-): Promise<void> {
-  const run = loadRuns().find((r) => r.id === runId);
-  if (!run?.pipeline || !isPipelineLive(run.pipeline)) return;
-  const transition = decidePipeline(run.pipeline, stage, outcome);
-  persist(true);
-  await drivePipeline(runId, transition, review);
-}
-
-/**
- * Carry on for as long as the machine says to.
- *
- * Its own function because the owner's production button enters a stage
- * DIRECTLY rather than by re-deciding one that already passed — re-deciding
- * `verify_preview` would overwrite what the check actually found with the
- * sentence "the owner approved it", which is the one thing on that step worth
- * keeping.
- */
-async function drivePipeline(
-  runId: string,
-  first: PipelineTransition,
-  review?: ReviewPassOutcome,
-): Promise<void> {
-  let transition = first;
-  // One consumption of the review outcome: it describes the pass that was
-  // started by the settle we are in, and a later lap gets its own.
-  let pendingReview = review;
-  for (;;) {
-    if (transition.action === "wait") return;
-    if (transition.action === "settled") {
-      await settlePipelineRun(runId);
-      return;
-    }
-    const entered = transition.stage;
-    const current = loadRuns().find((r) => r.id === runId);
-    if (!current?.pipeline) return;
-    const next = await enterPipelineStage(current, entered, pendingReview);
-    pendingReview = undefined;
-    persist(true);
-    // The stage is under way and something else brings the pipeline back.
-    if (!next) return;
-    const live = loadRuns().find((r) => r.id === runId);
-    if (!live?.pipeline || !isPipelineLive(live.pipeline)) return;
-    transition = decidePipeline(live.pipeline, entered, next);
-    persist(true);
-  }
-}
-
-/**
- * Begin a stage.
- *
- * Answers `null` when the stage is now UNDER WAY and something else will bring
- * the pipeline back — a run that has to finish, a deployment that has to build
- * — and an outcome when the stage decided itself, which the two verifications
- * and every refusal do.
- */
-/**
- * What a deploy-or-check stage answers on a box with no deployment
- * integration, which is every ClawBox: the four stages are SKIPPED, with the
- * reason on the step's own `detail`.
- *
- * Skipped and not failed: the pipeline's first half — build, review, improve —
- * is work the owner asked for and got, and throwing it away over a capability
- * the box does not have would be the box punishing them for it.
- */
-export const PIPELINE_DEPLOY_UNAVAILABLE_DETAIL =
-  "deploy_unavailable: this ClawBox has no deployment integration, so there was nothing to deploy to or check.";
-
-async function enterPipelineStage(
-  run: CodingRun,
-  stage: PipelineStage,
-  review?: ReviewPassOutcome,
-): Promise<StageOutcome | null> {
-  const pipeline = run.pipeline;
-  if (!pipeline) return null;
-  enterStage(pipeline, stage);
-
-  switch (stage) {
-    case "build":
-      // Never entered from a transition: the build IS the run, and it is
-      // already going when the pipeline is made.
-      return null;
-
-    case "review": {
-      if (review === "started") {
-        const reviewRun = reviewRunFor(run.id);
-        addEvidence(pipeline, "review", {
-          kind: "run",
-          ref: reviewRun?.id ?? null,
-          detail: "An automatic review pass is reading the work.",
-        });
-        pushProgress(run, RUNNER_STEP.pipelineReview);
-        persist(true);
-        return null;
-      }
-      if (review === "refused") {
-        return { kind: "failed", reason: "The automatic review pass was due and could not be started." };
-      }
-      // "skipped", and the same answer for a lap that somehow reached this
-      // stage with no outcome to read: nothing was reviewed, and saying it
-      // PASSED would be the box claiming work it did not do.
-      return { kind: "skipped", detail: "There was nothing for the review pass to read, so it did not run." };
-    }
-
-    case "improvement":
-      return startPipelineImprovement(run);
-
-    // ALL FOUR, not just the two deploys: `skipped` advances to the next stage
-    // (decidePipeline), so skipping `deploy_preview` alone would walk straight
-    // into `verify_preview`, which has no address to look at.
-    case "deploy_preview":
-    case "deploy_production":
-    case "verify_preview":
-    case "verify_production":
-      return { kind: "skipped", detail: PIPELINE_DEPLOY_UNAVAILABLE_DETAIL };
-
-    case "complete":
-      return null;
-  }
-}
-
-/**
- * Send the work back in for another lap, in the SAME record and the SAME
- * session.
- *
- * `startCompletionAttempt`'s shape, and for its reasons: the owner asked one
- * question, `attempts` and the deliverable belong to one run, and the nudge can
- * say "do not start over" and be obeyed only because the transcript of the lap
- * that just ended is still in front of the harness.
- */
-async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | null> {
-  const pipeline = run.pipeline;
-  if (!pipeline) return null;
-  if (!run.sessionId) {
-    return { kind: "failed", reason: "There is no session to carry on in, so the work could not be sent back for improvement." };
-  }
-
-  // The stage the MACHINE recorded when it routed here, never a search through
-  // `steps` for a failed one: see `PipelineState.sentBackFrom` for the two ways
-  // that guess was wrong.
-  const sentBack = pipeline.sentBackFrom;
-  const stage = sentBack?.stage ?? "verify_preview";
-  const reason = sentBack?.reason ?? "The delivery pipeline sent the work back.";
-  const task = improvementNudge({
-    stage,
-    reason,
-    round: pipeline.round,
-    maxRounds: pipeline.maxRounds,
-    buildLog: null,
-    // Only when THIS lap was sent back by a verification: `lastVerification`
-    // survives a lap, so after a failed deploy the one on the record belongs to
-    // an earlier check, and handing it over as "what this ClawBox checked"
-    // would be a lie about the work in front of the harness now.
-    verification: stage === "verify_preview" || stage === "verify_production"
-      ? lastVerificationFor(pipeline)
-      : null,
-  });
-
-  let tools: SpawnTools;
-  let releaseSlot: (() => void) | null = null;
-  try {
-    releaseSlot = await assertCanSpawn(null);
-    tools = await requireSpawnTools();
-    // The copy of the project this lap works in. A live pipeline holds it now
-    // (`settleRunWorktree` steps aside for one), but a pipeline already in
-    // flight when that hold shipped, or a tree the weekly sweep took, has none
-    // — and the lap would die on a missing folder with the whole task still to
-    // do. Put back from its branch exactly as the owner's own Resume does; a
-    // restore that fails leaves the record alone and `realDirectory` below says
-    // the sentence the owner needs.
-    if (run.worktree) run.worktree = await reopenWorktree(run);
-    run.directory = await realDirectory(run.directory);
-    // Nobody else may be working in this folder. A pipelined run can ALSO have
-    // the pull-request review loop going — GitHub's checks are a different
-    // question from the pipeline's own — and that loop's fix turns resume the
-    // same session in the same tree. Two harnesses there edit each other's
-    // half-written files and each settle's `git add -A` commits the other's,
-    // which is the whole reason a run gets a copy of the project to itself.
-    assertDirectoryFree(run.directory, run.id);
-  } catch (err) {
-    releaseSlot?.();
-    return { kind: "failed", reason: `Another turn could not be started: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  releaseSlot?.();
-
-  run.status = "running";
-  run.completedAt = null;
-  run.exitCode = null;
-  run.error = null;
-  run.pauseReason = null;
-  run.leftover = false;
-  run.lastActivityAt = Date.now();
-  addEvidence(pipeline, "improvement", {
-    kind: "note",
-    ref: null,
-    detail: `Round ${pipeline.round} of ${pipeline.maxRounds}: ${reason}`,
-  });
-  pushProgress(run, RUNNER_STEP.pipelineImprovement(pipeline.round, pipeline.maxRounds));
-  // Re-resolved for this lap, like a resume's: an entry the owner un-ticked
-  // while the run worked is not handed back to it, and the redaction table is
-  // armed again before the child that would echo one exists.
-  await prepareRunSecrets(run);
-  persist(true);
-  startProjectIcon(run);
-  try {
-    spawnOrSettle(run, run.sessionId, tools, { effort: run.effort, maxTurns: run.maxTurns }, task, true);
-  } catch {
-    // `spawnOrSettle` has already settled the record as failed and said why.
-    return { kind: "failed", reason: "The improvement turn could not be spawned." };
-  }
-  return null;
-}
-
-/** What the last verification actually saw, for the nudge. */
-function lastVerificationFor(pipeline: PipelineState): {
-  url: string;
-  status: number | null;
-  missing: string[];
-  description: string | null;
-} | null {
-  const verification = pipeline.lastVerification;
-  if (!verification) return null;
-  return {
-    url: verification.url,
-    status: verification.status,
-    missing: verification.expectations.filter((e) => !e.found).map((e) => e.text),
-    description: verification.vision?.description ?? null,
-  };
-}
-
-/** The pipeline is over. Say what the run actually is, and tell the owner. */
-async function settlePipelineRun(runId: string): Promise<void> {
-  const run = loadRuns().find((r) => r.id === runId);
-  const pipeline = run?.pipeline;
-  if (!run || !pipeline) return;
-  if (pipeline.status === "complete") {
-    pushProgress(run, RUNNER_STEP.pipelineComplete);
-  } else {
-    pushProgress(run, RUNNER_STEP.pipelineStopped(pipeline.failure?.reason ?? pipeline.status));
-    // The brief's own rule: a pipeline that did not finish ends the run
-    // `gave_up`, naming the stage and the reason. Only from `completed` —
-    // a run that FAILED already has the honest ending, and overwriting it
-    // would hide what actually went wrong with a gentler word.
-    if (run.status === "completed") {
-      run.status = "gave_up";
-      run.resumable = true;
-      run.completedAt = run.completedAt ?? Date.now();
-      run.error = pipelineGaveUpReason(pipeline).slice(0, MAX_ERROR_CHARS);
-      pushProgress(run, RUNNER_STEP.finished(run.status));
-    }
-  }
-  persist(true);
-  console.error(`[coding-agent] ${run.id} pipeline ${pipeline.status} at the ${stageNoun(pipeline.stage)} stage`);
-  // The copy of the project the pipeline was holding. `settleRunWorktree`
-  // stepped aside for every stage, and `reviewAndShip`'s own call to it
-  // returned several stages ago — on the asynchronous paths (a deployment
-  // settling on its watcher, a verification this driver made itself) this is
-  // the last act of the chain, so it is where the tree is decided. Idempotent:
-  // on the synchronous paths `reviewAndShip` reaches it straight afterwards and
-  // finds the record already settled.
-  await settleRunWorktree(run);
-  announcePipeline(run);
-}
-
-/** One sentence naming the stage and what stopped there. */
-function pipelineGaveUpReason(pipeline: PipelineState): string {
-  const reason = pipeline.failure?.reason ?? "The delivery pipeline did not finish.";
-  return `The delivery pipeline stopped at the ${stageNoun(pipeline.failure?.stage ?? pipeline.stage)} stage. ${reason} Resume it to carry on in the same session.`;
-}
-
-/** The finish notice `finishRun` held back while the pipeline was still going. */
-function announcePipeline(run: CodingRun): void {
-  void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
-    console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
-  });
-}
-
-/**
- * The owner has pressed "Deploy to production" on a pipeline that was waiting
- * for them.
- *
- * The route holds the gate — their session, this box's own origin, an explicit
- * confirmation — and this is what happens after it. `waiting_owner` is the one
- * state that resumes on an act rather than on an event, which is why it is a
- * verb of its own rather than something a poll notices.
- */
-export async function approvePipelineProduction(runId: string): Promise<CodingRun> {
-  const run = loadRuns().find((r) => r.id === runId);
-  if (!run) throw new CodingAgentError("not_found", "There is no run with that id on this ClawBox.");
-  const pipeline = run.pipeline;
-  if (!pipeline) throw new CodingAgentError("invalid", "That run has no delivery pipeline.");
-  if (pipeline.status !== "waiting_owner") {
-    throw new CodingAgentError("invalid", `That pipeline is not waiting for you: it is ${pipeline.status}.`);
-  }
-  // The wall clock, BEFORE anything is deployed. `decidePipeline` checks it at
-  // the next transition, which for this path is after `runDeployment` has
-  // already put a build on the project's own domain — so a pipeline parked
-  // overnight past its budget would have shipped and then recorded that it had
-  // run out of time. Asked here instead, where the answer is still "no".
-  if (Date.now() > pipeline.deadlineAt) {
-    const transition = decidePipeline(pipeline, "deploy_production", { kind: "passed" });
-    persist(true);
-    if (transition.action === "settled") await settlePipelineRun(runId);
-    throw new CodingAgentError("invalid", pipeline.failure?.reason
-      ?? "That pipeline ran out of its time budget while it was waiting. Start a new run.");
-  }
-  pipeline.status = "running";
-  // Recorded, because `resumePipelines` re-enters this stage after a restart
-  // and would otherwise ask the per-project switch again and park a second
-  // time in front of an owner who has already pressed the button.
-  pipeline.productionApprovedAt = Date.now();
-  const step = stepFor(pipeline, "deploy_production");
-  step.state = "pending";
-  step.detail = null;
-  addEvidence(pipeline, "deploy_production", {
-    kind: "note",
-    ref: null,
-    detail: "The owner approved the production deployment.",
-  });
-  persist(true);
-  await drivePipeline(runId, { action: "enter", stage: "deploy_production" });
-  return getRun(runId) ?? cloneRun(run);
-}
-
-/**
- * The owner has told a pipeline to stop.
- *
- * Its own verb, and not something `stopRun` covers, because the state it is
- * most often used in is a pipeline WAITING for the production button: the run
- * itself settled hours ago, so `stopRun` answers it untouched and the pipeline
- * would wait for ever.
- */
-export function stopRunPipeline(id: string): CodingRun {
-  const run = loadRuns().find((r) => r.id === id);
-  if (!run) throw new CodingAgentError("not_found", "There is no run with that id on this ClawBox.");
-  if (!run.pipeline) throw new CodingAgentError("invalid", "That run has no delivery pipeline.");
-  if (!isPipelineLive(run.pipeline)) return cloneRun(run);
-  stopPipelineFor(run, "The owner stopped the delivery pipeline.");
-  // The run's own ending stands: it built what it built, and the owner calling
-  // the rest of the flow off is not the run failing.
-  announcePipeline(run);
-  return cloneRun(run);
-}
-
-/** Stop a live pipeline because the run it belongs to was ended. */
-function stopPipelineFor(run: CodingRun, reason: string): void {
-  if (!isPipelineLive(run.pipeline) || !run.pipeline) return;
-  stopPipeline(run.pipeline, reason);
-  pushProgress(run, RUNNER_STEP.pipelineStopped(reason));
-  persist(true);
-}
-
-/**
- * Pipelines the restart interrupted.
- *
- * It deliberately does LESS than one
- * might expect, because most of the work is already done by the time it runs:
- *
- *  - a stage waiting on a RUN self-heals — `reconcileAfterRestart` reattaches or
- *    settles the record, and that settle comes back through
- *    `pipelineAfterSettle` exactly as it would have without the restart;
- *  - `waiting_owner` is not waiting on this box at all.
- *
- * What is left is the two cases nothing else covers: a VERIFICATION that was in
- * flight (a fetch and a screenshot, which nothing persisted and which is safe to
- * simply make again), and a stage recorded as running with nothing at all
- * behind it — which is what a restart between "enter the stage" and "start the
- * work" leaves, and which would otherwise be pending for ever.
- */
-export function resumePipelines(): void {
-  for (const run of loadRuns()) {
-    const pipeline = run.pipeline;
-    if (!pipeline || !isPipelineLive(pipeline)) continue;
-    const stage = pipeline.stage;
-    const step = stepFor(pipeline, stage);
-
-    if (stage === "verify_preview" || stage === "verify_production") {
-      if (step.state !== "running") continue;
-      pushProgress(run, RUNNER_STEP.pipelineResumed);
-      persist(true);
-      // Re-entered rather than continued: a verification is a fetch and a
-      // picture, and making it again is cheaper and more honest than guessing
-      // what the last one would have said.
-      advancePipeline(run.id, async () => {
-        const current = loadRuns().find((r) => r.id === run.id);
-        if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
-        // Through the same door a fresh entry uses, so the attempt is COUNTED:
-        // a box crash-looping mid-verification would otherwise re-fetch and
-        // re-photograph for ever, bounded only by the wall clock.
-        const outcome = await enterPipelineStage(current, stage);
-        persist(true);
-        if (outcome) await applyPipelineStage(run.id, stage, outcome);
-      });
-      continue;
-    }
-
-    if (stage === "deploy_preview" || stage === "deploy_production") {
-      // Nothing deploys on this box, so the stage only has to be entered again
-      // to record the skip it never got to write.
-      if (step.state !== "running") continue;
-      advancePipeline(run.id, async () => {
-        const current = loadRuns().find((r) => r.id === run.id);
-        if (!current?.pipeline || !isPipelineLive(current.pipeline)) return;
-        const outcome = await enterPipelineStage(current, stage);
-        persist(true);
-        if (outcome) await applyPipelineStage(run.id, stage, outcome);
-      });
-      continue;
-    }
-
-    // build / review / improvement: a live run brings the pipeline back on its
-    // own. Nothing live means the record was settled by the reconciliation,
-    // whose settle chain has already been through `pipelineAfterSettle`, so
-    // there is nothing left for this to do either.
-  }
-}
 
 /**
  * What the CLI prints when `--effort ultracode` cannot be honoured — the two
@@ -9840,12 +11204,33 @@ export function resumePipelines(): void {
 const ULTRACODE_REFUSED = /Ultracode needs dynamic workflows|Ultracode runs at xhigh effort, which is restricted/i;
 
 /** The wrapper's own diagnostics, minus its start-up banner. */
-function stderrTail(stderr: string): string {
+function stderrTail(stderr: string, dropModelWarning = false): string {
   const lines = stderr
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l && !/^claude-ds: ClawBox AI \(/.test(l));
+    .filter((l) => l && !/^claude-ds: ClawBox AI \(/.test(l) && !(dropModelWarning && MODEL_WARNING_LINE_RE.test(l)));
   return lines.slice(-4).join(" ").slice(0, MAX_ERROR_CHARS);
+}
+
+/** The CLI's warning about the model string, printed at start and true of a run that then works for hours. */
+const MODEL_WARNING_LINE_RE = /^\[claude-code:unrecognized_model\]/;
+
+/**
+ * The failure of a run the model HAD answered, when the harness died with no
+ * result: what ended it, not what it warned about. run-1phttv83 (exit 143
+ * after 12.3M tokens, its work committed) carried
+ * '[claude-code:unrecognized_model] {…}' as its whole error. That line is
+ * dropped from the tail HERE only: before the first answer it stays, because
+ * HARNESS_FAULT_RE and TRANSIENT_FAILURE_RE read it (classifyHarnessFailure,
+ * and the one automatic retry).
+ */
+function endedAfterAnswer(exitCode: number | null, tokens: number, tail: string): string {
+  const killed = exitCode === null || exitCode > 128;
+  const spent = `after ${Math.max(0, tokens).toLocaleString("en-US")} tokens`;
+  const lead = killed
+    ? `Claude Code was killed (exit ${exitCode ?? "signal"}) ${spent}.`
+    : `Claude Code exited with code ${exitCode} ${spent} without reporting a result.`;
+  return (tail ? `${lead} ${tail}` : lead).slice(0, MAX_ERROR_CHARS);
 }
 
 /**
@@ -9868,8 +11253,9 @@ function stderrTail(stderr: string): string {
  * `runWatcherPoll`.
  */
 const settling = store.settling;
+const settleChains: Map<string, Promise<void>> = store.settleChains ?? (store.settleChains = new Map<string, Promise<void>>());
 
-function trackSettleWork(work: Promise<unknown>): void {
+function trackSettleWork(work: Promise<unknown>, runId?: string): void {
   // Neutralised first: the tracked promise must never be the one that rejects,
   // or a caller that does not wait for it turns into an unhandled rejection.
   // The arm still says so, because `void`ing this at least surfaced a future
@@ -9879,6 +11265,71 @@ function trackSettleWork(work: Promise<unknown>): void {
   });
   settling.add(done);
   void done.finally(() => settling.delete(done));
+  if (runId) {
+    // After any chain of the same run still going (a Stop of a paused run lands
+    // during the pause's own settle): a wait is for ALL of them.
+    const before = settleChains.get(runId);
+    const all = before ? Promise.all([before, done]).then(() => undefined) : done;
+    settleChains.set(runId, all);
+    void all.finally(() => {
+      if (settleChains.get(runId) === all) settleChains.delete(runId);
+    });
+  }
+}
+
+/**
+ * The record that last decided what became of a run's worktree, once its
+ * chain has ended: the run itself — or the automatic review pass that carried
+ * on in its tree (`reviewOf`), whose OWN settle merges the branch home and
+ * records it on the pass's record, not the reviewed run's. Waited for in turn,
+ * all within `timeoutMs`. Null when the run has no record.
+ */
+export async function waitForRunHome(runId: string, timeoutMs: number = RUN_SETTLE_WAIT_MS): Promise<CodingRun | null> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const left = () => Math.max(0, deadline - Date.now());
+  let id = runId;
+  for (let hop = 0; hop < 4; hop++) {
+    await waitForRunSettled(id, left());
+    const pass = loadRuns().filter((r) => r.reviewOf === id).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (!pass) break;
+    while (isLive(pass.status) && left() > 0) await waitForRun(pass.id, Math.min(left(), 60_000));
+    id = pass.id;
+  }
+  const record = loadRuns().find((r) => r.id === id);
+  return record ? cloneRun(record) : null;
+}
+
+/** How long a caller waits for a run's settle chain by default before it goes on without it. */
+const RUN_SETTLE_WAIT_MS = 5 * 60_000;
+
+/**
+ * Wait for the END of a settled run's settle chain — its commit, review pass,
+ * pull request and, last, what became of its worktree (`settleRunWorktree`) —
+ * not just for the status `waitForRun` answers on, which is set before any of
+ * it. True when the chain is over (or there was none), false when `timeoutMs`
+ * passed first.
+ *
+ * What it is for: a team that judged a single run's work by its status found
+ * the files "present" on the run's branch while the merge home was still to be
+ * refused, and went done with nothing in the project; a Resume that started
+ * inside a Stop's settle had its folder removed under it ("The current working
+ * directory was deleted"). Never awaited from inside the chain it waits for.
+ */
+export async function waitForRunSettled(runId: string, timeoutMs: number = RUN_SETTLE_WAIT_MS): Promise<boolean> {
+  const chain = settleChains.get(runId);
+  if (!chain) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      chain.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** A plain wait. NOT `unref`ed: the point of this path is that a caller can
@@ -9957,10 +11408,13 @@ const PROXY_REFUSAL_RE = /\b429\b|\busage_limit\b/;
 
 /** A limit found on a settling run: what it is, when it lifts, and the words it came in. */
 interface FoundAccountLimit {
+  /** `limit.model` set: only that model's own week is spent (TASK-2141), not the account. */
   limit: AnthropicLimit;
-  /** When the account is taken to be back: the parsed reset, else the default window. */
+  /** When the account is taken to be back: the parsed reset, else the default window — until Anthropic says (settleLimitScope). */
   until: number;
   text: string;
+  /** Anthropic's name for the model week that is spent ("Fable"), once its answer said. */
+  weekName?: string;
 }
 
 /**
@@ -9993,14 +11447,87 @@ function anthropicLimitOf(run: CodingRun, state: LiveRun): FoundAccountLimit | n
  * refused as back at `until` — what a run waiting for "all limited" to end is
  * told. Off the snapshot, because the settle path that asks is synchronous.
  */
-function earliestAccountReset(refusedId: string | null, until: number): number {
+function earliestAccountReset(refusedId: string | null, until: number, model: string | null = null): number {
   const now = Date.now();
   let earliest = until;
   for (const account of accountsSnapshot() ?? []) {
-    if (account.id === refusedId || account.status !== "limited" || account.limitedUntil === null) continue;
-    if (account.limitedUntil > now && account.limitedUntil < earliest) earliest = account.limitedUntil;
+    if (account.id === refusedId) continue;
+    // Back for THIS run once both its own limit and its model's week are over (TASK-2141).
+    const ends = [account.status === "limited" ? account.limitedUntil : null, modelLimitedUntil(account, model, now)]
+      .filter((t): t is number => t !== null && t > now);
+    if (ends.length > 0 && Math.max(...ends) < earliest) earliest = Math.max(...ends);
   }
   return earliest;
+}
+
+/**
+ * The model a run is on, for the account pick (TASK-2141): the one it was
+ * started with — `run.model` is only the CLI's own report, from its first
+ * event, so a fresh run's first spawn has none yet.
+ */
+function runModelOf(run: CodingRun): string | null {
+  return run.requestedModel ?? run.model;
+}
+
+/** The model a run's limit is about: the one its words named, else the run's own (TASK-2141). */
+function limitModelOf(run: CodingRun, found: FoundAccountLimit | null): string | null {
+  return found?.limit.model ?? modelFamily(runModelOf(run));
+}
+
+/**
+ * WHICH window stopped the run, and until when, in Anthropic's own words
+ * (TASK-2141) — the CLI's line no longer says either reliably: "You've hit
+ * your limit" names no window and no time, and a model's own week
+ * (`weekly_scoped`) stops only runs on that model. So the account's usage is
+ * asked, and `found` is settled in place from the answer:
+ *
+ *  - one of the ACCOUNT's own windows spent: the account's limit, until
+ *    Anthropic's `resets_at` (a monthly spend limit keeps its kind);
+ *  - only the run's model's week spent: that model's limit, until its reset —
+ *    the account stays with every other model;
+ *  - nothing reads spent: the window nearest full that a request could have
+ *    crossed (nearestFull), else the CLI's own words as they were.
+ *
+ * Anthropic not answering (an API key, the `claude` sign-in, offline) leaves
+ * the words in charge: a model they name is that model's week; a time they
+ * give stands; else the default window. Never throws.
+ */
+async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promise<void> {
+  if (!run.anthropicAccount || found.limit.kind === "credit") return;
+  const model = limitModelOf(run, found);
+  const reading = await readAccountUsage(run.anthropicAccount).catch(() => null);
+  if (!reading) return;
+  const now = Date.now();
+  const spent = usageForModel(reading, model);
+  const keepKind = (kind: "session" | "weekly"): AnthropicLimitKind => (found.limit.kind === "spend" ? "spend" : kind);
+  const at = (resetsAt: number | null, fallback: number) => (resetsAt !== null && resetsAt > now ? resetsAt : fallback);
+  if (spent.account) {
+    found.limit = { kind: keepKind(spent.account.kind), resetsAt: spent.account.resetsAt };
+    found.until = at(spent.account.resetsAt, found.until);
+  } else if (spent.week?.family) {
+    found.limit = { kind: "weekly", resetsAt: spent.week.resetsAt, model: spent.week.family };
+    found.weekName = spent.week.name;
+    found.until = at(spent.week.resetsAt, found.until);
+  } else if (!found.limit.model) {
+    // Words that gave a time keep their window; "You've hit your limit" gave none.
+    const near = found.limit.resetsAt === null ? nearestFull(reading, model) : null;
+    if (near?.week?.family) {
+      found.limit = { kind: "weekly", resetsAt: near.week.resetsAt, model: near.week.family };
+      found.weekName = near.week.name;
+      found.until = at(near.week.resetsAt, found.until);
+    } else if (near) {
+      found.limit = { kind: keepKind(near.window.kind), resetsAt: near.window.resetsAt };
+      found.until = at(near.window.resetsAt, found.until);
+    }
+  } else if (found.limit.resetsAt === null) {
+    // The words named the model; Anthropic gives its week's reset (none of its weeks is spent here: the fullest).
+    const week = modelWeekOf(reading, found.limit.model);
+    if (week) {
+      found.weekName = week.name;
+      found.until = at(week.resetsAt, found.until);
+    }
+  }
+  console.error(`[coding-agent] ${run.id}: Anthropic says the limit on account ${run.anthropicAccount} is ${found.limit.model ? `the ${found.limit.model} week` : `its ${found.limit.kind} window`}, until ${new Date(found.until).toISOString()}`);
 }
 
 /**
@@ -10014,8 +11541,22 @@ function earliestAccountReset(refusedId: string | null, until: number): number {
 async function recordAccountLimit(run: CodingRun, found: FoundAccountLimit): Promise<LimitRecorded | null> {
   if (!run.anthropicAccount) return null;
   try {
-    const recorded = await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
-    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${found.limit.kind} limit until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    const guessed = found.until;
+    await settleLimitScope(run, found);
+    // A model's own week keeps the account for every other model (TASK-2141).
+    const week = found.limit.model;
+    const recorded = week
+      ? await markModelLimited(run.anthropicAccount, { family: week, name: found.weekName ?? week }, found.until, { source: "coding", runId: run.id })
+      : await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
+    console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${week ? `${week} week` : `${found.limit.kind} limit`} until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
+    // Already waiting on the time the words gave (or the default window):
+    // the record says the one Anthropic gave.
+    if (found.until !== guessed && run.status === "paused" && run.pauseReason?.kind === "allowance" && run.pauseReason.meter === "anthropic") {
+      const resetsAt = earliestAccountReset(run.anthropicAccount, found.until, limitModelOf(run, found));
+      run.pauseReason = { ...run.pauseReason, resetsAt: new Date(resetsAt).toISOString() };
+      pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
+      persist(true);
+    }
     return recorded;
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: could not record the Anthropic account's limit:`, err instanceof Error ? err.message : err);
@@ -10037,11 +11578,57 @@ function anthropicAuthFailureOf(run: CodingRun, state: LiveRun): string | null {
 
 /**
  * How many times one run may be carried on because its credential was
- * refused. A 401 the probe cannot pin on the account (Anthropic unreachable, a
- * CLI that refuses a working token) must not bounce a run round the pool — or
- * back onto the same account — for ever.
+ * refused, all accounts together. A 401 the probe cannot pin on the account
+ * (Anthropic unreachable, a CLI that refuses a working token) must not bounce a
+ * run round the pool for ever. Each account gets at most two of these in a run
+ * (AuthTrail), so this only bites on a pool of more than three.
  */
-const MAX_AUTH_SWITCHES = 3;
+const MAX_AUTH_RETRIES = 6;
+
+/**
+ * What one run has been through with refused credentials (TASK-2139), for the
+ * stretch of the run it covers: dropped when the run settles without being
+ * carried on (kept over a pause for an Anthropic reset, which the box resumes
+ * by itself), and when the owner resumes it.
+ *
+ * On 2026-11-03 Anthropic refused one account's OAuth token mid-run and five
+ * runs died within half a minute: each was refused, the probe said the account
+ * was fine, the run was put straight back on it, was refused again, and round
+ * it went until its retries ran out — while another connected account sat
+ * unused. So an account whose credential is refused gets ONE restart on a
+ * credential read again from the store — only when that copy is fresher than
+ * the refused one — and a second refusal there (or nothing fresher) moves the
+ * run to the next account in the owner's order; it never goes back to it.
+ */
+interface AuthTrail {
+  /** Times the run was carried on after a refusal — see MAX_AUTH_RETRIES. */
+  count: number;
+  /** Accounts that already had their one restart on a credential read fresh from the store. */
+  refreshed: Set<string>;
+  /** Accounts this run does not go back to: refused again after that restart, with nothing fresher to restart on, or not vouched for by the probe. */
+  refused: Set<string>;
+}
+
+function authTrailOf(runId: string): AuthTrail {
+  const trails = store.anthropicAuthTrail ?? (store.anthropicAuthTrail = new Map<string, AuthTrail>());
+  let trail = trails.get(runId);
+  if (!trail) {
+    trail = { count: 0, refreshed: new Set(), refused: new Set() };
+    trails.set(runId, trail);
+  }
+  return trail;
+}
+
+/** Paused until an Anthropic account's reset, which the box resumes by itself (resumeRunsWaitingForAnthropic). */
+function pausedForAnthropicReset(run: CodingRun): boolean {
+  return run.status === "paused" && run.pauseReason?.kind === "allowance" && run.pauseReason.meter === "anthropic";
+}
+
+/** The run's error when it ran out of refused-credential retries (MAX_AUTH_RETRIES). */
+function authRetriesSpentError(count: number): string {
+  return `Anthropic kept refusing this run's credential: it was carried on ${count} times, on fresh credentials and on other accounts, and was refused each time.`
+    + " Check the accounts in Settings → Providers → Anthropic accounts, sign in again any that need it, then start the run again.";
+}
 
 /** Why a run is being carried on on another account (TASK-1260 adds the last two). */
 type AccountTrouble =
@@ -10079,43 +11666,113 @@ async function continueOnAnotherAccount(
   why: AccountTrouble,
   carriedSecrets: Record<string, string> | undefined,
   carriedAccount: RunAnthropicCredential | undefined,
+  carriedMcp: RunMcpPlan | undefined,
 ): Promise<void> {
   const fromId = run.anthropicAccount;
   const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
-  const exclude = new Set<string>();
+  // Whatever moves the run now, it never goes back to an account it has
+  // already given up on after a refusal (AuthTrail).
+  const trail = authTrailOf(run.id);
+  const exclude = new Set<string>(trail.refused);
   let recorded: LimitRecorded | null = null;
+  // What asking Anthropic about a refused credential answered, when it was
+  // asked — or `again`: refused once more after its restart on a fresh one.
+  let authVerdict: "ok" | "dead" | "unknown" | "again" | null = null;
+  // The account the run goes back on, its credential read again from the
+  // store: the one whose refusal turned out to be a stale token.
+  let prefer: string | null = null;
+  // The credential the refused process was handed. The probe answers from the
+  // store's copy when it differs, renewing nothing; and the run is never
+  // handed this one again (prepareAccount's `prefer`).
+  const held = carriedAccount && carriedAccount.accountId === fromId ? carriedAccount.credential.secret : null;
   if (why.kind === "limit") {
     recorded = await recordAccountLimit(run, why.found);
     if (fromId) exclude.add(fromId);
   } else if (why.kind === "auth" && fromId) {
     // Confirmed before the account is taken out: a grant the pool can still
     // renew was only stale in this process, and the run goes on on the SAME
-    // account with a fresh token. A dead one is marked (which moves the box's
-    // active account); one Anthropic could not be asked about sits this spawn out.
-    const verdict = await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
-    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; asked again, it is ${verdict}`);
-    if (verdict !== "ok") exclude.add(fromId);
+    // account with a fresh token — ONCE, and never on the refused copy again
+    // (an API key Anthropic accepts when asked is still that copy, so the run
+    // moves on). A dead one is marked (which moves the box's active account);
+    // one Anthropic could not be asked about is left for the rest of the run.
+    // An account its organisation switched off is not asked about: its grant
+    // renews fine, so the probe would keep it and put the run straight back on it.
+    const disabled = detectAnthropicAccountDisabled(why.text);
+    if (!disabled && trail.refreshed.has(fromId)) {
+      // Refused AGAIN after that restart. Not asked again: it said "fine" last
+      // time, and asking renews the grant once more, replacing the token every
+      // other run on the account has just been handed. Nothing is marked —
+      // other runs may still be working on it — but this run moves on.
+      authVerdict = "again";
+      console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential again after its restart on a fresh one; not asking again, the run moves to the next account`);
+    } else {
+      authVerdict = disabled
+        ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
+        : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }, held).catch(() => "unknown" as const);
+      console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${authVerdict}${authVerdict === "ok" ? ": the run goes back on it once if the store holds a fresher credential" : ": the run moves to the next account"}`);
+    }
+    if (authVerdict === "ok") {
+      trail.refreshed.add(fromId);
+      prefer = fromId;
+    } else {
+      trail.refused.add(fromId);
+      exclude.add(fromId);
+    }
   }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
+  // Could another account than the one(s) just left behind answer, as far as
+  // the pool knows? Null when the pool could not be read at all.
+  let otherAccountOk: boolean | null = null;
   try {
-    const answer = await prepareAccount({ exclude });
+    const answer = await prepareAccount({ exclude, prefer: prefer ? { id: prefer, refused: held } : null, model: limitModelOf(run, why.kind === "limit" ? why.found : null) });
     prepared = answer.prepared;
+    if (prefer && prepared?.account.id !== prefer) {
+      // The store had nothing fresher than the credential just refused (or
+      // could not hand it out): the run does not go back on that account.
+      trail.refused.add(prefer);
+      exclude.add(prefer);
+      console.error(`[coding-agent] ${run.id}: account ${prefer} has no credential fresher than the one Anthropic refused; the run moves to the next account`);
+    }
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
+    const now = Date.now();
+    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsableFor(a, now, limitModelOf(run, why.kind === "limit" ? why.found : null)));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
   if (run.status !== "running" || live.has(run.id)) return;
 
   if (!prepared) {
-    // Nobody else can answer after all (another run got there first, or the
-    // next account's credential turned out dead). Wait for the first reset,
+    // Nobody else can answer after all (the next account's credential turned
+    // out dead, or could not be renewed just now). Wait for the first reset,
     // settled through finishRun's ordinary tail as the pause it is — or, when
     // no account comes back by itself, fail with the one thing that helps.
-    const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
+    // The first account back for THIS run's model — a model week counts (TASK-2141).
+    const resetsAt = nextResetFor(accountsSnapshot() ?? [], Date.now(), limitModelOf(run, why.kind === "limit" ? why.found : null))
+      ?? nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
     if (resetsAt === null) {
-      state.forcedAccountFailure = "Anthropic refused the credential of every account this run could use."
-        + " Sign one in again in Settings → Providers → Anthropic accounts, then resume the run.";
+      // Another account that can answer is still on the list: its sign-in only
+      // could not be renewed (or read) just now, which marks nothing — so
+      // "refused, sign in again" would be false while the card shows it fine.
+      // A failed run cannot be resumed in place (resumeRun takes a paused or
+      // gave-up one), so the way out is a new start, never "resume".
+      state.forcedAccountFailure = otherAccountOk === null
+        ? "The Anthropic account list could not be read, so the run could not be moved to another account. Start the run again in a moment."
+        : otherAccountOk
+          ? "Another Anthropic account could take this run over, but its sign-in could not be renewed or read just now; the box may be offline."
+            + " Start the run again once the box is back online."
+          : authVerdict === "unknown"
+            // Refused in the run, and asking again got no answer — its grant may well be fine.
+            ? "Anthropic refused the credential this run was using, and it could not be checked again just now."
+              + " If the account was signed out, sign it in again in Settings → Providers → Anthropic accounts; then start the run again."
+            : authVerdict === "ok" || authVerdict === "again"
+              // The last one refused is not marked — the card still shows it
+              // connected — so "sign it in again" alone would not add up.
+              ? "Anthropic refused the credential of every account this run could use — including one it still accepts when asked, which stays connected."
+                + " Check the accounts in Settings → Providers → Anthropic accounts, sign in again any that need it, then start the run again."
+              : "Anthropic refused the credential of every account this run could use."
+                + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
+      console.error(`[coding-agent] ${run.id}: no Anthropic account left to carry the run on after ${fromId ?? "its account"} (left behind: ${[...exclude].join(", ") || "none"}); it ends failed`);
       finishRun(run, state, exitCode);
       return;
     }
@@ -10140,17 +11797,25 @@ async function continueOnAnotherAccount(
     run.accountSwitches = [...run.accountSwitches, switched].slice(-MAX_ACCOUNT_SWITCHES);
   }
   run.anthropicAccount = prepared.account.id;
-  restoreRunSecrets(run.id, carriedSecrets ?? {}, {
+  // Carried on, as the move is the same run's next try — but never past a
+  // copy's last day, which may have gone by while this run waited for an account.
+  const carried = carriedSecrets ? await withoutExpiredSecrets(carriedSecrets, runSecretScopes.get(run.id) ?? {}) : {};
+  restoreRunSecrets(run.id, carried, {
     accountId: prepared.account.id,
     label: prepared.account.label,
     credential: prepared.credential,
-  });
+  }, carriedMcp);
   const from = fromLabel ?? "the previous account";
   if (why.kind === "limit") pushProgress(run, RUNNER_STEP.accountSwitched(from, prepared.account.label, formatResetClock(why.found.until)));
   else if (why.kind === "auth") pushProgress(run, RUNNER_STEP.accountRefused(from, prepared.account.label));
   else pushProgress(run, RUNNER_STEP.accountMoved(from, prepared.account.label));
   persist(true);
-  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}`);
+  const how = why.kind !== "auth"
+    ? ""
+    : sameAccount
+      ? `, restarted with its credential read again from the store (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`
+      : `, failed over in the owner's order (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`;
+  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}${how}`);
   try {
     // The SAME record and session: `continuingRecord`, so the counters add up,
     // and the session's own transcript is where the work is — the task is not
@@ -10190,12 +11855,20 @@ function moveRunsOffDeadAccounts(): string[] {
   return moved;
 }
 
-async function applyCodingSwap(): Promise<SwapConsumerOutcome> {
+async function applyCodingSwap(ctx: SwapContext): Promise<SwapConsumerOutcome> {
   if (!activeAccountSnapshot()) return { status: "skipped", code: "no_account", count: null };
   const moved = moveRunsOffDeadAccounts();
   const resumed = await resumeRunsWaitingForAnthropic();
-  const count = moved.length + resumed.length;
-  if (count > 0) console.error(`[coding-agent] the Anthropic account swap moved ${moved.length} run(s) and resumed ${resumed.length}`);
+  // The run whose own limit or refusal moved the account is being carried on
+  // by its own path (continueOnAnotherAccount), which recorded the limit
+  // first: its process is already gone, so the sweep above cannot see it. It
+  // moved all the same — counted, or the card and the notice say "nothing to
+  // move" over a run that just moved (2026-10-14).
+  const own = ctx.change.runId;
+  const ownRun = own && !moved.includes(own) && !resumed.includes(own) ? loadRuns().find((r) => r.id === own) : undefined;
+  const carried = ownRun && ownRun.status === "running" && ownRun.provider === "anthropic" ? 1 : 0;
+  const count = moved.length + resumed.length + carried;
+  if (count > 0) console.error(`[coding-agent] the Anthropic account swap moved ${moved.length + carried} run(s) and resumed ${resumed.length}`);
   return { status: "ok", code: count > 0 ? "moved" : "nothing_running", count };
 }
 
@@ -10298,6 +11971,11 @@ export async function armAnthropicAccounts(): Promise<void> {
 }
 
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
+  // The process is gone and its hook with it: what the hook handed over is
+  // recorded, the rest is queued again for the next start (settleRunInbox),
+  // and the inbox goes — a respawn makes a fresh one.
+  settleRunInbox(run, state);
+  removeRunInbox(run.id);
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
   state.openSubagents.clear();
@@ -10308,13 +11986,13 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   let accountLimit: FoundAccountLimit | null = null;
   let accountAuthText: string | null = null;
   let accountDecision: "switch" | "wait" | "auth" | "moved" | null = null;
+  // A context window outgrown, and the reply the carrying-on spawn may ask
+  // for — decided below, acted on after the cleanup (TASK-2203).
+  let contextCarryOn: { overflow: ContextOverflow; maxReplyTokens: number; attempt: number } | null = null;
+  // …and whether the failure WAS an outgrown window at all: its numbers are no
+  // transient upstream blink, whatever digits they happen to contain.
+  let contextOverflowed = false;
   if (run.status === "running") {
-    // The device's own stop — the token limit — has already written why on
-    // the record. A result event that slipped out before the kill landed
-    // must not turn that into "completed" with a "Stopped at the token
-    // limit" error beside it: both at once, and the resume the error offers
-    // hidden behind a status that says the work is done.
-    const deviceStopped = state.endRequested === "stop" && run.error !== null;
     if (state.forcedAccountPause) {
       // The account switch found no account to move the run to, AFTER the
       // process had gone (continueOnAnotherAccount). It settles as the wait it
@@ -10339,11 +12017,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.status = "failed";
       run.error = state.simulatedLimit;
       state.limitSignal = state.simulatedLimit;
-    } else if (state.outcome && !deviceStopped) {
+    } else if (state.outcome) {
       // The result event's verdict, now that the process is actually gone.
       // Ahead of the stop branch so a stop that raced the final message
-      // keeps "completed", as it always has — the OWNER's stop records no
-      // error, so it is the one this reaches.
+      // keeps "completed", as it always has.
       run.status = state.outcome.status;
       if (state.outcome.resumable) run.resumable = true;
       if (state.outcome.error && !run.error) run.error = redactForRun(run.id, state.outcome.error);
@@ -10398,13 +12075,46 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         noteStreamInputRefused();
         console.error(`[coding-agent] ${run.id}: the harness refused streaming input; messages will wait for a boundary`);
       }
-      run.error = ULTRACODE_REFUSED.test(state.stderr)
-        // The CLI refuses the flag before the first turn when dynamic
-        // workflows are off for this install or the plan does not allow
-        // xhigh. Name the way out rather than echo its /config advice, which
-        // the owner cannot follow from the app.
-        ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
-        : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+      run.error = runsOnCodex(run.provider)
+        // Codex prints its own failures as stream notices ("Reconnecting...",
+        // a stream error) before it gives up; the last one is the best account
+        // of a run that ended with no verdict, and stderr is the next.
+        ? (state.codexNotice ? redactForRun(run.id, state.codexNotice).slice(0, MAX_ERROR_CHARS) : "")
+          || tail || `Codex exited with code ${exitCode ?? "unknown"} before reporting a result.`
+        : ULTRACODE_REFUSED.test(state.stderr)
+          // The CLI refuses the flag before the first turn when dynamic
+          // workflows are off for this install or the plan does not allow
+          // xhigh. Name the way out rather than echo its /config advice, which
+          // the owner cannot follow from the app.
+          ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
+          : modelAnswered({ tokensUsed: run.tokensUsed - state.tokensAtSpawn, sawModelAnswer: state.sawModelAnswer })
+            // A model answered this spawn, so the harness could get one to:
+            // the error is what ended it, with the CLI's model warning left
+            // out of the tail (endedAfterAnswer).
+            ? endedAfterAnswer(exitCode, run.tokensUsed - state.tokensAtSpawn, redactForRun(run.id, stderrTail(state.stderr, true)))
+            : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+    }
+    // An `openai` run OpenAI turned away for a usage limit or a refused
+    // credential, said in the owner's terms. The limit is remembered, so the
+    // provider reads "limited" in the settings and the next run waits for the
+    // reset instead of being refused the same way (assertCanSpawn); a run that
+    // got its answer clears it. Resumable across a limit: the thread holds
+    // the work done so far, and a limit comes good by itself.
+    if (runsOnCodex(run.provider)) {
+      if (run.status === "completed") {
+        void clearOpenAILimit().catch((err: unknown) => {
+          console.error(`[coding-agent] ${run.id}: could not clear the OpenAI limit:`, err instanceof Error ? err.message : err);
+        });
+      } else if (run.status === "failed" && state.endRequested === null && state.codexLimit) {
+        const resetsAt = codexLimitUntil(state.codexLimit, Date.now());
+        void noteOpenAILimit(resetsAt).catch((err: unknown) => {
+          console.error(`[coding-agent] ${run.id}: could not record the OpenAI limit:`, err instanceof Error ? err.message : err);
+        });
+        run.error = `OpenAI turned this run away at its usage limit; it should be back at about ${formatResetClock(resetsAt)}: ${state.codexLimit}`.slice(0, MAX_ERROR_CHARS);
+        if (run.sessionId) run.resumable = true;
+      } else if (run.status === "failed" && state.codexAuth) {
+        run.error = `OpenAI did not accept this ClawBox's credential (${state.codexAuth}). Reconnect OpenAI in the Coding Agent app → Settings.`.slice(0, MAX_ERROR_CHARS);
+      }
     }
     // ClawBox AI refused the run's MODEL calls because one of its rolling
     // allowances is spent. That is not the work failing, and neither a retry
@@ -10416,7 +12126,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // Only the proxy's own answer counts — its 429 or its `usage_limit`
     // envelope — never words that merely quote a code: a run working on this
     // very codebase can fail with a sentence about `weekly_limit_exceeded`.
-    if (run.status === "failed" && state.endRequested === null && run.sessionId && PROXY_REFUSAL_RE.test(run.error ?? "")) {
+    // An OpenAI run's limit is OpenAI's, never the proxy's: it is read below.
+    if (run.status === "failed" && state.endRequested === null && run.sessionId && !runsOnCodex(run.provider) && PROXY_REFUSAL_RE.test(run.error ?? "")) {
       const refusal = parseClawaiAllowanceRefusal(run.error);
       if (refusal) {
         run.status = "paused";
@@ -10428,6 +12139,26 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
           message: (refusal.message ?? run.error ?? "").slice(0, MAX_PAUSE_MESSAGE_CHARS),
         };
         run.error = null;
+      }
+    }
+    // A CONTEXT WINDOW OUTGROWN (TASK-2203). The proxy passes DeepSeek's own
+    // refusal on — "This model's maximum context length is 1048576 tokens.
+    // However, you requested …" — which Claude Code does not read as "prompt
+    // is too long", so its own compaction never ran and the run died with its
+    // session full. That session is intact, so the run is carried on in it,
+    // after the cleanup below, compacted first (src/lib/coding-context-window.ts);
+    // a run that cannot be is failed with the numbers and the provider's words
+    // rather than "Claude Code reported an error". ClawBox AI runs only: an
+    // Anthropic run's refusal is the one Claude Code reads and compacts on
+    // itself, and a Codex run has its own compaction.
+    if (run.status === "failed" && run.provider === "clawbox-ai" && state.endRequested === null && !state.timedOut) {
+      const overflow = parseContextOverflow(run.error);
+      if (overflow) {
+        contextOverflowed = true;
+        const recoveries = run.contextRecoveries ?? 0;
+        const plan = planContextRecovery(overflow, recoveries, Boolean(run.sessionId));
+        if (plan.kind === "resume") contextCarryOn = { overflow, maxReplyTokens: plan.maxReplyTokens, attempt: plan.attempt };
+        else run.error = contextOverflowError(overflow, recoveries, plan.reason);
       }
     }
     // AN ANTHROPIC ACCOUNT AT ITS USAGE LIMIT (TASK-902). The overnight queue
@@ -10447,15 +12178,19 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         accountDecision = "moved";
       } else if (!accountLimit) {
         const refused = anthropicAuthFailureOf(run, state);
-        const retries = store.anthropicAuthRetries ?? (store.anthropicAuthRetries = new Map<string, number>());
-        const spent = retries.get(run.id) ?? 0;
-        if (refused && spent < MAX_AUTH_SWITCHES) {
-          // Counted per RUN, not per switch: a refusal the probe cannot pin on
-          // the account carries the run on on the SAME account, which records
-          // no switch — and must still not do it for ever.
-          retries.set(run.id, spent + 1);
-          accountAuthText = refused;
-          accountDecision = "auth";
+        if (refused) {
+          const trail = authTrailOf(run.id);
+          if (trail.count < MAX_AUTH_RETRIES) {
+            // Counted per RUN, not per switch: a restart on the SAME account
+            // with a fresh credential records no switch — and is counted all
+            // the same.
+            trail.count += 1;
+            accountAuthText = refused;
+            accountDecision = "auth";
+          } else {
+            console.error(`[coding-agent] ${run.id}: Anthropic refused this run's credential again after ${trail.count} carried-on tries; it ends failed on account ${run.anthropicAccount ?? "(none)"}`);
+            run.error = authRetriesSpentError(trail.count);
+          }
         }
       }
       if (accountLimit) {
@@ -10463,9 +12198,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         // a pause has to be on the record before the cleanup and the settle
         // below read the status. `null` — the pool has not been read since
         // boot — goes the slow way, which settles the pause itself if it must.
-        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount) : false;
+        const another = run.anthropicAccount ? anotherAccountLikely(run.anthropicAccount, Date.now(), limitModelOf(run, accountLimit)) : false;
         if (another === false) {
-          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until);
+          const resetsAt = earliestAccountReset(run.anthropicAccount, accountLimit.until, limitModelOf(run, accountLimit));
           run.status = "paused";
           run.resumable = true;
           run.error = null;
@@ -10496,9 +12231,15 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // The owner's secrets, taken before the cleanup below drops them — for the
   // retry branch alone, which cannot re-resolve them. See restoreRunSecrets.
   const carriedSecrets = runSecretEnv.get(run.id);
+  // …with when each dated one of them stops being handed, for that branch.
+  const carriedExpiry = runSecretExpiry.get(run.id);
   // …and the Anthropic account it was on, for the same branch and for the
   // account switch below.
   const carriedAccount = runAnthropicCredential.get(run.id);
+  // …and its project's MCP servers, for the same two continuations.
+  const carriedMcp = runMcpPlan.get(run.id);
+  // …and an `openai` run's key, for the retry.
+  const carriedOpenAIKey = runOpenAIKey.get(run.id);
   // …and its process group, which the cleanup forgets once it has signalled
   // it: the prune below waits for that group to be gone.
   const settledGroup = run.pgid;
@@ -10530,12 +12271,60 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       : accountDecision === "auth"
         ? { kind: "auth", text: accountAuthText ?? "" }
         : { kind: "moved" };
-    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount));
+    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount, carriedMcp));
     return;
   }
+  // THE CONTEXT WINDOW OUTGROWN (TASK-2203) — see where `contextCarryOn` is
+  // set. Like the account switch: the same record and session, back on
+  // "running" with nothing downstream told it finished, respawned with the
+  // reply cut to what fits beside the context (runContextReply). Claude Code
+  // compacts before its first request — the wrapper's auto-compact window is
+  // far below what the session holds — and goes on from the summary.
+  if (contextCarryOn && run.status === "failed" && run.sessionId) {
+    const { overflow, maxReplyTokens, attempt } = contextCarryOn;
+    run.contextRecoveries = attempt;
+    run.status = "running";
+    run.completedAt = null;
+    run.exitCode = null;
+    run.error = null;
+    // The refusal arrived as the result event's text; a continuation that
+    // dies without a result must not file it as the run's report.
+    run.summary = null;
+    run.resultText = null;
+    run.lastActivityAt = Date.now();
+    pushProgress(run, RUNNER_STEP.contextCompacted(attempt, MAX_CONTEXT_RECOVERIES, overflow.context, overflow.window));
+    persist(true);
+    console.error(`[coding-agent] ${run.id}: the provider refused a request past the context window (${overflow.context ?? "?"} of ${overflow.window ?? "?"} tokens); carrying on in session ${run.sessionId}, compacted, with replies of at most ${maxReplyTokens} tokens (attempt ${attempt} of ${MAX_CONTEXT_RECOVERIES})`);
+    // The same run's next stretch of the same work: the same credentials,
+    // less a dated copy whose day ended meanwhile (see the retry below).
+    if (carriedSecrets || carriedAccount || carriedMcp || carriedOpenAIKey) {
+      restoreRunSecrets(run.id, withoutPastDueSecrets(carriedSecrets ?? {}, carriedExpiry ?? {}), carriedAccount, carriedMcp, carriedOpenAIKey);
+    }
+    runContextReply.set(run.id, maxReplyTokens);
+    try {
+      spawnOrSettle(run, run.sessionId, state.tools, state.settings, contextRecoveryContinuation(artifactsDir(run.id)), true);
+      // A model has answered this run — a million tokens of it — so the
+      // harness-fault verdict must judge the carry-on with the stretch before
+      // it, as it does the transient retry's (TASK-1320): a refusal before the
+      // carry-on's first answer is this run's failure, not the box's harness.
+      const carried = live.get(run.id);
+      if (carried && carried !== state) {
+        carried.tokensAtSpawn = state.tokensAtSpawn;
+        carried.sawModelAnswer = state.sawModelAnswer;
+      }
+    } catch {
+      // spawnOrSettle settled the record and said why.
+      runContextReply.delete(run.id);
+    }
+    return;
+  }
+
   // Not carried on: this stretch of the run is over, and its refused-credential
-  // count goes with it rather than staying in the process for ever.
-  store.anthropicAuthRetries?.delete(run.id);
+  // trail goes with it rather than staying in the process for ever — except
+  // over a pause for an Anthropic reset. The box resumes that one by itself,
+  // and that resume is the same stretch: it must not go back to an account the
+  // run gave up on, nor start the count again (the owner's Resume drops it).
+  if (!pausedForAnthropicReset(run)) store.anthropicAuthTrail?.delete(run.id);
   if (accountDecision === "wait" && accountLimit) {
     void recordAccountLimit(run, accountLimit);
   }
@@ -10566,6 +12355,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // does: the harness never started, so nothing happened that a second
     // attempt could trip over — and this one goes without the flag.
     && (isTransientFailure(run.error) || state.scopeRefused || state.streamInputRefused)
+    // An outgrown window is never a blink, and its numbers may hold a "503".
+    && !contextOverflowed
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
@@ -10590,8 +12381,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
       // The same credentials and the same redaction table as the attempt that
       // got nowhere: this is one run making a second try at the same work, not
-      // a new decision by the owner.
-      if (carriedSecrets || carriedAccount) restoreRunSecrets(run.id, carriedSecrets ?? {}, carriedAccount);
+      // a new decision by the owner. Less a dated copy whose day ended while the
+      // first attempt ran: one is never handed after its day, whoever hands it.
+      if (carriedSecrets || carriedAccount || carriedMcp || carriedOpenAIKey) {
+        restoreRunSecrets(run.id, withoutPastDueSecrets(carriedSecrets ?? {}, carriedExpiry ?? {}), carriedAccount, carriedMcp, carriedOpenAIKey);
+      }
       try {
         spawnRun(run, null, state.tools, state.settings);
         // The retry is the same run's second try at the same work, seconds
@@ -10609,11 +12403,15 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.status = "failed";
         run.completedAt = Date.now();
         run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+        auditUnstartedSpawn(run.id);
         // And take back what restoreRunSecrets put in memory for a child that
         // never came into being. The cleanup above this branch has already run
         // and will not run again, so without this the owner's plaintext would
         // sit in this process until it restarted (found in review).
         dropRunSecrets(run.id);
+        // …and on disk: the spawn may have written its MCP config, with the
+        // project's server credentials, before it threw.
+        removeRunMcpConfigs(run.id);
       }
     }
   }
@@ -10646,7 +12444,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // like any other failure of the run, and nothing is remembered.
   // THIS spawn's bill (and its retry's), not the record's: see tokensAtSpawn.
   const spawnTokens = Math.max(0, run.tokensUsed - state.tokensAtSpawn);
-  const harnessVerdict = run.status === "failed"
+  run.spawnTokens = [...run.spawnTokens, spawnTokens].slice(-MAX_SPAWN_TOKENS_KEPT);
+  // Claude Code's harness only: a Codex run that could not get an answer is
+  // OpenAI's or the Codex CLI's to explain, and a fault recorded for it would
+  // refuse every Claude run on the box for nothing.
+  const harnessVerdict = run.status === "failed" && !runsOnCodex(run.provider)
     ? classifyHarnessFailure(run.error, { tokensUsed: spawnTokens, sawModelAnswer: state.sawModelAnswer })
     : null;
   if (harnessVerdict === "run_failure") {
@@ -10691,12 +12493,26 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // Read now, not after the commit below: the owner's Kill clears it while the
   // group it named may still be on its way out.
   const leftRunning = run.leftover;
+  // The settle's own question about it, when it is still being asked
+  // (noteRunLeftover): its answer, not the provisional one, decides below.
+  const leftoverCheck = leftoverChecks.get(run.id);
   // Until the wake below, a wait that begins now waits too (waitForRun): the
   // status already says settled, the branch does not have the work yet.
   store.unannounced.add(run.id);
   trackSettleWork((async () => {
     try {
+      await adoptRunBranchWork(run);
       await recordRunWork(run);
+      // The lessons the run proposed for its project's notes
+      // (src/lib/coding-run-notes.ts), vetted and merged before anyone waiting
+      // on it is woken — a team's next worker reads them. Not for a pause: the
+      // run is not over, and its next spawn may still change its mind.
+      if (settled !== "paused") {
+        const notes = await settleRunNotes(run, artifactsDir(run.id)).catch(() => ({ added: [], refused: [] }));
+        if (notes.added.length || notes.refused.length) {
+          console.error(`[coding-agent] ${run.id}: run notes +${notes.added.length}${notes.refused.length ? `, refused ${notes.refused.map((r) => r.reason).join(", ")}` : ""}`);
+        }
+      }
       // Before "finished", so the owner reads why something left the evidence
       // folder next to the run that put it there — and before any waiter or
       // update can find it: see pruneArtifacts. Not while something the run
@@ -10704,7 +12520,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // A run that left something running on purpose is not pruned at all; a
       // group the cleanup signalled is waited for, up to its SIGKILL and a
       // margin — something that shrugs off SIGTERM is still there until then.
-      if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
+      // A verdict that nothing in the group or the scope is the run's (only
+      // what was there before its first command) needs no wait for the group.
+      const verdict = leftoverCheck ? await leftoverCheck.catch(() => null) : null;
+      const keep = typeof verdict === "boolean" ? verdict : leftRunning;
+      if (!keep && (verdict === false || (await groupGone(settledGroup, STOP_GRACE_MS + 1_000)))) {
         const pruned = await pruneArtifacts(run.id);
         if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
       }
@@ -10714,6 +12534,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // Woken even when the bookkeeping above threw: a run that is over must
       // not keep every later wait on it for its whole slice.
       wakeWaiters(run.id);
+      // A slot is free: the queue's next run, in its turn.
+      void pumpRunQueue();
     }
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
     // A team's worker or reviewer ends here: its worktree is the
@@ -10721,9 +12543,26 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // review is the team's own reviewer's, and it never opens a pull
     // request — the assets, review pass and PR below would run in a folder
     // that is gone. The planner works in the project itself and keeps them.
-    if (run.team && run.team.role !== "planner") return;
-    await reviewAndShip(run, state.endRequested);
-  })());
+    try {
+      if (run.team && run.team.role !== "planner") return;
+      await reviewAndShip(run, state.endRequested);
+    } finally {
+      // The copies the owner limited to this one run go once it is over — here,
+      // at the END of the chain and not at the settle above it: the deliverable
+      // gate (inside reviewAndShip) can put this
+      // very record back to work, and that attempt is still its one run. A
+      // pause, or a record back at work, keeps them; that attempt's own settle
+      // comes back through here.
+      if (!isRunGoing(run.id)) {
+        endRunSecrets(run);
+        // Kept until here, not dropped with the secrets: the transient retry
+        // respawns before this chain and commits as the same identity.
+        runGitIdentity.delete(run.id);
+        // The folder janitor's after-run pass, if the boot hook armed it.
+        emitRunSettled();
+      }
+    }
+  })(), run.id);
   // A pause is the owner's own gesture — no finish notice for it.
   //
   // And neither is a run whose deliverable has not been looked at yet: "Coding
@@ -10731,12 +12570,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // making on the harness's word alone, and the run may be back at work
   // seconds later. `enforceDeliverable` sends it once it knows what the run
   // actually is — the two read the same predicate so no run falls between them.
-  // A live DELIVERY PIPELINE holds it for the same reason and by the same
-  // rule: the run is about to be reviewed, improved, deployed and checked, and
-  // "Coding agent finished run-x" now would be exactly the claim the pipeline
-  // exists to stop making. `settlePipelineRun` sends it when the pipeline is
-  // actually over.
-  if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
+  //
+  // A TEAM's run sends none either: the owner hears once, when the team
+  // settles (coding-team.ts `announceTeamSettled`), not once per planner,
+  // worker and reviewer.
+  if (run.status !== "paused" && !run.team && !deliverableGateApplies(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
     });
@@ -10831,8 +12669,15 @@ function consumeStreamText(run: CodingRun, state: LiveRun, text: string): void {
     stream.buffer = stream.buffer.slice(nl + 1);
     if (line && line.length <= MAX_STDOUT_LINE_CHARS && line.startsWith("{")) {
       try {
-        handleEvent(run, state, JSON.parse(line) as StreamEvent);
-        persist();
+        const event = JSON.parse(line) as unknown;
+        // The same log and the same tail for both runners; only the reading
+        // differs — Claude Code's stream-json, or Codex's `exec --json`.
+        if (runsOnCodex(run.provider)) handleCodexEvent(run, state, event);
+        else handleEvent(run, state, event as StreamEvent);
+        // The stream's own cadence, not the state one: a harness emits lines
+        // far faster than anybody reads the record, and each flush rewrites
+        // the whole file.
+        persist(false, STREAM_FLUSH_MS);
       } catch {
         // not JSON — Claude Code prints the odd plain line; ignore it
       }
@@ -10883,7 +12728,11 @@ function drainStream(run: CodingRun, state: LiveRun): void {
 function followStream(run: CodingRun, state: LiveRun): void {
   state.stream = { path: streamLogPath(run.id), offset: run.streamOffset, buffer: "", decoder: new StringDecoder("utf8") };
   state.stderrPath = stderrLogPath(run.id);
-  state.streamTimer = setInterval(() => drainStream(run, state), STREAM_POLL_MS);
+  state.streamTimer = setInterval(() => {
+    drainStream(run, state);
+    // The hook's receipts, while there is anything in the inbox to look for.
+    if (state.inboxPosted.size > 0) collectInboxReceipts(run, state);
+  }, STREAM_POLL_MS);
   state.streamTimer.unref();
 }
 
@@ -10907,6 +12756,68 @@ export function buildSpawnArgv(setprivPath: string, claudeArgs: string[]): { bin
   return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, wrapperPath(), ...claudeArgs] };
 }
 
+/** The same prefix in front of the Codex CLI, for an `openai` run. Exported for the contract test. */
+export function buildCodexSpawnArgv(setprivPath: string, codexArgs: string[]): { bin: string; argv: string[] } {
+  return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, codexBinary(), ...codexArgs] };
+}
+
+/**
+ * The Codex argv of an `openai` run (src/lib/coding-codex.ts): the same brief a
+ * Claude run gets, as developer instructions, and the run's own clawbox MCP
+ * server when it holds any of its tools. Never the project's harness servers:
+ * their credentials would have to travel in argv (prepareRunMcp says so in the
+ * run's feed). Exported for the contract test.
+ */
+export function buildCodexRunArgs(opts: RunArgsOptions & { model: string; readOnlyTools?: boolean }): string[] {
+  const visual = runHoldsVisualTools(opts.visual);
+  const developerInstructions = buildRunSystemPrompt({
+    ...opts,
+    // Ultracode's brief is about Claude Code's Workflow tool, which Codex does
+    // not have; its thinking half is the reasoning effort (codexReasoningEffort).
+    effort: opts.effort === ULTRACODE_EFFORT ? "xhigh" : opts.effort,
+    noHelpers: true,
+    // `codex exec` takes no step ceiling (buildCodexArgs), so the brief must
+    // not promise one: "This run has N steps." is a Claude run's sentence.
+    maxTurns: undefined,
+  });
+  const run = opts.run;
+  const mcpServers: Record<string, CodexMcpServer> = {};
+  if (run && !opts.readOnly && (visual || run.team || opts.readOnlyTools)) {
+    mcpServers.clawbox = runClawboxServer(run, { visual: visual && !opts.readOnly, readOnlyTools: opts.readOnlyTools === true });
+  } else if (run && opts.readOnly && run.team) {
+    // A read-only team run still speaks to its team (MCP_TEAM_TOOL).
+    mcpServers.clawbox = runClawboxServer(run, { visual: false, readOnlyTools: false });
+  }
+  return buildCodexArgs({
+    model: opts.model,
+    effort: opts.effort ?? DEFAULT_EFFORT,
+    developerInstructions,
+    resumeSessionId: opts.resumeSessionId ?? null,
+    mcpServers,
+    readOnly: opts.readOnly === true,
+  });
+}
+
+/**
+ * The run's command fence for Codex: the kill deny-list every Claude run gets,
+ * as execpolicy rules in the coding agent's CODEX_HOME. Rewritten at each spawn
+ * so a box that updates gets the current list. Best effort — a run that could
+ * not have its rules written still has its brief, as a Claude run whose hook
+ * failed does — and said in the log.
+ */
+function writeCodexRules(runId: string): void {
+  try {
+    const dir = path.join(ensureCodexHome(), "rules");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, "clawbox.rules");
+    const tmp = untraced(`${file}.${runId}.tmp`);
+    fs.writeFileSync(tmp, codexRulesText(BASH_KILL_DENYLIST, "A run ends what it started by PID; killing by name or every process can take this ClawBox down."), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: could not write the Codex rules:`, err instanceof Error ? err.message : err);
+  }
+}
+
 function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
@@ -10920,10 +12831,11 @@ function spawnRun(
    * `state.sawResult` is what `handleEvent` reads to decide that, and a fresh
    * `LiveRun` has it false — correct for every other spawn, because a resume
    * with `resumeRunId` makes a NEW record whose counters genuinely start at
-   * zero. A completion attempt is the one spawn that re-enters the SAME record:
-   * without this its result event overwrote `numTurns`, `permissionDenials`,
-   * `deniedActions` and `denials`, so a refusal from the first attempt — and the
-   * "Allow next time" button that answers it — vanished when the second ran.
+   * zero. The owner's Resume of a gave-up run is the one spawn that re-enters
+   * the SAME record: without this its result event overwrote `numTurns`,
+   * `permissionDenials`, `deniedActions` and `denials`, so a refusal from the
+   * first attempt — and the "Allow next time" button that answers it — vanished
+   * when the second ran.
    */
   continuingRecord = false,
 ): void {
@@ -10932,16 +12844,59 @@ function spawnRun(
   // reviewer (every task gets one — coding-team-reviewer.ts), or the run IS
   // the pass: in each case the flash reviewer would be a second look.
   const reviewedSeparately = run.reviewPass || run.reviewOf !== null || run.team !== null;
+  // An `openai` run is the Codex CLI, not Claude Code (src/lib/coding-codex.ts).
+  const codex = runsOnCodex(run.provider);
   // Streaming input unless this box's harness has been caught refusing the
   // flag (coding-run-messages.ts). It is what keeps the harness's stdin open
   // for the life of the run, so a message the owner sends at minute three can
   // be written as the next user turn instead of waiting for a boundary.
-  const streamInput = streamInputAvailable();
+  // `codex exec` reads its prompt once and has no such mode: a message to a
+  // Codex run waits for the next boundary, as on a box whose CLI refused it.
+  const streamInput = codex ? false : streamInputAvailable();
   // "opening" is the auto-PR path's promise to open or adopt a pull request
   // from this run's branch when it settles, and then to watch it — see
   // PR_DRAFT_BRIEF.
   const draftPullRequests = run.pr?.phase === "opening";
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // The run's inbox and hooks (src/lib/coding-run-inbox.ts). Whatever the
+  // previous spawn's hook did not take is the queue's again first — that
+  // process is gone, and the queue below is delivered this spawn's way.
+  settleRunInbox(run, null);
+  // Codex takes no per-run hooks, so no inbox and no merge guard (its command
+  // fence is the execpolicy rules below).
+  // This spawn's token: its scope is named by it, and so is its command
+  // clock, which is how a settle — or the next server, after a restart —
+  // finds the clock from the unit on the record (commandClockOfUnit).
+  const spawnToken = Date.now().toString(36);
+  const hookSettings = codex ? null : spawnHookSettings(run, spawnToken);
+  run.midTurn = hookSettings !== null && hookSettings.inbox;
+  // The CPU budget frozen at start; a record from before it existed gets the
+  // lone-run figure rather than none.
+  const cpuBudget = run.cpuBudget ?? runCpuBudget({ cpus: hostCpuCount() });
+  // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
+  // a resume sees a lesson the owner added meanwhile.
+  const runNotes = runNotesBlock(readRunNotes(run.directory));
+  // The visual decision, made ONCE — at this record's first spawn — and kept
+  // for every respawn, so the run's tools and its prompt prefix never move
+  // under it (CodingRun.visual).
+  if (run.visual === null) run.visual = decideRunVisual(run.task, run.directory);
+  // The project's MCP servers (prepareRunMcp), written for THIS spawn into a
+  // 0600 file the harness reads at start; the settle deletes it. A run whose
+  // project ticked nothing has no plan, writes nothing and keeps today's argv.
+  removeRunMcpConfigs(run.id);
+  const mcpPlan = run.readOnly ? undefined : runMcpPlan.get(run.id);
+  const runMcp: RunMcpArgs | null = mcpPlan && !codex
+    ? {
+        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team, readOnly: run.readOnly }, mcpPlan, { visual: runHoldsVisualTools(run.visual), solo: !run.team && !run.readOnly })),
+        allowedTools: mcpPlan.allowedTools,
+        disallowedTools: mcpPlan.disallowedTools,
+        readOnlyTools: mcpPlan.readOnlyTools,
+      }
+    : null;
+  const runArgs: RunArgsOptions = { resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp };
+  if (codex) writeCodexRules(run.id);
+  const dropped = codex
+    ? buildCodexSpawnArgv(tools.setprivPath, buildCodexRunArgs({ ...runArgs, model: run.requestedModel ?? defaultModelForProvider(run.provider) ?? DEFAULT_OPENAI_MODEL, readOnlyTools: mcpPlan?.readOnlyTools === true }))
+    : buildSpawnArgv(tools.setprivPath, buildRunArgs(runArgs));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -10956,7 +12911,7 @@ function spawnRun(
   // untouched on the far side of the `--`, because that prefix is the security
   // boundary and this one is only a cgroup. A per-spawn suffix, so a retry is
   // never refused the name of a scope systemd is still collecting.
-  const unit = tools.scopePath ? runScopeUnit(`${run.id}-${Date.now().toString(36)}`) : null;
+  const unit = tools.scopePath ? runScopeUnit(`${run.id}-${spawnToken}`) : null;
   const { bin, argv } = unit && tools.scopePath
     ? buildScopeArgv(tools.scopePath, unit, dropped.bin, dropped.argv)
     : dropped;
@@ -10970,19 +12925,35 @@ function spawnRun(
   // from a `close` handler and cannot read the disk (restoreRunSecrets).
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, secrets: runSecretEnv.get(run.id) });
+  // Taken, not read: only the spawn that carries a run on past an outgrown
+  // window asks for less than Claude Code's own reply.
+  const maxReplyTokens = runContextReply.get(run.id) ?? null;
+  runContextReply.delete(run.id);
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id), maxReplyTokens });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
   // itself never is, and never in argv. No entry means the wrapper's own
   // fallback: the legacy key, else the `claude` sign-in.
   const account = run.provider === "anthropic" ? runAnthropicCredential.get(run.id) : undefined;
+  // The owner's secrets this spawn carries, for the audit line that is written
+  // once the child's fate is known — see auditRunHandOff.
+  const handOff = runHandOffOf(run.id);
   let child: ChildProcess;
   try {
     // Inside the `try`: the handoff can throw (a full disk, a folder it cannot
     // make), and the `finally` must still close the two logs opened above. The
     // settle path takes any file it did write (removeCredentialHandoffs).
     if (account) runEnv.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE = writeCredentialHandoff(run.id, account.credential);
+    // An `openai` run on the owner's saved key: the one variable `codex exec`
+    // authenticates with. Codex keeps it from the commands the run starts
+    // (shell_environment_policy, coding-codex.ts) and the redaction table holds
+    // it (registerRunRedaction). Without a key, Codex reads the ChatGPT sign-in
+    // out of its own CODEX_HOME.
+    if (codex) {
+      const key = runOpenAIKey.get(run.id);
+      if (key) runEnv[CODEX_API_KEY_ENV] = key;
+    }
     child = spawn(bin, argv, {
       cwd: run.directory,
       // Deliberately NOT process.env: see the header. The cast is only because
@@ -11008,6 +12979,29 @@ function spawnRun(
     fs.closeSync(logs.out);
     fs.closeSync(logs.err);
   }
+  // `spawn` returning is not the process starting: an exec that fails (the
+  // wrapper missing, ENOENT) arrives as "error" instead of "spawn", and the line
+  // follows whichever comes first. A later "error" (a signal that could not be
+  // delivered) is about a child that had started, and changes nothing here.
+  let started = false;
+  child.once("spawn", () => {
+    started = true;
+    auditRunHandOff(run.id, handOff, true);
+  });
+  child.once("error", () => {
+    if (!started) auditRunHandOff(run.id, handOff, false);
+  });
+  // A run with no scope of its own gets the scope's nice level by hand, so the
+  // desktop is preferred over it either way. Set on the harness before it has
+  // forked anything worth the name; every child inherits it. Best effort: a
+  // run that could not be reniced still runs.
+  if (!unit && typeof child.pid === "number") {
+    try {
+      os.setPriority(child.pid, RUN_NICE);
+    } catch {
+      // Not ours to renice (a pid already gone): the run settles on its own.
+    }
+  }
 
   const state: LiveRun = {
     child,
@@ -11016,6 +13010,7 @@ function spawnRun(
     // systemd-run execs the harness in its own process, so this pid is the group
     // whichever of the two started it.
     pgid: typeof child.pid === "number" ? child.pid : null,
+    commandClock: hookSettings?.commandClock ?? null,
     stream: null,
     streamTimer: null,
     unitWatch: null,
@@ -11025,6 +13020,9 @@ function spawnRun(
     // Set once the first turn has actually been written below; a spawn whose
     // stdin threw never had an open pipe to close.
     stdinOpen: false,
+    midTurn: run.midTurn === true,
+    turnOpen: true,
+    inboxPosted: new Set<string>(),
     streamInputRefused: false,
     lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
@@ -11037,8 +13035,13 @@ function spawnRun(
     sawWriteAttempt: false,
     sawModelAnswer: false,
     tokensAtSpawn: run.tokensUsed,
+    breakdownAtSpawn: { ...run.tokenBreakdown },
+    resumedSession: Boolean(resumeSessionId),
     sawThinking: false,
     thinkingSeen: 0,
+    // A Codex thread reports its usage cumulatively: what it had billed before
+    // this spawn is taken off (applyCodexUsage).
+    ...(codex ? { codexBaseline: codexUsageBaseline(resumeSessionId) } : {}),
     tools,
     settings,
     commandMayHaveSideEffects: false,
@@ -11055,6 +13058,7 @@ function spawnRun(
     allowanceRefusal: null,
     pauseReason: null,
     limitSignal: null,
+    limitNotice: null,
     simulatedLimit: null,
     forcedAccountPause: null,
     authSignal: null,
@@ -11075,6 +13079,13 @@ function spawnRun(
   // this server never spawned, and a recycled pid is no handle at all.
   run.pgid = state.pgid;
   run.unit = unit;
+  // On disk AT ONCE, not with the next stream flush: the unit is the only
+  // handle the next web server has on this run (reconcileAfterRestart). Left
+  // to the 5 s streaming cadence, a restart a few seconds into a run found
+  // "running" with no unit, settled a run still alive in its scope as lost,
+  // and merged and removed the worktree it was working in (s8-restart-mid-run,
+  // 3 of 3 boards, after the cadence moved to STREAM_FLUSH_MS).
+  persist(true);
   followStream(run, state);
   installExitHook();
 
@@ -11091,7 +13102,7 @@ function spawnRun(
   child.on("error", (err) => {
     // Typically ENOENT: the wrapper is not where install.sh puts it.
     run.status = "failed";
-    run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err.message}`.slice(0, MAX_ERROR_CHARS);
+    run.error = `Could not start ${codex ? CODEX_COMMAND : CODING_HARNESS_COMMAND}: ${err.message}`.slice(0, MAX_ERROR_CHARS);
     settle(null);
   });
   // Settled a moment after the process is gone rather than the instant it is:
@@ -11128,21 +13139,22 @@ function spawnRun(
       state.stdinOpen = true;
       child.stdin?.write(streamJsonUserTurn(firstTurn));
       // Anything queued before the process existed — a message sent to a
-      // draft, or one that raced the start — goes in right behind the task
-      // rather than waiting for the first turn to end.
-      flushRunMessages(run, state);
+      // draft, or one that raced the start — goes to the inbox, for the
+      // first tool call; with no hook, in right behind the task rather than
+      // waiting for the first turn to end.
+      deliverRunMessages(run, state);
     } else {
       // No pipe to write to later, so anything already queued rides out with
       // the task itself — the boundary delivery, applied at the one boundary
-      // every spawn is. A start, the owner's Resume and another attempt at the
-      // deliverable all arrive here, so none of them needs its own copy.
+      // every spawn is. A start and the owner's Resume both arrive here, so
+      // neither needs its own copy.
       const waiting = queuedMessages(run.messages);
       const note = runMessagesNote(run.messages);
       if (child.stdin) {
         child.stdin.end(note ? `${firstTurn}\n\n${note}` : firstTurn);
         // Only once the bytes are on the pipe: with no stdin at all nothing
         // was said, and the queue is still the box's to deliver.
-        noteMessagesDelivered(run, waiting);
+        noteMessagesDelivered(run, waiting, "with_start");
       }
     }
   } catch {
@@ -11158,18 +13170,20 @@ function spawnRun(
  * the card, and the feed line is what makes the same fact visible in the
  * transcript preview and on the timeline.
  */
-function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]): void {
-  const now = Date.now();
+function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[], via: RunMessageVia, at = Date.now()): void {
   let marked = 0;
   for (const message of messages) {
     if (message.deliveredAt !== null) continue;
-    message.deliveredAt = now;
+    message.deliveredAt = at;
+    message.via = via;
     // pushProgress scrubs the owner's secrets out of the line and caps it,
     // like every other step in the feed.
-    pushProgress(run, runMessageProgressLine(message.text));
+    pushProgress(run, runMessageProgressLine(message.text, via));
     marked += 1;
   }
-  if (marked > 0) persist();
+  // At once, not debounced: a mark that died with the process would deliver
+  // the message a second time at the next spawn.
+  if (marked > 0) persist(true);
 }
 
 /** Different paths one spawn is pointed at before the box stops saying it: a run that keeps missing its folder is told a few times, not thirty. */
@@ -11193,7 +13207,7 @@ const MAX_WORKTREE_HINTS = 3;
  * no longer reach it.
  */
 function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string, flush = true): void {
-  if (!state.streamInput || !state.stdinOpen) return;
+  if (!(state.midTurn && state.turnOpen) && !(state.streamInput && state.stdinOpen)) return;
   if (state.worktreeHinted.has(counterpart) || state.worktreeHinted.size >= MAX_WORKTREE_HINTS) return;
   state.worktreeHinted.add(counterpart);
   try {
@@ -11204,7 +13218,7 @@ function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart:
     return;
   }
   persist(true);
-  if (flush) flushRunMessages(run, state);
+  if (flush) deliverRunMessages(run, state);
 }
 
 /**
@@ -11235,8 +13249,130 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
   }
   // Marked only once the bytes are on the pipe — "delivered" is a claim the
   // owner reads, and a message still in the queue is one the box owes them.
-  noteMessagesDelivered(run, sent);
+  noteMessagesDelivered(run, sent, "next_turn");
+  if (sent.length) state.turnOpen = true;
   return sent.length;
+}
+
+/**
+ * Hand what is queued to the run the quickest way it has NOW: its inbox while
+ * a turn is under way and the spawn has the hook (after the tool call it is
+ * in), else its stdin as the next turn. Answers how the queue went.
+ */
+function deliverRunMessages(run: CodingRun, state: LiveRun): RunMessageDelivery {
+  if (state.midTurn && state.turnOpen && postQueuedToInbox(run, state) > 0) return "after_tool_call";
+  if (state.midTurn && state.turnOpen && state.inboxPosted.size > 0) return "after_tool_call";
+  return flushRunMessages(run, state) > 0 ? "delivered" : "next_start";
+}
+
+/** The spawn's `--settings` hooks, or null when the hook script is not in this checkout. */
+function spawnHookSettings(run: CodingRun, spawnToken: string): { json: string; inbox: boolean; commandClock: string | null } | null {
+  const script = runHookScriptPath();
+  if (!fs.existsSync(script)) return null;
+  let inbox: string | null = null;
+  try {
+    inbox = ensureRunInbox(run.id);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: no inbox:`, err instanceof Error ? err.message : err);
+  }
+  // The merge guard for every team run, a read-only one included: it has Bash
+  // for read-only git, and the guard reads whole command lines.
+  // The keep-alive Stop hook for every run that can start work of its own: a
+  // read-only run (planner, reviewer, review pass) starts nothing to wait for.
+  let keepAlive: string | null = null;
+  if (!run.readOnly) {
+    try {
+      keepAlive = artifactsDir(run.id);
+    } catch (err) {
+      console.error(`[coding-agent] ${run.id}: no keep-alive hook:`, err instanceof Error ? err.message : err);
+    }
+  }
+  // Its command clock, created empty now, before the harness (and whatever
+  // launches it) has started anything: the Stop hook and the settle count only
+  // what started after the first command as the run's (coding-run-inbox.ts
+  // commandClockPath). Without one the hook keeps the old rule.
+  let commandClock: string | null = null;
+  if (keepAlive) {
+    try {
+      commandClock = createCommandClock(keepAlive, spawnToken);
+    } catch (err) {
+      console.error(`[coding-agent] ${run.id}: no command clock:`, err instanceof Error ? err.message : err);
+    }
+  }
+  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null, keepAlive, commandClock });
+  return json ? { json, inbox: inbox !== null, commandClock } : null;
+}
+
+/** The ids waiting in a run's inbox; none for an inbox that cannot be read. */
+function safeInboxPending(runId: string): string[] {
+  try {
+    return inboxPending(runId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Put every queued message this process has not put in the inbox yet there,
+ * framed the way the harness reads a message (runMessageTurn). Answers how
+ * many went in; a write that failed leaves its message queued.
+ */
+function postQueuedToInbox(run: CodingRun, state: LiveRun): number {
+  let posted = 0;
+  for (const message of queuedMessages(run.messages)) {
+    if (state.inboxPosted.has(message.id)) continue;
+    if (!postToInbox(run.id, { id: message.id, at: message.at, context: runMessageTurn(message.text, message.from) })) break;
+    state.inboxPosted.add(message.id);
+    posted += 1;
+  }
+  return posted;
+}
+
+/**
+ * What the run's hook handed over since the last look: marked delivered,
+ * mid-turn, at the moment the hook took it, and said on the run's feed — then
+ * the receipts go. Called from the tail while anything is in the inbox, and
+ * on the way into a settle.
+ */
+function collectInboxReceipts(run: CodingRun, state: LiveRun | null): number {
+  let receipts: Array<{ id: string; at: number }>;
+  try {
+    receipts = inboxReceipts(run.id);
+  } catch {
+    return 0;
+  }
+  if (!receipts.length) return 0;
+  let marked = 0;
+  for (const receipt of receipts) {
+    state?.inboxPosted.delete(receipt.id);
+    const message = run.messages.find((m) => m.id === receipt.id);
+    if (!message || message.deliveredAt !== null) continue;
+    noteMessagesDelivered(run, [message], "mid_turn", receipt.at);
+    marked += 1;
+  }
+  // Recorded (persisted at once by noteMessagesDelivered) before the receipt
+  // goes: a receipt outlives a crash in between, a lost mark would not.
+  clearReceipts(run.id, receipts.map((r) => r.id));
+  return marked;
+}
+
+/**
+ * The hook can only hand a message over while a turn is going. At a turn's
+ * end, a settle, and before a spawn delivers the queue its own way, whatever
+ * it took is recorded and whatever it did not is taken BACK — still queued on
+ * the record, for the next turn or the next start. One rename decides between
+ * the hook and this, so a message is never both.
+ */
+function settleRunInbox(run: CodingRun, state: LiveRun | null): void {
+  try {
+    collectInboxReceipts(run, state);
+    reclaimInbox(run.id);
+    // A receipt the hook wrote between the two looks.
+    collectInboxReceipts(run, state);
+  } catch {
+    // An inbox that cannot be read holds nothing the record does not.
+  }
+  state?.inboxPosted.clear();
 }
 
 /**
@@ -11250,6 +13386,10 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
  */
 function afterTurn(run: CodingRun, state: LiveRun): void {
   if (!state.streamInput || !state.stdinOpen) return;
+  // The turn is over, so the hook will not run again until the next one:
+  // what it did not take goes as that next turn instead.
+  state.turnOpen = false;
+  settleRunInbox(run, state);
   if (flushRunMessages(run, state) > 0) return;
   closeRunStdin(state);
 }
@@ -11286,14 +13426,20 @@ function protectedCheckout(): string {
  * that fourth is said on the record, because it is the only one the owner
  * could act on.
  */
-async function attachRunWorktree(run: CodingRun, projectDir: string): Promise<void> {
-  // Never throws: a run that could not be given a copy of the project is a
-  // run working in the project folder, which is what every run did until now
-  // — not a run that fails to start.
-  const made = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout() })
+async function attachRunWorktree(run: CodingRun, projectDir: string, baseBranch: string | null = null): Promise<void> {
+  // Never throws for the box's own choice: a run that could not be given a
+  // copy of the project is a run working in the project folder, which is what
+  // every run did until now — not a run that fails to start. A base branch the
+  // CALLER named is different: working in place would be on some other branch
+  // than the one asked for, so a branch that is not there refuses the start.
+  const made = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout(), baseBranch })
     .catch((err: unknown) => ({ ok: false as const, reason: "failed" as const, detail: err instanceof Error ? err.message : String(err) }));
+  if (!made.ok && made.reason === "no_base_branch") throw new CodingAgentError("invalid", made.detail);
   if (!made.ok) {
     if (made.reason === "failed") pushProgress(run, RUNNER_STEP.worktreeKept(`it could not be made — ${made.detail}`));
+    // A folder inside a repository that is not its own: said here, once. The
+    // branch step that follows answers the same reason and does not repeat it.
+    else if (made.reason === "not_repository_root" && made.root) pushProgress(run, RUNNER_STEP.notRepositoryRoot(made.root));
     return;
   }
   run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false, branchRemoved: false, result: null };
@@ -11324,6 +13470,9 @@ async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> 
   return { ...wt, removed: !back, branchRemoved: back ? false : wt.branchRemoved, result: null };
 }
 
+/** Why a stopped run's work is on its branch and not in the project — the record's, the feed's and the assistant's words. */
+const STOPPED_UNMERGED = "the run was stopped before it finished, so its work stays on its branch, unmerged; the owner decides whether to merge it";
+
 /** Every live run working in this exact folder — the question "is anybody still in there?". */
 function liveRunsIn(directory: string): CodingRun[] {
   return loadRuns().filter((r) => isLive(r.status) && r.directory === directory);
@@ -11332,25 +13481,43 @@ function liveRunsIn(directory: string): CodingRun[] {
 /**
  * What becomes of the run's worktree now that the chain it belongs to is over.
  *
- * THE RULE (the owner's): the tree goes only when the branch is merged or the
- * run left nothing on it. Anything else is work nobody has looked at, and the
- * tree stays with the card offering to remove it.
+ * THE RULE (the owner's, 2026-10-12): once the chain is over, the FILES go
+ * and the BRANCH stays. A run's work is its commits, and a worktree is only a
+ * checkout of them — git puts it back from the branch in a second when a
+ * resume, a review round or a Fix CI continuation needs it (`reopenWorktree`
+ * → `restoreRunWorktree`). Until this rule the tree stayed whenever the merge
+ * home was refused, and on a box whose owner keeps any uncommitted change in
+ * a project folder that is EVERY run: one project had ten copies of itself,
+ * 617 MB, under `.clawbox/worktrees/`, each one the files of a branch that
+ * was already safe in git. The old exception for a pull request (keep the
+ * tree, the review loop works in it) goes for the same reason — the loop's
+ * continuation is a `startRun({ resumeRunId })`, which restores the tree.
  *
  * In order:
  *   - somebody is still working in it (the automatic review pass, another go
  *     at the deliverable, the owner's own Resume) — leave it alone;
- *   - a live DELIVERY PIPELINE owns the run — leave it alone too. Between
- *     stages it holds no live run at all, and the copy is what the improvement
- *     lap re-spawns into and what an upload deploy sends; `settlePipelineRun`
- *     comes back here when the chain is actually over;
+ *   - the run is PAUSED — its chain is not over: the tree stays as it is for
+ *     the Resume that carries on in it, and nothing is merged;
  *   - the branch holds nothing — remove the tree AND the branch, which is
  *     the common ending for a run that investigated and changed nothing;
- *   - a pull request owns the branch — keep the tree, because the review loop
- *     hands the harness more turns in it and a merge would take the commits
- *     away from the pull request they are open as;
+ *   - the owner STOPPED it — remove the tree, keep the branch, merge nothing:
+ *     the work is half-finished, and half-finished work never lands in the
+ *     owner's base branch on its own (a run stopped at 75 s was merged into
+ *     main). It is recorded `unmerged` / `stopped`, so the page says where the
+ *     work is; a Resume restores the tree from the branch;
+ *   - a pull request owns the branch — remove the tree, keep the branch: the
+ *     work goes home through the request, and a local merge would take the
+ *     commits away from it;
  *   - otherwise merge it home into the project's base branch and remove the
  *     tree. A merge the project cannot take (it moved, it is dirty, it
- *     conflicts) keeps the tree and says why.
+ *     conflicts) is RECORDED on the run so the page can say which, and the
+ *     tree still goes — the work is on the branch, where the Changes tab and
+ *     `git merge` both find it.
+ *
+ * Only three things keep a tree on disk now: git could not say what is on its
+ * branch (no answer is not permission to delete), the tree holds work its
+ * branch does not (`unsavedWork` below), or the removal itself failed — and
+ * those are what the page's Remove copy is for.
  *
  * Never throws: this is the settle path, and a run whose tree could not be
  * tidied is still a run that finished.
@@ -11360,12 +13527,28 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
   if (!wt || wt.removed) return;
   try {
     if (liveRunsIn(wt.path).length > 0) return;
-    if (pipelineOwnsRun(run)) return;
     if (!fs.existsSync(wt.path)) {
       wt.removed = true;
       persist(true);
       return;
     }
+    if (run.status === "paused") {
+      pushProgress(run, RUNNER_STEP.worktreeKept("the run is paused, and Resume carries on in it"));
+      persist(true);
+      return;
+    }
+    // Settled lost at boot while nobody could say whether its scope was still
+    // up (reconcileAfterRestart): the tree is not this settle's to touch.
+    if (store.keepTrees.delete(run.id)) {
+      pushProgress(run, RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
+      persist(true);
+      return;
+    }
+    // Something the run started is still running in the tree (a server it
+    // left, `leftover`): the work may go home, but the folder stays under it.
+    // Asked after the settle's own leftover question has its answer.
+    await leftoverChecks.get(run.id)?.catch(() => undefined);
+    const inUse = run.leftover === true ? "something the run started is still running in it" : null;
     const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
     if (ahead === null) {
       // No answer is not permission to delete: keep it and say so.
@@ -11373,7 +13556,29 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
+    // Asked before EVERY removal below. `commitsAhead` counts the branch only,
+    // and `removeRunWorktree` forces: a commit that failed after its
+    // `git add -A` leaves the work staged in the tree, and a run that wrote
+    // through its shell without committing leaves it untracked there. Either
+    // way the tree is the only copy, so it stays — as it does when git cannot
+    // say. The answer is why it stays, or null when nothing would be lost.
+    const unsavedWork = async (): Promise<string | null> => {
+      if (run.commitError) return "the run's commit failed, so it may hold work its branch does not";
+      const changed = await worktreeHasChanges(wt.path);
+      if (changed === null) return "git could not say whether it holds uncommitted changes";
+      if (changed) return "it holds changes that are not committed to its branch";
+      // Committed on a branch of its own that could not be brought onto its
+      // branch (adoptRunBranchWork): the copy and the branch are kept.
+      const own = await ownBranchWork(wt.path, wt.branch);
+      return own.length ? `the run committed on ${own.map((o) => o.name).join(", ")}, which ${wt.branch} does not hold` : null;
+    };
     if (ahead === 0) {
+      const unsaved = (await unsavedWork()) ?? inUse;
+      if (unsaved) {
+        pushProgress(run, RUNNER_STEP.worktreeKept(unsaved));
+        persist(true);
+        return;
+      }
       // Recorded only if the files are actually gone: git can refuse the
       // removal (a busy file, an index lock), and a record that claimed the
       // copy had gone would leave the disk unreclaimed with nothing to retry
@@ -11392,9 +13597,37 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
-    if (run.pr && run.pr.phase !== "failed") {
-      pushProgress(run, RUNNER_STEP.worktreeKept(`${wt.branch} is open as a pull request`));
+    // The files go either way from here, unless they hold unsaved work; only
+    // the SENTENCE differs. Recorded only if they are actually gone (see the
+    // `ahead === 0` branch above).
+    const park = async (reason: string): Promise<void> => {
+      const unsaved = (await unsavedWork()) ?? inUse;
+      if (unsaved) {
+        pushProgress(run, RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
+        persist(true);
+        return;
+      }
+      if (!(await removeRunWorktree(wt.project, wt.path))) {
+        pushProgress(run, RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
+        persist(true);
+        return;
+      }
+      wt.removed = true;
+      pushProgress(run, RUNNER_STEP.worktreeParked(wt.branch, reason));
       persist(true);
+    };
+    if (run.status === "stopped") {
+      wt.result = { kind: "unmerged", reason: "stopped", detail: STOPPED_UNMERGED, base: null, commit: null };
+      await park(STOPPED_UNMERGED);
+      return;
+    }
+    // The pull request may be the ORIGIN's: a review pass or a review-loop
+    // turn carries on in the same tree with no `pr` of its own, and merging
+    // from there took the branch away from the request it is open for.
+    const origin = run.reviewOf ?? run.reviewLoopOf;
+    const pr = run.pr ?? (origin ? loadRuns().find((r) => r.id === origin)?.pr ?? null : null);
+    if (pr && pr.phase !== "failed") {
+      await park("it is open as a pull request");
       return;
     }
     const merged = await mergeRunBranch({
@@ -11404,14 +13637,20 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
     });
     if (!merged.ok) {
-      // Recorded, not just logged: this is the state the card reads to say
-      // what is in the way and offer to bring the work home once it is not.
+      // Recorded, not just logged: this is the state the run's page reads to
+      // say the work is on the branch and why it is not in the project.
       wt.result = { kind: "unmerged", reason: merged.reason, detail: merged.detail, base: null, commit: null };
-      pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
-      persist(true);
+      await park(merged.detail);
       return;
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
+    // The merge took the branch home, not what the tree holds beside it.
+    const unsaved = (await unsavedWork()) ?? inUse;
+    if (unsaved) {
+      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
+      persist(true);
+      return;
+    }
     if (!(await removeRunWorktree(wt.project, wt.path))) {
       // The work IS home — the merge landed — so this is only the copy left
       // behind, and the card's Remove is what answers it.
@@ -11428,93 +13667,11 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
 }
 
 /**
- * What the owner's **Bring the work home** answers with.
- *
- * A blocker is NOT an exception: it is the expected ending on a box whose
- * owner keeps uncommitted work in a project folder, and the caller has to be
- * able to show WHICH one it was and what clears it. So the refusal comes back
- * as a value with a stable `reason`, and the run record travels with it either
- * way — the card redraws from the box's own answer rather than from a second
- * poll, exactly as Remove copy already does.
- */
-export type BringHomeOutcome =
-  | { ok: true; merged: boolean; base: string; commit: string | null; run: CodingRun }
-  | { ok: false; reason: MergeHomeBlocker; detail: string; run: CodingRun };
-
-/**
- * The owner's **Bring the work home** button: merge a settled run's branch
- * into the project it was asked to work in.
- *
- * WHY. The settle already tries this, and refuses conservatively — the
- * project folder has uncommitted changes of its own, it has been moved to
- * another branch, the merge conflicts. Each refusal leaves the run saying
- * `completed` with its work reachable only as `clawbox/<runId>`, and the only
- * control on the card was Remove copy: a dead end, and on a box whose owner
- * keeps any uncommitted change in a project folder it is EVERY run. This is
- * the explicit gesture that finishes the job once the blocker is gone.
- *
- * WHAT IT WILL NOT DO. Exactly what the settle will not do, because the
- * project checkout is the owner's: it never stashes, discards, forces or
- * resets anything. It re-runs `mergeRunBranch`, which re-checks each
- * precondition, and answers the same reason when the blocker is still there.
- * The owner commits or stashes their own work, or switches the project back to
- * the base branch, and presses it again.
- */
-export async function bringRunWorkHome(id: string): Promise<BringHomeOutcome> {
-  const run = loadRuns().find((r) => r.id === id);
-  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
-  const wt = run.worktree;
-  if (!wt) throw new CodingAgentError("invalid", "That run worked in the project folder itself, so its work is already there.");
-  if (wt.branchRemoved) throw new CodingAgentError("invalid", "That run left nothing on its branch, so there is no work to bring home.");
-  // A live run is still writing into that tree and committing to that branch:
-  // merging half of it home is exactly the race worktrees exist to stop.
-  if (isLive(run.status) || liveRunsIn(wt.path).length > 0) {
-    throw new CodingAgentError("busy", "A run is still working in that copy of the project. Stop it first.");
-  }
-  const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
-  if (ahead === null) {
-    throw new CodingAgentError("invalid", `Git could not say what is on ${wt.branch}. The project may have moved or the branch may be gone.`);
-  }
-  if (ahead === 0) {
-    // Already home, or there was never anything on it. Either way the card
-    // must stop offering to bring it home — so the verdict is recorded rather
-    // than the call quietly succeeding against an unchanged record.
-    wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: null };
-    persist(true);
-    return { ok: true, merged: false, base: wt.base, commit: null, run: cloneRun(run) };
-  }
-  const merged = await mergeRunBranch({
-    projectDir: wt.project,
-    branch: wt.branch,
-    base: wt.base,
-    message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
-  });
-  if (!merged.ok) {
-    wt.result = { kind: "unmerged", reason: merged.reason, detail: merged.detail, base: null, commit: null };
-    pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
-    persist(true);
-    return { ok: false, reason: merged.reason, detail: merged.detail, run: cloneRun(run) };
-  }
-  wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
-  // The copy goes with the merge, as it does at settle — its commits are in
-  // the project now. A removal git refuses is not a failed bring-home: the
-  // work IS home, and Remove copy is what answers the files left behind.
-  if (await removeRunWorktree(wt.project, wt.path).catch(() => false)) {
-    wt.removed = true;
-    pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
-  } else {
-    pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
-  }
-  persist(true);
-  return { ok: true, merged: true, base: wt.base, commit: merged.commit, run: cloneRun(run) };
-}
-
-/**
  * The owner's Remove worktree button: take the files away whatever is on the
  * branch.
  *
  * Deliberately keeps the BRANCH. The button exists for a tree the settle
- * refused to remove, which by definition holds commits nothing else has —
+ * could not remove, which by definition holds commits nothing else has —
  * removing the files is reclaiming disk, and deleting the commits with them
  * would be a different, unrecoverable act behind the same word.
  */
@@ -11546,73 +13703,52 @@ export async function removeRunWorktreeFor(id: string): Promise<CodingRun> {
   return cloneRun(run);
 }
 
-/** How often the box looks for worktrees nothing needs any more. */
-export const WORKTREE_SWEEP_INTERVAL_MS = 7 * 24 * 60 * 60_000;
-export const WORKTREE_SWEEP_AT_KEY = "coding_agent_worktree_swept_at";
-
 /**
- * The weekly sweep: worktrees older than a fortnight whose branch is merged
- * or gone, across every project a known run has one in.
- *
- * WHY IT IS NEEDED at all, when the settle already tidies up: a run whose
- * merge conflicted, a box that restarted mid-settle, a project the owner
- * rebased by hand — each leaves a tree the settle never got to. Fourteen days
- * of no-one-touched-it plus a merged-or-gone branch is the point at which the
- * files are certainly recoverable from git.
- *
- * At most weekly (`WORKTREE_SWEEP_AT_KEY` in the config store), because the
- * web server restarts far more often than that and a sweep per boot would be
- * a `git worktree list` per project on every one. Never throws, and never
- * touches a tree a live run is in.
+ * Tell the run records that these worktrees are gone — the folder janitor
+ * (coding-folder-janitor.ts) removed them. A record whose tree was taken must
+ * not go on claiming one, or a resume would try to work in a folder that is
+ * not there; `removed` is what makes a resume rebuild it from the branch.
+ * Answers how many records changed.
  */
-export async function sweepCodingWorktrees(options: { force?: boolean } = {}): Promise<number> {
-  try {
-    if (!options.force) {
-      const last = await configGet(WORKTREE_SWEEP_AT_KEY);
-      if (typeof last === "number" && Date.now() - last < WORKTREE_SWEEP_INTERVAL_MS) return 0;
+export function markRunWorktreesRemoved(paths: readonly string[]): number {
+  if (paths.length === 0) return 0;
+  const gone = new Set(paths.map((p) => path.resolve(p)));
+  let changed = 0;
+  for (const run of loadRuns()) {
+    if (run.worktree && !run.worktree.removed && gone.has(path.resolve(run.worktree.path))) {
+      run.worktree.removed = true;
+      changed += 1;
     }
-    const runs = loadRuns();
-    const projects = new Set<string>();
-    for (const run of runs) {
-      if (run.worktree) projects.add(run.worktree.project);
-    }
-    if (projects.size === 0) {
-      await configSet(WORKTREE_SWEEP_AT_KEY, Date.now());
-      return 0;
-    }
-    const inUse = new Set(runs.filter((r) => isLive(r.status)).map((r) => r.directory));
-    let removed = 0;
-    for (const project of projects) {
-      try {
-        const outcome = await sweepRunWorktrees(project, { inUse });
-        removed += outcome.removed.length;
-        // A record whose tree the sweep took must not go on claiming one, or
-        // a resume would try to work in a folder that is not there.
-        for (const gone of outcome.removed) {
-          for (const run of runs) {
-            if (run.worktree && run.worktree.path === gone) run.worktree.removed = true;
-          }
-        }
-      } catch (err) {
-        console.warn(`[coding-agent] worktree sweep of ${project} failed:`, err instanceof Error ? err.message : err);
-      }
-    }
-    if (removed > 0) persist(true);
-    await configSet(WORKTREE_SWEEP_AT_KEY, Date.now());
-    return removed;
-  } catch (err) {
-    console.error("[coding-agent] worktree sweep:", err instanceof Error ? err.message : err);
-    return 0;
   }
+  if (changed > 0) persist(true);
+  return changed;
 }
 
 // ─── Public operations ───────────────────────────────────────────────────────
 
+/** A git branch name a caller may name as a run's base: plain, bounded, never an option. */
+const BASE_BRANCH_RE = /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._/-]{1,200}(?<![./])$/;
+
+/** `baseBranch` as asked, or null when none was; throws `invalid` on a malformed name. */
+export function requireBaseBranch(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  const name = typeof raw === "string" ? raw.trim().replace(/^origin\//, "") : "";
+  if (!name) return null;
+  if (!BASE_BRANCH_RE.test(name) || name.endsWith(".lock")) {
+    throw new CodingAgentError("invalid", `"${String(raw).slice(0, 80)}" is not a branch name this box will fork from.`);
+  }
+  return name;
+}
+
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
-  const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  let task = normalizeTask(input.task, isBoxWrittenTask(input));
+  /** A Fix CI continuation's place in its chain — see StartRunInput.fixCi. */
+  let ciFixOf: { runId: string; attempt: number } | null = null;
   // Read before anything is held — the slot, the folder — so a malformed
   // request is a plain 400 that cost the box nothing.
   const givenExperience = requireExperience(input.experience);
+  const givenEffort = requireEffort(input.effort);
+  const givenBase = requireBaseBranch(input.baseBranch);
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -11633,24 +13769,34 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let inheritedWorktree: RunWorktree | null = null;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
+  // A continuation of a run whose settle is still going — the commit after a
+  // Stop, its merge or parking, the worktree's removal — waits for that settle
+  // to END before it looks at the folder. Started inside it, a resume found the
+  // tree still there, was handed its path, and had it removed under it a moment
+  // later ("The current working directory was deleted", 0 s in). Not the
+  // automatic review pass nor a review-loop turn: those are started BY that
+  // settle, and waiting on it from inside would wait on itself.
+  if (resumeRunId && input.reviewOf == null && input.reviewLoopOf == null) await waitForRunSettled(resumeRunId);
   const previous = resumeRunId ? loadRuns().find((r) => r.id === resumeRunId) ?? null : null;
 
   // WHICH ACCOUNT THIS RUN WILL USE, worked out before the spawn gate rather
   // than after it. The gate judges a provider's credential, and judging the
   // owner's DEFAULT would refuse a run that explicitly named the account that
   // works — with a sentence about the account it never asked for. The caller's
-  // choice, else the run being resumed, else the owner's default; the same
-  // order applyProviderChoice applies below, which has the last word.
+  // choice, else the run being resumed, else — for a team's fresh run — its
+  // role's, else the owner's default; the order applyProviderChoice and the
+  // role step apply below, which have the last word.
+  const modelRole = input.team ? modelRoleOf(input.team.role) : null;
   const intendedProvider = isCodingProvider(input.provider)
     ? input.provider
-    : previous?.provider ?? await getCodingProvider();
+    : previous?.provider ?? await ownerOrRoleProvider(modelRole);
   // The slot is HELD from the gate to the insert below. `assertCanSpawn` counts
   // the runs it can see, and `loadRuns()` cannot see this one until
   // `insertRun` — several awaits away (the spawn tools, the folder, the
   // settings, the worktree, the auto-PR read) — so two starts that arrive
   // together both saw room for one. The same answer `teamSpawnSlot` already
   // gives with its `starting` count.
-  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider);
+  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider, !input.team && typeof input.reviewOf === "string");
   // Held beside the slot, and for the same span and the same reason: the folder
   // this run is starting in is claimed the moment `assertDirectoryFree` passes
   // and let go only once the record is visible, so a removal cannot slip
@@ -11670,7 +13816,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // caller, and without this exemption a round over a run that never
       // opened a session is refused rather than done cold.
       if (!previous.sessionId && input.freshSession !== true) {
-        throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+        throw new CodingAgentError("invalid", `That run never started a ${runsOnCodex(previous.provider) ? "Codex" : "Claude Code"} session, so it cannot be resumed. Start a new run instead.`);
+      }
+      // Fix CI: what failed goes after the caller's words — the box's own text
+      // from GitHub's logs, clipped the way a box-written task is.
+      if (input.fixCi === true) {
+        ciFixOf = { runId: previous.id, attempt: ciFixAttempt(previous, input.queuedRunId ?? null) };
+        task = normalizeTask(`${task}\n\n${ciFixNotes(previous.ci!, { push: true })}`, true);
       }
       // The session lives in the wrapper's state dir keyed by the folder it ran
       // in, so a resume always happens where the original run happened — which
@@ -11702,6 +13854,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         : previous.resumable || previous.status === "completed" ? previous.sessionId : null;
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
+      if (input.fixCi === true) throw new CodingAgentError("invalid", "A Fix CI run continues the run whose pull request failed: name it in resumeRunId.");
       ({ directory, projectId } = await resolveWorkingDirectory(input));
       releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
     }
@@ -11709,6 +13862,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Read once, here: a run keeps the settings it started with even if the
     // owner changes them while it works.
     const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+    // The caller's effort for THIS run stands in for the owner's setting — and
+    // only for the setting: the role step and the read-only clamp below still
+    // have the last word (StartRunInput.effort).
+    if (givenEffort) settings.effort = givenEffort;
     // A REVIEW ROUND inherits the effort of the run it is fixing, the way it
     // already inherits that run's provider and model. A round is a
     // continuation, not a new piece of work: thinking harder or softer about
@@ -11716,13 +13873,49 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // and on the fresh path — where the run has no memory to lean on — the
     // owner's current setting could be the weaker of the two.
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
+    // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
+    // unless the owner chose otherwise, a planner and a lead the provider's
+    // best model, a worker and a reviewer its middle one, and a planner, a lead
+    // and a reviewer at most `xhigh`; a worker the owner's effort. A
+    // role the owner put on another provider moves there, model and all — the
+    // readiness check below is that
+    // provider's, and the spawn's environment and credential are that
+    // provider's alone (buildRunEnv, prepareRunAccount: both read the record).
+    // A resume — a review round included — keeps the provider and model its
+    // session was opened on (applyProviderChoice already carried them) and
+    // takes only the effort.
+    if (modelRole) {
+      const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRoleModels());
+      settings.effort = role.effort;
+      // A reading role's step cap (ROLE_DEFAULTS.turnsCap): the safety net
+      // (DEFAULT_MAX_TURNS) is sized for the worker that writes.
+      settings.maxTurns = roleMaxTurns(modelRole, settings.maxTurns);
+      if (!inherited) {
+        settings.provider = role.provider;
+        settings.model = role.model;
+      }
+    }
+    // A run that may only read never runs on ultracode: the mode is xhigh plus
+    // the Workflow fan-out, and a run with no shell has nothing to fan out
+    // (buildRunArgs hands it no Workflow tool). The thinking half stays. The
+    // shell reviewer is not read-only and keeps whatever its role resolved.
+    if (input.readOnly === true && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
     // that run's account and folder — the automatic review pass and every
     // review-loop round included — unless the caller sent a block of its own.
     const experience = givenExperience
       ?? (previous ? { brief: previous.experienceBrief ?? null, record: previous.experience ?? null } : null);
+    const queuedRunId = typeof input.queuedRunId === "string" ? input.queuedRunId : null;
+    // This run's share of the CPU (src/lib/coding-run-cpu.ts): the runs that
+    // write going now, this one, and the siblings a team means to start beside
+    // it, whichever is more. A read-only run runs no build and is not counted.
+    const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== queuedRunId).length;
+    const cpuShare = typeof input.cpuShare === "number" && Number.isFinite(input.cpuShare) && input.cpuShare >= 1 ? Math.floor(input.cpuShare) : 1;
+    const cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: Math.max(cpuShare, writersLive + 1), onBattery: await onBatteryPower() });
+    const announcedId = queuedRunId ? null : announcedRunId(input);
     const run = newRunRecord({
+      ...(queuedRunId ? { id: queuedRunId } : announcedId ? { id: announcedId } : {}),
       task,
       directory,
       projectId,
@@ -11734,8 +13927,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
       reviewRound: typeof input.reviewRound === "number" && input.reviewRound > 0 ? Math.floor(input.reviewRound) : null,
       team: input.team ?? null,
+      modelRole,
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
+      cpuBudget,
       experience: experience?.record ?? null,
       experienceBrief: experience?.brief ?? null,
     });
@@ -11744,7 +13939,16 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // harness reads that line. Never fatal — an asset that could not be copied
     // is reported to the run (and drawn on its page) rather than losing the
     // task it was an input to.
+    // A continuation of a run that HAD the visual tools keeps them, so its
+    // session's tools and prompt prefix stay what they were; one that did not
+    // is decided afresh at its first spawn, from its own task and the folder
+    // as it is then (a review pass over pages the run just wrote gets them).
+    if (previous?.visual === true) run.visual = true;
     await stageInputs(run, input.inputs);
+    if (ciFixOf) {
+      run.ciFixOf = ciFixOf;
+      pushProgress(run, RUNNER_STEP.ciFix(ciFixOf.runId, ciFixOf.attempt, MAX_CI_FIX_ATTEMPTS));
+    }
     if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
     else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf, run.reviewRound));
     else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
@@ -11759,7 +13963,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (resumeRunId) {
       run.worktree = inheritedWorktree;
     } else if (!run.team && !run.readOnly) {
-      await attachRunWorktree(run, directory);
+      stepCodingStart(run.id, "worktree");
+      await attachRunWorktree(run, directory, givenBase);
+    }
+    if (givenBase && run.worktree?.base !== givenBase) {
+      throw new CodingAgentError("invalid", resumeRunId
+        ? "base_branch is for a new run: a resumed run keeps the branch it already has."
+        : "base_branch needs a run of its own copy of the project, and this folder does not get one (it is not a git repository's root, or it is ClawBox's own checkout).");
     }
 
     // The run's own branch, made BEFORE any work happens.
@@ -11776,7 +13986,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // in the same folder, on the branch its own pull request is already open
     // from, and a second branch under it would take the fixes away from that
     // pull request.
-    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
+    // A task that refuses a pull request ("do not open a PR") gets none, whatever
+    // the owner's auto-PR switch says: the switch is the default for a task that
+    // says nothing (goalRefusesPullRequest, shared with the team's goal).
+    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && !goalRefusesPullRequest(run.task) && (await getAutoPr())) {
       if (run.worktree) {
         // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
         // already forked it, off the project's own branch, and the run is
@@ -11816,6 +14029,16 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
           // red line at the top of every fresh-folder run in bench cycle 1.
           run.pr = null;
           pushProgress(run, RUNNER_STEP.noRepository);
+        } else if (!branched.ok && branched.reason === "not_repository_root") {
+          // The same fact from the other side: the folder is part of a
+          // repository that is not its own, so there is no branch to make and
+          // no pull request to imply. `pr: null` keeps the deliverable gate
+          // from holding the run to a pull request the box can never open —
+          // `pr.phase: "failed"` did, and every such run ended gave_up. Said
+          // once: attachRunWorktree has usually already written this line.
+          run.pr = null;
+          const line = RUNNER_STEP.notRepositoryRoot(branched.root);
+          if (!run.progress.includes(line)) pushProgress(run, line);
         } else if (branched.ok) {
           run.pr = {
             phase: "opening",
@@ -11860,22 +14083,60 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // without one never grows the list.
     openAttempt(run);
 
-    // THE DELIVERY PIPELINE. Last, because it reads the branch and the project
-    // this run ended up in, and because its preflight reads the project — a call
-    // that must not sit between the spawn gate and the folder checks.
-    await attachPipeline(run, input, settings);
-
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
+    stepCodingStart(run.id, "launching");
     await prepareRunSecrets(run);
+    // Where the folder stood as the run began — see CodingRun.headAtStart.
+    run.headAtStart = await headCommitShort(run.directory);
+    // A start refused between here and the insert never reaches a settle, so it
+    // gives back what it was just handed: the values out of memory, and the
+    // one-run copies it claimed back out of the store.
+    const abandon = (err: unknown): never => {
+      dropRunSecrets(run.id);
+      endRunSecrets(run);
+      throw err;
+    };
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
-    const history = await getHistoryPolicy();
-    insertRun(loadRuns(), run, history);
+    const history = await getHistoryPolicy().catch(abandon);
+    const list = loadRuns();
+    // A QUEUED run's turn: this record takes the queued one's place, with what
+    // it was told while it waited and the steps it already showed — never a
+    // second row beside it. Gone from the queue meanwhile (the owner canceled
+    // it while this start was on its way), it does not start at all.
+    const waited = queuedRunId ? list.findIndex((r) => r.id === queuedRunId) : -1;
+    if (queuedRunId && (waited < 0 || list[waited].status !== "queued")) {
+      abandon(new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started."));
+    }
+    // The failure it fixes now names it, so it is never offered twice.
+    if (ciFixOf && previous?.ci) previous.ci = { ...previous.ci, fixRunId: run.id };
+    if (waited >= 0) {
+      const before = list[waited];
+      run.messages = before.messages;
+      run.progress = [...before.progress, ...run.progress];
+      run.progressAt = [...before.progressAt, ...run.progressAt];
+      pushProgress(run, RUNNER_STEP.startedFromQueue);
+      list[waited] = run;
+    } else {
+      insertRun(list, run, history);
+    }
     persist(true);
-    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
+    // The record is what the lists show from here: the announcement steps aside.
+    endCodingStart(run.id);
+    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}${waited >= 0 ? " from the queue" : ""}`);
     startProjectIcon(run);
-    spawnOrSettle(run, resumeSessionId, tools, settings);
+    try {
+      spawnOrSettle(run, resumeSessionId, tools, settings);
+    } catch (err) {
+      // It never started, so the failure it claimed is free again (the
+      // queued path's releaseCiClaim, for a start that throws here).
+      if (ciFixOf && previous?.ci?.fixRunId === run.id) {
+        previous.ci = { ...previous.ci, fixRunId: null };
+        persist(true);
+      }
+      throw err;
+    }
     return cloneRun(run);
   } finally {
     releaseDirectory();
@@ -11925,66 +14186,6 @@ async function stageInputs(run: CodingRun, named: unknown): Promise<void> {
 }
 
 /**
- * Give this run a delivery pipeline, if it is to have one.
- *
- * WHO GETS ONE. The caller who asked for it, and — when the caller said
- * nothing at all — a run in a project the owner has switched the pipeline on
- * for. Never a review pass, a review-loop turn, a deployment-fix turn, a
- * read-only planner or a team's run: each of those is a TURN INSIDE somebody
- * else's chain, and a pipeline on one of them would be a second chain driving
- * the same folder.
- *
- * THE PREFLIGHT, AND THE TWO WAYS IT LANDS. A pipeline that cannot deploy must
- * say so before the box spends a build, a review pass and three improvement
- * laps getting to the stage that needs it — the owner's own rule. What differs
- * is who asked: a caller who NAMED a pipeline is refused, because they can fix
- * the request and a silent downgrade would have them believe the box was
- * shipping; a project DEFAULT stands aside instead, with the reason in the
- * run's own feed, because refusing there would take ordinary runs away from a
- * project the box cannot verify a page for just now.
- */
-async function attachPipeline(run: CodingRun, input: StartRunInput, settings: RunSettings): Promise<void> {
-  if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
-  const asked = readPipelineInput(input.pipeline);
-  // Refused at the door, with the code beside the sentence, for the reason
-  // `requireDeliverable` refuses: a caller whose request was quietly dropped
-  // would believe the box was shipping.
-  if (asked && !asked.ok) throw new PipelineChoiceError(asked.code, asked.error);
-
-  const explicit = asked !== null;
-  let wanted: PipelineInput | null = asked?.pipeline ?? null;
-  if (input.pipeline === undefined || input.pipeline === null) {
-    const fromProject = await projectScopeFor(run);
-    wanted = (await readPipelineDefault(fromProject)) ? defaultPipelineInput() : null;
-  }
-  if (!wanted) return;
-
-  const scope = await projectScopeFor(run);
-  const ready = await pipelinePreflight(scope, wanted.verify);
-  if (!ready.ok) {
-    if (explicit) throw new CodingAgentError("invalid", ready.reason);
-    pushProgress(run, RUNNER_STEP.pipelineStopped(ready.reason));
-    return;
-  }
-
-  run.pipeline = newPipeline({
-    verify: wanted.verify,
-    production: wanted.production,
-    // The owner's review-rounds setting, frozen here — the cap on how many
-    // times the work goes back round. Read with the run's other settings so a
-    // pipeline and the pull-request loop it runs beside cannot disagree.
-    maxRounds: await getReviewRounds(),
-  });
-  enterStage(run.pipeline, "build");
-  addEvidence(run.pipeline, "build", { kind: "run", ref: run.id, detail: "The run that does the work." });
-  // The review stage IS the automatic review pass, so the switch this run was
-  // frozen with has to be ON — otherwise the pipeline would wait for a pass
-  // that the settle path was never going to start.
-  settings.reviewPass = true;
-  run.reviewPass = true;
-}
-
-/**
  * The caller's deliverable, validated, or a thrown `invalid` saying why not.
  *
  * Thrown rather than dropped: a caller that named a deliverable the box cannot
@@ -12009,6 +14210,17 @@ function requireDeliverable(input: StartRunInput): Deliverable | null {
  * the record still says the run was given an empty one, which is a different
  * fact from being given none.
  */
+/**
+ * The per-request effort as the caller sent it: one of OFFERED_EFFORT_LEVELS,
+ * null for none, or `invalid` — read before anything is held, like the
+ * experience block, so a malformed request costs the box nothing.
+ */
+function requireEffort(raw: unknown): CodingEffort | null {
+  if (raw === undefined || raw === null) return null;
+  if (!isOfferedEffort(raw)) throw new CodingAgentError("invalid", effortRefusal(raw));
+  return raw;
+}
+
 function requireExperience(raw: unknown): { brief: string | null; record: RunExperience } | null {
   const read = readExperienceInput(raw);
   if (read === null) return null;
@@ -12025,22 +14237,31 @@ interface RunSettings {
   model: string | null;
   effort: CodingEffort;
   maxTurns: number;
-  tokenLimit: number | null;
   generateImages: boolean;
   generateAudio: boolean;
   /** The owner's review-pass switch, read with the rest and frozen on the
    *  record (CodingRun.reviewPass): the brief and the pass decide from it. */
   reviewPass: boolean;
-  /** Attempts at the deliverable, frozen on the record for the same reason. */
-  completionAttempts: number;
   /** The owner's permission rules, frozen on the record for the same reason. */
   allowRules: string[];
 }
 
+/**
+ * The account a fresh run is going to use, worked out before its settings are
+ * read — for the spawn gate, which has to judge THAT credential: the owner's
+ * default, or the provider a team role resolves to on it. `startRun`'s role
+ * step reaches the same answer from the settings it reads, and has the last
+ * word; the effort is no part of the question.
+ */
+async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvider> {
+  const owner = await getCodingProvider();
+  if (!role) return owner;
+  return resolveRoleRun(role, owner, defaultModelForProvider(owner), DEFAULT_EFFORT, await getRoleModels()).provider;
+}
+
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules] = await Promise.all([
-    getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
-    getCompletionAttempts(),
+  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+    getCodingProvider(), getEffort(), getMaxTurns(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
@@ -12051,11 +14272,9 @@ async function readRunSettings(): Promise<RunSettings> {
     model: defaultModelForProvider(provider),
     effort,
     maxTurns,
-    tokenLimit,
     generateImages,
     generateAudio,
     reviewPass,
-    completionAttempts,
     allowRules,
   };
 }
@@ -12100,25 +14319,29 @@ async function applyProviderChoice(
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
 function newRunRecord(fields: {
+  /** The id a QUEUED record already gave out (startQueuedRun); a fresh one otherwise. */
+  id?: string;
   task: string;
   directory: string;
   projectId: string | null;
   source: CodingRunSource;
-  status: "running" | "draft";
+  status: "running" | "draft" | "queued";
   settings: RunSettings;
   reviewOf?: string | null;
   reviewLoopOf?: string | null;
   reviewRound?: number | null;
   team?: RunTeam | null;
+  /** The role the settings were resolved for — a team's run only. */
+  modelRole?: ModelRole | null;
   readOnly?: boolean;
   extraBrief?: string | null;
+  cpuBudget?: number | null;
   experience?: RunExperience | null;
   experienceBrief?: string | null;
   deliverable?: Deliverable | null;
-  pipeline?: PipelineState | null;
 }): CodingRun {
   const now = Date.now();
-  const id = newRunId();
+  const id = fields.id ?? newRunId();
   return {
     id,
     task: fields.task,
@@ -12132,6 +14355,7 @@ function newRunRecord(fields: {
     model: null,
     provider: fields.settings.provider,
     requestedModel: fields.settings.model,
+    modelRole: fields.modelRole ?? null,
     // Chosen at each spawn from the pool (prepareRunSecrets), not here.
     anthropicAccount: null,
     accountSwitches: [],
@@ -12160,9 +14384,11 @@ function newRunRecord(fields: {
     subagentsByType: {},
     modelsUsed: [],
     commit: null,
+    headAtStart: null,
     maxTurns: fields.settings.maxTurns,
     tokensUsed: 0,
-    tokenLimit: fields.settings.tokenLimit,
+    tokenBreakdown: emptyTokenBreakdown(),
+    spawnTokens: [],
     thinkingTokens: 0,
     lastActivityAt: now,
     retries: 0,
@@ -12174,10 +14400,10 @@ function newRunRecord(fields: {
     reviewOf: fields.reviewOf ?? null,
     reviewLoopOf: fields.reviewLoopOf ?? null,
     reviewRound: fields.reviewRound ?? null,
-    pipeline: fields.pipeline ?? null,
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
+    cpuBudget: fields.cpuBudget ?? null,
     experience: fields.experience ?? null,
     experienceBrief: fields.experienceBrief ?? null,
     // No pull request until the aftermath opens one, and no loop until it has.
@@ -12189,6 +14415,8 @@ function newRunRecord(fields: {
     exitCode: null,
     media: { images: fields.settings.generateImages, audio: fields.settings.generateAudio },
     reviewPass: fields.settings.reviewPass,
+    // Decided at the first spawn, from the folder as it is then — see CodingRun.visual.
+    visual: null,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     unit: null,
@@ -12205,7 +14433,6 @@ function newRunRecord(fields: {
     deliverable: fields.deliverable ?? null,
     deliverableCheck: null,
     attempts: [],
-    completionAttempts: fields.settings.completionAttempts,
     // Nobody has told it anything yet.
     messages: [],
   };
@@ -12219,12 +14446,10 @@ function newRunRecord(fields: {
  *
  *  - standard — deleted with its evidence folder and its inputs, exactly as
  *    before the setting existed: unreachable artifacts would sit on the flash
- *    forever.
- *  - extended / everything — kept as an OLDER run, its record in a file of its
- *    own and its evidence where it was; the runs file stays at MAX_RUNS_KEPT.
- *    Extended then trims the older runs to its N, oldest first.
- *  - archive — moved into the archive, record, evidence, inputs, logs and a
- *    copy of the transcript together.
+ *    forever. Older runs a "keep everything" spell left behind go the same
+ *    way, at this next run rather than when the setting was saved.
+ *  - everything — kept as an OLDER run, its record in a file of its own and
+ *    its evidence where it was; the runs file stays at MAX_RUNS_KEPT.
  *
  * Under the disk guard (below HISTORY_MIN_FREE_BYTES free) a leaving run is
  * deleted as in standard, whatever the mode, and nothing already kept is
@@ -12244,49 +14469,32 @@ function retainRuns(list: CodingRun[], policy: HistoryPolicy): void {
     if (idx < 0) break;
     const [leaving] = list.splice(idx, 1);
     if (!low && keepsOlderRuns(policy) && writeOlderRun(leaving as unknown as HistoryRecord)) continue;
-    dropRun(leaving, policy, "trimmed", low);
+    dropRun(leaving);
   }
-  if (low || !hasOlderRuns()) return;
-  // The older runs past what this mode keeps: extended's N, or all of them
-  // under standard and archive (runs kept under a mode the owner has left —
-  // the settings card said the next run would take them).
-  const cap = olderRunsCap(policy, list.length);
-  if (!Number.isFinite(cap)) return;
-  const older = olderRunIndex();
-  for (const entry of older.slice(cap)) dropOlderRun(entry, policy, "trimmed", false);
+  if (low || keepsOlderRuns(policy) || !hasOlderRuns()) return;
+  // Under standard, the older runs a "keep everything" spell kept all go — the
+  // settings card said the next run would take them.
+  for (const entry of olderRunIndex()) dropOlderRun(entry);
 }
 
 /**
- * A run leaving the list for good: archived under the archive mode (unless the
- * disk is low, or the archive could not take it), deleted otherwise — its
- * evidence folder, its inputs and any stream log the box still holds for it.
+ * A run leaving the list for good: deleted with its evidence folder, its
+ * inputs and any stream log the box still holds for it.
  */
-function dropRun(run: CodingRun, policy: HistoryPolicy, reason: ArchiveReason, low: boolean): void {
-  if (policy.mode === "archive" && !low) {
-    const archived = archiveRun(run as unknown as HistoryRecord, {
-      evidenceDir: artifactsDir(run.id),
-      inputsDir: runInputsDir(run.id),
-      streamLog: streamLogPath(run.id),
-      stderrLog: stderrLogPath(run.id),
-      transcript: transcriptPath(run),
-    }, reason);
-    if (archived) {
-      console.error(`[coding-agent] ${run.id} moved to the archive`);
-      return;
-    }
-  }
+function dropRun(run: CodingRun): void {
   removeArtifacts(run.id);
   removeRunInputs(run.id);
   removeStreamLogs(run.id);
+  removeRunInbox(run.id);
 }
 
-/** An older run leaving for good — the same two ways as dropRun, and its own file with it. */
-function dropOlderRun(entry: OlderRunEntry, policy: HistoryPolicy, reason: ArchiveReason, low: boolean): void {
+/** An older run leaving for good — what dropRun takes, and its own file with it. */
+function dropOlderRun(entry: OlderRunEntry): void {
   const run = readOlderRun(entry.id);
-  if (run) dropRun(run, policy, reason, low);
+  if (run) dropRun(run);
   else {
-    // A record that no longer parses cannot be archived; what it points at
-    // still goes, so nothing is left on the flash that nothing lists.
+    // A record that no longer parses still points at a folder; that goes too,
+    // so nothing is left on the flash that nothing lists.
     removeArtifacts(entry.id);
     removeRunInputs(entry.id);
   }
@@ -12308,15 +14516,32 @@ function folderPresent(directory: string): boolean {
   }
 }
 
-/** The oldest run that is history — see isHeld for what is not, and
+/**
+ * A run the trim and the owner's Clear both leave alone: it holds a resumable
+ * session (`holdsResumableSession` — the held three and `gave_up`, whose card
+ * offers Resume) AND can still go on — live, or its folder still there.
+ * `resumeRun` and `startDraftRun` refuse a run whose folder is gone, so such a
+ * record can neither go on nor finish, and kept it was immortal: past the
+ * rail's newest dozen it was listed nowhere (the review pass paused in a
+ * folder the owner had deleted, 2026-09-06; 22 of the 40 gave_up records on
+ * the owner's box named folders that no longer existed, 2026-10-29). A LIVE
+ * run is kept whatever its folder says: the record is the only handle on the
+ * process. Only the folder's ABSENCE answers no — see folderPresent.
+ */
+function heldOn(r: CodingRun): boolean {
+  return holdsResumableSession(r.status) && (isLive(r.status) || folderPresent(r.directory));
+}
+
+/** The oldest run that is history — see heldOn for what is not, and
  *  isPrPending for the run that has settled but is still being watched. */
 function findLastFinished(list: CodingRun[]): number {
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    // `holdsResumableSession`, not `isHeld`: a run that GAVE UP is settled, but
-    // its session is intact and its card offers Resume, so trimming it to make
-    // room for a new run would take that session and its evidence folder with
-    // it — unasked, and past the rail's newest dozen, invisibly.
-    if (!holdsResumableSession(list[i].status) && !isPrPending(list[i].pr)) return i;
+    // `heldOn`, not `isHeld`: a run that GAVE UP is settled, but its session is
+    // intact and its card offers Resume, so trimming it to make room for a new
+    // run would take that session and its evidence folder with it — unasked,
+    // and past the rail's newest dozen, invisibly. Unless its folder is gone,
+    // in which case nothing can resume it and it is history like any other.
+    if (!heldOn(list[i]) && !isPrPending(list[i].pr)) return i;
   }
   return -1;
 }
@@ -12343,6 +14568,11 @@ function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): voi
 export function stopRun(id: string): CodingRun {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  // A queued run has no process to stop; taking it out of the queue is the
+  // OWNER's (cancelQueuedRun, behind the owner gate of the stop route).
+  if (run.status === "queued") {
+    throw new CodingAgentError("invalid", "That run is queued and has not started. Only the owner can cancel a queued run, from the Coding Agent app.");
+  }
   if (run.status === "paused") {
     // No process to signal — the pause already ended it. Stopping a paused
     // run is the owner closing the book on it.
@@ -12355,6 +14585,8 @@ export function stopRun(id: string): CodingRun {
     // folder, and anything it started is still wanted); closing the book on it
     // is where that stops being true.
     cleanupRunResources(run, null);
+    // The pause kept its one-run copies for the resume that is not coming now.
+    endRunSecrets(run);
     // The pull request the pause kept "opening" (see maybeOpenPullRequest)
     // ends here with the run: this path never reaches finishRun, so nothing
     // else would settle it.
@@ -12365,12 +14597,19 @@ export function stopRun(id: string): CodingRun {
     // the loop that is waiting for it would sit in "working" until the next
     // restart — pending in every sweep, and polled again at boot.
     endReviewLoopFor(run, "The review round was stopped while it was paused, so the pull request is still open.");
-    // And the delivery pipeline, for the same reason: this path never reaches
-    // finishRun, so nothing else would end it and it would hold the finish
-    // notice for good.
-    stopPipelineFor(run, "The run was stopped while it was paused, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
+    // The pause kept the worktree for its Resume; the stop is where its work
+    // is parked on the branch, unmerged, like any stopped run's.
+    trackSettleWork(settleRunWorktree(run), run.id);
+    // A paused REVIEW PASS is what its origin's finish notice was held back
+    // for (deliverableGateApplies), and the gate that releases it skipped the
+    // pause. A running pass's Stop reaches it through finishRun; this one is
+    // the owner's Stop too, so it goes the same way — the gate announces the
+    // origin, judging nothing over a Stop.
+    if (run.reviewOf !== null) trackSettleWork(enforceDeliverable(run, "stop", "skipped"), run.id);
+    // The pause told the chat nothing (it is not an ending); this is one.
+    announceEndingToChat(run);
     return cloneRun(run);
   }
   if (run.status !== "running") return cloneRun(run);
@@ -12382,9 +14621,12 @@ export function stopRun(id: string): CodingRun {
     run.error = "Stopped.";
     run.completedAt = Date.now();
     cleanupRunResources(run, null);
-    stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
+    endRunSecrets(run);
     persist(true);
     wakeWaiters(id);
+    // It held a slot on paper: the queue's next run may have it now.
+    void pumpRunQueue();
+    announceEndingToChat(run);
     return cloneRun(run);
   }
   requestEnd(run, state, "stop");
@@ -12415,7 +14657,7 @@ export function stopRun(id: string): CodingRun {
  * that button exists. Anything genuinely over is refused, because a queue
  * nothing will ever read is worse than a plain "no".
  */
-export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean } {
+export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean; delivery: RunMessageDelivery; messageId: string } {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (!holdsResumableSession(run.status)) {
@@ -12428,12 +14670,34 @@ export function queueRunMessage(id: string, text: unknown): { run: CodingRun; de
   // rules, then the queue's bound — which the route answers verbatim.
   const message = normalizeRunMessage(text);
   run.messages = appendRunMessage(run.messages, message, Date.now());
+  const messageId = run.messages[run.messages.length - 1].id;
   // Written before anything is attempted: a delivery that fails must still
   // leave the message on the record, waiting.
   persist(true);
-  const state = live.get(id);
-  const delivered = state ? flushRunMessages(run, state) > 0 : false;
-  return { run: cloneRun(run), delivered };
+  const state = run.status === "running" ? live.get(id) : undefined;
+  const delivery: RunMessageDelivery = state ? deliverRunMessages(run, state) : "next_start";
+  return { run: cloneRun(run), delivered: delivery === "delivered", delivery, messageId };
+}
+
+/**
+ * Wait a moment for a message sent to a run's inbox to be taken by its hook —
+ * the route's way of answering "delivered" for a run between two quick tool
+ * calls, rather than "after the tool call" when it is already over. Answers
+ * the message's record once it is delivered, or null at the deadline (still
+ * in the inbox: the hook hands it over after the call under way).
+ */
+export async function awaitRunMessageDelivery(runId: string, messageId: string, timeoutMs: number): Promise<RunMessage | null> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    const run = loadRuns().find((r) => r.id === runId);
+    const state = live.get(runId);
+    if (run && state && state.inboxPosted.size > 0) collectInboxReceipts(run, state);
+    const message = run?.messages.find((m) => m.id === messageId);
+    if (!message) return null;
+    if (message.deliveredAt !== null) return { ...message };
+    if (Date.now() >= deadline || run?.status !== "running") return null;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 /**
@@ -12476,6 +14740,8 @@ export function pauseRun(id: string): CodingRun {
     run.completedAt = Date.now();
     persist(true);
     wakeWaiters(id);
+    // Lost is an ending; a pause is not (the chat leg tells only endings).
+    announceEndingToChat(run);
     return cloneRun(run);
   }
   requestEnd(run, state, "pause");
@@ -12520,6 +14786,9 @@ export function resumeRun(id: string, opts: { automatic?: boolean } = {}): Promi
  * rather than that somebody resumed it.
  */
 async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> {
+  // The pause's own settle first — its commit and what it decides about the
+  // worktree — for the reason `startRun` waits for a resumed run's (see there).
+  await waitForRunSettled(id);
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
@@ -12531,17 +14800,17 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
   if (run.status !== "paused" && run.status !== "gave_up") {
     throw new CodingAgentError("invalid", "Only a paused run, or one that gave up, can be resumed in place. Start a new run instead.");
   }
-  // The owner's own Resume starts the refused-credential budget afresh
-  // (MAX_AUTH_SWITCHES): refusals from an earlier stretch of the run say
-  // nothing about the accounts the owner may have signed in again since.
-  if (!automatic) store.anthropicAuthRetries?.delete(run.id);
+  // The owner's own Resume starts the refused-credential trail afresh
+  // (AuthTrail): refusals from an earlier stretch of the run say nothing about
+  // the accounts the owner may have signed in again since.
+  if (!automatic) store.anthropicAuthTrail?.delete(run.id);
   // The account the session was OPENED on — a resume cannot move to another
   // one, so if that credential is gone the resume is refused rather than
   // quietly re-enacted somewhere else. Handed to the gate rather than checked
   // beside it, so the box's own half and the credential are one verdict.
   // Held from the gate to the flip below, like every other start — see
   // `startingRuns`.
-  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider, !run.team && typeof run.reviewOf === "string");
   // Held beside the slot — see `startRun`. A resume reaches the same folder a
   // removal may be about to take, and by the same synchronous claim.
   let releaseDirectory: () => void = () => {};
@@ -12591,11 +14860,8 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // on a running record and, worse, survive into the run's next settle.
     run.pauseReason = null;
     run.lastActivityAt = Date.now();
-    // The owner's own go at the deliverable, on the record like every other. It
-    // is NOT counted against the cap before it is made — the cap bounds what the
-    // BOX spends unasked, and a Resume the owner pressed is their decision, not
-    // the box's budget. The gate judges it when it settles, exactly as it judged
-    // the attempts before it.
+    // The owner's own go at the deliverable, on the record like every other.
+    // The gate judges it when it settles, exactly as it judged the first turn.
     // A run that gave up with no pull request ever opened gets the step back, so
     // the owner's Resume can actually reach the deliverable it is resumed for.
     if (gaveUp) reopenPullRequestStep(run);
@@ -12619,7 +14885,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     const continuation = !run.sessionId
       ? undefined
       : missing && deliverable
-        ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
+        ? `${completionNudge(deliverable, missing)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
         : automatic
           ? `You were paused because every Anthropic account on this ClawBox had reached its usage limit. The limit has reset and you are resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
           : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
@@ -12681,14 +14947,25 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
-  if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  // A draft the owner started while the box was full waits in the queue as
+  // itself, and the queue starts it here (startQueuedRun).
+  const fromQueue = run.status === "queued" && run.queued?.start?.kind === "draft";
+  if (run.status !== "draft" && !fromQueue) throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  // In order: a draft started while runs wait for a slot goes behind them.
+  if (!fromQueue && hasQueuedRuns()) return queueDraft(run);
   // The account this draft named, not whatever the default is now. Checked
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
   // spawned into a wrapper that dies.
   // Held from the gate to the flip below, like every other start — see
-  // `startingRuns`.
-  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  // `startingRuns`. Every slot taken: queued, not refused.
+  let releaseSlot: () => void;
+  try {
+    releaseSlot = await assertCanSpawn(run.team ?? null, run.provider, !run.team && typeof run.reviewOf === "string");
+  } catch (err) {
+    if (err instanceof SlotsFullError && !fromQueue) return queueDraft(run);
+    throw err;
+  }
   // Held beside the slot — see `startRun`. A draft that starts reaches the same
   // folder a removal may be about to take, and by the same synchronous claim.
   let releaseDirectory: () => void = () => {};
@@ -12708,17 +14985,19 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     // overwrite a choice the draft was created with; the others have no per-run
     // form and can only have come from the owner's stored default anyway.
     const settings = await readRunSettings();
+    const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== run.id).length;
+    run.cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: writersLive + 1, onBattery: await onBatteryPower() });
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
-    run.tokenLimit = settings.tokenLimit;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
-    run.completionAttempts = settings.completionAttempts;
+    run.headAtStart = await headCommitShort(run.directory);
     run.status = "running";
+    run.queued = null;
     run.startedAt = Date.now();
     run.lastActivityAt = Date.now();
     // The bar the draft was created with, now that it is actually starting.
     openAttempt(run);
-    pushProgress(run, RUNNER_STEP.startedFromDraft);
+    pushProgress(run, fromQueue ? RUNNER_STEP.startedFromQueue : RUNNER_STEP.startedFromDraft);
     // Resolved now and not when the draft was written: a draft can sit for days,
     // and the secrets a run gets are the ones ticked at the moment it starts.
     await prepareRunSecrets(run);
@@ -12731,6 +15010,316 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     releaseDirectory();
     releaseSlot();
   }
+}
+
+// ─── The run queue ───────────────────────────────────────────────────────────
+
+/**
+ * Runs that may wait for a slot at once. A queue is a promise to start each
+ * of them, unattended, in order; beyond this, the caller is told to wait.
+ */
+export const MAX_QUEUED_RUNS = 10;
+/** How soon the queue looks again after it stopped for something that clears by itself — the switch off, the harness not ready. */
+export const QUEUE_RETRY_MS = 60_000;
+/** Refusals that are the BOX's state, not the run's: the queue waits them out rather than failing the run. */
+const QUEUE_WAITS: ReadonlySet<CodingAgentErrorKind> = new Set(["disabled", "not_ready", "limited", "busy"]);
+
+function hasQueuedRuns(): boolean {
+  return loadRuns().some((r) => r.status === "queued");
+}
+
+/** The queued runs in the order they start in: the order they were asked for. */
+function queuedRuns(): CodingRun[] {
+  return loadRuns().filter((r) => r.status === "queued").sort((a, b) => (a.queued?.at ?? 0) - (b.queued?.at ?? 0));
+}
+
+/** A queued run's place in line, 1 being next; null for anything not queued. */
+export function queuePosition(id: string): number | null {
+  const at = queuedRuns().findIndex((r) => r.id === id);
+  return at < 0 ? null : at + 1;
+}
+
+/**
+ * Start a run, or QUEUE it when the box is already running every run the
+ * owner allows: the run route's start (owner and MCP bearer alike), so a
+ * second ask is never refused with CONFLICT for want of a slot. In order — a
+ * start while runs are waiting goes behind them, even when a slot just freed.
+ * Every other refusal (the switch, readiness, a bad folder) is still a refusal.
+ */
+export async function startOrQueueRun(input: StartRunInput): Promise<{ run: CodingRun; queued: boolean }> {
+  // ANNOUNCED before the first await: the runs list shows this start from
+  // the moment the request arrived (src/lib/coding-start-phase.ts), under the
+  // id its record will carry, and walks its steps — the checks, the worktree,
+  // the launch — until that record is written. A team's run is its team's
+  // card's to show, and a queued run's start already has a record.
+  const announced = input.team || input.queuedRunId ? null : (announcedRunId(input) ?? newRunId());
+  if (announced) {
+    beginCodingStart({
+      id: announced,
+      task: typeof input.task === "string" ? input.task : "",
+      projectId: input.projectId ?? null,
+      directory: input.directory ?? null,
+      source: input.source === "owner" ? "owner" : "agent",
+    });
+  }
+  const asked: StartRunInput = announced ? { ...input, runId: announced } : input;
+  let failed = false;
+  try {
+    if (!hasQueuedRuns()) {
+      try {
+        return { run: await startRun(asked), queued: false };
+      } catch (err) {
+        if (!(err instanceof SlotsFullError)) throw err;
+      }
+    }
+    const run = await queueRun(asked);
+    // Room may have come free between the refusal and the queue.
+    void pumpRunQueue();
+    return { run, queued: true };
+  } catch (err) {
+    // Nothing will come of it: the card says why, in place of "Starting…".
+    if (announced) {
+      failCodingStart(announced, err instanceof Error ? err.message : String(err));
+      failed = true;
+    }
+    throw err;
+  } finally {
+    if (announced && !failed) endCodingStart(announced);
+  }
+}
+
+/**
+ * The announced id a start may take: well formed, and no record's already —
+ * a caller can never name an existing run into a new one.
+ */
+function announcedRunId(input: StartRunInput): string | null {
+  const id = typeof input.runId === "string" ? input.runId : "";
+  if (!/^run-[0-9a-z]{8}$/.test(id)) return null;
+  return loadRuns().some((r) => r.id === id) ? null : id;
+}
+
+/**
+ * The QUEUED record: validated the way a start is — the task, the folder (or
+ * the run it continues), the account, the deliverable, the experience block —
+ * so a request the box would refuse is refused NOW, to the caller who can fix
+ * it, not when its turn comes hours later. Persisted with the request it is
+ * started with; nothing is staged, branched or spawned until then.
+ */
+async function queueRun(input: StartRunInput): Promise<CodingRun> {
+  if (!(await isCodingAgentEnabled())) {
+    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
+  }
+  const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  requireExperience(input.experience);
+  requireBaseBranch(input.baseBranch);
+  if (queuedRuns().length >= MAX_QUEUED_RUNS) {
+    throw new CodingAgentError("busy", `There are already ${MAX_QUEUED_RUNS} coding runs waiting for a slot on this ClawBox. Wait for the queue to move, or ask the owner to cancel one.`);
+  }
+  const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
+  let directory: string;
+  let projectId: string | null;
+  let inherited: { provider: CodingProvider; model: string | null } | null = null;
+  let fixing: CodingRun | null = null;
+  if (resumeRunId) {
+    const previous = loadRuns().find((r) => r.id === resumeRunId) ?? null;
+    if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
+    if (!previous.sessionId && input.freshSession !== true) {
+      throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+    }
+    if (input.fixCi === true) {
+      ciFixAttempt(previous, null);
+      fixing = previous;
+    }
+    directory = previous.directory;
+    projectId = previous.projectId;
+    inherited = { provider: previous.provider, model: previous.requestedModel };
+  } else {
+    if (input.fixCi === true) throw new CodingAgentError("invalid", "A Fix CI run continues the run whose pull request failed: name it in resumeRunId.");
+    ({ directory, projectId } = await resolveWorkingDirectory(input));
+  }
+  const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+  const announcedId = announcedRunId(input);
+  const run = newRunRecord({ ...(announcedId ? { id: announcedId } : {}), task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  // Claimed now, so the failure is not offered a second Fix CI while this one waits.
+  if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
+  run.queued = {
+    at: Date.now(),
+    start: {
+      kind: "new",
+      task: input.task,
+      projectId: typeof input.projectId === "string" ? input.projectId : null,
+      directory: typeof input.directory === "string" ? input.directory : null,
+      resumeRunId: resumeRunId || null,
+      provider: input.provider,
+      model: input.model,
+      deliverable: input.deliverable,
+      inputs: input.inputs,
+      experience: input.experience,
+      ...(typeof input.baseBranch === "string" ? { baseBranch: input.baseBranch } : {}),
+      ...(input.fixCi === true ? { fixCi: true } : {}),
+    },
+  };
+  pushProgress(run, RUNNER_STEP.queued(queuedRuns().length + 1));
+  insertRun(loadRuns(), run, await getHistoryPolicy());
+  persist(true);
+  console.error(`[coding-agent] ${run.id} queued by ${run.source} for ${run.directory}`);
+  return cloneRun(run);
+}
+
+/**
+ * A queued Fix CI continuation that leaves the queue without ever starting —
+ * the owner canceled it, or its turn came and it could not start — gives back
+ * the failure it claimed when it was queued (`queueRun`), so a Fix CI can be
+ * offered for it again. One that started keeps it: it did its attempt.
+ */
+function releaseCiClaim(run: CodingRun): void {
+  const start = run.queued?.start;
+  if (start?.kind !== "new" || start.fixCi !== true || !start.resumeRunId) return;
+  const previous = loadRuns().find((r) => r.id === start.resumeRunId);
+  if (previous?.ci?.fixRunId === run.id) previous.ci = { ...previous.ci, fixRunId: null };
+}
+
+/** A draft the owner started while every slot was taken: the same record, waiting its turn. */
+function queueDraft(run: CodingRun): CodingRun {
+  const position = queuedRuns().length + 1;
+  run.status = "queued";
+  run.queued = { at: Date.now(), start: { kind: "draft" } };
+  pushProgress(run, RUNNER_STEP.queued(position));
+  persist(true);
+  void pumpRunQueue();
+  return cloneRun(run);
+}
+
+/** The queue's start of one run: the request it was queued with, under the id it was given. */
+function startQueuedRun(id: string): Promise<CodingRun> {
+  return singleFlight(id, async () => {
+    const run = loadRuns().find((r) => r.id === id);
+    if (!run || run.status !== "queued") throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
+    const start = run.queued?.start;
+    // Straight to the draft's own start, not through startDraftRun: this IS
+    // the transition for the id, and asking for it again would wait on itself.
+    if (!start || start.kind === "draft") return startDraftRunOnce(id);
+    return startRun({
+      task: start.task ?? run.task,
+      projectId: start.projectId ?? null,
+      directory: start.directory ?? null,
+      resumeRunId: start.resumeRunId ?? null,
+      provider: start.provider,
+      model: start.model,
+      deliverable: start.deliverable,
+      inputs: start.inputs,
+      experience: start.experience,
+      ...(start.baseBranch !== undefined ? { baseBranch: start.baseBranch } : {}),
+      fixCi: start.fixCi === true,
+      source: run.source,
+      queuedRunId: id,
+    });
+  });
+}
+
+/**
+ * Start what the queue holds, in order, while there are slots. Called when a
+ * run settles (finishRun), when one stopped without ever settling, when the
+ * owner raises the limit, after a run is queued, and at boot — the queue is
+ * on disk, so it survives a restart and is picked up where it was.
+ *
+ * One pass at a time; a slot that frees during a pass makes it look again.
+ * A run whose start the BOX refuses for now (the switch, readiness, a limit)
+ * keeps its place and the queue looks again in QUEUE_RETRY_MS; one refused for
+ * itself (its folder is gone, its request no longer valid) is settled failed
+ * with the reason, and the next one goes.
+ */
+export function pumpRunQueue(): Promise<string[]> {
+  if (store.queuePump) {
+    store.queuePumpAgain = true;
+    return store.queuePump;
+  }
+  const pass = (async () => {
+    const started: string[] = [];
+    do {
+      store.queuePumpAgain = false;
+      for (;;) {
+        const next = queuedRuns()[0];
+        if (!next) break;
+        try {
+          await startQueuedRun(next.id);
+          started.push(next.id);
+        } catch (err) {
+          // A start that took the record and then could not spawn has settled
+          // it failed itself (spawnOrSettle) and left the queue, whatever the
+          // error says about waiting: the chat that queued it hears, as it
+          // would from failQueuedRun.
+          const settled = loadRuns().find((r) => r.id === next.id);
+          if (settled?.status === "failed") announceEndingToChat(settled);
+          // Every slot is taken: its turn comes when a run settles.
+          if (err instanceof SlotsFullError) break;
+          if (err instanceof CodingAgentError && QUEUE_WAITS.has(err.kind)) {
+            armQueueRetry();
+            break;
+          }
+          failQueuedRun(next.id, err);
+        }
+      }
+    } while (store.queuePumpAgain);
+    return started;
+  })().finally(() => {
+    store.queuePump = undefined;
+  });
+  store.queuePump = pass;
+  return pass;
+}
+
+function armQueueRetry(): void {
+  if (store.queueRetry) return;
+  store.queueRetry = setTimeout(() => {
+    store.queueRetry = null;
+    void pumpRunQueue();
+  }, QUEUE_RETRY_MS);
+  store.queueRetry.unref?.();
+}
+
+/** A queued run its turn could not start, for a reason of its own: settled failed, saying why, on its own page. */
+function failQueuedRun(id: string, err: unknown): void {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run || run.status !== "queued") return;
+  releaseCiClaim(run);
+  run.status = "failed";
+  run.queued = null;
+  run.error = `Its turn in the queue came, and it could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+  run.completedAt = Date.now();
+  pushProgress(run, RUNNER_STEP.finished("failed"));
+  persist(true);
+  wakeWaiters(id);
+  // The chat that queued it was told it starts by itself; it did not.
+  announceEndingToChat(run);
+}
+
+/**
+ * Take a run out of the queue before it starts — the OWNER's gesture alone
+ * (the stop route lets only the owner's session reach this; the MCP bearer may
+ * queue and read, never cancel). A start already under way for it is waited
+ * for first: then it is running, and Stop is the way to end it.
+ */
+export async function cancelQueuedRun(id: string): Promise<CodingRun> {
+  const inFlight = transitions.get(id);
+  if (inFlight) await inFlight.catch(() => undefined);
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status !== "queued") {
+    if (run.status === "running") throw new CodingAgentError("invalid", "That run has already left the queue and started. Stop it instead.");
+    return cloneRun(run);
+  }
+  releaseCiClaim(run);
+  run.status = "stopped";
+  run.queued = null;
+  run.error = "Canceled by the owner before it started.";
+  run.completedAt = Date.now();
+  pushProgress(run, RUNNER_STEP.queueCanceled);
+  persist(true);
+  wakeWaiters(id);
+  console.error(`[coding-agent] ${run.id} canceled in the queue by the owner`);
+  announceEndingToChat(run);
+  return cloneRun(run);
 }
 
 /** Discard a draft. Only drafts: everything else is history and history stays. */
@@ -12759,17 +15348,26 @@ export function deleteDraftRun(id: string): void {
  * that are nobody's team.
  *
  * Held from the gate to the insert, released in a `finally` so a start that
- * throws in between gives its slot back.
+ * throws in between gives its slot back. A team's start is counted under its
+ * team too (`startingTeams`), so the team's own look does not count it twice.
  */
-function holdSpawnSlot(): () => void {
-  store.startingRuns += 1;
+function holdSpawnSlot(review = false, teamId: string | null = null): () => void {
+  const key = review ? "startingReviews" : "startingRuns";
+  store[key] += 1;
+  const teams = teamId ? (store.startingTeams ??= new Map()) : null;
+  if (teams && teamId) teams.set(teamId, (teams.get(teamId) ?? 0) + 1);
   let released = false;
   return () => {
     if (released) return;
     released = true;
     // Never below zero: a double release would otherwise make the counter a
     // permanent discount on the limit.
-    store.startingRuns = Math.max(0, store.startingRuns - 1);
+    store[key] = Math.max(0, store[key] - 1);
+    if (teams && teamId) {
+      const left = (teams.get(teamId) ?? 0) - 1;
+      if (left > 0) teams.set(teamId, left);
+      else teams.delete(teamId);
+    }
   };
 }
 
@@ -12782,7 +15380,7 @@ function holdSpawnSlot(): () => void {
  * own awaits (the switch, readiness, the limit) are where the two starts read
  * the same number.
  */
-async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider): Promise<() => void> {
+async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider, reviewPass = false): Promise<() => void> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
@@ -12805,8 +15403,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     // The shared half still applies: those problems are in every provider's
     // way. `CodingProviderReadiness.ready` already folds them in.
     if (!verdict.ready) {
-      const shared = readiness.problems.filter((m) => !readiness.providers.some((p) => p.problems.includes(m)));
-      refusal = [...shared, ...verdict.problems].join(" ");
+      refusal = [...sharedProblems(readiness), ...verdict.problems].join(" ");
     }
   } else if (!readiness.ready) {
     refusal = readiness.problems.join(" ");
@@ -12827,17 +15424,30 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
       );
     }
   }
+  // OpenAI turned the last run away at its usage limit (finishRun remembered
+  // when it is over): the same wait as an Anthropic pool at its limit, so a
+  // queue holds the run until then instead of spending it on a refusal.
+  if (!refusal && provider === "openai") {
+    const until = await openAILimitedUntil();
+    if (until !== null) {
+      throw new CodingAgentError(
+        "limited",
+        `OpenAI is at its usage limit for this ClawBox; it should be back at ${formatResetClock(until)} (${new Date(until).toISOString()}).`
+        + " Wait for the limit reset rather than retrying, or connect OpenAI again with another key or account in the Coding Agent settings.",
+      );
+    }
+  }
   if (refusal) {
     throw new CodingAgentError("not_ready", refusal);
   }
   if (team) {
-    // A team's own runs share the box, up to MAX_TEAM_WORKERS and the memory
-    // guard — the team's own rule, and the orchestrator's `starting` count is
-    // what covers the gap there, so `startingRuns` is deliberately not read by
-    // it or the two would double-count one worker.
-    const slot = await teamSpawnSlot(team);
+    // A team's run shares the box with every other run: the owner's limit,
+    // the team's own MAX_TEAM_WORKERS and the memory guard, each refusal a
+    // wait the orchestrator sits out. Judged and held in one step — see
+    // judgeTeamSlot.
+    const slot = await judgeTeamSlot(team, 0, true);
     if (!slot.ok) throw new CodingAgentError("busy", slot.reason, slot.wait);
-    return holdSpawnSlot();
+    return slot.release;
   }
   const limit = await getMaxParallelRuns();
   // BOTH terms read after the last await, in the same synchronous window the
@@ -12845,13 +15455,26 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   // start that has since inserted its record and given its slot back — so the
   // run is missing from `active` AND from `startingRuns`, and the gate counts
   // it nowhere.
-  const active = loadRuns().filter((r) => isLive(r.status));
+  const freeMb = reviewPass && TEAM_SPAWN_MIN_AVAILABLE_MB > 0 ? await memAvailableMb() : null;
+  const live = loadRuns().filter((r) => isLive(r.status));
+  if (reviewPass) {
+    // The automatic review pass has its own small pool, so it never takes a
+    // start slot from the owner's runs; the memory guard still applies.
+    const reviewing = live.filter((r) => r.reviewOf).length + store.startingReviews;
+    if (reviewing >= REVIEW_PASS_POOL_RUNS) {
+      throw new SlotsFullError(`This ClawBox is already running ${reviewing} review passes at once, which is all it allows.`);
+    }
+    if (reviewing + live.length + store.startingRuns >= 1 && freeMb !== null && freeMb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
+      throw new CodingAgentError("busy", `Not enough free memory for a review pass (${freeMb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).`, true);
+    }
+    return holdSpawnSlot(true);
+  }
+  const active = parallelSlotHolders(live);
   // The runs already going PLUS the starts that have passed this gate and have
   // not reached their record yet — see `startingRuns`.
   const going = active.length + store.startingRuns;
   if (going >= limit) {
-    throw new CodingAgentError(
-      "busy",
+    throw new SlotsFullError(
       limit === 1 && active.length > 0
         ? `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`
         : `This ClawBox is already starting or running ${going} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
@@ -12995,16 +15618,19 @@ function spawnOrSettle(
   try {
     spawnRun(run, resumeSessionId, tools, settings, stdinText, continuingRecord);
   } catch (err) {
+    auditUnstartedSpawn(run.id);
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
     run.completedAt = Date.now();
     // Nothing settles this run through finishRun either, so the tab a previous
     // attempt of the same record opened is closed here.
     cleanupRunResources(run, null);
+    // …and a run that never started has ended: its one-run copies go too.
+    endRunSecrets(run);
     // …and neither does the aftermath run, which is where a run's copy of the
     // project is normally decided. A run that never started left nothing on
     // its branch, so this removes both.
-    trackSettleWork(settleRunWorktree(run));
+    trackSettleWork(settleRunWorktree(run), run.id);
     // The branch made for its pull request is already on the record. Nothing
     // settles the run through finishRun on this path, so the pull request is
     // ended here too, or it stays "opening" — pending — for good.
@@ -13050,7 +15676,12 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   liveHarnessFault = null;
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
+  store.keepTrees.clear();
   store.startingRuns = 0;
+  store.startingTeams?.clear();
+  if (store.queueRetry) clearTimeout(store.queueRetry);
+  store.queueRetry = null;
+  store.queuePumpAgain = false;
   // `anthropicResume` is left as it is: a pass still in flight must stay the
   // one the next pass waits for.
   return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS);
@@ -13069,7 +15700,7 @@ function endEveryLiveRun(): ChildProcess[] {
     if (state.streamTimer) clearInterval(state.streamTimer);
     if (state.unitWatch) clearInterval(state.unitWatch);
     // Said BEFORE the signal, like every other path that ends a run: the
-    // owner's Stop and Pause and the token limit set `endRequested`, and the
+    // owner's Stop and Pause set `endRequested`, and the
     // idle timeout says the same thing with `timedOut`. Without it finishRun
     // reads the kill as the provider blinking — transient stderr, no file
     // touched, `endRequested === null` — and starts a REPLACEMENT child that
@@ -13088,6 +15719,7 @@ function endEveryLiveRun(): ChildProcess[] {
   store.unannounced.clear();
   transitions.clear();
   runSecretEnv.clear();
+  runMcpPlan.clear();
   // What ends the watchers' loops: a poll already in flight is waited for by
   // the drain, and neither it nor a timer armed earlier polls again once its
   // run is gone from these — see `runWatcherPoll`.
@@ -13101,14 +15733,13 @@ function endEveryLiveRun(): ChildProcess[] {
  *
  * One pass is not enough, because the chain this waits for is the chain that
  * STARTS runs: `reviewAndShip` awaits `maybeStartReviewPass`, which spawns the
- * automatic review pass, and `enforceDeliverable` resumes the record for
- * another attempt. Both register a brand-new live run — after `live` was swept,
- * so nothing killed it, and `settling` empties the moment the chain that
+ * automatic review pass. That registers a brand-new live run — after `live`
+ * was swept, so nothing killed it, and `settling` empties the moment the chain that
  * started it returns. `settleWork` then reported success with a harness process
  * still going, holding the previous test's module copy, its temp tree and every
  * shared mock in that file.
  *
- * What it cost: `coding-pipeline-driver.test.ts` and
+ * What it cost: the delivery pipeline's driver test (since deleted) and
  * `coding-agent-durable-completion.test.ts` failed in CI's full run and passed
  * on their own, the leaked run's finish notice landing in the NEXT test's
  * freshly cleared spy. Reproduced on demand under CPU load, and pinned by
@@ -13129,6 +15760,7 @@ async function drainForTests(initial: ChildProcess[], timeoutMs: number): Promis
     killed = endEveryLiveRun();
     // A start this sweep interrupted must not keep its slot either.
     store.startingRuns = 0;
+    store.startingTeams?.clear();
     // A live run with no child yet — a spawn caught mid-flight — gives
     // `settleWork` nothing to wait on, and it would answer at once. Give the
     // spawn a turn rather than spinning on it.

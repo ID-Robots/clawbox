@@ -192,10 +192,9 @@ describe("a Hermes turn that streams", () => {
     await expect(adapter.sendTurn(turn, () => {})).rejects.toThrow("the provider is rate limiting");
   });
 
-  it("asks to be streamed to only when the box can and the caller is listening", async () => {
-    // Two halves, and neither on its own. Asking on a box that cannot stream
-    // costs nothing (the route answers JSON), but asking with no listener would
-    // hold the whole turn open for events nobody reads.
+  it("asks to be streamed to whenever the caller is listening", async () => {
+    // Asking with no listener would hold the whole turn open for events nobody
+    // reads, so that half stays.
     const streamable = makeAdapter(sseResponse([frame("done", { text: "ok", harness: "hermes" })]));
     await streamable.adapter.sendTurn(turn, () => {});
     expect(streamable.requests[0].headers.Accept).toBe("text/event-stream");
@@ -203,10 +202,18 @@ describe("a Hermes turn that streams", () => {
     const noListener = makeAdapter(jsonResponse({ text: "ok", harness: "hermes" }));
     await noListener.adapter.sendTurn(turn);
     expect(noListener.requests[0].headers.Accept).toBeUndefined();
+  });
 
-    const cannotStream = makeAdapter(jsonResponse({ text: "ok", harness: "hermes" }), BLOCKING_CAPS);
-    await cannotStream.adapter.sendTurn(turn, () => {});
-    expect(cannotStream.requests[0].headers.Accept).toBeUndefined();
+  it("still asks when the page's probe said the box cannot stream (TASK-2152)", async () => {
+    // The probe is read on page load and kept. One that landed while the
+    // dashboard was restarting after an update said "no" for the rest of the
+    // page's life, and every text turn of an ongoing chat then went to the
+    // CLI fallback, which cannot continue it. Asking costs nothing: a box that
+    // really cannot stream answers JSON, and that is read below.
+    const staleNo = makeAdapter(jsonResponse({ text: "ok", harness: "hermes" }), BLOCKING_CAPS);
+    const result = await staleNo.adapter.sendTurn(turn, () => {});
+    expect(staleNo.requests[0].headers.Accept).toBe("text/event-stream");
+    expect(result.text).toBe("ok");
   });
 
   it("reads a STREAMED answer even when the caller passed no listener", async () => {
@@ -312,5 +319,60 @@ describe("a Hermes turn that reports what it is doing", () => {
     const result = await adapter.sendTurn(turn, (e) => seen.push(e));
     expect(seen).toEqual([{ kind: "delta", text: "still here" }]);
     expect(result.text).toBe("still here");
+  });
+});
+
+describe("a Hermes stream the box ends because the session did (TASK-2131)", () => {
+  /** The box's own 401 for a session it no longer accepts. */
+  const gate401 = () => new Response(JSON.stringify({ error: "Authentication required" }), {
+    status: 401,
+    headers: { "x-clawbox-session": "expired", "cache-control": "no-store" },
+  });
+
+  function adapterWith(probe: () => Response) {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      if (String(url) === "/setup-api/users/me") return probe();
+      // What the route sends a listener whose session ran out mid-answer: the
+      // first half, then the end of the stream, with no `done`.
+      return sseResponse([frame("delta", { text: "The first half" })]);
+    });
+    const adapter = new HermesAdapter(
+      STREAMING_CAPS,
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+      fetchImpl as unknown as typeof fetch,
+    );
+    return { adapter, urls };
+  }
+
+  it("asks the box whether the session still holds before calling the reply cut off", async () => {
+    const { adapter, urls } = adapterWith(gate401);
+    const err = await adapter.sendTurn({ text: "Hey", attachments: [], idempotencyKey: "k-expired" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessError);
+    expect((err as HarnessError).message).toBe("The reply was cut off before it finished.");
+    expect(urls).toEqual(["/setup-api/hermes/chat", "/setup-api/users/me"]);
+  });
+
+  it("asks the same for a re-attached page's stream", async () => {
+    const { adapter, urls } = adapterWith(() => new Response(null, { status: 204 }));
+    const err = await adapter.attachLiveTurn().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessError);
+    expect(urls.at(-1)).toBe("/setup-api/users/me");
+  });
+
+  it("never asks about a stream that ended with its answer", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return sseResponse([frame("done", { text: "ok", harness: "hermes" })]);
+    });
+    const adapter = new HermesAdapter(
+      STREAMING_CAPS,
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek-v4-flash" }, modelsReady: true, sessionKey: "desktop" }),
+      fetchImpl as unknown as typeof fetch,
+    );
+    await adapter.sendTurn({ text: "Hey", attachments: [], idempotencyKey: "k-done" });
+    expect(urls).not.toContain("/setup-api/users/me");
   });
 });

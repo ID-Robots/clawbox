@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # READY_BODY, SETTLE_STATE, UPDATE_*: read by the tests that source this
 # Helpers for scripts/nano-tests/tests/NN-*.sh (TASK-1324) — SOURCED by a test,
 # never run on its own. See docs/nano-hardware-tests.md.
 #
@@ -51,7 +52,7 @@ note()   { printf '# %s\n' "$*"; }
 finish() { exit "$NANO_TEST_FAILED"; }
 
 # Prepended to every script `board` runs: the clawbox user's environment as a
-# non-interactive ssh does not give it, and the one authenticated HTTP helper.
+# non-interactive ssh does not give it, and the authenticated HTTP helpers.
 # shellcheck disable=SC2016  # expanded on the board, not here
 BOARD_PRELUDE='
 set -uo pipefail
@@ -80,6 +81,34 @@ api() {
   [ -n "$body" ] && extra=(-H "Content-Type: application/json" --data-binary "$body")
   out=$(mktemp)
   code=$(printf "header = \"Authorization: Bearer %s\"\n" "$token" \
+    | curl -sS -o "$out" -w "%{http_code}" -X "$method" --max-time "${API_MAX_TIME:-150}" \
+        "${extra[@]}" -K - "$DASHBOARD$path" 2>/dev/null)
+  printf "%s\n" "${code:-000}"
+  cat "$out"
+  rm -f "$out"
+}
+
+# owner_api METHOD PATH [JSON_BODY] -> as api, but as the OWNER, for a route
+# that answers the bearer with a question to the owner instead of acting
+# (update/run). The session cookie is minted HERE from data/.session-secret and,
+# like the bearer, reaches curl on its stdin only and never leaves the board.
+owner_api() {
+  local method=$1 path=$2 body=${3:-} out code cookie
+  local extra=()
+  cookie=$(node -e "const fs = require(\"fs\"), crypto = require(\"crypto\");
+    const secret = fs.readFileSync(process.argv[1], \"utf8\").trim();
+    let gen = 0;
+    try { const c = JSON.parse(fs.readFileSync(process.argv[2], \"utf8\")); if (Number.isFinite(c.session_generation)) gen = c.session_generation; } catch {}
+    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 1200, gen })).toString(\"base64url\");
+    process.stdout.write(payload + \".\" + crypto.createHmac(\"sha256\", secret).update(payload).digest(\"hex\"));
+  " "$REPO/data/.session-secret" "$REPO/data/config.json" 2>/dev/null)
+  if [ -z "$cookie" ]; then
+    printf "000\n{\"error\":\"no owner session could be minted from %s\"}\n" "$REPO/data/.session-secret"
+    return 0
+  fi
+  [ -n "$body" ] && extra=(-H "Content-Type: application/json" --data-binary "$body")
+  out=$(mktemp)
+  code=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$cookie" \
     | curl -sS -o "$out" -w "%{http_code}" -X "$method" --max-time "${API_MAX_TIME:-150}" \
         "${extra[@]}" -K - "$DASHBOARD$path" 2>/dev/null)
   printf "%s\n" "${code:-000}"
@@ -126,6 +155,17 @@ board_api() {
   case "$API_STATUS" in [0-9][0-9][0-9]) ;; *) API_STATUS=000 ;; esac
 }
 
+# board_owner_api METHOD PATH [JSON_BODY] — board_api as the owner (see
+# `owner_api` above). Sets API_STATUS and API_BODY the same way.
+board_owner_api() {
+  local out
+  # shellcheck disable=SC2016  # $@ is the board's positional list
+  out=$(board 'owner_api "$@"' "$@")
+  API_STATUS=$(printf '%s\n' "$out" | head -n1)
+  API_BODY=$(printf '%s\n' "$out" | tail -n +2)
+  case "$API_STATUS" in [0-9][0-9][0-9]) ;; *) API_STATUS=000 ;; esac
+}
+
 # jq over API_BODY; prints nothing when the body is not JSON.
 api_json() { printf '%s' "$API_BODY" | jq -r "$@" 2>/dev/null; }
 
@@ -158,6 +198,32 @@ wait_gateway_health() {
   done
 }
 
+# board_runtime — the agent runtime the box runs: "openclaw" or "hermes", read
+# from GET /setup-api/harness/active (the desktop chat's own question) and
+# kept for the rest of the test. A box that cannot say counts as OpenClaw, the
+# runtime every test was written for. Leaves API_STATUS/API_BODY as that call
+# set them, so call it before a test's own first request.
+BOARD_RUNTIME=
+board_runtime() {
+  if [ -z "$BOARD_RUNTIME" ]; then
+    board_api GET /setup-api/harness/active
+    BOARD_RUNTIME=$(api_json -r '.active // empty')
+    case "$BOARD_RUNTIME" in openclaw|hermes) ;; *) BOARD_RUNTIME=openclaw ;; esac
+  fi
+  printf '%s' "$BOARD_RUNTIME"
+}
+
+# openclaw_only WHAT — the first line of a test that only means something with
+# the OpenClaw gateway (port 18789, the `openclaw` CLI's agent turns, its
+# /healthz): on a Hermes box, whose gateway unit is masked on purpose, it is a
+# SKIP saying so rather than a failure, and the test ends here.
+openclaw_only() {
+  if [ "$(board_runtime)" = hermes ]; then
+    skip "$1 needs the OpenClaw gateway; this box runs the Hermes agent runtime, whose gateway is masked on purpose"
+    finish
+  fi
+}
+
 # chat_turn — one real chat turn through the box's configured provider:
 # `openclaw agent --agent main` must answer "NANO-CI-OK <serial>" within 240 s.
 # Retried ONCE after 60 s, because the gateway restarts twice after a rebuild
@@ -181,7 +247,9 @@ chat_turn() {
     reply=$(printf '%s' "$json" | jq -r '
       [ (.result.payloads // [])[]?.text, .result.text, .reply, .text ]
       | map(select(type == "string")) | join("\n")' 2>/dev/null)
-    if [ "$rc" -eq 0 ] && printf '%s' "$reply" | grep -qF "$marker"; then
+    # A here-string: `printf | grep -q` can SIGPIPE printf on a multi-line
+    # reply, which under pipefail reads as no answer.
+    if [ "$rc" -eq 0 ] && grep -qF "$marker" <<<"$reply"; then
       ok "chat turn answered \"$marker\" (attempt $attempt)"
       return 0
     fi
@@ -275,4 +343,399 @@ run_account() {
   text=$(api_json '.run.summary // .run.resultText // .run.error // "" | tostring | .[0:300]' | tr '\n' ' ')
   text=${text% }
   printf '%s' "${text:-the run gave no account}"
+}
+
+# ---- coding teams (80-, 81-) -------------------------------------------------
+
+# make_sim_repo — a simulated project in PROJECT_DIR: `develop` as its base, a
+# local bare origin beside it (PROJECT_DIR.origin) whose HEAD is develop, a
+# fake suite (./test.sh) and small modules. The repository's own identity is a
+# placeholder, so nothing of the board's is in its history.
+make_sim_repo() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board '
+    set -e
+    case "$1" in /home/clawbox/?*/nano-ci-*) ;; *) echo "refusing to prepare $1"; exit 2 ;; esac
+    P=$1; O=$1.origin
+    rm -rf -- "$O"
+    mkdir -p "$P/src" "$P/spec"
+    cd "$P"
+    git init -q -b develop
+    git config user.name "nano-ci"
+    git config user.email "nano-ci@example.invalid"
+    printf "export const up = -1;\n" > src/up.js
+    printf "export const down = 1;\n" > src/down.js
+    printf "export const up = -1;\nexport const down = 1;\n" > src/keyboard.js
+    printf "expect(up).toBe(-1);\nexpect(down).toBe(1);\n" > spec/keyboard.spec.js
+    printf "# Changelog\n\n" > CHANGELOG.md
+    printf "# keyboard (simulated)\n" > README.md
+    printf "#!/bin/sh\necho \"keyboard.spec.js: 2 passing\"\n" > test.sh
+    chmod +x test.sh
+    git add -A
+    git commit -q -m "first"
+    git init -q --bare -b develop "$O"
+    git remote add origin "$O"
+    git push -q origin develop
+    git remote set-head origin develop
+  ' "$PROJECT_DIR"
+}
+
+# remove_sim_repo — PROJECT_DIR and its origin; best effort.
+remove_sim_repo() {
+  [ -n "$PROJECT_DIR" ] || return 0
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'case "$1" in /home/clawbox/?*/nano-ci-*) rm -rf -- "$1.origin" ;; esac' "$PROJECT_DIR" >/dev/null 2>&1
+  remove_project_dir
+}
+
+# start_coding_team GOAL — POST /setup-api/coding-agent/team in PROJECT_DIR.
+# Sets TEAM_ID; returns non-zero (with API_STATUS/API_BODY for the reason).
+TEAM_ID=
+start_coding_team() {
+  board_api POST /setup-api/coding-agent/team "$(jq -cn --arg goal "$1" --arg dir "$PROJECT_DIR" '{goal: $goal, directory: $dir}')"
+  TEAM_ID=$(api_json '.team.id // empty')
+  [ "$API_STATUS" = 202 ] && [ -n "$TEAM_ID" ]
+}
+
+# wait_coding_team SECONDS [JQ] — long-poll GET /setup-api/coding-agent/team?id=
+# until the team settles, or until the jq test JQ holds for `.team` (then it
+# is stopped: what the caller wanted to see is there). On the deadline the
+# team is stopped too, so a stuck team does not keep spending the plan. Sets
+# TEAM_STATUS (`timeout` at the deadline) and TEAM_JSON, the last board.
+TEAM_STATUS=
+TEAM_JSON=
+wait_coding_team() {
+  local deadline=$(( $(date +%s) + $1 )) until=${2:-false}
+  TEAM_STATUS=working
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    board_api GET "/setup-api/coding-agent/team?id=$TEAM_ID&wait=20"
+    if [ "$API_STATUS" = 200 ]; then
+      TEAM_JSON=$API_BODY
+      TEAM_STATUS=$(team_json '.team.status // empty')
+      case "$TEAM_STATUS" in done | failed | stopped) return 0 ;; esac
+      if [ "$(team_json ".team | ($until)")" = true ]; then
+        stop_coding_team
+        TEAM_STATUS=$(team_json '.team.status // empty')
+        return 0
+      fi
+    else
+      note "polling $TEAM_ID: $(api_error)"
+      sleep 10
+    fi
+  done
+  stop_coding_team
+  TEAM_STATUS=timeout
+  return 1
+}
+
+# stop_coding_team — POST team/stop for TEAM_ID, and wait for it to settle.
+stop_coding_team() {
+  local i
+  board_api POST /setup-api/coding-agent/team/stop "$(jq -cn --arg id "$TEAM_ID" '{id: $id}')"
+  note "stopped $TEAM_ID: HTTP $API_STATUS"
+  for i in 1 2 3; do
+    board_api GET "/setup-api/coding-agent/team?id=$TEAM_ID&wait=10"
+    [ "$API_STATUS" = 200 ] && TEAM_JSON=$API_BODY
+    case "$(team_json '.team.status // empty')" in done | failed | stopped) return 0 ;; esac
+    [ "$i" -lt 3 ] && sleep 5
+  done
+}
+
+# team_json JQ — jq over the last board (TEAM_JSON).
+team_json() { printf '%s' "$TEAM_JSON" | jq -r "$@" 2>/dev/null; }
+
+# note_team LABEL — the board's account of itself, for the log: status, error,
+# base and branch, its tasks, and every alert and note it raised.
+note_team() {
+  local line
+  note "$1 $TEAM_ID: $(team_json -c '.team | {status, error, base, branch, singleRun, alerts, advice, shape, pr: (.pr | if . then {number, phase} else null end)}')"
+  while IFS= read -r line; do note "  $line"; done < <(team_json '.team.tasks[] | "\(.task_id) \(.status) attempts=\(.attempts) review=\(.review.verdict // "-") files=\(.files_hint | join(","))"')
+  while IFS= read -r line; do note "  $line"; done < <(team_json '.team.log[] | select(.type == "alert" or .type == "note") | "\(.type): \(.message[0:240])"')
+}
+
+# ---- gateway readiness (25-, 50-, 75-, 85-, 90-) ----------------------------
+
+# gateway_probe PATH — GET http://127.0.0.1:18789PATH ON the board (the
+# gateway's own unauthenticated probes: /startupz, /readyz, /healthz). Sets
+# PROBE_STATUS ("000" when nothing answered) and PROBE_BODY.
+PROBE_STATUS=000
+PROBE_BODY=
+gateway_probe() {
+  local out
+  # shellcheck disable=SC2016  # expanded on the board
+  out=$(board '
+    out=$(mktemp)
+    code=$(curl -sS -o "$out" -w "%{http_code}" --max-time 5 "http://127.0.0.1:18789$1" 2>/dev/null)
+    printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
+  ' "$1")
+  PROBE_STATUS=$(printf '%s\n' "$out" | head -n1)
+  PROBE_BODY=$(printf '%s\n' "$out" | tail -n +2)
+  case "$PROBE_STATUS" in [0-9][0-9][0-9]) ;; *) PROBE_STATUS=000 ;; esac
+}
+
+# wait_gateway_settled SECONDS — wait until the gateway is READY AND SETTLED:
+# /startupz answers 200 and /readyz reports its event loop not degraded on two
+# probes in a row.
+#
+# Right after a (re)start the gateway's event loop is busy loading plugins and
+# warming caches, and /readyz says so: `eventLoop.degraded: true` with
+# `reasons: ["cpu"]` for the first seconds of uptime, on a box that is about to
+# be perfectly healthy. A probe taken then is not a verdict, it is a box still
+# settling — so this waits it out, and only a gateway STILL degraded at the end
+# of the budget is reported. Every distinct degraded state seen on the way is
+# kept in SETTLE_SEEN (for a note), the seconds it took in SETTLE_WAITED, and
+# the last /readyz answer in READY_BODY. Channel health is NOT part of this
+# (readiness folds in channels — 25-gateway-channels asserts those itself).
+SETTLE_WAITED=0
+SETTLE_SEEN=
+READY_BODY=
+wait_gateway_settled() {
+  local budget=$1 start now good=0 state
+  start=$(date +%s)
+  SETTLE_SEEN=
+  while :; do
+    gateway_probe /startupz
+    if [ "$PROBE_STATUS" = 200 ]; then
+      gateway_probe /readyz
+      READY_BODY=$PROBE_BODY
+      state=$(printf '%s' "$PROBE_BODY" | jq -r '
+        if .eventLoop == null then "no-eventloop"
+        elif .eventLoop.degraded then "degraded:" + ((.eventLoop.reasons // []) | join(","))
+        else "settled" end' 2>/dev/null)
+      [ -n "$state" ] || state="unreadable(HTTP $PROBE_STATUS)"
+    else
+      state="starting(HTTP $PROBE_STATUS)"
+    fi
+    now=$(date +%s)
+    SETTLE_WAITED=$((now - start))
+    case "$state" in
+      settled|no-eventloop) good=$((good + 1)) ;;
+      *)
+        good=0
+        case " $SETTLE_SEEN " in *" $state "*) ;; *) SETTLE_SEEN="${SETTLE_SEEN:+$SETTLE_SEEN }$state" ;; esac
+        ;;
+    esac
+    [ "$good" -ge 2 ] && return 0
+    [ "$SETTLE_WAITED" -ge "$budget" ] && { SETTLE_STATE=$state; return 1; }
+    sleep 2
+  done
+}
+SETTLE_STATE=
+
+# wait_runtime_settled BUDGET — the box's agent runtime is up, whichever it
+# runs: the OpenClaw gateway settled (wait_gateway_settled) or, on a Hermes box
+# whose gateway is masked on purpose, Hermes healthy in
+# /setup-api/harness/status twice in a row. Sets SETTLE_WAITED and, on
+# failure, SETTLE_STATE like wait_gateway_settled.
+wait_runtime_settled() {
+  local budget=${1:-300} start now good=0 healthy
+  if [ "$(board_runtime)" != hermes ]; then
+    wait_gateway_settled "$budget"
+    return
+  fi
+  start=$(date +%s)
+  SETTLE_STATE=
+  while :; do
+    board_api GET /setup-api/harness/status
+    healthy=$(api_json -r '[.harnesses[]? | select(.id == "hermes") | .healthy] | first // empty')
+    now=$(date +%s)
+    SETTLE_WAITED=$((now - start))
+    if [ "$healthy" = true ]; then good=$((good + 1)); else good=0; fi
+    [ "$good" -ge 2 ] && return 0
+    if [ "$SETTLE_WAITED" -ge "$budget" ]; then
+      SETTLE_STATE="hermes not healthy (HTTP $API_STATUS, healthy=${healthy:-unknown})"
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+# runtime_settled_line WHAT — ok / not ok for wait_runtime_settled 300, naming
+# the runtime: "<runtime> settled WHAT (Ns)".
+runtime_settled_line() {
+  local what=$1 name=gateway
+  [ "$(board_runtime)" = hermes ] && name=Hermes
+  if wait_runtime_settled 300; then
+    ok "$name settled $what (${SETTLE_WAITED}s)"
+  else
+    not_ok "$name not settled $what: ${SETTLE_STATE:-unknown}"
+    return 1
+  fi
+}
+
+# hermes_chat_turn — one real chat turn through Hermes, the way the desktop
+# chat runs it (`hermes chat -q ... -Q`, see /setup-api/hermes/chat): the
+# reply must carry "NANO-CI-OK <serial>" within 240 s. Retried once after 60 s,
+# like chat_turn. A fresh conversation each time, so it never resumes the
+# owner's own chat.
+hermes_chat_turn() {
+  local marker="NANO-CI-OK $NANO_SERIAL" attempt out rc
+  for attempt in 1 2; do
+    # shellcheck disable=SC2016  # expanded on the board
+    out=$(board '
+      cd "$HOME" && PATH="$HOME/.local/bin:$PATH" timeout 240 "$HOME/.local/bin/hermes" chat \
+        -q "Reply with exactly this text and nothing else: $1" -Q 2>/dev/null
+    ' "$marker")
+    rc=$?
+    # The prompt carries the marker too: count it only on a line that is not
+    # the prompt echoed back.
+    if [ "$rc" -eq 0 ] && grep -vF "Reply with exactly" <<<"$out" | grep -qF "$marker"; then
+      ok "Hermes chat turn answered \"$marker\" (attempt $attempt)"
+      return 0
+    fi
+    if [ "$rc" -eq 124 ]; then
+      note "attempt $attempt: no Hermes answer within 240 s"
+    else
+      note "attempt $attempt: exit $rc, reply: $(printf '%s' "$out" | tr '\n' ' ' | head -c 300)"
+    fi
+    [ "$attempt" -eq 1 ] && { note "retrying in 60 s"; sleep 60; }
+  done
+  not_ok "no Hermes chat turn answered \"$marker\" in two attempts"
+  return 1
+}
+
+# runtime_chat_turn — chat_turn on an OpenClaw box, hermes_chat_turn on Hermes.
+runtime_chat_turn() {
+  if [ "$(board_runtime)" = hermes ]; then hermes_chat_turn; else chat_turn; fi
+}
+
+# runtime_kept — after an update, the box still runs the runtime it ran
+# before (board_runtime read it then); on Hermes the OpenClaw gateway also
+# stays masked. Prints its own ok / not ok.
+runtime_kept() {
+  local was now gw
+  was=$(board_runtime)
+  board_api GET /setup-api/harness/active
+  now=$(api_json -r '.active // empty')
+  if [ "$now" = "$was" ]; then ok "agent runtime kept: $now"; else not_ok "agent runtime was $was, now ${now:-unreadable (HTTP $API_STATUS)}"; fi
+  if [ "$was" = hermes ]; then
+    gw=$(board 'systemctl is-active clawbox-gateway.service 2>/dev/null' | tail -n 1)
+    if [ "$gw" = active ]; then not_ok "clawbox-gateway.service runs on a Hermes box (it should stay masked)"; else ok "clawbox-gateway.service stays ${gw:-inactive} on a Hermes box"; fi
+  fi
+}
+
+# ---- the box's own updater (85-, 90-) ----------------------------------------
+
+# ensure_on_release — the board on the current release (head of main), with
+# its gateway settled: kept when it is there already (85- leaves it there when
+# its rollback works), rebuilt otherwise. Prints its own ok / not ok; sets
+# HEAD0 to where the update starts from. Returns non-zero when it could not.
+HEAD0=
+ensure_on_release() {
+  # Read the runtime now, on the build under test: a rebuild must not change
+  # which settle check, chat turn and runtime check the test uses.
+  note "agent runtime: $(board_runtime)"
+  release_sha || { not_ok "could not read the current release (head of main)"; return 1; }
+  HEAD0=$(board_head)
+  if [ "$HEAD0" = "$RELEASE_SHA" ]; then
+    note "board already on the release ${RELEASE_SHA:0:12}"
+  else
+    note "board at ${HEAD0:0:12}: rebuilding it to the release ${RELEASE_SHA:0:12} first (several minutes)"
+    if ! rebuild_to_release; then
+      not_ok "could not put the board on the release (it is at $(board_head | cut -c1-12))"
+      return 1
+    fi
+    ok "board rebuilt to the release ${RELEASE_SHA:0:12}"
+    HEAD0=$RELEASE_SHA
+  fi
+  if wait_runtime_settled 300; then
+    ok "release build up and settled ($(board_runtime))"
+  else
+    not_ok "release build not settled: ${SETTLE_STATE:-unknown}"
+    return 1
+  fi
+}
+
+# board_head — the commit checked out on the board, or "".
+board_head() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'git -C "$REPO" rev-parse HEAD 2>/dev/null' | tail -n 1 | tr -d '[:space:]'
+}
+
+# build_identity_ok — scripts/verify-build-identity.sh on the board: the build
+# the dashboard serves names the checked-out commit. Prints its last line.
+build_identity_ok() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'cd "$REPO" && bash scripts/verify-build-identity.sh --project-dir "$REPO" 2>&1 | tail -n 3'
+}
+
+# rebuild_to_release — put the board on the current RELEASE (the head of main)
+# through `nano-ci rebuild`, the lab's privileged force-update + post_update.
+# `nano-ci rebuild` checks the board reached the commit named in
+# /tmp/nano-ci-want-sha, so that file is pointed at main's head for the
+# rebuild and put back after. Sets RELEASE_SHA. Returns non-zero when the board
+# did not reach it.
+RELEASE_SHA=
+release_sha() {
+  # shellcheck disable=SC2016  # expanded on the board
+  RELEASE_SHA=$(board 'git -C "$REPO" ls-remote origin refs/heads/main 2>/dev/null | cut -f1' | tail -n 1 | tr -d '[:space:]')
+  { [ ${#RELEASE_SHA} -eq 40 ] && [[ $RELEASE_SHA =~ ^[0-9a-f]+$ ]]; } || { RELEASE_SHA=; note "could not read the head of main on the board's origin"; return 2; }
+}
+rebuild_to_release() {
+  local saved
+  release_sha || return 2
+  saved=$(board 'cat /tmp/nano-ci-want-sha 2>/dev/null' | tr -d '[:space:]')
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$RELEASE_SHA" >/dev/null
+  "$NANO_CI" rebuild "$NANO_SERIAL" main 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "rebuild: $l"; done
+  if [ -n "$saved" ]; then
+    # shellcheck disable=SC2016  # expanded on the board
+    board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$saved" >/dev/null
+  else
+    board 'rm -f /tmp/nano-ci-want-sha' >/dev/null
+  fi
+  [ "$(board_head)" = "$RELEASE_SHA" ]
+}
+
+# start_app_update BRANCH — what an owner does in Settings: pin the update
+# branch, then "Update now" (POST /setup-api/update/run, force). Returns
+# non-zero when the update did not start; API_STATUS/API_BODY say why. The
+# click is the owner's: update/run answers the agent's bearer with a question
+# to the owner (202 pendingApproval) and starts nothing.
+start_app_update() {
+  board_api POST /setup-api/system/update-branch "$(jq -cn --arg b "$1" '{branch: $b}')"
+  [ "$API_STATUS" = 200 ] || return 1
+  board_owner_api POST /setup-api/update/run '{"force":true}'
+  # A build with the busy gate (GitHub #1269) answers 409 while agent work runs
+  # on the box; the test is the owner who updates anyway, and says so.
+  if [ "$API_STATUS" = 409 ] && [ "$(api_json '.busy // empty')" = true ]; then
+    note "update/run: agent work running ($(api_json -c '.work // {}')): updating anyway"
+    board_owner_api POST /setup-api/update/run '{"force":true,"ignoreBusy":true}'
+  fi
+  [ "$API_STATUS" = 200 ] && [ "$(api_json '.started // empty')" = true ]
+}
+
+# wait_app_update SECONDS [ON_TICK] — poll /setup-api/update/status until the
+# run ends. The dashboard restarts (and the box may reboot) in the middle of an
+# update, so a probe that gets no answer is waited through, not a verdict. Runs
+# ON_TICK (a function name) between polls. Sets UPDATE_PHASE (completed |
+# failed | timeout) and UPDATE_ERROR, the run's own account of a failure.
+UPDATE_PHASE=
+UPDATE_ERROR=
+wait_app_update() {
+  local deadline=$(( $(date +%s) + $1 )) tick=${2:-} phase seen_running=0 last=""
+  UPDATE_PHASE=timeout UPDATE_ERROR=
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ -n "$tick" ] && "$tick"
+    API_MAX_TIME=20 board_api GET /setup-api/update/status
+    if [ "$API_STATUS" = 200 ]; then
+      phase=$(api_json '.phase // empty')
+      step=$(api_json '[.steps[]? | select(.status == "running") | .id] | first // empty')
+      if [ "$phase/$step" != "$last" ]; then note "update: $phase${step:+ ($step)}"; last="$phase/$step"; fi
+      case "$phase" in
+        running) seen_running=1 ;;
+        completed|failed)
+          # An "idle"-derived answer before the run was ever seen running is
+          # the previous state, not this run's verdict.
+          if [ "$seen_running" = 1 ] || [ "$phase" = failed ]; then
+            UPDATE_PHASE=$phase
+            UPDATE_ERROR=$(api_json '(.error // ([.steps[]? | select(.status == "failed") | .error] | first) // "") | tostring | .[0:300]')
+            return 0
+          fi
+          ;;
+      esac
+    fi
+    sleep 15
+  done
+  return 1
 }

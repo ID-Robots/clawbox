@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { execWifiNmcli } from "@/lib/wifi-radio";
 import { logSafe } from "@/lib/log-safe";
-
-const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +27,7 @@ export async function POST(request: Request) {
 
   try {
     if (action === "forget") {
-      await execFileAsync("nmcli", ["connection", "delete", normalizedSsid], { timeout: 5_000 });
+      await execWifiNmcli(["connection", "delete", normalizedSsid], { timeout: 5_000 });
       return NextResponse.json({ success: true, action: "forget" });
     }
 
@@ -38,7 +35,7 @@ export async function POST(request: Request) {
     if (password.length < 8 || password.length > 63) {
       return NextResponse.json({ error: "Password must be 8–63 characters" }, { status: 400 });
     }
-    await execFileAsync("nmcli", [
+    await execWifiNmcli([
       "connection", "modify", normalizedSsid,
       "wifi-sec.key-mgmt", "wpa-psk",
       "wifi-sec.psk", password,
@@ -46,7 +43,7 @@ export async function POST(request: Request) {
     let connected = true;
     let reactivateError: string | null = null;
     try {
-      await execFileAsync("nmcli", ["connection", "up", normalizedSsid], { timeout: 15_000 });
+      await execWifiNmcli(["connection", "up", normalizedSsid], { timeout: 15_000 });
     } catch (err) {
       connected = false;
       reactivateError = err instanceof Error ? err.message : "Failed to reconnect";

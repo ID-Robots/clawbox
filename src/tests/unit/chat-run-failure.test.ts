@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { describeChatFailure, describeFallbackReply } from "@/lib/chat-error-text";
+import type { ChatMessage } from "@/lib/chat-history-cache";
 import {
   RunFailureLedger,
   runFailureFromAgentEvent,
   runFailureFromChatError,
+  withFailureNote,
 } from "@/lib/chat-run-failure";
 
 /**
@@ -101,6 +103,19 @@ const chatError = {
   },
 };
 
+/**
+ * The same run's SECOND error frame, sent when dispatch completes (core
+ * 2026.9.4): the first frame's words inside the Control UI's failure copy, and
+ * no `errorDetail`.
+ */
+const chatErrorRepeat = {
+  runId: RUN,
+  sessionKey: SESSION,
+  state: "error",
+  errorMessage:
+    "⚠️ Agent failed before reply: The selected model was not found by the provider. Check the model id or choose a different model.\nTo view logs, run `openclaw logs --follow` in a terminal.",
+};
+
 /** The case the owner saw: a reason the gateway has no copy for → its generic sentence. */
 const GENERIC_GATEWAY_SENTENCE = "The agent run failed before producing a reply.";
 const versionRefusal = {
@@ -165,23 +180,172 @@ describe("runFailureFromChatError", () => {
 });
 
 describe("RunFailureLedger", () => {
-  it("merges a run's frames and hands them over once, under the chat frame's own facts", () => {
+  it("merges a run's frames and hands them over under the chat frame's own facts — again for its second error frame", () => {
     const ledger = new RunFailureLedger();
     ledger.observe(finishing);
     ledger.observe(fallbackStep);
     ledger.observe(lifecycleError);
-    expect(ledger.settle(chatError)).toEqual({
+    const settled = {
       provider: "anthropic",
       model: "claude-nonexistent-9",
       reason: "model_not_found",
       detail: fallbackStep.data.fallbackStepFromFailureDetail,
-    });
-    // Consumed: the same run settles to the chat frame's facts alone.
-    expect(ledger.settle(chatError)).toEqual({
-      provider: "anthropic",
-      model: "claude-nonexistent-9",
+    };
+    expect(ledger.settle(chatError)).toEqual(settled);
+    // Remembered, not consumed: the gateway (core 2026.9.4) sends a second
+    // error frame for the same run when dispatch completes, with nothing but
+    // an operator's sentence on it. It used to settle to nothing and be worded
+    // as the generic "send it again" under the real reason.
+    expect(ledger.settle(chatErrorRepeat)).toEqual(settled);
+  });
+
+  it("tells the chat when an error frame repeats a run it already ended", () => {
+    const ledger = new RunFailureLedger();
+    ledger.observe(fallbackStep);
+    const first = ledger.settleError(chatError);
+    expect(first).toMatchObject({ runId: RUN, repeat: false, errorMessage: chatError.errorMessage });
+    const second = ledger.settleError(chatErrorRepeat);
+    expect(second.repeat).toBe(true);
+    expect(second.runId).toBe(RUN);
+    expect(second.context).toEqual(first.context);
+    // The FIRST frame's sentence, so the repeat reads as the first did: the
+    // second wraps the same words in "run `openclaw logs --follow`".
+    expect(second.errorMessage).toBe(chatError.errorMessage);
+    // And a third, should one ever come.
+    expect(ledger.settleError(chatErrorRepeat).repeat).toBe(true);
+  });
+
+  it("merges what a repeat carries itself on top of what is remembered", () => {
+    const ledger = new RunFailureLedger();
+    ledger.observe(fallbackStep);
+    ledger.settleError({ runId: RUN, state: "error", errorMessage: "x" });
+    expect(ledger.settleError({ ...chatErrorRepeat, errorDetail: { provider: "anthropic" } }).context).toEqual({
       reason: "model_not_found",
+      model: "anthropic/claude-nonexistent-9",
+      detail: fallbackStep.data.fallbackStepFromFailureDetail,
+      provider: "anthropic",
     });
+  });
+
+  it("calls no other run's error a repeat, nor a frame that names no run", () => {
+    const ledger = new RunFailureLedger();
+    expect(ledger.settleError(chatError).repeat).toBe(false);
+    expect(ledger.settleError({ ...chatError, runId: "another-run" }).repeat).toBe(false);
+    const anonymous = { state: "error", errorMessage: "x" };
+    expect(ledger.settleError(anonymous)).toEqual({ context: {}, errorMessage: "x", repeat: false });
+    expect(ledger.settleError(anonymous).repeat).toBe(false);
+  });
+
+  // One run id is not always one run: the Claude account swap sends its retry
+  // under ONE key before and after the gateway restart that moves the box to
+  // the next account, and the restarted gateway runs that key again — a whole
+  // new run, opening the way every run does on core 2026.9.4 (the frames are a
+  // live gateway's). Taken for the first run's repeat, its failure was
+  // swallowed whole.
+  describe("an id that runs again", () => {
+    const SWAP = "clawbox-swap-0123456789abcdef";
+    const RATE = "API rate limit reached. Please try again later.";
+    const NO_KEY = 'No API key found for provider "anthropic". Auth store: /home/clawbox/.openclaw/state/openclaw.sqlite'
+      + " (agentDir: /home/clawbox/.openclaw/agents/main/agent). Configure an API key";
+    const ANTHROPIC = { provider: "anthropic", model: "claude-opus-5-5" };
+    const rateLimited = { runId: SWAP, sessionKey: SESSION, agentId: "main", state: "error", errorMessage: RATE, errorDetail: { ...ANTHROPIC, failoverReason: "rate_limit" } };
+    const itsRepeat = { runId: SWAP, sessionKey: SESSION, state: "error", errorMessage: `⚠️ Agent failed before reply: ${RATE}` };
+    /** How a run opens: status frames, before any lifecycle frame and before anything worth folding. */
+    const opens = { runId: SWAP, stream: "run_status", data: { phase: "preparing_workspace" }, sessionKey: SESSION, agentId: "main", seq: 1, isHeartbeat: false };
+    const secondRunStep = {
+      runId: SWAP,
+      sessionKey: SESSION,
+      stream: "lifecycle",
+      seq: 3,
+      data: {
+        phase: "fallback_step",
+        fallbackStepFromModel: "anthropic/claude-opus-5-5",
+        fallbackStepFromFailureReason: "auth",
+        fallbackStepFromFailureDetail: NO_KEY,
+        fallbackStepFinalOutcome: "chain_exhausted",
+      },
+    };
+
+    it("settles the second run's error as its own failure — its sentence, its reason — and then that run's repeat as a repeat", () => {
+      const ledger = new RunFailureLedger();
+      expect(ledger.settleError(rateLimited).repeat).toBe(false);
+      expect(ledger.settleError(itsRepeat).repeat).toBe(true);
+
+      ledger.observe(opens);
+      ledger.observe(secondRunStep);
+      const second = ledger.settleError({ runId: SWAP, sessionKey: SESSION, agentId: "main", state: "error", errorMessage: `${NO_KEY.slice(0, 240)}...` });
+
+      expect(second.repeat).toBe(false);
+      expect(String(second.errorMessage)).toContain("No API key found");
+      // Nothing of the FIRST run's context: not its reason, not its provider detail.
+      expect(second.context).toEqual({ reason: "auth", model: "anthropic/claude-opus-5-5", detail: NO_KEY });
+      expect(describeChatFailure(second.errorMessage, second.context)).toMatch(/no working sign-in for Anthropic/);
+
+      const again = ledger.settleError({ runId: SWAP, sessionKey: SESSION, state: "error", errorMessage: "⚠️ Agent failed before reply: …" });
+      expect(again.repeat).toBe(true);
+      expect(again.errorMessage).toBe(second.errorMessage);
+    });
+
+    it("knows the id is running again from its FIRST frame, which carries nothing to fold", () => {
+      const ledger = new RunFailureLedger();
+      ledger.settleError(rateLimited);
+      ledger.observe(opens);
+      // The second run died before any lifecycle frame said why.
+      const second = ledger.settleError({ runId: SWAP, sessionKey: SESSION, state: "error", errorMessage: "The agent run failed before producing a reply." });
+      expect(second).toEqual({ runId: SWAP, context: {}, errorMessage: "The agent run failed before producing a reply.", repeat: false });
+    });
+
+    it.each<[string, Record<string, unknown>]>([
+      ["an assistant delta", { stream: "assistant", data: { text: "Let me look" } }],
+      ["a tool frame", { stream: "tool", data: { phase: "start", toolCallId: "call_1" } }],
+      ["its lifecycle start", { stream: "lifecycle", data: { phase: "start" } }],
+      ["a lifecycle frame with no phase", { stream: "lifecycle", data: {} }],
+    ])("takes %s under an ended id for a run at work", (_what, frame) => {
+      const ledger = new RunFailureLedger();
+      ledger.settleError(rateLimited);
+      ledger.observe({ runId: SWAP, sessionKey: SESSION, ...frame });
+      expect(ledger.settleError(itsRepeat).repeat).toBe(false);
+    });
+
+    it.each(["error", "end"])("does not take a run's own closing lifecycle `%s` frame, trailing its error, for a new run", (phase) => {
+      const ledger = new RunFailureLedger();
+      ledger.settleError(rateLimited);
+      ledger.observe({ runId: SWAP, sessionKey: SESSION, stream: "lifecycle", data: { phase, errorObservation: { ...ANTHROPIC, failoverReason: "rate_limit" } } });
+      const repeat = ledger.settleError(itsRepeat);
+      expect(repeat.repeat).toBe(true);
+      expect(repeat.errorMessage).toBe(RATE);
+    });
+
+    it("leaves every other run's ending alone", () => {
+      const ledger = new RunFailureLedger();
+      ledger.settleError(rateLimited);
+      ledger.settleError({ ...rateLimited, runId: "the-owners-own-turn" });
+      ledger.observe(opens);
+      expect(ledger.settleError({ ...itsRepeat, runId: "the-owners-own-turn" }).repeat).toBe(true);
+      // A frame that names no run reopens nothing either.
+      ledger.settleError(rateLimited);
+      ledger.observe({ stream: "run_status", data: { phase: "preparing_workspace" } });
+      expect(ledger.settleError(itsRepeat).repeat).toBe(true);
+    });
+  });
+
+  it("forgets an ended run past the cap, like any other", () => {
+    const ledger = new RunFailureLedger();
+    ledger.observe(fallbackStep);
+    ledger.settleError(chatError);
+    for (let i = 0; i < 8; i++) ledger.settleError({ runId: `later-${i}`, state: "error" });
+    const late = ledger.settleError(chatErrorRepeat);
+    expect(late.repeat).toBe(false);
+    expect(late.context).toEqual({});
+    // The newest are still known.
+    expect(ledger.settleError({ runId: "later-7", state: "error" }).repeat).toBe(true);
+  });
+
+  it("still takes a final's note once: nothing owes a second fallback line", () => {
+    const ledger = new RunFailureLedger();
+    ledger.observe(fallbackStepToFlash);
+    expect(ledger.settle(finalFrame).servedModel).toBe("deepseek/deepseek-v4-flash");
+    expect(ledger.settle(finalFrame)).toEqual({});
   });
 
   it("keeps runs apart and forgets the oldest, so a run whose error never came cannot leak", () => {
@@ -221,12 +385,31 @@ describe("describeChatFailure with the gateway's reason", () => {
       "That message did not go through — Anthropic does not offer the model this chat is set to (claude-nonexistent-9). Pick another model in the header and send it again.",
     );
     // The second `chat` error frame the gateway sends for the same run, with
-    // the operator's `openclaw logs --follow` line, must not reach the bubble.
-    const second = describeChatFailure(
-      "⚠️ Agent failed before reply: The selected model was not found by the provider. Check the model id or choose a different model.\nTo view logs, run `openclaw logs --follow` in a terminal.",
-      ledger.settle({ runId: RUN, state: "error" }),
-    );
-    expect(second).not.toContain("openclaw logs");
+    // the operator's `openclaw logs --follow` line, must not reach the bubble
+    // — and says what the first one said, whichever frame's words it is read from.
+    const repeat = ledger.settleError(chatErrorRepeat);
+    for (const words of [chatErrorRepeat.errorMessage, repeat.errorMessage]) {
+      const second = describeChatFailure(words, repeat.context);
+      expect(second).not.toContain("openclaw logs");
+      expect(second).toBe(
+        "That message did not go through — Anthropic does not offer the model this chat is set to (claude-nonexistent-9). Pick another model in the header and send it again.",
+      );
+    }
+  });
+
+  it("words a repeat from the first frame's sentence where only that one passes the leak rules", () => {
+    // No reason, no provider: the sentence is the gateway's own, relayed. The
+    // repeat's copy of it carries a terminal instruction, so read from THAT it
+    // would fall to the generic line under the useful one.
+    const ledger = new RunFailureLedger();
+    const first = ledger.settleError({ runId: "run-size", state: "error", errorMessage: "Request exceeds the size limit" });
+    const repeat = ledger.settleError({
+      runId: "run-size",
+      state: "error",
+      errorMessage: "⚠️ Agent failed before reply: Request exceeds the size limit.\nTo view logs, run `openclaw logs --follow` in a terminal.",
+    });
+    expect(describeChatFailure(repeat.errorMessage, repeat.context)).toBe(describeChatFailure(first.errorMessage, first.context));
+    expect(describeChatFailure(repeat.errorMessage, repeat.context)).toBe("Error: Request exceeds the size limit");
   });
 
   it("keeps the calm sentences for a rate limit or a refused credential when the reason says so", () => {
@@ -370,6 +553,48 @@ describe("a reply another model wrote", () => {
     expect(describeFallbackReply({ provider: "anthropic", model: "claude-x", reason: "model_not_found", servedModel: "deepseek-v4-flash" })).toBe(
       "This reply came from deepseek-v4-flash, not claude-x: Anthropic does not offer claude-x. Pick another model in the header.",
     );
+  });
+});
+
+describe("withFailureNote", () => {
+  const SENTENCE = "That message did not go through. Send it again — the details stayed in this box's log.";
+  const user = (text: string, idempotencyKey?: string): ChatMessage => ({ role: "user", text, timestamp: 1, ...(idempotencyKey ? { idempotencyKey } : {}) });
+  const reply = (text: string): ChatMessage => ({ role: "assistant", text, timestamp: 2 });
+  const note = (failedRun: string, text = SENTENCE) => ({ role: "system" as const, text, timestamp: 3, failedRun });
+
+  it("changes nothing while the run's note is still there", () => {
+    const transcript: ChatMessage[] = [user("hi", "run-a"), note("run-a")];
+    expect(withFailureNote(transcript, note("run-a", "worded differently"))).toBe(transcript);
+  });
+
+  it("takes an untagged note with the same words as the same note", () => {
+    // The mascot chat keeps a background tab's failure as text and appends it,
+    // untagged, when the owner comes back to the tab.
+    const transcript: ChatMessage[] = [user("hi", "run-a"), { role: "system", text: SENTENCE, timestamp: 3 }];
+    expect(withFailureNote(transcript, note("run-a"))).toBe(transcript);
+  });
+
+  it("puts a note the history re-read dropped back at the end of its own turn", () => {
+    const transcript = [reply("Ready."), user("hi", "run-a")];
+    expect(withFailureNote(transcript, note("run-a"))).toEqual([...transcript, note("run-a")]);
+    // The gateway's stored copy of the turn carries the key with its role suffix.
+    const stored = [reply("Ready."), user("hi", "run-a:user"), reply("half an ans")];
+    expect(withFailureNote(stored, note("run-a"))).toEqual([...stored, note("run-a")]);
+  });
+
+  it("never puts it under a message the owner sent since", () => {
+    const next = user("try this model instead", "run-b");
+    const transcript = [user("hi", "run-a"), next, reply("Sure.")];
+    expect(withFailureNote(transcript, note("run-a"))).toEqual([user("hi", "run-a"), note("run-a"), next, reply("Sure.")]);
+    // Another run's note, same words, is not this run's.
+    const both: ChatMessage[] = [user("hi", "run-a"), next, note("run-b")];
+    expect(withFailureNote(both, note("run-a"))).toEqual([user("hi", "run-a"), note("run-a"), next, note("run-b")]);
+  });
+
+  it("appends for a run whose turn is not in the transcript", () => {
+    const transcript = [user("hi"), reply("Hello.")];
+    expect(withFailureNote(transcript, note("run-elsewhere"))).toEqual([...transcript, note("run-elsewhere")]);
+    expect(withFailureNote<ChatMessage>([], note("run-a"))).toEqual([note("run-a")]);
   });
 });
 

@@ -48,6 +48,14 @@ vi.mock("fs/promises", () => ({
   default: { readFile: vi.fn(), writeFile: vi.fn(), rename: vi.fn(), mkdir: vi.fn() },
 }));
 
+// What the agent databases weigh, which sizes doctor's bound. 0 by default —
+// what the real reader answers under the `fs/promises` mock above.
+const { mockDatabaseBytes } = vi.hoisted(() => ({ mockDatabaseBytes: vi.fn<(stateDir: string) => Promise<number>>(async () => 0) }));
+vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
+  openclawDatabaseBytes: mockDatabaseBytes,
+}));
+
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockExecFile = vi.mocked(childProcess.execFile);
 
@@ -122,6 +130,36 @@ describe("runOpenclawDoctorFix and the legacy exec-approvals blocker", () => {
     });
 
     await expect(openclawConfig.runOpenclawDoctorFix()).resolves.toBe("completed");
+  });
+
+  it("gives doctor the time a few GB of agent databases take instead of killing it at 180 s", async () => {
+    // A stopped doctor here is a rolled-back sign-in (configure/route.ts), and
+    // on a box with ~3 GB of agent databases doctor reads for minutes.
+    mockDatabaseBytes.mockResolvedValue(3e9);
+    let doctor: ChildProcess | undefined;
+    mockSpawn.mockImplementation(((_cmd: string, args: string[]) => {
+      const child = new EventEmitter() as ChildProcess;
+      child.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+      child.stderr = new EventEmitter() as unknown as ChildProcess["stderr"];
+      child.kill = vi.fn(() => true) as unknown as ChildProcess["kill"];
+      if (args.includes("doctor")) doctor = child;
+      else queueMicrotask(() => child.emit("close", 0));
+      return child;
+    }) as unknown as typeof childProcess.spawn);
+    vi.useFakeTimers();
+    try {
+      const outcome = openclawConfig.runOpenclawDoctorFix();
+      // Five minutes of doctor: past the old flat 180 s, inside 90 + 3 x 120.
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(doctor).toBeDefined();
+      expect(doctor!.kill).not.toHaveBeenCalled();
+      doctor!.emit("close", 0);
+      await expect(outcome).resolves.toBe("completed");
+      expect(mockDatabaseBytes).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      mockDatabaseBytes.mockResolvedValue(0);
+    }
   });
 
   it("spawns nothing on the Hermes edition", async () => {

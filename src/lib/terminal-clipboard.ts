@@ -112,3 +112,23 @@ export async function readClipboard(): Promise<string | null> {
     return null;
   }
 }
+
+/**
+ * The clipboard's pictures, where script may read them (a secure origin, a
+ * browser with `clipboard.read`); [] everywhere else and for a clipboard that
+ * holds none. For the menu's Paste — a key press gets them from its own paste
+ * event, on plain HTTP too.
+ */
+export async function readClipboardImages(): Promise<Blob[]> {
+  if (!canUseAsyncClipboard() || typeof navigator.clipboard.read !== "function") return [];
+  try {
+    const images: Blob[] = [];
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find((t) => t.startsWith("image/"));
+      if (type) images.push(await item.getType(type));
+    }
+    return images;
+  } catch {
+    return [];
+  }
+}

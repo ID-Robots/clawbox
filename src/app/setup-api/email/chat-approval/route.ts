@@ -34,7 +34,7 @@ import {
   TelegramApiError,
   TelegramUnavailableError,
 } from "@/lib/email-approval-telegram";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { readTelegramBotsInUse, telegramBotId } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
@@ -74,7 +74,7 @@ async function snapshot() {
 }
 
 export async function GET(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   try {
     return NextResponse.json(await snapshot());
   } catch (err) {
@@ -86,7 +86,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
 
   let body: { enabled?: unknown; botToken?: unknown };
   try {
@@ -201,7 +201,7 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   // Order matters only in that the switch must not survive the token: an
   // enabled flag with no bot behind it is the "nobody is ever asked" state.
   await configSet(CHAT_APPROVAL_ENABLED_KEY, false);

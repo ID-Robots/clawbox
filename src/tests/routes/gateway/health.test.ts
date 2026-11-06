@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 
 const isPortOpenMock = vi.fn();
 // PARTIAL mock — only the probe is replaceable. A factory mock replaces the
@@ -25,7 +25,7 @@ describe("/setup-api/gateway/health", () => {
     isPortOpenMock.mockResolvedValue(true);
     const res = await GET();
     const body = await res.json();
-    expect(body).toEqual({ available: true, port: 18789 });
+    expect(body).toEqual({ available: true, port: 18789, restarting: false });
     expect(isPortOpenMock).toHaveBeenCalledWith(18789, "127.0.0.1", 1000);
   });
 
@@ -33,6 +33,100 @@ describe("/setup-api/gateway/health", () => {
     isPortOpenMock.mockResolvedValue(false);
     const res = await GET();
     const body = await res.json();
-    expect(body).toEqual({ available: false, port: 18789 });
+    expect(body).toEqual({ available: false, port: 18789, restarting: false });
+  });
+
+  it("is not available while a restart this server issued is still in flight (TASK-1535)", async () => {
+    // The old process still listens while systemd stops it; a page following a
+    // restart it was answered early about must not take that for "back".
+    const { markGatewayRestartBegun } = await import("@/lib/gateway-restart-tracker");
+    isPortOpenMock.mockResolvedValue(true);
+    const over = markGatewayRestartBegun();
+    try {
+      expect(await (await GET()).json()).toEqual({ available: false, port: 18789, restarting: true });
+      expect(isPortOpenMock).not.toHaveBeenCalled();
+    } finally {
+      over();
+    }
+    expect(await (await GET()).json()).toEqual({ available: true, port: 18789, restarting: false });
+  });
+
+  describe("the agents' databases", () => {
+    const saved = process.env.CLAWBOX_ROOT;
+    let root: string;
+    beforeEach(async () => {
+      const { mkdtempSync, mkdirSync } = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      root = mkdtempSync(path.join(os.tmpdir(), "health-migration-"));
+      mkdirSync(path.join(root, "data"), { recursive: true });
+      process.env.CLAWBOX_ROOT = root;
+    });
+    afterEach(async () => {
+      process.env.CLAWBOX_ROOT = saved;
+      (await import("node:fs")).rmSync(root, { recursive: true, force: true });
+    });
+
+    it("carries a degraded migration beside a gateway that is up, never instead of it", async () => {
+      // A 10.x gateway on 9.x agent databases listens and reports ready while
+      // every agent is refused: the port alone was a silent ready.
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      writeFileSync(path.join(root, "data", "openclaw-migration-status.json"), JSON.stringify({
+        state: "degraded", reason: "schema-behind", requiredBytes: 61_000_000_000, freeBytes: 80_000_000_000,
+        databases: { total: 3, behind: 2 }, core: "2026.10.3",
+      }));
+      isPortOpenMock.mockResolvedValue(true);
+      expect(await (await GET()).json()).toEqual({
+        available: true, port: 18789, restarting: false,
+        migration: { state: "degraded", reason: "schema-behind", requiredBytes: 61_000_000_000, freeBytes: 80_000_000_000 },
+      });
+    });
+
+    it("says nothing when the databases are fine", async () => {
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      writeFileSync(path.join(root, "data", "openclaw-migration-status.json"), JSON.stringify({ state: "ok", reason: null }));
+      isPortOpenMock.mockResolvedValue(true);
+      expect(await (await GET()).json()).toEqual({ available: true, port: 18789, restarting: false });
+    });
+
+    it("says the pre-start put back a refused database's pre-update copy — outcome and time, no names", async () => {
+      // The owner's data changed under a gateway that would not start: said,
+      // beside `available`, and without the agent or the file it concerned,
+      // because this route answers before sign-in.
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      const at = new Date(Date.now() - 60_000).toISOString();
+      writeFileSync(path.join(root, "data", "openclaw-start-guard.json"), JSON.stringify({
+        version: 1,
+        episode: { stage: "restored", databases: ["agent main"] },
+        notice: { outcome: "restored", reason: null, databases: ["agent main"], keptCopies: ["openclaw-agent.sqlite.clawbox-start-loop-20261023T110000Z"], at },
+      }));
+      isPortOpenMock.mockResolvedValue(true);
+      expect(await (await GET()).json()).toEqual({
+        available: true, port: 18789, restarting: false,
+        startRecovery: { outcome: "restored", reason: null, at, channelsSuppressed: false },
+      });
+    });
+
+    it("says the core's restart-loop breaker still holds channels back after the recovery — a yes, naming no channel", async () => {
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      const at = new Date(Date.now() - 60_000).toISOString();
+      writeFileSync(path.join(root, "data", "openclaw-start-guard.json"), JSON.stringify({
+        version: 1,
+        episode: { stage: "repaired", databases: ["agent main"] },
+        notice: { outcome: "repaired", reason: null, databases: ["agent main"], keptCopies: [], at },
+        channels: { watch: true, state: "suppressed", since: Date.now() / 1000 - 60, held: [{ channel: "telegram" }] },
+      }));
+      isPortOpenMock.mockResolvedValue(true);
+      const body = await (await GET()).json();
+      expect(body).toEqual({
+        available: true, port: 18789, restarting: false,
+        startRecovery: { outcome: "repaired", reason: null, at, channelsSuppressed: true },
+      });
+      expect(JSON.stringify(body)).not.toMatch(/telegram/);
+    });
   });
 });

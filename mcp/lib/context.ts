@@ -36,6 +36,15 @@ export interface DesktopApp {
    * kiosk — so a Jetson's agent is not offered an app its desktop never shows.
    */
   kioskOnly?: boolean;
+  /**
+   * Openable only while the ClawBox Desktop session is up with a Chrome to
+   * start, answered live by GET /setup-api/desktop/chrome. Off that session
+   * the app is neither listed nor accepted (`liveBuiltInApps`), so
+   * `ui_open_app` cannot claim a window the desktop never shows. On it with
+   * no Chrome installed the desktop still draws the icon (a click says how
+   * to install Chrome), but nothing would open, so the agent is not offered it.
+   */
+  desktopSession?: boolean;
 }
 
 // Every built-in desktop app, in the order src/lib/desktop-apps.ts declares
@@ -58,14 +67,16 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   terminal: { name: "Terminal", description: "Shell" },
   coding: { name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
   files: { name: "Files", description: "File manager" },
-  projects: { name: "Projects", description: "The owner's pinned project folders, opened in the Files app — browse, open and download them (a folder downloads as a ZIP)" },
   clawkeep: { name: "ClawKeep", description: "Backups: what is protected, run one now, restore" },
   "memory-shard": { name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
+  "prime-radiant": { name: "Prime Radiant", description: "The living wiki: browse pages and claims, review disputed facts, history, ingest documents" },
   system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
   store: { name: "Store", description: "App store" },
   browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
   web: { name: "Web", description: "The web: a search start page in a browser tab, with the kiosk's address bar", external: true, kioskOnly: true },
+  chrome: { name: "Google Chrome", description: "The owner's own Google Chrome as a native window on the ClawBox Desktop session's screen (only there; elsewhere the desktop has no such icon)", desktopSession: true },
   vnc: { name: "Remote Desktop", description: "VNC viewer" },
+  screenshot: { name: "Screenshot", description: "Capture the ClawBox desktop or a region of it, annotate the picture, save it into the Screenshots folder" },
 };
 
 /**
@@ -77,6 +88,21 @@ export function builtInApps(edition: Ed | null): DesktopApp[] {
   return Object.entries(APP_DESCRIPTIONS)
     .filter(([id, def]) => appExistsOnEdition(id, edition) && (!def.kioskOnly || kiosk))
     .map(([id, def]) => ({ id, ...def }));
+}
+
+/** Whether the ClawBox Desktop session can open Google Chrome right now (false when the server cannot say). */
+export async function desktopChromeAvailable(): Promise<boolean> {
+  const body = await apiTry<{ available?: unknown; installed?: unknown }>("/setup-api/desktop/chrome", { timeoutMs: 5_000 });
+  // `installed` is absent from a server that answered `available` only with a Chrome to start.
+  return body?.available === true && body.installed !== false;
+}
+
+/** `builtInApps`, minus the `desktopSession` apps when that session cannot open them now. */
+export async function liveBuiltInApps(edition: Ed | null): Promise<DesktopApp[]> {
+  const apps = builtInApps(edition);
+  if (!apps.some((a) => a.desktopSession)) return apps;
+  if (await desktopChromeAvailable()) return apps;
+  return apps.filter((a) => !a.desktopSession);
 }
 
 /**

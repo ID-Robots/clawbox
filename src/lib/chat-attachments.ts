@@ -129,7 +129,7 @@ export type StagingFailure = {
    * The last three are a DROP's: a folder over the drop's limits, a folder
    * with nothing this box can take, and a folder that staged only in part.
    */
-  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly" | "dropTooBig" | "emptyFolder" | "folderPartial";
+  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly" | "noPictures" | "dropTooBig" | "emptyFolder" | "folderPartial";
   /** A vetted message from the box, when it gave one that is safe to show. */
   detail: string | null;
   /** Numbers the line names beside the file (`{count}`, `{total}`, `{size}`). */
@@ -165,12 +165,11 @@ export function classifyStagingFailure(status: number | undefined, payload: unkn
  * Split a drop/paste/pick into what this box can actually use and what it
  * cannot.
  *
- * Two capabilities, not one, because the honest answer on a Hermes box is
- * "pictures yes, documents no": `hermes chat --image` is image-only, and the
- * agent's own path-in-prompt resolver matches picture extensions BY DESIGN
- * (`image_routing.py` excludes documents so a PDF is never attached as a vision
- * part). A single canAttach flag would force a choice between hiding a working
- * feature and accepting a file that silently never reaches the model.
+ * Two capabilities, not one, because they can differ: a Hermes box reads a
+ * document with its file tools (named in the prompt as `[Attached file: …]`)
+ * but looks at a picture only where it has a vision route. A single canAttach
+ * flag would force a choice between hiding a working feature and accepting a
+ * file that silently never reaches the model.
  *
  * Refusing here rather than at the staging route is deliberate: a document that
  * reached the box would be written to disk, counted against retention and named
@@ -196,6 +195,15 @@ export function partitionAttachments(
 }
 
 /**
+ * Why `partitionAttachments` refused `file`, in the composer's words: a
+ * document on a box that takes only pictures, or a picture on one that cannot
+ * look at pictures (a Hermes box with no vision route takes documents only).
+ */
+export function refusalReason(file: File): "imagesOnly" | "noPictures" {
+  return typeof file.type === "string" && file.type.startsWith("image/") ? "noPictures" : "imagesOnly";
+}
+
+/**
  * The `accept` attribute for the file picker, per capability.
  *
  * The picker's filter is not a security control — a determined user can pick
@@ -217,8 +225,8 @@ export function attachmentAcceptAttribute(
 // Files AND folders dragged onto the composer. A folder is read as its tree
 // (src/lib/dropped-files.ts) and staged as a folder, so the agent is handed
 // one path with the structure intact rather than a heap of loose files — on a
-// box that can read documents. Where it cannot (Hermes: pictures only), a
-// folder has no way into the turn, so its pictures go in as pictures.
+// box that can read documents. Where it cannot (pictures only), a folder has
+// no way into the turn, so its pictures go in as pictures.
 
 /** One file of a dropped folder: the file, and its place inside the folder (`site/src/app.js`). */
 export interface DroppedFile {
@@ -295,7 +303,7 @@ export function planChatDrop(
   for (const item of items) {
     if (item.kind === "file") {
       const { file } = item;
-      if (!allowed(file)) { refuse({ reason: "imagesOnly", detail: null, file: file.name }); continue; }
+      if (!allowed(file)) { refuse({ reason: refusalReason(file), detail: null, file: file.name }); continue; }
       if (file.size > limits.maxFileBytes) { refuse({ reason: "tooLarge", detail: null, file: file.name }); continue; }
       if (count + 1 > limits.maxFiles || bytes + file.size > limits.maxBytes) { refuse(tooBig(file.name)); continue; }
       count += 1;

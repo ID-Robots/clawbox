@@ -4,11 +4,11 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
-import { getAll, setMany } from "@/lib/config-store";
-import { readSetupGateFacts } from "@/lib/route-auth";
+import { getAll, set as setConfigKey, setMany } from "@/lib/config-store";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
+  type RestartGatewayOptions,
   runOpenclawDoctorFix,
   type OpenclawDoctorFixOutcome,
   findOpenclawBin,
@@ -28,10 +28,30 @@ import {
   openclawIsAbsent,
   OpenclawUnavailableError,
   type OpenClawConfig,
-  GatewayNotReadyError,
   gatewayReadyWaitMs,
+  beginConfigWriteTransaction,
+  configWriteBoundary,
+  flushConfigWrites,
+  inConfigWriteTransaction,
+  withConfigWriteScope,
 } from "@/lib/openclaw-config";
+import { apiKeyPasteChangesNothing } from "@/lib/openclaw-api-key-paste";
 import { waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
+import {
+  awaitGatewayHotApply,
+  diffConfigPaths,
+  readGatewayConfigBaseline,
+  restartGatewayAnsweringEarly,
+  restartRequiredPaths,
+} from "@/lib/gateway-hot-apply";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
+import {
+  putGatewayOAuthProfile,
+  readGatewayAuthProfile,
+  type GatewayAuthProfileCopy,
+  type GatewayAuthProfileRead,
+  type GatewayOAuthBundle,
+} from "@/lib/openclaw-auth-store";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -43,6 +63,7 @@ import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
 import {
   CLAWAI_PLAN_TIER_KEY,
   clawaiPlanTierForStore,
+  noteClawaiCredentialReplaced,
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
@@ -52,6 +73,8 @@ import {
   getLlamaCppContextWindow,
   getLlamaCppMaxTokens,
   getLlamaCppProxyBaseUrl,
+  LLAMACPP_REASONING_COMPAT,
+  llamaCppThinkingDefaultOp,
 } from "@/lib/llamacpp";
 import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
@@ -82,6 +105,14 @@ import {
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
+import { uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeeded } from "@/lib/local-tool-search";
+import {
+  disarmLocalCompactionModel,
+  localCompactionModelArmOps,
+  localCompactionModelDisarmNeeded,
+  noteLocalCompactionModel,
+} from "@/lib/local-compaction-model";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
@@ -105,6 +136,7 @@ import {
   ANTHROPIC_DEFAULT_MODEL_ID,
   GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
+  XAI_DEFAULT_MODEL_ID,
   ANTHROPIC_MODELS,
   extractProviderModelId,
   routesSubscriptionNatively,
@@ -112,12 +144,16 @@ import {
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { readXaiStoredProfiles } from "@/lib/xai-oauth-login";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
   EXPLICIT_MODEL_PICKS_KEY,
   decideClawboxAiModelId,
   explicitPicksFrom,
+  picksWithoutProvider,
 } from "@/lib/explicit-model-pick";
+import { followsNewestModel } from "@/lib/provider-newest-model";
+import { forgetUnavailableModels, readNewestModelId } from "@/lib/provider-model-availability";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -132,7 +168,7 @@ import {
 import { logSafe } from "@/lib/log-safe";
 import { deepseekPluginOnDisk, installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 import { canonicalPluginId, clearPluginRepair, readPluginRepairs } from "@/lib/plugin-repair";
-import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
+import { installedOpenclawCoreAtLeast, installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -230,6 +266,17 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     // in src/lib/openrouter-models.ts.
     defaultModel: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
     profileKey: "openrouter:default",
+  },
+  xai: {
+    // No `subscriptionOverride`: both modes live at the SAME profile id and
+    // write the same `xai/<id>` primary. An API key is pasted to `xai:default`
+    // like every other API-key provider; a SuperGrok / X Premium sign-in is
+    // stored there by the plugin's own `models auth login` (see
+    // src/lib/xai-oauth-login.ts) and this route only finishes it. Either way
+    // the turn is routed by the core's bundled `xai` plugin — see the `else`
+    // branch at step 7, which this provider takes on purpose.
+    defaultModel: `xai/${XAI_DEFAULT_MODEL_ID}`,
+    profileKey: "xai:default",
   },
   ollama: {
     defaultModel: "ollama/llama3.2:3b",
@@ -400,6 +447,20 @@ async function applyConfigSetGroups(groups: (ConfigSetGroup | null)[]): Promise<
   const present = groups.filter((group): group is ConfigSetGroup => !!group && group.ops.length > 0);
   if (present.length === 0) return;
 
+  // Inside the request's config write transaction (TASK-1535) every group is
+  // staged with its own boundary, and the transaction's commit is the
+  // combined write below — one for the WHOLE save, not one per call — with the
+  // same per-group fallback when it cannot land as one.
+  if (inConfigWriteTransaction()) {
+    for (const group of present) {
+      await configWriteBoundary(
+        { onError: group.onError, onApplied: group.onApplied },
+        () => runConfigSetBatch(group.ops),
+      );
+    }
+    return;
+  }
+
   if (present.length > 1) {
     try {
       await runConfigSetBatch(present.flatMap((group) => group.ops));
@@ -482,6 +543,25 @@ async function readModelsMode(): Promise<string | null> {
   }
 }
 
+/**
+ * Would `models auth paste-api-key` change nothing here (TASK-1535)? See
+ * `apiKeyPasteChangesNothing`. No config to read, or a check that throws,
+ * answers false: the paste — and the guard in front of it — then run.
+ */
+function pasteWouldChangeNothing(
+  config: OpenClawConfig | null,
+  provider: string,
+  profileId: string,
+  key: string,
+): boolean {
+  if (!config) return false;
+  try {
+    return apiKeyPasteChangesNothing({ config, provider, profileId, key });
+  } catch {
+    return false;
+  }
+}
+
 async function pasteAuthApiKey(provider: string, profileId: string, key: string): Promise<void> {
   // The sign-in guard is NOT here, deliberately: see `assertNoSignInAt`. By
   // the time this runs the request has already written its own
@@ -489,6 +569,61 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
   // says `oauth` — a guard reading the box at this point would refuse the very
   // save that wrote it. It is asked once, of the store as it was BEFORE this
   // request touched anything.
+  //
+  // NOT PASTED when the paste would change nothing (TASK-1535): a Settings save
+  // re-sends the credential the box already holds, and the ClawBox AI pass
+  // pasted the same token twice in one request — 5-14 s of CLI start-up each
+  // on a Jetson, for a store, a profile entry and an order that end up exactly
+  // as they were. `apiKeyPasteChangesNothing` says what "exactly" has to cover,
+  // and answers false for anything it cannot be sure of. The config it reads
+  // includes what this request has staged so far, which is what the paste
+  // would have found on disk.
+  const configNow = await readOpenClawConfig().catch(() => null);
+  if (pasteWouldChangeNothing(configNow, provider, profileId, key)) {
+    console.log(`[configure] the auth store already holds this ${logSafe(provider)} key; nothing to paste`);
+    return;
+  }
+  // The paste writes openclaw.json itself (the profile metadata), so what this
+  // request's transaction has staged before it lands before it, in order.
+  await flushConfigWrites();
+  // ClawBox AI's own slot is TAKEN OVER, never refused: see
+  // `releaseClawboxAiSlot`. Every other provider keeps the paste as it was.
+  const clawaiSlot = provider === CLAWBOX_AI_PROVIDER && profileId === CLAWBOX_AI_PROFILE_KEY;
+  let released = false;
+  if (clawaiSlot) {
+    const holder = signInHoldingSlot(configNow, profileId);
+    if (holder) {
+      await releaseClawboxAiSlot(profileId, holder);
+      released = true;
+    }
+  }
+  try {
+    await pasteApiKeyOnce(provider, profileId, key);
+  } catch (err) {
+    if (!clawaiSlot || !pasteRefusedOverSignIn(err)) throw err;
+    // Taken over already and still refused: nothing more this route can do.
+    if (released) throw new ClawboxAiSlotHeldError(profileId);
+    // The refusal names a sign-in the read above did not see — another
+    // agent's store, or one that could not be read. The CLI's own logout
+    // resolves the same agent the paste did, so it is asked once, and the
+    // paste once more.
+    await releaseClawboxAiSlot(profileId, "store");
+    try {
+      await pasteApiKeyOnce(provider, profileId, key);
+    } catch (retryErr) {
+      if (pasteRefusedOverSignIn(retryErr)) throw new ClawboxAiSlotHeldError(profileId);
+      throw retryErr;
+    }
+  }
+  // NEVER a success over a slot that still holds a sign-in: a paste that
+  // exited 0 with its refusal on stderr would otherwise go on to provision a
+  // provider whose every turn the gateway answers from the old credential.
+  if (clawaiSlot && signInHoldingSlot(null, profileId) === "store") {
+    throw new ClawboxAiSlotHeldError(profileId);
+  }
+}
+
+async function pasteApiKeyOnce(provider: string, profileId: string, key: string): Promise<void> {
   await spawnOpenclawCli(
     [
       "models", "auth", "paste-api-key",
@@ -517,6 +652,87 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
     ],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
+}
+
+/**
+ * The pinned core's refusal to paste an API key over a sign-in at the same id
+ * (2026.10.x): "The API-key profile belongs to another sign-in".
+ */
+const PASTE_REFUSED_OVER_SIGN_IN = /belongs to another sign-in/i;
+
+function pasteRefusedOverSignIn(err: unknown): boolean {
+  return err instanceof Error && PASTE_REFUSED_OVER_SIGN_IN.test(err.message);
+}
+
+/**
+ * Does something other than an API key hold `profileId`? `"store"` when the
+ * gateway's auth store has a non-api_key row there (or in the main agent's
+ * own copy of it), `"metadata"` when only openclaw.json's `auth.profiles`
+ * entry says so, null when neither does — or when neither can be read, which
+ * leaves the decision to the paste and its refusal. Never throws.
+ */
+function signInHoldingSlot(config: OpenClawConfig | null, profileId: string): "store" | "metadata" | null {
+  const stored = readGatewayAuthProfile(profileId);
+  if (stored?.kind === "present") {
+    const copies = [stored, stored.sharedCopy].filter((copy): copy is GatewayAuthProfileCopy => !!copy);
+    if (copies.some((copy) => copy.type !== "api_key")) return "store";
+  }
+  const profiles = config?.auth?.profiles;
+  const mode = profiles && Object.hasOwn(profiles, profileId) ? profiles[profileId]?.mode : undefined;
+  return typeof mode === "string" && mode !== "api_key" ? "metadata" : null;
+}
+
+/**
+ * ClawBox AI's credential slot still held a sign-in after this route tried to
+ * take it over.
+ */
+class ClawboxAiSlotHeldError extends Error {
+  constructor(readonly profileId: string) {
+    super(`auth profile ${profileId} still holds a sign-in`);
+    this.name = "ClawboxAiSlotHeldError";
+  }
+}
+
+/**
+ * Clear whatever sign-in holds ClawBox AI's credential slot, so the device's
+ * API key can be pasted there.
+ *
+ * TAKEN OVER, where every other provider's slot is guarded (`assertNoSignInAt`):
+ * `deepseek:default` is written by this route alone, so a sign-in found there
+ * is a leftover — an older ClawBox stored the device login as an OAuth bundle at
+ * this id — not a subscription the owner chose. The pinned core refuses to paste
+ * over it ("The API-key profile belongs to another sign-in"), which left ClawBox
+ * AI impossible to connect on such a box, from the wizard and from Settings.
+ *
+ * NATIVELY: `models auth logout <id> --yes` removes the profile from the store
+ * the paste writes and drops it from `auth.profiles` and `auth.order`
+ * (docs/cli/models.md). Logout refuses a profile its store does not hold; what
+ * is left then is an openclaw.json entry alone, which `config unset` removes.
+ * A failure here is not the answer: the paste that follows is, and so is the
+ * store read after it.
+ */
+async function releaseClawboxAiSlot(profileId: string, holder: "store" | "metadata"): Promise<void> {
+  console.warn(`[configure] a sign-in holds ${profileId} (${holder}); taking the slot over for the ClawBox AI key`);
+  try {
+    // Unpinned, like the paste: the core resolves the same agent for both.
+    await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: 60_000 });
+    return;
+  } catch (err) {
+    console.warn(
+      `[configure] models auth logout ${profileId} failed:`,
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+  }
+  if (holder !== "metadata") return;
+  try {
+    await runOpenclawConfigUnset(`auth.profiles.${profileId}`, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+    await flushConfigWrites();
+  } catch (err) {
+    console.warn(
+      `[configure] could not remove auth.profiles.${profileId}:`,
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+  }
 }
 
 /** A pasted API key would have replaced a subscription sign-in. */
@@ -569,7 +785,10 @@ class SignInWouldBeLostError extends Error {
  *
  * Fails OPEN: a store that cannot be read does not refuse a save the owner
  * asked for. The failure is logged, and the paste that follows is the same one
- * beta performed unconditionally.
+ * beta performed unconditionally. A read refused only because the core's state
+ * is under offline maintenance (a gateway start, a doctor run) is asked again
+ * first, inside `spawnOpenclawCli`, so this guard is not skipped over a window
+ * of seconds.
  */
 async function assertNoSignInAt(profileId: string): Promise<void> {
   // Nothing to lose where there is no OpenClaw auth store: the Hermes SKU
@@ -722,23 +941,62 @@ async function applyOpenAiAuthOrder(
 async function clearChatgptRuntimeArm(
   modelRef: string,
   config: OpenClawConfig | null,
-): Promise<string | undefined> {
+  warn: (sentence: string) => void,
+): Promise<void> {
   const models = (config?.agents?.defaults as
     { models?: Record<string, { agentRuntime?: { id?: unknown } }> } | undefined)?.models;
-  if (models?.[modelRef]?.agentRuntime?.id !== CHATGPT_AGENT_RUNTIME_ID) return undefined;
+  if (models?.[modelRef]?.agentRuntime?.id !== CHATGPT_AGENT_RUNTIME_ID) return;
   const path = chatgptRuntimeEntryPath(modelRef);
-  try {
-    await runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
-    return undefined;
-  } catch (unsetErr) {
-    console.error(
-      "[configure] failed to clear the Codex runtime entry:",
-      unsetErr instanceof Error ? JSON.stringify(logSafe(unsetErr.message)) : unsetErr,
-    );
-    return `Saved, but this box still routes ${modelRef} through your ChatGPT account: `
-      + `clearing the Codex runtime setting failed. Run 'openclaw config unset ${path}' `
-      + "from the Terminal, or chat may answer on the subscription instead of the API key.";
-  }
+  // The sentence is handed back through `warn` rather than returned: inside
+  // the request's config write transaction the removal only learns its outcome
+  // when the transaction commits (see `configWriteBoundary`).
+  await configWriteBoundary(
+    {
+      onError: (unsetErr) => {
+        console.error(
+          "[configure] failed to clear the Codex runtime entry:",
+          unsetErr instanceof Error ? JSON.stringify(logSafe(unsetErr.message)) : unsetErr,
+        );
+        warn(`Saved, but this box still routes ${modelRef} through your ChatGPT account: `
+          + `clearing the Codex runtime setting failed. Run 'openclaw config unset ${path}' `
+          + "from the Terminal, or chat may answer on the subscription instead of the API key.");
+      },
+    },
+    () => runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
+  );
+}
+
+/**
+ * The sentence for a primary that is in no model list this box has, or
+ * undefined when it is in one — or when that cannot be said.
+ *
+ * `readKnownModelIds` is the picker's own list — the catalog route's cached
+ * enumeration unioned with the curated catalogue, read-only and spawn-free.
+ * Null is UNKNOWN (no enumeration yet, or a provider with no curated catalogue
+ * at all: llamacpp, ollama, deepseek) and stays silent, because the whole
+ * point is to name an id that exists NOWHERE, not to report a cold cache.
+ *
+ * Asked in two situations. `refused`: the CLI's catalogue check refused the
+ * reference and the save wrote it past that (step 3). `unchecked`: the save
+ * landed through the running gateway (TASK-1535), which validates the schema
+ * but does not resolve model ids — the CLI's check did not run at all, so the
+ * list is the only opinion there is, and the sentence does not claim a refusal
+ * that never happened.
+ */
+async function primaryInNoListWarning(
+  primaryModel: string,
+  how: "refused" | "unchecked",
+): Promise<string | undefined> {
+  const primaryProvider = primaryModel.includes("/") ? primaryModel.split("/", 1)[0] : "";
+  const primaryId = extractProviderModelId(primaryModel, primaryProvider) ?? "";
+  const knownIds = primaryProvider && primaryId ? await readKnownModelIds(primaryProvider) : null;
+  if (!knownIds || knownIds.has(primaryId)) return undefined;
+  return how === "refused"
+    ? `Saved, but ${primaryModel} is in no model list this box has for ${primaryProvider}, `
+      + "and OpenClaw refused to validate it. Chat turns on it will fail. "
+      + "Pick a model in Settings to change it."
+    : `Saved, but ${primaryModel} is in no model list this box has for ${primaryProvider}, `
+      + "so chat turns on it may fail. Pick a model in Settings to change it.";
 }
 
 /**
@@ -832,6 +1090,16 @@ async function getConfiguredClawboxAiToken(preferredToken?: string) {
 // 2026.7.1 (2026-08-17): with these fields absent, `openclaw models list`
 // resolved both V4 models to 200K; with them present it reports 1M.
 const CLAWBOX_AI_CONTEXT_WINDOW = 1_000_000;
+// The ACTIVE-input cap (`contextTokens`, OpenClaw's own per-model key; explicit
+// wins over the catalog). OpenClaw compacts at the active window minus its
+// built-in reserve, so with only the 1M window a long session was never trimmed
+// early and every request re-sent 0.7M–1.4M tokens of history. Capped here it
+// compacts near 128K, while `contextWindow` keeps describing the real model.
+// Mirrored by the V4 block in scripts/gateway-pre-start.sh for boxes already
+// configured. Written for a 2026.10+ core only (verified there; an older core's
+// strict schema may refuse it, and this write is the whole provider): the boot
+// script backfills it once the core is known to take it.
+const CLAWBOX_AI_CONTEXT_TOKENS = 131_072;
 // 393,216 (384 x 1024) is the ceiling the upstream actually enforces, measured
 // against the live proxy on 2026-08-18: max_tokens=393216 is accepted, 400000
 // comes back 400 "the valid range of max_tokens is [1, 393216]". The previous
@@ -842,7 +1110,12 @@ const CLAWBOX_AI_MAX_TOKENS = 393_216;
 // never offers image attachments the proxy would reject.
 const CLAWBOX_AI_INPUT_MODALITIES = ["text"] as const;
 
-function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string = CLAWBOX_AI_VISION_MODEL_ID) {
+function buildClawboxAiProviderDefinition(
+  apiKey: string,
+  visionModelId: string = CLAWBOX_AI_VISION_MODEL_ID,
+  capContext = true,
+) {
+  const contextCap = capContext ? { contextTokens: CLAWBOX_AI_CONTEXT_TOKENS } : {};
   // Emit the proxy URL, our auth, per-tier identity/branding/reasoning, and
   // the context/output/modality limits above.
   // `cost` stays zero to mark these as included-in-subscription so the
@@ -874,6 +1147,7 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
         reasoning: true,
         input: [...CLAWBOX_AI_INPUT_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        ...contextCap,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
@@ -887,6 +1161,7 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
         reasoning: true,
         input: [...CLAWBOX_AI_INPUT_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        ...contextCap,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
@@ -1582,7 +1857,7 @@ async function configureClawboxAi(
     ],
     [
       `models.providers.${CLAWBOX_AI_PROVIDER}`,
-      buildClawboxAiProviderDefinition(clawboxAiToken, visionId),
+      buildClawboxAiProviderDefinition(clawboxAiToken, visionId, await installedOpenclawCoreAtLeast(2026, 10)),
       "--json",
     ],
     ...(extra?.requiredOps ?? []),
@@ -1722,28 +1997,92 @@ async function configureClawboxAi(
   // migration removes the entry again. The ROWS go first: a `models[]` whose
   // last row is ours is removed by an unset, and doing that after the entry-wide
   // unset would 404.
+  //
+  // Each in its own boundary, so a removal that fails is warned about and the
+  // next is still made — also when they ride the request's one config write.
   for (const op of legacyImageCleanup.replaceOps) {
-    try {
-      await runOpenclawConfigSet(op, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
-    } catch (err) {
-      console.warn(
-        `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${op[0]}):`,
-        err instanceof Error ? logSafe(err.message) : err,
-      );
-    }
+    await configWriteBoundary(
+      {
+        onError: (err) => console.warn(
+          `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${op[0]}):`,
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+      },
+      () => runOpenclawConfigSet(op, { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
+    );
   }
   for (const path of legacyImageCleanup.unsets) {
-    try {
-      await runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
-    } catch (err) {
-      console.warn(
-        `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${path}):`,
-        err instanceof Error ? logSafe(err.message) : err,
-      );
-    }
+    await configWriteBoundary(
+      {
+        onError: (err) => console.warn(
+          `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${path}):`,
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+      },
+      () => runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
+    );
   }
 
   return true;
+}
+
+/**
+ * The ClawBox AI cloud voice's credential, carried over to a new portal token
+ * (TASK-1535).
+ *
+ * `gateway-pre-start.sh` arms the voice entry (`tts.providers.openai`, or
+ * `messages.tts.providers.openai` before OpenClaw 2) with the portal token and
+ * stamps it `clawboxManaged`. A token change used to reach that entry only
+ * because this save ended in a gateway restart, which ran the boot script
+ * again; a save the gateway hot-applies does not, and the voice would have gone
+ * on presenting the old account's token until the next restart.
+ *
+ * So the one field the token feeds is moved here, and ONLY on an entry that is
+ * provably ours twice over: our stamp, and exactly the token this box stored
+ * before the save. Anything else — an owner's own speech route, an entry the
+ * stamp survived on but whose key is no longer ours — is left to the boot
+ * script's ownership rules, as is arming or withdrawing the voice itself
+ * (`_clawai_route_is_ours` in that script; `@/lib/clawai-cloud-defaults` says why
+ * a second opinion on those must not live here). Rewriting our own field with
+ * our own new value is the worst this can do. `tts` hot-applies.
+ */
+async function clawaiSpeechKeyRefresh(
+  previousToken: string,
+  token: string,
+): Promise<ConfigSetGroup | null> {
+  if (!previousToken || !token || previousToken === token) return null;
+  let current: OpenClawConfig;
+  try {
+    current = await readOpenClawConfig();
+  } catch {
+    return null;
+  }
+  const ops: OpenclawConfigSetArgs[] = [];
+  for (const home of ["tts", "messages.tts"]) {
+    let node: unknown = current;
+    for (const key of [...home.split("."), "providers", "openai"]) {
+      node = node && typeof node === "object" && !Array.isArray(node)
+        ? (node as Record<string, unknown>)[key]
+        : undefined;
+    }
+    const speech = node && typeof node === "object" && !Array.isArray(node)
+      ? (node as Record<string, unknown>)
+      : null;
+    if (speech?.clawboxManaged !== true || speech.apiKey !== previousToken) continue;
+    ops.push([`${home}.providers.openai.apiKey`, token]);
+  }
+  if (ops.length === 0) return null;
+  return {
+    ops,
+    onApplied: () => console.log("[AI Config] Moved the ClawBox AI cloud voice to the new portal token"),
+    // Non-fatal: the chat works without it, and the next gateway start writes
+    // the same field from the same token.
+    onError: (err) =>
+      console.warn(
+        "[AI Config] Failed to move the ClawBox AI cloud voice to the new portal token:",
+        err instanceof Error ? logSafe(err.message) : err,
+      ),
+  };
 }
 
 async function setFallbackModels(models: string[]) {
@@ -1842,21 +2181,29 @@ async function ensureFallbackModel(
     return;
   }
 
-  try {
-    // ClawBox AI is the last resort, and the owner's switch reaches it too.
-    const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai");
-    const fallbackConfigured = !clawaiSwitchedOff
-      && await configureClawboxAi(true, preferredClawboxAiToken);
-    if (fallbackConfigured) {
-      console.log("[AI Config] Configured ClawBox AI as fallback model");
-      return;
-    }
+  // A boundary rather than a bare `try`: inside the request's config write
+  // transaction these writes fail at its commit, and a failure there still has
+  // to land in this warning — every write below, the whole ClawBox AI pass
+  // included, is best effort here.
+  await configWriteBoundary(
+    {
+      onError: (err) =>
+        console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err),
+    },
+    async () => {
+      // ClawBox AI is the last resort, and the owner's switch reaches it too.
+      const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai");
+      const fallbackConfigured = !clawaiSwitchedOff
+        && await configureClawboxAi(true, preferredClawboxAiToken);
+      if (fallbackConfigured) {
+        console.log("[AI Config] Configured ClawBox AI as fallback model");
+        return;
+      }
 
-    await setFallbackModels([]);
-    console.log("[AI Config] Cleared stale fallback (no enabled local or ClawBox AI backup available)");
-  } catch (err) {
-    console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err);
-  }
+      await setFallbackModels([]);
+      console.log("[AI Config] Cleared stale fallback (no enabled local or ClawBox AI backup available)");
+    },
+  );
 }
 
 // Configure a provider through its OpenAI-compatible endpoint with the key
@@ -2027,30 +2374,115 @@ async function applyCloudProviderTransport(opts: {
  * until a reboot or a later save that happened to succeed (F-07).
  */
 type GatewayState =
-  /** Nothing touched it: every early exit, and the API-key path before step 9. */
+  /**
+   * Nothing restarted it: every early exit, and every save the running gateway
+   * applied live at step 9 (TASK-1535).
+   */
   | "untouched"
   /** Stopped for `doctor --fix`; no later step has restarted it. */
   | "stopped-for-doctor"
   /**
-   * Step 9 issued its restart. It came up; or it had not finished coming up and
-   * step 9 answered its own 200 with a warning; or the restart was refused and
-   * step 9 answered its own 502. Either way the gateway is not left stopped, so
-   * the wrapper below has nothing to restore.
+   * Step 9 issued its restart. systemd took it and step 9 answered its own 200
+   * while the gateway comes back; or the restart was refused and step 9
+   * answered its own 502. Either way the gateway is not left stopped by this
+   * request, so the wrapper below has nothing to restore.
    */
   | "restart-issued";
 
-/** Shared by reference: `configureModel` has too many exits to return it. */
-type GatewayTracker = { state: GatewayState };
+/**
+ * Shared by reference: `configureModel` has too many exits to return it.
+ * `gatewayBusy`: doctor found the gateway not down (its stop still draining on
+ * an x64 bridge, or another surface's restart bringing it back), so systemd
+ * queues the restore behind that job and asking is enough.
+ */
+type GatewayTracker = { state: GatewayState; gatewayBusy?: boolean };
+
+/**
+ * How POST restores a gateway this request stopped: never a readiness wait.
+ * Behind a job still running (a drain, another restart), a 60 s client would
+ * only wait that job out, past the tunnel's cut, so it only asks.
+ */
+function restoreOptions(gateway: GatewayTracker): RestartGatewayOptions {
+  return gateway.gatewayBusy
+    ? { awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }
+    : { awaitReady: false };
+}
 
 /** Folded into the error the owner sees when the restore itself fails. */
 const GATEWAY_OFFLINE_HINT =
   "The assistant is offline until the gateway restarts — use Restart in the system tray.";
 
+/** Said when a save that needed a restart was answered before the gateway was back. */
+const GATEWAY_RESTARTING_NOTICE =
+  "Saved. The assistant is restarting to apply it and will be back in about a minute.";
+
+/**
+ * Re-point channel voice notes after ANY provider save, detached and never
+ * rejecting. A save is when the credential behind the ClawBox AI transcription
+ * row changes: a ChatGPT sign-in makes the core refuse that row's endpoint,
+ * and a box that moves off ClawBox AI keeps naming a profile nothing backs.
+ * Nothing rewrote the row on either, and every Telegram voice note was refused
+ * before the box's own Whisper was tried. See `reconcileChannelAudio`.
+ */
+function alignChannelAudio(): Promise<void> {
+  return import("@/lib/stt-channel")
+    .then(({ reconcileChannelAudio }) => reconcileChannelAudio({ trigger: "provider" }))
+    .then(
+      () => undefined,
+      (err) => {
+        console.warn(
+          "[configure] could not align channel voice notes with the new credential:",
+          err instanceof Error ? logSafe(err.message) : err,
+        );
+      },
+    );
+}
+
+/**
+ * POST — save a provider. Answered as ONE JSON body (below), except when the
+ * body asks `background: true`: Settings' ask (TASK-2148). The same save then
+ * runs as a background task of the box (src/lib/provider-auth-tasks.ts) that
+ * also waits out the restart it starts and reads the provider's row back, and
+ * this answers 202 `{ taskId, started, task }` at once. The task's result is
+ * this route's own success body (restart already waited out); a failure ends
+ * it `failed` with the body's sentence and `code`. The same provider asked
+ * again while its task runs follows that task; another provider change
+ * running is 409 `provider_change_running`. On-device models are never asked
+ * this way and are always saved in the request.
+ */
 export async function POST(request: Request) {
+  const tasks = await import("@/lib/provider-auth-tasks");
+  const background = await tasks.backgroundAskOf(request);
+  if (!background) return configureNow(request);
+
+  const asked = typeof background.provider === "string" ? background.provider.trim() : "";
+  if (!asked) return NextResponse.json({ error: "Missing provider" }, { status: 400 });
+  const harness = await getActiveHarness().catch(() => "openclaw" as const);
+  const { canonicalProviderId, isLocalProviderRow, providerRowLabel } = await import("@/lib/provider-status");
+  const row = canonicalProviderId(harness, asked) ?? asked;
+  const own = () => tasks.saveRequest("/setup-api/ai-models/configure", background);
+  // An on-device model is not a sign-in: no row to follow, no card to draw.
+  if (isLocalProviderRow(row) || isLocalProviderRow(normalizeProviderId(asked) ?? asked)) {
+    return configureNow(own());
+  }
+  return tasks.providerAuthStartResponse(tasks.startProviderSignInTask({
+    provider: row,
+    label: providerRowLabel(harness, row),
+    ask: background,
+    save: async () => tasks.saveOutcomeOf(await configureNow(own())),
+  }));
+}
+
+/** The save itself, answered as one JSON body once it is done. */
+async function configureNow(request: Request): Promise<Response> {
   const gateway: GatewayTracker = { state: "untouched" };
   let response: Response;
   try {
-    response = await configureModel(request, gateway);
+    // The request a config write transaction can be opened in (TASK-1535):
+    // `configureModel` stages its openclaw.json writes and commits them as ONE
+    // write before step 9. A transaction it did not commit — an early answer,
+    // a throw — is abandoned with the request, and nothing it staged lands.
+    response = await withConfigWriteScope(() => configureModel(request, gateway));
   } catch (err) {
     // `configureModel` answers a Response for every failure it can classify, so
     // reaching here means its own catch block threw. Restoring only off the
@@ -2061,7 +2493,7 @@ export async function POST(request: Request) {
       // No readiness wait: this answer is logged and dropped — the original
       // throw becomes Next's 500 either way — so waiting out the budget would
       // only add blocking time to a request that has already failed.
-      await restartGateway({ awaitReady: false }).catch((restartErr) => {
+      await restartGateway(restoreOptions(gateway)).catch((restartErr) => {
         console.error(
           "[configure] Gateway restart after an unhandled save failure also failed:",
           restartErr instanceof Error ? logSafe(restartErr.message) : restartErr,
@@ -2082,9 +2514,17 @@ export async function POST(request: Request) {
     // the ordinary case on a cold box — and tell the owner to go press Restart
     // on a gateway that is already coming back, while adding the whole budget
     // to a request that has already failed.
-    await restartGateway({ awaitReady: false });
+    await restartGateway(restoreOptions(gateway));
     return response;
   } catch (err) {
+    // A restart still in flight is one systemd holds: the gateway comes back
+    // on its own, and "use Restart" would be advice for a restart already
+    // queued. By name, not `instanceof`: dozens of suites replace this module
+    // with a factory that does not carry the class.
+    if (err instanceof Error && err.name === "GatewayNotReadyError") {
+      console.warn("[configure] Gateway restore queued behind its stop:", JSON.stringify(logSafe(err.message)));
+      return response;
+    }
     // A runtime mask (an update in flight) refuses the restart; never unmask
     // from here. The save already failed — tell the owner what is left to do.
     console.error(
@@ -2235,7 +2675,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
     requestProvider = provider;
     requestScope = scope;
-    const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
+    // `clawaiTier` arrives in the plan picker's vocabulary — from the panel's
+    // save and from `clawai/poll` forwarding the session's tier — where Free is
+    // a plan the device runs on "flash", as `uiTierToDeviceTier` and both Hermes
+    // paths already map it. Read as "no pick", Free let the badge a previous
+    // account left behind choose the model, Max's included.
+    const requestedClawboxAiTier = body.clawaiTier === "free"
+      ? uiTierToDeviceTier("free")
+      : normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     // Normalized once, like the key above: this handler reads the `model`
     // field in four branches, and inlining the same ternary in each let the
@@ -2247,8 +2694,24 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const isOpenRouter = provider === "openrouter";
     const isGoogle = provider === "google";
     const isAnthropic = provider === "anthropic";
+    // The xAI SIGN-IN carries no credential in the request at all: the core's
+    // xai plugin stored it during `openclaw models auth login`, driven by
+    // `/setup-api/ai-models/xai-login`. This save is the second half — the
+    // primary and everything after the credential write — and it proves the
+    // sign-in is in the store before it writes anything (step 1).
+    const isXaiSignIn = provider === "xai" && authMode === "subscription";
+    // The ClawBox AI DEVICE LOGIN arrives as `authMode: "subscription"` too
+    // (`clawai/poll`), but what it hands over is the portal's API token — the
+    // credential the ClawBox AI token lane pastes. So it is stored the way that
+    // lane stores it, through `models auth paste-api-key`, which writes the auth
+    // store of the RUNNING gateway and asks it to reload. It used to take the
+    // OAuth lane instead: an OAuth bundle in the legacy file, `doctor --fix`
+    // with the gateway STOPPED to import it, and the restart after — a minute
+    // or two of dead chat, for a profile the paste in `configureClawboxAi`
+    // replaced with the API key a few steps later anyway.
+    const isClawaiDeviceLogin = isClawAI && authMode === "subscription";
     const isLocalScope = scope === "local";
-    if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
+    if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI && !isXaiSignIn)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
@@ -2363,6 +2826,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // later cannot forget it (TASK-668).
     const modelsModeBefore = await readModelsMode();
 
+    // openclaw.json and the running gateway's view of it, BEFORE this save
+    // writes anything — what step 9 compares against to decide whether the
+    // gateway can apply the save while it keeps serving, or has to restart for
+    // it (TASK-1535). Taken here for the same reason `modelsModeBefore` is: one
+    // snapshot, compared once, so a branch added later cannot forget it. Not on
+    // the Hermes-only edition, which has neither the file nor the gateway and
+    // never reaches step 9.
+    const configBeforeSave: OpenClawConfig | null = openclawIsAbsent()
+      ? null
+      : await Promise.resolve()
+        .then(() => readOpenClawConfig())
+        .catch(() => ({} as OpenClawConfig));
+    const gatewayBaseline = openclawIsAbsent() ? null : await readGatewayConfigBaseline();
+
     // BEFORE anything is written, and before this request has put anything of
     // its own in the store — a refusal is not a failure and must not leave a
     // trail, and by the time the save reaches the paste it has unpaired
@@ -2375,9 +2852,26 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // openrouter branch below — every save that reaches it is key-based), and
     // the ClawBox AI profile is written by this route alone. It is one CLI cold
     // start, and this is the wizard's critical path.
+    //
+    // xAI is skipped too, and NOT because it has no sign-in: ClawBox offers
+    // one (the panel's Subscription tab, through `/setup-api/ai-models/xai-
+    // login`), and it lives at the same `xai:default` id this paste writes.
+    // Picking the API Key tab and saving IS the owner switching from that
+    // sign-in to a key — the panel says so on that tab when the box is signed
+    // in — so refusing it here would leave the switch with no way to happen
+    // from the UI. The paste replaces the row, exactly as `--force` on the
+    // sign-in replaces a key in the other direction. Anthropic keeps the guard:
+    // there the sign-in and the key are offered side by side and the refusal
+    // is the only thing between a stray paste and a lost subscription.
+    //
+    // And skipped for a paste that would change nothing (TASK-1535): the row at
+    // the id is then already this very key — no sign-in — and the paste is left
+    // out below, so there is nothing for the guard to protect and no reason to
+    // pay its CLI start. Nothing between here and the paste writes the store.
     if (
       authMode !== "subscription"
-      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter
+      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter && provider !== "xai"
+      && !pasteWouldChangeNothing(configBeforeSave, ocProvider, config.profileKey, normalizedApiKey)
     ) {
       await assertNoSignInAt(config.profileKey);
     }
@@ -2463,9 +2957,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //
     // `requestedClawboxAiTier` is the wizard's plan PICKER, and during a first
     // pairing that is whatever the card defaulted to before anyone had an
-    // account to look at — "flash" (Pro). Trusting it wrote the €9 model onto
-    // boxes paired with a €49 Max token, with no way to reach the frontier
-    // model afterwards: the picker had already been consulted and the account
+    // account to look at — "flash" (Free or Pro). Trusting it wrote the €9 model
+    // onto boxes paired with a €49 Max token, with no way to reach the Max model
+    // id afterwards: the picker had already been consulted and the account
     // never was (TASK-481). We hold the token and the portal will answer
     // truthfully, so ask it, exactly as the Codex branch below asks ChatGPT
     // for entitlement and for the same reason.
@@ -2491,6 +2985,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // that IS the state this card is about. This route holds a portal answer
     // for the credential it is writing, at the moment it writes it.
     let portalPlan: ClawaiPortalPlan | undefined;
+    let clawaiTokenRejected = false;
     if (isClawAI && clawboxAiToken) {
       try {
         const lookup = await fetchPortalTier(clawboxAiToken);
@@ -2512,10 +3007,34 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             );
           }
         }
+        if (lookup.source === "unreachable" && lookup.rejected) {
+          clawaiTokenRejected = true;
+        }
       } catch (err) {
         // Never let a tier probe break pairing; fall through to the picker.
         console.warn("[configure] ClawBox AI portal tier probe failed:", err);
       }
+    }
+    // The portal itself refused this credential (revoked / invalid). Writing it
+    // again and restarting the gateway only parks the wizard on "warming up"
+    // over a token that can never work (TASK-1601). Drop ONLY the stored
+    // ClawBox AI credential — every other provider is left as it is — and tell
+    // the client to pair again, before anything is written.
+    if (clawaiTokenRejected) {
+      if (previousClawaiToken && previousClawaiToken === clawboxAiToken) {
+        try {
+          await setConfigKey(CLAWBOX_AI_TOKEN_CONFIG_KEY, undefined);
+        } catch (err) {
+          console.warn("[configure] Could not clear the rejected ClawBox AI token:", err);
+        }
+      }
+      return NextResponse.json(
+        {
+          error: "This ClawBox AI sign-in is no longer valid. Sign in to ClawBox AI again to link this device.",
+          code: "clawai_token_rejected",
+        },
+        { status: 401 },
+      );
     }
   const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
       ? (portalConfirmedTier
@@ -2535,6 +3054,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // The picks map minus the ClawBox AI entry, when this save links a DIFFERENT
     // ClawBox AI account. Written in the same batch as the new token below.
     let clawaiPicksToStore: Record<string, string> | null = null;
+    // A provider whose earlier pick this save drops: the owner saved the
+    // newest-model default (see `followsNewestModel` below).
+    let providerPickToForget: string | null = null;
 
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
@@ -2665,6 +3187,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // Never let model selection break sign-in.
         console.warn("[configure] codex entitlement probe failed:", err);
       }
+    } else if (!normalizedModel && followsNewestModel(ocProvider)) {
+      // No model named, on a provider whose default follows its newest model
+      // (src/lib/provider-newest-model.ts): the newest this box has enumerated
+      // and this account has not been refused on, rather than the cold-start
+      // constant `PROVIDERS` carries — that one stays as the answer when there
+      // is no enumeration to read yet.
+      const newest = await readNewestModelId(ocProvider).catch(() => null);
+      if (newest) config.defaultModel = `${ocProvider}/${newest}`;
     } else if (normalizedModel) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
@@ -2683,6 +3213,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         "anthropic",
         "openai",
         "google",
+        "xai",
       ]);
       if (supportedProviders.has(targetProvider)) {
         if (!isValidModelId(targetProvider, requestedModel)) {
@@ -2698,12 +3229,27 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // overwrite a choice — and the marker holds the LAST choice, whichever
         // provider it was about.
         explicitPickToRecord = config.defaultModel;
+        // Except the default itself, for a provider whose default follows its
+        // newest model. The wizard and Settings ALWAYS send a model — the
+        // picker's preselection, which is the catalogue's default — so a save
+        // that left it alone is indistinguishable from a choice on the wire.
+        // Recorded, it would pin the box to today's newest and the box would
+        // never follow the next one (src/lib/provider-follow-newest.ts). So the
+        // newest is read as "the default", and the provider's earlier pick is
+        // dropped in the same batch: the owner has just gone back to it.
+        if (followsNewestModel(targetProvider)) {
+          const newest = await readNewestModelId(targetProvider).catch(() => null);
+          if (newest && newest === requestedModel) {
+            explicitPickToRecord = null;
+            providerPickToForget = targetProvider;
+          }
+        }
       }
     }
 
     // ── Hermes edition: no openclaw binary exists here ──────────────────────
     // Everything below configures OpenClaw — it writes ~/.openclaw, runs
-    // `openclaw config set …`, and restarts the gateway. On the Hermes SKU there
+    // `openclaw config set …`, and has the gateway apply it. On the Hermes SKU there
     // is no openclaw binary, so the API-key path used to fail with `spawn
     // openclaw ENOENT` and then blame the user's credentials, while the local
     // (Gemma) switch failed the same way. Route to Hermes' own config store
@@ -2939,6 +3485,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //   * openai (ChatGPT) → `models auth login --provider openai` (the OAuth bundle below is its output)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
+    //   * xai           → --auth-choice xai-api-key --xai-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
     //                     a custom proxy URL + DeepSeek-compatible API
     //                     so direct write is unavoidable until OpenClaw
@@ -2954,9 +3501,32 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // the gateway's auth-profile schema. If
     // OpenClaw bumps the schema and we see profile-rejected errors in
     // production, the migration target is `openclaw onboard`.
-    if (authMode !== "subscription") {
+    if (isXaiSignIn) {
+      // Nothing to write: the plugin already stored the sign-in. What this
+      // save must not do is report success over a login that did not land —
+      // the CLI's exit code is the only evidence the xai-login route has, so
+      // ask the store, the same reader the API-key guard uses. "Looked, and it
+      // is not there" refuses before anything is written; "could not look"
+      // passes, as it does for that guard, because refusing a sign-in nobody
+      // can disprove would lock its owner out.
+      const stored = await readXaiStoredProfiles();
+      if (stored && !stored.some((row) => row.id === config.profileKey && row.type === "oauth")) {
+        return NextResponse.json(
+          {
+            error: "The xAI sign-in did not reach this box's credential store. Sign in again.",
+            code: "xai_sign_in_missing",
+          },
+          { status: 409 },
+        );
+      }
+      if (!stored) {
+        console.warn("[configure] could not read the auth store to confirm the xAI sign-in; saving anyway");
+      }
+    } else if (authMode !== "subscription" || isClawaiDeviceLogin) {
       // Every API-key credential goes through `models auth paste-api-key`
-      // (stdin): on OpenClaw 2 a hand-written auth-profiles.json is a LEGACY
+      // (stdin), the ClawBox AI device login's portal token included (see
+      // `isClawaiDeviceLogin`): on OpenClaw 2 a hand-written
+      // auth-profiles.json is a LEGACY
       // store the gateway refuses to hydrate — AuthProfileMigrationRequired
       // killed it after every provider save until doctor ran. The CLI writes
       // the store of the running generation and the openclaw.json metadata
@@ -2977,6 +3547,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await pasteAuthApiKey(ocProvider, config.profileKey, apiKeyValue);
     } else {
       const authProfiles = await readAuthProfiles();
+      // Built ONCE and handed to both the legacy file and the gate under the
+      // doctor call: the gate compares `expires`, and a second `Date.now()`
+      // would make every sign-in look like one the store did not take.
+      let oauthBundle: GatewayOAuthBundle | undefined;
       if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
@@ -2984,7 +3558,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // with it, and gateway-pre-start's ~/.codex/auth.json synthesis uses
         // `id` (falling back to `access`). Persisting it keeps the synthesized
         // id_token a valid JWT instead of whatever `access` happens to be.
-        authProfiles.profiles[config.profileKey] = {
+        oauthBundle = {
           type: "oauth",
           provider: ocProvider,
           access: normalizedApiKey,
@@ -2995,6 +3569,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             : Date.now() + 8 * 60 * 60 * 1000, // default 8h
           ...(projectId ? { projectId } : {}),
         };
+        authProfiles.profiles[config.profileKey] = oauthBundle;
       }
       await writeAuthProfiles(authProfiles);
       // OpenClaw 2 refuses to hydrate this LEGACY file: run the doctor
@@ -3008,6 +3583,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // legacy file and the old best-effort behavior.
       // The stop inside is unconditional; POST restores the unit if no later
       // step restarts it.
+      //
+      // WHY THIS LANE STILL STOPS THE GATEWAY when every other save is applied
+      // to the running one: the pinned core (2026.10.7) has no live way in for
+      // an OAuth credential obtained outside it. `models auth paste-token`
+      // stores a bare token with no refresh token (dead after its expiry),
+      // `models.authSetApiKey` takes API keys only, and `models auth login`
+      // runs the provider's own interactive flow. Its documented import for an
+      // access + refresh bundle is `doctor --fix` over the legacy file, and
+      // doctor beside a running or still-draining gateway finds a second owner
+      // of its state (`runOpenclawDoctorFix`). So the OAuth sign-ins —
+      // Claude's, ChatGPT's, Google's — keep the stop and the restart step 9
+      // issues for it; what makes that restart shorter is the pre-start's
+      // stamps (scripts/gateway-pre-start-stamps.py).
       gateway.state = "stopped-for-doctor";
       // WHAT KIND of doctor failure this was (TASK-741). It still FAILS — the
       // migration provably did not happen, and a legacy auth-profiles.json left
@@ -3016,6 +3604,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // owner to "run `openclaw doctor --fix` from the Terminal" is advice for
       // the command that is blocked, and he can do nothing with it.
       let doctorBlockedBy: OpenclawDoctorFixOutcome | null = null;
+      // Outside the try, for the gate under the catch, which runs on an explicit
+      // "completed" and nothing else: not a doctor that threw (a v1 box carries
+      // on past the catch), not a blocked outcome, and not the `undefined` the
+      // note below exempts.
+      let outcome: OpenclawDoctorFixOutcome | undefined;
       try {
         // TWO rules at once, and they pull in opposite directions.
         //
@@ -3032,7 +3625,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // and treating it as a refusal turns every one of their ordinary saves
         // into this 502. That inertness is the whole reason these outcomes are
         // returned rather than thrown, and it is load-bearing for the suite.
-        const outcome: OpenclawDoctorFixOutcome | undefined = await runOpenclawDoctorFix();
+        outcome = await runOpenclawDoctorFix();
+        if (outcome === "gateway-still-stopping" || outcome === "gateway-not-stopped") gateway.gatewayBusy = true;
         if (outcome !== undefined && outcome !== "completed") {
           doctorBlockedBy = outcome;
           // Into the SAME failure path, deliberately: the v1/v2 decision below
@@ -3089,9 +3683,131 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
                   + " manages the gateway service, so the subscription sign-in was rolled back. Restart the device"
                   + " and sign in again. If it is refused again, install the latest device update — older OpenClaw"
                   + " versions cannot be told that ClawBox owns the gateway."
+                // Doctor was deliberately not run beside a gateway that was not
+                // down, so the Terminal advice below would be for a command
+                // that never ran. The restore below brings the gateway back.
+                : doctorBlockedBy === "gateway-still-stopping" || doctorBlockedBy === "gateway-not-stopped"
+                ? "The assistant was busy restarting, so its credential migration was not run and the"
+                  + " subscription sign-in was rolled back. Sign in again in a few minutes."
                 : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
             },
             { status: 502 },
+          );
+        }
+      }
+      // DID THE SIGN-IN LAND? (the incident of 2026-10-10.) "completed" was
+      // this branch's only proof, and it is no proof of the credential: the
+      // core's JSON → sqlite migration only ADDS profile ids its store does
+      // not hold. For an id already there it keeps the stored profile,
+      // archives the file written above and still reports "completed". On the
+      // box this was found on the stored `anthropic:default` was a failed
+      // OAuth refresh fence, which the gateway never uses: this route answered
+      // 200 to 7 of 8 sign-ins while every chat turn died with "No API key
+      // found for provider anthropic".
+      //
+      // So ask the gateway's own store what it holds, and when that is not
+      // this sign-in, write it there and ask again (openclaw-auth-store.ts —
+      // its write wants the gateway stopped, which the doctor call above has
+      // just done). Import, verify, replace in place, verify — in that order,
+      // so the credential that was there is never removed before the new one
+      // is stored.
+      //
+      // "Cannot look" passes; "looked, and it is not there" refuses. No store,
+      // or one this build cannot read, is a core generation this code has not
+      // met — on a v1 box the legacy file IS the store — and refusing a
+      // sign-in nobody can disprove would lock its owner out. A store that
+      // answers and still does not hold the sign-in is the incident itself, so
+      // it is a 502 with nothing below written: the primary, the session pins,
+      // the config-store flags and the OAuth handoff file all come later, and
+      // POST restarts the gateway.
+      //
+      // WHAT A REFUSAL LEAVES is not always what was there, and the sentence
+      // does not say it is: a replace that committed and could not be read
+      // back stays committed — the store module has no undo. Nor is anything
+      // undone when the save fails AFTER this gate: the sign-in is then in the
+      // store under `auth.profiles` metadata the batch below never rewrote,
+      // and on a box that held an API key at this id core accepts neither
+      // until a sign-in completes (review of 2026-10-10, finding 1 — narrow,
+      // healed by the retry both sentences ask for, and recorded here rather
+      // than fixed).
+      //
+      // Claude's sign-in only: it is the profile this was measured on.
+      // The ClawBox AI device login no longer reaches this branch (it pastes,
+      // see `isClawaiDeviceLogin`); it stays excluded by name, not only by the
+      // provider id it rides today, so a future route back here cannot put an
+      // OAuth row where its CLI paste belongs.
+      if (outcome === "completed" && oauthBundle && ocProvider === "anthropic" && !isClawAI) {
+        const fingerprint = tokenFingerprint(oauthBundle.access);
+        const expires = oauthBundle.expires;
+        const isSignIn = (copy: GatewayAuthProfileCopy) =>
+          copy.type === "oauth"
+          && !copy.fenced
+          && copy.fingerprint === fingerprint
+          && copy.expires === expires;
+        // Where the main agent holds its own copy of the id, core resolves
+        // that one over the shared row — and hands out the shared one instead
+        // when it is usable and expires later. Stored means BOTH are this
+        // sign-in; `sharedCopy` is absent on every box without such a copy.
+        const landed = (read: GatewayAuthProfileRead) =>
+          read.kind === "present"
+          && isSignIn(read)
+          && (read.sharedCopy === undefined || (read.sharedCopy !== null && isSignIn(read.sharedCopy)));
+        // What a read answered, for the journal: never the credential, nor
+        // the fingerprint that stands in for it. A box whose main agent holds
+        // its own copy is said to be one — none is known in the field, and
+        // this line is how the first would be recognised.
+        const held = (read: GatewayAuthProfileRead) =>
+          read.kind !== "present"
+            ? read.kind
+            : `present${read.fence ? `, an OAuth refresh fence (${read.fence})` : ""}`
+              + (read.sharedCopy !== undefined ? ", in the main agent's own copy" : "");
+        const stored = readGatewayAuthProfile(config.profileKey);
+        let cannotLook: "no-store" | "unreadable" | null = null;
+        if (stored.kind === "no-store" || stored.kind === "unreadable") {
+          cannotLook = stored.kind;
+        } else if (!landed(stored)) {
+          const put = putGatewayOAuthProfile(config.profileKey, oauthBundle);
+          // No second look when nothing was committed: there is nothing new to find.
+          const after = put.ok ? readGatewayAuthProfile(config.profileKey) : null;
+          if (!put.ok && put.reason === "no-store") {
+            // The store went between the read and the write: the same answer
+            // as not finding one.
+            cannotLook = "no-store";
+          } else if (after && landed(after)) {
+            console.warn(
+              `[configure] doctor --fix completed without storing the new ${config.profileKey} sign-in`
+              + ` (the gateway's auth store was left as it was: ${held(stored)}); ClawBox replaced it in place`,
+            );
+          } else {
+            // The one line that says WHICH refusal this was. Without it the
+            // 502 left nothing in the journal at all — and the likeliest of
+            // the three, a replace that committed and did not read back, is
+            // the one the store module has no words of its own for.
+            console.error(
+              `[configure] the ${config.profileKey} sign-in is not in the gateway's auth store:`
+              + ` the store answered ${held(stored)} before, the replace ${put.ok ? "committed" : `answered ${put.reason}`},`
+              + ` and the store ${after ? `answered ${held(after)}` : "was not read"} afterwards`,
+            );
+            return NextResponse.json(
+              {
+                // True of every way to get here — nothing written, or written
+                // and not confirmed — so it claims neither.
+                error: "The sign-in was accepted, but this device could not confirm that its assistant stored it,"
+                  + " so the setup was not finished. Sign in again; if it is refused again, restart the device and retry.",
+                code: "credential_not_stored",
+              },
+              { status: 502 },
+            );
+          }
+        }
+        if (cannotLook) {
+          // sqlite's or Node's own words for an unreadable store: a build
+          // where node:sqlite cannot load makes this gate inert on every
+          // sign-in, and this is the only place that would show.
+          const cause = stored.kind === "unreadable" && stored.cause ? `: ${JSON.stringify(logSafe(stored.cause))}` : "";
+          console.warn(
+            `[configure] could not verify that the ${config.profileKey} sign-in reached the gateway's auth store`
+            + ` (${cannotLook})${cause}; carrying on with what doctor --fix reported`,
           );
         }
       }
@@ -3136,6 +3852,25 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // poll, the llama.cpp install route, the Ollama hook and the first-run
     // wizard branch all discard the field. Recorded rather than widened here.
     let unvalidatedPrimaryWarning: string | undefined;
+
+    // ONE openclaw.json write for everything from here to step 9 (TASK-1535).
+    //
+    // Steps 3 to 8 write the auth profile, the primary, the gateway settings,
+    // the provider definition, the vision and image slots, the fallbacks and
+    // the plugin gate — each from its own helper, and each used to be its own
+    // write: a CLI start apiece (5-14 s on a Jetson), then a gateway reload of
+    // a half-written config. A ClawBox AI re-save was measured at 50 s in four
+    // such rounds. From here they are STAGED, every config read sees what is
+    // staged, and `configWrites.commit()` before step 9 makes them one exact
+    // `config.patch` through the running gateway, which validates the whole and
+    // applies it once — see `ConfigWriteTransaction` in openclaw-config.ts.
+    //
+    // A write that may fail without failing the save keeps saying so: its
+    // handling travels with it (`configWriteBoundary`), and when the one write
+    // cannot be made the commit replays the staged writes one by one inside
+    // those same boundaries, as this route used to make them.
+    const configWrites = beginConfigWriteTransaction("configure");
+
     if (ocProvider === CHATGPT_PROVIDER) {
       // ONE config read for both OpenAI decisions this save makes: which
       // credential to prefer, and whether the previous lane left the Codex
@@ -3147,8 +3882,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         configStore[OPENAI_AUTH_ORDER_KEY] === true,
       );
       if (!isChatgptSubscription && (!isLocalScope || shouldPromoteLocalToPrimary)) {
-        chatgptOrderWarning = await clearChatgptRuntimeArm(config.defaultModel, openAiConfig)
-          ?? chatgptOrderWarning;
+        await clearChatgptRuntimeArm(config.defaultModel, openAiConfig, (sentence) => {
+          chatgptOrderWarning = sentence;
+        });
       }
     }
 
@@ -3160,12 +3896,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //    *parallel* writes: concurrent `openclaw config set` processes race on
     //    the same file and lose to ConfigMutationConflictError. One batched
     //    process is not concurrency, it is one validated read-modify-write.
+    // Compaction on the cloud model the box is leaving, in the batch that puts
+    // the primary on the device (TASK-2127, src/lib/local-compaction-model.ts).
+    let compactionArmOps: OpenclawConfigSetArgs[] = [];
     const baseOps: OpenclawConfigSetArgs[] = [
       [
         `auth.profiles.${config.profileKey}`,
         // Subscription → "oauth"; every key-based provider → "api_key". The old
         // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
-        JSON.stringify(authMode === "subscription"
+        // The ClawBox AI device login is key-based: it pasted an API key at
+        // step 1, and metadata saying `oauth` would contradict the store the
+        // running gateway reloads from until `configureClawboxAi` rewrote it.
+        JSON.stringify(authMode === "subscription" && !isClawaiDeviceLogin
           ? { provider: ocProvider, mode: "oauth" }
           : { provider: ocProvider, mode: "api_key" }),
         "--json",
@@ -3181,6 +3923,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // (src/lib/provider-plugin-ops.ts).
       baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
       baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
+      // Tool Search off while the primary is the on-device model, in the batch
+      // that puts it there (src/lib/local-tool-search.ts).
+      baseOps.push(...(await localToolSearchArmOps(configBeforeSave, config.defaultModel)));
+      compactionArmOps = await localCompactionModelArmOps(
+        configBeforeSave,
+        config.defaultModel,
+        configBeforeSave?.agents?.defaults?.model?.primary ?? null,
+      );
+      baseOps.push(...compactionArmOps);
       // The reference is `openai/<id>` for both OpenAI auth modes; this entry
       // is what says the turn belongs to the ChatGPT account and runs on the
       // Codex app-server — the key the core itself keeps when it migrates a
@@ -3230,6 +3981,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // effort: a failed install falls through to the direct primary write
     // below and the gateway's own readiness report names the missing plugin
     // loudly.
+    let providerPluginInstalled = false;
     if (isClawAI) {
       // On disk from EITHER registry, for the running core (TASK-1302): a
       // ClawHub install lands in `extensions/deepseek/`, an npm one under
@@ -3237,9 +3989,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // npm-installed plugin on every configure.
       if (!(await deepseekPluginOnDisk(OPENCLAW_HOME_DIR))) {
         console.log("[AI Config] Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it)...");
+        // `plugins install` writes openclaw.json itself: whatever this save has
+        // staged before it lands first, in order.
+        await flushConfigWrites();
         const plugin = await installDeepseekProviderPlugin();
         if (plugin.installed) {
           console.log(`[AI Config] deepseek provider plugin installed (${plugin.installed})`);
+          // Plugin code that was not on disk when the gateway started: one of
+          // the changes step 9 still restarts for.
+          providerPluginInstalled = true;
           // The plugin the boot script may have marked for repair is on disk
           // again, and this route goes on to write the provider itself — so
           // this IS the outcome, and the "Needs repair" badge on the ClawBox AI
@@ -3263,36 +4021,40 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           const switchedOff = await readPluginRepairs()
             .then((rows) => Object.values(rows).find((row) => canonicalPluginId(row.id) === "deepseek")?.id ?? null)
             .catch(() => null);
-          let backOn = true;
-          if (switchedOff) {
-            try {
-              await runOpenclawConfigSet(
-                [`plugins.entries["${switchedOff}"].enabled`, "true", "--strict-json"],
-                { uid: CLAWBOX_UID, gid: CLAWBOX_GID },
-              );
-            } catch (err) {
-              // The badge STAYS: it is the only true thing left on screen, and
-              // the Retry it offers runs the same write again.
-              backOn = false;
-              console.warn(
-                "[AI Config] the deepseek plugin was installed but could not be switched back on;"
-                + " leaving its repair record in place:",
-                err instanceof Error ? err.message : err,
-              );
-            }
-          }
           // SAID, not swallowed. The install succeeded and this route's own
           // answer is about the provider, so a failed clear must not fail it —
           // but a badge left on a row that works is a false failure the owner
           // cannot act on, and the log is where it is looked for.
-          if (backOn) {
+          const clearRepairBadge = async (): Promise<void> => {
             await clearPluginRepair("deepseek").catch((err: unknown) => {
               console.warn(
                 "[AI Config] the deepseek repair marker could not be cleared; Settings may still show a Retry:",
                 err instanceof Error ? err.message : err,
               );
             });
-          }
+          };
+          // The badge goes once the entry is back on — when the write LANDS,
+          // which inside this save's config write transaction is its commit.
+          await configWriteBoundary(
+            {
+              // The badge STAYS: it is the only true thing left on screen, and
+              // the Retry it offers runs the same write again.
+              onError: (err) =>
+                console.warn(
+                  "[AI Config] the deepseek plugin was installed but could not be switched back on;"
+                  + " leaving its repair record in place:",
+                  err instanceof Error ? err.message : err,
+                ),
+              onApplied: clearRepairBadge,
+            },
+            async () => {
+              if (!switchedOff) return;
+              await runOpenclawConfigSet(
+                [`plugins.entries["${switchedOff}"].enabled`, "true", "--strict-json"],
+                { uid: CLAWBOX_UID, gid: CLAWBOX_GID },
+              );
+            },
+          );
         } else {
           console.warn(
             "[AI Config] deepseek provider plugin install did not complete:",
@@ -3303,67 +4065,68 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
 
     const primaryIdx = baseOps.findIndex((op) => op[0] === "agents.defaults.model.primary");
-    try {
-      await runConfigSetBatch(baseOps);
-    } catch (batchErr) {
-      const message = batchErr instanceof Error ? batchErr.message : String(batchErr);
-      // Only the OpenClaw 2 catalog-validation refusal of the primary falls
-      // through — anything else keeps its existing failure path. v2 checks a
-      // model reference against a freshly refreshed provider catalog, so a
-      // placeholder key (the wizard's documented "save the profile without
-      // validating the key" contract) or a provider plugin on its first boot
-      // resolves ZERO models and the whole batch was refused with it.
-      if (primaryIdx === -1 || !/Cannot set model reference/i.test(message)) {
-        throw batchErr;
-      }
-      const remaining = baseOps.filter((_, index) => index !== primaryIdx);
-      if (remaining.length > 0) {
-        await runConfigSetBatch(remaining);
-      }
-      // Direct atomic write for the primary alone, the same way this route
-      // already writes provider entries the CLI's schema lags behind. The
-      // gateway tolerates an unresolvable primary at rest; the model is
-      // proven the first time it speaks, exactly as before OpenClaw 2.
-      const primaryModel = String(baseOps[primaryIdx][1]);
-      // The narrow helper performs a strict read under the same cross-process
-      // sidecar lock OpenClaw's CLI/gateway use. That prevents a complete-file
-      // write from overwriting a concurrent auth/provider/gateway mutation and
-      // refuses malformed input instead of rebuilding the config from a fragment.
-      //
-      // Three routes write `agents.defaults.model.primary` and they hold three
-      // different policies on this same CLI refusal, deliberately, because they
-      // are asked three different questions:
-      //   * here (a credential save)   — write past it, and warn below if the
-      //     id is in no catalogue: refusing would make a placeholder key or a
-      //     plugin's first boot unable to finish setup at all;
-      //   * chat/model (a model PICK)  — refuse it (`refuseUnresolvableModel`):
-      //     the owner chose from a list and can choose again;
-      //   * local-ai/exclusive         — let it throw.
-      // Said here so a fourth writer does not invent a fourth policy.
-      await setPrimaryModelWithoutCatalogValidation(primaryModel);
-      // The retry above re-lands the plugin enable with the rest of the
-      // batch (it is not the primary), so the refusal here is the catalog's.
-      console.warn(
-        "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
-        // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
-        JSON.stringify(logSafe(message)),
-      );
-      // …and only NOW decide whether a human needs to hear about it: is the id
-      // one this box has? `readKnownModelIds` is the picker's own list — the
-      // catalog route's cached enumeration unioned with the curated catalogue,
-      // read-only and spawn-free. Null is UNKNOWN (no enumeration yet, or a
-      // provider with no curated catalogue at all: llamacpp, ollama, deepseek)
-      // and stays silent, because the whole point is to name an id that exists
-      // NOWHERE, not to report a cold cache.
-      const primaryProvider = primaryModel.includes("/") ? primaryModel.split("/", 1)[0] : "";
-      const primaryId = extractProviderModelId(primaryModel, primaryProvider) ?? "";
-      const knownIds = primaryProvider && primaryId ? await readKnownModelIds(primaryProvider) : null;
-      if (knownIds && !knownIds.has(primaryId)) {
-        unvalidatedPrimaryWarning =
-          `Saved, but ${primaryModel} is in no model list this box has for ${primaryProvider}, `
-          + "and OpenClaw refused to validate it. Chat turns on it will fail. "
-          + "Pick a model in Settings to change it.";
-      }
+    // A boundary, not a `try`: inside this save's config write transaction the
+    // batch is refused — if it is — when the transaction commits, and the
+    // handling below is what the commit runs then.
+    await configWriteBoundary(
+      {
+        onError: async (batchErr) => {
+          const message = batchErr instanceof Error ? batchErr.message : String(batchErr);
+          // Only the OpenClaw 2 catalog-validation refusal of the primary falls
+          // through — anything else keeps its existing failure path. v2 checks a
+          // model reference against a freshly refreshed provider catalog, so a
+          // placeholder key (the wizard's documented "save the profile without
+          // validating the key" contract) or a provider plugin on its first boot
+          // resolves ZERO models and the whole batch was refused with it.
+          if (primaryIdx === -1 || !/Cannot set model reference/i.test(message)) {
+            throw batchErr;
+          }
+          const remaining = baseOps.filter((_, index) => index !== primaryIdx);
+          if (remaining.length > 0) {
+            await runConfigSetBatch(remaining);
+          }
+          // Direct atomic write for the primary alone, the same way this route
+          // already writes provider entries the CLI's schema lags behind. The
+          // gateway tolerates an unresolvable primary at rest; the model is
+          // proven the first time it speaks, exactly as before OpenClaw 2.
+          const primaryModel = String(baseOps[primaryIdx][1]);
+          // The narrow helper performs a strict read under the same cross-process
+          // sidecar lock OpenClaw's CLI/gateway use. That prevents a complete-file
+          // write from overwriting a concurrent auth/provider/gateway mutation and
+          // refuses malformed input instead of rebuilding the config from a fragment.
+          //
+          // Three routes write `agents.defaults.model.primary` and they hold three
+          // different policies on this same CLI refusal, deliberately, because they
+          // are asked three different questions:
+          //   * here (a credential save)   — write past it, and warn below if the
+          //     id is in no catalogue: refusing would make a placeholder key or a
+          //     plugin's first boot unable to finish setup at all;
+          //   * chat/model (a model PICK)  — refuse it (`refuseUnresolvableModel`):
+          //     the owner chose from a list and can choose again;
+          //   * local-ai/exclusive         — let it throw.
+          // Said here so a fourth writer does not invent a fourth policy.
+          await setPrimaryModelWithoutCatalogValidation(primaryModel);
+          // The retry above re-lands the plugin enable with the rest of the
+          // batch (it is not the primary), so the refusal here is the catalog's.
+          console.warn(
+            "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
+            // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
+            JSON.stringify(logSafe(message)),
+          );
+          unvalidatedPrimaryWarning = await primaryInNoListWarning(primaryModel, "refused");
+        },
+      },
+      () => runConfigSetBatch(baseOps),
+    );
+    // A cloud primary written above: OpenClaw's own Tool Search back, as it ships.
+    let toolSearchWarning: string | undefined;
+    if (primaryIdx !== -1 && localToolSearchDisarmNeeded(configBeforeSave, config.defaultModel)) {
+      toolSearchWarning = await disarmLocalToolSearch("AI Config");
+    }
+    // ...and OpenClaw's own compaction model back, when ClawBox set it.
+    await noteLocalCompactionModel(compactionArmOps);
+    if (primaryIdx !== -1 && await localCompactionModelDisarmNeeded(configBeforeSave, config.defaultModel)) {
+      await disarmLocalCompactionModel("AI Config");
     }
 
     // 5. Ensure openclaw config files are owned by clawbox
@@ -3392,10 +4155,28 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // cannot vouch for either, so a plan sitting there belongs to nobody this
     // save knows about and goes with the rest. Deleting a key that is not there
     // is a no-op; leaving one that outlived its account is not.
-    const clawaiPlanIsForAnotherAccount = isClawAI && previousClawaiToken !== clawboxAiToken;
+    //
+    // The token openclaw.json RAN counts too: it is the one the status poll
+    // asks the portal about. A sign-in whose commit failed has already stored
+    // the new token in step 6 while openclaw.json kept the old one, and its
+    // retry would otherwise read as a save on the same account and keep the
+    // previous account's plan.
+    const runningClawaiToken = configBeforeSave?.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
+    const clawaiPlanIsForAnotherAccount = isClawAI && (
+      previousClawaiToken !== clawboxAiToken
+      || (typeof runningClawaiToken === "string"
+        && runningClawaiToken.startsWith("claw_")
+        && runningClawaiToken !== clawboxAiToken)
+    );
     const clawaiPlanForStore = isClawAI && (portalPlan || clawaiPlanIsForAnotherAccount)
       ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) }
       : {};
+    // The badge and the plan as ONE entry set, the pair both boot scripts read.
+    // A cloud save records it after `configWrites.commit()` — see there.
+    const clawaiAccountStamps = {
+      ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+      ...clawaiPlanForStore,
+    };
     // The coding agent's three tools — `coding_agent_run`, `_status`, `_stop` —
     // are registered CONDITIONALLY by the ClawBox MCP server, from a probe it
     // makes ONCE while it boots; it is then a long-lived stdio child of the
@@ -3482,17 +4263,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         }
       }
     } else {
+      // The picks map without the provider whose newest-model default this save
+      // landed on, or null when it held no pick for it — nothing to write then.
+      const picksAfterDefaultSave = providerPickToForget
+        ? picksWithoutProvider(
+          clawaiPicksToStore ?? explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]),
+          providerPickToForget,
+        )
+        : null;
       await setMany({
         ai_model_configured: true,
         ai_model_provider: ocProvider,
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
-        ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
-        // The PLAN beside the badge, in the SAME batch so the pair the boot
-        // scripts read cannot come apart — see `clawaiPlanForStore` above for
-        // when it is written, when it is retired, and when the key is left
-        // exactly as it is.
-        ...clawaiPlanForStore,
+        // NOT the badge and the plan: `clawaiAccountStamps` is written after
+        // the openclaw.json commit below, for the reason given there.
+        //
         // The owner named a model in this save (TASK-713), or this save linked a
         // different ClawBox AI account and the previous owner's pick goes with
         // it. Either way in the SAME batch as the other facts about the save, so
@@ -3505,9 +4291,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
               [normalizeProviderId(ocProvider) ?? ocProvider]: explicitPickToRecord,
             },
           }
-          : clawaiPicksToStore
-            ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
-            : {}),
+          : picksAfterDefaultSave
+            ? { [EXPLICIT_MODEL_PICKS_KEY]: picksAfterDefaultSave }
+            : clawaiPicksToStore
+              ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
+              : {}),
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
@@ -3669,12 +4457,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
                 err instanceof Error ? logSafe(err.message) : err,
               ),
           };
+      const speechKeyGroup = await clawaiSpeechKeyRefresh(previousClawaiToken, clawboxAiToken);
       const clawboxAiConfigured = await configureClawboxAi(
         false,
         clawboxAiToken,
         {
           requiredOps: [["models.mode", "merge"]],
-          groups: [fallbackGroup],
+          groups: speechKeyGroup ? [fallbackGroup, speechKeyGroup] : [fallbackGroup],
           // Answered HERE, from the snapshot taken before this request's own
           // `setMany` — see the field's docblock. `previousClawaiToken` is the
           // same value the ClawKeep account-switch guard below reads, so a
@@ -3741,6 +4530,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
       const modelName = config.defaultModel.replace(/^llamacpp\//, "");
+      // Thinking per request, off unless asked (LLAMACPP_REASONING_COMPAT) —
+      // keys of a 2026.10+ core; an older or unreadable one gets the old row.
+      const localReasoning = await installedOpenclawCoreAtLeast(2026, 10);
       const providerDef = JSON.stringify({
         baseUrl: getLlamaCppProxyBaseUrl(),
         api: "openai-completions",
@@ -3748,16 +4540,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         models: [{
           id: modelName,
           name: modelName,
-          reasoning: false,
+          reasoning: localReasoning,
+          ...(localReasoning ? { compat: LLAMACPP_REASONING_COMPAT } : {}),
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: llamaCppContextWindow,
           maxTokens: llamaCppMaxTokens,
         }],
       });
+      // A reasoning row defaults to `medium` in the core: `off` is the model's
+      // own default unless the owner already set one.
+      const thinkingDefault = (configBeforeSave?.agents?.defaults as { models?: Record<string, { params?: { thinking?: unknown } }> } | undefined)
+        ?.models?.[`llamacpp/${modelName}`]?.params?.thinking;
       await runConfigSetBatch([
         ["models.providers.llamacpp", providerDef, "--json"],
         ["models.mode", isLocalScope ? "merge" : "replace"],
+        ...(localReasoning && thinkingDefault === undefined ? [llamaCppThinkingDefaultOp(`llamacpp/${modelName}`)] : []),
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
@@ -3813,13 +4611,26 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
-      try {
-        await runCommand(OPENCLAW_BIN, [
-          "config", "set", "models.mode", "merge",
-        ]);
-      } catch {
+      //
+      // xAI lands here ON PURPOSE, beside the OpenAI API key, rather than in an
+      // `applyCloudProviderTransport` branch like google and openrouter. Those
+      // two get an openai-compat override because their native route could not
+      // be made to work (openrouter has no plugin; google's plugin failed auth
+      // at call time). xAI's is a bundled, enabled-by-default plugin that takes
+      // the key from the agent auth store `paste-api-key` just wrote, on its own
+      // `openai-responses` transport — an override here would pin it to
+      // `openai-completions` with the key frozen inline and shadow the plugin's
+      // own catalogue. NOT YET PROVEN ON A DEVICE with a real xAI key; if the
+      // plugin turns out to fail at call time the way google's did, the
+      // override is the fallback, and it would also need `xai` in chat/model's
+      // OPENAI_COMPAT_PROVIDERS.
+      await configWriteBoundary(
         // Non-fatal: merge is the default behavior anyway
-      }
+        { onError: () => {} },
+        () => runCommand(OPENCLAW_BIN, [
+          "config", "set", "models.mode", "merge",
+        ]),
+      );
 
       await ensureFallbackModel(config.defaultModel);
     }
@@ -3839,18 +4650,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //    (skip for local-only local-AI setups that leave the primary
     //    alone).
     //
-    //    NOT while the gateway is stopped. A sign-in that went through the
-    //    auth-profile migration stopped the gateway for `doctor` above and
-    //    nothing restarts it before step 9, so this sweep used to run into
-    //    "Gateway not reachable (ECONNREFUSED)" and be swallowed as non-fatal
+    //    RUN AT STEP 9, once the gateway serves this save — never here. A
+    //    sign-in that went through the auth-profile migration stopped the
+    //    gateway for `doctor` above, and a sweep run against it went into
+    //    "Gateway not reachable (ECONNREFUSED)" and was swallowed as non-fatal
     //    — on a box (2026-09-18) the main session kept its old ClawBox AI pin
     //    while the box default became GPT-6 Astra, and every turn ran on the
-    //    pin under a header that said Astra. The sweep is deferred past the
-    //    restart, and past the gateway ANSWERING, not merely listening.
+    //    pin under a header that said Astra. And a gateway that has not applied
+    //    the save yet may not know the model the sweep pins (a llama.cpp row
+    //    this save just wrote). So the sweep follows the hot apply's
+    //    acknowledgment, or the restarted gateway ANSWERING, not merely
+    //    listening (TASK-1535).
     //
-    //    Decided HERE, outside the closure, because the deferral decision below
-    //    has to know it: a save that will sweep nothing must not hold Settings
-    //    for the readiness budget, and must never report a failed sweep about
+    //    Decided HERE, outside the closure, because step 9 has to know it: a
+    //    save that will sweep nothing must never report a failed sweep about
     //    one that was never going to run.
     const sweepTarget = isLocalScope && !shouldPromoteLocalToPrimary
       ? null
@@ -3888,29 +4701,57 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         return false;
       }
     };
-    let sessionSweepDeferred = false;
     let sessionSweepFailed = false;
-    if (sweepTarget) {
-      if (gateway.state === "stopped-for-doctor") {
-        sessionSweepDeferred = true;
-      } else {
-        sessionSweepFailed = !(await sweepSessionsToPrimary());
-      }
-    }
 
     // 8b. The OFF half of the gate: switch the anthropic plugin off only when
     //     nothing on the box could use it — the primary is elsewhere AND no
     //     usable Anthropic credential remains (the ON half rode in the primary
     //     batch at step 3). See setProviderPlugins for the catalog measurement
     //     behind the rule.
+    let flippedProvider: string | null = null;
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
       const primaryProvider = config.defaultModel.split("/", 1)[0];
       // Same gate, same rule: it returns the provider whose plugin it flipped,
       // which is a catalogue change for THAT provider — not for the one this
-      // save is about, which step 8c counts below.
-      const flippedProvider = await setProviderPlugins(primaryProvider);
-      if (flippedProvider) notifyProviderSetChanged(flippedProvider);
+      // save is about, which step 8c counts below. Announced after the commit
+      // below, once the flip is in the file.
+      flippedProvider = await setProviderPlugins(primaryProvider);
     }
+
+    // THE ONE WRITE (TASK-1535): everything steps 3 to 8b staged lands here,
+    // as one exact `config.patch` the running gateway validates as a whole and
+    // applies once — or, when it cannot, one write at a time inside the same
+    // boundaries, as before. A failure no boundary takes is this save's 500.
+    await configWrites.commit();
+    // The ClawBox AI badge and plan are recorded HERE, once openclaw.json —
+    // where the status poll reads the credential from — holds the token they
+    // describe. Recorded in step 6 they were on file seconds before that token
+    // was, and a status poll in between asked the portal about the PREVIOUS
+    // account's token and wrote its tier and plan back over them: after a
+    // sign-in to another account the desktop went on showing the old
+    // account's profile whenever the portal could not be asked. The
+    // generation bump refuses the writes of a poll still out about that token
+    // (it read the token before this commit); what such a poll wrote earlier,
+    // the batch below overwrites.
+    if (isClawAI && !isLocalScope) {
+      if (clawaiPlanIsForAnotherAccount) noteClawaiCredentialReplaced();
+      await setMany(clawaiAccountStamps);
+    }
+    // Through the gateway, the CLI's catalogue check did not run on a primary
+    // this save changed. The list is then the only opinion there is.
+    const primaryBeforeSave = (configBeforeSave?.agents?.defaults as { model?: unknown } | undefined)?.model;
+    const primaryWasBefore = typeof primaryBeforeSave === "string"
+      ? primaryBeforeSave
+      : (primaryBeforeSave as { primary?: unknown } | undefined)?.primary;
+    if (
+      configWrites.committedAs === "gateway"
+      && primaryIdx !== -1
+      && !unvalidatedPrimaryWarning
+      && primaryWasBefore !== config.defaultModel
+    ) {
+      unvalidatedPrimaryWarning = await primaryInNoListWarning(config.defaultModel, "unchecked");
+    }
+    if (flippedProvider) notifyProviderSetChanged(flippedProvider);
 
     // 8c. Kick off a catalog refresh for the just-configured provider so
     //     the picker shows the full live model list instead of whatever
@@ -3929,6 +4770,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     backoff it recorded describe a box that no longer exists. A client's
     //     `?refresh=1` cannot count it; only a write can.
     notifyProviderSetChanged(ocProvider);
+    //     And the models this account was refused on are asked again: a save of
+    //     the credential is what an owner does after adding credit, and a mark
+    //     would otherwise keep the model out of the picker for the rest of its
+    //     day (src/lib/provider-model-availability.ts). Fail-soft bookkeeping.
+    if (followsNewestModel(ocProvider)) await forgetUnavailableModels(ocProvider);
 
     // 8d. Did this save flip `models.mode`? Then every recorded model COUNT was
     //     taken under a rule that no longer holds — under `replace` the core
@@ -3945,8 +4791,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this
     // OAuth profile (write-if-missing). On an explicit (re)login, clear the
     // stale file so the restart below regenerates it with the fresh token —
-    // afterward the Codex app-server owns its own refresh, so we don't touch
-    // it again.
+    // a ChatGPT sign-in always restarts at step 9, because it went through the
+    // `doctor --fix` stop above — and afterward the Codex app-server owns its
+    // own refresh, so we don't touch it again.
     //
     // Every agent's `codex-home/auth.json` goes with it. That file is the
     // Codex app-server's own CODEX_HOME copy, and scripts/codex-auth-mirror.js
@@ -3986,120 +4833,135 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // — see the subscription branch — so nothing here executes against an
     // un-migrated auth store.)
 
-    // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
-    gateway.state = "restart-issued";
-    let gatewayWarning: string | undefined;
-    // `setup_complete` flips at the very end of the wizard
-    // (/setup-api/setup/complete), so "not true" is exactly "the first-run
-    // wizard is still driving this box".
+    // 9. Make the running gateway serve this save — WITHOUT restarting it
+    //    wherever the core can apply the save live (TASK-1535).
     //
-    // Read through route-auth, NOT through the config-store snapshot above.
-    // `readConfig()` there is fail-OPEN — a damaged config.json reads as `{}` —
-    // and route-auth exists precisely to say that must not decide this key: it
-    // fails CLOSED, so an unreadable config is "provisioned", which is also
-    // what `/setup-api/setup/status` and middleware serve. Fail open here and a
-    // box whose config.json is truncated renders Settings while this route
-    // treats it as the wizard and silently drops the notice Settings is the one
-    // branch that renders. Re-read per request; nothing is cached.
-    const firstRunWizard = !readSetupGateFacts().setupComplete;
-    // The sweep that follows the gateway with NOBODY waiting on its answer: the
-    // wizard, and a Settings save whose own budget ran out. One definition for
-    // both, so they cannot drift, and `.catch` on it — this file's own rule for
-    // every detached call (see the two restores in the POST wrapper and the
-    // cloud-defaults applier below), and under Node an unhandled rejection is a
-    // dead process.
+    //    This step used to restart clawbox-gateway on every save, "so it picks
+    //    up the new auth profile and model". The pinned core does both by
+    //    itself: its config reload (`hybrid`, the default) hot-applies agents,
+    //    models, auth.profiles, auth.order and plugins.entries.*, and the CLI
+    //    paste that wrote the credential asks the running gateway to rebuild its
+    //    auth state (`models.authRefresh`). The restart cost every save 50-60 s
+    //    of dead chat, and one measured on a board took 125 s and then told the
+    //    owner the gateway "did not come back".
     //
-    // Twice the port budget, because nothing is holding a request open for it:
-    // the whole point of detaching is that the answer may take longer than a
-    // person will wait. Derived from the same operator knob (`gatewayReadyWaitMs`,
-    // `GATEWAY_READY_WAIT_MS`) so a box that needs longer gets longer here too.
-    const scheduleDeferredSweep = () => {
-      void waitForGatewayRpcReady(gatewayReadyWaitMs() * 2)
-        .then((ready) => (ready ? sweepSessionsToPrimary() : false))
-        .catch((err) => {
-          // The save has LANDED by the time this runs, and its answer has gone
-          // out. A rejection here must not take the web server down over a
-          // sweep whose failure the owner has already been told about.
-          console.warn(
-            "[configure] the deferred session sweep could not run:",
-            err instanceof Error ? logSafe(err.message) : err,
-          );
-        });
-    };
-    try {
-      // The readiness answer is worth waiting for only where something reads
-      // it, and in the wizard nothing does: AIModelsStep's wizard branch logs
-      // `warning` and calls onNext() (Settings is the branch that renders it),
-      // and llamacpp/install, clawai/poll and useOllamaModels all drop it too.
-      // The cost is not theoretical — e2e-install measured THIS request at
-      // 52 894 ms on a cold first boot: ~23 s of config writes and `systemctl
-      // restart`, then the whole 30 s budget, expired. So first boot pays the
-      // full budget for a value with no consumer, on the one path where the
-      // budget is not even enough to answer. Skip the port poll there, exactly
-      // as /setup-api/system/hostname does for its own discarded answer.
-      //
-      // Only the poll is skipped, never the restart: a REFUSED restart still
-      // throws from the exec below and still 502s, in the wizard too. And a
-      // gateway that never comes back is not silent either — the chat the
-      // wizard hands off to cannot open a session without one.
-      await restartGateway({ awaitReady: !firstRunWizard });
-      if (sessionSweepDeferred) {
-        // The port is open once `awaitReady` returns; the RPC is not. In the
-        // wizard the answer has no consumer and no session to speak of, so the
-        // sweep follows readiness in the background; in Settings it is waited
-        // for, because the chat the owner returns to is the one being re-pointed.
-        //
-        // BOUNDED by the same budget the port wait above uses, and no longer:
-        // this box is reachable through the Cloudflare tunnel, whose origin
-        // gives up at ~100 s, and a save that landed reported as "Failed to
-        // configure" is the false failure this wait must not create. Past the
-        // budget the answer goes out saying the pins are still there, and the
-        // sweep follows the gateway on its own — "slow" is not "never".
-        if (firstRunWizard) {
-          scheduleDeferredSweep();
-        } else if (await waitForGatewayRpcReady(gatewayReadyWaitMs())) {
-          sessionSweepFailed = !(await sweepSessionsToPrimary());
-        } else {
-          sessionSweepFailed = true;
-          scheduleDeferredSweep();
-        }
+    //    So the restart is kept for what still needs one, and nothing else:
+    //      - the gateway was STOPPED above for the `doctor --fix` credential
+    //        migration (the OAuth sign-ins: Claude's, ChatGPT's, Google's — not
+    //        xAI's, which its plugin stores, and not the ClawBox AI device
+    //        login, which pastes an API key); systemd does not start a
+    //        stopped unit by itself, and the ChatGPT sign-in's Codex mirrors
+    //        are regenerated by the boot script on that start;
+    //      - plugin code was installed (the ClawBox AI provider plugin);
+    //      - a setting only a restart applies changed — `gateway.auth.*` when
+    //        the token is rotated, and anything the core's reload table does not
+    //        name (`restartRequiredPaths` diffs openclaw.json against the
+    //        snapshot taken before step 1).
+    //    Everything else waits, bounded, for the gateway to report the new
+    //    config revision applied, then sweeps the open chats. A gateway that
+    //    does not confirm in time is restarted after all: the restart is the
+    //    fallback, never a step skipped on hope.
+    const configAfterSave = await Promise.resolve()
+      .then(() => readOpenClawConfig())
+      .catch(() => ({} as OpenClawConfig));
+    const restartReasons: string[] = [];
+    if (gateway.state === "stopped-for-doctor") {
+      restartReasons.push("it was stopped for the credential migration");
+    }
+    if (providerPluginInstalled) {
+      restartReasons.push("a provider plugin was installed");
+    }
+    const restartPaths = restartRequiredPaths(configBeforeSave ?? {}, configAfterSave ?? {});
+    if (restartPaths.length > 0) {
+      restartReasons.push(`restart-only settings changed (${restartPaths.join(", ")})`);
+    }
+
+    // Resolves once the gateway serves the save and answers RPCs: at once for a
+    // hot apply, after the restart otherwise. What has to follow the gateway —
+    // the session sweep on a restart, the cloud defaults below — chains on it.
+    let gatewayBack: Promise<boolean> = Promise.resolve(true);
+    let gatewayRestarting = false;
+    if (restartReasons.length === 0) {
+      const hot = await awaitGatewayHotApply({
+        baseline: gatewayBaseline,
+        configChanged: diffConfigPaths(configBeforeSave ?? {}, configAfterSave ?? {}).length > 0,
+        // Every OpenClaw save reaching this step has written a credential or a
+        // selection through the CLI (the paste at step 1 or in the ClawBox AI
+        // pass), and `models.authRefresh` is the core's call for exactly that.
+        credentialsWritten: true,
+      });
+      if (hot.applied) {
+        console.log(`[configure] the gateway applied the save without a restart (${hot.how})`);
+        // Awaited: the chat the owner returns to is the one being re-pointed,
+        // and a sweep that could not run is said in this answer.
+        if (sweepTarget) sessionSweepFailed = !(await sweepSessionsToPrimary());
+      } else if (hot.why === "gateway-restarting") {
+        // The core took the save as one only a restart applies and is doing it
+        // itself (hybrid mode). A second restart of ours would only make it
+        // longer; follow that one instead.
+        console.log("[configure] the gateway is restarting by itself to apply the save");
+        gatewayRestarting = true;
+        gatewayBack = waitForGatewayRpcReady(gatewayReadyWaitMs() * 2).catch(() => false);
+      } else {
+        restartReasons.push(`the gateway did not confirm the change (${hot.why})`);
       }
-    } catch (err) {
-      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
-      // A gateway that has not finished coming back is NOT a failed configure.
-      // The provider, the credential and the model are all written by the time
-      // this runs; only the wait gave up. This 502 predates the readiness wait,
-      // when it could fire only if `systemctl restart` itself failed — the wait
-      // widened it to "the port did not open inside 30 s", which is a state the
-      // box recovers from on its own, and reporting it as a failure stops the
-      // first-boot wizard dead at the AI step and tells the owner to reboot a
-      // box that needed ten more seconds.
-      //
-      // A restart that was REFUSED is a different fact: nothing is coming, and
-      // the owner does have to act. That one keeps the 502.
-      if (!(err instanceof GatewayNotReadyError)) {
+    }
+    if (restartReasons.length > 0) {
+      console.log(`[configure] restarting the gateway: ${restartReasons.join("; ")}`);
+      gateway.state = "restart-issued";
+      try {
+        // ANSWERED EARLY. The request returns once systemd has taken the restart;
+        // the page waits for the gateway itself (`gatewayRestarting` below, and
+        // /setup-api/gateway/health, which reports a restart still in flight as
+        // unavailable). Holding the request through the stop, the pre-start and
+        // the core start-up is what ran it past the ~100 s the tunnel in front
+        // of this box allows — and what turned a save that had landed into
+        // "gateway did not come back".
+        //
+        // `back` waits twice the port budget for the RPC behind it, because
+        // nobody is holding a request open for it; derived from the same
+        // operator knob (`gatewayReadyWaitMs`, `GATEWAY_READY_WAIT_MS`).
+        const restart = await restartGatewayAnsweringEarly();
+        gatewayRestarting = true;
+        gatewayBack = restart.back;
+      } catch (err) {
+        // A restart that was REFUSED (a masked unit during an update, a missing
+        // one): nothing is coming, and the owner does have to act. The provider,
+        // the credential and the model are all written by now.
+        console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
         return NextResponse.json(
           { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
           { status: 502 },
         );
       }
-      gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
-      // The port never came back inside the budget, so the deferred sweep
-      // has not run either: say so now, and still let it follow the gateway
-      // when it does come back rather than leaving the pins for good.
-      if (sessionSweepDeferred) {
-        sessionSweepFailed = true;
-        scheduleDeferredSweep();
-      }
+    }
+    if (gatewayRestarting && sweepTarget) {
+      // The sweep follows the restarted gateway ANSWERING, with nobody waiting
+      // on it: the answer below has already gone out. `.catch` on it — this
+      // file's rule for every detached call, and under Node an unhandled
+      // rejection is a dead process.
+      void gatewayBack
+        .then((ready) => (ready ? sweepSessionsToPrimary() : false))
+        .then((swept) => {
+          if (!swept) {
+            console.warn("[configure] open chats could not be re-pointed after the restart; they keep their previous model");
+          }
+        })
+        .catch((err) => {
+          console.warn(
+            "[configure] the deferred session sweep could not run:",
+            err instanceof Error ? logSafe(err.message) : err,
+          );
+        });
     }
 
     // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). A ClawBox AI
     // save is the moment the box either gains a subscription or changes the one
     // it has, and the cloud voice, cloud transcription and cloud embeddings all
-    // follow from what that subscription covers. Asked for HERE, after the
-    // gateway restart above, because two of the three writes go through the
-    // openclaw CLI and the entry for the cloud voice is written by
-    // `gateway-pre-start.sh` on the way back up.
+    // follow from what that subscription covers. Asked for HERE, after step 9,
+    // because two of the three writes go through the openclaw CLI and the
+    // entry for the cloud voice is written by `gateway-pre-start.sh` when a
+    // restart brings the gateway back.
     //
     // Best effort, and never awaited for its answer: the save has landed, and
     // the applier's own contract is that it never rejects and never demotes.
@@ -4113,8 +4975,24 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // timeout path held this response for minutes while the first-boot wizard
     // sat on a save that had already landed. Nothing in the answer depends on
     // it, and the boot hook re-runs the same pass 45 s into every start.
+    //
+    // AFTER THE GATEWAY ANSWERS (`gatewayBack`: at once after a hot apply, once
+    // the restarted gateway answers otherwise). A restart is answered before it
+    // is over, and the applier's openclaw.json writes (voice provider, memory
+    // embedder) used to land while the gateway was still starting. The
+    // gateway treats a config that changes under its startup migrations as
+    // unusable and exits with EX_CONFIG (78), which the unit deliberately does
+    // not restart — a freshly linked box finished the wizard with no gateway
+    // and no chat until something restarted it by hand. Waiting costs nothing
+    // here (the request has already been answered); a gateway that never comes
+    // back inside the budget gets the same attempt as before.
     if (isClawAI) {
-      void import("@/lib/clawai-cloud-defaults")
+      // Started inside a promise so even a synchronous throw from the wait
+      // stays on this detached chain and never reaches the answer.
+      void Promise.resolve()
+        .then(() => gatewayBack)
+        .catch(() => false)
+        .then(() => import("@/lib/clawai-cloud-defaults"))
         .then(({ applyClawaiCloudDefaults }) =>
           applyClawaiCloudDefaults({
             trigger: "link",
@@ -4131,13 +5009,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             "[configure] could not apply the ClawBox AI cloud defaults:",
             err instanceof Error ? logSafe(err.message) : err,
           );
-        });
+        })
+        .then(() => alignChannelAudio());
+    } else {
+      void Promise.resolve()
+        .then(() => gatewayBack)
+        .catch(() => false)
+        .then(() => alignChannelAudio());
     }
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
     // Deferring the unlink to here means a failure that returned EARLY left the
-    // file intact, so the client can retry within the TTL. A gateway that has
-    // not finished restarting is not one of those: it falls through to here and
+    // file intact, so the client can retry within the TTL. A gateway that is
+    // still restarting is not one of those: it falls through to here and
     // consumes the file, which is right — the configure landed, and a retry
     // would redo a completed save.
     if (pendingHandoffTokensPath) {
@@ -4150,12 +5034,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const sessionSweepWarning = sessionSweepFailed
       ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
       : undefined;
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning, sessionSweepWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, toolSearchWarning, hermesWarning, sessionSweepWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({
       success: true,
       ...(warning ? { warning } : {}),
+      // The save landed and the gateway is coming back from a restart this
+      // answer did not wait for. Settings holds its "Restarting gateway" row
+      // until /setup-api/gateway/health says it is back, and shows the notice
+      // only if it is not back within its own wait; callers that do not wait
+      // can show it as it is. Not a warning: nothing failed.
+      ...(gatewayRestarting ? { gatewayRestarting: true, restartingNotice: GATEWAY_RESTARTING_NOTICE } : {}),
       // The plan may have moved while the model deliberately did not (TASK-713).
       // Reported so the plan card can say so, rather than answering 200 over a
       // screen where nothing appears to have happened.
@@ -4186,6 +5076,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             + `openclaw models auth logout ${err.profileId}`
             + " — then paste the key.",
           code: "sign_in_would_be_lost",
+          profileId: err.profileId,
+        },
+        { status: 409 },
+      );
+    }
+    // ClawBox AI's slot could not be taken over. Its own sentence, because the
+    // generic one below ("check your credentials") is wrong over a token the
+    // portal just issued, and the device-login finaliser relays this text to
+    // the wizard as it is.
+    if (err instanceof ClawboxAiSlotHeldError) {
+      console.warn(`[configure] the sign-in at ${err.profileId} could not be taken over for ClawBox AI`);
+      return NextResponse.json(
+        {
+          error: "ClawBox AI could not replace an older sign-in stored in its credential slot "
+            + `(${err.profileId}). Remove it in the Terminal: `
+            + `openclaw models auth logout ${err.profileId} — then connect ClawBox AI again.`,
+          code: "clawai_slot_held",
           profileId: err.profileId,
         },
         { status: 409 },

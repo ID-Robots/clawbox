@@ -28,6 +28,12 @@ vi.mock("@/lib/harness", () => ({
   isSingleHarnessEdition: () => false,
 }));
 
+// The first-conversation ritual's retirement works on the OpenClaw workspace
+// under $HOME; what it does is language-persona.test.ts's business, and here it
+// is only whether the switch asks for it.
+const retireOnboardingRitual = vi.fn(async () => false);
+vi.mock("@/lib/language-persona", () => ({ retireOnboardingRitual: () => retireOnboardingRitual() }));
+
 const dashboardRpc = vi.fn(async (_method: string, _params?: unknown) => ({ status: "ok" }) as unknown);
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: (m: string, p: unknown) => dashboardRpc(m, p) }));
 
@@ -142,5 +148,37 @@ describe("POST /setup-api/harness/select", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true, active: "hermes" });
+  });
+
+  // TASK-1528: a set-up box runs no first-conversation ritual, and the
+  // retirement holds off while Hermes is in play. The identity sync restarts
+  // the gateway before the switch is persisted, so the gateway's own boot path
+  // still read Hermes; the switch has to ask once the new harness is on disk.
+  it("retires the first-conversation ritual after a switch to OpenClaw is persisted", async () => {
+    setActiveHarness.mockResolvedValue("hermes");
+
+    const res = await post("openclaw");
+
+    expect(res.status).toBe(200);
+    expect(retireOnboardingRitual).toHaveBeenCalledTimes(1);
+    expect(setActiveHarness.mock.invocationCallOrder[0]).toBeLessThan(
+      retireOnboardingRitual.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not touch the OpenClaw workspace on a switch to Hermes", async () => {
+    const res = await post("hermes");
+
+    expect(res.status).toBe(200);
+    expect(retireOnboardingRitual).not.toHaveBeenCalled();
+  });
+
+  it("does not retire anything when the switch could not be persisted", async () => {
+    setActiveHarness.mockRejectedValue(new Error("EROFS"));
+
+    const res = await post("openclaw");
+
+    expect(res.status).toBe(500);
+    expect(retireOnboardingRitual).not.toHaveBeenCalled();
   });
 });

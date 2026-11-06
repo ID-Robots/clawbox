@@ -6,6 +6,12 @@
 //   2. The persona write always targeted the OpenClaw workspace. On a Hermes
 //      device nothing reads that directory, so the setting was a dead write
 //      and the agent kept answering in English.
+//
+// And one found on a box with more than one user: the language was the BOX's.
+// Any signed-in user's pick rewrote the shared SOUL.md and USER.md, so it
+// changed the agent's language for the owner, for every other user and for
+// every cron run. A user's pick is now their own; only the owner's sets the
+// box default and the persona.
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
@@ -25,6 +31,9 @@ vi.mock("@/lib/harness", () => ({
 // language value, not about who asks: every caller here is the owner.
 vi.mock("@/lib/route-auth", () => ({
   requireSession: vi.fn().mockResolvedValue(null),
+  // Who a cookie speaks for. No one by default: the agent's bearer, the setup
+  // wizard and the e2e harness are no person, and set the box default.
+  sessionIdentity: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("fs/promises", () => ({
@@ -44,11 +53,14 @@ import nodePath from "node:path";
 
 import * as config from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
+import { sessionIdentity } from "@/lib/route-auth";
 
+const mockGet = vi.mocked(config.get);
 const mockGetAll = vi.mocked(config.getAll);
 const mockSet = vi.mocked(config.set);
 const mockSetMany = vi.mocked(config.setMany);
 const mockActiveHarness = vi.mocked(getActiveHarness);
+const mockSessionIdentity = vi.mocked(sessionIdentity);
 
 /** The device-store key that records a pick the ritual made us defer. */
 const DEFERRED = "ui_language_persona_pending";
@@ -99,8 +111,10 @@ describe("/setup-api/preferences — language", () => {
     // $HOME would be describing a box nobody runs.
     process.env.OPENCLAW_HOME = nodePath.join(HOME_DIR, ".openclaw");
     delete process.env.HERMES_HOME;
+    mockGet.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
     mockSet.mockResolvedValue(undefined);
+    mockSessionIdentity.mockResolvedValue(null);
     mockSetMany.mockResolvedValue(undefined);
     mockActiveHarness.mockResolvedValue("openclaw");
     const fsMod = (await import("fs/promises")).default;
@@ -402,5 +416,151 @@ describe("/setup-api/preferences — language", () => {
     // And it does not answer a question nobody asked: a wallpaper change says
     // nothing about whether the persona is owed a language.
     expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  // ── Defect 4: one user's pick was the whole box's language ─────────────────
+
+  describe("each signed-in user has a language of their own", () => {
+    const OWNER = { username: "owner", isOwner: true };
+    const ALICE = { username: "alice", isOwner: false };
+    const BOB = { username: "bob", isOwner: false };
+
+    /** The device store, in memory, behind the four functions the route reaches. */
+    let store: Record<string, unknown>;
+    beforeEach(() => {
+      store = {};
+      mockGetAll.mockImplementation(async () => ({ ...store }));
+      mockGet.mockImplementation(async (key: string) => store[key]);
+      mockSet.mockImplementation(async (key: string, value: unknown) => {
+        if (value === undefined) delete store[key];
+        else store[key] = value;
+      });
+      mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+        Object.assign(store, entries);
+      });
+    });
+
+    const signedInAs = (who: { username: string; isOwner: boolean } | null) =>
+      mockSessionIdentity.mockResolvedValue(who);
+    const readLanguage = async () => {
+      const res = await GET(new Request("http://localhost/setup-api/preferences?keys=ui_language"));
+      return (await res.json()).ui_language;
+    };
+
+    it("stores a user's pick as theirs and never writes SOUL.md or USER.md", async () => {
+      store["pref:ui_language"] = "en";
+      signedInAs(ALICE);
+      const res = await post({ ui_language: "de" });
+      expect(res.status).toBe(200);
+      expect(writeFile).not.toHaveBeenCalled();
+      expect(store["pref:ui_language"]).toBe("en");
+      expect(store.ui_language_by_user).toEqual({ alice: "de" });
+      // Owes the persona nothing either: the deferral flag is the box's.
+      expect(store).not.toHaveProperty(DEFERRED);
+    });
+
+    it("never writes the persona for a user's pick, on either harness, ritual or not", async () => {
+      signedInAs(ALICE);
+      for (const harness of ["openclaw", "hermes"] as const) {
+        mockActiveHarness.mockResolvedValue(harness);
+        for (const lang of ["bg", "en", "ja"]) await post({ ui_language: lang });
+      }
+      expect(writeFile).not.toHaveBeenCalled();
+      expect(store).not.toHaveProperty("pref:ui_language");
+      expect(store.ui_language_by_user).toEqual({ alice: "ja" });
+    });
+
+    it("writes the persona and the box default for the owner's pick", async () => {
+      signedInAs(OWNER);
+      await post({ ui_language: "bg" });
+      expect(written()).toEqual([`${OPENCLAW_WS}/USER.md`, `${OPENCLAW_WS}/SOUL.md`]);
+      expect(store["pref:ui_language"]).toBe("bg");
+      expect(store).not.toHaveProperty("ui_language_by_user");
+    });
+
+    it("gives two users different languages, and the owner and /login the box default", async () => {
+      store["pref:ui_language"] = "en";
+      signedInAs(ALICE);
+      await post({ ui_language: "de" });
+      signedInAs(BOB);
+      await post({ ui_language: "fr" });
+
+      signedInAs(ALICE);
+      expect(await readLanguage()).toBe("de");
+      signedInAs(BOB);
+      expect(await readLanguage()).toBe("fr");
+      signedInAs(OWNER);
+      expect(await readLanguage()).toBe("en");
+      signedInAs(null);
+      expect(await readLanguage()).toBe("en");
+      expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("gives a user with no pick of their own the box default", async () => {
+      store["pref:ui_language"] = "bg";
+      store.ui_language_by_user = { alice: "de" };
+      signedInAs(BOB);
+      expect(await readLanguage()).toBe("bg");
+    });
+
+    it("serves a user's own pick in an all=1 read, even on a box with no default", async () => {
+      store["pref:wp_opacity"] = 80;
+      store.ui_language_by_user = { alice: "sv" };
+      signedInAs(ALICE);
+      const res = await GET(new Request("http://localhost/setup-api/preferences?all=1"));
+      expect(await res.json()).toEqual({ wp_opacity: 80, ui_language: "sv" });
+    });
+
+    it("never serves the per-user map itself as a preference", async () => {
+      store["pref:ui_language"] = "bg";
+      store.ui_language_by_user = { alice: "de" };
+      signedInAs(OWNER);
+      const res = await GET(new Request("http://localhost/setup-api/preferences?all=1"));
+      expect(await res.json()).toEqual({ ui_language: "bg" });
+    });
+
+    it("lets the owner change the box default without touching a user's pick", async () => {
+      store.ui_language_by_user = { alice: "de" };
+      signedInAs(OWNER);
+      await post({ ui_language: "fr" });
+      expect(store.ui_language_by_user).toEqual({ alice: "de" });
+      signedInAs(ALICE);
+      expect(await readLanguage()).toBe("de");
+    });
+
+    it("still stores the rest of a user's bundle on the desktop they share", async () => {
+      store["pref:ui_language"] = "en";
+      signedInAs(ALICE);
+      await post({ ui_language: "it", wp_opacity: 40 });
+      expect(store["pref:wp_opacity"]).toBe(40);
+      expect(store["pref:ui_language"]).toBe("en");
+      expect(store.ui_language_by_user).toEqual({ alice: "it" });
+    });
+
+    it("refuses a user's invalid locale exactly as it refuses the owner's", async () => {
+      signedInAs(ALICE);
+      const res = await post({ ui_language: STORED_JUNK_LOCALE, wp_opacity: 40 });
+      expect(res.status).toBe(400);
+      expect(store).toEqual({});
+    });
+
+    it("never serves a stored per-user value outside the locales we ship", async () => {
+      store["pref:ui_language"] = "bg";
+      store.ui_language_by_user = { alice: STORED_JUNK_LOCALE };
+      signedInAs(ALICE);
+      expect(await readLanguage()).toBe("bg");
+    });
+
+    it("asks no one who is signed in for a write that names no language", async () => {
+      signedInAs(ALICE);
+      await post({ wp_opacity: 40 });
+      expect(mockSessionIdentity).not.toHaveBeenCalled();
+    });
+
+    it("tells no cache to keep an answer that depends on the cookie", async () => {
+      const res = await GET(new Request("http://localhost/setup-api/preferences?keys=ui_language"));
+      expect(res.headers.get("cache-control")).toContain("no-store");
+      expect(res.headers.get("vary")).toContain("Cookie");
+    });
   });
 });

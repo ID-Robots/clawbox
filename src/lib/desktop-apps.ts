@@ -15,7 +15,7 @@ export interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "prime_radiant" | "system_update" | "chat" | "screenshot" | "chrome";
   url?: string;
   // Webapps only: how the desktop opens it (InstalledMeta.launch).
   launch?: "window";
@@ -48,10 +48,6 @@ export const apps: AppDef[] = [
   // `claude-ds` away in the Terminal app.)
   { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
-  // The owner's pinned project folders: the Files app itself, opened on its
-  // Projects view (src/lib/project-folders.ts) — a door into Files, not a
-  // second file manager. On the desktop, off the shelf.
-  { id: "projects", name: "app.projects", color: "#0d9488", type: "files", pinned: false, defaultWidth: 900, defaultHeight: 620 },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   // The memory index — health, "Index now", the schedule — as its own window.
   // It used to be a card inside ClawKeep and borrowed its green; it has its own
@@ -59,6 +55,11 @@ export const apps: AppDef[] = [
   // and green is reserved there for a STATE (on, healthy) rather than for an
   // identity. Sized for the single card it shows.
   { id: "memory-shard", name: "app.memoryShard", color: "#2f2a52", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
+  // Prime Radiant, the "living wiki": a git-backed vault of pages and claims
+  // that Memory Shard searches as one of its sources. Its own app, pinned
+  // beside Memory Shard because the two are read together, and on every
+  // edition. A product name, so it carries no translation key.
+  { id: "prime-radiant", name: "Prime Radiant", color: "#0f2a52", type: "prime_radiant", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
@@ -70,5 +71,50 @@ export const apps: AppDef[] = [
   // its own new tabs on the same start page; the kiosk extension test holds
   // the two URLs together.
   { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false, kioskOnly: true },
+  // The owner's own Google Chrome as a native window on the ClawBox Desktop
+  // session's screen (src/lib/desktop-chrome.ts): their profile and logins,
+  // not the kiosk's. Drawn only on that screen while the session is up
+  // (`useDesktopChrome`); every other desktop hides it.
+  { id: "chrome", name: "Google Chrome", color: "#f1f3f4", type: "chrome", pinned: false },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  // Capture the desktop and mark it up (TASK-1475). On the desktop, off the
+  // shelf: its keys (Print Screen, Ctrl+Shift+S, Alt+Shift+S) and the tray's
+  // Screenshot button (TASK-1491) take a capture with the app closed, and the
+  // window opens itself on the result. Last in the list so a desktop that
+  // already has its icons arranged gains one at the end.
+  { id: "screenshot", name: "app.screenshot", color: "#be123c", type: "screenshot", pinned: false, defaultWidth: 1100, defaultHeight: 680 },
 ];
+
+/**
+ * The Material Symbols glyph each app is drawn with — on the desktop, and as
+ * the mark beside a chat step that used the app (`chat-tool-events.tsx`), so
+ * the two cannot disagree. Apps drawn as artwork instead (Hermes, the Agent
+ * Browser, Chrome, Prime Radiant, the chat's crab, OpenClaw) are not here.
+ */
+export const APP_GLYPHS: Readonly<Record<string, string>> = Object.freeze({
+  settings: "settings",
+  setup: "construction",
+  terminal: "terminal",
+  files: "folder",
+  clawkeep: "shield_lock",
+  // A faceted gem rather than a memory chip: the shard is the thing the app
+  // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
+  // the bundled subset, but the shine variant's sparkle marks sit right on
+  // top of the facet lines, and at desktop-icon size (48px) the two read as
+  // one blob instead of a gem. The plain gem keeps the identity and stays
+  // legible small.
+  "memory-shard": "diamond",
+  system_update: "system_update",
+  vnc: "desktop_windows",
+  // The globe: the open web, as opposed to `browser`'s window with the
+  // assistant in it (AgentBrowserIcon).
+  web: "language",
+  camera: "photo_camera",
+  screenshot: "screenshot_monitor",
+  store: "storefront",
+  chat: "chat_bubble",
+  "hermes-skills": "extension",
+  // The same glyph the finish card's Open button and the run page use for
+  // the agent, so the icon on the desktop is the icon in the app.
+  coding: "smart_toy",
+});

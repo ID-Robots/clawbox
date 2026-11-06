@@ -97,6 +97,12 @@ describe("translations", () => {
         // The setup wizard's "Choose your assistant" step (TASK-1149).
         "assistant",
         "wifi",
+        // Settings → System → Agent databases (OpenClaw database maintenance).
+        "dbMaintenance",
+        // Settings → Harness → Scheduled job alerts, and the alert's own words.
+        "jobAlerts",
+        // The desktop's corner card for long work Settings started (background tasks).
+        "backgroundTasks",
         "clawaiUsage",
         "update",
         "credentials",
@@ -141,6 +147,12 @@ describe("translations", () => {
         "whatsNew",
         // Settings → Users, multi-user ClawBox OS (TASK-1256).
         "users",
+        // The Screenshot app (TASK-1475).
+        "screenshot",
+        // Public app links from a desktop icon's menu (TASK-1478).
+        "publicLink",
+        // Prime Radiant, the living wiki.
+        "primeRadiant",
       ]);
 
       for (const key of Object.keys(translations.en)) {

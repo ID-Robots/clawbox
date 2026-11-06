@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { cancelDeviceLogin, pollDeviceLogin, startDeviceLogin } from "@/lib/coding-github";
 import { noteGitHubAccountChanged } from "@/lib/project-import";
@@ -25,7 +25,7 @@ export const dynamic = "force-dynamic";
  * to the agent's bearer stays the one every owner-only route gives.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Connecting GitHub needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

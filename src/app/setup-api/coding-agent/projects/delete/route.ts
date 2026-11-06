@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { declaredTooLong, readJsonObject } from "@/lib/bounded-json";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { listProjects } from "@/lib/coding-agent";
 import {
@@ -70,7 +70,7 @@ function refuse(status: number, kind: string, error: string, code?: string) {
 
 /** The owner's session AND this box's own page — for reading as well as removing. */
 async function guard(request: Request): Promise<NextResponse | null> {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return refuse(
       403,
       "owner_only",

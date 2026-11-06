@@ -11,6 +11,7 @@
 // `<org>/<model>` slugs.
 
 import { lastModelSegment } from "./chat-header-pills";
+import { newestModelId } from "./provider-newest-model";
 import {
   OPENROUTER_CURATED_MODELS,
   OPENROUTER_DEFAULT_MODEL_ID,
@@ -135,6 +136,8 @@ export interface ProviderCatalog {
 // enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5", hint: "Default. Most capable." },
+  // Offered, not the default: a box with no pick still lands on Opus 5.5.
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1", hint: "Newest generation." },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Speed + intelligence." },
   // Still selectable, and still what a box that explicitly picked it keeps
@@ -327,20 +330,55 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
  */
 export const GOOGLE_DEFAULT_MODEL_ID = "gemini-2.5-flash";
 
+// xAI (Grok) API-key models — cold-start display only, like every list here.
+// Unlike GOOGLE_MODELS these are NOT seeded into a `models.providers.xai`
+// override: the core bundles an `xai` provider plugin (base URL
+// https://api.x.ai/v1, `openai-responses`, `enabledByDefault: true`) whose own
+// manifest catalogue is what routes a turn, so the configure route writes the
+// key and the primary and leaves transport to the plugin, the way it does for
+// an OpenAI API key. The live list is `openclaw models list --provider xai
+// --all --json --refresh`, which on the pinned core asks xAI's /v1/models with
+// the box's own credential — the picker shows these three only until that
+// enumeration lands, and only when it fails. xAI still serves all three
+// (docs.x.ai/developers/models, 2026-10-28: 500k context each); an account can
+// have a quota for one model and none for another, so the older two stay
+// selectable rather than leaving such an account with nothing to fall back to.
+export const XAI_MODELS: readonly ProviderModelOption[] = [
+  { id: "grok-4.7", label: "Grok 4.7", hint: "Default. Newest flagship." },
+  { id: "grok-4.6", label: "Grok 4.6", hint: "Previous generation." },
+  { id: "grok-4.5", label: "Grok 4.5", hint: "Older generation." },
+] as const;
+
+/**
+ * The xAI model this box lands on when nothing named one AND no enumeration has
+ * answered yet.
+ *
+ * The fourth of the set, for the reason the Google one gives: the configure
+ * route's PROVIDERS table, chat/model's DEFAULT_PROVIDER_MODELS and
+ * PROVIDER_CATALOGS all need a cold-start answer. It is no longer spelled by
+ * hand: xAI follows the newest model (src/lib/provider-newest-model.ts), and
+ * the live default comes from the box's enumeration through
+ * `readNewestModelId`. This is the same rule applied to the fallback list
+ * above, so the fallback cannot name an older model than the list it heads.
+ */
+export const XAI_DEFAULT_MODEL_ID = newestModelId("xai", XAI_MODELS) ?? XAI_MODELS[0].id;
+
 // ClawBox AI tiers — surfaced via the secondary model picker after
 // consolidating Flash/Pro into one "ClawBox AI" provider row in the
 // chat dropdown. Model ids are the upstream DeepSeek slugs since
-// Mike's gateway forwards via the deepseek provider; the UI labels
+// the gateway forwards via the deepseek provider; the UI labels
 // match the subscription plans (Flash → "Pro plan", Pro → "Max plan")
-// so users see the same word on the device that they paid for.
+// so users see the same word on the device that they paid for. Both ids
+// are served by DeepSeek V4 Flash, and the hints say so.
 export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
-  { id: "deepseek-v4-flash", label: "Free/Pro Tier", hint: "Default. Faster." },
-  { id: "deepseek-v4-pro", label: "Max Tier", hint: "1.6T frontier model. Max plan only." },
+  { id: "deepseek-v4-flash", label: "Free/Pro Tier", hint: "DeepSeek V4 Flash. Default." },
+  { id: "deepseek-v4-pro", label: "Max Tier", hint: "DeepSeek V4 Flash. Max plan only." },
 ] as const;
 
 // Provider IDs the live-catalog route knows how to fetch from upstream
-// (`openclaw models list --provider <p>` for the first four; OpenRouter's
-// own /api/v1/models for the last). Single source of truth so the route's
+// (`openclaw models list --provider <p>` for the CLI-backed ones — anthropic,
+// openai, google, xai; OpenRouter's own /api/v1/models for openrouter; a
+// constant for clawai; nothing at all for codex). Single source of truth so the route's
 // allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
 // header dropdown all gate on the same set.
 /**
@@ -477,7 +515,9 @@ export function subscriptionSurfaceLabel(provider: string): string | null {
   return entry.surfaceProvider ?? null;
 }
 
-export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;
+// `xai` last, so the catalog route's boot warmup — staggered 5 s per entry in
+// this order — keeps every older provider on the slot it had.
+export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter", "xai"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 
 export function isCatalogProvider(provider: string | null | undefined): provider is CatalogProvider {
@@ -539,6 +579,12 @@ export const PROVIDER_CATALOGS = Object.freeze({
     provider: "openrouter",
     models: OPENROUTER_CURATED_MODELS,
     defaultModelId: OPENROUTER_DEFAULT_MODEL_ID,
+    allowCustom: true,
+  },
+  xai: {
+    provider: "xai",
+    models: XAI_MODELS,
+    defaultModelId: XAI_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
 } satisfies Record<string, ProviderCatalog>);

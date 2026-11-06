@@ -18,7 +18,14 @@ import { getActiveHarness, type Harness } from "@/lib/harness";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { clawaiTokenRejectedByPortal } from "@/lib/clawbox-ai-portal-tier";
-import { readConfig } from "@/lib/openclaw-config";
+import { readConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+import { readGatewayAuthProfile } from "@/lib/openclaw-auth-store";
+import {
+  CHATGPT_PROVIDER,
+  CHATGPT_UI_PROVIDER,
+  isOauthProfile,
+  profileProviderId,
+} from "@/lib/chatgpt-subscription";
 import { get as getConfigValue } from "@/lib/config-store";
 import {
   CLAWAI_PROVIDER,
@@ -76,6 +83,15 @@ export interface ProviderStatusRow {
   state: ProviderConnectionState;
   /** True for the provider the harness config actually names as its default. */
   isDefault: boolean;
+  /**
+   * Whether the box HOLDS a credential for this row, usable or not. The two
+   * `needs-reauth` rows differ in exactly this: a refused ClawBox AI token or
+   * a fenced Claude sign-in is still on the box (true), and the default left
+   * with nothing — ClawBox AI's after its own sign-out — holds none (false).
+   * The list offers a sign-out of the first and never of the second. Optional
+   * for a client reading an older server; absent means "not said".
+   */
+  credentialHeld?: boolean;
   /**
    * The owner's switch, orthogonal to `state`: a provider can be connected and
    * switched off at the same time, and the strip shows both facts. False only
@@ -172,6 +188,9 @@ const OPENCLAW_PANEL_PROVIDERS: readonly { id: string; label: string }[] = [
   { id: "anthropic", label: "Anthropic Claude" },
   { id: "google", label: "Google Gemini" },
   { id: "openrouter", label: "OpenRouter" },
+  // Last, so every row above keeps its place. An API key or a SuperGrok / X
+  // Premium sign-in, both at `xai:default` — either makes the row connected.
+  { id: "xai", label: "xAI Grok" },
 ];
 
 const LOCAL_PROVIDER_LABELS: Record<string, string> = {
@@ -239,6 +258,20 @@ export function parseDisabledProviders(raw: unknown): Set<string> {
 
 function sectionFor(id: string): "ai" | "localAi" {
   return LOCAL_PROVIDER_IDS.has(id) ? "localAi" : "ai";
+}
+
+/** Is this row one of the on-device engines (Settings → Local AI), not a cloud sign-in? */
+export function isLocalProviderRow(id: string): boolean {
+  return LOCAL_PROVIDER_IDS.has(id);
+}
+
+/**
+ * The name a row is shown under, for a server sentence about it (the
+ * provider sign-out's refusals) — the same label the rows themselves carry.
+ */
+export function providerRowLabel(harness: Harness, id: string): string {
+  if (harness === "hermes") return hermesProviderLabel(id);
+  return OPENCLAW_PANEL_PROVIDERS.find((p) => p.id === id)?.label ?? LOCAL_PROVIDER_LABELS[id] ?? id;
 }
 
 /** A row before the owner's switch is stamped on it; see `readProviderStatus`. */
@@ -376,6 +409,7 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
         ? "needs-reauth"
         : stateFor(credentialed, isDefault, awaitingProbe),
       isDefault,
+      credentialHeld: credentialed === true,
       section: sectionFor(id),
     };
   });
@@ -385,42 +419,150 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
 
 export { isClawboxAiToken } from "@/lib/clawai-token";
 
-/**
- * OpenClaw: `openclaw.json` is the whole answer. A provider is connected when
- * the gateway holds an auth profile for it or a key under its provider
- * definition — the same two places `/setup-api/chat/model` builds its dropdown
- * from, so the strip and the chat can never disagree about who is available.
- */
-async function readOpenclawStatus(): Promise<UnstampedSummary> {
-  const config = await readConfig();
-  const profiles = config.auth?.profiles ?? {};
-  const definitions = config.models?.providers ?? {};
+const ANTHROPIC_PROVIDER = "anthropic";
 
-  const credentialed = new Set<string>();
-  for (const [profileKey, entry] of Object.entries(profiles)) {
-    const id = normalizeProviderId(entry?.provider ?? profileKey.split(":")[0]);
-    if (id) credentialed.add(id);
+/**
+ * How old a PENDING refresh marker has to be before it is nobody's any more.
+ * Core gives one refresh call two minutes (`OAUTH_REFRESH_CALL_TIMEOUT_MS`,
+ * 120 s on 2026.9.4) and then settles the marker one way or the other; this is
+ * that ceiling and a margin. A marker still pending past it lost its owner —
+ * a gateway stopped mid-renewal — and core never settles it: measured, a turn
+ * waits out the two minutes on it, throws, and leaves it pending.
+ */
+const ORPHANED_REFRESH_MS = 150_000;
+
+/**
+ * Is this box's Claude SIGN-IN one the gateway will never use?
+ *
+ * `auth.profiles` in openclaw.json is metadata: it says a sign-in was filed,
+ * and the credential it names lives in the gateway's own store. Core swaps an
+ * OAuth credential there for an inert marker before each refresh and makes the
+ * marker terminal on ANY refresh error — on the box this was found on
+ * (2026-10-10), a DNS failure right after resume. Every turn then died with
+ * "No API key found for provider anthropic" while the strip said Connected,
+ * and the chat's own sentence sent the owner to reconnect Anthropic on the one
+ * screen that called it connected. It recurs on any box that renews its token
+ * while offline.
+ *
+ * POSITIVE EVIDENCE ONLY. True when the sign-in is all the box has for
+ * Anthropic — every anthropic profile is oauth-mode and no key sits under a
+ * provider definition — and the store was READ and holds a DEAD marker at each
+ * of them. No store, an unreadable one, no profile there, a healthy profile:
+ * all false. This takes "connected" away from a sign-in the store shows the
+ * gateway cannot use, and is never a second way to say "disconnected".
+ *
+ * A DEAD marker, not any marker. Core commits a PENDING one before every
+ * renewal and swaps the new credential in when the token endpoint answers, so
+ * a healthy sign-in holds one for that round trip about three times a day —
+ * measured against 2026.9.4, for as long as the endpoint took. Read as dead,
+ * that was "Needs sign-in" on a working box, a greyed header row and a refused
+ * model pick, and the Providers strip kept the answer, because it re-reads
+ * only on a change. So: the marker core made terminal (`failed`), or a pending
+ * one whose row has not been written for longer than core lets one refresh
+ * run ({@link ORPHANED_REFRESH_MS}). The row's timestamp is never earlier than
+ * the marker's own write, so that age can only be understated — by anything
+ * but the wall clock stepping forward under a renewal in flight (the box has
+ * no RTC), which reads dead for what is left of that one round trip.
+ *
+ * WHAT IT CANNOT SEE. A key the gateway takes from an environment — its unit's
+ * own, `<stateDir>/.env`, the config's `env` block — is no part of this
+ * evidence: a box hand-configured that way beside a dead sign-in reads
+ * needs-reauth here while its turns still answer.
+ *
+ * Two read-only sqlite opens per sign-in at most (the shared store, and the
+ * main agent's own database beside it — its copy of the id is the one a turn
+ * resolves), and only on a box that has such a sign-in — no CLI start, no
+ * gateway RPC. Exported for `/setup-api/chat/model`, so the strip and the chat
+ * header ask ONE function and cannot disagree.
+ */
+export function claudeSignInFenced(config: OpenClawConfig): boolean {
+  for (const [wireId, definition] of Object.entries(config.models?.providers ?? {})) {
+    const key = (definition as { apiKey?: unknown } | undefined)?.apiKey;
+    // A string, or the SecretRef object core resolves (`{source, provider, id}`): either is a key of its own.
+    const keyed = typeof key === "string" ? key.trim() !== "" : !!key && typeof key === "object" && Object.keys(key).length > 0;
+    if (keyed && normalizeProviderId(wireId) === ANTHROPIC_PROVIDER) return false;
   }
-  for (const [wireId, definition] of Object.entries(definitions)) {
-    const key = (definition as { apiKey?: unknown })?.apiKey;
+  const signIns: string[] = [];
+  for (const [profileKey, entry] of Object.entries(config.auth?.profiles ?? {})) {
+    if (normalizeProviderId(profileProviderId(profileKey, entry)) !== ANTHROPIC_PROVIDER) continue;
+    // An API key or a setup token beside the sign-in is a credential of its
+    // own, and the gateway can run on it whatever the sign-in's state.
+    if (!isOauthProfile(entry)) return false;
+    signIns.push(profileKey);
+  }
+  return signIns.length > 0 && signIns.every((profileId) => {
+    const stored = readGatewayAuthProfile(profileId);
+    if (stored.kind !== "present") return false;
+    if (stored.fence === "failed") return true;
+    return stored.fence === "pending"
+      && stored.storeUpdatedAtMs !== null
+      && Date.now() - stored.storeUpdatedAtMs > ORPHANED_REFRESH_MS;
+  });
+}
+
+/**
+ * The providers `openclaw.json` holds a credential for: an auth profile filed
+ * under the provider, or a key under its provider definition. ONE reader for
+ * the Providers strip and the chat picker (`/setup-api/chat/model`), so the two
+ * cannot disagree about who is connected — and the picker offers no row the
+ * gateway has nothing to authenticate with (TASK-2055).
+ *
+ * The auth-profile MODE splits OpenAI into the picker's two rows. Both
+ * credentials are filed under `openai`, but an OAuth profile is the ChatGPT
+ * sign-in — the `codex` row ({@link CHATGPT_UI_PROVIDER}), which routes only
+ * the subscription's models — and a key or token is the API-key row. Read as
+ * one provider, a box signed in with ChatGPT alone offered "OpenAI GPT" too,
+ * and every pick on it was refused. The strip folds the two back into its one
+ * OpenAI row through {@link normalizeProviderId}.
+ *
+ * `normalize` collapses aliases BEFORE ids are counted, for the reason
+ * `subscriptionOnlyProviders` spells out (deepseek and clawai are one provider
+ * under two names). Pure and synchronous: no store, no CLI, no probe.
+ */
+export function credentialedProviders(
+  config: OpenClawConfig,
+  normalize: (provider: string) => string | null = normalizeProviderId,
+): Set<string> {
+  const credentialed = new Set<string>();
+  const add = (provider: string) => {
+    const id = normalize(provider);
+    if (id) credentialed.add(id);
+  };
+  for (const [profileKey, entry] of Object.entries(config.auth?.profiles ?? {})) {
+    const provider = profileProviderId(profileKey, entry);
+    if (!provider) continue;
+    add(isOauthProfile(entry) && provider === CHATGPT_PROVIDER ? CHATGPT_UI_PROVIDER : provider);
+  }
+  for (const [wireId, definition] of Object.entries(config.models?.providers ?? {})) {
+    const key = (definition as { apiKey?: unknown } | undefined)?.apiKey;
     if (typeof key !== "string" || !key.trim()) continue;
-    const id = normalizeProviderId(wireId);
-    if (!id) continue;
     // ClawBox AI's images and cloud voice ride in the `openai` slot — its
     // OpenAI-compatible routes on our proxy, keyed with the claw_ token. That
     // is a ClawBox AI credential wherever it sits, not an OpenAI account, and
     // a box with only ClawBox AI linked was reading "OpenAI: Connected".
-    if (isClawboxAiToken(key)) {
-      credentialed.add(CLAWAI_PROVIDER);
-      continue;
-    }
-    credentialed.add(id);
+    add(isClawboxAiToken(key) ? CLAWAI_PROVIDER : wireId);
   }
+  return credentialed;
+}
+
+/**
+ * OpenClaw: `openclaw.json` is the answer for every row but one. A provider is
+ * connected when {@link credentialedProviders} says so — the reader
+ * `/setup-api/chat/model` builds its dropdown from, so the strip and the chat
+ * can never disagree about who is available. The one exception is a Claude
+ * sign-in the gateway's store holds only a dead marker for
+ * ({@link claudeSignInFenced}).
+ */
+async function readOpenclawStatus(): Promise<UnstampedSummary> {
+  const config = await readConfig();
+  const credentialed = credentialedProviders(config);
   // The ClawBox AI credential can live in the config store instead of the
   // config file (a box migrated from a Hermes install), and `hasClawaiToken`
   // is the helper that knows both homes.
   const clawaiRefused = clawaiTokenRefused();
   if (await hasClawaiToken()) credentialed.add(CLAWAI_PROVIDER);
+  // Asked once, and only of a row that would otherwise read Connected.
+  const claudeFenced = credentialed.has(ANTHROPIC_PROVIDER) && claudeSignInFenced(config);
 
   const primary = config.agents?.defaults?.model?.primary ?? null;
   const defaultProvider = normalizeProviderId(primary ? primary.split("/")[0] : null);
@@ -465,10 +607,12 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
       // summary's own doc promises. Same shape of false failure as the one
       // this fix addresses, different reader, and it needs `readConfigStrict`
       // rather than a probe state.
-      state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed.has(id)
+      state: (id === CLAWAI_PROVIDER && clawaiRefused && credentialed.has(id))
+        || (id === ANTHROPIC_PROVIDER && claudeFenced)
         ? "needs-reauth"
         : stateFor(credentialed.has(id), isDefault),
       isDefault,
+      credentialHeld: credentialed.has(id),
       section: sectionFor(id),
     };
   });
@@ -488,6 +632,15 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
  */
 let clawaiKeyProbe: { at: number; value: boolean | null } | null = null;
 const CLAWAI_KEY_PROBE_TTL_MS = 30_000;
+
+/**
+ * Drop the remembered answer: the provider sign-out has just taken the key
+ * out of Hermes' config, and the row must not read "Connected" for another
+ * 30 s over a key that is gone.
+ */
+export function forgetClawaiKeyProbe(): void {
+  clawaiKeyProbe = null;
+}
 async function clawaiKeyInHarnessStore(): Promise<boolean | null> {
   if (clawaiKeyProbe && Date.now() - clawaiKeyProbe.at < CLAWAI_KEY_PROBE_TTL_MS) return clawaiKeyProbe.value;
   let value: boolean | null;
@@ -518,6 +671,7 @@ const CATALOGUES_BY_ROW: ReadonlyMap<string, readonly string[]> = new Map(
     anthropic: ["anthropic"],
     google: ["google"],
     openrouter: ["openrouter"],
+    xai: ["xai"],
   }),
 );
 

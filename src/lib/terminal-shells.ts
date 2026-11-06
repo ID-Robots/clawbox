@@ -24,7 +24,13 @@ export function parseEtcShells(text: string): string[] {
 
 export function readEtcShells(file = "/etc/shells"): string[] {
   try {
-    return parseEtcShells(fs.readFileSync(file, "utf8"));
+    // `turbopackIgnore`, because of the default above. Since Next 16.4.0 the
+    // build reads a parameter's default through to the call, so to it `file`
+    // is "/etc/shells, or whatever a caller passes": a path it can only partly
+    // resolve, which is a file reference and so a walk over the whole project,
+    // data/ included (src/lib/runtime-path.ts). 16.4.0 stopped the build there
+    // on a coding run's venv link; scripts/check-build-isolation.sh found it.
+    return parseEtcShells(fs.readFileSync(/* turbopackIgnore: true */ file, "utf8"));
   } catch {
     return [];
   }

@@ -57,7 +57,12 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
 }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun: vi.fn(async () => 0) }));
-vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
+// Only the drawing is stubbed: a merge home reads the real BOX_FAVICONS
+// (readCheckout in coding-team-worktree.ts) to tell the box's files from the owner's.
+vi.mock("@/lib/project-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/project-icon")>()),
+  ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
+}));
 
 type Lib = typeof import("@/lib/coding-agent");
 

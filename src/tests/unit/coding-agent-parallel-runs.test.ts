@@ -21,7 +21,12 @@ vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun: vi.fn(async () => 0) }));
-vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
+// Only the drawing is stubbed: a merge home reads the real BOX_FAVICONS
+// (readCheckout in coding-team-worktree.ts) to tell the box's files from the owner's.
+vi.mock("@/lib/project-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/project-icon")>()),
+  ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
+}));
 // A roomy box for a team's second run: the memory guard reads MemAvailable,
 // and the host's own is neither the fixture nor the same on every runner.
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
@@ -121,7 +126,8 @@ describe("how many runs at once", () => {
     expect(lib.DEFAULT_MAX_PARALLEL_RUNS).toBe(2);
     expect(await lib.setMaxParallelRuns(4)).toBe(4);
     expect(await lib.getMaxParallelRuns()).toBe(4);
-    await expect(lib.setMaxParallelRuns(5)).rejects.toMatchObject({ kind: "invalid" });
+    const ceiling = lib.hostMaxParallelRuns();
+    await expect(lib.setMaxParallelRuns(ceiling + 1)).rejects.toMatchObject({ kind: "invalid" });
     await expect(lib.setMaxParallelRuns(0)).rejects.toMatchObject({ kind: "invalid" });
     await expect(lib.setMaxParallelRuns(2.5)).rejects.toMatchObject({ kind: "invalid" });
     // Refused, not saved: the value the owner had is still in force.
@@ -129,7 +135,44 @@ describe("how many runs at once", () => {
     const status = await lib.getCodingAgentStatus();
     expect(status.maxParallelRuns).toBe(4);
     expect(status.minMaxParallelRuns).toBe(1);
-    expect(status.maxMaxParallelRuns).toBe(4);
+    expect(status.maxMaxParallelRuns).toBe(ceiling);
+  });
+
+  it("scales the ceiling with the host: four on a Jetson or under 16 GB, one per 4 GB above, at most sixteen", () => {
+    const GB = 1024 ** 3;
+    expect(lib.hostMaxParallelRuns(8 * GB, true)).toBe(4);
+    expect(lib.hostMaxParallelRuns(64 * GB, true)).toBe(4);
+    expect(lib.hostMaxParallelRuns(8 * GB, false)).toBe(4);
+    expect(lib.hostMaxParallelRuns(15.9 * GB, false)).toBe(4);
+    expect(lib.hostMaxParallelRuns(16 * GB, false)).toBe(4);
+    expect(lib.hostMaxParallelRuns(24 * GB, false)).toBe(6);
+    expect(lib.hostMaxParallelRuns(62 * GB, false)).toBe(15);
+    expect(lib.hostMaxParallelRuns(128 * GB, false)).toBe(16);
+    expect(lib.hostMaxParallelRuns(Number.NaN, false)).toBe(4);
+    expect(lib.maxParallelRunsFrom(8, 4)).toBe(2);
+    expect(lib.maxParallelRunsFrom(8, 15)).toBe(8);
+  });
+
+  it("starts an automatic review pass beside a full box, from its own pool of two", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    makePlainProject("alpha");
+    makePlainProject("beta");
+    makePlainProject("gamma");
+    makePlainProject("delta");
+    await lib.setMaxParallelRuns(1);
+    const a = await lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    await expect(lib.startRun({ task: "two", directory: "beta", source: "owner" })).rejects.toMatchObject({ kind: "busy" });
+    const r1 = await lib.startRun({ task: "review one", directory: "beta", source: "owner", reviewOf: a.id });
+    const r2 = await lib.startRun({ task: "review two", directory: "gamma", source: "owner", reviewOf: a.id });
+    expect(r1.status).toBe("running");
+    expect(r2.status).toBe("running");
+    await expect(lib.startRun({ task: "review three", directory: "delta", source: "owner", reviewOf: a.id }))
+      .rejects.toMatchObject({ kind: "busy", message: expect.stringMatching(/review passes/) });
+    fs.writeFileSync(flag, "go");
+    await finished(a.id);
+    await finished(r1.id);
+    await finished(r2.id);
   });
 
   it("reads a value nothing on this box could have written as the default", async () => {
@@ -280,6 +323,53 @@ describe("how many runs at once", () => {
     await finished(reviewer.id);
   });
 
+  /**
+   * A team was refused outright beside ANY live run that was not its own —
+   * the automatic review pass the box starts after every run among them — and
+   * died at its first second, while single runs went on side by side up to
+   * the limit. A team now shares the box: its runs take the owner's slots
+   * like anyone's, and a full box is a wait.
+   */
+  it("starts two teams' planners beside a live single run, and makes the next team run WAIT at the limit", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    for (const name of ["alpha", "beta", "gamma", "delta"]) makeGitProject(name);
+    await lib.setMaxParallelRuns(3);
+    const planner = (teamId: string) => ({ id: teamId, role: "planner" as const, taskId: null });
+    const single = await lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    const a = await lib.startRun({ task: "plan a", directory: "beta", source: "owner", readOnly: true, team: planner("team-aaaa0001") });
+    const b = await lib.startRun({ task: "plan b", directory: "gamma", source: "owner", readOnly: true, team: planner("team-bbbb0002") });
+    expect([a.status, b.status]).toEqual(["running", "running"]);
+    expect(lib.runningCount()).toBe(3);
+    // At the limit: a team's run is refused as a WAIT, which the orchestrator sits out…
+    await expect(lib.startRun({ task: "plan c", directory: "delta", source: "owner", readOnly: true, team: planner("team-cccc0003") }))
+      .rejects.toMatchObject({ kind: "busy", wait: true, message: expect.stringMatching(/3 coding runs at once/) });
+    // …and the ordinary gate counts the teams' runs as slots taken.
+    await expect(lib.startRun({ task: "two", directory: "delta", source: "owner" })).rejects.toMatchObject({ kind: "busy" });
+    fs.writeFileSync(flag, "go");
+    for (const run of [single, a, b]) await finished(run.id);
+  });
+
+  it("does not let a team's start and a single start that arrive together both take the last slot", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    makeGitProject("alpha");
+    makeGitProject("beta");
+    await lib.setMaxParallelRuns(1);
+    const single = () => lib.startRun({ task: "one", directory: "alpha", source: "owner" });
+    const planner = () => lib.startRun({ task: "plan", directory: "beta", source: "owner", readOnly: true, team: { id: "team-aaaa0001", role: "planner", taskId: null } });
+    // In both orders: whichever reaches the gate second sees the first's hold.
+    for (const order of [[single, planner], [planner, single]]) {
+      fs.rmSync(flag, { force: true });
+      const both = await Promise.allSettled(order.map((start) => start()));
+      expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect((both.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toMatchObject({ kind: "busy" });
+      expect(lib.runningCount()).toBe(1);
+      fs.writeFileSync(flag, "go");
+      await finished((both.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ id: string }>).value.id);
+    }
+  });
+
   it("names the live run that holds a folder: the team's own never beside a reader, a stranger's or another team's always", () => {
     const dir = "/home/clawbox/Projects/site";
     const mine = { id: "run-aaaaaaaa", status: "running" as const, directory: dir, readOnly: false, team: { id: "team-aaaa0001", role: "worker" as const, taskId: "t1" } };
@@ -335,6 +425,73 @@ describe("a run's own copy of the project", () => {
     expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
   });
 
+  it("commits and merges home what the run wrote only through its shell, in its own copy", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([`echo late > "$PWD/late.txt"`, `echo '${result("the job wrote late.txt")}'`, "exit 0"].join("\n"));
+    const started = await lib.startRun({ task: "start a job", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    expect(fs.readFileSync(path.join(dir, "late.txt"), "utf8")).toBe("late\n");
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
+  });
+
+  it("forks from the base branch the caller names, and refuses one that does not exist before anything starts", async () => {
+    const dir = makeGitProject("alpha");
+    git(dir, "branch", "beta");
+    git(dir, "checkout", "--quiet", "-b", "elsewhere");
+    fs.writeFileSync(path.join(dir, "other.txt"), "x\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "--quiet", "-m", "elsewhere");
+    const started = await lib.startRun({ task: "look", directory: "alpha", source: "owner", baseBranch: "beta" });
+    expect(started.worktree?.base).toBe("beta");
+    expect(fs.existsSync(path.join(started.directory, "other.txt"))).toBe(false);
+    await finished(started.id);
+    await expect(lib.startRun({ task: "look", directory: "alpha", source: "owner", baseBranch: "nope" })).rejects.toMatchObject({ kind: "invalid" });
+    await expect(lib.startRun({ task: "look", directory: "alpha", source: "owner", baseBranch: "--force" })).rejects.toMatchObject({ kind: "invalid" });
+    expect(lib.listRuns().filter((r) => r.status === "running")).toEqual([]);
+  });
+
+  it("merges the work home when the run made a branch of its own in its copy and committed there", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([
+      'git checkout -q -b fix/own-branch',
+      ...wrote("made.txt"),
+      'git add -A && git -c user.name=t -c user.email=t@x commit -q -m "fix on my own branch"',
+      `echo '${result("wrote a file on fix/own-branch")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    const branch = lib.getRun(started.id)!.worktree!.branch;
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    // Home, on the project's branch — not left on a branch nothing merges.
+    expect(fs.existsSync(path.join(dir, "made.txt"))).toBe(true);
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Merged into master/);
+    expect(lib.getRun(started.id)?.worktree?.branchRemoved).toBe(false);
+    expect(git(dir, "log", "--format=%s", branch)).toMatch(/fix on my own branch/);
+  });
+
+  it("says so, and keeps the copy, when the run's own branch cannot be brought onto its branch", async () => {
+    makeGitProject("alpha");
+    installWrapper([
+      ...wrote("made.txt"),
+      'git add -A && git -c user.name=t -c user.email=t@x commit -q -m "on the given branch"',
+      'git checkout -q -b fix/clash master',
+      'echo "other" > made.txt',
+      'git add -A && git -c user.name=t -c user.email=t@x commit -q -m "on my own branch"',
+      `echo '${result("two versions of made.txt")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept/); }, { timeout: 20_000 });
+    const progress = lib.getRun(started.id)!.progress.join("\n");
+    expect(progress).toMatch(/Not committed: the run committed on a branch of its own, which could not be brought onto clawbox\/run-[a-z0-9]{8}: Merging fix\/clash into/);
+    expect(progress).toMatch(/copy of the project was kept: .*the run committed on fix\/clash/);
+    expect(lib.getRun(started.id)?.worktree?.removed).toBeFalsy();
+    expect(fs.existsSync(started.directory)).toBe(true);
+  });
+
   it("removes the copy AND its branch when the run left nothing on it", async () => {
     const dir = makeGitProject("alpha");
     const started = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
@@ -363,7 +520,7 @@ describe("a run's own copy of the project", () => {
     expect(lib.getRun(worked.id)?.worktree?.branchRemoved).toBe(false);
   });
 
-  it("keeps the copy when the merge cannot be made, and says why", async () => {
+  it("removes the copy but keeps the branch when the merge cannot be made, records why, and touches nothing of the owner's", async () => {
     const dir = makeGitProject("alpha");
     installWrapper([...wrote("shared.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
     const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
@@ -372,19 +529,108 @@ describe("a run's own copy of the project", () => {
     fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
     await finished(started.id);
     await vi.waitFor(() => {
-      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept/);
+      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed; its work is kept on/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    // The FILES are gone — a tree per refused merge was ten copies of one
+    // project on the owner's box — and the BRANCH is where the work stays.
+    expect(run.worktree?.removed).toBe(true);
+    expect(run.worktree?.branchRemoved).toBe(false);
+    expect(fs.existsSync(run.directory)).toBe(false);
+    expect(run.worktree?.result).toMatchObject({ kind: "unmerged", reason: "dirty" });
+    expect(run.progress.join("\n")).toMatch(/uncommitted changes of its own/);
+    expect(fs.readFileSync(path.join(dir, "mine.txt"), "utf8")).toBe("the owner's\n");
+    expect(fs.existsSync(path.join(dir, "shared.txt"))).toBe(false);
+    expect(git(dir, "show", "--name-only", "--format=", run.worktree!.branch).trim()).toBe("shared.txt");
+  });
+
+  /**
+   * The settle forces a tree away, and `commitsAhead` counts the branch only.
+   * Work that never reached the branch — staged by a commit that then failed,
+   * or written and never committed — lives in the tree alone, so the tree
+   * stays. Each removal is guarded: nothing ahead, refused merge, merged.
+   */
+  it("keeps the copy, and its branch, when the run's commit failed with the work staged in it", async () => {
+    const dir = makeGitProject("alpha");
+    // `--no-verify` skips pre-commit and commit-msg, not prepare-commit-msg:
+    // refusing there fails the commit AFTER `git add -A` staged the file, so
+    // the branch gets nothing and the tree holds the work.
+    const hook = path.join(dir, ".git", "hooks", "prepare-commit-msg");
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    installWrapper([...wrote("made.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
+    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept: the run's commit failed/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.commitError).toBeTruthy();
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.branchRemoved).toBe(false);
+    expect(git(dir, "branch", "--list", run.worktree!.branch)).toContain(run.worktree!.branch);
+    expect(git(run.directory, "diff", "--cached", "--name-only")).toBe("made.txt");
+    expect(run.progress.join("\n")).not.toMatch(/copy of the project was removed/);
+  });
+
+  it("keeps the copy when the merge is refused but the tree holds work its branch does not", async () => {
+    const dir = makeGitProject("alpha");
+    // One file committed through the run's own shell — the branch is ahead —
+    // and a second left beside it, never committed.
+    installWrapper([
+      'echo "kept" > "$PWD/kept.txt"',
+      'git -C "$PWD" add kept.txt && git -C "$PWD" -c user.name=t -c user.email=t@x commit -q -m "the run\'s own commit"',
+      'echo "draft" > "$PWD/draft.txt"',
+      `echo '${result("committed one file")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make two files", directory: "alpha", source: "owner" });
+    fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n"))
+        .toMatch(/copy of the project was kept: it holds changes that are not committed to its branch; the project folder has uncommitted changes of its own/);
     }, { timeout: 20_000 });
     const run = lib.getRun(started.id)!;
     expect(run.worktree?.removed).toBe(false);
-    expect(fs.existsSync(run.directory)).toBe(true);
-    expect(run.progress.join("\n")).toMatch(/uncommitted changes of its own/);
-    expect(fs.readFileSync(path.join(dir, "mine.txt"), "utf8")).toBe("the owner's\n");
+    expect(run.worktree?.result).toMatchObject({ kind: "unmerged", reason: "dirty" });
+    expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
+    expect(git(dir, "show", "--name-only", "--format=", run.worktree!.branch).trim()).toBe("kept.txt");
+  });
 
-    // …and the owner's own Remove takes the files while the branch keeps the work.
-    const after = await lib.removeRunWorktreeFor(started.id);
-    expect(after.worktree?.removed).toBe(true);
-    expect(fs.existsSync(run.directory)).toBe(false);
-    expect(git(dir, "show", "--name-only", "--format=", after.worktree!.branch).trim()).toBe("shared.txt");
+  it("keeps the copy after a merge when the tree still holds work the merge did not take", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([
+      'echo "kept" > "$PWD/kept.txt"',
+      'git -C "$PWD" add kept.txt && git -C "$PWD" -c user.name=t -c user.email=t@x commit -q -m "the run\'s own commit"',
+      'echo "draft" > "$PWD/draft.txt"',
+      `echo '${result("committed one file")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make two files", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n"))
+        .toMatch(/copy of the project was kept: it was merged into master, but it holds changes that are not committed to its branch/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.result).toMatchObject({ kind: "merged", base: "master" });
+    expect(fs.existsSync(path.join(dir, "kept.txt"))).toBe(true);
+    expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
+  });
+
+  it("still removes a copy whose only stray entry is the project's own linked node_modules", async () => {
+    const dir = makeGitProject("alpha");
+    fs.mkdirSync(path.join(dir, "node_modules"));
+    const started = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
+    expect(fs.lstatSync(path.join(started.directory, "node_modules")).isSymbolicLink()).toBe(true);
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    expect(fs.existsSync(started.directory)).toBe(false);
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed; it left nothing on its branch/);
+    // The link went, never what it pointed at.
+    expect(fs.existsSync(path.join(dir, "node_modules"))).toBe(true);
   });
 
   it("refuses Remove for a run that worked in the project folder itself", async () => {
@@ -426,46 +672,5 @@ describe("a run's own copy of the project", () => {
     expect(started.pr).toMatchObject({ phase: "opening", branch: `clawbox/${started.id}`, base: "master" });
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("master");
     await finished(started.id);
-  });
-});
-
-describe("the weekly worktree sweep", () => {
-  it("runs at most once a week and records when it last ran", async () => {
-    makeGitProject("alpha");
-    const started = await lib.startRun({ task: "look", directory: "alpha", source: "owner" });
-    await finished(started.id);
-    // The SETTLE has to be over first. It removes this run's copy (nothing on
-    // its branch), and a sweep that lands between git's removal and its prune
-    // sees a registration whose files are gone and tidies it — counting one
-    // removal for work the settle was already doing.
-    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
-    expect(await lib.sweepCodingWorktrees()).toBe(0);
-    const config = JSON.parse(fs.readFileSync(path.join(root, "data", "config.json"), "utf-8"));
-    expect(typeof config[lib.WORKTREE_SWEEP_AT_KEY]).toBe("number");
-    // A second call inside the week does nothing at all.
-    expect(await lib.sweepCodingWorktrees()).toBe(0);
-  });
-
-  it("prunes a fortnight-old copy whose branch is merged, and marks the record so a resume rebuilds it", async () => {
-    const dir = makeGitProject("alpha");
-    installWrapper([...wrote("made.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
-    // The owner's stray file blocks the settle's merge, so the copy survives it.
-    fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
-    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
-    await finished(started.id);
-    await vi.waitFor(() => {
-      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept/);
-    }, { timeout: 20_000 });
-
-    // The owner merges it themselves, later, and the copy goes stale.
-    git(dir, "add", "-A");
-    git(dir, "commit", "--quiet", "-m", "the owner's own");
-    git(dir, "merge", "--no-ff", "--no-edit", "-m", "merge the run", `clawbox/${started.id}`);
-    const old = new Date(Date.now() - 30 * 24 * 60 * 60_000);
-    fs.utimesSync(started.directory, old, old);
-
-    expect(await lib.sweepCodingWorktrees({ force: true })).toBe(1);
-    expect(fs.existsSync(started.directory)).toBe(false);
-    expect(lib.getRun(started.id)?.worktree?.removed).toBe(true);
   });
 });

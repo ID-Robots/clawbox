@@ -150,8 +150,17 @@ export interface TranscriptRecord {
   provider?: string;
   /** The run this record belongs to, so a reconcile can match it to a bubble. */
   turnId?: string;
-  /** Only ever "error", and only on a record that reports a failed turn. */
-  variant?: "error";
+  /**
+   * The Hermes session this reply ran on, so a reloaded page resumes the
+   * conversation it redraws instead of opening a fresh one (`loadHistory`).
+   * A pointer, not memory: what the agent knows stays in its own database.
+   */
+  sessionId?: string;
+  /**
+   * "error" on a record that reports a failed turn; "stopped" on the marker
+   * left where the owner pressed Stop (the chat words it in their language).
+   */
+  variant?: "error" | "stopped";
 }
 
 /**
@@ -224,6 +233,7 @@ function boundRecord(record: TranscriptRecord): TranscriptRecord {
     ...(record.provider ? { provider: String(record.provider).slice(0, MAX_DETAIL_CHARS) } : {}),
     ...(record.turnId ? { turnId: record.turnId } : {}),
     ...(record.variant ? { variant: record.variant } : {}),
+    ...(record.sessionId ? { sessionId: String(record.sessionId).slice(0, MAX_DETAIL_CHARS) } : {}),
   };
 }
 
@@ -478,6 +488,8 @@ function parseRecord(line: string): TranscriptRecord | null {
     ...(typeof row.provider === "string" && row.provider ? { provider: row.provider } : {}),
     ...(typeof row.turnId === "string" && row.turnId ? { turnId: row.turnId } : {}),
     ...(row.variant === "error" ? { variant: "error" as const } : {}),
+    ...(row.variant === "stopped" ? { variant: "stopped" as const } : {}),
+    ...(typeof row.sessionId === "string" && row.sessionId ? { sessionId: row.sessionId } : {}),
   };
 }
 

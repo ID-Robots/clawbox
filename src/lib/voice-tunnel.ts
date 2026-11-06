@@ -50,6 +50,29 @@ export function classifyTunnelDestination(payload: unknown): TunnelDestination {
 }
 
 /**
+ * The page the customer is on, at the tunnel's address (TASK-2058).
+ *
+ * "Take me there" used to land on the tunnel's root — the desktop, with the
+ * chat they were about to talk to closed and whatever the address said about
+ * where they were gone. The tunnel serves the same box, so the same path,
+ * query and hash name the same page there.
+ *
+ * Only the ORIGIN is taken from the tunnel URL, and the path is assigned as a
+ * path: built by string concatenation, a current path of `//host/…` would
+ * read as a protocol-relative address and send the customer to that host.
+ */
+export function tunnelPageUrl(
+  tunnelUrl: string,
+  here: { pathname: string; search: string; hash: string },
+): string {
+  const target = new URL(new URL(tunnelUrl).origin);
+  target.pathname = here.pathname;
+  target.search = here.search;
+  target.hash = here.hash;
+  return target.toString();
+}
+
+/**
  * The live answer: what the tunnel is doing right now on this box.
  *
  * A network failure maps to `failed`, not `off` — "the tunnel is not enabled,

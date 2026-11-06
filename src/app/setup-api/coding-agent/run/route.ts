@@ -1,13 +1,32 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
+import { hasPersonSession } from "@/lib/owner-session";
+import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, newRunId, startOrQueueRun } from "@/lib/coding-agent";
+import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
+import { ownerStopRefusal, ownerStopWorkForRun, releaseOwnerStopHold } from "@/lib/coding-team";
+import { pushPendingAction } from "@/lib/pending-actions";
+import { findChatOrigin, forgetRunChatOrigin, recordRunChatOrigin } from "@/lib/coding-agent-notify";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline?, inputs?, experience? } → start a coding run.
+ * effort?, deliverable?, inputs?, experience?, fixCi? } → start a coding run.
+ *
+ * `effort` is the per-request override of the owner's effort setting
+ * (Settings → Coding Agent): one of OFFERED_EFFORT_LEVELS (`low`, `xhigh`,
+ * `max`, `ultracode`), validated HERE — 400 `invalid` with `code: "effort"`
+ * naming the levels — and again in `startRun`, where it stands in for the
+ * owner's setting and nothing more: a reading role's cap and the read-only
+ * clamp still apply after it. The Create card's Ultracode toggle asks the
+ * assistant to pass it (`coding_agent_run`'s `effort`).
+ *
+ * `fixCi: true` with `resumeRunId` is a "Fix CI" continuation: the run named
+ * had its pull request fail its checks (the record's `ci`), and the box
+ * appends what failed — the checks, the failing tests, the files, the tail of
+ * the failed jobs' logs — to `task`. Refused (400 `invalid`) without such a
+ * failure on record, for a failure a Fix CI was already started from, and past
+ * the chain's MAX_CI_FIX_ATTEMPTS.
  *
  * `experience` is what the training cluster's dispatcher selected from its
  * experience store for this task — exactly the JSON its
@@ -35,7 +54,11 @@ export const dynamic = "force-dynamic";
  * are a sentence for the owner rather than something to retry.
  *
  * Answers 202 immediately with the run record; the work continues in the
- * background and is polled through GET /setup-api/coding-agent/runs. The MCP
+ * background and is polled through GET /setup-api/coding-agent/runs. When the
+ * box is already running every run the owner allows, the run is QUEUED rather
+ * than refused (`startOrQueueRun`): 202 `{ started: false, queued: true, run }`,
+ * the record in status `queued` with its `queued.position`, started by the box
+ * itself in order as runs end — across a restart too. The MCP
  * client's default timeout is 8 s and OpenClaw reaps the MCP process after
  * ten idle minutes, so holding this request open for the run was never an
  * option.
@@ -52,8 +75,8 @@ export async function POST(request: Request) {
 
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
-    provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
-    inputs?: unknown; experience?: unknown;
+    provider?: unknown; model?: unknown; effort?: unknown; deliverable?: unknown;
+    inputs?: unknown; experience?: unknown; fixCi?: unknown; userAskedAgain?: unknown; baseBranch?: unknown;
   };
   try {
     body = await request.json();
@@ -73,13 +96,53 @@ export async function POST(request: Request) {
       { status: 413 },
     );
   }
+  // A level this box does not offer is refused before anything is read or
+  // held, with a `code` so the MCP tool advises on the right argument.
+  if (body.effort !== undefined && body.effort !== null && !isOfferedEffort(body.effort)) {
+    return NextResponse.json({ error: effortRefusal(body.effort), kind: "invalid", code: "effort" }, { status: 400 });
+  }
 
   // Who is asking decides how the run is labelled, nothing more: an owner
   // clicking in Settings holds a cookie, the agent holds the bearer.
-  const source = (await hasOwnerSession(request)) ? "owner" : "agent";
+  const source = (await hasPersonSession(request)) ? "owner" : "agent";
+
+  // The assistant's run on the work of a team of its own that the owner
+  // stopped waits for the user to ask again (`userAskedAgain`), as a team
+  // does — refused before the desktops hear of a start, so no card appears.
+  // A start that says the user asked again lifts the hold once it has begun.
+  const askedAgain = body.userAskedAgain === true;
+  const holdWork = source === "agent"
+    ? await ownerStopWorkForRun({
+      task,
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
+      directory: typeof body.directory === "string" ? body.directory : null,
+      resumeRunId: typeof body.resumeRunId === "string" ? body.resumeRunId : null,
+    })
+    : null;
+  if (holdWork && !askedAgain) {
+    const held = ownerStopRefusal(holdWork);
+    if (held) return NextResponse.json({ error: held.message, kind: held.kind, code: held.code }, { status: httpStatusForCodingError(held.kind) });
+  }
+
+  // The id the run will carry, named now: the runs list shows this start
+  // under it from this moment (startOrQueueRun announces it before its first
+  // await), and every open desktop is told at once — before the worktree, the
+  // account and the spawn, which used to be all the owner waited through with
+  // nothing on screen. The desktop only nudges its poll on it.
+  const runId = newRunId();
+  notifyDesktop({ type: "coding_run", phase: "starting", runId }, `coding-run-start:${runId}`);
+
+  // Which of the owner's chats the assistant is answering while it asks for
+  // this run — asked NOW, while that chat's turn is still running — so the
+  // chat hears when the run ends (coding-agent-notify.ts). Never for the
+  // owner's own click: the app they clicked in is where they look. Kept under
+  // the id before the start, which a run that fails at once can end inside.
+  const chatOrigin = source === "agent" ? await findChatOrigin() : null;
+  if (chatOrigin) recordRunChatOrigin(runId, chatOrigin);
 
   try {
-    const run = await startRun({
+    const { run, queued } = await startOrQueueRun({
+      runId,
       task,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
@@ -88,6 +151,9 @@ export async function POST(request: Request) {
       // cannot accept a combination the MCP tool would refuse, or the reverse.
       provider: body.provider,
       model: body.model,
+      // Validated above; `startRun` checks it once more and applies it where
+      // the owner's effort is read, before the role caps and the read-only clamp.
+      ...(body.effort !== undefined && body.effort !== null ? { effort: body.effort } : {}),
       source,
       // Passed through unvalidated ON PURPOSE: `startRun` reads it through the
       // one reader (`readDeliverableInput`), which is also what the draft route
@@ -96,13 +162,6 @@ export async function POST(request: Request) {
       // `command` deliverable is allowed; it is derived above from the owner's
       // cookie, never from the body.
       deliverable: body.deliverable,
-      // Unvalidated for the same reason and by the same rule: `startRun` reads
-      // it through `readPipelineInput`, which throws `invalid` with a stable
-      // code rather than repairing, so a caller learns its request was refused
-      // instead of getting a pipeline that checks something else. Absent, the
-      // PROJECT's own default decides — which is why `undefined` has to survive
-      // this line rather than being normalised to null.
-      pipeline: body.pipeline,
       // Absolute paths of files this run is to be GIVEN. Passed through
       // unvalidated for the reason `deliverable` is: `startRun` reads the list
       // through the one reader and judges each path on its own, answering a
@@ -110,19 +169,41 @@ export async function POST(request: Request) {
       // The assistant needs this because it writes its generated media inside
       // its own state directory, which no run may read.
       inputs: body.inputs,
-      // Unvalidated for the reason `pipeline` is: `startRun` reads it through
+      // Unvalidated for the reason `deliverable` is: `startRun` reads it through
       // `readExperienceInput`, which refuses with a stable code, so nothing a
       // caller sent reaches the run's prompt before that reader has passed it.
       experience: body.experience,
+      // Unvalidated for the reason `deliverable` is: `startRun` reads it
+      // through `requireBaseBranch` and refuses a malformed or missing branch.
+      ...(body.baseBranch !== undefined && body.baseBranch !== null ? { baseBranch: body.baseBranch } : {}),
+      // Only ever `true` or absent: what failed is the box's to append, from
+      // its own record of the named run — never the caller's.
+      ...(body.fixCi === true ? { fixCi: true } : {}),
     });
-    return NextResponse.json({ started: true, run }, { status: 202 });
+    if (chatOrigin && run.id !== runId) recordRunChatOrigin(run.id, chatOrigin);
+    // Every open desktop hears that a run began — the ROUTE says so, not the
+    // MCP tool, so a run started from another device, the owner's own click
+    // or the review pass shows up as a chat card within one poll. The
+    // desktop only nudges its poll on it; the run record stays the truth.
+    notifyDesktop(
+      { type: "coding_run", phase: queued ? "queued" : "started", runId: run.id, projectId: run.projectId, ...(run.team ? { teamId: run.team.id } : {}) },
+      `coding-run:${run.id}`,
+    );
+    if (holdWork && askedAgain) releaseOwnerStopHold(holdWork);
+    return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
   } catch (err) {
+    // The start the desktops were told of will not happen: they re-read, and
+    // the runs list's `starting` says why (startOrQueueRun listed it failed).
+    notifyDesktop({ type: "coding_run", phase: "failed", runId }, `coding-run-failed:${runId}`);
+    // The assistant has the refusal as this call's answer; no notice will
+    // ever be due under this id, so its chat record goes with it.
+    if (chatOrigin) forgetRunChatOrigin(runId);
     if (err instanceof CodingAgentError) {
       // The provider/model refusal carries a `code` beside the shared 400, so a
       // caller can tell "that pair is not on this box" from "that folder is not
       // allowed" — both are `kind: "invalid"`, and the MCP tool advises on the
       // wrong argument without it. Anything else answers exactly as before.
-      const code = err instanceof ProviderChoiceError || err instanceof PipelineChoiceError || err instanceof ExperienceChoiceError
+      const code = err instanceof ProviderChoiceError || err instanceof ExperienceChoiceError
         ? { code: err.code }
         : {};
       return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
@@ -133,4 +214,11 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+}
+
+/** One notice on the desktop ring, fire-and-forget: a notice that fails is logged, never the start's failure. */
+function notifyDesktop(action: Record<string, unknown>, id: string): void {
+  void pushPendingAction(action, id).catch((err: unknown) => {
+    console.error("[coding-agent/run] desktop notice failed:", err instanceof Error ? err.message : err);
+  });
 }

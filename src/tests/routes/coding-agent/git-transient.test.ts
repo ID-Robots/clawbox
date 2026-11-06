@@ -18,7 +18,7 @@ vi.mock("@/lib/coding-github", async (importOriginal) => ({
   disconnectGitHub: vi.fn(),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => true) }));
 
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),

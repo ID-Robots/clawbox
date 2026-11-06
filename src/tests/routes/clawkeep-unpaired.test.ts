@@ -37,7 +37,7 @@ const daemon = vi.hoisted(() => ({
 // for any of them). These cases are about what the OWNER gets on an unpaired
 // box, so the session answers yes; the refusal itself is pinned in
 // clawkeep-owner-only.test.ts and clawkeep-restore-restart.test.ts.
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => true) }));
 
 vi.mock("node:child_process", async (importOriginal) => {

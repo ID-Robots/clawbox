@@ -260,6 +260,18 @@ describe("POST /setup-api/setup/edition — the activation", () => {
     expect(out.at(-1)).toEqual({ success: true, edition: "hermes", restarting: true });
   });
 
+  it("lists every phase a step that ended well passed, even when no scan of the journal caught its marker", async () => {
+    // The harness swap's twin defect (2026-10-14): the scans saw no marker,
+    // and the list went from `request` straight to `done`.
+    h.journal = [];
+    stepLandsOn("hermes", ["  -> install.sh --step edition_lock", "  -> install.sh --step hermes_edition", "  This box is now the Hermes edition"]);
+    const out = await lines(await route.POST(post({ edition: "hermes" })));
+    expect(out.filter((l) => "phase" in l).map((l) => l.phase)).toEqual([
+      "request", "check", "lock", "provision", "cleanup", "done",
+    ]);
+    expect(out.at(-1)).toEqual({ success: true, edition: "hermes", restarting: true });
+  });
+
   it("hands the step exactly the request the root reader accepts", async () => {
     let seen = "";
     h.follow.mockImplementation(async () => {

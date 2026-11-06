@@ -150,6 +150,14 @@ const EVENT = {
    * hour-long window this frame's absence justified.
    */
   clarifyExpire: "clarify.expire",
+  /**
+   * The agent's transient status line. Hermes re-tags its compaction progress
+   * (auto, preflight or `/compress`) as `{ kind: "compacting", text }` for the
+   * whole pause (tui_gateway `_status_update`) so a driver can show it is
+   * summarizing rather than hung. Read for that kind alone (TASK-2127): the
+   * chat says "Shortening the conversation…" while it lasts.
+   */
+  statusUpdate: "status.update",
   error: "error",
 } as const;
 
@@ -293,6 +301,12 @@ export type DashboardActivity =
    */
   | { kind: "status"; text: string }
   /**
+   * Hermes is compacting the conversation (`status.update` kind "compacting")
+   * — `start` on the first such frame, `end` on the first frame of the turn
+   * that is not one (TASK-2127).
+   */
+  | { kind: "compaction"; phase: "start" | "end" }
+  /**
    * The agent has stopped and is asking the customer something.
    *
    * Reported as ACTIVITY rather than as text for the same reason a tool step
@@ -406,6 +420,53 @@ export interface DashboardTurnRequest {
   /** A stored session id to resume, or empty to start a new conversation. */
   readonly sessionId?: string;
   readonly signal?: AbortSignal;
+  /**
+   * Told WHY, when the turn could not be opened and null comes back.
+   *
+   * Null alone carried no reason, and the caller needs one (TASK-2152): a
+   * dashboard that is restarting is worth waiting for and asking again, while
+   * one that refused the conversation is not, and the journal had nothing to
+   * say about either — a field report showed only the CLI fallback failing.
+   */
+  readonly onOpenFailure?: (failure: DashboardOpenFailure) => void;
+}
+
+/**
+ * Why `openDashboardTurn` gave a turn up.
+ *
+ * - `unavailable` — no ticket, or the socket would not come up or died before
+ *   the session answered: a dashboard that is down or restarting.
+ * - `timeout` — the dashboard is up but a session call did not answer in time
+ *   (a cold start loads every plugin and the MCP server first).
+ * - `refused` — the dashboard answered and said no: the conversation could
+ *   not be resumed, or it would not switch models and nothing says what the
+ *   conversation runs instead.
+ * - `stopped` — the owner stopped the turn while it was being opened.
+ */
+export type DashboardOpenFailureReason = "unavailable" | "timeout" | "refused" | "stopped";
+
+export interface DashboardOpenFailure {
+  readonly reason: DashboardOpenFailureReason;
+  /** The dashboard's or the transport's own words, for the journal. */
+  readonly detail: string;
+}
+
+/** A failure whose reason is known where it is thrown. */
+class OpenFailure extends Error {
+  constructor(readonly reason: DashboardOpenFailureReason, message: string) {
+    super(message);
+  }
+}
+
+/** The reason for a failure that was not thrown as an `OpenFailure`. */
+function openFailureOf(err: unknown, signal?: AbortSignal): DashboardOpenFailure {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (signal?.aborted) return { reason: "stopped", detail };
+  if (err instanceof OpenFailure) return { reason: err.reason, detail };
+  if (isQuietStreamError(err) || detail === "dashboard reply timed out") return { reason: "timeout", detail };
+  // Everything else on the way to a session is the socket itself failing: a
+  // refused connect, a handshake that timed out, a close before the reply.
+  return { reason: "unavailable", detail };
 }
 
 export interface DashboardTurnFinal {
@@ -438,6 +499,12 @@ export interface DashboardTurn {
    */
   readonly model: string;
   readonly provider: string;
+  /**
+   * The model the turn ASKED for, when Hermes would not switch this
+   * conversation to it and the conversation's own model (`model`) answers
+   * instead. Absent whenever no switch was refused.
+   */
+  readonly refusedModel?: string;
   /**
    * Run the submitted turn, reporting each fragment of the answer as it lands.
    *
@@ -508,6 +575,24 @@ function frameType(frame: GatewayFrame): string {
  * Read conservatively: a switch counts as made only when nothing says it was
  * not. `warning` is upstream's own channel for "the live session did not sync",
  * and `✗` is the marker its own output uses for a refusal.
+ *
+ * But `warning` is not ONLY that channel, and reading every warning as a
+ * refusal was the first-message failure of TASK-2152. A switch that TOOK can
+ * carry a note there too — measured on a board, v0.22.5, ClawBox AI:
+ *
+ *   { "output": "  ✓ Model switched: deepseek-v4-flash … ⚠ Note: …",
+ *     "warning": "Note: `deepseek-v4-flash` was not found in this custom
+ *                 endpoint's model listing (…). It may still work …" }
+ *
+ * The live agent had switched ("Model switched in-place" in the agent log),
+ * the turn was given up anyway, the CLI fallback cannot resume a session the
+ * dashboard owns (`permission_denied`), and the next message worked only
+ * because the session was by then already on the picked model. So a warning
+ * is a refusal UNLESS Hermes announced the switch: `_commit_agent_switch`
+ * ends in a `session.info` event naming the new model on this very socket,
+ * written before the reply. The deferred-confirm answer (an expensive model,
+ * not switched) and a failed sync both come with a warning and without that
+ * announcement, so they still read as refusals.
  */
 /**
  * Ids that are safe to place in a `/model …` command line.
@@ -589,13 +674,23 @@ function commandSafe(value: string): boolean {
   return !value.startsWith("-") && COMMAND_SAFE_ID.test(value);
 }
 
-function modelSwitchTook(frame: GatewayFrame): boolean {
+function modelSwitchTook(frame: GatewayFrame, announced: boolean): boolean {
   if (frame.error) return false;
   const result = frame.result || {};
-  const warning = result.warning;
-  if (typeof warning === "string" && warning.trim()) return false;
   const output = typeof result.output === "string" ? result.output : "";
-  return !output.includes("✗");
+  if (output.includes("✗")) return false;
+  const warning = result.warning;
+  if (typeof warning === "string" && warning.trim()) return announced;
+  return true;
+}
+
+/** The model a `session.info` event announces, or "" when the frame is not one. */
+function announcedModel(frame: GatewayFrame): string {
+  if (frameType(frame) !== "session.info") return "";
+  const payload = frame.params?.payload;
+  if (!payload || typeof payload !== "object") return "";
+  const model = (payload as Record<string, unknown>).model;
+  return typeof model === "string" ? model.trim() : "";
 }
 
 function payloadText(frame: GatewayFrame): string {
@@ -799,12 +894,25 @@ function clarifyStillOpen(
  * response has already been committed to streaming and there is no way back.
  *
  * Returns null rather than throwing for exactly that reason: "this box cannot
- * stream right now" is an expected answer, not a fault.
+ * stream right now" is an expected answer, not a fault. Why it is null goes to
+ * `req.onOpenFailure`.
  */
 export async function openDashboardTurn(req: DashboardTurnRequest): Promise<DashboardTurn | null> {
-  if (req.signal?.aborted) return null;
+  const giveUp = (failure: DashboardOpenFailure): null => {
+    try {
+      req.onOpenFailure?.(failure);
+    } catch {
+      /* the caller's listener is not this turn's problem */
+    }
+    return null;
+  };
+  if (req.signal?.aborted) return giveUp({ reason: "stopped", detail: "stopped before the turn was opened" });
   const ticket = await dashboardWsTicket(req.signal).catch(() => null);
-  if (!ticket) return null;
+  if (!ticket) {
+    return giveUp(req.signal?.aborted
+      ? { reason: "stopped", detail: "stopped before the turn was opened" }
+      : { reason: "unavailable", detail: "no WebSocket ticket: the dashboard did not answer" });
+  }
 
   let socket: WebSocket;
   try {
@@ -815,8 +923,8 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       // Origin is what a non-browser client is expected to present.
       handshakeTimeout: CONNECT_TIMEOUT_MS,
     });
-  } catch {
-    return null;
+  } catch (err) {
+    return giveUp(openFailureOf(err, req.signal));
   }
 
   const close = () => {
@@ -855,6 +963,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
    */
   let framesSeen = 0;
   let lastEvent = "(none)";
+  /**
+   * The model a `/model` switch is waiting to hear announced, and whether it
+   * was — see `modelSwitchTook`. Read here rather than in `awaitReply`,
+   * which drops every event on its way to the reply it is looking for.
+   */
+  let switchTarget = "";
+  let switchAnnounced = false;
 
   socket.on("message", (raw) => {
     framesSeen += 1;
@@ -871,6 +986,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     }
     const type = frameType(frame);
     if (type) lastEvent = type;
+    if (switchTarget && announcedModel(frame) === switchTarget) switchAnnounced = true;
     if (waiter) {
       const resume = waiter;
       waiter = null;
@@ -975,13 +1091,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
 
     const sessionFrame = await awaitReply(rpcId, SESSION_TIMEOUT_MS);
     if (sessionFrame.error) {
-      throw new Error(String(sessionFrame.error.message || "dashboard refused the session"));
+      throw new OpenFailure("refused", String(sessionFrame.error.message || "dashboard refused the session"));
     }
     const result = sessionFrame.result || {};
     const transportSid = typeof result.session_id === "string" ? result.session_id : "";
     const stored = result.stored_session_id;
     const sessionId = typeof stored === "string" && stored ? stored : req.sessionId || "";
-    if (!transportSid) throw new Error("dashboard returned no session handle");
+    if (!transportSid) throw new OpenFailure("refused", "dashboard returned no session handle");
 
     // What this session is ACTUALLY set to run, as the dashboard reports it.
     // `session.resume` returns it in `info` ({model, provider, reasoning_effort,
@@ -1039,15 +1155,18 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     // comparing providers would report a difference on every single turn and
     // pay that cost forever.
     let switchedModel = false;
+    // The model a refused switch asked for — see below.
+    let refusedModel = "";
     const alreadyOnModel = Boolean(activeModel) && activeModel === req.model;
     if (wantResume && req.model && !alreadyOnModel) {
       // An id that cannot go on a command line safely does not go on one. The
       // turn drops to the CLI instead, where the same values travel as separate
       // argv elements and cannot become flags.
       if (!commandSafe(req.model) || (req.provider && !commandSafe(req.provider))) {
-        throw new Error("model or provider is not safe to switch with");
+        throw new OpenFailure("refused", "model or provider is not safe to switch with");
       }
       const switchId = nextRpcId();
+      switchTarget = req.model;
       socket.send(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -1060,40 +1179,45 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
         }),
       );
       const switched = await awaitReply(switchId, SWITCH_TIMEOUT_MS);
-      // A switch that did not take gives this transport UP, rather than
-      // answering on the wrong model.
+      // A switch that did not take must never be REPORTED as taken — the
+      // turn would claim a model it was not running. What it does instead
+      // changed with Hermes v0.22.4 (TASK-2152).
       //
-      // There is a real case for it, found on the box: switching TO a
-      // user-defined provider is refused, because the switch validates the
-      // model against the target provider's model listing, and a
-      // `providers.<slug>` entry in config.yaml used to carry none. On this
-      // device that is `clawai` — the DEFAULT provider — so "go back to ClawBox
-      // AI mid-conversation" was exactly the combination that could not be made
-      // here. `applyClawaiToHermes` now declares that listing, so the clawai
-      // case should no longer arise on a box this code has written; the guard
-      // stays because a refusal is a thing the transport must read either way —
-      // for a model outside the declared list, or a provider we never wrote —
-      // and because nothing in this process can prove the switch took.
+      // Refusals are real: switching TO a provider whose listing does not
+      // carry the model is refused, and so is a provider this box holds no
+      // credential for.
       //
-      // Throwing lands in the catch below, which returns null, and the route
-      // then spawns the CLI for this turn. That path passes `-m` and
-      // `--provider` as argv rather than re-pointing the session — it does
-      // carry `--resume <sid>` on a threaded turn, so it is not the fresh
-      // process this comment used to claim, and whether argv beats a
-      // per-session override there is the one thing about it still unverified
-      // on a box (`cliServedPair` in the route says the same). The turn is
-      // slower and not streamed, and it is ANSWERED BY THE MODEL THE CUSTOMER PICKED —
-      // which is the property that matters more.
-      if (!modelSwitchTook(switched)) {
-        throw new Error(`dashboard would not switch this session to ${req.model}`);
+      // Up to Hermes v0.21.7 this gave the transport up and the route spawned
+      // `hermes chat --resume` with `-m` and `--provider`, which answered on the
+      // picked model. From v0.22.4 that CLI runs through the gateway, keeps a
+      // resumed session's frozen launch, and — measured on a board — is refused
+      // a conversation the dashboard started outright (`permission_denied`,
+      // src/lib/hermes-session-refusal.ts). Giving up therefore lost the turn,
+      // and the same message failed every time it was sent.
+      //
+      // So the conversation's OWN model answers, which is exactly what the
+      // product already says a resumed Hermes conversation does: "a
+      // conversation keeps the model it was launched with … the conversation on
+      // screen carries on as it was" (src/lib/chat-model-notice.ts), with the
+      // line over the composer saying so. The handle reports that model, so the
+      // record names what really answered, and `refusedModel` names what was
+      // asked for. Only when the dashboard did not say what the session runs is
+      // there nothing honest to report, and then the turn is still given up.
+      switchTarget = "";
+      if (!modelSwitchTook(switched, switchAnnounced)) {
+        if (!activeModel) {
+          throw new OpenFailure("refused", `dashboard would not switch this session to ${req.model}`);
+        }
+        refusedModel = req.model;
+      } else {
+        activeModel = req.model;
+        if (req.provider) {
+          activeProvider = req.provider;
+          providerFromRequest = true;
+        }
+        // The switch WIPES the session's reasoning effort — see below.
+        switchedModel = true;
       }
-      activeModel = req.model;
-      if (req.provider) {
-        activeProvider = req.provider;
-        providerFromRequest = true;
-      }
-      // The switch WIPES the session's reasoning effort — see below.
-      switchedModel = true;
     }
     // What the DASHBOARD reported is resolved once, here, so the handle below
     // and the completion frame report the same thing — see servedProviderSlug.
@@ -1133,7 +1257,10 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     // turn's switch resumes with the wiped value, and re-asserting is the only
     // thing that repairs it. Best-effort by design: a box that refuses this
     // answers on the level it already had, which is what it does today.
-    if (req.reasoning && (switchedModel || activeReasoning !== req.reasoning)) {
+    //
+    // NOT after a refused switch: the level was chosen for the model that was
+    // refused, and the conversation's own model keeps its own.
+    if (req.reasoning && !refusedModel && (switchedModel || activeReasoning !== req.reasoning)) {
       const effortId = nextRpcId();
       socket.send(
         JSON.stringify({
@@ -1184,6 +1311,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       sessionId,
       model: activeModel,
       provider: activeProvider,
+      ...(refusedModel ? { refusedModel } : {}),
       close,
       async run(
         onDelta: (chunk: string) => void,
@@ -1191,6 +1319,16 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       ): Promise<DashboardTurnFinal> {
         if (started) throw new Error("this turn has already run");
         started = true;
+        // A Stop that landed while the turn was being OPENED — the ticket, the
+        // socket, `session.resume`, a model switch — has already fired, and an
+        // abort event never fires twice. Before anything is submitted, so the
+        // agent is never started on a prompt the owner already stopped. The
+        // turn outlives its request now (TASK-2117), so nothing else would end
+        // it: closing the request no longer closes this socket.
+        if (req.signal?.aborted) {
+          close();
+          throw new DOMException("aborted", "AbortError");
+        }
         // Name the abort BEFORE closing. Closing alone made `run` reject with
         // `dashboard socket closed (<code>)`, which the route's `isAbort` check
         // cannot match — so a user pressing Stop was recorded in the customer's
@@ -1358,6 +1496,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
           if (!forwarded) submitPrompt();
           let answer = "";
           let reasoning = "";
+          let compacting = false;
           let truncated = false;
           for (;;) {
             // The one place the two windows are chosen between. While a person
@@ -1429,6 +1568,11 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
             // window back the moment the agent resumes is what keeps a turn
             // that wedges AFTER a clarify from holding the response for an hour.
             if (pendingClarifyId && TURN_PROGRESS.has(type)) pendingClarifyId = "";
+            // The turn moving on is the end of a compaction it was in.
+            if (compacting && TURN_PROGRESS.has(type)) {
+              compacting = false;
+              if (onActivity) onActivity({ kind: "compaction", phase: "end" });
+            }
             switch (type) {
               case EVENT.messageDelta: {
                 const chunk = payloadText(frame);
@@ -1623,6 +1767,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 const message = typeof payload.message === "string" ? payload.message : "";
                 throw new Error(message || "the agent reported an error");
               }
+              case EVENT.statusUpdate: {
+                const payload = (frame.params?.payload || {}) as Record<string, unknown>;
+                const now = payload.kind === "compacting";
+                if (now !== compacting && onActivity) onActivity({ kind: "compaction", phase: now ? "start" : "end" });
+                compacting = now;
+                break;
+              }
               default:
                 // Every other frame is display detail this route does not
                 // render (tool chips, usage, session info). Logged only when
@@ -1672,8 +1823,8 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
         // customer being a few seconds slow into an error in their transcript.
       },
     };
-  } catch {
+  } catch (err) {
     close();
-    return null;
+    return giveUp(openFailureOf(err, req.signal));
   }
 }

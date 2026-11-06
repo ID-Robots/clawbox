@@ -17,6 +17,9 @@ import { useEffect, useRef } from "react";
 import { useState, useSyncExternalStore } from "react";
 import { describeProgressLine, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { useT } from "@/lib/i18n";
+import { CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
+import { codingModelName } from "@/lib/coding-model-names";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 
 /**
@@ -43,7 +46,6 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   startedWith: "codingAgent.stepStartedWith",
   continuing: "codingAgent.stepContinuing",
   thinking: "codingAgent.stepThinking",
-  tokenLimit: "codingAgent.stepTokenLimit",
   subagentStarted: "codingAgent.stepSubagentStarted",
   subagentFinished: "codingAgent.stepSubagentFinished",
   subagentRefused: "codingAgent.stepSubagentRefused",
@@ -60,10 +62,12 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   reattached: "codingAgent.stepReattached",
   startingFresh: "codingAgent.stepStartingFresh",
   noRepository: "codingAgent.stepNoRepository",
+  notRepositoryRoot: "codingAgent.stepNotRepositoryRoot",
   worktree: "codingAgent.stepWorktree",
   worktreeMerged: "codingAgent.stepWorktreeMerged",
   worktreeRemoved: "codingAgent.stepWorktreeRemoved",
   worktreeKept: "codingAgent.stepWorktreeKept",
+  worktreeParked: "codingAgent.stepWorktreeParked",
   evidencePruned: "codingAgent.stepEvidencePruned",
   workingOnBranch: "codingAgent.stepWorkingOnBranch",
   noPullRequest: "codingAgent.stepNoPullRequest",
@@ -87,36 +91,38 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   pauseRequested: "codingAgent.stepPauseRequested",
   resumedByOwner: "codingAgent.stepResumedByOwner",
   drafted: "codingAgent.stepDrafted",
+  queued: "codingAgent.stepQueued",
+  startedFromQueue: "codingAgent.stepStartedFromQueue",
+  queueCanceled: "codingAgent.stepQueueCanceled",
+  ciFailed: "codingAgent.stepCiFailed",
+  ciFix: "codingAgent.stepCiFix",
   startedFromDraft: "codingAgent.stepStartedFromDraft",
   leftoverRunning: "codingAgent.stepLeftoverRunning",
   endedLeftovers: "codingAgent.stepEndedLeftovers",
   ownerEndedLeftovers: "codingAgent.stepOwnerEndedLeftovers",
   deliverableMet: "codingAgent.stepDeliverableMet",
   deliverableMissing: "codingAgent.stepDeliverableMissing",
-  anotherAttempt: "codingAgent.stepAnotherAttempt",
   droppedSteps: "codingAgent.stepDropped",
   secretsInjected: "codingAgent.stepSecretsInjected",
   secretsUnreadable: "codingAgent.stepSecretsUnreadable",
+  mcpServers: "codingAgent.stepMcpServers",
+  mcpServersMissing: "codingAgent.stepMcpServersMissing",
   anthropicAccount: "codingAgent.stepAnthropicAccount",
   accountSwitched: "codingAgent.stepAccountSwitched",
   accountRefused: "codingAgent.stepAccountRefused",
   accountMoved: "codingAgent.stepAccountMoved",
   accountsWaiting: "codingAgent.stepAccountsWaiting",
   resumedAfterLimit: "codingAgent.stepResumedAfterLimit",
+  usageLimitContinuing: "codingAgent.stepUsageLimitContinuing",
+  usageLimitGrace: "codingAgent.stepUsageLimitGrace",
+  contextCompacted: "codingAgent.stepContextCompacted",
+  contextCompactedUnsized: "codingAgent.stepContextCompactedUnsized",
   teamMessageToRun: "codingAgent.stepTeamMessageToRun",
   teamMessageToLead: "codingAgent.stepTeamMessageToLead",
+  messageMidTurn: "codingAgent.stepMessageMidTurn",
+  messageToRun: "codingAgent.stepMessageToRun",
   teamMessageToAssistant: "codingAgent.stepTeamMessageToAssistant",
-  pipelineReview: "codingAgent.stepPipelineReview",
-  pipelineImprovement: "codingAgent.stepPipelineImprovement",
-  pipelineDeployPreview: "codingAgent.stepPipelineDeployPreview",
-  pipelineDeployProduction: "codingAgent.stepPipelineDeployProduction",
-  pipelineVerifyPreview: "codingAgent.stepPipelineVerifyPreview",
-  pipelineVerifyProduction: "codingAgent.stepPipelineVerifyProduction",
-  pipelineVerified: "codingAgent.stepPipelineVerified",
-  pipelineWaitingOwner: "codingAgent.stepPipelineWaitingOwner",
-  pipelineResumed: "codingAgent.stepPipelineResumed",
-  pipelineComplete: "codingAgent.stepPipelineComplete",
-  pipelineStopped: "codingAgent.stepPipelineStopped",
+  runMessageToAssistant: "codingAgent.stepRunMessageToAssistant",
 };
 
 /**
@@ -131,10 +137,86 @@ const STATUS_KEY: Record<string, string> = {
   stopped: "codingAgent.statusStopped",
   paused: "codingAgent.statusPaused",
   draft: "codingAgent.statusDraft",
+  queued: "codingAgent.statusQueued",
   // The wire format's own snake_case; the catalogue key is camelCase, the way
   // `reviewState.needsOwner` is — translations.test.ts forbids an underscore.
   gave_up: "codingAgent.statusGaveUp",
 };
+
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * A translated string with an English floor.
+ *
+ * `t` answers the KEY itself for a string the pack has not got, and these
+ * keys reach a box whose locale file may predate them (an older pack, or a
+ * translations chunk that failed to load while the box was offline). A raw
+ * "codingAgent.stepCommitted" on the timeline would be worse than the
+ * English the runner wrote, so a missing key falls back to `step.label` —
+ * the same sentence, already filled in.
+ */
+function word(t: Translate, key: string, english: string, params?: Record<string, string | number>): string {
+  const said = t(key, params);
+  return said === key ? english : said;
+}
+
+/**
+ * What the run was started ON, from its record rather than its feed: the
+ * account that paid and, on a team, the role its model was chosen for. The
+ * runner's "Started with <model>" line names the model alone, and it is frozen
+ * (runs on disk carry it), so the rest comes from the record beside it.
+ */
+export interface StartedOn {
+  provider?: CodingProvider | null;
+  modelRole?: ModelRole | null;
+}
+
+/**
+ * The first step as "Started with Sonnet 5 on Anthropic (Reviewer)" — or
+ * null where the record cannot say more than the line does (no provider on a
+ * record from before the field), and the plain step label stands.
+ */
+function startedOnLabel(t: Translate, step: ProgressDescription, on: StartedOn | undefined): string | null {
+  if (step.labelKey !== "startedWith" && step.labelKey !== "started") return null;
+  if (!on?.provider || !isCodingProvider(on.provider)) return null;
+  const provider = t(CODING_PROVIDER_NAME_KEY[on.provider]);
+  const role = on.modelRole && (MODEL_ROLES as readonly string[]).includes(on.modelRole) ? t(`codingAgent.modelRole.${on.modelRole}`) : null;
+  if (step.labelKey === "started") {
+    return role
+      ? word(t, "codingAgent.stepStartedOnRole", step.label, { provider, role })
+      : word(t, "codingAgent.stepStartedOn", step.label, { provider });
+  }
+  const model = codingModelName(String(step.params?.model ?? ""));
+  return role
+    ? word(t, "codingAgent.stepStartedWithRole", step.label, { model, provider, role })
+    : word(t, "codingAgent.stepStartedWithOn", step.label, { model, provider });
+}
+
+/** A step's chip text in the owner's language. */
+function stepLabel(t: Translate, step: ProgressDescription, on?: StartedOn): string {
+  if (!step.labelKey) return step.label;
+  const started = startedOnLabel(t, step, on);
+  if (started !== null) return started;
+  const params = step.params && step.params.status !== undefined
+    // The status word is a run status, and the app already has all six.
+    ? { ...step.params, status: word(t, STATUS_KEY[String(step.params.status)] ?? "", String(step.params.status)) }
+    : step.params;
+  return word(t, STEP_KEY[step.labelKey], step.label, params);
+}
+
+function stepDetail(t: Translate, step: ProgressDescription): string | undefined {
+  return step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
+}
+
+/**
+ * One progress line as the timeline words it — its glyph, its kind, the chip's
+ * text and the detail beside it — for a surface that shows a single step
+ * outside the timeline (the agent diagram's "Now"), so the two never disagree.
+ */
+export function describeStep(t: Translate, line: string): { icon: string; kind: ProgressDescription["kind"]; label: string; detail: string | null } {
+  const step = describeProgressLine(line);
+  return { icon: step.icon, kind: step.kind, label: stepLabel(t, step), detail: stepDetail(t, step) ?? null };
+}
 
 /** The chat card's chip tones, as the app's classes. */
 const TONE: Record<ProgressDescription["kind"], string> = {
@@ -153,10 +235,16 @@ interface Props {
   startedAt?: number;
   /** The run is still going: the newest step is the one happening now. */
   live: boolean;
-  /** While live: the chat card's "Coding agent working" line — the dots, the tokens, the clock. */
-  working?: { label: string; busy: string; tokens?: string; duration?: string };
+  /** While live: the chat card's "Coding agent working" line — the dots alone; the figures are the rail's. */
+  working?: { label: string; busy: string };
   /** Inside another card (the live card's Timeline tab): no card of its own. */
   embedded?: boolean;
+  /** A settled run's log: a card folded to its heading, opened on a click. */
+  folded?: boolean;
+  /** The account the run is on — its first step says so beside the model. Absent on a record from before the field. */
+  provider?: CodingProvider | null;
+  /** On a team run: the role its model was chosen for (coding-role-models.ts). Null for a solo run. */
+  modelRole?: ModelRole | null;
   testId?: string;
 }
 
@@ -188,7 +276,7 @@ function sinceStart(at: number, startedAt: number): string {
   return `+${m}m ${sec - m * 60}s`;
 }
 
-export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, testId = "coding-agent-run-activity" }: Props) {
+export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, folded = false, provider, modelRole, testId = "coding-agent-run-activity" }: Props) {
   const { t } = useT();
   const list = useRef<HTMLOListElement>(null);
   // Hydrated or not — every hook before the early return below.
@@ -220,37 +308,21 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
     const since = startedAt !== undefined ? sinceStart(times[i], startedAt) : null;
     return [clock, since].filter(Boolean).join(" · ") || null;
   };
-  /**
-   * A translated string with an English floor.
-   *
-   * `t` answers the KEY itself for a string the pack has not got, and these
-   * keys reach a box whose locale file may predate them (an older pack, or a
-   * translations chunk that failed to load while the box was offline). A raw
-   * "codingAgent.stepCommitted" on the timeline would be worse than the
-   * English the runner wrote, so a missing key falls back to `step.label` —
-   * the same sentence, already filled in.
-   */
-  const word = (key: string, english: string, params?: Record<string, string | number>) => {
-    const said = t(key, params);
-    return said === key ? english : said;
-  };
-  const label = (step: ProgressDescription) => {
-    if (!step.labelKey) return step.label;
-    const params = step.params && step.params.status !== undefined
-      // The status word is a run status, and the app already has all six.
-      ? { ...step.params, status: word(STATUS_KEY[String(step.params.status)] ?? "", String(step.params.status)) }
-      : step.params;
-    return word(STEP_KEY[step.labelKey], step.label, params);
-  };
-  const detail = (step: ProgressDescription) =>
-    step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
+  const label = (step: ProgressDescription) => stepLabel(t, step, { provider, modelRole });
+  const detail = (step: ProgressDescription) => stepDetail(t, step);
+  // Folded, the card is a <details> and its heading the <summary>: one
+  // heading either way, and the steps stay in the DOM for a reader that
+  // wants them (a closed <details> keeps its children mounted).
+  const Card = folded ? "details" : "div";
+  const Heading = folded ? "summary" : "p";
   return (
-    <div className={embedded ? "" : `mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined}>
-      <p className={SECTION_LABEL}>
+    <Card className={embedded ? "" : `mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined} data-folded={folded || undefined}>
+      <Heading className={`${SECTION_LABEL}${folded ? " cursor-pointer list-none" : ""}`}>
         {t("codingAgent.timelineTitle")}
         <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{lines.length}</span>
         {live && working && (
-          // The chat card's own sign of life, with the same figures beside it.
+          // The chat card's own sign of life. No figures beside it: the
+          // rail's tiles are the one home of the tokens and the clock.
           <span className="ml-auto normal-case tracking-normal font-normal text-[11px] text-amber-300 inline-flex items-center gap-2" data-testid="coding-agent-run-working">
             <span className="inline-flex items-center gap-1.5">
               {working.label}
@@ -260,12 +332,10 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
                 <span className="coding-agent-working-dot" style={{ animationDelay: "0.3s" }} />
               </span>
             </span>
-            {working.tokens && <span className="text-[var(--text-muted)]">· {working.tokens}</span>}
-            {working.duration && <span className="text-[var(--text-muted)]">· {working.duration}</span>}
           </span>
         )}
         {live && !working && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />}
-      </p>
+      </Heading>
       {/* Oldest first, the newest at the bottom where a live run adds to it;
           capped in height so a long run stays a card, and scrolled to its end
           so the step happening now is the one on screen. */}
@@ -340,6 +410,6 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
           );
         })}
       </ol>
-    </div>
+    </Card>
   );
 }

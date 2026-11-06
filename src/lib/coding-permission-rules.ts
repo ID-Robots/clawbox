@@ -209,6 +209,9 @@ const HARD_SEGMENTS: readonly string[] = [
   // it as environment variables; the file holds every other project's too, and
   // the key it is sealed with is `.session-secret` two lines up.
   "secrets.json",
+  // …and its audit trail (src/lib/secrets-audit.ts): names, never values, but
+  // which project holds which credential and which runs were handed it.
+  "secrets-audit.log",
 ];
 
 /** Kernel and system trees a rule has no business naming. */

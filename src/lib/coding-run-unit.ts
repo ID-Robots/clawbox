@@ -28,6 +28,7 @@ import { execFile } from "child_process";
 import fs from "fs";
 import path from "./runtime-path";
 import { promisify } from "util";
+import { runMemoryLimits } from "@/lib/box-memory-policy";
 
 const execFileAsync = promisify(execFile);
 
@@ -35,14 +36,36 @@ const execFileAsync = promisify(execFile);
 export const RUN_UNIT_PREFIX = "clawbox-run-";
 
 /**
- * The memory the box will let one run have. Sane defaults, hardcoded for now:
- * MemoryHigh is the point where the kernel starts reclaiming hard and the run
- * merely slows down, MemoryMax the wall where it is killed. Together they are
- * what stops one runaway harness from taking the desktop, the gateway and the
- * web server down with it — the failure mode this device actually sees.
+ * The memory the box will let one run have. MemoryHigh is the point where the
+ * kernel starts reclaiming hard and the run merely slows down, MemoryMax the
+ * wall where it is killed. Together they are what stops one runaway harness
+ * from taking the desktop, the gateway and the web server down with it — the
+ * failure mode this device actually sees.
+ *
+ * Both are a SHARE of this box's RAM, not a literal: 8 GB boards, 16 GB
+ * laptops and 128 GB Sparks ship the same image. See `box-memory-policy.ts`.
  */
-export const RUN_MEMORY_HIGH = "3G";
-export const RUN_MEMORY_MAX = "4G";
+const RUN_LIMITS = runMemoryLimits();
+export const RUN_MEMORY_HIGH = RUN_LIMITS.high;
+export const RUN_MEMORY_MAX = RUN_LIMITS.max;
+
+/**
+ * The CPU and disk share one run gets, against the default 100 every other
+ * unit has — the desktop's session, the web server, the gateway. A WEIGHT, not
+ * a quota: it only bites under contention, so a lone run on an idle box still
+ * gets every core, while a team pushing the load past the core count yields
+ * to the things the owner is looking at (a team once drove a 4-core/8-thread
+ * laptop to load 27 and the desktop stopped repainting). See
+ * `coding-run-cpu.ts` for the other half, the budget a run is told to keep to.
+ *
+ * `IOWeight` only takes effect where the user manager has the `io` controller
+ * delegated, which stock systemd does not do; systemd accepts the property
+ * either way. `RUN_NICE` is what reaches the disk there too: the kernel's I/O
+ * schedulers derive a process's best-effort I/O priority from its nice level.
+ */
+export const RUN_CPU_WEIGHT = 20;
+export const RUN_IO_WEIGHT = 20;
+export const RUN_NICE = 10;
 
 /** A run id as it may appear in a unit name: the generator's own alphabet. */
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -113,6 +136,14 @@ export function buildScopeArgv(
       `MemoryHigh=${RUN_MEMORY_HIGH}`,
       "-p",
       `MemoryMax=${RUN_MEMORY_MAX}`,
+      "-p",
+      `CPUWeight=${RUN_CPU_WEIGHT}`,
+      "-p",
+      `IOWeight=${RUN_IO_WEIGHT}`,
+      // A scope has no Nice= property (it is an exec setting); systemd-run sets
+      // the priority on its own process before exec'ing the harness, so every
+      // child the run forks inherits it.
+      `--nice=${RUN_NICE}`,
       "--",
       bin,
       ...argv,
@@ -297,6 +328,38 @@ export async function unitActive(unit: string): Promise<boolean | null> {
     const out = (err as { stdout?: string } | null)?.stdout;
     if (typeof out === "string" && out.trim()) return readActive(out);
     return null;
+  }
+}
+
+/**
+ * The live scope of a run whose record never got to NAME it: systemd's own
+ * list of `clawbox-run-<runId>-*.scope`, the newest one still up. A record is
+ * written "running" before its spawn, and a web server that went before the
+ * unit reached the disk left a run alive in its scope with nothing on record
+ * to find it by (reconcileAfterRestart). TRI-STATE, like `unitActive`: null
+ * when systemd says there is none, undefined when it could not be asked —
+ * "could not look" must never be read as "it is gone".
+ */
+export async function findRunScopeUnit(runId: string): Promise<string | null | undefined> {
+  if (typeof runId !== "string" || !RUN_ID.test(runId)) return null;
+  const binary = await findSystemdTool("systemctl");
+  if (!binary) return undefined;
+  const prefix = `${RUN_UNIT_PREFIX}${runId}-`;
+  try {
+    const { stdout } = await execFileAsync(binary, ["--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager", `${prefix}*.scope`], {
+      timeout: SYSTEMD_TIMEOUT_MS,
+      env: scopeEnv({ PATH: toolSearchPath() }) as NodeJS.ProcessEnv,
+    });
+    // `UNIT LOAD ACTIVE SUB DESCRIPTION`, one per line. The token after the run
+    // id is the spawn's time in base 36, so the greatest name is the newest.
+    const up = stdout.split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .filter(([unit, , active]) => isRunScopeUnit(unit) && unit.startsWith(prefix) && readActive(active ?? ""))
+      .map(([unit]) => unit)
+      .sort();
+    return up.length ? up[up.length - 1] : null;
+  } catch {
+    return undefined;
   }
 }
 

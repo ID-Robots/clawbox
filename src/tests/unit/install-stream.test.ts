@@ -87,3 +87,33 @@ describe("progressPercent", () => {
     expect(progressPercent({ total: 200 })).toBe(0);
   });
 });
+
+describe("readInstallStream: an install waiting its turn (TASK-2128)", () => {
+  it("passes on that it is queued, what it waits for, and when it starts", async () => {
+    const seen: InstallProgress[] = [];
+    const lines = [
+      { taskId: "t2", kind: "whisper-engine-install", status: "Queued — starts after Kokoro", queued: true, behind: { kind: "voice-kokoro-install", label: "Kokoro" } },
+      { status: "Installing speech on this box (faster-whisper)…", queued: false },
+      { status: "  Building CTranslate2 with CUDA for sm_87..." },
+      { success: true, status: "Speech on this box is installed." },
+    ];
+    const outcome = await readInstallStream(streamOf(lines.map((l) => `${JSON.stringify(l)}\n`).join("")), (p) => seen.push(p));
+    expect(outcome).toEqual({ ok: true });
+    expect(seen[0]).toEqual({
+      status: "Queued — starts after Kokoro",
+      completed: undefined,
+      total: undefined,
+      queued: true,
+      behind: { kind: "voice-kokoro-install", label: "Kokoro" },
+    });
+    expect(seen[1]).toMatchObject({ queued: false });
+    expect(seen[2]).not.toHaveProperty("queued");
+  });
+
+  it("drops a `behind` it cannot read rather than passing half of it on", async () => {
+    const seen: InstallProgress[] = [];
+    await readInstallStream(streamOf(`${JSON.stringify({ status: "Queued", queued: true, behind: { kind: 3 } })}\n{"success":true}\n`), (p) => seen.push(p));
+    expect(seen[0]).toMatchObject({ queued: true });
+    expect(seen[0]).not.toHaveProperty("behind");
+  });
+});

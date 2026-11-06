@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 import { activeRunDirectory, activeRunId, getRun } from "@/lib/coding-agent";
 import { artifactsDir, INLINE_IMAGE_MIME, safeRunId } from "@/lib/coding-agent-artifacts";
@@ -39,7 +39,7 @@ const ACCEPTED_EXTENSIONS = Object.keys(MIME_FOR).join(", ").replace(/, ([^,]+)$
  * grants nothing.
  */
 async function allowedRoots(request: Request, requestedRunId?: string): Promise<{ roots: string[]; refusal: string }> {
-  const owner = await hasOwnerSession(request);
+  const owner = await hasPersonSession(request);
   const runId = owner ? null : (requestedRunId ?? activeRunId());
   const runDir = owner ? null : (requestedRunId ? getRun(requestedRunId)?.directory : activeRunDirectory());
   const wanted = runId && runDir ? [runDir, artifactsDir(runId)] : [filesBrowseRoot()];

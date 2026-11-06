@@ -106,6 +106,18 @@ describe("ToastHost — a notice that can be acted on", () => {
     return () => window.removeEventListener(name, on);
   }
 
+  it("says where the click goes on the bubble itself, and nothing extra on a plain notice", () => {
+    render(<ToastHost />);
+    dispatch({ message: "plain notice" });
+    dispatch({ message: "⚠️ Scheduled job “Backup” failed.", action: { open: "settings", section: "harness" } });
+    const labels = screen.getAllByTestId("toast-action-label");
+    expect(labels).toHaveLength(1);
+    expect(labels[0].textContent).toContain("Open Settings → Harness");
+    // Already the end of the button's name; said twice it would be read twice.
+    expect(labels[0].getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByRole("button", { name: "⚠️ Scheduled job “Backup” failed. — Open Settings → Harness" })).toBeInTheDocument();
+  });
+
   it("opens Settings on the email section when the body is clicked, and takes the toast away", () => {
     const sections: unknown[] = [];
     const apps: unknown[] = [];
@@ -135,6 +147,31 @@ describe("ToastHost — a notice that can be acted on", () => {
       stopSections();
       stopApps();
       delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+    }
+  });
+
+  it("hands the focus on with the section for an account-limit notice", () => {
+    type PendingWindow = Window & { __clawboxPendingSettingsSection?: unknown; __clawboxPendingSettingsFocus?: unknown };
+    const sections: unknown[] = [];
+    const stopSections = listen(OPEN_SETTINGS_SECTION_EVENT, sections);
+    try {
+      render(<ToastHost />);
+      dispatch({
+        message: "Every Anthropic account on this ClawBox is at its usage limit.",
+        action: { open: "settings", section: "ai", focus: "anthropicAccounts" },
+      });
+
+      act(() => { fireEvent.click(screen.getByRole("button", { name: /— Open Settings → Providers$/ })); });
+
+      // Both ways, like the section: the event for a Settings window that is
+      // up, the handoff for one that is not open yet.
+      expect(sections).toEqual([{ section: "ai", focus: "anthropicAccounts" }]);
+      expect((window as PendingWindow).__clawboxPendingSettingsSection).toBe("ai");
+      expect((window as PendingWindow).__clawboxPendingSettingsFocus).toBe("anthropicAccounts");
+    } finally {
+      stopSections();
+      delete (window as PendingWindow).__clawboxPendingSettingsSection;
+      delete (window as PendingWindow).__clawboxPendingSettingsFocus;
     }
   });
 

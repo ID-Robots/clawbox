@@ -15,9 +15,8 @@ import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { useTr } from "@/lib/i18n-floor";
-import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
+import { CHAT_MODEL_STATE_EVENT, OPEN_CLAWAI_OFFER_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
-import AnthropicAccountsCard from "./AnthropicAccountsCard";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
 import LocalAiPanel from "./LocalAiPanel";
@@ -45,13 +44,22 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import JobAlertsPanel from "./JobAlertsPanel";
+import DbMaintenancePanel from "./DbMaintenancePanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
+import PathGuardPanel from "./PathGuardPanel";
+import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
+import { useSettledSessionUser } from "@/lib/use-session-user";
 import MonitorsPanel from "./MonitorsPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import { BackgroundTaskInline } from "./BackgroundTaskProgress";
+import { useSettingsJobs } from "@/hooks/useSettingsJobs";
+import { CHANNEL_SETUP_GROUP } from "@/lib/background-task-kinds";
+import { settingsJobFetch, type SettingsJob } from "@/lib/settings-job-client";
 import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
@@ -233,7 +241,30 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "users", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+
+/**
+ * Users is a part of System now — System → Users, beside the device's own
+ * figures — rather than a sidebar row of its own (TASK-2130). The name it had
+ * as a section still opens it, so every link written before the move
+ * (`dispatchOpenSettingsSection("users")`, `/app/settings?section=users`)
+ * lands where the page went.
+ */
+const USERS_LINK = "users";
+
+/** The two views System holds: the device's figures, and who can sign in. */
+type SystemView = "device" | "users";
+
+/** System's tabs, in order; each named by the key that already names it elsewhere in Settings. */
+const SYSTEM_VIEWS: { id: SystemView; icon: string; labelKey: string }[] = [
+  { id: "device", icon: "computer", labelKey: "settings.device" },
+  { id: "users", icon: "group", labelKey: "settings.users" },
+];
+
+/** The System view a deep-link value asks for: Users for the old Users link, the device's figures for any other. */
+function toSystemView(value: unknown): SystemView {
+  return value === USERS_LINK ? "users" : "device";
+}
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -357,9 +388,8 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
-  // Who can sign in to the box — each a real Linux account (TASK-1256). Only
-  // the owner ever sees Settings; the route behind the panel checks too.
-  { id: "users", icon: "group", labelKey: "settings.users" },
+  // Who can sign in to the box — each a real Linux account — is System →
+  // Users, the owner's alone; it had a row of its own here until TASK-2130.
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   // The whole system update — versions, the run, beta channel, branch pin,
   // force — is a Settings page now; the About tile only points here.
@@ -374,10 +404,17 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
 const DEFAULT_SECTION: Section = "appearance";
 
 /** A deep-link value as a Section, or null. The old Local Models section is
- *  part of Local AI now. */
+ *  part of Local AI now, and the old Users section part of System. */
 function toSection(value: unknown): Section | null {
+  if (value === USERS_LINK) return "system";
   if (typeof value !== "string" || !(SECTIONS as readonly string[]).includes(value)) return null;
   return value === "localModels" ? "localAi" : (value as Section);
+}
+
+/** The deep-link value a cold open left on `window`, untouched. */
+function pendingLink(): unknown {
+  if (typeof window === "undefined") return undefined;
+  return (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
 }
 
 // The section a cold open was asked for, read BEFORE the first render so the
@@ -385,8 +422,12 @@ function toSection(value: unknown): Section | null {
 // a tick later. A peek, not a take: the mount effect still deletes the slot,
 // because React may run a state initializer twice.
 function peekPendingSection(): Section | null {
-  if (typeof window === "undefined") return null;
-  return toSection((window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection);
+  return toSection(pendingLink());
+}
+
+/** The System view a cold open was asked for, read the same way for the same reason. */
+function peekPendingSystemView(): SystemView {
+  return toSystemView(pendingLink());
 }
 
 /* ── Discord ── */
@@ -610,8 +651,27 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
+  // A deep link asked for Providers with the Anthropic accounts open and in
+  // view (the usage-limit notices). Held until the list says it showed them,
+  // then cleared, so a later visit to Providers is not the same ask again.
+  const [showAnthropicAccounts, setShowAnthropicAccounts] = useState(false);
+  const anthropicAccountsShown = useCallback(() => setShowAnthropicAccounts(false), []);
+  // The same ask for the Scheduled job alerts card on Harness (the job alert's
+  // "Open Settings → Harness"): spent once the card has scrolled itself into view.
+  const [showJobAlerts, setShowJobAlerts] = useState(false);
+  const jobAlertsShown = useCallback(() => setShowJobAlerts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
+  // Which of System's two views is open (System → Users or the device's
+  // figures). Only the owner has the choice: anyone else signed in is never
+  // shown Users, wherever a link asked to go — so until /users/me has said who
+  // this is, a link to Users waits rather than drawing the list for a moment.
+  // No answer at all is the owner's, as it is on the desktop (page.tsx); the
+  // route behind the panel judges each request itself either way.
+  const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
+  const sessionUser = useSettledSessionUser();
+  const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
+  const systemShows: SystemView | null = systemView === "device" ? "device" : usersAllowed === null ? null : usersAllowed ? "users" : "device";
   useEffect(() => {
     let alive = true;
     const answer = (available: boolean) => {
@@ -689,11 +749,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
     // The owner went somewhere: a Monitors link still waiting for the box's
-    // answer is not theirs any more.
+    // answer is not theirs any more, and neither is an accounts ask the
+    // Providers list has not got to yet.
     monitorsLink.current = false;
+    setShowAnthropicAccounts(false);
+    setShowJobAlerts(false);
     if (next === "remote" && requireLoginFor("remote")) return;
     // The old Local Models section is part of Local AI now.
     if (next === "localModels") next = "localAi";
+    // The System row opens System itself; Users is one tab further in.
+    if (next === "system") setSystemView("device");
     setSection(next);
     // Both, so one navigation call works on either layout: the mobile view
     // reads `mobileSection`, and a hub row that only set `section` would
@@ -706,7 +771,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // on `window` first, so a deep-link issued before this effect runs (cold
   // open of Settings) isn't lost to a listener-mount race.
   useEffect(() => {
-    const apply = (s: unknown) => {
+    const apply = (s: unknown, focus?: unknown) => {
       const next = toSection(s);
       if (!next) return;
       // Monitors only where the box has said it has a monitor session: until
@@ -718,13 +783,31 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       // A later link to anywhere else wins over one still waiting.
       monitorsLink.current = false;
+      // `users` (the old Users section) opens System on Users; `system` on
+      // the device's figures, which is what its links are about.
+      if (next === "system") setSystemView(toSystemView(s));
       setSection(next);
       setMobileSection(next);
+      // The one block inside a section a link may also ask for
+      // (`NOTIFY_ACTION_FOCUS`, src/lib/notify-action.ts). Any other focus, or
+      // this one on another section, is ignored like an unknown section — and
+      // every link replaces the last one's ask, as it does the section.
+      setShowAnthropicAccounts(next === "ai" && focus === "anthropicAccounts");
+      setShowJobAlerts(next === "harness" && focus === "jobAlerts");
     };
     const requestClawAiOffer = () => {
       monitorsLink.current = false;
       setSection("ai");
       setMobileSection("ai");
+      // The same split as the pitch card's Connect below: a Hermes box draws its
+      // own ClawBox AI sign-in once the provider is SELECTED, and the offer
+      // counter there is read by an AIModelsStep that renders nothing — it would
+      // start a device login with no card on screen to show the code.
+      if (editionRef.current === "hermes") {
+        setRequestedAiProviderId("clawai");
+        setProviderSelectionRequest((current) => current + 1);
+        return;
+      }
       setOpenClawAIOfferRequest((current) => current + 1);
     };
     const requestProviderSelection = (providerId: unknown) => {
@@ -737,13 +820,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
     const w = window as Window & {
       __clawboxPendingSettingsSection?: unknown;
+      __clawboxPendingSettingsFocus?: unknown;
       __clawboxPendingClawAiOffer?: unknown;
       __clawboxPendingAiProvider?: unknown;
     };
     if (w.__clawboxPendingSettingsSection !== undefined) {
-      apply(w.__clawboxPendingSettingsSection);
+      apply(w.__clawboxPendingSettingsSection, w.__clawboxPendingSettingsFocus);
       delete w.__clawboxPendingSettingsSection;
     }
+    delete w.__clawboxPendingSettingsFocus;
     if (w.__clawboxPendingAiProvider !== undefined) {
       requestProviderSelection(w.__clawboxPendingAiProvider);
       delete w.__clawboxPendingAiProvider;
@@ -753,24 +838,33 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       delete w.__clawboxPendingClawAiOffer;
     }
     const handler = (event: Event) => {
-      apply((event as CustomEvent<{ section?: string }>).detail?.section);
+      const detail = (event as CustomEvent<{ section?: string; focus?: string }>).detail;
+      apply(detail?.section, detail?.focus);
       // The dispatcher sets the cold-open handoff AND fires this event, not
       // knowing whether Settings is up. When it is, this path is what applies
       // the section — so the handoff has to be taken here too, or it sits on
       // `window` until the NEXT cold open of Settings, which then lands on
       // whatever section some earlier deep link asked for.
-      delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+      delete w.__clawboxPendingSettingsSection;
+      delete w.__clawboxPendingSettingsFocus;
     };
     const providerHandler = (event: Event) =>
       requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
-    const offerHandler = () => requestClawAiOffer();
+    const offerHandler = () => {
+      requestClawAiOffer();
+      // Taken here as well as on mount, like the section's handoff above: the
+      // dispatcher (`dispatchClawaiSignIn`) sets it without knowing whether
+      // Settings is up, and one left on `window` would start a second device
+      // login at the next cold open.
+      delete w.__clawboxPendingClawAiOffer;
+    };
     window.addEventListener("clawbox:open-settings-section", handler);
     window.addEventListener("clawbox:select-ai-provider", providerHandler);
-    window.addEventListener("clawbox:open-clawai-offer", offerHandler);
+    window.addEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     return () => {
       window.removeEventListener("clawbox:open-settings-section", handler);
       window.removeEventListener("clawbox:select-ai-provider", providerHandler);
-      window.removeEventListener("clawbox:open-clawai-offer", offerHandler);
+      window.removeEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     };
   }, []);
   const [isMobile, setIsMobile] = useState(false);
@@ -840,24 +934,28 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // `processes` has always been the by-CPU list, so a server that predates the
   // second ordering simply has no memory view to switch to.
   const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
+  // System's figures are on screen in its device view only: System → Users
+  // draws none of them, and neither does the phone's list of sections, which
+  // keeps `section` while it is up — so neither polls.
+  const systemFiguresShown = (isMobile ? mobileSection : section) === "system" && systemShows === "device";
   useEffect(() => {
-    if (section !== "system" && section !== "about") return;
+    if (!systemFiguresShown && section !== "about") return;
     // Ask only for what is on screen. About draws neither block, and on System
     // each one is behind its own button — so a collapsed panel costs no `ps`
     // and no /proc/stat diff on the box, not merely a hidden <div> here.
     // Re-running on each toggle is deliberate: expanding fetches at once rather
     // than showing an empty card until the next 3 s tick.
     const query = new URLSearchParams({
-      processes: section === "system" && processesOpen ? "1" : "0",
-      perCore: section === "system" && perCoreOpen ? "1" : "0",
+      processes: systemFiguresShown && processesOpen ? "1" : "0",
+      perCore: systemFiguresShown && perCoreOpen ? "1" : "0",
     });
     const url = `/setup-api/system/stats?${query}`;
     const poll = () => fetch(url, { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
     poll();
-    if (section !== "system") return;
+    if (!systemFiguresShown) return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
-  }, [section, processesOpen, perCoreOpen]);
+  }, [section, systemFiguresShown, processesOpen, perCoreOpen]);
 
   /* ── Versions, for About's rows and the sidebar subtitles. The update
      itself — its run, the beta channel, the branch pin, the force — is the
@@ -1389,6 +1487,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // not the active harness: a dual box's active harness can be hermes while its
   // AI panel is still the OpenClaw picker, which needs the card.
   const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  // For the deep-link listeners above, which are installed once on mount.
+  const editionRef = useRef(edition);
+  useEffect(() => { editionRef.current = edition; }, [edition]);
   useEffect(() => {
     if (edition !== null) return;
     let alive = true;
@@ -1688,7 +1789,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setTgStreamingNotice(null);
     setTgStreaming(next); // optimistic
     try {
-      const res = await fetch("/setup-api/telegram/streaming", {
+      const res = await settingsJobFetch("/setup-api/telegram/streaming", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: next }),
@@ -1793,7 +1894,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setTgConfigurePromise(configurePromise);
 
     try {
-      const res = await fetch("/setup-api/telegram/configure", {
+      const res = await settingsJobFetch("/setup-api/telegram/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ botToken: tgToken.trim() }),
@@ -2255,7 +2356,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setEmailSaving(true);
     setEmailMsg(null);
     try {
-      const res = await fetch("/setup-api/email/configure", {
+      const res = await settingsJobFetch("/setup-api/email/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2320,7 +2421,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setEmailSaving(true);
     setEmailMsg(null);
     try {
-      const res = await fetch("/setup-api/email/configure", { method: "DELETE" });
+      const res = await settingsJobFetch("/setup-api/email/configure", { method: "DELETE" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.success) {
         setEmailMsg({ type: "error", message: data?.error || t("settings.failedSave") });
@@ -2409,7 +2510,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       setWaSaving(true);
       setWaMsg(null);
       try {
-        const res = await fetch("/setup-api/whatsapp/configure", {
+        const res = await settingsJobFetch("/setup-api/whatsapp/configure", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -2560,7 +2661,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setWaPairBusy(true);
     setWaMsg(null);
     try {
-      const res = await fetch("/setup-api/whatsapp/unpair", { method: "POST" });
+      const res = await settingsJobFetch("/setup-api/whatsapp/unpair", { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         setWaMsg({ type: "error", message: t("settings.whatsappUnpairFailed") });
@@ -2720,6 +2821,36 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     }
   }, [markChannelSettled, claimChannelRead]);
 
+  /*
+   * The channel's setup is the BOX's work (TASK-2148): every save, connect and
+   * disconnect above goes through `settingsJobFetch`, which asks its route for
+   * a job of the box (src/lib/settings-jobs.ts) and follows it — so closing
+   * Settings half-way loses neither the work nor its verdict, and the
+   * desktop's corner card shows it meanwhile. Reopened (or opened in another
+   * tab, on another device), Settings reads the channel jobs the box runs:
+   * the channel shows as being set up, its section draws the job's progress
+   * and holds its controls, and the channel's own status is read again the
+   * moment the job ends.
+   */
+  const onChannelJobsEnded = useCallback((ended: SettingsJob[]) => {
+    const subjects = new Set(ended.map((job) => job.subject));
+    // One the box no longer keeps ended too, and says nothing of which.
+    const every = subjects.size === 0;
+    if (every || subjects.has("telegram")) {
+      void refreshTelegramStatus();
+      void refreshPairing();
+    }
+    if (every || subjects.has("email")) void refreshEmailStatus();
+    if (every || subjects.has("whatsapp")) void refreshWhatsapp();
+    if (every || subjects.has("discord")) void refreshDiscordStatus();
+  }, [refreshTelegramStatus, refreshPairing, refreshEmailStatus, refreshWhatsapp, refreshDiscordStatus]);
+  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { onEnded: onChannelJobsEnded });
+  const channelJobFor = (subject: string): SettingsJob | null => (channelJob?.subject === subject ? channelJob : null);
+  const telegramJob = channelJobFor("telegram");
+  const emailJob = channelJobFor("email");
+  const whatsappJob = channelJobFor("whatsapp");
+  const discordJob = channelJobFor("discord");
+
   // The member list costs Discord API calls, so it is fetched only while the
   // Discord section is actually open — never from the status poll that backs
   // the sidebar subtitle.
@@ -2832,7 +2963,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setDcStatus(null);
     setDcIntentsMissing(null);
     try {
-      const res = await fetch("/setup-api/discord/configure", {
+      const res = await settingsJobFetch("/setup-api/discord/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ botToken: dcToken.trim() }),
@@ -2914,7 +3045,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     setDcMembersSaving(true);
     setDcStatus(null);
     try {
-      const res = await fetch("/setup-api/discord/configure", {
+      const res = await settingsJobFetch("/setup-api/discord/configure", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ allowedUserIds: dcSelected }),
@@ -3181,6 +3312,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // Per instance: the desktop can have this window open beside the standalone
   // page in another tab, and the region's name is resolved by id.
   const panelTitleId = useId();
+  // System's tabs and their panels are named by id, per instance for the same reason.
+  const systemTabsId = useId();
   const resetProgressSteps = [
     {
       id: "erase",
@@ -3222,7 +3355,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     ? createPortal(
         <div
           ref={factoryResetProgressPanelRef}
-          className="fixed inset-0 flex items-center justify-center"
+          className="main-screen-scrim fixed inset-0 flex items-center justify-center"
           style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
           role="dialog"
           aria-modal="true"
@@ -3302,7 +3435,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // No backdrop blur under the dim: a full-screen blur is redone over the whole
     // desktop on every frame anything beneath it moves (the mascot always does).
     // One step darker keeps the look.
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+    <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
       <div
         ref={factoryResetPanelRef}
         role="dialog"
@@ -3369,7 +3502,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // No backdrop blur under the dim: a full-screen blur is redone over the whole
     // desktop on every frame anything beneath it moves (the mascot always does).
     // One step darker keeps the look.
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/65 px-4">
+    <div className="main-screen-scrim fixed inset-0 z-[300] flex items-center justify-center bg-black/65 px-4">
       <div ref={systemPasswordConfirmPanelRef} role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
         <div className="flex items-center gap-2 mb-3">
           <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
@@ -3420,6 +3553,62 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const MobileTitle = asPage ? "h1" : "h2";
   /** What names that region when it is a section: the panel's own heading. */
   const panelRegionProps = asPage ? {} : { "aria-labelledby": panelTitleId };
+
+  /**
+   * System's two views, a choice only the owner is given: the device's own
+   * figures, where System opens, and Users — who can sign in to the box, the
+   * list, the add-user form and the owner's "Share OpenClaw with all users" —
+   * which had a sidebar row of its own until TASK-2130. Anyone else signed in
+   * gets System without the tabs, and no Users anywhere.
+   */
+  const systemTabId = (view: SystemView) => `${systemTabsId}-tab-${view}`;
+  const systemPanelId = (view: SystemView) => `${systemTabsId}-panel-${view}`;
+  /** A view's container is a tab panel where there are tabs, and a plain block where there are none. */
+  const systemPanelProps = (view: SystemView) => usersAllowed === true
+    ? { role: "tabpanel", id: systemPanelId(view), "aria-labelledby": systemTabId(view) }
+    : {};
+  // The tabs pattern's keys: the arrows move between the two (and open the
+  // one they land on), Home and End go to the first and the last.
+  const onSystemTabKey = (e: React.KeyboardEvent) => {
+    const at = SYSTEM_VIEWS.findIndex((v) => v.id === systemShows);
+    const last = SYSTEM_VIEWS.length - 1;
+    const to = e.key === "ArrowRight" ? (at + 1) % SYSTEM_VIEWS.length
+      : e.key === "ArrowLeft" ? (at + last) % SYSTEM_VIEWS.length
+        : e.key === "Home" ? 0
+          : e.key === "End" ? last
+            : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    const next = SYSTEM_VIEWS[to].id;
+    setSystemView(next);
+    document.getElementById(systemTabId(next))?.focus();
+  };
+  const systemTabs = usersAllowed === true && (
+    <div role="tablist" aria-label={t("settings.system")} onKeyDown={onSystemTabKey} className="max-w-xl flex gap-1 bg-white/[0.04] rounded-xl p-1 mb-5" data-testid="settings-system-tabs">
+      {SYSTEM_VIEWS.map((view) => {
+        const selected = systemShows === view.id;
+        return (
+          <button
+            key={view.id}
+            type="button"
+            role="tab"
+            id={systemTabId(view.id)}
+            aria-selected={selected}
+            aria-controls={selected ? systemPanelId(view.id) : undefined}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => setSystemView(view.id)}
+            data-testid={`settings-system-tab-${view.id}`}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer border-none ${
+              selected ? "bg-orange-500/15 text-[var(--coral-bright)] shadow-sm" : "bg-transparent text-white/35 hover:text-[var(--text-secondary)] hover:bg-white/[0.04]"
+            }`}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{view.icon}</span>
+            {t(view.labelKey)}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   const renderContent = () => (
     <>
@@ -4140,7 +4329,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               />
             )}
 
-            <AiProviderList />
+            <AiProviderList
+              showAnthropicAccounts={showAnthropicAccounts}
+              onAnthropicAccountsShown={anthropicAccountsShown}
+            />
 
             {/* No status card here. The AI Providers panel below opens with the
                 hero, which names the active provider, its model and its
@@ -4154,7 +4346,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
             <I18nProvider><AIModelsStep
               embedded
-              providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+              providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai"]}
               defaultProviderId="clawai"
               currentProviderId={aiProvider?.provider ?? null}
               currentModel={aiProvider?.model ?? null}
@@ -4180,13 +4372,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 that used to live here (a credential the portal still accepts)
                 is the list's own filter now, and a switched-off ClawBox AI
                 shows neither the meter nor the button. */}
-
-            {/* The Anthropic accounts coding runs spend, in the owner's order,
-                with the one a usage limit set aside and when it is back
-                (TASK-902). On every edition and whatever the chat provider
-                above is: it is the coding agent's pool, not the chat's, and
-                the limit notices open this section to show it. */}
-            <AnthropicAccountsCard />
           </div>
         )}
 
@@ -4219,6 +4404,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
                 {CHANNEL_ITEMS.map((item) => {
                   const state = channelState(item.id);
+                  // A setup the box is running for this channel (TASK-2148):
+                  // said on the row, with the turning ring, over whatever
+                  // the channel answered before it.
+                  const job = channelJobFor(item.id);
                   // The account IS set up in both states; only one of them is
                   // carrying traffic. The icon follows the account, the dot
                   // follows the traffic.
@@ -4252,7 +4441,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         ref={(el) => { channelRowRefs.current[item.id] = el; }}
                         onClick={() => setSectionGated(item.id)}
                         data-testid={`settings-channel-${item.id}`}
-                        data-state={state}
+                        data-state={job ? "configuring" : state}
                         className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer"
                       >
                         {/* The ligature IS the glyph's text, so without this the
@@ -4276,7 +4465,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                               screen reader — a live region that appears already
                               populated does not reliably announce. */}
                           <span className="block text-[11px] text-[var(--text-muted)] truncate">
-                            {state === "unknown"
+                            {job
+                              ? (job.status ?? job.title)
+                              : state === "unknown"
                               ? t("settings.checking")
                               : state === "unreachable"
                                 ? t("settings.statusUnavailable")
@@ -4292,7 +4483,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             same row. The dot is decoration (`aria-hidden`), so
                             the state reaches assistive tech through the
                             subtitle above it, which every branch words. */}
-                        {state === "connected" ? (
+                        {job ? (
+                          <span
+                            className="material-symbols-rounded text-[var(--coral-bright)] shrink-0 motion-safe:animate-spin"
+                            style={{ fontSize: 14 }}
+                            aria-hidden="true"
+                            data-testid={`settings-channel-job-spinner-${item.id}`}
+                          >
+                            progress_activity
+                          </span>
+                        ) : state === "connected" ? (
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
                         ) : state === "silent" ? (
                           /* Full opacity, like the emerald beside it: the two
@@ -4379,6 +4579,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Telegram ─── */}
         {activeSection === "telegram" && (
           <div className="max-w-xl space-y-5">
+            <BackgroundTaskInline taskId={telegramJob?.id ?? null} testId="settings-channel-job-telegram" />
 
             {/* Status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -4396,20 +4597,34 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 </div>
               ) : tgConfigured && !tgReconfigure ? (
                 <div>
-                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
-                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                  {/* `tgReceiving === false` is the gateway's own answer that the
+                      bot is NOT listening (a revoked or mistyped token, a
+                      stopped gateway). The hub row already says so; this card
+                      must not contradict it with a green "active". `null`
+                      (could not ask) keeps the green card, as the hub does. */}
+                  <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 mb-4 border ${tgReceiving === false ? "bg-amber-500/[0.06] border-amber-500/20" : "bg-green-500/[0.06] border-green-500/15"}`}>
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${tgReceiving === false ? "bg-amber-500/15" : "bg-green-500/15"}`}>
+                      <span className={`material-symbols-rounded ${tgReceiving === false ? "text-amber-400" : "text-green-400"}`} style={{ fontSize: 22 }}>{tgReceiving === false ? "warning" : "check_circle"}</span>
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm text-[var(--text-primary)] font-medium">
-                        {tgBotInfo?.firstName || t("settings.botConnected")}
+                        {tgBotInfo?.firstName || (tgReceiving === false ? "Telegram" : t("settings.botConnected"))}
                       </div>
                       {tgBotInfo?.username && (
                         <div className="text-xs text-[var(--text-muted)] mt-0.5 truncate">@{tgBotInfo.username}</div>
                       )}
                       <div className="flex items-center gap-1.5 mt-0.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                        <span className="text-xs text-green-400/80">{t("settings.telegramActive")}</span>
+                        {tgReceiving === false ? (
+                          <>
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                            <span className="text-xs text-amber-400/90">{t("settings.channelNotReceiving")}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                            <span className="text-xs text-green-400/80">{t("settings.telegramActive")}</span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -4447,7 +4662,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         aria-label={t("settings.telegramProgress")}
                         aria-checked={!!tgStreaming}
                         aria-busy={tgStreamingPending}
-                        disabled={tgStreamingPending || tgStreaming === null}
+                        disabled={tgStreamingPending || telegramJob !== null || tgStreaming === null}
                         onClick={() => toggleTelegramStreaming(!tgStreaming)}
                         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
                           tgStreaming ? "bg-[var(--coral-bright)]" : "bg-gray-600"
@@ -4699,7 +4914,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 <div className="flex items-center gap-3 mt-5">
                   <button
                     onClick={saveTelegram}
-                    disabled={tgSaving || !tgToken.trim()}
+                    disabled={tgSaving || telegramJob !== null || !tgToken.trim()}
                     className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                   >
                     {tgSaving ? (
@@ -4733,6 +4948,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Email ─── */}
         {activeSection === "email" && (
           <div className="max-w-xl space-y-5" data-testid="settings-section-email">
+            <BackgroundTaskInline taskId={emailJob?.id ?? null} testId="settings-channel-job-email" />
 
             {/* Status */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -4790,7 +5006,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     <button
                       type="button"
                       onClick={disconnectEmail}
-                      disabled={emailSaving}
+                      disabled={emailSaving || emailJob !== null}
                       className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50"
                     >
                       {t("settings.emailDisconnect")}
@@ -5216,7 +5432,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   <button
                     type="button"
                     onClick={saveEmail}
-                    disabled={emailSaving || !emailAddress.trim() || !emailPassword}
+                    disabled={emailSaving || emailJob !== null || !emailAddress.trim() || !emailPassword}
                     className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                   >
                     {emailSaving ? (
@@ -5251,6 +5467,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           /* `tabIndex={-1}` is not a tab stop; it is somewhere for focus to
              land when the status card's Retry replaces itself. */
           <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp" ref={whatsappPaneRef} tabIndex={-1}>
+            <BackgroundTaskInline taskId={whatsappJob?.id ?? null} testId="settings-channel-job-whatsapp" />
 
             {/* Upstream's ban-risk warning, shown before anything else rather
                 than hidden behind a docs link — it is the single most important
@@ -5381,7 +5598,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={unpairWhatsappPhone}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-red-500/15 border border-red-500/40 text-sm font-semibold text-red-300 cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappUnpairConfirm")}
@@ -5389,7 +5606,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => setWaUnpairConfirm(false)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappUnpairCancel")}
@@ -5400,7 +5617,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => setWaUnpairConfirm(true)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappUnpair")}
@@ -5408,7 +5625,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => startWhatsappPairing(true)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappPairRelink")}
@@ -5448,7 +5665,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={() => startWhatsappPairing(false)}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               data-testid="whatsapp-pair-start"
                               className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
                             >
@@ -5522,7 +5739,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             <button
                               type="button"
                               onClick={cancelWhatsappPairing}
-                              disabled={waPairBusy}
+                              disabled={waPairBusy || whatsappJob !== null}
                               className="mt-3 px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
                             >
                               {t("settings.whatsappPairCancel")}
@@ -5594,7 +5811,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         <button
                           type="button"
                           onClick={() => removeWhatsappNumber(number)}
-                          disabled={waSaving}
+                          disabled={waSaving || whatsappJob !== null}
                           aria-label={t("settings.whatsappRemoveNumber")}
                           className="text-xs text-[var(--text-muted)] hover:text-red-300 bg-transparent border-none cursor-pointer disabled:opacity-50"
                         >
@@ -5619,7 +5836,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     <button
                       type="button"
                       onClick={addWhatsappNumber}
-                      disabled={waSaving || !waNumber.trim()}
+                      disabled={waSaving || whatsappJob !== null || !waNumber.trim()}
                       className="px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
                     >
                       {t("settings.whatsappAddNumber")}
@@ -5636,7 +5853,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                         key={mode}
                         type="button"
                         onClick={() => saveWhatsapp({ mode })}
-                        disabled={waSaving}
+                        disabled={waSaving || whatsappJob !== null}
                         aria-pressed={waStatus?.mode === mode}
                         className={`flex w-full items-start gap-3 rounded-xl px-4 py-3 text-left border cursor-pointer disabled:opacity-50 ${
                           waStatus?.mode === mode
@@ -5670,7 +5887,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     role="switch"
                     aria-label={t("settings.whatsappEnable")}
                     aria-checked={!!waStatus?.enabled}
-                    disabled={waSaving || waStatus === null || (!waStatus.paired && !waStatus.enabled)}
+                    disabled={waSaving || whatsappJob !== null || waStatus === null || (!waStatus.paired && !waStatus.enabled)}
                     onClick={() => saveWhatsapp({ enabled: !waStatus?.enabled })}
                     className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
                       waStatus?.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
@@ -5701,6 +5918,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Discord ─── */}
         {activeSection === "discord" && (
           <div className="max-w-xl space-y-5">
+            <BackgroundTaskInline taskId={discordJob?.id ?? null} testId="settings-channel-job-discord" />
 
             {/* Status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -5922,7 +6140,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                             type="checkbox"
                             checked={checked}
                             onChange={() => toggleDiscordMember(member.id)}
-                            disabled={dcMembersSaving}
+                            disabled={dcMembersSaving || discordJob !== null}
                             className="shrink-0 accent-[var(--coral-bright)]"
                           />
                           <span className="min-w-0 flex-1">
@@ -5953,7 +6171,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   <button
                     type="button"
                     onClick={saveDiscordMembers}
-                    disabled={dcMembersSaving || dcSelected.length === 0}
+                    disabled={dcMembersSaving || discordJob !== null || dcSelected.length === 0}
                     className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
                   >
                     {t("settings.discordMembersSave")}
@@ -6032,7 +6250,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 <div className="flex items-center gap-3 mt-5">
                   <button
                     onClick={saveDiscord}
-                    disabled={dcSaving || !dcToken.trim()}
+                    disabled={dcSaving || discordJob !== null || !dcToken.trim()}
                     className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                   >
                     {dcSaving ? (
@@ -6075,7 +6293,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 switch (owner's request, 2026-09-15). Beside the harness it
                 runs on, because that is the thing it is a capability OF. */}
             <ClawboxMcpPanel />
+            {/* Owner-only switch for the protected-path guard (TASK-1661). */}
+            <PathGuardPanel />
+            {/* Owner-only switch for Hermes' desktop control. Draws nothing
+                unless CLAWBOX_COMPUTER_USE_SETTING=1 (its route is a 404). */}
+            <ComputerUsePanel />
             <BackgroundJobsPanel />
+            {/* The scheduled-job alerts (TASK-2179): the switch, and which of
+                the assistant's scheduled jobs are failing — where the alert's
+                desktop notice and Telegram message send the owner. */}
+            <JobAlertsPanel show={showJobAlerts} onShown={jobAlertsShown} />
 
             {/* Desktop environment and Performance mode, moved here from
                 System at the owner's request (2026-09-09): set once and then
@@ -6088,9 +6315,20 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── System ─── */}
-        {activeSection === "system" && (
-          <div className="max-w-xl space-y-5">
+        {/* ─── System: the device's figures and, for the owner, Users ─── */}
+        {activeSection === "system" && systemTabs}
+        {activeSection === "system" && systemShows === null && (
+          <div className="flex items-center justify-center py-8">
+            <div className="spinner" role="status" aria-label={t("loading")} />
+          </div>
+        )}
+        {activeSection === "system" && systemShows === "users" && (
+          <div {...systemPanelProps("users")}>
+            <UsersPanel />
+          </div>
+        )}
+        {activeSection === "system" && systemShows === "device" && (
+          <div className="max-w-xl space-y-5" {...systemPanelProps("device")}>
 
             {stats ? (
               <>
@@ -6368,6 +6606,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
             )}
 
+            {/* OpenClaw's agent databases: sizes, the nightly compaction and
+                "Run now". Self-fetching and outside the stats ternary, like the
+                password card below; the Hermes edition has no OpenClaw. */}
+            {edition !== "hermes" && <DbMaintenancePanel />}
 
             {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed).
                 It is about the box, not the assistant, so it lives with the box's
@@ -6485,8 +6727,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Remote Control ─── */}
         {activeSection === "remote" && renderRemoteSection()}
 
-        {/* ─── Users (multi-user ClawBox OS) ─── */}
-        {activeSection === "users" && <UsersPanel />}
         {activeSection === "monitors" && monitorsAvailable && <MonitorsPanel />}
 
         {/* ─── About ─── */}
@@ -6842,6 +7082,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     key={item.id}
                     onClick={() => {
                       if (item.id === "remote" && requireLoginFor("remote")) return;
+                      if (item.id === "system") setSystemView("device");
                       setSection(item.id);
                       setMobileSection(item.id);
                     }}
@@ -6899,7 +7140,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
@@ -6918,7 +7159,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -7013,7 +7254,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -7045,7 +7286,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
@@ -7064,7 +7305,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
       {hostnameRebootTo && typeof document !== "undefined" && createPortal(
-        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
+        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="main-screen-scrim fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             <div className="relative w-20 h-20" aria-hidden="true">
               <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />

@@ -3,13 +3,19 @@
  * node itself does: a failing test registered after an await is a failure,
  * never dropped into a pass by exiting early. A run that does not end — a
  * timer the code under test never stops — says it timed out instead of
- * "pass=-1 fail=-1".
+ * "pass=-1 fail=-1". And it reads those counts whatever node's default
+ * reporter is: spec, with no `# pass N` line, from node 23 on.
  */
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { nodeTest } from "../../../bench/lib/score-utils.mjs";
+
+// Starts real processes (node): vitest's 5 s test default is not enough. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const roots: string[] = [];
 
@@ -26,6 +32,28 @@ function workdir({ ticker, testFile, testBody }: { ticker: boolean; testFile: st
   fs.writeFileSync(path.join(dir, "test", testFile), testBody);
   return dir;
 }
+
+/**
+ * A directory holding a `node` that runs the real one with the spec reporter
+ * unless the caller names a reporter — node 23 and newer's own default, on
+ * whichever node runs this suite.
+ */
+function specByDefaultNode(): string {
+  const real = spawnSync("node", ["-p", "process.execPath"], { encoding: "utf8" }).stdout.trim();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-node-spec-"));
+  roots.push(dir);
+  fs.writeFileSync(path.join(dir, "node"), [
+    "#!/bin/sh",
+    `case " $* " in *" --test-reporter"*) exec "${real}" "$@" ;; esac`,
+    `exec "${real}" --test-reporter=spec "$@"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  return dir;
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 afterAll(() => {
   for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true });
@@ -67,6 +95,24 @@ describe("nodeTest", () => {
         + 'test("total", () => { assert.strictEqual(total([{ price: 1.25, qty: 3 }]), "3.70"); });\n',
     }), { timeoutMs: 20_000 });
     expect(fail.check).toMatchObject({ pass: false, detail: "pass=0 fail=1" });
+  }, 30_000);
+
+  it("reads node's counts when its default reporter is spec, as from node 23 on", async () => {
+    const dir = workdir({
+      ticker: false,
+      testFile: "total.test.js",
+      testBody: 'const test = require("node:test"); const assert = require("node:assert"); const { total } = require("../total.js");\n'
+        + 'test("total", () => { assert.strictEqual(total([{ price: 1.25, qty: 3 }]), "3.75"); });\n'
+        + 'test("empty cart", () => { assert.strictEqual(total([]), "1.00"); });\n',
+    });
+    vi.stubEnv("NODE_OPTIONS", undefined);
+    vi.stubEnv("PATH", `${specByDefaultNode()}${path.delimiter}${process.env.PATH}`);
+    // The `node` on PATH now prints spec when asked for nothing, with no `# pass N` line to count.
+    const bare = spawnSync("node", ["--test"], { cwd: dir, encoding: "utf8" });
+    expect(`${bare.stdout}${bare.stderr}`).not.toMatch(/^# pass \d+$/m);
+    const res = await nodeTest(dir, { timeoutMs: 20_000 });
+    expect(res).toMatchObject({ passCount: 1, failCount: 1 });
+    expect(res.check).toMatchObject({ pass: false, detail: "pass=1 fail=1" });
   }, 30_000);
 
   it("names the limit when a timer the code never stops keeps the run from ending", async () => {

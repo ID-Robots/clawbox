@@ -5,10 +5,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  * device that ships no OpenClaw.
  *
  * `/setup-api/update/versions` always carries an `openclaw` component, and
- * `getVersionInfo()` fills its `target` from the ClawBox pin even when
- * `current` is null — so on the Hermes SKU the raw payload reads
+ * `getVersionInfo()` filled its `target` from the ClawBox pin even when
+ * `current` was null — so on the Hermes SKU the raw payload read
  * `openclaw: { current: null, target: "<pin>" }`: a version to converge on for
- * a harness the box does not have. `device_status`, reading the SAME payload in
+ * a harness the box does not have. (The producer reports that component empty
+ * on Hermes now; the Hermes fixture below keeps the old target, because the
+ * strip must not rest on the producer having nulled it.) `device_status`, reading the SAME payload in
  * the same MCP server, drops that key on purpose. Two tools, one payload,
  * opposite honesty.
  *
@@ -47,10 +49,11 @@ const ctx = (edition: "openclaw" | "hermes", install: Install = edition): McpCon
 });
 
 /**
- * The shape `getVersionInfo()` really returns, per SKU — including the detail
- * this card is about: `openclaw.target` is the ClawBox pin even where
- * `openclaw.current` is null, because the producer only nulls the target when a
- * current version exists and already contains it.
+ * The shape `getVersionInfo()` returned, per SKU — including the detail this
+ * card is about: `openclaw.target` was the ClawBox pin even where
+ * `openclaw.current` was null. The producer reports an empty OpenClaw
+ * component on Hermes now; the fixture keeps the old target so the strip is
+ * proved against the payload that needed it.
  */
 const payload = (edition: Install) =>
   edition === "hermes"

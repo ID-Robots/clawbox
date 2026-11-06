@@ -93,6 +93,17 @@ describe("Settings → Appearance and Network expose named, stateful controls", 
     expect(screen.getByRole("button", { name: "settings.fit" })).toHaveAttribute("aria-pressed", "false");
   });
 
+  // The remote-desktop resolution moved to the Agent Browser's settings, next
+  // to Open in VNC: Appearance → Display no longer carries it or reads it.
+  it("no longer offers the remote-desktop resolution under Display", () => {
+    openAppearance();
+    expect(screen.getByRole("slider", { name: "settings.opacity" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "settings.vncResolution" })).toBeNull();
+    expect(screen.queryByText("settings.vncResolutionHint")).toBeNull();
+    const calls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(calls.some((url) => url.includes("/setup-api/vnc/resolution"))).toBe(false);
+  });
+
   it("names the hotspot switch and states whether it is broadcasting", async () => {
     render(<SettingsApp ui={ui} />);
     fireEvent.click(screen.getByRole("button", { name: /settings\.network/ }));

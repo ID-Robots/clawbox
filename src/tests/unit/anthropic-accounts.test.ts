@@ -29,6 +29,8 @@ vi.mock("os", async (importOriginal) => {
 });
 
 const SESSION_SECRET = "7c".repeat(32);
+/** A block page a proxy or a CDN answers in Anthropic's place: a 403, and nothing Anthropic wrote. */
+const CHALLENGE_PAGE = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Checking your browser before accessing the site.</body></html>";
 const LEGACY_KEY = "sk-ant-api03-legacy-owner-key-0123456789";
 const SECOND_KEY = "sk-ant-api03-second-account-key-987654321";
 
@@ -291,6 +293,25 @@ describe("OAuth accounts", () => {
     await pool.addOAuthAccount({ label: "Max", email: "m@example.com", tokens: tokens("live-access", 60 * 60_000) });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ENOTFOUND")));
     expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "live-access" });
+  });
+
+  // A box that was off overnight boots with every access token ended, and the
+  // first queued run asks for a renewal before Wi-Fi or DNS is up.
+  it("keeps an account whose token ran out while Anthropic could not be reached, and renews it once the network is back", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "m@example.com", tokens: tokens("ended-access", -60_000) });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) })));
+    expect((await pool.prepareAccount()).prepared).toBeNull();
+    expect((await pool.readAccounts()).find((a) => a.id === account.id)?.status).toBe("ok");
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 28_800 }), { status: 200 })));
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "fresh-access" });
+  });
+
+  it("does not take a page from something in between for Anthropic refusing the grant", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "m@example.com", tokens: tokens("ended-access", -60_000) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(CHALLENGE_PAGE, { status: 403, headers: { "content-type": "text/html" } })));
+    expect((await pool.prepareAccount()).prepared).toBeNull();
+    expect((await pool.readAccounts()).find((a) => a.id === account.id)?.status).toBe("ok");
   });
 
   it("treats the same email again as the same account signing in again", async () => {
@@ -578,12 +599,69 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 
+  it("marks nothing when the token endpoint answers with a page Anthropic did not write", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("live-access", 8 * 3_600_000) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(CHALLENGE_PAGE, { status: 403, headers: { "content-type": "text/html" } })));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok")).toBe("unknown");
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
   it("checks an API key the way the key form does", async () => {
     const account = await pool.addApiKeyAccount({ label: "Key", key: LEGACY_KEY });
     const verify = vi.fn(async () => "rejected" as const);
     expect(await pool.probeAccountCredential(account.id, verify)).toBe("dead");
     expect(verify).toHaveBeenCalledWith(LEGACY_KEY);
     expect((await pool.readAccounts())[0].status).toBe("revoked");
+  });
+
+  it("asks once for an account however many callers ask together, and every one gets that answer (TASK-2139)", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("stale-access", 8 * 3_600_000) });
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return new Response(JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const answers = await Promise.all([1, 2, 3].map(() => pool.probeAccountCredential(account.id, async () => "ok", {}, "stale-access")));
+    expect(answers).toEqual(["ok", "ok", "ok"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Done asking: the next caller is asked afresh, not handed the old answer.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{\"error\":\"invalid_grant\"}", { status: 400 })));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", {}, "fresh-access")).toBe("dead");
+  });
+
+  it("renews nothing when the store already holds a fresher token than the refused one", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("renewed-access", 8 * 3_600_000) });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", {}, "refused-access")).toBe("ok");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "renewed-access" });
+  });
+
+  it("checks no key when the owner has put another one in since the refused one was handed out", async () => {
+    const account = await pool.addApiKeyAccount({ label: "Key", key: SECOND_KEY });
+    const verify = vi.fn(async () => "rejected" as const);
+    expect(await pool.probeAccountCredential(account.id, verify, {}, LEGACY_KEY)).toBe("ok");
+    expect(verify).not.toHaveBeenCalled();
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
+  it("names the run that joined a probe another consumer started on the mark it comes to", async () => {
+    const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("dead-access", 8 * 3_600_000) });
+    await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access", 8 * 3_600_000) });
+    const changes: { source?: string; runId?: string | null }[] = [];
+    pool.onActiveChange((change) => changes.push(change));
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return new Response("{\"error\":\"invalid_grant\"}", { status: 400 });
+    }));
+    const answers = await Promise.all([
+      pool.probeAccountCredential(work.id, async () => "ok", { source: "chat" }),
+      pool.probeAccountCredential(work.id, async () => "ok", { source: "coding", runId: "run-joined" }),
+    ]);
+    expect(answers).toEqual(["dead", "dead"]);
+    // The swap counts the run it names as moved (applyCodingSwap).
+    await vi.waitFor(() => expect(changes).toEqual([expect.objectContaining({ cause: "auth", source: "coding", runId: "run-joined" })]));
   });
 
   it("takes the Terminal sign-in out until the owner signs in again", async () => {
@@ -596,6 +674,43 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     const later = new Date(Date.now() + 5_000);
     fs.utimesSync(credentials, later, later);
     expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+});
+
+describe("going back on the account a run was refused on (TASK-2139)", () => {
+  const tokens = (access: string) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + 8 * 3_600_000 });
+
+  it("hands out the preferred account ahead of the active one", async () => {
+    await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work-access") });
+    const personal = await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access") });
+    const { prepared } = await pool.prepareAccount({ prefer: { id: personal.id, refused: "personal-old" } });
+    expect(prepared).toMatchObject({ account: { id: personal.id }, credential: { secret: "personal-access" } });
+  });
+
+  it("never hands out the credential the run was refused with: the next account in the order instead", async () => {
+    const work = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const personal = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const { prepared } = await pool.prepareAccount({ prefer: { id: work.id, refused: LEGACY_KEY } });
+    expect(prepared).toMatchObject({ account: { id: personal.id }, credential: { secret: SECOND_KEY } });
+    // Nothing else to go to: nothing is handed out rather than the refused copy.
+    expect((await pool.prepareAccount({ prefer: { id: work.id, refused: LEGACY_KEY }, exclude: new Set([personal.id]) })).prepared).toBeNull();
+    // Passed over, not marked.
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+  });
+
+  it("skips an excluded preferred account", async () => {
+    const work = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const personal = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const { prepared } = await pool.prepareAccount({ prefer: { id: work.id, refused: null }, exclude: new Set([work.id]) });
+    expect(prepared?.account.id).toBe(personal.id);
+  });
+});
+
+describe("whether a run has an account to use at all", () => {
+  it("does not call the pool connected when its only account cannot answer until the owner signs it in again", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: { access: "a", refresh: "r", expires: Date.now() + 3_600_000 } });
+    await pool.markCredentialProblem(account.id, "expired");
+    expect(await pool.poolHasCredential()).toMatchObject({ any: false, hasOAuth: false });
   });
 });
 
@@ -632,5 +747,91 @@ describe("a refused Terminal sign-in with no time on record", () => {
     const later = new Date(Date.now() + 5_000);
     fs.utimesSync(credentials, later, later);
     expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+});
+
+describe("the owner's \"most room\" pick", () => {
+  const H = 3_600_000;
+  const tokens = (access: string) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + 8 * H });
+
+  /** Anthropic's usage endpoint, by the account's access token: every ask is recorded, and nothing else may be fetched. */
+  function usage(byToken: Record<string, { fiveHour: number; sevenDay: number }>): string[] {
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith("/api/oauth/usage")) throw new Error(`unexpected fetch of ${url}`);
+      const access = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      asked.push(access);
+      const u = byToken[access];
+      return u
+        ? new Response(JSON.stringify({ five_hour: { utilization: u.fiveHour }, seven_day: { utilization: u.sevenDay } }), { status: 200 })
+        : new Response("{}", { status: 403 });
+    }));
+    return asked;
+  }
+
+  async function threeAccounts() {
+    const a = await pool.addOAuthAccount({ label: "A", email: "a@example.com", tokens: tokens("sk-ant-oat01-a") });
+    const b = await pool.addOAuthAccount({ label: "B", email: "b@example.com", tokens: tokens("sk-ant-oat01-b") });
+    const c = await pool.addOAuthAccount({ label: "C", email: "c@example.com", tokens: tokens("sk-ant-oat01-c") });
+    return { a, b, c };
+  }
+
+  const ROOM = {
+    "sk-ant-oat01-a": { fiveHour: 10, sevenDay: 20 },
+    "sk-ant-oat01-b": { fiveHour: 70, sevenDay: 30 },
+    "sk-ant-oat01-c": { fiveHour: 20, sevenDay: 40 },
+  };
+
+  it("is off by default: the owner's order, and Anthropic is never asked", async () => {
+    const asked = usage(ROOM);
+    const { a, b, c } = await threeAccounts();
+    expect((await pool.describePool()).pickMode).toBe("order");
+    await pool.markLimited(a.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(b.id);
+    expect((await pool.prepareAccount({ exclude: new Set([b.id]) })).prepared?.account.id).toBe(c.id);
+    expect(asked).toEqual([]);
+  });
+
+  it("moves to the account whose fullest window has the most room, asking only at the move, at most every ten minutes per account", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 9, 21, 12, 0));
+    const asked = usage(ROOM);
+    const { a, b, c } = await threeAccounts();
+    await pool.setPickMode("most-room");
+    expect((await pool.describePool()).pickMode).toBe("most-room");
+    // Sticky: choosing the pick moves nothing, and a spawn on the active account asks nothing.
+    expect((await pool.readPoolState()).activeId).toBe(a.id);
+    expect((await pool.prepareAccount()).prepared?.account.id).toBe(a.id);
+    expect(asked).toEqual([]);
+
+    // B's five-hour window is the fuller one (70 %), C's week (40 %): C has the more room.
+    await pool.markLimited(a.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(c.id);
+    expect([...asked].sort()).toEqual(["sk-ant-oat01-b", "sk-ant-oat01-c"]);
+
+    // Within ten minutes B's reading stands; A, back, has none yet and is asked.
+    await pool.clearLimit(a.id);
+    expect((await pool.readPoolState()).activeId).toBe(c.id);
+    await pool.markLimited(c.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(a.id);
+    expect(asked.filter((t) => t === "sk-ant-oat01-b")).toHaveLength(1);
+    expect(asked.at(-1)).toBe("sk-ant-oat01-a");
+
+    // A spawn that sees A refuse, past the ten minutes: B is asked again.
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    expect((await pool.prepareAccount({ exclude: new Set([a.id]) })).prepared?.account.id).toBe(b.id);
+    expect(asked.filter((t) => t === "sk-ant-oat01-b")).toHaveLength(2);
+  });
+
+  it("never puts the pool's API key ahead of a subscription, even one Anthropic would not say the room of", async () => {
+    // No readings at all: the owner's order, with the key after the subscriptions.
+    const asked = usage({});
+    const { a, b, c } = await threeAccounts();
+    const key = await pool.addApiKeyAccount({ label: "Key", key: SECOND_KEY });
+    await pool.reorderAccounts([a.id, key.id, c.id, b.id]);
+    await pool.setPickMode("most-room");
+    await pool.markLimited(a.id, Date.now() + H, "session");
+    expect((await pool.readPoolState()).activeId).toBe(c.id);
+    expect(asked).toHaveLength(2);
   });
 });

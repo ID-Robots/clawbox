@@ -24,6 +24,8 @@ import path from "./runtime-path";
 import fs from "fs";
 import { runChild, failureDetail, type ChildResult } from "./child-run";
 import { codingGitIdentityArgs } from "./coding-git-identity";
+import { BOX_FAVICONS } from "./project-icon";
+import { writeRunMarker } from "./coding-folder-kind";
 
 const CALL_TIMEOUT_MS = 60_000;
 export const WORKTREES_DIR = path.join(".clawbox", "worktrees");
@@ -102,18 +104,54 @@ export function workerBranchName(teamId: string, taskId: string, attempt: number
   return `clawbox/${teamId}-${taskId}-${attempt}`;
 }
 
+/** A coding team's own branch or one of its workers' (`clawbox/team-<id>…`): never a base anything forks from. */
+export const TEAM_BRANCH_RE = /^clawbox\/team-[a-z0-9]{8}(?:-.+)?$/;
+
 /**
- * The team's own branch, forked from what the checkout is on and CHECKED
- * OUT in the main checkout, so every merge lands on it and the project
+ * What a new team or run forks from: the branch the checkout is on — unless
+ * that is a coding team's own branch. A team leaves the checkout on its branch
+ * (`ensureTeamBranch`), and one that failed leaves its fixes there: a team
+ * restarted in the same folder forked from it, carried the old fixes, rebuilt
+ * them anyway, and its merges conflicted with themselves (night run,
+ * 2026-10-29). The base is then the one that team recorded (`recordedBase`,
+ * followed back past teams that forked from teams), else the remote's default
+ * branch, else main, master or develop, whichever exists. `from` is the start
+ * point, null for HEAD.
+ */
+export async function forkBase(dir: string, recordedBase: (branch: string) => string | null = () => null): Promise<{ ok: true; base: string; from: string | null } | { ok: false; detail: string }> {
+  const current = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const on = ok(current) && out(current) && out(current) !== "HEAD" ? out(current) : null;
+  if (!on || !TEAM_BRANCH_RE.test(on)) return { ok: true, base: on ?? "main", from: null };
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  let recorded: string | null = on;
+  while (recorded && TEAM_BRANCH_RE.test(recorded) && !seen.has(recorded)) {
+    seen.add(recorded);
+    recorded = recordedBase(recorded);
+  }
+  if (recorded && !TEAM_BRANCH_RE.test(recorded)) candidates.push(recorded);
+  const remoteHead = await git(dir, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  if (ok(remoteHead) && out(remoteHead).startsWith("origin/")) candidates.push(out(remoteHead).slice("origin/".length));
+  candidates.push("main", "master", "develop");
+  for (const name of candidates) {
+    if (ok(await git(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]))) return { ok: true, base: name, from: name };
+    if (ok(await git(dir, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]))) return { ok: true, base: name, from: `origin/${name}` };
+  }
+  return { ok: false, detail: `The checkout is on ${on}, a coding team's branch, and no base branch (main, master, develop or the remote's default) was found to fork from. Check out the project's base branch first.` };
+}
+
+/**
+ * The team's own branch, forked from the project's base (`forkBase`) and
+ * CHECKED OUT in the main checkout, so every merge lands on it and the project
  * page's Create PR has the base to compare against. A repository with no
  * commits gets an empty first one, for the same reason startRunBranch does:
  * `checkout -b` on an unborn HEAD renames it rather than forking.
  */
-export function ensureTeamBranch(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
-  return withDirLock(dir, () => ensureTeamBranchNow(dir, teamId));
+export function ensureTeamBranch(dir: string, teamId: string, recordedBase?: (branch: string) => string | null): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+  return withDirLock(dir, () => ensureTeamBranchNow(dir, teamId, recordedBase));
 }
 
-async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+async function ensureTeamBranchNow(dir: string, teamId: string, recordedBase?: (branch: string) => string | null): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
   const inside = await git(dir, ["rev-parse", "--is-inside-work-tree"]);
   if (!ok(inside)) return { ok: false, detail: failureDetail(inside, "Reading the git repository", "Make the folder a git repository first.") };
   const head = await git(dir, ["rev-parse", "--verify", "HEAD"]);
@@ -123,13 +161,13 @@ async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: t
     const seeded = await git(dir, [...as.args, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, detail: failureDetail(seeded, "Making the first commit") };
   }
-  const current = await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const base = ok(current) && out(current) && out(current) !== "HEAD" ? out(current) : "main";
+  const fork = await forkBase(dir, recordedBase);
+  if (!fork.ok) return fork;
   const branch = teamBranchName(teamId);
-  const made = await git(dir, ["checkout", "-b", branch]);
+  const made = await git(dir, fork.from ? ["checkout", "--no-track", "-b", branch, fork.from] : ["checkout", "-b", branch]);
   if (!ok(made)) return { ok: false, detail: failureDetail(made, `Creating the team branch ${branch}`) };
   await excludeWorktrees(dir);
-  return { ok: true, branch, base };
+  return { ok: true, branch, base: fork.base };
 }
 
 /**
@@ -150,6 +188,12 @@ export const GENERATED_ARTIFACT_EXCLUDES = [
   ".mypy_cache/",
   ".ruff_cache/",
   "node_modules/",
+  // The LINK a run's worktree gets (linkSharedNodeModules): a pattern with a
+  // trailing slash matches directories only, so `node_modules/` let a settle's
+  // `git add -A` commit the symlink — an absolute path into the project that
+  // is broken in every other checkout (bench kanban-app, 2026-10-18: the
+  // merged project could not start or run its tests anywhere else).
+  "/node_modules",
   ".venv/",
   "venv/",
   ".DS_Store",
@@ -217,7 +261,106 @@ async function addWorkerWorktreeNow(dir: string, teamId: string, taskId: string,
   fs.mkdirSync(path.join(dir, WORKTREES_DIR), { recursive: true });
   const added = await git(dir, ["worktree", "add", "-b", branch, target, teamBranchName(teamId)]);
   if (!ok(added)) return { ok: false, detail: failureDetail(added, `Making a worktree for ${taskId}`) };
+  // The run marker (coding-folder-kind.ts), under the `.clawbox/` the
+  // repository's info/exclude already hides from `git status`.
+  writeRunMarker(target, { kind: "team", id: teamId, project: dir });
   return { ok: true, path: target, branch };
+}
+
+/**
+ * A checkout's uncommitted state as a merge home has to read it: `changed` is
+ * anything git lists APART from `favicons` — the box's own (`BOX_FAVICONS`)
+ * lying untracked at the folder's root, named relative to `dir`, the way the
+ * pathspecs and the files below want them. Shared by a team's merge and a
+ * run's merge home (coding-run-worktree.ts), so the two cannot disagree about
+ * which files are the box's.
+ *
+ * A favicon is the box's only when `?? <name>` is ALL git says of that path:
+ * one the project tracks, changed, renamed or dropped from the index, is the
+ * project's own and stays in `changed`. Porcelain paths are the repository's
+ * whatever folder git runs in, and a team may work in a sub-folder of one, so
+ * the folder's prefix goes in front. `-z` because a path then comes as it is:
+ * never quoted, and never a leading space the trimmed output could eat.
+ */
+export async function readCheckout(dir: string, untracked: "normal" | "all"): Promise<{ ok: true; changed: boolean; favicons: string[] } | { ok: false; failed: ChildResult }> {
+  const shown = await git(dir, ["rev-parse", "--show-prefix"]);
+  if (!ok(shown)) return { ok: false, failed: shown };
+  const prefix = out(shown);
+  const status = await git(dir, ["status", "--porcelain", "-z", `--untracked-files=${untracked}`]);
+  if (!ok(status)) return { ok: false, failed: status };
+  // `XY <path>` each, and a rename's source after it as a bare path.
+  const entries = status.stdout.split("\0").filter(Boolean);
+  const favicons = BOX_FAVICONS.filter((name) => {
+    const file = prefix + name;
+    const mentions = entries.filter((e) => e === file || e.slice(3) === file);
+    return mentions.length === 1 && mentions[0] === `?? ${file}`;
+  });
+  const box = new Set(favicons.map((name) => `?? ${prefix}${name}`));
+  return { ok: true, changed: entries.some((e) => !box.has(e)), favicons };
+}
+
+/** A box favicon moved out of a merge's way, with what it takes to put it back. */
+export interface FaviconAside {
+  file: string;
+  bytes: Buffer;
+  mode: number;
+}
+
+/**
+ * The box's untracked favicons that `branch` brings its own of, moved out of
+ * the merge's way. Git refuses to write over an untracked file even when the
+ * bytes are the same ("untracked working tree files would be overwritten by
+ * merge"), and a favicon the branch brought is the work: it wins. Held in
+ * memory rather than deleted, so `putBackFavicons` can return each one the
+ * merge left room for.
+ */
+export async function setAsideFavicons(dir: string, branch: string, favicons: readonly string[]): Promise<FaviconAside[]> {
+  const aside: FaviconAside[] = [];
+  for (const name of favicons) {
+    // `./`: the path relative to `dir` in the branch's tree, not to the repository's root.
+    if (!ok(await git(dir, ["cat-file", "-e", `${branch}:./${name}`]))) continue;
+    const file = path.join(dir, name);
+    // One handle for the check and the read: O_NOFOLLOW refuses a symlink, and
+    // stat/readFile on the same handle cannot race a swap of the path, so the
+    // bytes put back are the favicon's and nothing else's. Handle methods, not
+    // fs calls on a descriptor, which the build would trace (runtime-path.ts).
+    let handle;
+    try {
+      handle = await fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    } catch {
+      // Left where it lies: the merge then says why it cannot go on, in git's words.
+      continue;
+    }
+    try {
+      const stat = await handle.stat();
+      // The box writes plain files; anything else is not its to move.
+      if (!stat.isFile()) continue;
+      const bytes = await handle.readFile();
+      fs.unlinkSync(file);
+      aside.push({ file, bytes, mode: stat.mode & 0o777 });
+    } catch {
+      // Left where it lies, as above.
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  }
+  return aside;
+}
+
+/**
+ * Each favicon `setAsideFavicons` moved, back where it was if the name is
+ * still free: after a merge that did not land, or one whose result has no
+ * such file. Never over one ('wx'), so a favicon the branch brought stays.
+ */
+export function putBackFavicons(aside: readonly FaviconAside[]): void {
+  for (const { file, bytes, mode } of aside) {
+    try {
+      fs.writeFileSync(file, bytes, { flag: "wx", mode });
+    } catch {
+      // EEXIST is the branch's own favicon in its place, which is the point;
+      // anything else is a favicon the next run's start draws again.
+    }
+  }
 }
 
 /**
@@ -234,27 +377,36 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
     const as = await asBox(dir);
     if (!as.ok) return { ok: false, conflict: false, detail: as.detail };
     // Whatever landed in the team's checkout uncommitted while the workers
-    // were out — the favicons the box draws at a run's start above all —
-    // goes on the team branch first: a merge refuses to overwrite an
+    // were out goes on the team branch first: a merge refuses to overwrite an
     // untracked file a worker's branch also brought, and "MERGE FAILED …
     // untracked working tree files would be overwritten" rejected finished
     // work for that (team-8l9oudxd, t1, 2026-09-05). An identical file then
     // merges as one; a different one conflicts honestly, below.
-    const stray = await git(dir, ["status", "--porcelain", "--untracked-files=all"]);
-    if (!ok(stray)) return { ok: false, conflict: false, detail: failureDetail(stray, "Reading the team checkout before the merge") };
-    if (out(stray)) {
-      const added = await git(dir, ["add", "-A"]);
+    //
+    // Never the favicons the box draws at a run's start (`readCheckout`):
+    // they are not the team's work, and this commit put them in the owner's
+    // history. They stay untracked, and one a worker's branch brings its own
+    // of is moved aside for the merge instead, so the branch's file wins.
+    const seen = await readCheckout(dir, "all");
+    if (!seen.ok) return { ok: false, conflict: false, detail: failureDetail(seen.failed, "Reading the team checkout before the merge") };
+    if (seen.changed) {
+      const added = await git(dir, ["add", "-A", "--", ":/", ...seen.favicons.map((name) => `:(exclude)${name}`)]);
       if (!ok(added)) return { ok: false, conflict: false, detail: failureDetail(added, "Staging the team checkout's files before the merge") };
       const kept = await git(dir, [...as.args, "commit", "-q", "--no-verify", "-m", "Coding team: files present in the checkout before a merge"]);
       if (!ok(kept)) return { ok: false, conflict: false, detail: failureDetail(kept, "Committing the team checkout's files before the merge") };
     }
+    const aside = await setAsideFavicons(dir, branch, seen.favicons);
     // `--no-ff` always writes a merge COMMIT, so this needs an identity for the
     // same reason the preservation commit above does — and for the same reason
     // the run worktrees' merge home has always passed one.
     const merged = await git(dir, [...as.args, "merge", "--no-ff", "--no-edit", "-m", message, branch]);
-    if (ok(merged)) return { ok: true, merged: true };
+    if (ok(merged)) {
+      putBackFavicons(aside);
+      return { ok: true, merged: true };
+    }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await git(dir, ["merge", "--abort"]);
+    putBackFavicons(aside);
     return { ok: false, conflict, detail: failureDetail(merged, `Merging ${branch} into the team branch`) };
   });
 }
@@ -292,6 +444,134 @@ export async function harvestWorktree(worktreePath: string, message: string): Pr
   const committed = await git(worktreePath, [...as.args, "commit", "-q", "--no-verify", "-m", message]);
   if (!ok(committed)) return { ok: false, detail: failureDetail(committed, "Committing the files the worker left uncommitted") };
   return { ok: true, files };
+}
+
+/**
+ * Commits a run MADE in this worktree and left on a branch of its own — a
+ * branch it made with `git checkout -b fix/…`, or its HEAD detached there —
+ * that `branch`, the one the box gave it, does not hold. Oldest first.
+ *
+ * "Made here" is read off this worktree's own HEAD reflog: the entries that
+ * wrote a commit (a commit, an amend, a cherry-pick, a revert, a rebase's
+ * picks, a merge commit). A commit HEAD merely stood on — a base branch the
+ * run checked out, a sibling worker's commit — is never one, and a commit no
+ * branch holds any more (amended, reset away) was undone by the run itself.
+ * A coding team's or another run's branch is never a source.
+ */
+export async function ownBranchWork(worktreePath: string, branch: string): Promise<Array<{ name: string; commit: string }>> {
+  const ref = `refs/heads/${branch}`;
+  const given = await git(worktreePath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const log = await git(worktreePath, ["reflog", "show", "--format=%H %gs", "HEAD"]);
+  if (!ok(log)) return [];
+  const madeAt = new Map<string, number>();
+  out(log).split("\n").forEach((line, i) => {
+    const [hash, ...rest] = line.trim().split(" ");
+    if (hash && !madeAt.has(hash) && MADE_ENTRY_RE.test(rest.join(" "))) madeAt.set(hash, i);
+  });
+  if (madeAt.size === 0) return [];
+  const tip = ok(given) ? out(given) : null;
+  const held = async (commit: string) => tip !== null && ok(await git(worktreePath, ["merge-base", "--is-ancestor", commit, tip]));
+  const found: Array<{ name: string; commit: string; at: number }> = [];
+  const refs = await git(worktreePath, ["for-each-ref", "--format=%(objectname) %(refname)", "refs/heads"]);
+  for (const line of ok(refs) ? out(refs).split("\n") : []) {
+    const [commit, name] = line.trim().split(" ");
+    if (!commit || !name || name === ref) continue;
+    const short = name.replace(/^refs\/heads\//, "");
+    if (TEAM_BRANCH_RE.test(short) || /^clawbox\/run-/.test(short)) continue;
+    const at = madeAt.get(commit);
+    if (at === undefined || found.some((f) => f.commit === commit) || (await held(commit))) continue;
+    found.push({ name: short, commit, at });
+  }
+  // A HEAD detached at a commit it made, which no branch names.
+  const symbolic = await git(worktreePath, ["symbolic-ref", "--quiet", "HEAD"]);
+  const head = await git(worktreePath, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (!ok(symbolic) && ok(head)) {
+    const commit = out(head);
+    const at = madeAt.get(commit);
+    if (at !== undefined && !found.some((f) => f.commit === commit) && !(await held(commit))) found.push({ name: commit.slice(0, 12), commit, at });
+  }
+  return found.sort((a, b) => b.at - a.at).map(({ name, commit }) => ({ name, commit }));
+}
+
+/** A HEAD reflog subject that wrote a commit (see ownBranchWork). */
+const MADE_ENTRY_RE = /^(?:commit(?: \([a-z ]+\))?|cherry-pick|revert|rebase(?: -i)? \((?:pick|reword|edit|squash|fixup)\)):|^merge .*: Merge made/;
+
+/**
+ * What a run committed on a branch of its OWN (`ownBranchWork`), brought onto
+ * `branch` — the one the box gave it and the one everything after the run
+ * reads. A worker told to commit its work made `fix/…` with
+ * `git checkout -b` and committed there; its given branch stayed where it was
+ * forked, and finished work was rejected as NO CHANGE (team-sso0e0wq,
+ * 2026-10-29).
+ *
+ * Each such branch, oldest first: `branch` is moved forward when it is behind
+ * the work (with `merge --ff-only` when HEAD is on it, so the tree follows;
+ * with `update-ref` when it is not, so the tree does not move), else the work
+ * is merged into it. A merge git cannot do alone is aborted and HEAD put back
+ * where the run left it, so its files are still on disk; the failure says what
+ * was not brought. HEAD ends on `branch` when the run left it elsewhere at a
+ * commit `branch` now holds. `from` names what was adopted, null when nothing
+ * needed to be. The run's own branches are left where they are.
+ */
+export async function adoptOwnBranchWork(worktreePath: string, branch: string): Promise<{ ok: true; from: string | null } | { ok: false; detail: string }> {
+  const ref = `refs/heads/${branch}`;
+  const tipOf = async () => {
+    const r = await git(worktreePath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return ok(r) && out(r) ? out(r) : null;
+  };
+  if (!(await tipOf())) {
+    // Not a repository git can read here: nothing to say, and the caller's
+    // own steps report it. A repository without the branch: said.
+    if (!ok(await git(worktreePath, ["rev-parse", "--git-dir"]))) return { ok: true, from: null };
+    return { ok: false, detail: `${branch}, the branch this work belongs on, is gone from the repository.` };
+  }
+  const symbolic = await git(worktreePath, ["symbolic-ref", "--quiet", "HEAD"]);
+  const headRef = ok(symbolic) && out(symbolic) ? out(symbolic) : null;
+  const headAt = await git(worktreePath, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  const head = ok(headAt) ? out(headAt) : null;
+  // Where the run left HEAD, to put it back if a merge fails.
+  const leftAt = headRef ? headRef.replace(/^refs\/heads\//, "") : head;
+  let onGiven = headRef === ref;
+  const adopted: string[] = [];
+  for (const source of await ownBranchWork(worktreePath, branch)) {
+    const tip = await tipOf();
+    if (!tip) return { ok: false, detail: `${branch} went from the repository while ${source.name} was being brought onto it.` };
+    if (ok(await git(worktreePath, ["merge-base", "--is-ancestor", source.commit, tip]))) continue;
+    if (ok(await git(worktreePath, ["merge-base", "--is-ancestor", tip, source.commit]))) {
+      const moved = onGiven
+        ? await git(worktreePath, ["merge", "--ff-only", "-q", source.commit])
+        : await git(worktreePath, ["update-ref", ref, source.commit, tip]);
+      if (!ok(moved)) return { ok: false, detail: failed(moved, `Bringing ${source.name} onto ${branch}`) };
+      adopted.push(source.name);
+      continue;
+    }
+    // Forked from somewhere else: merged into the given branch, in this worktree.
+    const as = await asBox(worktreePath);
+    if (!as.ok) return { ok: false, detail: as.detail };
+    if (!onGiven) {
+      const back = await git(worktreePath, ["checkout", "-q", branch]);
+      if (!ok(back)) return { ok: false, detail: failed(back, `Checking ${branch} out to bring ${source.name} onto it`) };
+      onGiven = true;
+    }
+    const merged = await git(worktreePath, [...as.args, "merge", "--no-ff", "--no-edit", "-m", `Bring ${source.name} onto ${branch}`, source.commit]);
+    if (!ok(merged)) {
+      await git(worktreePath, ["merge", "--abort"]);
+      if (headRef !== ref && leftAt) await git(worktreePath, ["checkout", "-q", leftAt]);
+      return { ok: false, detail: failed(merged, `Merging ${source.name} into ${branch}`) };
+    }
+    adopted.push(source.name);
+  }
+  if (!onGiven && head) {
+    const tip = await tipOf();
+    if (tip === head) await git(worktreePath, ["symbolic-ref", "HEAD", ref]);
+    else if (tip && ok(await git(worktreePath, ["merge-base", "--is-ancestor", head, tip]))) await git(worktreePath, ["checkout", "-q", branch]);
+  }
+  return { ok: true, from: adopted.length ? adopted.join(", ") : null };
+}
+
+/** What failed, then git's own words on one line: a board note quotes the first line only. */
+function failed(r: ChildResult, what: string): string {
+  return `${what} failed: ${failureDetail(r, what).replace(/\s+/g, " ").trim()}`;
 }
 
 /**
@@ -343,11 +623,17 @@ function leftovers(porcelain: string): { files: string[]; left: string[] } {
   return { files: [...paths].filter((p) => !never(p)), left: [...paths].filter(never) };
 }
 
-/** The worktree's files go; its branch stays as history. */
-export function removeWorktree(dir: string, worktreePath: string): Promise<void> {
+/**
+ * The worktree's files go; its branch stays as history — unless it is named in
+ * `dropBranch`: a worktree made for an attempt that never started (its task
+ * stopped being ready while it was made) leaves no history, and its branch
+ * name is the one the task's next attempt will ask for.
+ */
+export function removeWorktree(dir: string, worktreePath: string, opts: { dropBranch?: string } = {}): Promise<void> {
   return withDirLock(dir, async () => {
     await git(dir, ["worktree", "remove", "--force", worktreePath]);
     await git(dir, ["worktree", "prune"]);
+    if (opts.dropBranch) await git(dir, ["branch", "-D", opts.dropBranch]);
   });
 }
 

@@ -77,7 +77,7 @@ describe("SystemTray — the internet line", () => {
       const url = new URL(String(input), "http://clawbox.local");
       const method = init?.method ?? "GET";
       expect(
-        nonOwnerVerdict({ pathname: url.pathname, method, searchParams: url.searchParams, intent: "fetch" }),
+        nonOwnerVerdict({ pathname: url.pathname, method, searchParams: url.searchParams, intent: "fetch", username: "alice" }),
         `${method} ${url.pathname}`,
       ).toBe("allow");
     }

@@ -68,6 +68,38 @@ class State:
     # switched off while the account was full" — a pause it re-arms by itself
     # once credentials work again — from an owner switching it off for good.
     quota_full_since_ms: int = 0
+    # Why the last backup run REFUSED to upload, and the sizes it refused on —
+    # the pre-upload admission check in `runner`. "" when the last run was not
+    # refused there: every run clears the record as it starts, so a refusal
+    # never outlives the run after it. `quota_full` carries all three sizes;
+    # `usage_unverified` (the prefix could not be listed) carries what the
+    # archive needed and the quota, and 0 for the usage nobody could count.
+    # The app reads these to say "needs 1.2 GB, 300 MB free" in the owner's
+    # language — the sentence the daemon logs is English and is never shown.
+    # Deliberately NOT `quota_full_since_ms`: that one says the PORTAL refuses
+    # credentials, and the bridge ends a quota pause the moment credentials
+    # mint again — which they do the whole time a refusal like this stands.
+    last_refusal: str = ""  # "" | "quota_full" | "usage_unverified"
+    last_refusal_at_ms: int = 0
+    last_refusal_needed_bytes: int = 0
+    last_refusal_used_bytes: int = 0
+    last_refusal_quota_bytes: int = 0
+    # The failure incident the portal was last told about — from the first
+    # failed run to the next one that succeeds — so that one incident costs the
+    # owner a "backup needs attention" email at most at the backoff points of
+    # `runner.ALERT_BACKOFF_MS`, not one a night. 0 when the last run was fine.
+    alert_incident_since_ms: int = 0
+    # How many "error" heartbeats of this incident the portal has received …
+    alert_reports: int = 0
+    # … and when the next one may go: a failure before then is logged and
+    # recorded here, and the portal keeps showing the one it was told.
+    alert_next_report_at_ms: int = 0
+
+
+#: The values `last_refusal` may hold; anything else in the file reads as "".
+REFUSAL_QUOTA_FULL = "quota_full"
+REFUSAL_USAGE_UNVERIFIED = "usage_unverified"
+_REFUSALS = frozenset({REFUSAL_QUOTA_FULL, REFUSAL_USAGE_UNVERIFIED})
 
 
 def _safe_int(value: object) -> int:
@@ -78,6 +110,12 @@ def _safe_int(value: object) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
+
+
+def _refusal(value: object) -> str:
+    """`last_refusal` as written, or "" for anything that is not one of the
+    kinds the runner writes — a refusal the app cannot name is not shown."""
+    return value if isinstance(value, str) and value in _REFUSALS else ""
 
 
 def _large_archives(value: object) -> list[dict[str, object]]:
@@ -139,6 +177,14 @@ def load(path: Path | str | None = None) -> State:
         last_skipped_links=skipped_links(raw.get("last_skipped_links")),
         last_skipped_link_count=_safe_int(raw.get("last_skipped_link_count", 0)),
         quota_full_since_ms=_safe_int(raw.get("quota_full_since_ms", 0)),
+        last_refusal=_refusal(raw.get("last_refusal")),
+        last_refusal_at_ms=_safe_int(raw.get("last_refusal_at_ms", 0)),
+        last_refusal_needed_bytes=_safe_int(raw.get("last_refusal_needed_bytes", 0)),
+        last_refusal_used_bytes=_safe_int(raw.get("last_refusal_used_bytes", 0)),
+        last_refusal_quota_bytes=_safe_int(raw.get("last_refusal_quota_bytes", 0)),
+        alert_incident_since_ms=_safe_int(raw.get("alert_incident_since_ms", 0)),
+        alert_reports=_safe_int(raw.get("alert_reports", 0)),
+        alert_next_report_at_ms=_safe_int(raw.get("alert_next_report_at_ms", 0)),
     )
 
 

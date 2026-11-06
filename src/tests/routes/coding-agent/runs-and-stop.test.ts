@@ -8,6 +8,7 @@
  * an hour. Stop is gated in-handler like every other state change.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runSummaryLine } from "@/lib/coding-agent-slim";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import { saveEnv } from "@/tests/helpers/env";
 
@@ -16,9 +17,10 @@ const clearFinishedRuns = vi.hoisted(() => vi.fn());
 const listRuns = vi.hoisted(() => vi.fn());
 const waitForRun = vi.hoisted(() => vi.fn());
 const stopRun = vi.hoisted(() => vi.fn());
+const cancelQueuedRun = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, getRun, listRuns, waitForRun, stopRun, clearFinishedRuns };
+  return { ...actual, getRun, listRuns, waitForRun, stopRun, clearFinishedRuns, cancelQueuedRun };
 });
 
 const RUN = { id: "run-k3x9q2ab", status: "completed", summary: "done", source: "agent" };
@@ -63,13 +65,30 @@ describe("GET runs", () => {
     expect(res.status).toBe(200);
     // The route decorates each run with where its transcript lives, so the
     // app can offer a live preview without knowing Claude Code's layout.
-    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null }] });
+    // `summaryLine` rides on every run for the chat's settled card.
+    // `starting` beside the records: no start is on its way in this test.
+    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null, summaryLine: runSummaryLine(RUN) }], starting: [] });
     expect(listRuns).toHaveBeenCalledWith(30);
+  });
+
+  it("answers a settled run slim on ?slim=1 and a live one whole; the default is untouched", async () => {
+    const settled = { ...RUN, progress: ["Read index.html"], progressAt: [1], resultText: "closing", allowRules: ["Bash(git *)"], deniedActions: ["rm"], denials: [{ tool: "Bash" }] };
+    const live = { ...settled, id: "run-live00001", status: "running" };
+    listRuns.mockReturnValue([settled, live]);
+    const slim = await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=30&artifacts=1&slim=1"))).json();
+    expect(slim.runs[0]).toEqual({ ...settled, transcriptPath: null, artifacts: [], slim: true, progress: [], progressAt: [], resultText: null, allowRules: [], deniedActions: [], denials: [], summaryLine: runSummaryLine({ ...settled, resultText: null }) });
+    expect(slim.runs[1]).toEqual({ ...live, transcriptPath: null, artifacts: [], summaryLine: runSummaryLine(live) });
+    // Without the flag every record is whole, as the mount read and the read after a run settles need it.
+    const whole = await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=30"))).json();
+    expect(whole.runs).toEqual([{ ...settled, transcriptPath: null, summaryLine: runSummaryLine(settled) }, { ...live, transcriptPath: null, summaryLine: runSummaryLine(live) }]);
+    // One run by id is never slim: that is how a run page fills itself.
+    getRun.mockReturnValue(settled);
+    expect((await (await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab&slim=1"))).json()).run.progress).toEqual(["Read index.html"]);
   });
 
   it("returns one run by id without waiting when wait is absent", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab"));
-    expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null } });
+    expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null, summaryLine: runSummaryLine(RUN) } });
     expect(waitForRun).not.toHaveBeenCalled();
   });
 
@@ -166,6 +185,20 @@ describe("POST stop", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).run.status).toBe("stopped");
     expect(stopRun).toHaveBeenCalledWith("run-k3x9q2ab");
+  });
+
+  it("takes a QUEUED run out of the queue for the owner alone — never for the bearer, whoever queued it", async () => {
+    getRun.mockReturnValue({ ...RUN, status: "queued", source: "agent" });
+    cancelQueuedRun.mockResolvedValue({ ...RUN, status: "stopped", source: "agent" });
+    const refused = await stop({ id: "run-k3x9q2ab" }, "bearer");
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ kind: "owner_only", error: expect.stringMatching(/only the owner can cancel a queued run/) });
+    expect(cancelQueuedRun).not.toHaveBeenCalled();
+    const ok = await stop({ id: "run-k3x9q2ab" }, "cookie");
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).run.status).toBe("stopped");
+    expect(cancelQueuedRun).toHaveBeenCalledWith("run-k3x9q2ab");
+    expect(stopRun).not.toHaveBeenCalled();
   });
 
   it("answers a JSON 404 for an unknown run", async () => {

@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "./runtime-path";
 import { CLOUDFLARED_DIR, getTunnelServiceState, startTunnelService } from "./cloudflared";
 import { get as getConfigValue } from "./config-store";
+import { migrateLegacyPortalUrl } from "./portal-legacy-domain";
 import {
   type NamedTunnelCredential,
   clearNamedTunnelCredential,
@@ -14,9 +15,10 @@ import {
 } from "./named-tunnel";
 
 const DEVICE_ID_FILE = path.join(CLOUDFLARED_DIR, "device-id");
-const PORTAL_HEARTBEAT_URL =
+const PORTAL_HEARTBEAT_URL = migrateLegacyPortalUrl(
   process.env.PORTAL_HEARTBEAT_URL?.trim() ||
-  "https://clawbox.com/api/portal/devices/heartbeat";
+  "https://clawbox.com/api/portal/devices/heartbeat",
+);
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const MACHINE_ID_FILE = "/etc/machine-id";
 

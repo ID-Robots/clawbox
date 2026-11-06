@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import { createHash } from "crypto";
+import { readFileSync, realpathSync, statSync } from "fs";
 import path from "@/lib/runtime-path";
 import { HERMES_BIN } from "@/lib/harness";
 import { spawnFailureMessage } from "@/lib/hermes-cli-message";
@@ -64,8 +66,8 @@ const WIDE_CONSOLE_COLUMNS = "400";
 // part of the cache key, so it would force a miss on every ClawBox probe AND on
 // the owner's next banner.)
 //
-// The shim is four lines: unset PYTHONPATH, unset PYTHONHOME, exec
-// `<agent_dir>/venv/bin/python <agent_dir>/hermes`. Where that agent dir is
+// The shim runs the agent's interpreter (see hermesVenvPython) on the checkout
+// with PYTHONPATH and PYTHONHOME removed. Where that agent dir is
 // resolves the way the rest of this repo resolves it — `hermesHome()` in
 // hermes-env.ts, `whatsappBridgeInstallDir()` in hermes-whatsapp.ts — so both
 // documented overrides move BOTH halves of the probe together and the silent
@@ -73,9 +75,49 @@ const WIDE_CONSOLE_COLUMNS = "400";
 // per call rather than at import, and copied rather than imported: this block
 // is meant to be deleted whole, and a new module edge out of hermes-cli.ts
 // would have to be added to every suite that mocks that module.
-const hermesAgentDir = () =>
-  process.env.HERMES_AGENT_DIR ||
-  path.join(process.env.HERMES_HOME || path.join(HOME_DIR, ".hermes"), "hermes-agent");
+const hermesHomeDir = () => process.env.HERMES_HOME || path.join(HOME_DIR, ".hermes");
+const hermesAgentDir = () => process.env.HERMES_AGENT_DIR || path.join(hermesHomeDir(), "hermes-agent");
+/**
+ * The interpreter the agent at `agentDir` runs on — install.sh's
+ * `hermes_venv_python`, and upstream's `selected_venv` (pm/environments.py).
+ *
+ * From v0.21.7 the shim no longer execs `<agent_dir>/venv/bin/python`: the
+ * upstream package manager builds the environment outside the checkout and
+ * records it in `<hermes_home>/installs/<key>/facts.json`
+ * (`packages.venv.environment`), `<key>` being the first 16 hex digits of the
+ * sha256 of the checkout's real path. A record wins and must sit under that
+ * key's `environments/` with a `pyvenv.cfg`; a record that fails that answers
+ * null, so the silent probe is skipped rather than aimed at a stale tree. With
+ * no record at all the in-tree `venv` of an older install answers, exactly as
+ * before.
+ */
+function hermesVenvPython(agentDir: string, hermesHome: string): string | null {
+  let real: string;
+  try {
+    real = realpathSync(agentDir);
+  } catch {
+    real = path.resolve(agentDir);
+  }
+  const state = path.join(hermesHome, "installs", createHash("sha256").update(real).digest("hex").slice(0, 16));
+  let recorded: unknown;
+  try {
+    const facts = JSON.parse(readFileSync(path.join(state, "facts.json"), "utf-8").replace(/^\uFEFF/, ""));
+    recorded = facts?.packages?.venv?.environment;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return path.join(agentDir, "venv", "bin", "python");
+    return null;
+  }
+  if (recorded === undefined || recorded === null) return path.join(agentDir, "venv", "bin", "python");
+  if (typeof recorded !== "string") return null;
+  try {
+    const venv = realpathSync(recorded);
+    const generations = realpathSync(path.join(state, "environments"));
+    if (!venv.startsWith(generations + path.sep) || !statSync(path.join(venv, "pyvenv.cfg")).isFile()) return null;
+    return path.join(venv, "bin", "python");
+  } catch {
+    return null;
+  }
+}
 const SILENT_VERSION_PY =
   "from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)";
 /** The one argv this file knows a silent equivalent for. */
@@ -164,32 +206,35 @@ export async function runHermesCli(
 
   if (opts.silenceUpdateCheck && !opts.sudo && isSilenceableVersionCall(args)) {
     const agentDir = hermesAgentDir();
-    try {
-      const quiet = await spawnHermes(
-        path.join(agentDir, "venv", "bin", "python"),
-        ["-c", SILENT_VERSION_PY],
-        {
-          ...opts,
-          timeoutMs: Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, SILENT_VERSION_TIMEOUT_MS),
-          // The package IS the checkout — there is no pip dist to import — so
-          // the checkout goes on the path the shim's `exec <dir>/hermes` puts
-          // there. PYTHONSAFEPATH keeps the CWD off sys.path[0], where `-c`
-          // would otherwise put it and the shim never does; Python 3.11+ reads
-          // it and older interpreters ignore an unknown PYTHON* variable.
-          env: { ...opts.env, PYTHONPATH: agentDir, PYTHONSAFEPATH: "1" },
-        },
-        // PYTHONHOME goes the way the shim takes it — removed, not set: an
-        // inherited one aims this interpreter at a different stdlib. And no
-        // console line for a speculative spawn that has a supported call
-        // behind it, or a box with no venv logs every probe twice.
-        { unsetEnv: ["PYTHONHOME"], logSpawnFailure: false },
-      );
-      if (quiet.code === 0 && looksLikeVersionBanner(quiet.stdout)) return quiet;
-    } catch (e) {
-      // Fall through to the supported call — except for the one failure that
-      // says the CHILD misbehaved rather than that it could not be started:
-      // asking the same question again would overflow the same buffer.
-      if (isOutputLimitError(e)) throw e;
+    const python = hermesVenvPython(agentDir, hermesHomeDir());
+    if (python) {
+      try {
+        const quiet = await spawnHermes(
+          python,
+          ["-c", SILENT_VERSION_PY],
+          {
+            ...opts,
+            timeoutMs: Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, SILENT_VERSION_TIMEOUT_MS),
+            // The package IS the checkout — there is no pip dist to import — so
+            // the checkout goes on the path the shim's `exec <dir>/hermes` puts
+            // there. PYTHONSAFEPATH keeps the CWD off sys.path[0], where `-c`
+            // would otherwise put it and the shim never does; Python 3.11+ reads
+            // it and older interpreters ignore an unknown PYTHON* variable.
+            env: { ...opts.env, PYTHONPATH: agentDir, PYTHONSAFEPATH: "1" },
+          },
+          // PYTHONHOME goes the way the shim takes it — removed, not set: an
+          // inherited one aims this interpreter at a different stdlib. And no
+          // console line for a speculative spawn that has a supported call
+          // behind it, or a box with no venv logs every probe twice.
+          { unsetEnv: ["PYTHONHOME"], logSpawnFailure: false },
+        );
+        if (quiet.code === 0 && looksLikeVersionBanner(quiet.stdout)) return quiet;
+      } catch (e) {
+        // Fall through to the supported call — except for the one failure that
+        // says the CHILD misbehaved rather than that it could not be started:
+        // asking the same question again would overflow the same buffer.
+        if (isOutputLimitError(e)) throw e;
+      }
     }
   }
 

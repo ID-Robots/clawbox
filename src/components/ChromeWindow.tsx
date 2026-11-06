@@ -42,7 +42,8 @@ interface ChromeWindowProps {
   zIndex: number;
   onClose: () => void;
   onFocus: () => void;
-  onMinimize: () => void;
+  /** Absent: the window has no shelf entry to minimize to, and draws no Minimize button (PopoutWindow). */
+  onMinimize?: () => void;
   onGeometryChange?: (geo: { x: number; y: number; width: number; height: number }) => void;
   minimized?: boolean;
   rightInset?: number;
@@ -191,6 +192,13 @@ function ChromeWindow({
   // `moved`: the window has left the place the press found it — the moment it
   // takes a compositor layer of its own (see handleMove).
   const dragRef = useRef({ isDragging: false, moved: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
+  // The press the title bar has already asked forward with, so the window's
+  // own press handler (below) does not ask a second time for the same one.
+  const focusAskedForRef = useRef<Event | null>(null);
+  const handlePress = useCallback((e: React.MouseEvent) => {
+    if (focusAskedForRef.current === e.nativeEvent) return;
+    onFocus();
+  }, [onFocus]);
   const resizeRef = useRef<{
     isResizing: boolean;
     edge: string;
@@ -368,6 +376,7 @@ function ChromeWindow({
     // Whether it already holds the top layer is the desktop's to know — its
     // focus handler is where a press on the top window is answered with
     // nothing.
+    focusAskedForRef.current = e.nativeEvent;
     onFocus();
   }, [maximized, snapped, position.x, position.y, onFocus]);
 
@@ -778,7 +787,7 @@ function ChromeWindow({
     setMinimizing(true);
     setTimeout(() => {
       setMinimizing(false);
-      onMinimize();
+      onMinimize?.();
     }, 250);
   }, [onMinimize]);
 
@@ -832,7 +841,11 @@ function ChromeWindow({
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
           : "opacity 0.15s, box-shadow 0.15s",
       }}
-      onMouseDown={isActive ? undefined : onFocus}
+      // Every press, the active window's too: the floating chat or the
+      // top-right bubbles may stand over the window in front, and a press is
+      // what puts it back over them. The desktop answers a window that is
+      // already on top without a render (`focusWindow`).
+      onMouseDown={handlePress}
     >
       {/* Title bar — ChromeOS style */}
       <div
@@ -859,15 +872,17 @@ function ChromeWindow({
 
         {/* Right: window controls — ChromeOS circular buttons */}
         <div className="flex items-center gap-1.5 ml-2">
-          {/* Minimize */}
-          <button
-            onClick={handleMinimize}
-            className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
-            title={t("window.minimize")}
-            aria-label={t("window.minimize")}
-          >
-            <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>minimize</span>
-          </button>
+          {/* Minimize — only for a window the shelf can bring back. */}
+          {onMinimize && (
+            <button
+              onClick={handleMinimize}
+              className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
+              title={t("window.minimize")}
+              aria-label={t("window.minimize")}
+            >
+              <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>minimize</span>
+            </button>
+          )}
 
           {/* Maximize */}
           <button

@@ -72,13 +72,17 @@ function identityFromClaims(claims, owner, users) {
 }
 
 /**
- * Verify the cookie in a raw `Cookie` header and say who it speaks for.
+ * Verify the cookie in a raw `Cookie` header and say who it speaks for and
+ * when it runs out (`exp`, seconds since the epoch). A socket opened on it
+ * lives past its upgrade, so production-server.js needs the second answer to
+ * close the socket when the session itself would no longer be accepted
+ * (scripts/upgrade-session-watch.js).
  *
  * @param {string | undefined} cookieHeader
  * @param {{ secret?: string, sessionGen: number, users: Map<string, string>, owner: string }} facts
- * @returns {{ username: string, isOwner: boolean } | null}
+ * @returns {{ username: string, isOwner: boolean, exp: number } | null}
  */
-function sessionIdentityFromCookieHeader(cookieHeader, facts) {
+function sessionFromCookieHeader(cookieHeader, facts) {
   try {
     const secret = facts.secret;
     if (!secret) return null;
@@ -101,10 +105,23 @@ function sessionIdentityFromCookieHeader(cookieHeader, facts) {
     if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return null;
     // Reject cookies from before the last password change (session revocation).
     if ((typeof data.gen === "number" ? data.gen : 0) !== facts.sessionGen) return null;
-    return identityFromClaims(data, facts.owner, facts.users);
+    const identity = identityFromClaims(data, facts.owner, facts.users);
+    return identity ? { ...identity, exp: data.exp } : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Verify the cookie in a raw `Cookie` header and say who it speaks for.
+ *
+ * @param {string | undefined} cookieHeader
+ * @param {{ secret?: string, sessionGen: number, users: Map<string, string>, owner: string }} facts
+ * @returns {{ username: string, isOwner: boolean } | null}
+ */
+function sessionIdentityFromCookieHeader(cookieHeader, facts) {
+  const session = sessionFromCookieHeader(cookieHeader, facts);
+  return session ? { username: session.username, isOwner: session.isOwner } : null;
 }
 
 module.exports = {
@@ -112,5 +129,6 @@ module.exports = {
   ownerUsername,
   parseUserRegistry,
   identityFromClaims,
+  sessionFromCookieHeader,
   sessionIdentityFromCookieHeader,
 };

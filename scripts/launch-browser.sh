@@ -2,17 +2,34 @@
 set -euo pipefail
 
 # Launch Chromium with CDP remote debugging on the VNC virtual display.
-# Called by clawbox-browser-cdp.service (systemd)
+# Called by clawbox-browser.service (systemd)
+#
+# `launch-browser.sh --print-config` prints the profile, port and executable
+# this would use and exits — the test that keeps these rules and
+# src/lib/desktop-browser-config.ts in step runs it.
+#
+# `launch-browser.sh URL` asks for that page: opened in the browser already
+# running (in place of a blank tab when it has one), or as the first page of a
+# fresh start instead of the owner's start page. Without a URL a running
+# browser is only brought to the front — never given another blank tab.
+# Every start begins clean (scripts/lib/browser-clean-start.sh): no restored
+# session and no "Restore pages?" bubble, also after a crash.
+
+# shellcheck source=scripts/lib/browser-clean-start.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/browser-clean-start.sh"
 
 CURRENT_USER="$(id -un)"
 HOME="${HOME:-$(getent passwd "$CURRENT_USER" | cut -d: -f6)}"
-PROFILE="$HOME/.config/clawbox-browser"
-CDP_PORT="${CDP_PORT:-18800}"
+DEFAULT_PROFILE="$HOME/.config/clawbox-browser"
+DEFAULT_CDP_PORT=18800
 VNC_STATE_FILE="${HOME}/.cache/clawbox/vnc-display.env"
 # The owner's start page, written by the web server (src/lib/browser-setup.ts)
 # because systemd is what starts this browser — the setting cannot be passed as
-# an argument from the page that changed it.
-BROWSER_STATE_FILE="${HOME}/.cache/clawbox/browser.env"
+# an argument from the page that changed it. The same file names the owner's
+# own browser, when they have one: CLAWBOX_BROWSER_PROFILE_DIR,
+# CLAWBOX_BROWSER_CDP_PORT and CLAWBOX_BROWSER_EXECUTABLE (the rules are
+# src/lib/desktop-browser-config.ts's, which the web server reads).
+BROWSER_STATE_FILE="${CLAWBOX_BROWSER_ENV_FILE:-${HOME}/.cache/clawbox/browser.env}"
 DEFAULT_DISPLAY="${DISPLAY:-:99}"
 DEFAULT_START_URL="about:blank"
 
@@ -47,6 +64,58 @@ is_snap_chromium_wrapper() {
   grep -qE '(/snap/bin/chromium|snap run chromium)' "$bin" 2>/dev/null
 }
 
+trim() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+
+# `~`, `$HOME` and `${HOME}` at the start of a value the file kept literal
+# (single-quoted), the way the web server expands them.
+expand_home() {
+  local v="$1"
+  case "$v" in
+    "~"|'$HOME'|'${HOME}') v="$HOME" ;;
+    "~/"*) v="$HOME/${v#"~/"}" ;;
+    '$HOME/'*) v="$HOME/${v#'$HOME/'}" ;;
+    '${HOME}/'*) v="$HOME/${v#'${HOME}/'}" ;;
+  esac
+  printf '%s' "$v"
+}
+
+# Absolute, no whitespace, quote or backslash, no `.`/`..` segment, not `/`.
+# Prints the path with its trailing slashes removed; fails when unusable.
+normalize_profile_dir() {
+  local v
+  v="$(expand_home "$1")"
+  [[ "$v" == /* ]] || return 1
+  local unsafe="[[:space:]'\"\\\\]"
+  [[ "$v" =~ $unsafe ]] && return 1
+  while [[ "$v" == */ ]]; do v="${v%/}"; done
+  [ -n "$v" ] || return 1
+  [[ "/$v/" == */./* || "/$v/" == */../* ]] && return 1
+  printf '%s' "$v"
+}
+
+# 1024-65535, digits only. Prints it without leading zeros.
+normalize_cdp_port() {
+  local v="$1"
+  # Length by ${#v}, not a bounded repeat (src/tests/unit/shell-regex-hygiene.test.ts).
+  [[ "$v" =~ ^[0-9]+$ ]] && (( ${#v} <= 5 )) || return 1
+  v=$((10#$v))
+  (( v >= 1024 && v <= 65535 )) || return 1
+  printf '%s' "$v"
+}
+
+# Absolute. Whether it is there and runnable is decided at launch, below.
+normalize_executable() {
+  local v
+  v="$(expand_home "$1")"
+  [[ "$v" == /* ]] || return 1
+  printf '%s' "$v"
+}
+
 find_playwright_chromium() {
   # Playwright 1.50+ ships Chrome-for-Testing at chrome-linux64/chrome on
   # amd64 and chrome-linux-arm64/chrome on arm64; older builds used
@@ -63,6 +132,15 @@ if [ -f "$VNC_STATE_FILE" ]; then
   source "$VNC_STATE_FILE"
 fi
 
+# The environment outranks the file, key by key: remember what it set before
+# sourcing the file can overwrite it. (The unit's own CDP_PORT=18800 is the
+# old knob the web server never read; it no longer decides anything.)
+ENV_PROFILE_DIR="$(trim "${CLAWBOX_BROWSER_PROFILE_DIR:-}")"
+ENV_CDP_PORT="$(trim "${CLAWBOX_BROWSER_CDP_PORT:-}")"
+ENV_EXECUTABLE="$(trim "${CLAWBOX_BROWSER_EXECUTABLE:-}")"
+ENV_AGENT_ISOLATED="$(trim "${CLAWBOX_BROWSER_AGENT_ISOLATED:-}")"
+unset CLAWBOX_BROWSER_PROFILE_DIR CLAWBOX_BROWSER_CDP_PORT CLAWBOX_BROWSER_EXECUTABLE CLAWBOX_BROWSER_AGENT_ISOLATED
+
 if [ -f "$BROWSER_STATE_FILE" ]; then
   # shellcheck disable=SC1090
   source "$BROWSER_STATE_FILE"
@@ -70,15 +148,82 @@ fi
 
 START_URL="${CLAWBOX_BROWSER_START_URL:-$DEFAULT_START_URL}"
 
+[ -n "$ENV_PROFILE_DIR" ] && CLAWBOX_BROWSER_PROFILE_DIR="$ENV_PROFILE_DIR"
+[ -n "$ENV_CDP_PORT" ] && CLAWBOX_BROWSER_CDP_PORT="$ENV_CDP_PORT"
+[ -n "$ENV_EXECUTABLE" ] && CLAWBOX_BROWSER_EXECUTABLE="$ENV_EXECUTABLE"
+[ -n "$ENV_AGENT_ISOLATED" ] && CLAWBOX_BROWSER_AGENT_ISOLATED="$ENV_AGENT_ISOLATED"
+
+# A value that is set but unusable is a warning and the default, never a guess
+# — the web server applies the same rule, so both always name the same profile
+# and port.
+PROFILE="$DEFAULT_PROFILE"
+if [[ -n "${CLAWBOX_BROWSER_PROFILE_DIR:-}" && ! "$CLAWBOX_BROWSER_PROFILE_DIR" =~ ^[[:space:]]*$ ]]; then
+  if p="$(normalize_profile_dir "$(trim "$CLAWBOX_BROWSER_PROFILE_DIR")")"; then
+    PROFILE="$p"
+  else
+    echo "CLAWBOX_BROWSER_PROFILE_DIR must be an absolute path without spaces or quotes; using $DEFAULT_PROFILE" >&2
+  fi
+fi
+CDP_PORT="$DEFAULT_CDP_PORT"
+if [[ -n "${CLAWBOX_BROWSER_CDP_PORT:-}" && ! "$CLAWBOX_BROWSER_CDP_PORT" =~ ^[[:space:]]*$ ]]; then
+  if p="$(normalize_cdp_port "$(trim "$CLAWBOX_BROWSER_CDP_PORT")")"; then
+    CDP_PORT="$p"
+  else
+    echo "CLAWBOX_BROWSER_CDP_PORT must be a port from 1024 to 65535; using $DEFAULT_CDP_PORT" >&2
+  fi
+fi
+CONFIGURED_EXECUTABLE=""
+if [[ -n "${CLAWBOX_BROWSER_EXECUTABLE:-}" && ! "$CLAWBOX_BROWSER_EXECUTABLE" =~ ^[[:space:]]*$ ]]; then
+  if p="$(normalize_executable "$(trim "$CLAWBOX_BROWSER_EXECUTABLE")")"; then
+    CONFIGURED_EXECUTABLE="$p"
+  else
+    echo "CLAWBOX_BROWSER_EXECUTABLE must be an absolute path; finding Chromium automatically" >&2
+  fi
+fi
+
+# The escape hatch from "one browser per box" (src/lib/shared-browser.ts):
+# 1 gives the assistant a hidden browser of its own again. Anything but a
+# plain yes or no is a warning and the default, which is sharing this one.
+AGENT_ISOLATED=0
+if [[ -n "${CLAWBOX_BROWSER_AGENT_ISOLATED:-}" && ! "$CLAWBOX_BROWSER_AGENT_ISOLATED" =~ ^[[:space:]]*$ ]]; then
+  case "$(trim "$CLAWBOX_BROWSER_AGENT_ISOLATED" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) AGENT_ISOLATED=1 ;;
+    0|false|no|off) AGENT_ISOLATED=0 ;;
+    *) echo "CLAWBOX_BROWSER_AGENT_ISOLATED must be 1 or 0; sharing the desktop browser with the assistant" >&2 ;;
+  esac
+fi
+
+if [ "${1:-}" = "--print-config" ]; then
+  printf 'PROFILE=%s\nCDP_PORT=%s\nEXECUTABLE=%s\nAGENT_ISOLATED=%s\n' "$PROFILE" "$CDP_PORT" "$CONFIGURED_EXECUTABLE" "$AGENT_ISOLATED"
+  exit 0
+fi
+
 DISPLAY="${CLAWBOX_VNC_DISPLAY:-$DEFAULT_DISPLAY}"
 [ -n "${CLAWBOX_VNC_XAUTHORITY:-}" ] && export XAUTHORITY="$CLAWBOX_VNC_XAUTHORITY"
 
 # Find chromium — prefer non-snap binaries (snap fails in system services due to cgroup confinement)
 CHROMIUM=""
 
+# 0. The owner's own browser, when they named one. Never swapped for another
+# build: a different browser on the owner's profile could migrate it or fail
+# to read its sign-ins, which is worse than not starting.
+if [ -n "$CONFIGURED_EXECUTABLE" ]; then
+  if [ ! -f "$CONFIGURED_EXECUTABLE" ] || [ ! -x "$CONFIGURED_EXECUTABLE" ]; then
+    echo "The configured browser $CONFIGURED_EXECUTABLE (CLAWBOX_BROWSER_EXECUTABLE) is not an executable file" >&2
+    exit 1
+  fi
+  if is_snap_chromium_wrapper "$CONFIGURED_EXECUTABLE"; then
+    echo "The configured browser $CONFIGURED_EXECUTABLE is the snap build, which a system service cannot start" >&2
+    exit 1
+  fi
+  CHROMIUM="$CONFIGURED_EXECUTABLE"
+fi
+
 # 1. Playwright-managed Chromium (no snap restrictions, preferred)
-PW_CHROME="$(find_playwright_chromium)"
-[ -n "$PW_CHROME" ] && [ -x "$PW_CHROME" ] && CHROMIUM="$PW_CHROME"
+if [ -z "$CHROMIUM" ]; then
+  PW_CHROME="$(find_playwright_chromium)"
+  [ -n "$PW_CHROME" ] && [ -x "$PW_CHROME" ] && CHROMIUM="$PW_CHROME"
+fi
 
 # 2. Non-snap system binaries
 if [ -z "$CHROMIUM" ]; then
@@ -100,10 +245,58 @@ fi
   exit 1
 }
 
-# Check if already running
-if curl -s "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1; then
-  echo "Browser already running on CDP port $CDP_PORT"
+# The page asked for, if any. Only an http(s) address or about:blank: this
+# lands on Chromium's command line, where anything else could be read as a
+# switch.
+ASKED_URL=""
+if [ -n "${1:-}" ]; then
+  case "$1" in
+    http://*|https://*|about:blank) [[ "$1" =~ [[:space:]] ]] || ASKED_URL="$1" ;;
+  esac
+  [ -n "$ASKED_URL" ] || echo "Not an http(s) address, so not opened: $1" >&2
+fi
+
+# Already running: that browser is reused — its page brought to the front, the
+# URL asked for opened in it — and this exits 0. A second start would only hand
+# it another tab. Returns only when nothing answers on the port.
+reuse_running_browser() {
+  local reused status=0
+  reused="$(browser_reuse_running "$CDP_PORT" "$ASKED_URL" "$START_URL")" || status=$?
+  [ "$status" -eq 1 ] && return 0
+  echo "Browser already running on CDP port $CDP_PORT: $reused"
   exit 0
+}
+reuse_running_browser
+
+# The owner's own profile (not ClawBox's), open in a browser that does not
+# answer on the port: a second Chromium on it would only hand the start page
+# to that one as a stray tab and exit. Chromium's SingletonLock names the
+# holder as <hostname>-<pid>. ClawBox's own profile keeps its old recovery
+# (the web server clears that one's stale locks before starting it).
+if [ "$PROFILE" != "$DEFAULT_PROFILE" ] && [ -L "$PROFILE/SingletonLock" ]; then
+  lock_holder="$(readlink "$PROFILE/SingletonLock" 2>/dev/null || true)"
+  lock_pid="${lock_holder##*-}"
+  if [[ "$lock_pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$lock_pid" ]; then
+    echo "The browser profile $PROFILE is already open (pid $lock_pid) without remote debugging on port $CDP_PORT; not starting a second browser on it" >&2
+    exit 1
+  fi
+fi
+
+# Any profile, ClawBox's own included: a browser on it that does not answer
+# on the port yet is one still starting — given a few seconds, then reused
+# like any running one. One that never answers is not joined either; one that
+# goes away meanwhile (the last of a killed browser's processes) leaves the
+# profile free, and the start goes on.
+if browser_profile_in_use "$PROFILE"; then
+  for _ in $(seq 1 20); do
+    sleep 0.5
+    reuse_running_browser
+    browser_profile_in_use "$PROFILE" || break
+  done
+  if browser_profile_in_use "$PROFILE"; then
+    echo "A browser is running on $PROFILE without remote debugging on port $CDP_PORT; not starting a second browser on it" >&2
+    exit 1
+  fi
 fi
 
 if ! wait_for_display "$DISPLAY" "${XAUTHORITY:-}"; then
@@ -135,10 +328,38 @@ fi
 # of what --disable-gpu did) but let the GPU process run SwiftShader for
 # WebGL. --enable-unsafe-swiftshader is the switch recent Chromium requires
 # before it will hand a page a software WebGL context.
+# Chrome for Testing — the Playwright build this box prefers — puts a banner
+# over every window: "Chrome for Testing vNNN is only for automated testing…
+# Download Chrome". On this box the browser IS driven by automation, and the
+# banner only takes a strip of the owner's screen to tell them to install
+# something else. `--test-type=gpu` is what Chromium checks before it adds that
+# infobar (measured on a Jetson, Chrome for Testing 153: gone with it, there
+# without). Only for that build: a browser the owner named keeps exactly the
+# flags it always had.
+is_chrome_for_testing() {
+  local version
+  version="$("$1" --version 2>/dev/null || true)"
+  case "$version" in
+    *"Chrome for Testing"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+BUILD_FLAGS=()
+if is_chrome_for_testing "$CHROMIUM"; then
+  BUILD_FLAGS=(--test-type=gpu)
+fi
+
+# A clean start: the new tab page instead of the last session, and a clean
+# last exit, so a crash or a hard stop brings back no tabs and no "Restore
+# pages?" bubble. Only those keys of the profile's preferences change.
+echo "Session: $(browser_reset_session_prefs "$PROFILE" || true)"
+
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
   "${SANDBOX_FLAGS[@]}" \
+  "${BUILD_FLAGS[@]}" \
+  "${BROWSER_CLEAN_START_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
   --remote-allow-origins="http://127.0.0.1:${CDP_PORT}" \
   --user-data-dir="$PROFILE" \
@@ -153,4 +374,4 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --disable-background-networking \
   --password-store=basic \
   --metrics-recording-only \
-  "$START_URL"
+  "${ASKED_URL:-$START_URL}"

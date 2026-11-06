@@ -14,7 +14,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 
 /**
- * Both legacy ClawBox AI model ids now serve Flash 4.1 and start at Medium
+ * Both legacy ClawBox AI model ids now serve DeepSeek V4 Flash and start at Medium
  * reasoning (the owner's ruling of 2026-09-15). A level the user picked
  * themselves — Off included — still wins over that default.
  *
@@ -84,7 +84,7 @@ class FakeGatewayWs {
   }
 }
 
-/** A Max-plan account whose legacy aliases both serve Flash 4.1. */
+/** A Max-plan account whose legacy aliases both serve DeepSeek V4 Flash. */
 function installFetch(model: string) {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
@@ -150,7 +150,7 @@ async function firstPushedThinkingLevel(model: string): Promise<unknown> {
   return params.thinkingLevel;
 }
 
-describe("chat reasoning default for ClawBox AI Flash 4.1", () => {
+describe("chat reasoning default for ClawBox AI DeepSeek V4 Flash", () => {
   beforeEach(() => {
     history = [{ role: "assistant", content: [{ type: "text", text: SEED_TEXT }], timestamp: 500 }];
     sent.length = 0;

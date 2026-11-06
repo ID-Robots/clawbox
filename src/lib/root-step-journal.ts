@@ -55,6 +55,13 @@
  * "still running".
  */
 
+/**
+ * install.sh's `--step` EXIT trap ends a run that recorded failures with a
+ * banner and two `[provision-…]` markers; none of them is the reason a step
+ * failed, so neither reader of that reason may hand one to the owner.
+ */
+export const DISPATCH_VERDICT_LINE = /^(\[provision-(status|run)\]|#{3,}|# )/;
+
 /** The systemd instance one `install.sh --step <name>` run happens in. */
 export function rootStepUnit(step: string): string {
   return `clawbox-root-update@${step}.service`;
@@ -64,11 +71,14 @@ export function rootStepUnit(step: string): string {
  * `journalctl` arguments for what THIS dispatch of `step` wrote.
  *
  * @param sinceMs when the caller started the step, `Date.now()`-style.
- * @param lines   how much of the window's tail to read.
+ * @param lines   how much of the window's tail to read; left out, the whole
+ *                window — for a `--grep` read, which an older journalctl
+ *                (systemd 249) would otherwise cut to the window's last N
+ *                entries BEFORE matching.
  */
 export function rootStepJournalArgs(
   step: string,
-  { sinceMs, lines }: { sinceMs: number; lines: number },
+  { sinceMs, lines }: { sinceMs: number; lines?: number },
 ): string[] {
   return [
     "-u",
@@ -82,8 +92,7 @@ export function rootStepJournalArgs(
     // 1 ms after a marker excludes it and 1 ms before includes it.
     "--since",
     `@${(sinceMs / 1000).toFixed(3)}`,
-    "-n",
-    String(lines),
+    ...(lines === undefined ? [] : ["-n", String(lines)]),
     "--no-pager",
     "-o",
     "cat",

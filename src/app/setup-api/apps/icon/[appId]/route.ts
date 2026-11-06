@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import { getAll as configGetAll } from "@/lib/config-store";
-import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
+import { isPng, placeIcon, readIconBytes, safeAppId, webappIconPath } from "@/lib/webapp-icon";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +37,19 @@ function knownMissing(appId: string): boolean {
 // Short enough that an icon added later is not hidden for long, long enough
 // that switching a category and back does not re-request every missing one.
 const MISSING_HEADERS = { "Cache-Control": "public, max-age=600" };
+
+/**
+ * "This listing has no picture" — the ordinary answer for most of the
+ * catalogue, which names a letter, not an image, for each app (the store's
+ * `icon` field), so the Store cannot know before asking. It used to be a 404,
+ * and the browser logs every failed image as an error: one console line and
+ * one red request per card, ~33 per search. A 204 is not an error to the
+ * browser, and an <img> with no bytes still fires `error`, which is what puts
+ * the letter tile in its place — the same picture as before, without the noise.
+ */
+function noIcon(): NextResponse {
+  return new NextResponse(null, { status: 204, headers: MISSING_HEADERS });
+}
 
 async function isInstalled(appId: string): Promise<boolean> {
   try {
@@ -104,9 +117,7 @@ export async function GET(
     // Not cached locally
   }
 
-  if (knownMissing(appId)) {
-    return NextResponse.json({ error: "Icon not found" }, { status: 404, headers: MISSING_HEADERS });
-  }
+  if (knownMissing(appId)) return noIcon();
 
   // Proxy from the remote store. The desktop cannot load clawbox.com itself
   // (CSP img-src, and the store proxy rule), so every card's icon comes
@@ -116,7 +127,10 @@ export async function GET(
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
-      const buffer = Buffer.from(await res.arrayBuffer());
+      // Read under the cap every store icon download applies: a body larger
+      // than a tile is no picture, and the letter tile stands in for it.
+      const buffer = await readIconBytes(res);
+      if (!buffer) return noIcon();
 
       // data/icons holds INSTALLED apps' icons — the install route downloads
       // one, uninstall removes it, webapp-icon.ts generates one. Persisting
@@ -124,10 +138,13 @@ export async function GET(
       // session, with nothing that ever pruned it. The write here is only the
       // repair for an install whose own download failed; a browsed icon is
       // served with `max-age` and left to the browser's cache.
-      if (await isInstalled(appId)) {
-        fs.mkdir(ICONS_DIR, { recursive: true })
-          .then(() => fs.writeFile(iconPath, buffer))
-          .catch(() => {});
+      //
+      // Only a PNG is kept, as the install-time downloads keep only a PNG: a
+      // 200 that is an error page would otherwise be served as this app's
+      // icon from disk for good. `placeIcon` never replaces a file, so an
+      // icon that landed meanwhile (a generated one, a finished install) wins.
+      if (isPng(buffer) && await isInstalled(appId)) {
+        placeIcon(iconPath, buffer).catch(() => {});
       }
 
       return new NextResponse(buffer, {
@@ -139,7 +156,7 @@ export async function GET(
     }
     if (res.status === 404) {
       rememberMissing(appId);
-      return NextResponse.json({ error: "Icon not found" }, { status: 404, headers: MISSING_HEADERS });
+      return noIcon();
     }
   } catch {
     // Remote failed

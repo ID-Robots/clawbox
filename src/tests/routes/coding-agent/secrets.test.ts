@@ -402,6 +402,20 @@ describe("secrets/names — the agent's own narrower door", () => {
     for (const row of body.names) expect(Object.keys(row).sort()).toEqual(["inject", "name", "readable", "scope"]);
   });
 
+  it("answers a ticked copy that has expired, or that its one run already has, as not given", async () => {
+    listSecrets.mockResolvedValue([
+      { ...VIEW, name: "ONE_RUN_TOKEN", expiresAt: "run", expired: false },
+      { ...VIEW, name: "SPENT_TOKEN", expiresAt: "run", expired: true },
+      { ...VIEW, name: "OLD_TOKEN", expiresAt: "2001-01-01T00:00:00.000Z", expired: true },
+    ]);
+    const res = await names.GET(request({ path: "/setup-api/coding-agent/secrets/names", cookie: ownerCookie() }));
+    expect((await res.json()).names).toEqual([
+      { name: "ONE_RUN_TOKEN", scope: BOX_SCOPE, inject: true, readable: true },
+      { name: "SPENT_TOKEN", scope: BOX_SCOPE, inject: false, readable: true },
+      { name: "OLD_TOKEN", scope: BOX_SCOPE, inject: false, readable: true },
+    ]);
+  });
+
   it("refuses an unauthenticated caller", async () => {
     const res = await names.GET(request({ path: "/setup-api/coding-agent/secrets/names" }));
     expect(res.status).toBe(401);

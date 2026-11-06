@@ -81,6 +81,7 @@ import { isLive } from "@/lib/coding-agent-status";
 import { getDefaultDirectory, listRuns, projectDirectoryOf, type CodingProjectKind, type CodingRun } from "@/lib/coding-agent";
 import { beginProjectRemoval, runStartingIn } from "@/lib/coding-project-removal-lock";
 import { deleteSecretsForScope, listSecrets } from "@/lib/project-secrets";
+import { deleteProjectMcpAllowlist } from "@/lib/project-mcp-servers";
 
 // ─── What may go wrong ───────────────────────────────────────────────────────
 
@@ -1148,6 +1149,9 @@ export async function deleteProject(input: {
     // Moving the removed folder back would not bring them back either.
     const sharedWith = await otherProjectWithSameScope(target, roots);
     const secretsRemoved = sharedWith ? [] : await deleteSecretsForScope(target.folder).catch(() => [] as string[]);
+    // The project's MCP servers go the same way, on the same condition: a
+    // project that shares the scope still has its runs' tools.
+    if (!sharedWith) await deleteProjectMcpAllowlist(target.folder);
     const pruned = await pruneProjectTrash(roots, deletedAt)
       .catch(() => ({ removed: [] as string[], expired: [] as string[], early: [] as string[] }));
 

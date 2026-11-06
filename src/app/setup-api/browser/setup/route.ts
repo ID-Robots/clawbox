@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   getBrowserAutoOpen,
@@ -27,7 +27,7 @@ import {
  * POST { setupComplete?, autoOpen?, startUrl? } → { setupComplete, autoOpen, startUrl }.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing the browser settings needs a signed-in browser session.", code: "owner_only" },
       { status: 403 },

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetBackgroundTasksForTests } from "@/lib/background-tasks";
 
 /**
  * /setup-api/whisper — the speech-model size picker.
@@ -10,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const owner = { value: true };
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
 vi.mock("@/lib/route-auth", () => ({ requireSession: async () => null }));
 
 /** The root-step follower behind `{action:"install-engine"}`; its real module reaches systemd. */
@@ -42,7 +43,12 @@ const primary = { value: "cloud" as string };
 const setPrimary = vi.fn(async (..._a: unknown[]) => {});
 const cleared = vi.fn(async (..._a: unknown[]) => {});
 const gatewayRestart = vi.fn(async () => {});
-vi.mock("@/lib/stt-channel", () => ({ syncChannelAudio: (...a: unknown[]) => sync(...a) }));
+/** What an engine install wires the new engine into channel voice notes with. */
+const reconcile = vi.fn(async (..._a: unknown[]) => true);
+vi.mock("@/lib/stt-channel", () => ({
+  syncChannelAudio: (...a: unknown[]) => sync(...a),
+  reconcileChannelAudio: (...a: unknown[]) => reconcile(...a),
+}));
 vi.mock("@/lib/stt-preference", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/stt-preference")>()),
   getSttPrimary: async () => primary.value,
@@ -74,7 +80,9 @@ vi.mock("@/lib/whisper-models", () => ({
  * the route re-measures rather than trusting the exit code, so the fake has to
  * be able to exit 0 and leave nothing behind.
  */
-const child = { code: 0, stdout: ["Fetching the small model..."], stderr: "", leavesWeights: true };
+const child = { code: 0, stdout: ["Fetching the small model..."], stderr: "", leavesWeights: true, hold: false };
+/** With `child.hold`, the fetcher runs until this is called — what a signal to its group does. */
+let heldClose: ((code?: number | null) => void) | null = null;
 /** Every spawn the route made: command, argv and the options it passed. */
 const spawned: [string, string[], { env?: NodeJS.ProcessEnv }][] = [];
 vi.mock("child_process", async (importOriginal) => ({
@@ -95,6 +103,10 @@ vi.mock("child_process", async (importOriginal) => ({
     };
     setTimeout(() => {
       for (const line of child.stdout) for (const fn of outHandlers) fn(`${line}\n`);
+      if (child.hold) {
+        heldClose = (code = null) => { for (const fn of handlers.close ?? []) fn(code); };
+        return;
+      }
       if (child.stderr) for (const fn of errHandlers) fn(child.stderr);
       if (child.code === 0 && child.leavesWeights) {
         for (const size of state.sizes) if (!size.cached) size.cached = true;
@@ -124,6 +136,9 @@ async function readStream(res: Response): Promise<Record<string, unknown>[]> {
 }
 
 beforeEach(() => {
+  // The engine install is a background task of the server, kept per PROCESS:
+  // one a test left running would be followed by the next test's POST.
+  resetBackgroundTasksForTests();
   owner.value = true;
   disk.free = 100 * 1024 * 1024 * 1024;
   state.installed = true;
@@ -133,6 +148,8 @@ beforeEach(() => {
   child.stdout = ["Fetching the small model..."];
   child.stderr = "";
   child.leavesWeights = true;
+  child.hold = false;
+  heldClose = null;
   spawned.length = 0;
   pointed.mockClear().mockResolvedValue({ ok: true, error: undefined });
   restarted.mockClear().mockResolvedValue({ ok: true });
@@ -211,6 +228,119 @@ describe("POST /setup-api/whisper", () => {
     expect(pointed).toHaveBeenCalledWith("small");
     expect(restarted).toHaveBeenCalled();
     expect(lines.at(-1)).toMatchObject({ success: true, size: "small", restarted: true });
+  });
+
+  it("runs as a background task in two steps, named on the first line", async () => {
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ size: "small" })));
+    expect(lines[0]).toMatchObject({ taskId: expect.any(String), kind: "whisper-size-download" });
+    expect(lines.some((l) => typeof l.total === "number" && (l.total as number) > 0)).toBe(true);
+  });
+
+  it("stops on Cancel: the fetcher's group is signalled, the half-fetched size removed, the unit untouched", async () => {
+    child.hold = true;
+    // Never a real signal: the fake fetcher's group "exits" when it is asked to.
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, sig?: string | number) => {
+      if (pid === -4242 && sig === "SIGTERM") setTimeout(() => heldClose?.(), 0);
+      return true;
+    }) as typeof process.kill);
+    const { POST } = await load();
+    const { cancelBackgroundTask } = await import("@/lib/background-tasks");
+    const res = await POST(post({ size: "small" }));
+    const reader = res.body!.getReader();
+    const first = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+
+    expect(cancelBackgroundTask(first.taskId).ok).toBe(true);
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += new TextDecoder().decode(value);
+    }
+    const last = JSON.parse(rest.trim().split("\n").at(-1)!);
+
+    expect(kill).toHaveBeenCalledWith(-4242, "SIGTERM");
+    expect(last).toMatchObject({ cancelled: true, taskId: first.taskId });
+    expect(removed).toHaveBeenCalledWith("small");
+    expect(pointed).not.toHaveBeenCalled();
+    expect(restarted).not.toHaveBeenCalled();
+  });
+
+  it("follows a download of the same size already running, and QUEUES another size behind it — never a refusal", async () => {
+    child.hold = true;
+    const { POST } = await load();
+    const first = await POST(post({ size: "small" }));
+    const reader = first.body!.getReader();
+    const firstLine = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await reader.cancel();
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+
+    // Another size: accepted, waiting its turn behind the running download.
+    const other = await POST(post({ size: "medium" }));
+    expect(other.status).toBe(200);
+    const otherLines = readStream(other);
+
+    const again = await POST(post({ size: "small" }));
+    // The fetcher "finishes": the weights land and the stream closes.
+    for (const size of state.sizes) if (size.id === "small") size.cached = true;
+    const closeFirst = heldClose!;
+    heldClose = null;
+    closeFirst(0);
+    const lines = await readStream(again);
+    expect(lines[0].taskId).toBe(firstLine.taskId);
+    expect(lines.at(-1)).toMatchObject({ success: true, size: "small", taskId: firstLine.taskId });
+
+    // Its turn came by itself: the queued size starts its own fetch.
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+    for (const size of state.sizes) if (size.id === "medium") size.cached = true;
+    heldClose!(0);
+    const queued = await otherLines;
+    expect(queued[0]).toMatchObject({ queued: true, behind: { kind: "whisper-size-download", label: "Whisper small" } });
+    expect(queued[0].taskId).not.toBe(firstLine.taskId);
+    expect(queued.some((l) => l.queued === false)).toBe(true);
+    expect(queued.at(-1)).toMatchObject({ success: true, size: "medium" });
+    expect(spawned).toHaveLength(2);
+    expect(pointed.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["small", "medium"]);
+  });
+
+  it("follows a running download of the same size before measuring the disk it is filling", async () => {
+    child.hold = true;
+    const { POST } = await load();
+    const first = await POST(post({ size: "small" }));
+    const reader = first.body!.getReader();
+    const firstLine = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]);
+    await reader.cancel();
+    // The download has eaten into the space a fresh check would ask for.
+    disk.free = 1024;
+    const again = await POST(post({ size: "small" }));
+    expect(again.status).toBe(200);
+    for (const size of state.sizes) if (size.id === "small") size.cached = true;
+    await vi.waitFor(() => expect(heldClose).not.toBeNull());
+    heldClose?.(0);
+    const lines = await readStream(again);
+    expect(lines[0].taskId).toBe(firstLine.taskId);
+  });
+
+  it("refuses the removals while an engine install runs that this process has no flag for (adopted after a restart)", async () => {
+    const { DELETE } = await load();
+    const { startBackgroundTask } = await import("@/lib/background-tasks");
+    let release!: () => void;
+    const adopted = startBackgroundTask({
+      kind: "whisper-engine-install",
+      group: "whisper-engine",
+      title: "Installing speech (Whisper)",
+      run: () => new Promise<void>((resolve) => { release = resolve; }),
+    });
+    expect(adopted.started).toBe(true);
+    const engine = await DELETE(new Request("http://localhost/setup-api/whisper?scope=engine", { method: "DELETE" }));
+    expect(engine.status).toBe(409);
+    const one = await DELETE(new Request("http://localhost/setup-api/whisper?size=tiny", { method: "DELETE" }));
+    expect(one.status).toBe(409);
+    expect(uninstalled).not.toHaveBeenCalled();
+    expect(removed).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release();
   });
 
   it("leaves the unit alone when the download fails, and says why", async () => {
@@ -327,6 +457,7 @@ describe("POST /setup-api/whisper — the fetcher's environment", () => {
 describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
   beforeEach(() => {
     followMock.mockReset();
+    reconcile.mockReset().mockResolvedValue(true);
     state.installed = false;
   });
 
@@ -349,8 +480,8 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     const { POST } = await load();
     const res = await POST(post({ action: "install-engine" }));
     expect(res.status).toBe(200);
-    expect(followMock.mock.calls[0][0]).toBe("voice_whisper_install");
     const out = await readStream(res);
+    expect(followMock.mock.calls[0][0]).toBe("voice_whisper_install");
     expect(out.map((l) => l.status)).toContain("  faster-whisper ready");
     expect(out[out.length - 1]).toMatchObject({ success: true });
     // Nothing of the size picker ran: no fetch, no unit write, no restart.
@@ -358,11 +489,47 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
     expect(restarted).not.toHaveBeenCalled();
   });
 
+  /**
+   * The install built the engine, enabled the unit and said "installed", and
+   * channel voice notes went on walking a list without it — on the box this
+   * was found on, a list whose only row the gateway refused. The new engine is
+   * wired in before the closing success, with a fresh import probe, and
+   * without a gateway restart (`tools` hot-applies on the pinned core).
+   */
+  it("puts the engine it just installed into channel voice notes before it says installed", async () => {
+    const order: string[] = [];
+    followMock.mockResolvedValue({ ok: true });
+    reconcile.mockImplementation(async () => { order.push("wired"); return true; });
+    const { POST } = await load();
+    const out = await readStream(await POST(post({ action: "install-engine" })));
+    order.push("answered");
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith({ trigger: "whisper-install", freshProbe: true });
+    expect(order).toEqual(["wired", "answered"]);
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+    expect(gatewayRestart).not.toHaveBeenCalled();
+  });
+
+  it("still reports a landed install as installed when the wiring could not be written, and says when it will be", async () => {
+    followMock.mockResolvedValue({ ok: true });
+    reconcile.mockRejectedValue(new Error("ConfigMutationConflictError"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { POST } = await load();
+    const out = await readStream(await POST(post({ action: "install-engine" })));
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+    expect(out.map((l) => l.status)).toContain(
+      "Channel voice notes could not be switched to it yet — they will be at the next restart.",
+    );
+    warn.mockRestore();
+  });
+
   it("closes with the step's error when it failed", async () => {
     followMock.mockResolvedValue({ ok: false, error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
     const { POST } = await load();
     const out = await readStream(await POST(post({ action: "install-engine" })));
-    expect(out[out.length - 1]).toEqual({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
+    expect(out[out.length - 1]).toMatchObject({ error: "faster-whisper does not apply to this board (no CUDA toolkit)" });
+    // An engine that did not land is not wired into anything.
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("refuses an engine install that would not fit before anything starts, and a later one with room proceeds", async () => {
@@ -395,12 +562,14 @@ describe("POST /setup-api/whisper {action:\"install-engine\"}", () => {
       POST(post({ action: "install-engine" })),
       POST(post({ action: "install-engine" })),
     ]);
-    expect([a.status, b.status].sort()).toEqual([200, 409]);
-    const refused = a.status === 409 ? a : b;
-    expect((await refused.json()).code).toBe("busy");
+    // Both answered — the second press follows the first's install, the same
+    // task, rather than being refused or starting a second build under it.
+    expect([a.status, b.status]).toEqual([200, 200]);
     await vi.waitFor(() => expect(followMock).toHaveBeenCalledTimes(1));
     finish();
-    await readStream(a.status === 200 ? a : b);
+    const [first, second] = await Promise.all([readStream(a), readStream(b)]);
+    expect(second[0].taskId).toBe(first[0].taskId);
+    expect(followMock).toHaveBeenCalledTimes(1);
   });
 
   it("gives the reservation back when the engine is already installed", async () => {
@@ -465,6 +634,7 @@ describe("DELETE /setup-api/whisper", () => {
     followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
     const { POST, DELETE } = await load();
     const installing = await POST(post({ action: "install-engine" }));
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
     const res = await DELETE(del("base"));
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("busy");
@@ -552,6 +722,7 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     followMock.mockImplementation(() => new Promise<{ ok: boolean }>((resolve) => { finish = () => resolve({ ok: true }); }));
     const { POST, DELETE } = await load();
     const installing = await POST(post({ action: "install-engine" }));
+    await vi.waitFor(() => expect(followMock).toHaveBeenCalled());
     const res = await DELETE(del());
 
     expect(res.status).toBe(409);
@@ -608,7 +779,8 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     await vi.waitFor(() => expect(uninstalled).toHaveBeenCalled());
     const res = await POST(post({ action: "install-engine" }));
     expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe("busy");
+    // Its own code: a removal in progress, not "another install is running".
+    expect((await res.json()).code).toBe("removing");
     expect(followMock).not.toHaveBeenCalled();
     finish();
     expect((await removing).status).toBe(200);

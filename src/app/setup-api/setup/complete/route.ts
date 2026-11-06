@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { setMany } from "@/lib/config-store";
 import { getSessionSigningSecret, createSessionCookie, getSessionGeneration } from "@/lib/auth";
 import { requireSession } from "@/lib/route-auth";
+import { applyDeferredLanguagePersona, retireOnboardingRitual } from "@/lib/language-persona";
 
 export async function POST(request: Request) {
   // Second line of defence, the same one setup/reset carries. Middleware's
@@ -13,10 +14,13 @@ export async function POST(request: Request) {
   // loosened or a path reaches it around the matcher. `allowBootstrap` stays
   // false on purpose: a box with no owner must never be marked complete, and
   // the wizard always holds the cookie CredentialsStep minted by the time it
-  // posts here. `requireSession` (not `hasOwnerSession`) because it honours
+  // posts here. `requireSession` (not `hasPersonSession`) because it honours
   // CLAWBOX_TEST_MODE, which the e2e-install harness — driving the wizard with
   // no cookie jar, and later posting here to harvest a fresh session — relies on.
-  const unauthorized = await requireSession(request);
+  // `ownerOnly` because the cookie below carries no user, and a cookie without
+  // one is the owner's: a user the owner added, or the agent's bearer, would
+  // otherwise walk out of here as the owner (4.3 bug 1).
+  const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) return unauthorized;
 
   try {
@@ -26,6 +30,14 @@ export async function POST(request: Request) {
       setup_completed_at: timestamp,
       setup_progress_step: undefined,
     });
+
+    // A set-up box answers its first chat message normally (TASK-1528): end
+    // the first-conversation ritual the gateway armed at first boot, then pay
+    // the persona the language the wizard's picker had to defer for it. Both
+    // never throw, and both are repeated by the heartbeat and the gateway's
+    // ExecStartPre, so a failure here costs minutes, not the setup.
+    await retireOnboardingRitual();
+    await applyDeferredLanguagePersona();
 
     // Auto-login after first setup so user isn't shown the login screen
     const res = NextResponse.json({ success: true });

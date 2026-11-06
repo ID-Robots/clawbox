@@ -208,6 +208,10 @@ export async function POST(request: Request) {
           });
           return;
         }
+        // Proven above: the step ended with the lock flipped and the marker
+        // gone, so it passed every phase of its own — the ones no journal scan
+        // caught are said now rather than skipped.
+        phases.reach("cleanup");
         emit(controller, { phase: "done" });
         emit(controller, { success: true, edition: target, restarting: true });
       } catch (err) {

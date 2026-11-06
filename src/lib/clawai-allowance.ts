@@ -117,6 +117,43 @@ export function parseClawaiAllowanceRefusal(raw: unknown): ClawaiAllowanceRefusa
   return { kind, resetAt, message: lifted ? lifted.slice(0, MAX_MESSAGE_CHARS) : null };
 }
 
+/** A refusal envelope is a few hundred bytes; past this a 429's body is not one. */
+export const MAX_REFUSAL_BODY_BYTES = 16_384;
+
+/**
+ * The allowance a 429 names, read from the start of its body (at most
+ * `maxBytes`, the rest cancelled unread), or null when it names none or the
+ * body cannot be read. For a 429 a caller holds directly, never a clone: a
+ * teed branch's cancel waits for its twin.
+ */
+export async function readClawaiAllowanceRefusal(res: Response, maxBytes = MAX_REFUSAL_BODY_BYTES): Promise<ClawaiAllowanceRefusal | null> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    reader = res.body?.getReader();
+  } catch {
+    return null;
+  }
+  if (!reader) return null;
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    while (bytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value.subarray(0, maxBytes - bytes);
+      bytes += chunk.byteLength;
+      text += decoder.decode(chunk, { stream: true });
+    }
+    text += decoder.decode();
+  } catch {
+    // A body that broke off part way: what arrived is still read.
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return parseClawaiAllowanceRefusal(text);
+}
+
 export interface FreesUpOptions {
   /** BCP 47 locale the clock is written in (the desktop's UI language). */
   locale: string;

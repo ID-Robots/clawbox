@@ -13,6 +13,7 @@ vi.mock("@/lib/clawai-connect", () => ({
   createClawAiUserCode: vi.fn(() => "ABCD-1234"),
   createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
   CLAWAI_USER_CODE_LENGTH: 8,
+  CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
   writeClawAiSession: vi.fn(),
   readClawAiSession: vi.fn(),
   clearClawAiSession: vi.fn(),
@@ -22,6 +23,11 @@ vi.mock("@/lib/clawai-connect", () => ({
 vi.mock("@/app/setup-api/ai-models/configure/route", () => ({
   POST: vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 })),
 }));
+// The finaliser is the box's provider sign-in task (TASK-2148), which reads the
+// row back before it ends.
+vi.mock("@/lib/provider-status", () => ({
+  readProviderStatus: vi.fn(async () => ({ harness: "openclaw", providers: [], defaultProvider: null, unrunnable: [], degraded: false })),
+}));
 
 import {
   readClawAiSession,
@@ -29,6 +35,7 @@ import {
   isClawAiSessionExpired,
 } from "@/lib/clawai-connect";
 import { POST as configurePost } from "@/app/setup-api/ai-models/configure/route";
+import { getBackgroundTask, resetBackgroundTasksForTests } from "@/lib/background-tasks";
 
 const mockReadClawAiSession = vi.mocked(readClawAiSession);
 const mockWriteClawAiSession = vi.mocked(writeClawAiSession);
@@ -37,8 +44,11 @@ const mockConfigurePost = vi.mocked(configurePost);
 
 describe("ClawBox AI device-auth routes", () => {
   beforeEach(() => {
+    resetBackgroundTasksForTests();
     vi.resetModules();
     vi.clearAllMocks();
+    // A session a case left standing for every read is not the next case's.
+    mockReadClawAiSession.mockReset();
     mockIsClawAiSessionExpired.mockReturnValue(false);
   });
 
@@ -104,6 +114,64 @@ describe("ClawBox AI device-auth routes", () => {
     vi.unstubAllGlobals();
   });
 
+  it("gives no new code while a ClawBox AI sign-in is finishing on the box, and names that one (TASK-2148)", async () => {
+    const { startBackgroundTask } = await import("@/lib/background-tasks");
+    let release!: () => void;
+    const running = startBackgroundTask({
+      kind: "provider-sign-in",
+      group: "provider-auth",
+      title: "Connecting ClawBox AI",
+      meta: { subject: "clawai", action: "sign-in", label: "ClawBox AI" },
+      run: () => new Promise((resolve) => { release = () => resolve({}); }),
+    });
+    if (!running.started) throw new Error("not started");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const mod = await import("@/app/setup-api/ai-models/clawai/start/route");
+    const response = await mod.POST(new NextRequest("http://clawbox.local/setup-api/ai-models/clawai/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "primary" }),
+    }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "provider_change_running", taskId: running.task.id });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockWriteClawAiSession).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release();
+    vi.unstubAllGlobals();
+  });
+
+  it("gives no new code while ClawBox AI is being signed out either — the sign-out would drop it", async () => {
+    const { startBackgroundTask } = await import("@/lib/background-tasks");
+    let release!: () => void;
+    const running = startBackgroundTask({
+      kind: "provider-sign-out",
+      group: "provider-auth",
+      title: "Signing out of ClawBox AI",
+      meta: { subject: "clawai", action: "sign-out", label: "ClawBox AI" },
+      run: () => new Promise((resolve) => { release = () => resolve({}); }),
+    });
+    if (!running.started) throw new Error("not started");
+    vi.stubGlobal("fetch", vi.fn());
+
+    const mod = await import("@/app/setup-api/ai-models/clawai/start/route");
+    const response = await mod.POST(new NextRequest("http://clawbox.local/setup-api/ai-models/clawai/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "primary" }),
+    }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "provider_change_running", error: expect.stringContaining("ClawBox AI is being signed out") });
+    expect(mockWriteClawAiSession).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    release();
+    vi.unstubAllGlobals();
+  });
+
   it("returns pending while the upstream poll says the user has not entered the code", async () => {
     mockReadClawAiSession.mockResolvedValueOnce({
       device_id: "device-id-xyz",
@@ -135,8 +203,35 @@ describe("ClawBox AI device-auth routes", () => {
     vi.unstubAllGlobals();
   });
 
+  it("signs nothing in when the session was ended while the portal answered — a sign-out cleared it", async () => {
+    mockReadClawAiSession
+      .mockResolvedValueOnce({
+        device_id: "device-id-xyz",
+        user_code: "ABCD-1234",
+        interval: 5,
+        createdAt: Date.now(),
+        status: "pending",
+        provider: "clawai",
+        scope: "primary",
+        tier: "pro",
+        error: null,
+      })
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: "portal-token-123" }), { status: 200 })));
+
+    const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    const response = await mod.POST();
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({ status: "error", error: expect.stringMatching(/cancelled/) });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(mockConfigurePost).not.toHaveBeenCalled();
+    expect(mockWriteClawAiSession).not.toHaveBeenCalled();
+  });
+
   it("acknowledges the poll with `configuring` and runs configure off the request lifecycle", async () => {
-    mockReadClawAiSession.mockResolvedValueOnce({
+    // The session stays on disk while the poll asks the portal: it reads it
+    // again before it acts on the token.
+    mockReadClawAiSession.mockResolvedValue({
       device_id: "device-id-xyz",
       user_code: "ABCD-1234",
       interval: 5,
@@ -169,10 +264,11 @@ describe("ClawBox AI device-auth routes", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toEqual({ status: "configuring" });
-    // Background configure runs as a fire-and-forget; flush microtasks so
-    // the test sees its writes before the assertions below.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // The box's sign-in task (TASK-2148), named so the card can follow it.
+    expect(body).toEqual({ status: "configuring", taskId: expect.any(String) });
+    // The configure runs off the request lifecycle, as that task: wait for it
+    // to end before the assertions below.
+    await vi.waitFor(() => expect(getBackgroundTask(body.taskId)?.state).toBe("succeeded"));
 
     expect(mockConfigurePost).toHaveBeenCalledTimes(1);
     const configureRequest = mockConfigurePost.mock.calls[0][0];
@@ -184,10 +280,10 @@ describe("ClawBox AI device-auth routes", () => {
       clawaiTier: "pro",
     });
     // The session goes through `configuring` first (synchronously, before
-    // we acknowledge the poll) and then `complete` once the background
-    // configure resolves.
-    const writes = mockWriteClawAiSession.mock.calls.map(([arg]) => arg.status);
-    expect(writes).toEqual(["configuring", "complete"]);
+    // we acknowledge the poll), names its task from inside it, and then
+    // `complete` once the background configure resolves.
+    const writes = mockWriteClawAiSession.mock.calls.map(([arg]) => [arg.status, arg.taskId ?? null]);
+    expect(writes).toEqual([["configuring", null], ["configuring", body.taskId], ["complete", null]]);
     expect(mockWriteClawAiSession).toHaveBeenLastCalledWith(expect.objectContaining({
       status: "complete",
       error: null,

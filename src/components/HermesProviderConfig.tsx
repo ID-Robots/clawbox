@@ -5,11 +5,14 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ProviderRadioRow from "./ProviderRadioRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
-import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, GENERIC_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
+import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, HERMES_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
+import { useProviderAuthTasks } from "@/hooks/useProviderAuthTasks";
+import { waitForBackgroundTaskEnd } from "@/lib/background-task-client";
+import { settingsJobFetch } from "@/lib/settings-job-client";
 import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
@@ -24,6 +27,7 @@ import {
 import {
   CLAWAI_TIER_INFO,
   CLAWAI_TIER_STORAGE_KEY,
+  UNPAIRED_DEFAULT_UI_TIER,
   resolveUiTier,
   uiTierToDeviceTier,
   type ClawaiTier,
@@ -155,7 +159,7 @@ const CONFIGURING_DONE_DWELL_MS = 900;
 /** A connect that has not landed by then gives the form back. */
 const CONFIGURING_WATCHDOG_MS = 120_000;
 const LOCAL_AI_PROVIDER = "llamacpp";
-const LAST_CONFIGURING_PHASE = GENERIC_CONFIGURING_STEP_KEYS.length - 1;
+const LAST_CONFIGURING_PHASE = HERMES_CONFIGURING_STEP_KEYS.length - 1;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
 // imports it), so it cannot call `t` — but a row's `description` is copy, not
@@ -202,7 +206,7 @@ export default function HermesProviderConfig({
     phase: number;
     completed: boolean;
   } | null>(null);
-  const configuringSteps = useMemo(() => GENERIC_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
+  const configuringSteps = useMemo(() => HERMES_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
 
   // Seeded from the DEVICE's configured provider by the mount effect below;
   // "openrouter" is only the pre-resolution placeholder. Under REQ 1's scoping
@@ -421,7 +425,9 @@ export default function HermesProviderConfig({
 
   // ClawBox AI — a managed provider that still runs THROUGH Hermes.
   const [clawai, setClawai] = useState<ClawaiState | null>(null);
-  const [uiTier, setUiTier] = useState<ClawaiTier>("flash");
+  // The unpaired default until the mount read below answers; `resolveUiTier`
+  // then keeps a stored choice and moves a paired box to its real plan.
+  const [uiTier, setUiTier] = useState<ClawaiTier>(UNPAIRED_DEFAULT_UI_TIER);
   // The UI tier the device is currently RUNNING (null until we know). Compared
   // against `uiTier` to decide whether "Switch to …" is actionable — comparing
   // device tiers instead collapsed Free and Pro onto the same value, so a Free
@@ -906,12 +912,57 @@ export default function HermesProviderConfig({
     }
   }, []);
 
+  // ── The box's work, not the window's (TASK-2148) ─────────────────────────
+  //
+  // In Settings a save is a background task of the box
+  // (src/lib/provider-auth-tasks.ts): posted with `background: true`, answered
+  // 202 at once, and followed here to its ending — which the desktop's corner
+  // card shows too, and which a Settings closed half-way does not lose.
+  /** Stops the following once this panel is gone; the box's task goes on. */
+  const lifeRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const life = new AbortController();
+    lifeRef.current = life;
+    return () => life.abort();
+  }, []);
+  /** The sign-in task this panel follows (or followed), so it is never taken up twice. */
+  const followedTaskRef = useRef<string | null>(null);
+  /**
+   * The box's task the overlay stands for right now. Its ending is the box's:
+   * the watchdog that gives a wedged in-request save its form back does not
+   * apply, and there is no "Start over" to offer over work that cannot stop.
+   */
+  const [followingTask, setFollowingTask] = useState<string | null>(null);
+  const postAsTask = useCallback(async (url: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> => {
+    try {
+      const res = await settingsJobFetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: lifeRef.current?.signal,
+      }, {
+        onStarted: (taskId) => {
+          followedTaskRef.current = taskId;
+          setFollowingTask(taskId);
+        },
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      return { ok: res.ok && data.success !== false, status: res.status, data };
+    } catch {
+      return { ok: false, status: 500, data: { error: t("hermesProvider.save.failed") } };
+    } finally {
+      setFollowingTask(null);
+    }
+  }, [t]);
+
   const login = useClawaiDeviceLogin({
     scope: "primary",
     getTier: () => uiTier,
     onStart: () => setClawaiStatus(null),
     onBusyChange: setLoginBusy,
-    onConfiguring: () => {
+    onConfiguring: (taskId) => {
+      // The device login follows its own task to the end (its poll).
+      if (taskId) followedTaskRef.current = taskId;
       setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.finishingSetup") });
       beginConfiguring(CLAWAI_PROVIDER);
     },
@@ -932,6 +983,35 @@ export default function HermesProviderConfig({
     },
   });
 
+  // A sign-in the box is running that this panel is not following — saved
+  // before Settings was closed, in another tab or on another device — is
+  // taken up on opening: the same overlay, the same ending, and no second
+  // connect offered over it.
+  const { running: providerChange } = useProviderAuthTasks(embedded === true);
+  useEffect(() => {
+    if (providerChange?.action !== "sign-in" || configuring) return;
+    if (followedTaskRef.current === providerChange.id) return;
+    const { id, provider } = providerChange;
+    followedTaskRef.current = id;
+    // The box's task is external state this panel follows, like the device
+    // login's poll.
+    beginConfiguring(provider);
+    setFollowingTask(id);
+    void waitForBackgroundTaskEnd(id, { signal: lifeRef.current?.signal }).then((ended) => {
+      if (!ended || lifeRef.current?.signal.aborted) return;
+      setFollowingTask(null);
+      if (ended.state === "succeeded") {
+        refreshModels();
+        void reloadClawai();
+        notifyChatHeader();
+        finishWizardStep(provider);
+        return;
+      }
+      abortConfiguring();
+      setSaveStatus({ kind: "err", msg: ended.error ?? t("hermesProvider.save.failed") });
+    });
+  }, [abortConfiguring, beginConfiguring, configuring, finishWizardStep, notifyChatHeader, providerChange, refreshModels, reloadClawai, t]);
+
   // The overlay hides every control, so it must never be the whole screen for
   // good: a configure that wedges (a `hermes config set` that hangs — the
   // failure the config cache was written around) used to leave the form
@@ -945,10 +1025,10 @@ export default function HermesProviderConfig({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [abortConfiguring, t]);
   useEffect(() => {
-    if (!configuring || configured) return;
+    if (!configuring || configured || followingTask) return;
     const timer = setTimeout(cancelConfiguring, CONFIGURING_WATCHDOG_MS);
     return () => clearTimeout(timer);
-  }, [configuring, configured, cancelConfiguring]);
+  }, [configuring, configured, cancelConfiguring, followingTask]);
 
   // Advance the overlay rows on the same schedule as the OpenClaw step. The
   // last row is only ticked by the poll's terminal `complete`, never by time.
@@ -1043,13 +1123,19 @@ export default function HermesProviderConfig({
   }
 
   async function applyClawaiTokenInner(token: string): Promise<void> {
-    const res = await fetch("/setup-api/hermes/clawai", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, tier: uiTierToDeviceTier(uiTier) }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    const body = { token, tier: uiTierToDeviceTier(uiTier) };
+    if (embedded) {
+      const saved = await postAsTask("/setup-api/hermes/clawai", body);
+      if (!saved.ok) throw new Error(typeof saved.data.error === "string" && saved.data.error ? saved.data.error : `HTTP ${saved.status}`);
+    } else {
+      const res = await fetch("/setup-api/hermes/clawai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    }
     await reloadClawai();
     setSelectedProvider(CLAWAI_PROVIDER);
     notifyChatHeader();
@@ -1062,18 +1148,25 @@ export default function HermesProviderConfig({
     setClawaiStatus(null);
     beginConfiguring(CLAWAI_PROVIDER);
     try {
-      const res = await fetch("/setup-api/hermes/clawai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Send the UI tier the button is LABELLED with. The route accepts the
-        // three-tier vocabulary and does the device mapping itself; sending the
-        // device tier here made "Switch to Free" post the Pro plan's model.
-        body: JSON.stringify({ tier: uiTier }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      // Send the UI tier the button is LABELLED with. The route accepts the
+      // three-tier vocabulary and does the device mapping itself; sending the
+      // device tier here made "Switch to Free" post the Pro plan's model.
+      let data: { model?: string; error?: unknown };
+      if (embedded) {
+        const saved = await postAsTask("/setup-api/hermes/clawai", { tier: uiTier });
+        if (!saved.ok) throw new Error(typeof saved.data.error === "string" && saved.data.error ? saved.data.error : `HTTP ${saved.status}`);
+        data = saved.data as { model?: string };
+      } else {
+        const res = await fetch("/setup-api/hermes/clawai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tier: uiTier }),
+        });
+        data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(typeof data?.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
+      }
       const applied = uiTierToDeviceTier(uiTier);
-      setClawai((c) => (c ? { ...c, active: true, tier: applied, tierStored: applied, model: data.model } : c));
+      setClawai((c) => (c ? { ...c, active: true, tier: applied, tierStored: applied, model: typeof data.model === "string" ? data.model : c.model } : c));
       setAppliedUiTier(uiTier);
       setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
       notifyChatHeader();
@@ -1117,31 +1210,45 @@ export default function HermesProviderConfig({
       // the user had just pasted was thrown away, and (b) when it did succeed
       // but the key write then failed, the device was already switched to a
       // provider it could not authenticate against, with no rollback.
-      if (savingKey) {
-        const kr = await fetch("/setup-api/hermes/provider-key", {
+      if (embedded) {
+        // One task of the box: the key, then the pick (TASK-2148).
+        const saved = await postAsTask("/setup-api/hermes/models", {
+          provider: selectedProvider,
+          ...(modelInScope ? { model } : {}),
+          ...(savingKey ? { apiKey: key } : {}),
+        });
+        if (!saved.ok) throw new Error(saveErrorMessage(saved.data, saved.status, saved.data.keySaved === true));
+        if (savingKey) {
+          setApiKey("");
+          refreshModels();
+        }
+      } else {
+        if (savingKey) {
+          const kr = await fetch("/setup-api/hermes/provider-key", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: selectedProvider, apiKey: key }),
+          });
+          const kd = await kr.json().catch(() => ({}));
+          if (!kr.ok) throw new Error(typeof kd?.error === "string" && kd.error ? kd.error : `Key: HTTP ${kr.status}`);
+          setApiKey("");
+          // Pull the now-unlocked live list (the server dropped its cache too).
+          refreshModels();
+        }
+
+        // Omit the model when we hold no in-scope id — typically right after a
+        // first key save, while the list was still empty. The server then writes
+        // that provider's OWN recommended default; it can never write a foreign
+        // vendor's id, so leaving the choice to it is strictly safer than sending
+        // whatever the (empty) dropdown had.
+        const res = await fetch("/setup-api/hermes/models", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider: selectedProvider, apiKey: key }),
+          body: JSON.stringify({ provider: selectedProvider, ...(modelInScope ? { model } : {}) }),
         });
-        const kd = await kr.json().catch(() => ({}));
-        if (!kr.ok) throw new Error(typeof kd?.error === "string" && kd.error ? kd.error : `Key: HTTP ${kr.status}`);
-        setApiKey("");
-        // Pull the now-unlocked live list (the server dropped its cache too).
-        refreshModels();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(saveErrorMessage(data, res.status, savingKey));
       }
-
-      // Omit the model when we hold no in-scope id — typically right after a
-      // first key save, while the list was still empty. The server then writes
-      // that provider's OWN recommended default; it can never write a foreign
-      // vendor's id, so leaving the choice to it is strictly safer than sending
-      // whatever the (empty) dropdown had.
-      const res = await fetch("/setup-api/hermes/models", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: selectedProvider, ...(modelInScope ? { model } : {}) }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(saveErrorMessage(data, res.status, savingKey));
 
       // Selecting a non-clawai provider means ClawBox AI is no longer active.
       setClawai((c) => (c ? { ...c, active: false } : c));
@@ -1229,7 +1336,7 @@ export default function HermesProviderConfig({
             detail={null}
             progressPercent={null}
             completed={configuring.completed}
-            onCancel={configuring.completed ? undefined : cancelConfiguring}
+            onCancel={configuring.completed || followingTask ? undefined : cancelConfiguring}
             cancelLabel={t("hermesProvider.oauth.startOver")}
             t={t}
           />

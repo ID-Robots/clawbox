@@ -1,0 +1,1111 @@
+/**
+ * The `prime_radiant_*` MCP tools (mcp/tools/prime-radiant.ts): each one calls
+ * the route the desktop app calls, with the method, path and body that route
+ * reads; each turns the route's refusals into what the agent should do; and
+ * each refuses an argument the device would never accept before anything is
+ * sent. The routes themselves are pinned in src/tests/routes/prime-radiant-*.
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+
+const { api } = vi.hoisted(() => ({ api: vi.fn() }));
+vi.mock("../../../mcp/lib/api", () => ({ api: (...a: unknown[]) => api(...a) }));
+
+import { ApiError } from "../../../mcp/lib/errors";
+import { contractViolations, paramDescriptionViolations } from "../../../mcp/lib/register";
+import { PRIME_RADIANT_TOOLS, RAISED_REVIEW_KINDS, REVIEW_KINDS, REVIEW_STATUSES, registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
+import {
+  RAISED_REVIEW_KINDS as LIB_RAISED_REVIEW_KINDS,
+  REVIEW_KINDS as LIB_REVIEW_KINDS,
+  REVIEW_STATUSES as LIB_REVIEW_STATUSES,
+} from "@/lib/prime-radiant/review-store";
+import { captureRegistrar, type CaptureHarness } from "../helpers/mcp-registrar";
+
+const BASE = "/setup-api/prime-radiant";
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+const CLAIM = "acme-sales/pricing/blue-widget";
+const JOB = "ing-0123456789ab";
+const REV = "rev-0123456789ab";
+const GQ = "gq-0123456789ab";
+
+function harness(edition: "openclaw" | "hermes" = "openclaw"): CaptureHarness {
+  const h = captureRegistrar(edition);
+  registerPrimeRadiantTools(h.reg);
+  return h;
+}
+
+/** Answer each call by its path, in order of the rules given. */
+function answer(...rules: Array<[RegExp, unknown]>) {
+  api.mockImplementation(async (path: string) => {
+    for (const [re, body] of rules) if (re.test(path)) return body;
+    throw new Error(`unexpected call to ${path}`);
+  });
+}
+
+function refuse(status: number, code: string, extra: Record<string, unknown> = {}) {
+  api.mockImplementation(async () => {
+    throw new ApiError(status, JSON.stringify({ error: `refused: ${code}`, code, ...extra }));
+  });
+}
+
+const call = (n = 0) =>
+  api.mock.calls[n] as [string, { method: string; query?: Record<string, unknown>; body?: Record<string, unknown>; timeoutMs: number; onTimeout?: { message: string; next: string } }];
+
+beforeEach(() => {
+  api.mockReset();
+});
+
+interface Case {
+  tool: string;
+  args: Record<string, unknown>;
+  reply: unknown;
+  method: string;
+  path: string;
+  /** What the route must be sent: `query` / `body`, matched with toMatchObject. */
+  sent?: { query?: Record<string, unknown>; body?: Record<string, unknown> };
+  says: RegExp;
+  /** Arguments the schema refuses; null for a tool that takes none. */
+  bad: Record<string, unknown> | null;
+}
+
+const CASES: Case[] = [
+  {
+    tool: "prime_radiant_pages",
+    args: { domain: "acme-sales", owner: "sales-team", verified: "unverified", title_contains: "widget", limit: 20 },
+    reply: { total: 1, pages: [{ path: "concepts/pricing.md", valid: true, title: "Widget pricing", type: "concept", domain: "acme-sales", owner: "sales-team", verified: false, claims: 2, summary: "Prices." }] },
+    method: "GET",
+    path: `${BASE}/pages`,
+    sent: { query: { domain: "acme-sales", owner: "sales-team", verified: "false", q: "widget", limit: 20 } },
+    says: /"concepts\/pricing\.md"/,
+    bad: { domain: "Acme Sales" },
+  },
+  {
+    tool: "prime_radiant_page",
+    args: { path: "concepts/pricing.md", include_body: true },
+    reply: {
+      path: "concepts/pricing.md",
+      frontmatter: { title: "Widget pricing", type: "concept", domain: "acme-sales", owner: "sales-team", status: "draft", sources: ["a.md"], claims: [{ id: CLAIM, text: "10 EUR.", confidence: 1, status: "verified", verified: { at: "2026-02-01", by: "owner", via: "assistant" }, evidence: [{ kind: "source", path: "a.md" }] }] },
+      body: "Prices.\n\nMore.",
+      summary: "Prices.",
+      verified: true,
+      backlinks: ["entities/acme.md"],
+      links: [],
+      lint: { findings: [] },
+    },
+    method: "GET",
+    path: `${BASE}/pages/concepts/pricing.md`,
+    says: /"verified_by": "owner",\s*"verified_via": "assistant"[\s\S]*"backlinks": \[\s*"entities\/acme\.md"/,
+    bad: { path: "" },
+  },
+  {
+    tool: "prime_radiant_search",
+    args: { query: "blue widget price", limit: 5 },
+    reply: { initialised: true, shardEnabled: true, indexing: false, results: [{ path: "concepts/pricing.md", id: CLAIM, kind: "claim", type: "concept", title: "Widget pricing", verified: true, snippet: "10 EUR", score: 0.912 }] },
+    method: "GET",
+    path: `${BASE}/search`,
+    sent: { query: { q: "blue widget price", limit: 5 } },
+    says: /"claim_id": "acme-sales\/pricing\/blue-widget"[\s\S]*"score": 0\.91/,
+    bad: { query: "x", limit: 50 },
+  },
+  {
+    tool: "prime_radiant_map",
+    args: { page: "concepts/pricing.md" },
+    reply: {
+      revision: SHA,
+      truncated: false,
+      nodes: [
+        { id: "concepts/pricing.md", title: "Widget pricing", domain: "acme-sales", degree: 1 },
+        { id: "entities/acme.md", title: "Acme", domain: "acme-sales", degree: 1 },
+        { id: "concepts/lonely.md", title: "Lonely", domain: null, degree: 0 },
+      ],
+      edges: [[0, 1, 1]],
+    },
+    method: "GET",
+    path: `${BASE}/graph`,
+    says: /"neighbours": \[\s*\{\s*"path": "entities\/acme\.md"[\s\S]*"tie": "linked"/,
+    bad: { page: 7 },
+  },
+  {
+    tool: "prime_radiant_lint",
+    args: { pages: ["concepts/pricing.md", "entities/acme.md"] },
+    reply: { checked: 2, errors: 1, warnings: 0, findings: [{ rule: "no-sources", severity: "error", path: "entities/acme.md", message: "the page names no sources" }] },
+    method: "GET",
+    path: `${BASE}/lint`,
+    sent: { query: { paths: "concepts/pricing.md,entities/acme.md" } },
+    says: /"rule": "no-sources"/,
+    bad: { pages: [] },
+  },
+  {
+    tool: "prime_radiant_costs",
+    args: { since: "2026-10-01", run_id: JOB },
+    reply: { basis: "estimate", totals: { calls: 3, usdEstimate: 0.01 } },
+    method: "GET",
+    path: `${BASE}/costs`,
+    sent: { query: { since: "2026-10-01", runId: JOB } },
+    says: /"basis": "estimate"/,
+    bad: { since: "last week" },
+  },
+  {
+    tool: "prime_radiant_settings",
+    args: {},
+    reply: { settings: { nightly: { enabled: true, time: "03:00" } }, defaults: { ingest: { exclude: ["node_modules"] } }, limits: {}, nightly: { nextRunAt: 0 } },
+    method: "GET",
+    path: `${BASE}/settings`,
+    says: /"time": "03:00"[\s\S]*"next_nightly_run": "off"/,
+    bad: null,
+  },
+  {
+    tool: "prime_radiant_review_list",
+    args: { status: "open", kind: "contradiction", limit: 10 },
+    reply: { total: 1, counts: { open: 1 }, items: [{ id: REV, kind: "contradiction", claimId: CLAIM, pages: ["concepts/pricing.md"], candidates: [{ text: "10 EUR" }, { text: "12 EUR" }], status: "open" }] },
+    method: "GET",
+    path: `${BASE}/review`,
+    sent: { query: { status: "open", kind: "contradiction", limit: 10 } },
+    says: /"number": 2,\s*"text": "12 EUR"/,
+    bad: { status: "closed" },
+  },
+  {
+    tool: "prime_radiant_history",
+    args: { path: "concepts/pricing.md", limit: 5 },
+    reply: { path: "concepts/pricing.md", commits: [{ sha: SHA, subject: "edit: concepts/pricing.md", at: "2026-10-16T10:00:00Z", author: "ClawBox assistant" }] },
+    method: "GET",
+    path: `${BASE}/history/concepts/pricing.md`,
+    sent: { query: { limit: 5 } },
+    says: /"commit": "0123456789ab"[\s\S]*"by": "ClawBox assistant"/,
+    bad: { path: "concepts/pricing.md", limit: 0 },
+  },
+  {
+    tool: "prime_radiant_diff",
+    args: { commit: SHA, path: "concepts/pricing.md" },
+    reply: { commit: { sha: SHA, subject: "edit", at: "x", author: "ClawBox assistant" }, files: ["concepts/pricing.md"], diff: "-a\n+b\n", truncated: false },
+    method: "GET",
+    path: `${BASE}/diff`,
+    sent: { query: { commit: SHA, path: "concepts/pricing.md" } },
+    says: /"diff": "-a\\n\+b\\n"/,
+    bad: { commit: "HEAD~1" },
+  },
+  {
+    tool: "prime_radiant_ingest_status",
+    args: { job_id: JOB },
+    reply: { job: { id: JOB, status: "done" }, deadLetter: [{ seq: 1, label: "Documents/a.pdf", error: "unreadable", attempts: 2, bytes: 10 }] },
+    method: "GET",
+    path: `${BASE}/ingest/${JOB}`,
+    says: /"file": "Documents\/a\.pdf"/,
+    bad: { job_id: "job-1" },
+  },
+  {
+    tool: "prime_radiant_page_create",
+    args: { type: "entity", title: "Acme Widgets Ltd", domain: "acme-sales", summary: "A synthetic firm.", facts: ["Founded in 1999."], confidence: 70 },
+    reply: { path: "entities/acme-widgets-ltd.md", commit: SHA, claims: ["acme-sales/acme-widgets-ltd/founded-in-1999"], findings: [] },
+    method: "POST",
+    path: `${BASE}/pages`,
+    sent: { body: { type: "entity", title: "Acme Widgets Ltd", domain: "acme-sales", summary: "A synthetic firm.", facts: ["Founded in 1999."], confidence: 0.7 } },
+    says: /Created entities\/acme-widgets-ltd\.md\. Commit 0123456789ab/,
+    bad: { type: "novel", title: "x", domain: "acme", summary: "x" },
+  },
+  {
+    tool: "prime_radiant_page_edit",
+    args: { path: "concepts/pricing.md", summary: "New summary.", recheck_after: "by_type", as_of: "2026-09-30" },
+    reply: { path: "concepts/pricing.md", commit: SHA, changed: ["summary", "stale_after", "as_of"], findings: [] },
+    method: "PATCH",
+    path: `${BASE}/pages/concepts/pricing.md`,
+    sent: { body: { summary: "New summary.", stale_after: null, as_of: "2026-09-30" } },
+    says: /Edited concepts\/pricing\.md \(summary, stale_after, as_of\)/,
+    // "never" would clear the page's date and leave its type's interval running: refused, not a false success.
+    bad: { path: "concepts/pricing.md", recheck_after: "never" },
+  },
+  {
+    tool: "prime_radiant_page_delete",
+    args: { path: "concepts/pricing.md", confirm: true },
+    reply: { path: "concepts/pricing.md", commit: SHA, claims: [CLAIM], verified: [CLAIM] },
+    method: "DELETE",
+    path: `${BASE}/pages/concepts/pricing.md`,
+    says: /Deleted concepts\/pricing\.md\. Its 1 claim\(s\) went with it, 1 of them verified\./,
+    bad: { path: "concepts/pricing.md", confirm: false },
+  },
+  {
+    tool: "prime_radiant_page_merge",
+    args: { into: "entities/acme.md", from: ["entities/acme-widgets-gmbh.md"], confirm: true },
+    reply: {
+      into: "entities/acme.md",
+      from: ["entities/acme-widgets-gmbh.md"],
+      dryRun: false,
+      commit: SHA,
+      claims: [CLAIM],
+      verified: [CLAIM],
+      aliases: ["Acme Widgets GmbH"],
+      relinked: [{ path: "concepts/pricing.md", links: 2 }],
+      links: 3,
+      findings: [],
+    },
+    method: "POST",
+    path: `${BASE}/pages/merge`,
+    sent: { body: { into: "entities/acme.md", from: ["entities/acme-widgets-gmbh.md"] } },
+    says: /Merged entities\/acme-widgets-gmbh\.md into entities\/acme\.md: 1 claim\(s\) \(1 verified, kept as they are\) moved, 3 link\(s\) on 1 page\(s\) now lead there\. Commit 0123456789ab/,
+    bad: { into: "entities/acme.md", from: [], confirm: true },
+  },
+  {
+    tool: "prime_radiant_pages_bulk_edit",
+    args: { edits: [{ path: "entities/acme.md", domain: "acme-sales" }, { path: "concepts/pricing.md", owner: "sales-team", privacy: "confidential" }] },
+    reply: {
+      changed: ["entities/acme.md"],
+      unchanged: [],
+      refused: [{ path: "concepts/pricing.md", code: "verified", error: "A person verified this page as a whole." }],
+      commit: SHA,
+      dryRun: false,
+    },
+    method: "POST",
+    path: `${BASE}/pages/bulk`,
+    sent: { body: { edits: [{ path: "entities/acme.md", domain: "acme-sales" }, { path: "concepts/pricing.md", owner: "sales-team", privacy: "confidential" }] } },
+    says: /Bulk edit: 1 page\(s\) changed, 0 already said so, 1 refused\. Commit 0123456789ab[\s\S]*"code": "verified"/,
+    bad: { edits: [] },
+  },
+  {
+    tool: "prime_radiant_claim_add",
+    args: { page: "concepts/pricing.md", text: "The green widget costs 9 EUR.", confidence: 60, source: "price-list.pdf" },
+    reply: { id: "acme-sales/pricing/green", page: "concepts/pricing.md", commit: SHA, findings: [] },
+    method: "POST",
+    path: `${BASE}/claims`,
+    sent: { body: { page: "concepts/pricing.md", text: "The green widget costs 9 EUR.", confidence: 0.6, source: "price-list.pdf" } },
+    says: /Added claim acme-sales\/pricing\/green/,
+    bad: { page: "concepts/pricing.md", text: "x".repeat(241), confidence: 80 },
+  },
+  {
+    tool: "prime_radiant_claim_edit",
+    args: { id: CLAIM, confidence: 95 },
+    reply: { id: CLAIM, page: "concepts/pricing.md", commit: SHA, findings: [] },
+    method: "PATCH",
+    path: `${BASE}/claims/acme-sales/pricing/blue-widget`,
+    sent: { body: { confidence: 0.95 } },
+    says: /Edited claim acme-sales\/pricing\/blue-widget/,
+    bad: { id: "Acme/Pricing" },
+  },
+  {
+    tool: "prime_radiant_claim_delete",
+    args: { id: CLAIM, page: "concepts/pricing.md", confirm: true },
+    reply: { id: CLAIM, page: "concepts/pricing.md", commit: SHA, wasVerified: false },
+    method: "DELETE",
+    path: `${BASE}/claims/acme-sales/pricing/blue-widget`,
+    sent: { query: { page: "concepts/pricing.md" } },
+    says: /Deleted claim acme-sales\/pricing\/blue-widget from concepts\/pricing\.md\. Commit/,
+    bad: { id: CLAIM },
+  },
+  {
+    tool: "prime_radiant_claim_verify",
+    args: { id: CLAIM, confirm: true },
+    reply: { claimId: CLAIM, page: "concepts/pricing.md", commit: SHA, retired: [] },
+    method: "POST",
+    path: `${BASE}/claims/verify`,
+    // The tool's confirm goes on to the route: the owner's verification, through the assistant.
+    sent: { body: { id: CLAIM, confirm: true } },
+    says: /Verified acme-sales\/pricing\/blue-widget on concepts\/pricing\.md, stamped as verified by the owner \(via the assistant\)/,
+    bad: { id: CLAIM },
+  },
+  {
+    tool: "prime_radiant_review_resolve",
+    args: { id: REV, action: "pick", candidate: 2, confirm: true },
+    reply: { item: { id: REV, status: "resolved", claimId: CLAIM }, commit: SHA, retired: ["acme-sales/catalogue/blue-widget"] },
+    method: "POST",
+    path: `${BASE}/review/${REV}/resolve`,
+    sent: { body: { action: "pick", candidate: 1, confirm: true } },
+    says: /verified under acme-sales\/pricing\/blue-widget by the owner \(via the assistant\)\. Retired the other answers' ids: acme-sales\/catalogue\/blue-widget/,
+    bad: { id: REV, action: "approve", confirm: true },
+  },
+  {
+    tool: "prime_radiant_review_resolve",
+    args: { id: REV, action: "dismiss", reason: "The reminder adds a late fee.", confirm: true },
+    reply: { item: { id: REV, status: "resolved", claimId: CLAIM }, commit: null, retired: [] },
+    method: "POST",
+    path: `${BASE}/review/${REV}/resolve`,
+    sent: { body: { action: "dismiss", reason: "The reminder adds a late fee.", confirm: true } },
+    says: /is now resolved/,
+    bad: { id: REV, action: "dismiss", reason: 7, confirm: true },
+  },
+  {
+    tool: "prime_radiant_review_raise",
+    args: { claim_id: CLAIM, candidates: ["10 EUR", "12 EUR"], note: "The price list changed." },
+    reply: { item: { id: REV } },
+    method: "POST",
+    path: `${BASE}/review`,
+    sent: { body: { claimId: CLAIM, candidates: [{ text: "10 EUR" }, { text: "12 EUR" }], note: "The price list changed." } },
+    says: /Raised review item rev-0123456789ab/,
+    bad: { candidates: Array.from({ length: 9 }, (_, i) => `answer ${i}`) },
+  },
+  {
+    tool: "prime_radiant_undo",
+    args: { commit: SHA, path: "concepts/pricing.md", confirm: true },
+    reply: { reverted: SHA, commit: "fedcba9876543210fedcba9876543210fedcba98", changed: ["concepts/pricing.md"] },
+    method: "POST",
+    path: `${BASE}/revert`,
+    sent: { body: { commit: SHA, path: "concepts/pricing.md" } },
+    says: /Undid 0123456789ab as commit fedcba987654 \(concepts\/pricing\.md\)/,
+    bad: { commit: SHA },
+  },
+  {
+    tool: "prime_radiant_ingest_preview",
+    args: { folders: ["Documents/acme"] },
+    reply: { preview: { documents: 12, skips: {}, topFolders: [] } },
+    method: "POST",
+    path: `${BASE}/ingest/preview`,
+    sent: { body: { folders: ["Documents/acme"] } },
+    says: /"documents": 12/,
+    bad: { folders: [] },
+  },
+  {
+    tool: "prime_radiant_ingest_start",
+    args: { files: ["Documents/acme/catalogue.md"] },
+    reply: { job: { id: JOB, total: 1 } },
+    method: "POST",
+    path: `${BASE}/ingest`,
+    sent: { body: { files: ["Documents/acme/catalogue.md"] } },
+    says: /Started import ing-0123456789ab/,
+    bad: { files: Array.from({ length: 201 }, (_, i) => `f${i}.md`) },
+  },
+  {
+    tool: "prime_radiant_ingest_stop",
+    args: { job_id: JOB },
+    reply: { stopping: true },
+    method: "DELETE",
+    path: `${BASE}/ingest/${JOB}`,
+    says: /Stopping import ing-0123456789ab/,
+    bad: { job_id: "ing-xyz" },
+  },
+  {
+    tool: "prime_radiant_ingest_retry",
+    args: { job_id: JOB },
+    reply: { job: { id: "ing-ba9876543210" } },
+    method: "POST",
+    path: `${BASE}/ingest/${JOB}/retry`,
+    says: /Started import ing-ba9876543210 over the files ing-0123456789ab failed on/,
+    bad: {},
+  },
+  {
+    tool: "prime_radiant_nightly_run",
+    args: {},
+    reply: { run: { id: "run-0123456789ab" } },
+    method: "POST",
+    path: `${BASE}/nightly/run`,
+    sent: { body: {} },
+    says: /Started nightly pass run-0123456789ab/,
+    bad: null,
+  },
+  {
+    tool: "prime_radiant_nightly_merge",
+    args: { branch: "dream/2026-10-15", confirm: true },
+    reply: { branch: "dream/2026-10-15", commit: SHA, changed: ["a.md", "b.md"] },
+    method: "POST",
+    path: `${BASE}/nightly/run`,
+    sent: { body: { merge: "dream/2026-10-15" } },
+    says: /Merged dream\/2026-10-15 as 0123456789ab \(2 page\(s\)\)/,
+    bad: { branch: "main", confirm: true },
+  },
+  {
+    tool: "prime_radiant_connect_run",
+    args: { dry_run: true },
+    reply: { pages: 3, written: 0, dryRun: true },
+    method: "POST",
+    path: `${BASE}/maintenance`,
+    sent: { body: { action: "connect", dryRun: true } },
+    says: /"would"[\s\S]*"dryRun": true/,
+    bad: { dry_run: "yes" },
+  },
+  {
+    tool: "prime_radiant_settings_update",
+    args: { nightly_time: "04:30", contradictions_enabled: false, domains: ["acme-sales=Sales team"], reset: ["ingest_exclude"], confirm: true },
+    reply: { settings: { nightly: { time: "04:30" } }, nightly: { nextRunAt: Date.UTC(2026, 9, 17, 4, 30) } },
+    method: "PUT",
+    path: `${BASE}/settings`,
+    sent: { body: { nightly: { time: "04:30" }, contradictions: { enabled: false }, domains: [{ name: "acme-sales", owner: "Sales team" }], ingest: { exclude: null } } },
+    says: /"result": "Saved\.[\s\S]*"next_nightly_run": "2026-10-17T04:30:00\.000Z"/,
+    bad: { nightly_time: "25:00", confirm: true },
+  },
+  {
+    tool: "prime_radiant_golden_list",
+    args: {},
+    reply: {
+      questions: [{ id: GQ, question: "What does the blue widget cost?", expected: "10 EUR", owner: "Sales team", domain: "acme-sales", claimId: CLAIM, page: null }],
+      verdicts: { [GQ]: { verdict: "correct", why: "same price", at: "2026-10-17T03:00:00.000Z" } },
+      score: { questions: 1, last: { at: "2026-10-17T03:00:00.000Z", percent: 100, asked: 1, correct: 1, wrong: 0, missing: 0, stale: 0, failed: 0 }, trend: [{ at: "x", percent: 80 }, { at: "y", percent: 100 }], change: 20 },
+    },
+    method: "GET",
+    path: `${BASE}/golden`,
+    says: /"percent_correct": 100,[\s\S]*"change_since_previous": 20[\s\S]*"last_verdict": "correct"/,
+    bad: null,
+  },
+  {
+    tool: "prime_radiant_golden_add",
+    args: { question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales", claim_id: CLAIM },
+    reply: { question: { id: GQ, owner: "Sales team" }, commit: SHA },
+    method: "POST",
+    path: `${BASE}/golden`,
+    sent: { body: { question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales", claimId: CLAIM } },
+    says: new RegExp(`Added golden question ${GQ} for Sales team[\\s\\S]*Commit ${SHA.slice(0, 12)}`),
+    bad: { question: "Q?", expected: "A", domain: "Not A Slug" },
+  },
+  {
+    tool: "prime_radiant_golden_edit",
+    args: { id: GQ, expected: "12 EUR", clear: ["page", "owner"] },
+    reply: { question: { id: GQ }, commit: SHA },
+    method: "PATCH",
+    path: `${BASE}/golden/${GQ}`,
+    sent: { body: { expected: "12 EUR", page: null, owner: null } },
+    says: new RegExp(`Edited golden question ${GQ}\\. Commit`),
+    bad: { id: "gq-not-hex", expected: "x" },
+  },
+  {
+    tool: "prime_radiant_golden_delete",
+    args: { id: GQ, confirm: true },
+    reply: { question: { id: GQ }, commit: SHA },
+    method: "DELETE",
+    path: `${BASE}/golden/${GQ}`,
+    says: new RegExp(`Deleted golden question ${GQ}\\.`),
+    bad: { id: GQ },
+  },
+  {
+    tool: "prime_radiant_daily_questions",
+    args: { owner: "Иван Иванов" },
+    reply: {
+      initialised: true,
+      outbound: false,
+      perOwner: 5,
+      owner: "Иван Иванов",
+      language: "bg",
+      questions: [{ kind: "claim", page: "concepts/sales.md", question: "Още ли е вярно? „Q1 sales were 40.“ (Widget sales)", answer: { tool: "prime_radiant_claim_verify", args: { id: CLAIM } } }],
+    },
+    method: "GET",
+    path: `${BASE}/daily`,
+    sent: { query: { owner: "Иван Иванов" } },
+    says: /"language": "bg"[\s\S]*"sending": "Sending is off[\s\S]*"ask": "Още ли е вярно\?[\s\S]*"tool": "prime_radiant_claim_verify",\s*"id": "acme-sales\/pricing\/blue-widget"/,
+    bad: { owner: "x".repeat(81) },
+  },
+];
+
+describe("the family", () => {
+  it("registers every tool on both editions, nothing else, within the contract", () => {
+    for (const edition of ["openclaw", "hermes"] as const) {
+      const h = harness(edition);
+      expect(h.names().sort()).toEqual([...PRIME_RADIANT_TOOLS].sort());
+      for (const info of h.reg.list()) {
+        expect(contractViolations(info), info.name).toEqual([]);
+        expect(paramDescriptionViolations(info), info.name).toEqual([]);
+        expect(info.opts.profile, info.name).toBeUndefined();
+      }
+    }
+  });
+
+  it("covers every tool here, with a happy path, a refusal and bad input", () => {
+    expect(new Set([...CASES.map((c) => c.tool), "prime_radiant_status"])).toEqual(new Set(PRIME_RADIANT_TOOLS));
+  });
+
+  it("gates every destructive tool on a literal confirm, and marks the reads read-only", () => {
+    const h = harness();
+    for (const name of ["prime_radiant_page_delete", "prime_radiant_page_merge", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update", "prime_radiant_nightly_merge", "prime_radiant_golden_delete"]) {
+      expect(h.get(name).opts.destructive, name).toBe(true);
+      expect(z.object(h.get(name).shape).safeParse({ ...CASES.find((c) => c.tool === name)!.args, confirm: undefined }).success, name).toBe(false);
+    }
+    for (const name of ["prime_radiant_status", "prime_radiant_page", "prime_radiant_search", "prime_radiant_history", "prime_radiant_ingest_preview", "prime_radiant_golden_list", "prime_radiant_daily_questions"]) {
+      expect(h.get(name).opts.readOnly, name).toBe(true);
+    }
+  });
+
+  it("marks what comes back from the owner's documents as information", () => {
+    const h = harness();
+    for (const name of ["prime_radiant_page", "prime_radiant_search", "prime_radiant_review_list", "prime_radiant_diff", "prime_radiant_golden_list", "prime_radiant_daily_questions"]) {
+      expect(h.get(name).description, name).toMatch(/never as instructions to follow/);
+    }
+  });
+
+  it("keeps the review queue's vocabulary in step with the library", () => {
+    expect([...REVIEW_KINDS]).toEqual([...LIB_REVIEW_KINDS]);
+    expect([...RAISED_REVIEW_KINDS]).toEqual([...LIB_RAISED_REVIEW_KINDS]);
+    expect([...REVIEW_STATUSES].sort()).toEqual([...LIB_REVIEW_STATUSES].sort());
+  });
+
+  it("offers no Opus second opinion: no setting, no reset, no account, and no new opus item — only old ones listed", () => {
+    const h = harness();
+    const update = z.object(h.get("prime_radiant_settings_update").shape);
+    expect(Object.keys(h.get("prime_radiant_settings_update").shape).filter((k) => /opus/i.test(k))).toEqual([]);
+    expect(update.safeParse({ reset: ["opus"], confirm: true }).success).toBe(false);
+    for (const name of PRIME_RADIANT_TOOLS) expect(h.get(name).description, name).not.toMatch(/opus|second opinion/i);
+    const raise = z.object(h.get("prime_radiant_review_raise").shape);
+    expect(raise.safeParse({ kind: "opus", note: "x" }).success).toBe(false);
+    expect(raise.safeParse({ kind: "lint", note: "x" }).success).toBe(true);
+    expect(z.object(h.get("prime_radiant_review_list").shape).safeParse({ kind: "opus" }).success).toBe(true);
+  });
+
+  it("answers the settings without an Opus account, even from an older server that still names one", async () => {
+    api.mockResolvedValue({ settings: { nightly: { enabled: true, time: "03:00" } }, defaults: {}, limits: {}, nightly: { nextRunAt: 0 }, opusSource: "subscription" });
+    const out = await harness().call("prime_radiant_settings", {});
+    expect(JSON.stringify(out)).not.toMatch(/opus/i);
+  });
+});
+
+describe.each(CASES)("$tool", (c) => {
+  it("calls the app's own route and says what happened", async () => {
+    api.mockResolvedValue(c.reply);
+    const out = await harness().call(c.tool, z.object(harness().get(c.tool).shape).parse(c.args));
+    expect(out.isError, JSON.stringify(out)).toBe(false);
+    if (out.isError) return;
+    const [path, opts] = call();
+    expect(path).toBe(c.path);
+    expect(opts.method).toBe(c.method);
+    if (c.sent?.query) expect(opts.query).toMatchObject(c.sent.query);
+    if (c.sent?.body) expect(opts.body).toEqual(c.sent.body);
+    expect(out.text).toMatch(c.says);
+  });
+
+  it("turns the route's owner-only refusal into an instruction, not a retry", async () => {
+    refuse(403, "owner_only");
+    const out = await harness().call(c.tool, z.object(harness().get(c.tool).shape).parse(c.args));
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toBe("refused: owner_only");
+    expect(out.error.next).toMatch(/owner's to do\. Do not retry/);
+  });
+
+  it.skipIf(c.bad === null)("refuses a bad argument before anything is sent", () => {
+    const parsed = z.object(harness().get(c.tool).shape).safeParse(c.bad);
+    expect(parsed.success).toBe(false);
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("golden and daily questions", () => {
+  it("lists the owners and never offers to send while sending is off; says it may when the owner turned it on", async () => {
+    api.mockResolvedValue({ initialised: true, outbound: false, perOwner: 5, owners: [{ owner: "Sales team", domains: ["acme-sales"], language: "en", waiting: 3 }] });
+    const off = await harness().call("prime_radiant_daily_questions", {});
+    expect(off.isError).toBe(false);
+    if (off.isError) return;
+    expect(JSON.parse(off.text)).toEqual({
+      sending: expect.stringMatching(/^Sending is off: .*do not message anyone\.$/),
+      per_owner: 5,
+      owners: [{ owner: "Sales team", domains: ["acme-sales"], language: "en", waiting_today: 3 }],
+    });
+    expect(call()[1].query).toBeUndefined();
+    api.mockResolvedValue({ initialised: true, outbound: true, owner: "Sales team", language: "en", questions: [] });
+    const on = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (on.isError) throw new Error(on.error.message);
+    expect(JSON.parse(on.text).sending).toMatch(/^Sending is on: you may send them .* not on a timer of your own\.$/);
+  });
+
+  it("hands the assistant the answer path of each daily question, a review item with no claim fixed first, then dismissed", async () => {
+    api.mockResolvedValue({
+      initialised: true,
+      outbound: false,
+      owner: "Sales team",
+      language: "en",
+      questions: [
+        { kind: "review", page: "concepts/sales.md", question: "A question about “Widget sales” is waiting for you.", answer: { tool: "prime_radiant_review_resolve", args: { id: "rev-0123456789ab", action: "dismiss" }, fixFirst: { tool: "prime_radiant_page_edit", args: { path: "concepts/sales.md" } } } },
+        { kind: "review", page: "concepts/price.md", options: ["10 EUR", "12 EUR"], question: "Which is right about “Price”?", answer: { tool: "prime_radiant_review_resolve", args: { id: "rev-0123456789ac" } } },
+      ],
+    });
+    const out = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (out.isError) throw new Error(out.error.message);
+    const body = JSON.parse(out.text);
+    expect(body.how_to_answer).toMatch(/action pick and the option's number as candidate[\s\S]*fix_first/);
+    expect(body.questions[0]).toMatchObject({
+      answer_with: { tool: "prime_radiant_review_resolve", id: "rev-0123456789ab", action: "dismiss" },
+      fix_first: { tool: "prime_radiant_page_edit", path: "concepts/sales.md" },
+    });
+    expect(body.questions[1].fix_first).toBeUndefined();
+    expect(body.questions[1].options).toEqual(["10 EUR", "12 EUR"]);
+  });
+
+  it("hands on a recheck answer's recheck_after, so page edit has the day to set", async () => {
+    api.mockResolvedValue({
+      initialised: true,
+      outbound: false,
+      owner: "Sales team",
+      language: "en",
+      questions: [
+        {
+          kind: "recheck",
+          page: "howtos/restock.md",
+          due: "2026-09-30",
+          question: "Is “Restocking” still current? Its re-check was due 2026-09-30.",
+          answer: { tool: "prime_radiant_page_edit", args: { path: "howtos/restock.md", recheck_after: "2027-04-15" } },
+        },
+      ],
+    });
+    const out = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (out.isError) throw new Error(out.error.message);
+    const body = JSON.parse(out.text);
+    expect(body.questions[0]).toMatchObject({
+      recheck_was_due: "2026-09-30",
+      answer_with: { tool: "prime_radiant_page_edit", path: "howtos/restock.md", recheck_after: "2027-04-15" },
+    });
+    expect(body.how_to_answer).toMatch(/recheck_after given/);
+    // The day handed on is one page edit accepts.
+    const edit = z.object(harness().get("prime_radiant_page_edit").shape).safeParse({ path: "howtos/restock.md", recheck_after: "2027-04-15" });
+    expect(edit.success).toBe(true);
+  });
+
+  it("lists golden questions in whole rows, narrowed by domain or owner, saying how many are left", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      id: `gq-${i.toString(16).padStart(12, "0")}`,
+      question: `What does widget ${i} cost? ${"detail ".repeat(10)}`,
+      expected: `${i} EUR`,
+      owner: i % 2 ? "Sales team" : "Ops desk",
+      domain: i % 2 ? "acme-sales" : "acme-ops",
+      claimId: null,
+      page: null,
+    }));
+    api.mockResolvedValue({ questions: many, verdicts: {}, score: null });
+    const all = await harness().call("prime_radiant_golden_list", {});
+    if (all.isError) throw new Error(all.error.message);
+    const body = JSON.parse(all.text);
+    expect(body.total).toBe(60);
+    expect(body.questions.length + body.more_questions).toBe(60);
+    expect(body.more_questions).toBeGreaterThan(0);
+    expect(body.narrow).toMatch(/domain or owner/);
+    const ops = await harness().call("prime_radiant_golden_list", { domain: "ACME-OPS", owner: "ops desk" });
+    if (ops.isError) throw new Error(ops.error.message);
+    const narrowed = JSON.parse(ops.text);
+    expect(narrowed.total).toBe(30);
+    expect(narrowed.questions.every((q: { domain: string }) => q.domain === "acme-ops")).toBe(true);
+  });
+
+  it("tells the assistant to delete a golden question first when the set is full", async () => {
+    refuse(409, "too_many");
+    const out = await harness().call("prime_radiant_golden_add", { question: "Q?", expected: "A", domain: "acme-sales" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/prime_radiant_golden_delete/);
+  });
+
+  it("shows the golden accuracy in status, and a page's re-check day by its type", async () => {
+    answer(
+      [/\/status$/, { initialised: true, vault: { pages: 1 }, golden: { questions: 4, last: { at: "2026-10-17T03:00:00.000Z", percent: 75, asked: 4, correct: 3, wrong: 1, missing: 0, stale: 0, failed: 0 }, trend: [{ percent: 75 }], change: null } }],
+      [/\/ingest$/, { jobs: [] }],
+      [/\/nightly$/, { runs: [] }],
+      [/\/maintenance$/, {}],
+      [/\/review$/, { counts: { open: 0 } }],
+    );
+    const out = await harness().call("prime_radiant_status", {});
+    if (out.isError) throw new Error(out.error.message);
+    expect(JSON.parse(out.text).accuracy).toMatchObject({ golden_questions: 4, percent_correct: 75, last_check: { correct: 3, wrong: 1 }, trend: [75] });
+
+    api.mockReset();
+    api.mockResolvedValue({
+      path: "concepts/sales.md",
+      frontmatter: { type: "metric", title: "Widget sales", domain: "acme-sales", owner: "x", status: "stable", generated: { at: "2026-09-01T00:00:00.000Z", by: "flash" }, verified: null, stale_after: null, claims: [] },
+    });
+    const page = await harness().call("prime_radiant_page", { path: "concepts/sales.md" });
+    if (page.isError) throw new Error(page.error.message);
+    expect(JSON.parse(page.text)).toMatchObject({ recheck_after: "2026-10-01", recheck_by: "type" });
+  });
+
+  it("clears a page's own re-check date with by_type, and stores owners' languages", async () => {
+    api.mockResolvedValue({ path: "concepts/x.md", commit: SHA, changed: ["stale_after"] });
+    await harness().call("prime_radiant_page_edit", { path: "concepts/x.md", recheck_after: "by_type" });
+    expect(call()[1].body).toEqual({ stale_after: null });
+    api.mockReset();
+    api.mockResolvedValue({ settings: {} });
+    const out = await harness().call("prime_radiant_settings_update", { owner_languages: ["Иван Иванов=bg"], daily_per_owner: 3, golden_max_questions: 20, confirm: true });
+    expect(out.isError, JSON.stringify(out)).toBe(false);
+    expect(call()[1].body).toEqual({ verification: { languages: [{ owner: "Иван Иванов", language: "bg" }], perOwner: 3 }, golden: { maxQuestions: 20 } });
+    api.mockReset();
+    const bad = await harness().call("prime_radiant_settings_update", { owner_languages: ["Иван=klingon"], confirm: true });
+    expect(bad.isError).toBe(true);
+    if (bad.isError) expect(bad.error.code).toBe("BAD_ARGUMENT");
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("prime_radiant_map", () => {
+  it("calls a content page no other content page links to unconnected, whatever its degree", async () => {
+    api.mockResolvedValue({
+      revision: SHA,
+      nodes: [
+        // Listed in index.md and tied by a shared source: degree 1, still reached by nobody.
+        { id: "concepts/listed.md", title: "Listed", degree: 1, inbound: 0 },
+        { id: "concepts/linked.md", title: "Linked", degree: 1, inbound: 1 },
+        // Not a content page: never an orphan.
+        { id: "sources/price-list.md", title: "Price list", degree: 0, inbound: 0 },
+      ],
+      edges: [[0, 1, 0.5]],
+    });
+    const out = await harness().call("prime_radiant_map", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).unconnected).toEqual({ count: 1, pages: ["concepts/listed.md"] });
+  });
+
+  it("ranks the most connected pages by their links, not by shared sources and hints", async () => {
+    api.mockResolvedValue({
+      revision: SHA,
+      nodes: [
+        { id: "b.md", title: "B", degree: 8, links: 2, inbound: 2 },
+        { id: "a.md", title: "A", degree: 3, links: 3, inbound: 1 },
+      ],
+      edges: [],
+    });
+    const out = await harness().call("prime_radiant_map", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const top = JSON.parse(out.text).most_connected;
+    expect(top[0]).toMatchObject({ path: "a.md", links: 3 });
+    expect(top.map((n: { path: string }) => n.path)).toEqual(["a.md", "b.md"]);
+  });
+});
+
+describe("prime_radiant_ingest_status", () => {
+  it("says how many changed documents behind a verified page an import left out", async () => {
+    answer([/\/ingest$/, { running: null, jobs: [{ id: JOB, status: "done", total: 3, done: 2, pages: 2, failed: 0, skipped: 1, skips: { verified: 1 } }] }]);
+    const out = await harness().call("prime_radiant_ingest_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).jobs[0]).toMatchObject({ id: JOB, skipped: 1, left_out_verified: 1 });
+  });
+});
+
+describe("prime_radiant_status", () => {
+  it("reads the vault, the import, the nightly pass and the queue in one answer", async () => {
+    answer(
+      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 }, links: { pages: 3, median: 4, mean: 4, atTarget: 1, target: 5 } }],
+      [/\/ingest$/, { running: null, jobs: [{ id: JOB, status: "done", pages: 2, failed: 0 }] }],
+      [/\/nightly$/, { running: null, nextRunAt: 0, runs: [] }],
+      [/\/maintenance$/, { running: null, last: {} }],
+      [/\/review$/, { counts: { open: 2 } }],
+    );
+    const out = await harness().call("prime_radiant_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text)).toMatchObject({
+      initialised: true,
+      pages: 3,
+      verified_pages: 1,
+      claims: 4,
+      last_change: { commit: SHA.slice(0, 12), by: "ClawBox assistant" },
+      checks: { errors: 1, warnings: 2 },
+      links_per_page: { median: 4, target: 5 },
+      review_items_open: 2,
+      import: { running: null },
+      nightly: { next_run: "off" },
+    });
+  });
+
+  it("shows the search index's size against the owner's limit", async () => {
+    answer(
+      [/\/status$/, {
+        initialised: true,
+        vault: { pages: 3 },
+        index: { exists: true, usedMb: 41.3, limitMb: 160, chunks: 42_100, maxChunks: 163_047, pages: 3, cappedPages: 2, withoutPageVector: 2, needsFullScan: true, migrationPending: true },
+      }],
+      [/./, {}],
+    );
+    const out = await harness().call("prime_radiant_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).search_index).toEqual({
+      used_mb: 41.3, limit_mb: 160, chunks: 42_100, max_chunks: 163_047, pages: 3, capped_pages: 2, pages_without_page_vector: 2, converting_to_8bit: true, full_scan_pending: true,
+    });
+    answer([/\/status$/, { initialised: true, vault: { pages: 0 }, index: { exists: false, limitMb: 64 } }], [/./, {}]);
+    const none = await harness().call("prime_radiant_status", {});
+    if (!none.isError) expect(JSON.parse(none.text).search_index).toEqual({ built: false, limit_mb: 64 });
+  });
+
+  it("sends the agent to open the app when there is no vault yet", async () => {
+    answer([/\/status$/, { initialised: false }], [/./, {}]);
+    const out = await harness().call("prime_radiant_status", {});
+    expect(out.isError).toBe(false);
+    if (!out.isError) expect(out.text).toContain('ui_open_app(\\"prime-radiant\\")');
+  });
+
+  it("still answers when a side read fails", async () => {
+    api.mockImplementation(async (path: string) => {
+      if (path.endsWith("/status")) return { initialised: true, vault: { pages: 1 } };
+      throw new ApiError(500, "{}");
+    });
+    const out = await harness().call("prime_radiant_status", {});
+    expect(out.isError).toBe(false);
+    if (!out.isError) expect(JSON.parse(out.text)).toMatchObject({ pages: 1, import: "unknown", nightly: "unknown", review_items_open: "unknown" });
+  });
+});
+
+describe("the search index size limit", () => {
+  it("is set and reset in MB through the settings route, and refused outside 32..4096 before anything is sent", async () => {
+    answer([/\/settings$/, { settings: { search: { indexLimitMb: 512 } } }]);
+    const set = await harness().call("prime_radiant_settings_update", { search_index_limit_mb: 512, confirm: true });
+    expect(set.isError).toBe(false);
+    expect(call(0)[0]).toBe(`${BASE}/settings`);
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { search: { indexLimitMb: 512 } } });
+    if (!set.isError) expect(JSON.parse(set.text).settings.search).toEqual({ indexLimitMb: 512 });
+
+    api.mockClear();
+    await harness().call("prime_radiant_settings_update", { reset: ["search_index_limit_mb"], confirm: true });
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { search: { indexLimitMb: null } } });
+
+    const shape = z.object(harness().get("prime_radiant_settings_update").shape);
+    for (const bad of [16, 31, 4097, 100.5, "160"]) {
+      expect(shape.safeParse({ search_index_limit_mb: bad, confirm: true }).success, String(bad)).toBe(false);
+    }
+    for (const ok of [32, 160, 4096]) expect(shape.safeParse({ search_index_limit_mb: ok, confirm: true }).success, String(ok)).toBe(true);
+  });
+
+  it("is read back with its default and limits", async () => {
+    answer([/\/settings$/, { settings: { search: { indexLimitMb: 256 } }, defaults: { search: { indexLimitMb: 160 } }, limits: { searchIndexLimitMb: { min: 32, max: 4096 } } }]);
+    const out = await harness().call("prime_radiant_settings", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text)).toMatchObject({
+      settings: { search: { indexLimitMb: 256 } },
+      defaults: { search: { indexLimitMb: 160 } },
+      limits: { searchIndexLimitMb: { min: 32, max: 4096 } },
+    });
+  });
+});
+
+describe("refusals worth their own words", () => {
+  it("names the lint rules a change broke", async () => {
+    refuse(409, "lint_blocked", { findings: [{ rule: "secret-pattern", path: "concepts/x.md", message: "x" }] });
+    const out = await harness().call("prime_radiant_page_edit", { path: "concepts/x.md", body: "x" });
+    expect(out.isError && out.error).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("secret-pattern on concepts/x.md") });
+  });
+
+  it("says an undo of a verification is nobody's to retry, and how to change the fact instead", async () => {
+    refuse(409, "lint_blocked", { findings: [{ rule: "verification-undo", path: "concepts/pricing.md", message: "x" }] });
+    const out = await harness().call("prime_radiant_undo", { commit: SHA, path: "concepts/pricing.md", confirm: true });
+    expect(out.isError && out.error).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("verification-undo on concepts/pricing.md") });
+    expect(out.isError && out.error.next).toMatch(/never undone[\s\S]*Do not retry[\s\S]*prime_radiant_claim_verify/);
+    expect(out.isError && out.error.next).not.toMatch(/owner can do it|try again/);
+  });
+
+  it("marks a verification in a page's history as one that cannot be undone", async () => {
+    answer([
+      /\/history\//,
+      {
+        path: "concepts/pricing.md",
+        commits: [
+          { sha: SHA, subject: `verify: ${CLAIM}`, at: "2026-10-16T10:00:00Z", author: "Prime Radiant", verified: { by: "owner" }, noUndo: "verification" },
+          { sha: "fedcba9876543210fedcba9876543210fedcba98", subject: "edit: concepts/pricing.md", at: "2026-10-15T10:00:00Z", author: "ClawBox assistant" },
+        ],
+      },
+    ]);
+    const out = await harness().call("prime_radiant_history", { path: "concepts/pricing.md" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const [verification, edit] = JSON.parse(out.text).commits;
+    expect(verification).toMatchObject({ commit: "0123456789ab", undo: false });
+    expect(edit).not.toHaveProperty("undo");
+  });
+
+  it("sends a verified claim's edit to verify, and a busy import to its status", async () => {
+    refuse(409, "verified");
+    const edit = await harness().call("prime_radiant_claim_edit", { id: CLAIM, text: "x" });
+    expect(edit.isError && edit.error.next).toMatch(/prime_radiant_claim_verify/);
+    refuse(409, "busy", { runningId: JOB });
+    const start = await harness().call("prime_radiant_ingest_start", { folders: ["Documents"] });
+    expect(start.isError && start.error).toMatchObject({ code: "CONFLICT", message: expect.stringContaining(`running: ${JOB}`) });
+  });
+
+  it("names which folder of the list the route refused", async () => {
+    refuse(404, "folder_not_found", { index: 1 });
+    const out = await harness().call("prime_radiant_ingest_preview", { folders: ["Documents", "Nowhere"] });
+    expect(out.isError && out.error).toMatchObject({ code: "NOT_FOUND", message: expect.stringContaining("item 2 of the list") });
+  });
+
+  it("says to open the app before the vault exists", async () => {
+    refuse(412, "not_initialised");
+    const out = await harness().call("prime_radiant_claim_add", { page: "concepts/x.md", text: "A fact.", confidence: 80 });
+    expect(out.isError && out.error.next).toMatch(/ui_open_app\("prime-radiant"\)/);
+  });
+
+  it("falls back to the status for a refusal it has no words for", async () => {
+    api.mockRejectedValue(new ApiError(500, "<html>oops</html>"));
+    const out = await harness().call("prime_radiant_pages", { verified: "any", offset: 0, limit: 10 });
+    expect(out.isError && out.error.code).toBe("ENDPOINT_DOWN");
+  });
+});
+
+describe("arguments the handler checks itself", () => {
+  it("refuses an edit, a claim edit or a settings change that changes nothing", async () => {
+    for (const [tool, args] of [
+      ["prime_radiant_page_edit", { path: "concepts/x.md" }],
+      ["prime_radiant_claim_edit", { id: CLAIM }],
+      ["prime_radiant_settings_update", { confirm: true }],
+      ["prime_radiant_review_raise", { note: "Something is off." }],
+    ] as const) {
+      const out = await harness().call(tool, args);
+      expect(out.isError && out.error.code, tool).toBe("BAD_ARGUMENT");
+    }
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("wants folders or files, never both or neither", async () => {
+    for (const args of [{}, { folders: ["A"], files: ["a.md"] }]) {
+      const out = await harness().call("prime_radiant_ingest_start", args);
+      expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+    }
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("wants the candidate for pick and the text for an own answer", async () => {
+    for (const args of [{ id: REV, action: "pick", confirm: true }, { id: REV, action: "own_answer", confirm: true }]) {
+      const out = await harness().call("prime_radiant_review_resolve", args);
+      expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+    }
+    api.mockResolvedValue({ item: { id: REV, status: "resolved", claimId: CLAIM }, commit: SHA, retired: [] });
+    await harness().call("prime_radiant_review_resolve", { id: REV, action: "own_answer", text: "11 EUR.", confirm: true });
+    expect(call()[1].body).toEqual({ action: "new", text: "11 EUR.", confirm: true });
+  });
+
+  it("reads domains as name=owner", async () => {
+    const out = await harness().call("prime_radiant_settings_update", { domains: ["Sales Team"], confirm: true });
+    expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("answers an empty search without calling the route", async () => {
+    const out = await harness().call("prime_radiant_search", { query: "   ", limit: 5 });
+    expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("prime_radiant_page_merge", () => {
+  const MERGE = { into: "entities/acme.md", from: ["entities/acme-widgets-gmbh.md", "concepts/acme-legacy.md"], confirm: true as const };
+
+  it("previews with dry_run, lets the body change only when asked, and says nothing was changed", async () => {
+    api.mockResolvedValue({ into: MERGE.into, from: MERGE.from, dryRun: true, commit: null, claims: [CLAIM], links: 0, relinked: [], unparsed: ["concepts/broken.md"], privacy: "confidential", reviewItems: 1 });
+    const out = await harness().call("prime_radiant_page_merge", { ...MERGE, dry_run: true, keep_into_body: false });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(call()[1]).toMatchObject({ method: "POST", body: { into: MERGE.into, from: MERGE.from, dry_run: true, keep_into_body: false } });
+    expect(JSON.parse(out.text)).toMatchObject({
+      result: expect.stringMatching(/^Dry run, nothing was changed\. Merging entities\/acme-widgets-gmbh\.md, concepts\/acme-legacy\.md into entities\/acme\.md: 1 claim\(s\) would move/),
+      claims: [CLAIM],
+      privacy_raised_to: "confidential",
+      not_relinked: ["concepts/broken.md"],
+      review_items_followed: 1,
+    });
+    // The default keeps the staying page's body: nothing extra is sent.
+    api.mockReset().mockResolvedValue({ into: MERGE.into, from: MERGE.from, dryRun: false, commit: SHA, claims: [] });
+    await harness().call("prime_radiant_page_merge", MERGE);
+    expect(call()[1].body).toEqual({ into: MERGE.into, from: MERGE.from });
+  });
+
+  it("refuses a page merged into itself, more than 20 pages or a path that is not one, sending nothing", async () => {
+    const out = await harness().call("prime_radiant_page_merge", { ...MERGE, from: [MERGE.into] });
+    expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+    const shape = z.object(harness().get("prime_radiant_page_merge").shape);
+    expect(shape.safeParse({ ...MERGE, from: Array.from({ length: 21 }, (_, i) => `entities/p${i}.md`) }).success).toBe(false);
+    for (const p of ["../../system/power", "./x.md", "/concepts/x.md"]) {
+      expect(shape.safeParse({ ...MERGE, into: p }).success, p).toBe(false);
+      expect(shape.safeParse({ ...MERGE, from: [p] }).success, p).toBe(false);
+    }
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("turns the merge's own refusals into what to do", async () => {
+    for (const [code, next] of [
+      ["deprecated", /page that replaced it/],
+      ["into_links", /keep_into_body: false/],
+      ["too_long", /merge fewer pages/],
+      ["too_many_claims", /delete a claim first/],
+      ["verified", /prime_radiant_review_raise/],
+    ] as const) {
+      refuse(409, code);
+      const out = await harness().call("prime_radiant_page_merge", MERGE);
+      expect(out.isError && out.error, code).toMatchObject({ code: "CONFLICT", message: `refused: ${code}`, next: expect.stringMatching(next) });
+    }
+  });
+});
+
+describe("a page path can only ever name a page", () => {
+  // The URL parser resolves dot segments: `pages/../../system/power` IS
+  // /setup-api/system/power, so an unchecked path would send this tool's
+  // method and body to another route with the same bearer.
+  const ESCAPES = ["../../system/power", "concepts/../../settings", "./x.md", "concepts//x.md", "/concepts/x.md", "concepts\\x.md", "%2e%2e/x"];
+
+  it.each([
+    ["prime_radiant_page", (p: string) => ({ path: p })],
+    ["prime_radiant_page_edit", (p: string) => ({ path: p, title: "x" })],
+    ["prime_radiant_page_delete", (p: string) => ({ path: p, confirm: true })],
+    ["prime_radiant_history", (p: string) => ({ path: p })],
+    ["prime_radiant_undo", (p: string) => ({ commit: SHA, path: p, confirm: true })],
+    ["prime_radiant_claim_add", (p: string) => ({ page: p, text: "A fact." })],
+  ] as const)("%s refuses a path that is not one", (tool, args) => {
+    const shape = z.object(harness().get(tool).shape);
+    for (const p of ESCAPES) expect(shape.safeParse(args(p)).success, p).toBe(false);
+    expect(shape.safeParse(args("concepts/Acme widgets 2.md")).success).toBe(true);
+  });
+
+  it("refuses a dot segment in the handler too, sending nothing", async () => {
+    for (const [tool, args] of [
+      ["prime_radiant_page_delete", { path: "../../system/power", confirm: true }],
+      ["prime_radiant_page", { path: "concepts/../../settings", include_body: true }],
+    ] as const) {
+      const out = await harness().call(tool, args);
+      expect(out.isError && out.error.code, tool).toBe("BAD_ARGUMENT");
+    }
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("a write that times out", () => {
+  it("is told to look before repeating it; a read and the preview keep the plain retry", async () => {
+    api.mockResolvedValue({ path: "entities/x.md", commit: SHA, claims: [] });
+    await harness().call("prime_radiant_page_create", { type: "entity", title: "X", domain: "acme", summary: "X.", confidence: 80 });
+    expect(call()[1]).toMatchObject({ method: "POST", onTimeout: { next: expect.stringMatching(/Do not repeat it yet/) } });
+    api.mockReset().mockResolvedValue({ path: "entities/x.md" });
+    await harness().call("prime_radiant_page", { path: "entities/x.md", include_body: false });
+    expect(call()[1].onTimeout).toBeUndefined();
+    api.mockReset().mockResolvedValue({ preview: {} });
+    await harness().call("prime_radiant_ingest_preview", { folders: ["Documents"] });
+    expect(call()[1].onTimeout).toBeUndefined();
+  });
+});
+
+describe("search states", () => {
+  it.each([
+    [{ initialised: false }, /no vault yet/],
+    [{ initialised: true, shardEnabled: false }, /Memory Shard, which is switched off/],
+    [{ initialised: true, shardEnabled: true, indexing: true }, /being built right now/],
+    [{ initialised: true, shardEnabled: true, indexing: false, results: [] }, /Nothing in the wiki matched/],
+  ])("%j", async (reply, says) => {
+    api.mockResolvedValue(reply);
+    const out = await harness().call("prime_radiant_search", { query: "widgets", limit: 5 });
+    expect(out.isError).toBe(false);
+    if (!out.isError) expect(out.text).toMatch(says);
+  });
+});
+
+describe("prime_radiant_pages_bulk_edit", () => {
+  const shape = () => z.object(harness().get("prime_radiant_pages_bulk_edit").shape);
+
+  it("sends a dry run as one, and says nothing was changed", async () => {
+    api.mockResolvedValue({ changed: ["entities/acme.md", "concepts/pricing.md"], unchanged: ["concepts/shipping.md"], refused: [], commit: null, dryRun: true });
+    const out = await harness().call("prime_radiant_pages_bulk_edit", shape().parse({ edits: [{ path: "entities/acme.md", domain: "acme-sales" }], dry_run: true }));
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(call()[1].body).toEqual({ edits: [{ path: "entities/acme.md", domain: "acme-sales" }], dry_run: true });
+    expect(out.text).toMatch(/Dry run, nothing was changed: 2 page\(s\) would change, 1 already said so, 0 refused\./);
+    expect(out.text).not.toMatch(/refused"/);
+  });
+
+  it("refuses an entry that changes nothing, and more than 500 entries, before anything is sent", async () => {
+    const out = await harness().call("prime_radiant_pages_bulk_edit", shape().parse({ edits: [{ path: "entities/acme.md", domain: "acme-sales" }, { path: "concepts/pricing.md" }] }));
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/Edit 2 \(concepts\/pricing\.md\) changes nothing/);
+    expect(shape().safeParse({ edits: Array.from({ length: 501 }, (_, i) => ({ path: `concepts/p-${i}.md`, owner: "x" })) }).success).toBe(false);
+    expect(shape().safeParse({ edits: [{ path: "../setup-api/x", owner: "x" }] }).success).toBe(false);
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("lists at most 100 changed pages and counts the rest", async () => {
+    const changed = Array.from({ length: 140 }, (_, i) => `concepts/p-${i}.md`);
+    api.mockResolvedValue({ changed, unchanged: [], refused: [], commit: SHA, dryRun: false });
+    const out = await harness().call("prime_radiant_pages_bulk_edit", shape().parse({ edits: [{ path: "concepts/p-0.md", owner: "x" }] }));
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const body = JSON.parse(out.text);
+    expect(body.changed).toHaveLength(100);
+    expect(body.changed_not_listed).toBe(40);
+    expect(body.result).toMatch(/Bulk edit: 140 page\(s\) changed, 0 already said so, 0 refused\. Commit 0123456789ab/);
+  });
+});

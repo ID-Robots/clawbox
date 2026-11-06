@@ -6,6 +6,9 @@ vi.mock("fs/promises", () => ({
     // `force`, so ENOENT means "nothing of that name" and anything else means
     // "there and not removed". Default: it was there and it went.
     rm: vi.fn().mockResolvedValue(undefined),
+    // No public-link list on this box (TASK-1478): the disable that runs
+    // first finds nothing to remove.
+    readFile: vi.fn().mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
   },
 }));
 

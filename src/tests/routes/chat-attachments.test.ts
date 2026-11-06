@@ -26,15 +26,31 @@ const TEXT = Buffer.from("just some notes and nothing a viewer could render");
  * Which harness this box runs, per test.
  *
  * `canAttachDocuments` is a property of the harness, and it is the whole point
- * of the gate under test: a document staged on a Hermes box is disk the agent
- * has no way to open, because `chat --image` is image-only and the path
- * resolver in `image_routing.py` matches picture extensions by design.
+ * of the gate under test: a document staged for a harness that cannot open one
+ * is disk nothing will ever read. See `documentsOff` below.
  */
 let harness: "openclaw" | "hermes" = "openclaw";
 vi.mock("@/lib/harness", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/harness")>()),
   getActiveHarness: async () => harness,
 }));
+
+/**
+ * A harness with no way to open a document. Both editions read documents
+ * since 2026-10-13 (Hermes with its own file tools), so the route's second
+ * gate is exercised against a capability table that says no.
+ */
+let documentsOff = false;
+vi.mock("@/lib/harness/capabilities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/harness/capabilities")>();
+  return {
+    ...actual,
+    capabilitiesFor: (...args: Parameters<typeof actual.capabilitiesFor>) => {
+      const caps = actual.capabilitiesFor(...args);
+      return documentsOff ? { ...caps, canAttachDocuments: false } : caps;
+    },
+  };
+});
 
 let tmpHome: string;
 let openclawHome: string;
@@ -193,6 +209,7 @@ function seedStaged(name: string, bytes: Buffer, ageMs: number): string {
 
 describe("/setup-api/chat/attachments", () => {
   beforeEach(async () => {
+  documentsOff = false;
     harness = "openclaw";
     originalHome = process.env.HOME;
     originalOpenclawHome = process.env.OPENCLAW_HOME;
@@ -568,6 +585,7 @@ describe("/setup-api/chat/attachments", () => {
 
   it("refuses a document on a harness that has no way to open one", async () => {
     harness = "hermes";
+    documentsOff = true;
     const res = await POST(request(multipart("notes.txt", TEXT)));
     expect(res.status).toBe(415);
     expect((await res.json()).error).toMatch(/only attach images/i);
@@ -584,8 +602,19 @@ describe("/setup-api/chat/attachments", () => {
     expect(staged()).toHaveLength(1);
   });
 
+  it("takes a document on Hermes, whose agent opens it with its file tools", async () => {
+    // 2026-10-13 smoke test: the composer refused the file, the message went
+    // out without it, and the agent searched the disk for it.
+    harness = "hermes";
+    const res = await POST(request(multipart("notes.txt", TEXT)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(fs.readFileSync(body.path)).toEqual(TEXT);
+  });
+
   it("still takes a picture on the box that refused the document", async () => {
     harness = "hermes";
+    documentsOff = true;
     const res = await POST(request(multipart("shapes.png", PNG)));
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -600,6 +629,7 @@ describe("/setup-api/chat/attachments", () => {
     // has already shown it did not come from our composer. Only the bytes say
     // what the file is.
     harness = "hermes";
+    documentsOff = true;
     const res = await POST(request(multipart("invoice.png", TEXT)));
     expect(res.status).toBe(415);
     // The bytes had to be written before they could be read, so the point here

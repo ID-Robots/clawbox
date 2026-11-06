@@ -328,13 +328,20 @@ export async function startLlamaCppServer(alias?: string): Promise<LlamaCppStart
 
 async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStartStatus> {
   const stopGeneration = llamaCppStopGeneration
-  const [{ getAll }, { readConfig }, llamaCpp] = await Promise.all([
+  const [{ getAll }, { readConfig }, llamaCpp, { getActiveHarness }] = await Promise.all([
     import('./lib/config-store'),
     import('./lib/openclaw-config'),
     import('./lib/llamacpp-server'),
+    import('./lib/harness'),
   ])
 
-  const [config, state] = await Promise.all([readConfig(), getAll().catch(() => ({} as Record<string, unknown>))])
+  // The runtime sizes the window: Hermes refuses one under its floor
+  // (HERMES_LLAMACPP_CONTEXT_WINDOW in lib/llamacpp.ts).
+  const [config, state, harness] = await Promise.all([
+    readConfig(),
+    getAll().catch(() => ({} as Record<string, unknown>)),
+    getActiveHarness(),
+  ])
   const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(state, 'local_ai_configured')
   if (hasExplicitLocalAiFlag && state['local_ai_configured'] === false) {
     const primaryModel = config.agents?.defaults?.model?.primary?.trim()
@@ -355,7 +362,7 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
     return 'skipped-not-configured'
   }
 
-  const spec = llamaCpp.getLlamaCppLaunchSpec(alias)
+  const spec = llamaCpp.getLlamaCppLaunchSpec(alias, harness)
   const runningModels = await llamaCpp.queryLlamaCppModels(spec.baseUrl)
   if (runningModels.includes(alias)) {
     console.log(`[instrumentation] llama.cpp already running for ${alias}`)

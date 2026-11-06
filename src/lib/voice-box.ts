@@ -16,6 +16,9 @@
 import { promises as fs } from "fs";
 import { getActiveHarness } from "@/lib/harness";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
+import { CLOUD_TTS_ENTITLED_TIER } from "@/lib/clawai-cloud-defaults-state";
+import { readClawaiSpeechWithdrawable } from "@/lib/clawai-plan-tier";
+import { CLAWBOX_AI_PROXY_URLS } from "@/lib/clawbox-ai-models";
 import {
   hermesVoiceConfigView,
   readHermesVoice,
@@ -26,6 +29,7 @@ import { buildTtsInventory, KOKORO_STAMP, localTtsCommandRunnable, type LocalMod
 import { readConfig, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import {
   localCommandPath,
+  withoutClawboxCloudVoice,
   type LocalVoiceProbe,
   type VoiceConfigView,
   type VoiceEngine,
@@ -74,7 +78,7 @@ async function exists(p: string): Promise<boolean> {
  * it as a `type: command` provider), so this half needed no edition of its own.
  */
 export async function readVoiceConfig(harness: ActiveHarness): Promise<VoiceConfigView> {
-  if (harness !== "hermes") return await readConfig();
+  if (harness !== "hermes") return await openclawVoiceConfigForPlan(await readConfig());
   const [probe, token, entitled] = await Promise.all([
     readHermesVoice(),
     resolveClawaiToken(),
@@ -83,6 +87,29 @@ export async function readVoiceConfig(harness: ActiveHarness): Promise<VoiceConf
   // The endpoint only for a box whose plan includes the cloud voice; see the
   // parameter's own note for why that is said as a null URL.
   return hermesVoiceConfigView(probe, token, entitled ? CLAWBOX_AI_PROXY_URL : null);
+}
+
+/** Every address of the ClawBox AI proxy this build knows: the configured one and the ones every box shares. */
+export function clawboxAiProxyUrls(): readonly string[] {
+  return [CLAWBOX_AI_PROXY_URL, ...CLAWBOX_AI_PROXY_URLS];
+}
+
+/**
+ * OpenClaw's speech config as the box may USE it now.
+ *
+ * On OpenClaw only the gateway's boot script withdraws the cloud voice of a
+ * plan that no longer covers it, so between a downgrade and that start the
+ * file still holds our entry — and without this, the Voice panel listed the
+ * cloud voices and every spoken reply went to a proxy that now refuses the
+ * account. So once the plan ON RECORD is one without the voice, the entry the
+ * boot will remove is left out here (`withoutClawboxCloudVoice`), and Auto and
+ * the chain fall back to the box's own voice at once. The same plan rule the
+ * boot's delete reads (`clawaiSpeechWithdrawable`): a plan not on record keeps
+ * what it has. Hermes needs none of this — its view reads the plan already.
+ */
+export async function openclawVoiceConfigForPlan(config: VoiceConfigView): Promise<VoiceConfigView> {
+  if (!(await readClawaiSpeechWithdrawable(CLOUD_TTS_ENTITLED_TIER))) return config;
+  return withoutClawboxCloudVoice(config, clawboxAiProxyUrls());
 }
 
 export async function probeBox(harness: ActiveHarness) {

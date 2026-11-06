@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
+import { CLAWAI_PLAN_CHANGED_EVENT, notifyProvidersChanged, PROVIDER_SIGNAL_DEBOUNCE_MS } from "@/lib/ui-events";
 
 const realFetch = globalThis.fetch;
 
@@ -105,6 +106,57 @@ describe("useClawboxLogin", () => {
     expect(result.current.tier).toBeNull();
   });
 
+  // A Free sign-in stamps the box's MODEL tier "flash" — the same stamp the
+  // Pro plan gets — so the account tiers on the wire cannot say Free. The
+  // plan is `clawaiPlan`, and the hook's `tier` (every paid gate's input) and
+  // `plan` (the celebration's) both come from it.
+  it("reads a Free account as Free from clawaiPlan, not as Pro from its flash model tier", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "clawai",
+      clawaiTier: "flash",
+      clawaiAccountTier: "flash",
+      clawaiPlan: "free",
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBeNull();
+    expect(result.current.plan).toBe("free");
+  });
+
+  it("reads the paid plans from clawaiPlan: flash is Pro, pro is Max, whatever the model tier", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai",
+      // A Max subscriber whose box runs Flash.
+      clawaiAccountTier: "flash",
+      clawaiPlan: "pro",
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.tier).toBe("pro");
+    expect(result.current.plan).toBe("pro");
+  });
+
+  it("unlocks nothing on a plan that is not known, and says it is not known", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai",
+      clawaiAccountTier: "flash",
+      clawaiPlan: null,
+      clawaiConfigured: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBeNull();
+    expect(result.current.plan).toBeNull();
+  });
+
   it("falls back to legacy provider-equality when the response omits clawaiConfigured", async () => {
     // Zero-downtime rollout: an old server build (or stale Next.js
     // route handler that hasn't reloaded yet) won't emit the new
@@ -121,6 +173,9 @@ describe("useClawboxLogin", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.loggedIn).toBe(true);
     expect(result.current.tier).toBe("flash");
+    // A pre-rollout server has no plan to give: nothing may be announced off
+    // the model tier it does give.
+    expect(result.current.plan).toBeNull();
   });
 
   it("does not flip out of loading on a non-2xx response, but still leaves loggedIn=false", async () => {
@@ -535,4 +590,111 @@ describe("useClawboxLogin — one shared poll", () => {
     await advance(20_000);
     expect(statusCalls()).toBe(2);
   });
+
+  it("asks at once when the providers change — a sign-in shows the new account, not the previous one", async () => {
+    vi.useFakeTimers();
+    let plan = "pro";
+    globalThis.fetch = vi.fn(async () => jsonResponse({
+      provider: "clawai", clawaiConfigured: true, clawaiPlan: plan,
+    })) as unknown as typeof fetch;
+
+    const { result, unmount } = renderHook(() => [useClawboxLogin(30_000), useClawboxLogin(30_000)] as const);
+    await flush();
+    expect(result.current[0].plan).toBe("pro");
+    expect(statusCalls()).toBe(1);
+
+    // The ClawBox AI sign-in landed on another, Free account, and the configure
+    // success said so — every surface is answered now, not on the next tick.
+    plan = "free";
+    notifyProvidersChanged();
+    await advance(PROVIDER_SIGNAL_DEBOUNCE_MS);
+    expect(statusCalls()).toBe(2);
+    expect(result.current[0].plan).toBe("free");
+    expect(result.current[1].plan).toBe("free");
+
+    // The cadence restarts from that ask, and the last hook out stops listening.
+    await advance(30_000);
+    expect(statusCalls()).toBe(3);
+    unmount();
+    notifyProvidersChanged();
+    await advance(60_000);
+    expect(statusCalls()).toBe(3);
+  });
+
+  it("waits for the visible edge when the providers change while the page is hidden", async () => {
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: "clawai" })) as unknown as typeof fetch;
+
+    renderHook(() => useClawboxLogin(30_000));
+    await flush();
+    setVisibility("hidden");
+    notifyProvidersChanged();
+    await advance(PROVIDER_SIGNAL_DEBOUNCE_MS);
+    expect(statusCalls()).toBe(1);
+    setVisibility("visible");
+    await flush();
+    expect(statusCalls()).toBe(2);
+  });
 });
+
+describe("useClawboxLogin — a plan that moved while the box runs", () => {
+  function countPlanEvents() {
+    const seen = { count: 0 };
+    const listener = () => { seen.count += 1; };
+    window.addEventListener(CLAWAI_PLAN_CHANGED_EVENT, listener);
+    return { seen, stop: () => window.removeEventListener(CLAWAI_PLAN_CHANGED_EVENT, listener) };
+  }
+
+  it("tells the page when its poll recorded a new plan, so Settings → Voice re-reads at once", async () => {
+    const events = countPlanEvents();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true, provider: "clawai", clawaiConfigured: true, clawaiPlan: "pro", clawaiPlanChanged: true,
+    })) as unknown as typeof fetch;
+    const { result, unmount } = renderHook(() => useClawboxLogin());
+    try {
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(events.seen.count).toBe(1);
+    } finally {
+      unmount();
+      events.stop();
+    }
+  });
+
+  it("tells it too when another page's poll recorded the change — the plan differs from the last one seen", async () => {
+    const events = countPlanEvents();
+    let plan = "free";
+    globalThis.fetch = vi.fn(async () => jsonResponse({
+      connected: true, provider: "clawai", clawaiConfigured: true, clawaiPlan: plan,
+    })) as unknown as typeof fetch;
+    const { result, unmount } = renderHook(() => useClawboxLogin());
+    try {
+      await waitFor(() => expect(result.current.plan).toBe("free"));
+      expect(events.seen.count).toBe(0);
+      plan = "pro";
+      act(() => notifyProvidersChanged());
+      await waitFor(() => expect(result.current.plan).toBe("pro"), { timeout: PROVIDER_SIGNAL_DEBOUNCE_MS + 2_000 });
+      expect(events.seen.count).toBe(1);
+    } finally {
+      unmount();
+      events.stop();
+    }
+  });
+
+  it("says nothing while the plan stays where it was", async () => {
+    const events = countPlanEvents();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true, provider: "clawai", clawaiConfigured: true, clawaiPlan: "pro",
+    })) as unknown as typeof fetch;
+    const { result, unmount } = renderHook(() => useClawboxLogin());
+    try {
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => notifyProvidersChanged());
+      await new Promise((r) => setTimeout(r, PROVIDER_SIGNAL_DEBOUNCE_MS + 100));
+      expect(events.seen.count).toBe(0);
+    } finally {
+      unmount();
+      events.stop();
+    }
+  });
+});
+

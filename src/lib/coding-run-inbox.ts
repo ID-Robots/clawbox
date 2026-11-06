@@ -1,0 +1,291 @@
+/**
+ * A coding run's INBOX: how a message reaches a run in the middle of a turn.
+ *
+ * `--input-format stream-json` keeps the harness's stdin open, but Claude Code
+ * reads the next user turn only once the current one has ENDED — and a
+ * delegated run's first turn is the whole task. So a correction sent at minute
+ * three was read at minute forty, as the run's last word. And the pipe is this
+ * web server's: a run reattached after a restart has none at all.
+ *
+ * What the installed Claude Code does take mid-turn is a hook's
+ * `additionalContext` (PostToolUse, `hookSpecificOutput`), handed to the model
+ * right after the tool call it belongs to — proved against the box's own
+ * harness (Claude Code 2.1.296: a run told a word only through this hook
+ * answered with it) and in this repo's tests against the hook script itself. Every run is spawned with that hook (`runHookSettings`,
+ * via `--settings`), pointed at a folder of its own:
+ *
+ *   data/coding-agent-inbox/<runId>/pending/   messages waiting for a tool call
+ *                                  /taken/     receipts: what the hook handed over
+ *                                  /reclaimed/ what the box took back at a turn's end
+ *
+ * A message is written whole (to a temp name, then renamed) into `pending/`;
+ * the hook (scripts/coding-run-hook.mjs) TAKES it by renaming it into
+ * `taken/`, and the web server takes back what is still pending at the end of
+ * a turn by renaming it into `reclaimed/` and delivering it the old way (the
+ * next stdin turn, or the next spawn's first). A rename is atomic, so each
+ * message goes exactly one of those ways, never both and never twice.
+ *
+ * Everything on disk, nothing in a pipe: the inbox works for a run this web
+ * server only reattached to, and a receipt the hook left while the server was
+ * down is read when it comes back.
+ */
+
+import fs from "fs";
+import path, { untraced } from "@/lib/runtime-path";
+import { CONFIG_ROOT, DATA_DIR } from "@/lib/config-store";
+import { RUN_MESSAGE_ID_RE } from "@/lib/coding-run-messages";
+
+const RUN_ID_RE = /^run-[a-z0-9]{8}$/;
+/** `<13-digit ms>-<id>.json`: the inbox's own order is the order the messages arrived in. */
+const INBOX_FILE_RE = /^(\d{13})-(m-[a-z0-9]{8,16})\.json$/;
+
+export function inboxRoot(): string {
+  return path.join(DATA_DIR, "coding-agent-inbox");
+}
+
+/** The run's inbox folder. Throws for anything that is not a run id: the value reaches the filesystem. */
+export function runInboxDir(runId: string): string {
+  if (!RUN_ID_RE.test(runId)) throw new Error(`Not a run id: ${runId}`);
+  return path.join(inboxRoot(), runId);
+}
+
+/** Make the run's inbox (0700, its three folders), and answer it. */
+export function ensureRunInbox(runId: string): string {
+  const dir = runInboxDir(runId);
+  for (const sub of ["pending", "taken", "reclaimed"]) fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+function names(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir).filter((n) => INBOX_FILE_RE.test(n)).sort();
+  } catch {
+    return [];
+  }
+}
+
+function idOf(name: string): string {
+  return INBOX_FILE_RE.exec(name)![2];
+}
+
+/**
+ * Put one message in the run's inbox for its hook: `context` is the text the
+ * model is handed, already framed (runMessageTurn). False when it could not be
+ * written — the message then stays queued for the old ways.
+ */
+export function postToInbox(runId: string, message: { id: string; at: number; context: string }): boolean {
+  if (!RUN_MESSAGE_ID_RE.test(message.id)) return false;
+  try {
+    const dir = ensureRunInbox(runId);
+    const name = `${String(Math.max(0, Math.floor(message.at))).padStart(13, "0")}-${message.id}.json`;
+    // Written beside the folder the hook reads and renamed in, so the hook
+    // never finds half a message.
+    const tmp = untraced(path.join(dir, `.${name}.${process.pid}.tmp`));
+    fs.writeFileSync(tmp, JSON.stringify({ id: message.id, context: message.context }), { mode: 0o600 });
+    fs.renameSync(tmp, path.join(dir, "pending", name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The ids still waiting in the inbox, oldest first. */
+export function inboxPending(runId: string): string[] {
+  return names(path.join(runInboxDir(runId), "pending")).map(idOf);
+}
+
+/** What the hook has handed over and the box has not recorded yet, oldest first, with when. */
+export function inboxReceipts(runId: string): Array<{ id: string; at: number }> {
+  const taken = path.join(runInboxDir(runId), "taken");
+  return names(taken).map((name) => {
+    let at = Date.now();
+    try {
+      // The rename is the delivery; a rename keeps the file's times, so its
+      // change time is when the hook took it.
+      at = Math.floor(fs.statSync(path.join(taken, name)).ctimeMs);
+    } catch {
+      // Gone between the listing and the look: now is close enough.
+    }
+    return { id: idOf(name), at };
+  });
+}
+
+/** A receipt recorded on the run's record: removed, so it is never counted twice. */
+export function clearReceipts(runId: string, ids: readonly string[]): void {
+  const taken = path.join(runInboxDir(runId), "taken");
+  const wanted = new Set(ids);
+  for (const name of names(taken)) {
+    if (!wanted.has(idOf(name))) continue;
+    try {
+      fs.rmSync(path.join(taken, name), { force: true });
+    } catch {
+      // Left behind it is read again, and a message already delivered is not marked twice.
+    }
+  }
+}
+
+/**
+ * Take back every message the hook has not taken — at a turn's end, at the
+ * run's settle, before a spawn delivers the queue its own way. Answers the ids
+ * the box got; one the hook took meanwhile is not among them (its receipt is).
+ */
+export function reclaimInbox(runId: string): string[] {
+  const dir = runInboxDir(runId);
+  const got: string[] = [];
+  for (const name of names(path.join(dir, "pending"))) {
+    const target = path.join(dir, "reclaimed", name);
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fs.renameSync(path.join(dir, "pending", name), target);
+    } catch {
+      continue;
+    }
+    got.push(idOf(name));
+    try {
+      fs.rmSync(target, { force: true });
+    } catch {
+      // A reclaimed file is never read again; one left over costs a few bytes.
+    }
+  }
+  return got;
+}
+
+/** The run's inbox, gone with its record. */
+export function removeRunInbox(runId: string): void {
+  try {
+    fs.rmSync(runInboxDir(runId), { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
+/** scripts/coding-run-hook.mjs, in this checkout. */
+export function runHookScriptPath(): string {
+  return path.join(CONFIG_ROOT, "scripts", "coding-run-hook.mjs");
+}
+
+/** A word for a POSIX shell, quoted: the hook's command line is run by `sh -c`. */
+function shellWord(word: string): string {
+  return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A spawn token is the base-36 time its scope is named by (coding-agent.ts `spawnRun`). */
+const SPAWN_TOKEN_RE = /^[a-z0-9]{1,16}$/;
+
+/**
+ * One spawn's COMMAND CLOCK: `<evidence>/.run-jobs/first-command-<token>`.
+ *
+ * Whatever launched the harness shares its cgroup — a launcher's own watcher,
+ * forked at session start and reparented to init, sat in a run's scope until
+ * the session ended, and the keep-alive hook refused every stop over it as a
+ * process "you started". What the run started is what started AFTER its first
+ * command, so the box needs to know when that was: the spawn's PreToolUse
+ * guard appends /proc/uptime (ticks since boot, the same clock a process's
+ * start time is kept in) to this file before a tool call while it is empty.
+ * Read by scripts/coding-run-hook.mjs (`commandClock`), for the Stop hook and
+ * for the settle's `leftovers` question. Per spawn, because a resume is a new
+ * harness under a new launcher; a dotfolder, so it is never an artifact. The
+ * launcher also restarts its watcher AFTER the first command (an account
+ * failover mid-run), which no clock can tell from the run's work: the hook
+ * knows that one by its command line, `--heal-watch` and the harness's own
+ * session folder (`launcherWatchers`), which the Stop hook writes into
+ * `<clock>.stop-ran` for the settle.
+ */
+export function commandClockPath(stateDir: string, token: string): string {
+  if (!SPAWN_TOKEN_RE.test(token)) throw new Error(`Not a spawn token: ${token}`);
+  return path.join(stateDir, ".run-jobs", `first-command-${token}`);
+}
+
+/**
+ * Create the spawn's command clock EMPTY, before the harness starts: an empty
+ * clock tells the hook "no command has run yet", which a missing one cannot
+ * (a missing clock is the old rule — everything in the cgroup counts). An
+ * earlier spawn's `<clock>.stop-ran`, and the session folder in it, go.
+ */
+export function createCommandClock(stateDir: string, token: string): string {
+  const file = commandClockPath(stateDir, token);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, "", { mode: 0o600 });
+  fs.rmSync(untraced(`${file}.stop-ran`), { force: true });
+  return file;
+}
+
+/**
+ * Can that spawn's clock tell the run's leftovers from what was in its scope
+ * before it? Yes when it is stamped (a command ran), and yes when it is
+ * empty but the run's own Stop hook has run with it (`<clock>.stop-ran`, see
+ * scripts/coding-run-hook.mjs `keepalive`): the harness runs this spawn's
+ * hooks and no command ran, so nothing left is the run's. An empty clock with
+ * no such mark is a harness that never ran its hooks (a stand-in in a test) or
+ * one that died first, and the settle keeps its old answer for it.
+ */
+export function commandClockAnswers(file: string | null): boolean {
+  if (!file) return false;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return false;
+  }
+  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.some((line) => /^\d+(\.\d{1,2})?$/.test(line))) return true;
+  return lines.length === 0 && fs.existsSync(untraced(`${file}.stop-ran`));
+}
+
+/**
+ * The `--settings` JSON a run is spawned with: its PostToolUse inbox hook,
+ * and — for a coding team's run — the PreToolUse guard that denies any
+ * command merging a pull request. `node` is the binary that runs the hook (the
+ * web server's own); null `inbox` leaves the inbox hook out.
+ *
+ * The inbox hook fires after EVERY tool call (`matcher: "*"`, so a read-only
+ * run that never calls Bash is reached too), and the inbox is empty on nearly
+ * all of them: 0 mid-turn deliveries in 44 runs, 100 to 260 tool calls each,
+ * 80 to 160 ms and ~48 MB of Node per call. So the command the harness runs is
+ * a shell guard, built from `sh` builtins only, that looks for a pending file
+ * and execs Node only when there is one: `set --` expands the glob (an
+ * unmatched pattern stays literal, and `-e` is false for it), `exec` hands the
+ * hook's stdin on to the script, and the trailing `:` keeps the exit status 0
+ * on the empty path — the hook never fails the tool call it rides on.
+ *
+ * `keepAlive` is the run's evidence folder: with it the run also gets a Stop
+ * hook (`keepalive`) that refuses to let the model end its turn while the
+ * run still has work of its own going on — a message in its inbox, a job it
+ * registered, a background process it started — because a `claude -p` run
+ * that stops is never woken again. Bounded inside the script (MAX_BLOCKS,
+ * MAX_BLOCK_SPAN_MS); see scripts/coding-run-hook.mjs.
+ *
+ * `commandClock` (with `keepAlive`) is the spawn's command clock
+ * (`createCommandClock`): the Stop hook is told where it is, and a PreToolUse
+ * guard on EVERY tool (`matcher: "*"`: a sub-agent's or a workflow's first
+ * command comes after the Agent call that started it) stamps it before the
+ * first one. Built from `sh` builtins only, like the inbox guard — `-s` is
+ * false for an empty file, `read` takes the first field of /proc/uptime,
+ * `printf` and `>>` append it — so no tool call ever pays for a Node process,
+ * and the trailing `:` keeps the exit status 0.
+ */
+export function runHookSettings(opts: { node: string; script?: string; inbox: string | null; mergeGuard: boolean; keepAlive?: string | null; commandClock?: string | null }): string | null {
+  const script = opts.script ?? runHookScriptPath();
+  const hook = (...args: string[]) => ({ type: "command", command: [opts.node, script, ...args].map(shellWord).join(" "), timeout: 10 });
+  const inboxHook = (dir: string) => ({
+    type: "command",
+    command: `set -- ${shellWord(dir)}/pending/*.json; [ -e "$1" ] && exec ${[opts.node, script, "inbox", dir].map(shellWord).join(" ")}; :`,
+    timeout: 10,
+  });
+  const clockHook = (file: string) => ({
+    type: "command",
+    command: `[ -s ${shellWord(file)} ] || { read -r up rest < /proc/uptime && printf '%s\\n' "$up" >> ${shellWord(file)}; } 2>/dev/null; :`,
+    timeout: 10,
+  });
+  const clock = opts.keepAlive && opts.commandClock ? opts.commandClock : null;
+  const hooks: Record<string, unknown[]> = {};
+  if (opts.inbox) hooks.PostToolUse = [{ matcher: "*", hooks: [inboxHook(opts.inbox)] }];
+  const pre: unknown[] = [];
+  if (clock) pre.push({ matcher: "*", hooks: [clockHook(clock)] });
+  if (opts.mergeGuard) pre.push({ matcher: "Bash", hooks: [hook("merge-guard")] });
+  if (pre.length) hooks.PreToolUse = pre;
+  if (opts.keepAlive) {
+    hooks.Stop = [{ hooks: [hook("keepalive", opts.keepAlive, ...(opts.inbox ? [opts.inbox] : []), ...(clock ? [`--first-command=${clock}`] : []))] }];
+  }
+  return Object.keys(hooks).length ? JSON.stringify({ hooks }) : null;
+}

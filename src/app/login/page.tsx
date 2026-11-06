@@ -144,6 +144,10 @@ function LoginForm() {
             message = { key: loginUsers.multiUser ? "login.incorrectCredentials" : "login.incorrectPassword" };
           } else if (data?.code === "locked") {
             message = { key: "login.tooManyAttempts" };
+          } else if (data?.code === "signin_unavailable") {
+            // The box could not check the password at all: its root-owned
+            // helper is missing (src/lib/clawbox-users.ts). Not "incorrect".
+            message = { key: "login.signinUnavailable" };
           } else if (typeof data?.error === "string") {
             message = { text: data.error };
           }

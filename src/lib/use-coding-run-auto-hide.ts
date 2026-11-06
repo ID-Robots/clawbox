@@ -12,7 +12,9 @@ import { useAutoHide } from "@/lib/use-auto-hide";
  * has nothing left to ask of anyone, so it stays long enough to be seen
  * turning green and then goes on its own. Nothing is lost when it goes — the
  * run record is untouched, the chat's 🤖 chip brings the card back, and the
- * Coding Agent app keeps the run's history.
+ * Coding Agent app keeps the run's history. The chip is for THESE cards only:
+ * one the owner put away with × stays away for good
+ * (src/lib/use-dismissed-coding-runs.ts).
  *
  * globals.css (`.coding-agent-autohide`) fades the card out over the last
  * 240 ms of this, so its delay and duration add up to this number.
@@ -81,7 +83,9 @@ function sameOutcomes(a: readonly RunState[], b: readonly RunState[]): boolean {
  * each render restarts no clock.
  *
  * This hides CARDS, not runs: `restore()` brings back every card that went on
- * its own, and they do not count down again.
+ * its own, and they do not count down again. It knows nothing of the cards
+ * the owner put away with × — the chat keeps those apart and filters them out
+ * whatever this says, so a restore never brings one of them back.
  */
 export function useCodingRunAutoHide(runs: readonly RunState[], onHide?: (id: string) => void): {
   /** Runs whose card is still shown but will leave when its clock runs out. */

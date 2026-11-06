@@ -106,6 +106,20 @@ call_tool "update_check"    '{}'
 call_tool "ui_list_apps"    '{}'
 
 echo ""
+echo "── Docs (both editions): the pages shipped with this install, offline ──"
+call_tool "docs_search"     '{"query":"update failed","limit":3}'
+call_tool "docs_read"       '{"path":"support/troubleshooting","section":"Still stuck?"}'
+call_tool "docs_read"       '{"path":"support/troubleshooting#updates-say-up-to-date-but-the-version-is-old"}'
+call_tool "docs_read"       '{"path":"agents/mcp"}'
+call_tool "docs_read"       '{"path":"support/no-such-page"}' NOT_FOUND
+# The path guard: nothing outside docs-site/ and docs/agents/ is ever opened.
+call_tool "docs_read"       '{"path":"../package.json"}' BLOCKED_PATH
+call_tool "docs_read"       '{"path":"support/../../.env"}' BLOCKED_PATH
+call_tool "docs_read"       '{"path":"/etc/passwd"}' BLOCKED_PATH
+call_tool "docs_read"       '{"path":"~/.ssh/id_rsa"}' BLOCKED_PATH
+call_tool "docs_read"       '{"path":".gitignore"}' BLOCKED_PATH
+
+echo ""
 echo "── Argument validation ──"
 call_tool "ui_open_app"     '{"app_id":"no-such-app-xyz"}' NOT_FOUND
 call_tool "preferences_set" '{"key":"ui_language","value":"klingon"}' BAD_ARGUMENT

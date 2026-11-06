@@ -15,9 +15,11 @@ Everything on this page is on both [editions](/editions/overview) unless it says
   <img src="/images/4.0/chat-empty.png" alt="The chat panel open over the desktop with an empty transcript: a small crab above the line Say something!, the message box below it, and the provider and reasoning pills in the row beneath." />
 </Frame>
 
-<Frame caption="The same chat with something in it — this box is answering from Gemma 4, on the box itself">
-  <img src="/images/4.0/install/chat-conversation.png" alt="The chat open over the desktop on a short exchange: a greeting, then a question asking what the assistant can help with on this ClawBox, and its reply saying it can manage files on the box, use the browser, run shell commands and call its skills. The composer below carries an attach button, a plus button and a model pill reading Gemma 4." />
+<Frame caption="The chat docked beside Files: the assistant made a folder and a file on the box, and the result is open on the left">
+  <img src="/images/4.3/chat-agent.webp" alt="The chat docked beside Files on the ClawBox desktop: asked to make a Recipes folder and save a shopping list in it, the assistant has done both — the file is open in Files on the left — and then lists what is on it; the ClawBox provider pill and the Medium reasoning pill sit under the message box" />
 </Frame>
+
+On the Hermes edition the chat shows the Hermes icon where these pictures show the crab.
 
 ## The pills: provider, model and reasoning
 
@@ -30,7 +32,9 @@ The chat panel carries up to three pills in the row beneath the message box.
 | **Reasoning effort** | How hard the model thinks before answering. The levels on offer are whatever the provider accepts, so this control changes shape: a provider that takes a scale shows it, one that only has thinking on or off shows two states, and one that takes no reasoning level at all does not show the control. |
 
 A change applies to the **running** agent. There is no restart between you and the next
-message, and open conversations are not dropped.
+message, and open conversations are not dropped. On OpenClaw, changing the default model in
+**Settings → Providers**, installing or switching Local AI, and the local-only switch are
+applied live too wherever they can be, so the chat carries on.
 
 <Note>
 On **ClawBox AI** there is no model pill — the chat names the provider and there is
@@ -75,7 +79,7 @@ stopped and is waiting for you.
   <Accordion title="Email waiting to be sent">
     The assistant wrote a message and wants to send it from your account. You read it
     first and nothing goes out until you approve — this card is what **Ask me before
-    sending** in **Settings → Email** produces, and it is on by default. You can send them
+    sending** in **Settings → Channels → Email** produces, and it is on by default. You can send them
     all, send one, or delete them without sending. See
     [Messaging channels](/guides/messaging-channels#email).
   </Accordion>
@@ -89,19 +93,57 @@ A failed turn says what actually went wrong: the provider's own reason, not a ge
 - **A fallback model answered.** Your first-choice model refused or errored and the next
   model in the chain replied instead. The reply says which model wrote it.
 - **An allowance ran out.** On ClawBox AI, the chat says whether it was the weekly chat
-  allowance, the 5-hour burst or the memory-indexing allowance, and when it frees up. Your
-  usage is in **Settings → Providers**.
+  allowance, the **short-term limit (5 hours)** or the memory-indexing allowance, and when
+  it frees up — for the weekly allowance also how to add an extra-usage pack. Your usage is
+  in **Settings → Providers**.
+- **The sign-in is missing or revoked.** When the box has no working sign-in for the
+  provider the chat is set to, the chat says so and names the two fixes: connect that provider
+  again in **Settings → Providers**, or pick another model in the header. A Claude sign-in that
+  needs renewing is marked on the Providers strip too. A ClawBox AI turn that failed on its sign-in
+  offers a way to sign in again. See
+  [Troubleshooting](/support/troubleshooting#chat-says-the-provider-refused-or-the-sign-in-is-missing).
+- **An Anthropic account hit its limit.** With [several Anthropic accounts](/guides/anthropic-accounts)
+  on OpenClaw, the next message moves to another account instead of answering with the limit
+  message.
+
+## Stopping a reply
+
+**Stop** ends the reply that is being written. Whatever part of the answer had arrived stays,
+with a grey **Stopped.** line under it, so a stopped reply is not mistaken for a lost one. On
+Hermes the stopped reply is kept after a reload too.
+
+## Long conversations
+
+A conversation keeps growing until it no longer fits what the model can read at once:
+
+- On OpenClaw with ClawBox AI, a long chat is shortened (compacted) automatically, so each
+  message does not send more and more of the conversation.
+- On the on-device model, a conversation that grows too long offers **a new chat** instead
+  of a minutes-long shortening on the box. The card says how much room the model has.
 
 ## Voice
 
-**Voice in** — in the **chat panel**, press the microphone to record. The recording is
-turned into text and sent as a message. The Chat app has no microphone. Recording needs a secure connection, so on a plain `http://` address the
-chat points you at this box's Remote Access tunnel instead of failing silently.
+**Voice in** — in the **chat panel**, **hold** the microphone button while you speak and let
+go to send: the recording is turned into text and sent as a message. A quick click still
+starts and stops a recording instead. Holding **F8** while the chat is open does the same, and
+**Esc** cancels. The Chat app has no microphone. Recording needs a secure connection, so on a
+plain `http://` address the chat points you at this box's Remote Access tunnel instead of
+failing silently.
 
 **Voice out** — **Settings → Voice → Spoken replies**, **off by default**. With it on, a
 reply gets a player on its bubble: press play, scrub through it, or download the audio.
 A question you asked out loud is answered out loud. Where your box answers messaging
-channels, a voice note there gets a spoken reply too.
+channels, a voice note there gets a spoken reply too. Two more switches in **Settings →
+Voice**, both off by default:
+
+- **Auto-play every spoken reply** plays the reply to a question you *typed* aloud as well,
+  while you are at the chat.
+- **Short spoken answers** has a spoken reply say only the main answer, in at most three
+  sentences, so it starts sooner. The full reply still appears in the chat.
+
+Spoken replies download compressed — a 15-second reply is about 90 KB. When the cloud voice
+does not answer, a reply gives up after about 20 seconds, and a short line under it says the
+voice is not answering or could not speak that reply.
 
 <Note>
 Speaking on Telegram, WhatsApp and Discord is an OpenClaw-edition feature. On the Hermes
@@ -110,12 +152,22 @@ edition the box still answers out loud in the chat; replies on those channels st
 
 ## Other things in the composer
 
-- **Attach a picture** or take a photo, and ask about it.
+- **Attach a picture** or take a photo, and ask about it, or **attach a file**. On Hermes,
+  documents reach the assistant even when its model cannot look at pictures.
 - **Generate a picture** from a description.
 - **Several chats at once**, in the chat panel — tabs across the top, each its own
   conversation. **New session** starts a fresh one in the same tab.
 - **Files the assistant produced** appear as cards you can download, with their real name
   and size.
+
+## Coding runs in the chat
+
+When the assistant hands work to the [Coding Agent](/whats-new#the-coding-agent-on-a-live-chart),
+the run shows as a card in the chat, and the chat that started it hears when it ends. A run
+started somewhere else — another browser or device — shows its card in the open chat within
+about half a minute, without a reload. A card you hide with **×** stays hidden, in every window
+and after a reload; **Show finished coding runs again** brings back only the cards that left on
+their own.
 
 ## Where the conversation runs
 

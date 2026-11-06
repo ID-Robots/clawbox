@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   clearAnthropicKey,
@@ -68,7 +68,7 @@ async function state() {
  * next to a working terminal login would have no way to make sense of it.
  */
 export async function GET(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   return state();
 }
 
@@ -85,7 +85,7 @@ export async function GET(request: Request) {
  * panel can say "saved, not checked" rather than claim a test that never ran.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   if (!isSameOriginRequest(request)) return crossOrigin();
 
   let body: unknown;
@@ -158,7 +158,7 @@ export async function POST(request: Request) {
  * account is still reachable and where that comes from.
  */
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   if (!isSameOriginRequest(request)) return crossOrigin();
   await clearAnthropicKey();
   console.error("[coding-agent] the stored Anthropic API key was removed by the owner");

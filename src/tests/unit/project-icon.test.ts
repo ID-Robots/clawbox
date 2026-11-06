@@ -25,7 +25,7 @@ vi.mock("@/lib/webapp-icon", async (importOriginal) => {
 });
 
 import { webappIconPath } from "@/lib/webapp-icon";
-import { ensureProjectIcon, FAVICON_ICO, FAVICON_PNG, icoFromPng } from "@/lib/project-icon";
+import { BOX_FAVICONS, ensureProjectIcon, FAVICON_ICO, FAVICON_PNG, icoFromPng } from "@/lib/project-icon";
 
 const PNG = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(120, 5)]);
 const SMALL = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(30, 9)]);
@@ -66,6 +66,9 @@ describe("ensureProjectIcon", () => {
     expect(fs.readFileSync(path.join(directory, FAVICON_PNG)).equals(SMALL)).toBe(true);
     const ico = fs.readFileSync(path.join(directory, FAVICON_ICO));
     expect(ico.subarray(22).equals(SMALL)).toBe(true);
+    // Exactly the files a merge home reads as the box's own (BOX_FAVICONS):
+    // a name drawn here and missing there would block a merge home again.
+    expect(fs.readdirSync(directory).sort()).toEqual([...BOX_FAVICONS].sort());
   });
 
   it("never replaces a favicon the run or the owner wrote themselves", async () => {

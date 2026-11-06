@@ -207,4 +207,39 @@ describe("/setup-api/hermes/chat — the slim profile for small local models", (
     expect(res.status).toBe(200);
     expect(argvFlag("-t")).toBeNull();
   });
+
+  describe("an operator's toolset override and the owner's computer_use switch", () => {
+    const withSwitch = (value: unknown) =>
+      mockGet.mockImplementation(async (key: string) => (key === "clawbox_computer_use" ? value : "llamacpp"));
+    const smallTurn = () => {
+      mockGetModelOptions.mockResolvedValue(payload("clawlocal", "gemma4-e2b-it-q4_0") as never);
+      return post({ message: "hi", provider: "clawlocal", model: "gemma4-e2b-it-q4_0" });
+    };
+
+    it("keeps computer_use out of -t when the owner switched it off", async () => {
+      process.env.CLAWBOX_SMALL_MODEL_TOOLSETS = "web,computer_use,file";
+      withSwitch(false);
+      expect((await smallTurn()).status).toBe(200);
+      expect(argvFlag("-t")).toBe("web,file");
+    });
+
+    it("passes the override through when the switch is on or was never touched", async () => {
+      process.env.CLAWBOX_SMALL_MODEL_TOOLSETS = "web,computer_use,file";
+      withSwitch(true);
+      await smallTurn();
+      expect(argvFlag("-t")).toBe("web,computer_use,file");
+      vi.clearAllMocks();
+      mockSpawn.mockImplementation(() => fakeHermes() as never);
+      withSwitch(undefined);
+      await smallTurn();
+      expect(argvFlag("-t")).toBe("web,computer_use,file");
+    });
+
+    it("never sends an empty -t when the override named only computer_use", async () => {
+      process.env.CLAWBOX_SMALL_MODEL_TOOLSETS = "computer_use";
+      withSwitch(false);
+      await smallTurn();
+      expect(argvFlag("-t")).toBe("web,memory,file,terminal");
+    });
+  });
 });

@@ -2,7 +2,8 @@
  * The Planner of a coding team: what it is told, and how its answer is read.
  *
  * The planner is one read-only headless run (the coding agent's own runner,
- * with a brief that forbids edits) whose final message is the plan: a JSON
+ * with a brief that forbids edits; it reads with Read, Grep, Glob and
+ * read-only git — see READ_ONLY_GIT_RULES) whose final message is the plan: a JSON
  * array of tasks, or — the form it is asked for — that array wrapped in an
  * object with the team's SHAPE beside it (how many workers side by side, how
  * the work is reviewed). This module owns that brief and the parser. The
@@ -15,13 +16,15 @@
  *
  * The same planner comes back as the team's LEAD while the team runs, when
  * the owner's `coding_team_dynamic` switch is on: after workers settle — one
- * turn for every task that settled since its last, and only when there is
- * something to decide (`leadShouldRun`) — one short read-only run may add a
- * task or retire one still pending. Its answer is read here too, as
- * strictly, and against the board as it stands.
+ * turn for every task that settled since its last, and only when it can
+ * change the outcome (`leadShouldRun`: nothing left can start and the goal
+ * is not complete, or a worker was stopped by the team's budget) — one short
+ * read-only run may add a task or retire one still pending. Its answer is
+ * read here too, as strictly, and against the board as it stands.
  */
 
-import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
+import { MAX_TEAM_WORKERS, TEAM_TASK_CHARS } from "@/lib/coding-agent";
+import type { CodingProvider } from "@/lib/coding-provider";
 import {
   allComplete,
   boardDigest,
@@ -30,14 +33,18 @@ import {
   MAX_LEAD_ADDS,
   MAX_LEAD_RETIRES,
   MAX_RATIONALE_CHARS,
+  MAX_REPO_MAP_ITEMS,
   MAX_TASK_DESCRIPTION_CHARS,
   MAX_TEAM_TASKS,
+  normalizeRepoMap,
   REVIEW_MODES,
-  type LogEntry,
+  type RepoMap,
   type ReviewMode,
+  type LogEntry,
   type TaskStatus,
   type TeamBoard,
   type TeamShape,
+  type TeamTask,
 } from "@/lib/coding-team-board";
 
 export interface PlannedTask {
@@ -48,23 +55,56 @@ export interface PlannedTask {
 
 /** How a task is written: the planner's rules, and the lead's when it adds one. */
 const TASK_RULES = [
-  "Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets.",
-  `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters. Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
+  "Each task_description must stand on its own: say what to build or change, in which files, how the worker verifies it, and every constraint of the goal that bears on it (what to leave alone, whether to commit, what not to open) — it is the whole brief that worker gets. A worker sees only the HEAD of a long goal after its own task, so a rule that lives only in the goal's tail never reaches it.",
+  `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks). Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
   "A task that verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer: its worker starts from the work merged so far, and a task it does not wait for may not be there yet.",
-  "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
+  "files_hint lists the files the task owns — files or folders; a worker may add tests or helpers beside them, and the reviewer is told which files lie outside the hint.",
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
 ];
+
+/**
+ * What a planner writes in its repo_map's gotchas and its shape's rationale
+ * when it could not read the project. A CONTRACT with the team
+ * (coding-team.ts and coding-team-board.ts look for these exact words to
+ * catch a blind plan): a planner that planned blind once hedged with a
+ * catch-all task over every other task's files, and the team collapsed into
+ * one run. Change it only together with them.
+ */
+export const SOURCE_NOT_INSPECTED = "source not inspected";
 
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
-  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
-  "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks; one task is fine for a small goal.",
+  `You have Read, Grep, Glob and read-only git (git log, git status, git diff, git show and the like): every repo_map entry must come from a file you actually opened, and if you could not read the project, write the exact words '${SOURCE_NOT_INSPECTED}' in repo_map.gotchas and in shape.rationale instead of guessing.`,
+  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. The rationale is at most ${MAX_RATIONALE_CHARS} characters; longer text is cut.`,
+  `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
+  "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",
   ...TASK_RULES,
-  `Size the team to the goal in shape: parallelism is how many workers may run side by side; review is "each" (a reviewer checks every task), "final" (one reviewer checks the merged result at the end) or "none" (only the automatic check that a worker was refused nothing and stayed inside its files); rationale says why in at most ${MAX_RATIONALE_CHARS} characters.`,
+  `Size the team to the goal in shape: parallelism is how many workers may run side by side; review is "each" (a reviewer checks every task), "final" (one reviewer checks the merged result at the end) or "none" (only the automatic check that a worker was refused nothing); rationale says why in at most ${MAX_RATIONALE_CHARS} characters.`,
   'A one-file fix is ONE task with parallelism 1 and review "final". Tasks on independent files may run in parallel — parallelism up to the number of tasks that can run at once. A migration, or any chain where each step builds on the last, runs serially: parallelism 1, each task depending on the one before.',
   "If the goal cannot be planned as written — it names files or folders that are not there, or turns on a decision only the owner can take — say so in one short team_message to the lead or to the owner's assistant, never for progress or acknowledgements, and still answer with the JSON plan.",
 ].join(" ");
+
+/**
+ * The brief with the box's real width after it: how many of the team's runs
+ * the owner lets go at once (a task's reviewer takes its worker's seat), so a
+ * parallelism above it is known to only wait for a seat — the planner was
+ * told 3 while the box ran 2, in silence.
+ */
+export function withBoxWidth(brief: string, width: number): string {
+  return `${brief} This box runs at most ${width} of the team's runs at once (the owner's Settings), a task's reviewer in its worker's seat: a parallelism above ${width} only waits for a seat.`;
+}
+
+/** A provider as the briefs — and the team's own English lines — name it. */
+const PROVIDER_WORDS: Readonly<Record<CodingProvider, string>> = {
+  "clawbox-ai": "ClawBox AI",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+};
+
+export function providerWords(provider: CodingProvider): string {
+  return PROVIDER_WORDS[provider] ?? provider;
+}
 
 /** How much of a planner's wrong answer is quoted back to it. */
 const REPLAN_QUOTE_CHARS = 1_500;
@@ -72,8 +112,9 @@ const REPLAN_QUOTE_CHARS = 1_500;
 /**
  * The second ask, when the planner's final message held no plan — a page of
  * prose about the tasks, a fenced list, a question. Seen on the box: a
- * 43-turn planner that wrote its plan as headings and never the array. The
- * folder is already read, so this run is asked for ONE thing: the plan.
+ * 43-turn planner that wrote its plan as headings and never the array. It
+ * continues the planner's own session (`resumeRunId`), where the folder is
+ * already read, so it asks for ONE thing: the plan.
  */
 export function replanTask(goal: string, previous: string | null | undefined, reason: string): string {
   const quoted = (previous ?? "").trim();
@@ -81,9 +122,9 @@ export function replanTask(goal: string, previous: string | null | undefined, re
     `Goal: ${goal}`,
     `Your previous answer to this goal was not a plan the team can read (${reason}).`,
     quoted ? `This is what you answered:\n${quoted.length > REPLAN_QUOTE_CHARS ? `${quoted.slice(0, REPLAN_QUOTE_CHARS - 1)}…` : quoted}` : "You answered nothing.",
-    "Answer again with ONLY the JSON plan described in your brief — the object with its shape and its tasks array — no prose before or after it. Read the folder again only if you must.",
+    "Answer again with ONLY the JSON plan described in your brief — the object with its shape and its tasks array — no prose before or after it.",
   ].join("\n\n");
-  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+  return text.length > TEAM_TASK_CHARS ? `${text.slice(0, TEAM_TASK_CHARS - 1)}…` : text;
 }
 
 /**
@@ -103,6 +144,12 @@ export interface PlanParse {
   tasks: PlannedTask[];
   /** The team's shape as the planner gave it, or null — a bare array, or no shape: the default team. */
   shape: TeamShape | null;
+  /**
+   * The planner's map of what the goal touches, bounded, or null. Advice for
+   * the workers rather than a contract: a map that is not usable is left out,
+   * never a reason to refuse a plan whose tasks are fine.
+   */
+  repoMap: RepoMap | null;
   /** Every field cut to its bound; absent when nothing was. */
   clipped?: ClippedField[];
 }
@@ -138,6 +185,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   const problems: string[] = [];
   const clipped: ClippedField[] = [];
   let shape: TeamShape | null = null;
+  let repoMap: RepoMap | null = null;
   let list: unknown = raw;
   if (!Array.isArray(raw)) {
     if (!isObject(raw)) return { ok: false, reason: "The planner's answer is not a JSON array." };
@@ -149,6 +197,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
       if (read.ok) shape = read.shape;
       else problems.push(...read.problems);
     }
+    repoMap = normalizeRepoMap(raw.repo_map);
   }
   const items = list as unknown[];
   if (items.length === 0) return { ok: false, reason: "The planner produced no tasks." };
@@ -177,7 +226,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   // planner is asked again.
   const forward = forwardDependencies(tasks, 0);
   if (forward.length) return { ok: false, reason: joinProblems(forward) };
-  return { ok: true, tasks, shape, ...(clipped.length ? { clipped } : {}) };
+  return { ok: true, tasks, shape, repoMap, ...(clipped.length ? { clipped } : {}) };
 }
 
 /** Every dependency of a task (numbered from `t{offset + 1}`) on one listed after it, as the fault the planner or lead must fix. */
@@ -250,7 +299,9 @@ function readTasks(items: unknown[], offset: number, problems: string[], clipped
     const hint = item.files_hint === undefined ? [] : item.files_hint;
     const validHint = Array.isArray(hint) && hint.every((f) => typeof f === "string");
     if (!validHint) problems.push(`Task ${id}'s files_hint is not a list of paths.`);
-    if (description && validDepends && validHint) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
+    if (!description || !validDepends || !validHint) continue;
+    // A `role` the planner writes (the deleted bulk mark, a word it made up) is neither read nor a fault: every task is a worker's.
+    tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
   }
   return tasks;
 }
@@ -308,7 +359,7 @@ export const REPLAN_BRIEF = [
   "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one or more workers have just finished their tasks. You decide ONE thing: does the rest of the plan still fit the goal?",
   "Read what you need, but change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"add": [task, ...], "retire": ["t4", ...], "note": string}. Every field is optional; {} means the plan stands, and that is the usual answer — change the plan only for a concrete reason.',
-  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]} with a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks), for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
+  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}, for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
   `retire: tasks still PENDING that the goal no longer needs — a finished task already did that work, or it turned out to be unnecessary. At most ${MAX_LEAD_RETIRES} over the whole team; a task a worker has started cannot be retired.`,
   `note: why, in one line of at most ${MAX_LEAD_NOTE_CHARS} characters, for the team's log.`,
   "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is listed in full under \"Messages to the lead since your last turn:\", and older messages are among the latest lines of the board you are given: weigh them, and act on them only through add or retire.",
@@ -347,64 +398,37 @@ export function leadRoom(ctx: ReplanContext): { adds: number; retires: number; r
 }
 
 /**
- * A line of a worker's result that says it could not do its part: a
- * blocker in its own words, or the refusal the orchestrator appends when
- * the work could not be committed or merged, or never reached the branch.
- * Read at the start of a line, after any list or emphasis marks, as a whole
- * word.
- */
-const BLOCKER_LINE = /^(?:(?:BLOCKED|MISSING|[Cc]annot|[Cc]ould not|NOT COMMITTED|NO CHANGE|MERGE CONFLICT|MERGE FAILED)(?![\w-])|[Bb]locked:)/;
-/** What a report section with nothing in it says: "Could not finish: nothing." */
-const NOTHING = /^(?:none|nothing|n\/a)\b/i;
-
-const bare = (line: string) => line.replace(/^[\s>*_#-]+/, "");
-
-function blockerLine(result: string | null): string | null {
-  if (!result) return null;
-  const lines = result.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = bare(lines[i]);
-    if (!BLOCKER_LINE.test(line)) continue;
-    // A worker's final message is asked for "anything you could not finish",
-    // and one with nothing to say still writes the words: what the line says
-    // after its colon — or, for a heading, on the next line — decides.
-    const colon = line.indexOf(":");
-    const after = colon < 0 ? "" : line.slice(colon + 1).replace(/^[\s*_]+/, "").trim();
-    const heading = /^\s*#/.test(lines[i]) || (colon >= 0 && !after);
-    const said = after || (heading ? bare(lines.slice(i + 1).find((l) => l.trim()) ?? "") : "");
-    if (!NOTHING.test(said)) return line;
-  }
-  return null;
-}
-
-/** A `team_message` a run sent to the lead after `sinceTs`. */
-function isMessageToLead(e: LogEntry, sinceTs: number): boolean {
-  return e.type === "message" && e.payload?.to === "lead" && typeof e.payload.text === "string" && e.ts > sinceTs;
-}
-
-/**
  * Whether the lead is worth a run for `batch` — the tasks whose workers
- * settled since its last turn. An accepted, clean task with nothing said to
- * the lead leaves the plan as it was, and the lead's usual answer to it is
- * `{}`: ~10–45k tokens and a stall of every new worker, for nothing. It runs
- * when a task of the batch was rejected or failed; when a worker's result
- * names a blocker; when a run sent the lead a message after `sinceTs` (its
- * last turn, or 0: since the team started); or when nothing left can start
- * and the goal is not complete — a dependency chain broke, and only a new
- * task can mend it.
+ * settled since its last turn (`sinceTs`, or 0: since the team started). Only
+ * where its answer can change the outcome: when a worker of the batch was
+ * stopped by the team's budget (log `budget` after `sinceTs`) and its task is
+ * offered again — is it still worth a worker? — or when nothing left can
+ * start and the goal is not complete: a dependency chain broke, and only a
+ * new task can mend it. Not for a rejection with a try left, a blocker in a
+ * result or a message to the lead: on 28 live turns the plan stood every
+ * time (8 of 9 retirements undid rule rejections), each turn 10–45k tokens
+ * ahead of the next worker.
  */
 export function leadShouldRun(board: TeamBoard, batch: readonly string[], sinceTs: number): { run: boolean; why: string } {
-  const settled = board.tasks.filter((t) => batch.includes(t.task_id));
-  const bad = settled.find((t) => t.status === "failed" || t.status === "rejected" || t.review?.verdict === "rejected");
-  if (bad) return { run: true, why: `${bad.task_id} ${bad.status === "failed" ? "failed" : "was rejected"}` };
-  for (const t of settled) {
-    const line = blockerLine(t.result);
-    if (line) return { run: true, why: `${t.task_id}'s result says: ${clip(line, 160)}` };
-  }
-  const message = board.log.find((e) => isMessageToLead(e, sinceTs));
-  if (message) return { run: true, why: `${String(message.payload?.from)} sent the lead a message` };
+  const stopped = board.log.find((e) => e.type === "budget" && e.task_id !== undefined && batch.includes(e.task_id) && e.ts > sinceTs);
+  if (stopped) return { run: true, why: `${stopped.task_id}'s worker was stopped by the budget and the task is offered again` };
+  // A task whose worker settled but whose reviewer has not spoken is IN
+  // FLIGHT, not settled: `isExhausted` (which the orchestrator also uses to
+  // settle the team, so it is not changed here) counts only a running task,
+  // and in team-ppwwpnzl the lead ran the moment t1 was accepted while t2 was
+  // complete-but-unreviewed and t3 waited on both — 4 s and 11K tokens to
+  // say "the plan stands". The verdict decides what runs next (t2 accepted
+  // frees t3; rejected with a try left re-offers t2), and `workTask` queues
+  // the lead again once it lands, so nothing is lost by waiting for it.
+  const reviewing = board.tasks.find(underReview);
+  if (reviewing) return { run: false, why: `${reviewing.task_id} is under review: its verdict decides what runs next` };
   if (isExhausted(board) && !allComplete(board)) return { run: true, why: "nothing left can start, and the goal is not complete" };
-  return { run: false, why: "every task settled clean and accepted; no blocker, no message to the lead" };
+  return { run: false, why: "nothing a lead could change: the work goes on" };
+}
+
+/** Complete and not yet ruled on — `reviewTask` has not recorded a verdict (nor the rule a shape without a reviewer runs on). */
+function underReview(task: Pick<TeamTask, "status" | "review">): boolean {
+  return task.status === "complete" && task.review === null;
 }
 
 /** How much of a settled task's own result the lead is shown — alone; several share the room, never under the floor — and of the goal. */
@@ -424,6 +448,11 @@ const RESULT_LABEL = "Its worker's result:\n";
  * LEAD_INBOX_MESSAGE_CHARS, where the digest keeps a line of the last few
  * log entries. Over `maxChars` the OLDEST go, and a line says how many.
  */
+/** A `team_message` a run sent to the lead after `sinceTs`. */
+function isMessageToLead(e: LogEntry, sinceTs: number): boolean {
+  return e.type === "message" && e.payload?.to === "lead" && typeof e.payload.text === "string" && e.ts > sinceTs;
+}
+
 function leadInbox(board: TeamBoard, maxChars: number): string {
   if (maxChars <= INBOX_LABEL.length + 1) return "";
   // `?? 0`: a board built before the inbox has no lastLeadAt, and every message is new to its lead.
@@ -445,7 +474,7 @@ function leadInbox(board: TeamBoard, maxChars: number): string {
  * The lead's task text: every task of the batch that settled since its last
  * turn and how, each one's result, what it may still change, the goal, the
  * messages sent to the lead since its last turn, and the board's digest in
- * whatever room is left — all inside the run route's cap. One settled task's
+ * whatever room is left — all inside TEAM_TASK_CHARS. One settled task's
  * result is shown as it always was; several share the room the rest leaves.
  */
 export function leadTask(board: TeamBoard, settledTaskIds: readonly string[], ctx: ReplanContext): string {
@@ -464,19 +493,19 @@ export function leadTask(board: TeamBoard, settledTaskIds: readonly string[], ct
   ];
   const inbox = leadInbox(board, MAX_LEAD_INBOX_CHARS);
   const fixed = [...settled.map((s) => `${s.line}\n\n${RESULT_LABEL}`), ...tail, inbox].join("\n\n").length;
-  const each = Math.max(LEAD_MIN_RESULT_CHARS, Math.min(LEAD_RESULT_CHARS, Math.floor((MAX_TASK_CHARS - fixed) / Math.max(1, settled.length))));
+  const each = Math.max(LEAD_MIN_RESULT_CHARS, Math.min(LEAD_RESULT_CHARS, Math.floor((TEAM_TASK_CHARS - fixed) / Math.max(1, settled.length))));
   const head = [
     ...settled.flatMap((s) => [s.line, `${RESULT_LABEL}${s.result ? clip(s.result, each) : "(none)"}`]),
     ...tail,
   ].join("\n\n");
   // The inbox after the head, cut to the room the head leaves — oldest
   // messages first — so the final cut never takes the newest.
-  const box = leadInbox(board, Math.min(MAX_LEAD_INBOX_CHARS, MAX_TASK_CHARS - head.length - 2));
+  const box = leadInbox(board, Math.min(MAX_LEAD_INBOX_CHARS, TEAM_TASK_CHARS - head.length - 2));
   const withInbox = box ? `${head}\n\n${box}` : head;
   const label = "\n\nThe board (every other task, then the latest alerts and messages):\n";
-  const digest = boardDigest(board, settledTaskIds, Math.min(MAX_DIGEST_CHARS, MAX_TASK_CHARS - withInbox.length - label.length));
+  const digest = boardDigest(board, settledTaskIds, Math.min(MAX_DIGEST_CHARS, TEAM_TASK_CHARS - withInbox.length - label.length));
   const text = digest ? `${withInbox}${label}${digest}` : withInbox;
-  return clip(text, MAX_TASK_CHARS);
+  return clip(text, TEAM_TASK_CHARS);
 }
 
 export interface Replan {

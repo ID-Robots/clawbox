@@ -144,20 +144,98 @@ describe("gatewayWsChatSendMain", () => {
   });
 });
 
+describe("gatewayWsMainChatHistory", () => {
+  it("asks the session the hello names as main for its newest message — what the chat asks on open", async () => {
+    helloExtra = { snapshot: { sessionDefaults: { mainSessionKey: "agent:main:main" } } };
+    const port = await fakeGateway((method) => (method === "chat.history" ? { ok: true, payload: { messages: [] } } : { ok: false, error: { code: "NOT_FOUND" } }));
+    await load(port);
+    expect(await lib.gatewayWsMainChatHistory()).toEqual({ sessionKey: "agent:main:main" });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "chat.history"]);
+    expect(seen[1].params).toEqual({ sessionKey: "agent:main:main", limit: 1 });
+  });
+
+  it("raises the gateway's UNAVAILABLE as a call refusal, with its code — not as a gateway that is down", async () => {
+    const port = await fakeGateway(() => ({ ok: false, error: { code: "UNAVAILABLE", message: "SQLite session reclamation commit checkpoint expired" } }));
+    await load(port);
+    await expect(lib.gatewayWsMainChatHistory()).rejects.toMatchObject({
+      name: "GatewayRpcError",
+      code: "UNAVAILABLE",
+      message: "SQLite session reclamation commit checkpoint expired",
+    });
+    expect(seen[1].params).toEqual({ sessionKey: "main", limit: 1 });
+  });
+});
+
+describe("gatewayWsActiveSessions", () => {
+  it("asks for the sessions with work running — only keys the gateway's closed schema knows — and names main from the same hello", async () => {
+    helloExtra = { snapshot: { sessionDefaults: { mainSessionKey: "agent:main:main" } } };
+    // The row shape a board's 2026.10.9 gateway answers `sessions.list` with.
+    const port = await fakeGateway((method) => (method === "sessions.list"
+      ? {
+        ok: true,
+        payload: {
+          count: 4,
+          sessions: [
+            { key: "agent:main:cron:nightly", updatedAt: 300, hasActiveRun: true, status: "running", kind: "direct" },
+            { key: "agent:main:main", updatedAt: 100, hasActiveRun: true, status: "running", kind: "direct" },
+            { key: "agent:main:clawbox-abc123def456", updatedAt: 200, hasActiveRun: true, status: "running", kind: "direct" },
+            { key: "agent:main:clawbox-0c105ed00001", updatedAt: 400, hasActiveRun: false, status: "done", kind: "direct" },
+            { updatedAt: 500, hasActiveRun: true },
+          ],
+        },
+      }
+      : { ok: false, error: { code: "NOT_FOUND" } }));
+    await load(port);
+    const out = await lib.gatewayWsActiveSessions({ timeoutMs: 4_000 });
+    expect(out).toEqual({
+      mainSessionKey: "agent:main:main",
+      // Newest first; a row that says it is idle, or names no key, is not taken.
+      sessionKeys: ["agent:main:cron:nightly", "agent:main:clawbox-abc123def456", "agent:main:main"],
+    });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "sessions.list"]);
+    expect(seen[1].params).toEqual({ activeOnly: true, rowMode: "compact", limit: 50 });
+  });
+
+  it("answers no sessions for an idle gateway, and rejects as gatewayWsCall does", async () => {
+    const port = await fakeGateway(() => ({ ok: true, payload: { sessions: [] } }));
+    await load(port);
+    expect(await lib.gatewayWsActiveSessions()).toEqual({ mainSessionKey: "main", sessionKeys: [] });
+    await load(1);
+    await expect(lib.gatewayWsActiveSessions()).rejects.toMatchObject({ name: "GatewayWsUnavailableError" });
+  });
+});
+
 describe("gatewayWsPatchConfig", () => {
-  it("reads the hash, then patches with the raw merge and answers what changed", async () => {
+  it("patches against the revision the caller read, with the raw merge, and answers what changed", async () => {
     const port = await fakeGateway((method, params) => {
-      if (method === "config.get") return { ok: true, payload: { hash: "hmac-abc", config: {} } };
       if (method === "config.patch") return params.baseHash === "hmac-abc" && typeof params.raw === "string"
         ? { ok: true, payload: { ok: true, noop: false, changedPaths: ["agents.defaults.model.primary"] } }
         : { ok: false, error: { code: "BAD", message: "shape" } };
       return { ok: false, error: { code: "NOT_FOUND" } };
     });
     await load(port);
-    const out = await lib.gatewayWsPatchConfig({ agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } });
+    const out = await lib.gatewayWsPatchConfig(
+      { agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } },
+      { baseHash: "hmac-abc" },
+    );
     expect(out).toEqual({ noop: false, changedPaths: ["agents.defaults.model.primary"] });
-    const patch = seen.find((s) => s.method === "config.patch")?.params as { raw: string };
+    // ONE call: the caller read the revision it built the patch from, and a
+    // `config.get` here would vouch for a file the patch was not computed from.
+    expect(seen.map((s) => s.method)).toEqual(["connect", "config.patch"]);
+    const patch = seen.find((s) => s.method === "config.patch")?.params as { raw: string; replacePaths?: unknown };
     expect(JSON.parse(patch.raw)).toEqual({ agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } });
+    expect(patch.replacePaths).toBeUndefined();
+  });
+
+  it("names the arrays it replaces on purpose", async () => {
+    const port = await fakeGateway(() => ({ ok: true, payload: { ok: true, noop: false, changedPaths: [] } }));
+    await load(port);
+    await lib.gatewayWsPatchConfig(
+      { agents: { defaults: { model: { fallbacks: [] } } } },
+      { baseHash: "h", replacePaths: ["agents.defaults.model.fallbacks"] },
+    );
+    const patch = seen.find((s) => s.method === "config.patch")?.params as { replacePaths?: unknown };
+    expect(patch.replacePaths).toEqual(["agents.defaults.model.fallbacks"]);
   });
 });
 

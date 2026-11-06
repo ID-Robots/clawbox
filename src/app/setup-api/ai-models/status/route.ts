@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
-import { readConfig } from "@/lib/openclaw-config";
+import { readConfigStrict } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PLAN_UNPAID,
   CLAWBOX_AI_PRO_MODEL_ID,
+  normalizeClawboxAiPlanTier,
   normalizeClawboxAiTier,
+  type ClawboxAiPlanTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
-import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
+import { hermesConfigGetMany, hermesConfigReadPending } from "@/lib/hermes-config-cache";
 // Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
 // configure route can reach the same answer from the same cache (TASK-481).
 import { clawaiTokenRejectedByPortal, fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
@@ -24,7 +27,7 @@ import {
 // The portal's PLAN, written where the same two boot scripts can read it. The
 // tier stamp beside it is a device DEFAULT and may not be refused on — see
 // `clawai-plan-tier.ts` and TASK-744.
-import { clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
+import { CLAWAI_PLAN_TIER_KEY, clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +37,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI GPT",
   google: "Google Gemini",
   openrouter: "OpenRouter",
+  xai: "xAI Grok",
   ollama: "Ollama Local",
   llamacpp: "llama.cpp Local",
   // Hermes' id for the on-device model. Without an entry here the raw
@@ -113,7 +117,10 @@ interface ResolvedAiState {
  * user's chosen provider isn't reported as the active one.
  */
 async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
-  const config = await readConfig();
+  // Strict: `readConfig` answers `{}` to an unreadable or half-written file,
+  // which reads as "no ClawBox AI profile" and so as the Free plan. A missing
+  // file is still `{}`; any other failure throws to GET's "not known" answer.
+  const config = await readConfigStrict();
 
   const profiles = config.auth?.profiles ?? {};
   const model = config.agents?.defaults?.model?.primary ?? null;
@@ -175,6 +182,12 @@ async function resolveHermesAiState(): Promise<ResolvedAiState> {
   // provider to something else, so its presence — not the active provider — is
   // what "a ClawBox AI account is configured" means.
   const hasClawaiProfile = Boolean(cfg["providers.clawai.base_url"]);
+  // A read that timed out (or never reached the CLI) is "" too. That is not
+  // "no ClawBox AI account": throw to GET's "not known" answer rather than let
+  // it read as the Free plan.
+  if (!hasClawaiProfile && hermesConfigReadPending("providers.clawai.base_url")) {
+    throw new Error("hermes config read for providers.clawai.base_url did not complete");
+  }
 
   const tokenRaw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY).catch(() => null);
   const clawaiToken = typeof tokenRaw === "string" && tokenRaw.startsWith("claw_") ? tokenRaw : null;
@@ -189,7 +202,7 @@ async function resolveHermesAiState(): Promise<ResolvedAiState> {
  * paths so the ClawBox AI tier/portal-reconcile logic can never drift between
  * them.
  */
-async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse> {
+async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: number): Promise<NextResponse> {
   const normalizedProvider = normalizeProvider(state.provider);
 
   // ClawBox AI account entitlement is independent of which provider is
@@ -216,6 +229,19 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
   // thrown away, and the badge went on saying "Connected · Pro" while every
   // turn came back "HTTP 403: Invalid token".
   let clawaiTokenRejected = false;
+  // The account's PLAN — what the owner pays for — as opposed to the tier
+  // above, which is the MODEL the box defaults to. The two are not the same
+  // fact: a Free sign-in stamps the box "flash" (Free and Pro run the same
+  // model, see `uiTierToDeviceTier`), so the device tier cannot tell Free from
+  // Pro, and a Max subscriber may run Flash. Read as the plan, that stamp put
+  // the "Welcome to ClawBox Pro" celebration in front of Free accounts and
+  // opened Pro-only screens to them. Everything that shows or gates on a PLAN
+  // reads this field: `mapPortalPlanVerdict`'s words — "free", "flash" (the Pro
+  // plan), "pro" (the Max plan) — or null for "not known". A box with no
+  // ClawBox AI account pays for nothing, which is an answer.
+  let clawaiPlan: ClawboxAiPlanTier | null = state.hasClawaiProfile ? null : CLAWBOX_AI_PLAN_UNPAID;
+  // This poll recorded a different plan than the box had (see below).
+  let clawaiPlanChanged = false;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -229,13 +255,14 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       // NEW credential can both land inside that window — see
       // `clearPersistedClawaiCredentialRefusal`.
       const askedAt = Date.now();
-      // The credential counter as it stands NOW, for the plan write below. Same
-      // window and same hazard as `askedAt` above: the portal takes up to four
-      // seconds and the box can be re-linked inside that time.
-      const askedAtGeneration = clawaiPlanGeneration();
+      // `askedAtGeneration` is the credential counter for the stamp writes
+      // below. Same window and same hazard as `askedAt` above: the portal takes
+      // up to four seconds and the box can be re-linked inside that time. Taken
+      // by `GET` BEFORE the token was read — see there.
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
+        clawaiPlan = lookup.planVerdict;
         // A portal that answered but published no list is not "unknown": it is
         // an older portal build, and there the badge IS all the entitlement
         // there has ever been. Fill the list from it so nothing that used to
@@ -270,7 +297,21 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         // rather than `planTier`, because that one answers `null` to a
         // genuinely unpaid account, to an ABSENT `tier` and to a plan word this
         // build has never seen alike — and only the first is a downgrade.
-        await persistClawaiPlanTier({ verdict: lookup.planVerdict }, askedAtGeneration);
+        const planChange = await persistClawaiPlanTier({ verdict: lookup.planVerdict }, askedAtGeneration);
+        // A plan that MOVED (an upgrade on the portal while the box runs) is
+        // followed here and now, not at the next restart: the cloud voice of a
+        // Max plan is armed and the cloud defaults applied
+        // (`@/lib/clawai-plan-follow`). Detached — it can restart the gateway,
+        // and this answer is a badge poll — and asked once, by the poll that
+        // recorded the change.
+        if (planChange) {
+          clawaiPlanChanged = true;
+          void import("@/lib/clawai-plan-follow")
+            .then(({ followClawaiPlanChange }) => followClawaiPlanChange(planChange))
+            .catch((err: unknown) => {
+              console.warn("[ai-models/status] could not follow the plan change:", err instanceof Error ? err.message : err);
+            });
+        }
         // The portal ANSWERED about the credential this box holds, so any
         // refusal recorded against it is over. Same poll, same store, same
         // "write only on change" discipline as the tier stamp above — the
@@ -296,6 +337,16 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         if (clawaiTokenRejectedByPortal()) await persistClawaiCredentialRefusal();
       }
     }
+    // No verdict this poll — the portal was unreachable, refused the
+    // credential, answered in words this build cannot read, or there is no
+    // portal token to ask with: the plan the portal last reported for this
+    // credential. The credential writers record or delete it together with
+    // the credential, so it is never a previous account's. NEVER the device
+    // stamp, which says "flash" for a Free account; with nothing on record the
+    // plan is not known, and nothing may be celebrated or unlocked on it.
+    clawaiPlan ??= normalizeClawboxAiPlanTier(
+      await getConfigValue(CLAWAI_PLAN_TIER_KEY).catch(() => null),
+    );
   }
 
   // The badge-facing tier mirrors the account tier *only* when
@@ -314,6 +365,13 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     model: state.model,
     clawaiTier,
     clawaiAccountTier,
+    // The PLAN the account pays for ("free" / "flash" = Pro / "pro" = Max), or
+    // null when it is not known. The tiers above are MODEL defaults; the plan
+    // badge, the tier celebration and the paid-plan screens read this.
+    clawaiPlan,
+    // True on the one answer whose poll recorded a CHANGED plan, so an open
+    // page re-reads what follows the plan (Settings → Voice) at once.
+    ...(clawaiPlanChanged ? { clawaiPlanChanged: true } : {}),
     // Model ids the portal says this account may run, or null when it did not
     // say. The picker gates on this, never on the tier badge above.
     clawaiAllowedModels,
@@ -340,6 +398,13 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
 export async function GET() {
   try {
+    // The credential counter, taken BEFORE the token is read. A sign-in bumps
+    // it once the new token is in place, so a poll that read the previous
+    // token always holds an older count and its tier and plan writes are
+    // refused. Taken after the read, a bump landing between the two would be
+    // in this poll's count and the previous account's profile would be
+    // recorded over the new one's.
+    const askedAtGeneration = clawaiPlanGeneration();
     // Resolve from whichever config the active harness actually uses. A Hermes
     // device has no OpenClaw config at all, so reading only openclaw.json there
     // reported "no ClawBox AI" for a signed-in box.
@@ -347,12 +412,14 @@ export async function GET() {
     const state = harness === "hermes"
       ? await resolveHermesAiState()
       : await resolveOpenclawAiState();
-    return await buildStatusResponse(state);
+    return await buildStatusResponse(state, askedAtGeneration);
   } catch {
     return NextResponse.json(
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
-        clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
+        // `clawaiPlan: null` is "not known", never Free: a failed read must not
+        // tell a paying owner their plan just ended.
+        clawaiTier: null, clawaiAccountTier: null, clawaiPlan: null, clawaiAllowedModels: null,
         clawaiConfigured: false, clawaiTokenRejected: false, tierSource: "picker",
       },
       {

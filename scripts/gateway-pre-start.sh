@@ -17,6 +17,11 @@
 # reconfigure, AI-provider change, Local-only toggle, chat model
 # switch, and crash-triggered restart.
 set -euo pipefail
+# When this pre-start began: one reading of /proc/uptime, the monotonic clock
+# the step timings and the time budgets below are counted on (clawbox_now_ms
+# says why not bash's own). Empty where it cannot be read, which then times
+# from the first step.
+read -r CLAWBOX_PRESTART_T0_UPTIME _ 2>/dev/null </proc/uptime || CLAWBOX_PRESTART_T0_UPTIME=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -24,6 +29,12 @@ CLAWBOX_HOME_DIR="${CLAWBOX_HOME_DIR:-${HOME:-/home/clawbox}}"
 CLAWBOX_ROOT="${CLAWBOX_ROOT:-$CLAWBOX_HOME_DIR/clawbox}"
 CLAWBOX_PORT="${CLAWBOX_PORT:-80}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-$CLAWBOX_HOME_DIR/.npm-global/bin/openclaw}"
+# Every `openclaw` below that reads the config goes through this: the core
+# refuses such a command while another process holds its state for offline
+# maintenance and says to retry when it finishes (see the script). A call site
+# spells it "${OPENCLAW_RETRY:-/usr/bin/env}", so a block run on its own still runs.
+OPENCLAW_RETRY="$SCRIPT_DIR/openclaw-maintenance-retry.sh"
+[ -x "$OPENCLAW_RETRY" ] || OPENCLAW_RETRY=/usr/bin/env
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${CLAWBOX_OPENCLAW_HOME:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}}/openclaw.json}"
 # Every `openclaw` below, and the scripts this one launches, must read and
 # write THAT file. The CLI does not look at OPENCLAW_CONFIG: it takes
@@ -200,6 +211,227 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_V2
 
+# ── Step timings, and the checks a start may take on trust ──────────────────
+#
+# Every gateway (re)start waits for this whole script, and a box log showed
+# ~36 s of it on a start whose every check answered "already current" — the
+# one a provider sign-in causes. Two things follow from that, both here:
+#
+# TIMINGS. Each step below is opened with `"${CLAWBOX_STEP:-:}" "<name>"`,
+# which logs how long the step before it took ("  Timing: <step> <ms> ms"),
+# and the EXIT trap logs the last one and the total. Called through the
+# variable on purpose: the test suites run single sections of this file on
+# their own, and in such a slice the call is `:` and does nothing.
+#
+# STAMPS. The three checks that cost a CLI cold start on every boot whatever
+# their answer — the Codex plugin's registry dependencies, the core's
+# plugin-consent report and the Claude Code version report — ask
+# scripts/gateway-pre-start-stamps.py whether the answer the last full check
+# recorded still holds, and skip the CLI when it does. That helper says yes
+# only when nothing the check reads has changed, the record is under a day
+# old, this start is not systemd restarting the gateway after a failure, and
+# the previous start reached `gateway ready` (its docstring has the whole
+# list). A miss is today's full check, never a failure. CLAWBOX_PRESTART_FULL=1
+# turns every reuse off.
+CLAWBOX_STAMPS_PY="$SCRIPT_DIR/gateway-pre-start-stamps.py"
+CLAWBOX_STAMPS_FILE="$CLAWBOX_ROOT/data/gateway-pre-start-stamps.json"
+CLAWBOX_STAMPS_GUARD="$CLAWBOX_ROOT/data/openclaw-start-guard.json"
+CLAWBOX_STAMPS_READY=0
+if [ -f "$CLAWBOX_STAMPS_PY" ] && command -v python3 >/dev/null 2>&1; then
+  CLAWBOX_STAMPS_READY=1
+fi
+# What the stamps let this start skip, for the closing timing line.
+CLAWBOX_STAMPS_REUSED=""
+CLAWBOX_STAMP_KEY=""
+CLAWBOX_STAMP_VALUE=""
+CLAWBOX_STAMP_WHY=""
+
+# Ask whether a check may be skipped: `clawbox_stamp_check <step> <kind>
+# [key inputs...]`. 0 = reuse CLAWBOX_STAMP_VALUE; 1 = run the full check, and
+# remember its answer under CLAWBOX_STAMP_KEY (empty when there is no key).
+clawbox_stamp_check() {
+  local step="$1" kind="$2" out state reuse=()
+  shift 2
+  CLAWBOX_STAMP_KEY=""
+  CLAWBOX_STAMP_VALUE=""
+  CLAWBOX_STAMP_WHY=""
+  [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] || return 1
+  [ "${CLAWBOX_PRESTART_FULL:-0}" = "1" ] && reuse=(--no-reuse)
+  out="$(timeout -k 5 20 python3 -I "$CLAWBOX_STAMPS_PY" check --step "$step" --kind "$kind" \
+    --record "$CLAWBOX_STAMPS_FILE" --guard "$CLAWBOX_STAMPS_GUARD" \
+    --script "$SCRIPT_DIR/gateway-pre-start.sh" \
+    --core-pkg "$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json" \
+    "${reuse[@]}" "$@" 2>/dev/null)" || return 1
+  state="${out%%$'\t'*}"
+  out="${out#*$'\t'}"
+  CLAWBOX_STAMP_KEY="${out%%$'\t'*}"
+  [ "$CLAWBOX_STAMP_KEY" = "-" ] && CLAWBOX_STAMP_KEY=""
+  case "$out" in *$'\t'*) out="${out#*$'\t'}" ;; *) out="" ;; esac
+  if [ "$state" = "hit" ]; then
+    CLAWBOX_STAMP_VALUE="$out"
+    CLAWBOX_STAMPS_REUSED="${CLAWBOX_STAMPS_REUSED:+$CLAWBOX_STAMPS_REUSED, }$step"
+    return 0
+  fi
+  CLAWBOX_STAMP_WHY="$out"
+  return 1
+}
+
+# Record a full check's answer: `clawbox_stamp_remember <step> <key> [value]`.
+# Never fails the boot; a record that cannot be written is the next full check.
+clawbox_stamp_remember() {
+  [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && [ -n "${2:-}" ] || return 0
+  if ! timeout -k 5 20 python3 -I "$CLAWBOX_STAMPS_PY" remember --step "$1" --key "$2" --value "${3:-}" \
+      --record "$CLAWBOX_STAMPS_FILE" >/dev/null 2>&1; then
+    echo "  WARN: could not record the $1 check in $CLAWBOX_STAMPS_FILE; the next start runs it in full" >&2
+  fi
+  return 0
+}
+
+# Milliseconds on the box's MONOTONIC clock, into CLAWBOX_NOW_MS: /proc/uptime
+# (CLOCK_BOOTTIME, "12345.67 …", so in 10 ms steps; `read` is a builtin, so no
+# fork), or the reading of it given as $1. Not bash's SECONDS or EPOCHREALTIME,
+# which are wall clock: the box has no battery-backed RTC, boots on the clock it
+# saved at shutdown, and timesyncd steps it forward — half a day after a night
+# off — while this script runs. On those, one cold boot logged a 12-hour "pre-start
+# total" and handed both time budgets below 0 s, though systemd, which counts
+# the unit's TimeoutStartSec on a monotonic clock, had used 40 s of it. Without
+# /proc/uptime the wall clock is all there is.
+#
+# ONE clock per run, latched by the first reading in CLAWBOX_CLOCK: a run that
+# began on the wall clock stays on it, and a run that began on /proc/uptime and
+# then gets a reading it cannot use carries on from its last uptime reading by
+# the wall clock (CLAWBOX_CLOCK_OFFSET_MS). Subtracting one clock from the
+# other is off by the whole epoch, about 1.8e12 ms.
+CLAWBOX_CLOCK=""
+CLAWBOX_CLOCK_OFFSET_MS=0
+clawbox_now_ms() {
+  local up="${1:-}" rest wall us="${EPOCHREALTIME:-}"
+  if [ -n "$us" ]; then
+    us="${us/[.,]/}"
+    wall=$(( 10#$us / 1000 ))
+  else
+    wall=$(( SECONDS * 1000 ))
+  fi
+  if [ "$CLAWBOX_CLOCK" != "wall" ]; then
+    [ -n "$up" ] || read -r up rest 2>/dev/null </proc/uptime || up=""
+    if [[ "$up" =~ ^[0-9]+\.[0-9]+$ ]]; then
+      rest="${up#*.}00"
+      CLAWBOX_NOW_MS=$(( 10#${up%%.*} * 1000 + 10#${rest:0:3} ))
+      CLAWBOX_CLOCK=uptime
+      CLAWBOX_CLOCK_OFFSET_MS=$(( CLAWBOX_NOW_MS - wall ))
+      return 0
+    fi
+    [ -n "$CLAWBOX_CLOCK" ] || CLAWBOX_CLOCK=wall
+  fi
+  CLAWBOX_NOW_MS=$(( wall + CLAWBOX_CLOCK_OFFSET_MS ))
+}
+CLAWBOX_STEP_NAME="startup and version probe"
+clawbox_now_ms "${CLAWBOX_PRESTART_T0_UPTIME:-}"
+CLAWBOX_PRESTART_STARTED_MS="$CLAWBOX_NOW_MS"
+CLAWBOX_STEP_STARTED_MS="$CLAWBOX_PRESTART_STARTED_MS"
+
+# Whole seconds this pre-start has run on that clock, into
+# CLAWBOX_PRESTART_ELAPSED_S: what the time budgets below take off the unit's
+# ceiling. Called as "${CLAWBOX_ELAPSED:-:}", like the step marks, so a section
+# run on its own counts none.
+clawbox_prestart_elapsed() {
+  clawbox_now_ms
+  CLAWBOX_PRESTART_ELAPSED_S=$(( (CLAWBOX_NOW_MS - CLAWBOX_PRESTART_STARTED_MS) / 1000 ))
+}
+CLAWBOX_ELAPSED=clawbox_prestart_elapsed
+
+# Close the step that is open and open the next one (an empty name opens none).
+clawbox_step_mark() {
+  clawbox_now_ms
+  if [ -n "$CLAWBOX_STEP_NAME" ]; then
+    echo "  Timing: $CLAWBOX_STEP_NAME $(( CLAWBOX_NOW_MS - CLAWBOX_STEP_STARTED_MS )) ms"
+  fi
+  CLAWBOX_STEP_NAME="${1:-}"
+  CLAWBOX_STEP_STARTED_MS="$CLAWBOX_NOW_MS"
+}
+CLAWBOX_STEP=clawbox_step_mark
+
+# The closing lines, on every exit. `set +e` first: under `set -e` a command
+# failing inside an EXIT trap replaces the script's own exit status, and a
+# timing line must never turn a good start into a failed one (or hide a bad one).
+clawbox_prestart_finish() {
+  local rc="$1"
+  set +e
+  clawbox_step_mark ""
+  echo "  Timing: pre-start total $(( CLAWBOX_NOW_MS - CLAWBOX_PRESTART_STARTED_MS )) ms (exit $rc); reused instead of re-checked: ${CLAWBOX_STAMPS_REUSED:-nothing}"
+  return 0
+}
+trap 'clawbox_prestart_finish "$?"' EXIT
+
+# OpenClaw 2026.10 or later. What this script drives for the agent databases —
+# the memory-index defaults (`memory.search.rememberAcrossConversations`,
+# `memory.search.sources`), the DeepSeek `contextTokens` cap and the offline
+# `doctor --session-sqlite/--state-sqlite compact` maintenance — is verified
+# against the 2026.10 core and NOT against older ones, and a config key an older
+# core does not know is a refused gateway, which the repair above (doctor --fix
+# drops unknown keys) and the next pass (writes them again) would turn into a
+# loop. A box can run this script on an older core: an update whose disk
+# pre-flight refused the new core leaves the new ClawBox on the old one. Same
+# precedence as CLAWBOX_OPENCLAW_V2: an explicit value wins; an unknown core is 0.
+if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_10=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.10 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.10" ]; then
+    CLAWBOX_OPENCLAW_2026_10=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_10
+
+"${CLAWBOX_STEP:-:}" "start-loop recovery"
+
+# ── Start-loop recovery: a database the core refuses at every start ─────────
+#
+# One session row the core refused in the default agent's database kept a box's
+# gateway from starting, and `Restart=always` restarted it a dozen times in
+# eight minutes with nothing in between ever changing. This is the in between:
+# when the unit has restarted itself three times running and the gateway's own
+# output names a database it refused, scripts/openclaw-db-maintenance.py
+# (`start-guard`) runs the core's own repair (`doctor --fix`, then `doctor
+# --session-sqlite recover`); if the next start still fails over a database it
+# puts back that database's newest pre-update copy, setting the refused one
+# aside. Nothing is deleted, and data/openclaw-start-guard.json says what was
+# done, for the owner. On every other start it only records the start, and
+# whether the last run reached `gateway ready` — which the rollback-copy
+# clean-up at the end of this script waits for.
+#
+# FIRST, before anything else here touches the state, and with most of the
+# unit's 600 s: a repair on a few GB of database takes minutes. 150 s are held
+# back for the rest of this script on a box whose config the core already
+# accepts. Every failure is a WARN: this never stops a start.
+CLAWBOX_START_GUARD="$SCRIPT_DIR/openclaw-db-maintenance.py"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -x "$OPENCLAW_BIN" ] && [ -f "$CLAWBOX_START_GUARD" ] \
+  && command -v python3 >/dev/null 2>&1; then
+  _sg_unit="${CLAWBOX_GATEWAY_UNIT:-clawbox-gateway.service}"
+  # systemd's own count of automatic restarts since the unit was last started
+  # by hand; anything that is not a number counts as none.
+  _sg_restarts="$(systemctl show "$_sg_unit" -p NRestarts --value 2>/dev/null || true)"
+  [[ "$_sg_restarts" =~ ^[0-9]+$ ]] || _sg_restarts=0
+  _sg_ceiling="${CLAWBOX_PRESTART_CEILING_S:-600}"
+  [[ "$_sg_ceiling" =~ ^[0-9]+$ ]] || _sg_ceiling=600
+  "${CLAWBOX_ELAPSED:-:}"
+  _sg_budget=$(( _sg_ceiling - 150 - ${CLAWBOX_PRESTART_ELAPSED_S:-0} ))
+  if [ "$_sg_budget" -lt 0 ]; then _sg_budget=0; fi
+  _sg_rc=0
+  timeout -k 10 "$(( _sg_budget + 30 ))" python3 -I "$CLAWBOX_START_GUARD" start-guard \
+    --state-dir "$OPENCLAW_STATE_DIR" \
+    --config "$OPENCLAW_CONFIG" \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --unit "$_sg_unit" \
+    --restarts "$_sg_restarts" \
+    --budget-seconds "$_sg_budget" || _sg_rc=$?
+  if [ "$_sg_rc" -ne 0 ]; then
+    echo "  WARN: start-loop recovery stopped (exit $_sg_rc); the gateway starts as it is" >&2
+  fi
+fi
+
+"${CLAWBOX_STEP:-:}" "config check"
+
 # ── First boot on a NEW OpenClaw core: make the config loadable again ───────
 #
 # THE INCIDENT (TASK-737). A customer box was dark for 25 hours after the
@@ -335,7 +567,7 @@ clawbox_exec_approvals_blocker() {
 # config is the subject, which is every other caller.
 clawbox_core_config_verdict() {
   local out rc=0
-  out="$(OPENCLAW_CONFIG_PATH="${1:-$OPENCLAW_CONFIG}" timeout -k 5 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
+  out="$(OPENCLAW_CONFIG_PATH="${1:-$OPENCLAW_CONFIG}" timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
   # EXIT 0 IS ACCEPTANCE unless the core's own payload contradicts it
   # (TASK-741). Requiring stdout to parse as JSON on TOP of a zero exit made a
   # core that exits 0 with empty, banner-prefixed or non-JSON output answer
@@ -355,10 +587,13 @@ clawbox_core_config_verdict() {
   # would spend 180 s of doctor on every start of a box whose config is fine.
   case "$rc" in
     0|1) ;;
+    # The retry wrapper's own answer: the core was still finishing maintenance
+    # on its state at the end of its window. Busy, not a verdict.
+    75) printf 'unknown\tOpenClaw was still finishing maintenance on its state\n'; return 0 ;;
     *) printf 'unknown\tthe validator did not answer (exit %s)\n' "$rc"; return 0 ;;
   esac
   CLAWBOX_VERDICT_JSON="$out" CLAWBOX_VERDICT_RC="$rc" python3 <<'PY'
-import json, os, sys
+import json, os, re, sys
 
 # Exit 0 with no readable verdict is still acceptance: the exit code IS the
 # answer, and a banner is not a contradiction. Exit 1 with no readable verdict
@@ -384,6 +619,17 @@ if doc.get("valid") is not False:
     # contradicting itself, and neither half is worth a stamp or a doctor run:
     # say so and ask again next boot.
     _no_verdict("the validator's exit code and its verdict disagree")
+# The core's maintenance refusal arrives as `valid: false` on `<root>` ("read
+# failed … undergoing offline maintenance; retry when it finishes"). It says who
+# holds the state, not what is wrong with the config: no verdict, never a
+# refusal worth 180 s of doctor.
+if any(
+    isinstance(issue, dict)
+    and re.search(r"retry (?:when it|after maintenance) finishes", str(issue.get("message", "")), re.I)
+    for issue in doc.get("issues") or []
+):
+    print("unknown\tOpenClaw's state was under offline maintenance")
+    sys.exit(0)
 parts = []
 for issue in doc.get("issues") or []:
     if not isinstance(issue, dict):
@@ -900,6 +1146,7 @@ then
       ;;
   esac
 fi
+"${CLAWBOX_STEP:-:}" "hostname and allowed origins"
 # Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then
@@ -1013,17 +1260,27 @@ if [ -n "$CLAWBOX_EXTRA_ORIGINS" ]; then
 fi
 export CLAWBOX_EXTRA_ORIGINS
 
+"${CLAWBOX_STEP:-:}" "config pass"
+
 # The device store the Next app writes (`data/config.json`), not openclaw.json.
 # The cloud-voice migration below needs the portal-confirmed plan stamp that
 # lives there, and only there. Exported rather than passed as a second argv so
 # the block keeps the single-argument shape every other python heredoc here has.
 export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
+# Where the memory-index block below asks for the one rebuild a change of the
+# index's identity needs (scripts/openclaw-db-maintenance.py memory-rebuild).
+export CLAWBOX_MEMORY_REBUILD_RECORD="$CLAWBOX_ROOT/data/openclaw-memory-rebuild.json"
+# What that block reads the agent databases with (read-only; see its
+# keyword-only check): the housekeeping script's own inventory and reader.
+export CLAWBOX_DB_MAINTENANCE_PY="$SCRIPT_DIR/openclaw-db-maintenance.py"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, re, sys, tempfile, secrets, shutil, time
 
 # OpenClaw 2 config homes — see the bash block that computes this.
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
+# OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
+CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -1482,6 +1739,82 @@ if _wants_llamacpp:
 
 _clawbox_root = os.environ.get("CLAWBOX_ROOT", "/home/clawbox/clawbox")
 
+# The tuning below lives in $CLAWBOX_ROOT/.env (install.sh and
+# install-x64.sh both write it with ensure_env_setting) and NEITHER
+# gateway unit loads that file: clawbox-gateway.service takes
+# network.env and discord.env, the x64 unit only Environment= lines.
+# (Other units do read .env — clawbox-setup, clawbox-embed,
+# clawbox-browser — which is exactly why llama-server, started under
+# clawbox-setup, ran at the configured size while this repair, reading
+# os.environ alone, ALWAYS wrote the 131072 default: OpenClaw believed
+# 131k, compaction never fired, and a long session died with
+# context-exceeded.) Reading the few keys we need is deliberately
+# narrower than adding `EnvironmentFile=-.../.env` to the gateway unit,
+# which would hand every key in a clawbox-writable file to the
+# long-running gateway process, CLAWBOX_TEST_MODE included.
+#
+# Read for the repair below AND for the window reconciliation after it,
+# which needs the server's real size on a box whose entry is complete.
+#
+# errors="replace" and a bare except: .env is clawbox-writable and one
+# latin-1 byte in an operator's key would otherwise raise
+# UnicodeDecodeError out of this heredoc, fail ExecStartPre under
+# `set -euo pipefail`, and leave the box with no gateway at all.
+_llamacpp_dotenv = {}
+try:
+    with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _key, _, _value = _line.partition("=")
+            _key = _key.strip()
+            if _key.startswith("export "):
+                _key = _key[len("export "):].strip()
+            _value = _value.strip()
+            if len(_value) >= 2 and _value[0] == _value[-1] and _value[0] in ("'", '"'):
+                _value = _value[1:-1]
+            _llamacpp_dotenv[_key] = _value
+except Exception:
+    _llamacpp_dotenv = {}
+
+def _llamacpp_setting(_name):
+    """The process environment first, then the shipped .env."""
+    _from_env = (os.environ.get(_name) or "").strip()
+    return _from_env if _from_env else _llamacpp_dotenv.get(_name, "").strip()
+
+def _llamacpp_int(_raw, _minimum, _default):
+    """Number() semantics, not int(): see src/lib/llamacpp.ts.
+
+    int() raises on "32768.0" and "1e5" — both of which the TypeScript
+    side accepts and llama-server is genuinely started with — and the
+    except swallowed it, so the provider silently got the default while
+    the server ran at the configured size. A non-numeric override must
+    still not abort gateway pre-start: this migration runs on the path
+    that repairs a mute box, so raising here would turn a bad env var
+    into a box that never starts at all.
+    """
+    try:
+        _value = int(float(_raw))
+    except (TypeError, ValueError, OverflowError):
+        return _default
+    return _value if _value >= _minimum else _default
+
+# Keep the two defaults in step with DEFAULT_LLAMACPP_CONTEXT_WINDOW and
+# DEFAULT_LLAMACPP_MAX_TOKENS in src/lib/llamacpp.ts, and the output cap no
+# larger than the window, as getLlamaCppMaxTokens() keeps it.
+_ctx = _llamacpp_int(_llamacpp_setting("LLAMACPP_CONTEXT_WINDOW"), 16384, 32768)
+_max_tokens = min(_llamacpp_int(_llamacpp_setting("LLAMACPP_MAX_TOKENS"), 1, 8192), _ctx)
+
+# Thinking on the on-device model: per request, off unless asked. The row
+# declares binary reasoning (every enabled level clamps to `high`, `off` is sent
+# as `none`, which the ClawBox proxy turns into enable_thinking) and the model's
+# own default is `off`, because a reasoning row otherwise defaults to `medium`.
+# Keys of a 2026.10+ core. Keep in step with LLAMACPP_REASONING_COMPAT in
+# src/lib/llamacpp.ts.
+_LLAMACPP_REASONING_COMPAT = {"supportedReasoningEfforts": ["none", "high"], "reasoningEffortMap": {"off": "none"}}
+_llamacpp_reasoning = bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False))
+
 if _wants_llamacpp and _llamacpp_gaps and not _llamacpp_model_ids:
     print(
         "  Skipped llamacpp provider repair: "
@@ -1543,69 +1876,6 @@ elif _wants_llamacpp and _llamacpp_gaps:
             _providers_now = {}
             _models_now["providers"] = _providers_now
 
-        # The tuning below lives in $CLAWBOX_ROOT/.env (install.sh and
-        # install-x64.sh both write it with ensure_env_setting) and NEITHER
-        # gateway unit loads that file: clawbox-gateway.service takes
-        # network.env and discord.env, the x64 unit only Environment= lines.
-        # (Other units do read .env — clawbox-setup, clawbox-embed,
-        # clawbox-browser — which is exactly why llama-server, started under
-        # clawbox-setup, ran at the configured size while this repair, reading
-        # os.environ alone, ALWAYS wrote the 131072 default: OpenClaw believed
-        # 131k, compaction never fired, and a long session died with
-        # context-exceeded.) Reading the few keys we need is deliberately
-        # narrower than adding `EnvironmentFile=-.../.env` to the gateway unit,
-        # which would hand every key in a clawbox-writable file to the
-        # long-running gateway process, CLAWBOX_TEST_MODE included.
-        #
-        # errors="replace" and a bare except: .env is clawbox-writable and one
-        # latin-1 byte in an operator's key would otherwise raise
-        # UnicodeDecodeError out of this heredoc, fail ExecStartPre under
-        # `set -euo pipefail`, and leave the box with no gateway at all.
-        _llamacpp_dotenv = {}
-        try:
-            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _ef:
-                for _line in _ef:
-                    _line = _line.strip()
-                    if not _line or _line.startswith("#") or "=" not in _line:
-                        continue
-                    _key, _, _value = _line.partition("=")
-                    _key = _key.strip()
-                    if _key.startswith("export "):
-                        _key = _key[len("export "):].strip()
-                    _value = _value.strip()
-                    if len(_value) >= 2 and _value[0] == _value[-1] and _value[0] in ("'", '"'):
-                        _value = _value[1:-1]
-                    _llamacpp_dotenv[_key] = _value
-        except Exception:
-            _llamacpp_dotenv = {}
-
-        def _llamacpp_setting(_name):
-            """The process environment first, then the shipped .env."""
-            _from_env = (os.environ.get(_name) or "").strip()
-            return _from_env if _from_env else _llamacpp_dotenv.get(_name, "").strip()
-
-        def _llamacpp_int(_raw, _minimum, _default):
-            """Number() semantics, not int(): see src/lib/llamacpp.ts.
-
-            int() raises on "32768.0" and "1e5" — both of which the TypeScript
-            side accepts and llama-server is genuinely started with — and the
-            except swallowed it, so the provider silently got the default while
-            the server ran at the configured size. A non-numeric override must
-            still not abort gateway pre-start: this migration runs on the path
-            that repairs a mute box, so raising here would turn a bad env var
-            into a box that never starts at all.
-            """
-            try:
-                _value = int(float(_raw))
-            except (TypeError, ValueError, OverflowError):
-                return _default
-            return _value if _value >= _minimum else _default
-
-        _ctx = _llamacpp_int(_llamacpp_setting("LLAMACPP_CONTEXT_WINDOW"), 16384, 131072)
-        # getLlamaCppMaxTokens(): an absent or unusable value means the context
-        # window, not the 131072 default.
-        _max_tokens_raw = _llamacpp_setting("LLAMACPP_MAX_TOKENS")
-        _max_tokens = _llamacpp_int(_max_tokens_raw, 1, _ctx) if _max_tokens_raw else _ctx
         # The port is in the unit environment on both installers (this script
         # defaults and exports it; the x64 unit sets Environment=CLAWBOX_PORT),
         # and no installer writes it to .env — so it is read from the process
@@ -1621,15 +1891,16 @@ elif _wants_llamacpp and _llamacpp_gaps:
         ).rstrip("/")
         _repaired_entry = dict(_llamacpp_entry) if isinstance(_llamacpp_entry, dict) else {}
         if "models" in _llamacpp_gaps:
-            _repaired_entry["models"] = _llamacpp_rows + [{
+            _repaired_entry["models"] = _llamacpp_rows + [dict({
                 "id": _mid,
                 "name": _mid,
-                "reasoning": False,
+                "reasoning": _llamacpp_reasoning,
                 "input": ["text"],
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 "contextWindow": _ctx,
                 "maxTokens": _max_tokens,
-            } for _mid in _llamacpp_missing_ids]
+            }, **({"compat": json.loads(json.dumps(_LLAMACPP_REASONING_COMPAT))} if _llamacpp_reasoning else {}))
+                for _mid in _llamacpp_missing_ids]
         # The bearer we are about to write is PROVIDER-WIDE. OpenClaw resolves a
         # row's endpoint as `model.baseUrl ?? provider.baseUrl` and has no
         # per-model credential slot, so completing this entry while a row keeps
@@ -1731,6 +2002,111 @@ elif _wants_llamacpp and _llamacpp_gaps:
                     "  Repaired models.providers.llamacpp for "
                     + ", ".join(_llamacpp_model_ids)
                 )
+
+# Reconciliation: the llamacpp rows' window vs the window llama-server runs.
+#
+# ai-models/configure writes a row's contextWindow/maxTokens from .env once,
+# when Local AI is turned on, and the repair above only fills rows that are
+# missing. So when .env moves (install.sh migrates the shipped 131072 to 32768)
+# the server restarts at the new size while the row goes on claiming the old
+# one, and OpenClaw sizes prompts and compaction for a window the server does
+# not have — a long session ends in "context exceeded". A row may claim LESS
+# than the server (harmless, and maybe an operator's choice), never MORE.
+#
+# Only on an entry routed through this box's own proxy (whose server is the one
+# .env describes) and only on rows without a baseUrl of their own.
+_lc_entry_now = _providers_now.get("llamacpp") if isinstance(_providers_now, dict) else None
+_lc_base_now = _lc_entry_now.get("baseUrl") if isinstance(_lc_entry_now, dict) else None
+if (
+    isinstance(_lc_base_now, str)
+    and _lc_base_now.strip().rstrip("/").endswith("/setup-api/local-ai/llamacpp/v1")
+    and isinstance(_lc_entry_now.get("models"), list)
+):
+    def _lc_number(_v):
+        return isinstance(_v, (int, float)) and not isinstance(_v, bool) and _v > 0
+
+    _lc_resized = []
+    for _row in _lc_entry_now["models"]:
+        if not isinstance(_row, dict) or not isinstance(_row.get("id"), str):
+            continue
+        if isinstance(_row.get("baseUrl"), str) and _row["baseUrl"].strip():
+            continue
+        _row_ctx = _row.get("contextWindow")
+        _row_max = _row.get("maxTokens")
+        # A row that states no window is not one ai-models/configure wrote,
+        # and OpenClaw resolves it its own way: left as it is.
+        if not _lc_number(_row_ctx):
+            continue
+        if _row_ctx > _ctx:
+            _row["contextWindow"] = _ctx
+            # The output cap was sized for the window being replaced.
+            _row["maxTokens"] = _max_tokens
+            _lc_resized.append(_row["id"])
+        elif _lc_number(_row_max) and _row_max > _row_ctx:
+            _row["maxTokens"] = min(_max_tokens, int(_row_ctx))
+            _lc_resized.append(_row["id"])
+    if _lc_resized:
+        changed = True
+        print(
+            "  Resized models.providers.llamacpp row(s) "
+            + ", ".join(_lc_resized)
+            + " to the window llama-server runs ("
+            + str(_ctx)
+            + " tokens, answers up to "
+            + str(_max_tokens)
+            + ")"
+        )
+
+    # The same rows, thinking per request (see _LLAMACPP_REASONING_COMPAT): a
+    # row in the shape ClawBox wrote before — `reasoning: false`, no compat —
+    # takes the declaration, and every reasoning row's model gets an `off`
+    # default unless one is set. An owner's own compat is left as it is.
+    if _llamacpp_reasoning:
+        _lc_thinking = []
+        _lc_defaults_models = None
+        for _row in _lc_entry_now["models"]:
+            if not isinstance(_row, dict) or not isinstance(_row.get("id"), str) or not _row["id"].strip():
+                continue
+            if isinstance(_row.get("baseUrl"), str) and _row["baseUrl"].strip():
+                continue
+            if _row.get("reasoning") is False and "compat" not in _row:
+                _row["reasoning"] = True
+                _row["compat"] = json.loads(json.dumps(_LLAMACPP_REASONING_COMPAT))
+                _lc_thinking.append(_row["id"])
+            if _row.get("reasoning") is not True:
+                continue
+            _agents_now = cfg.get("agents")
+            _defaults_now = _agents_now.get("defaults") if isinstance(_agents_now, dict) else None
+            if not isinstance(_defaults_now, dict):
+                continue
+            _lc_defaults_models = _defaults_now.get("models")
+            if _lc_defaults_models is None:
+                _lc_defaults_models = {}
+                _defaults_now["models"] = _lc_defaults_models
+            if not isinstance(_lc_defaults_models, dict):
+                continue
+            _ref = "llamacpp/" + _row["id"].strip()
+            _entry = _lc_defaults_models.get(_ref)
+            if _entry is None:
+                _entry = {}
+                _lc_defaults_models[_ref] = _entry
+            if not isinstance(_entry, dict):
+                continue
+            _params = _entry.get("params")
+            if _params is None:
+                _params = {}
+                _entry["params"] = _params
+            if isinstance(_params, dict) and "thinking" not in _params:
+                _params["thinking"] = "off"
+                if _row["id"] not in _lc_thinking:
+                    _lc_thinking.append(_row["id"])
+        if _lc_thinking:
+            changed = True
+            print(
+                "  Thinking on demand for models.providers.llamacpp row(s) "
+                + ", ".join(_lc_thinking)
+                + ": off by default, on when a chat or a message asks for it"
+            )
 
 # Reconciliation: models.providers.{llamacpp,ollama}.apiKey vs data/.local-ai-token.
 #
@@ -3349,15 +3725,18 @@ CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL = {
     "provider": "openai",
     "model": CLAWBOX_TRANSCRIBE_MODEL_ID,
 }
-# What a box with no audio config gets: the cloud alone. The on-box engine is
-# a `type: "cli"` row running the workspace's stt-client.py, and it is
-# Settings (src/app/setup-api/stt) that adds it — only that route knows
-# whether faster-whisper is installed here. The script name is duplicated from
-# src/lib/stt-local.ts; it is matched by name rather than full path because
-# HOME is the script's to resolve, and a path check here would call a moved
-# workspace foreign.
-CLAWBOX_AUDIO_MODELS = [CLAWBOX_CLOUD_AUDIO_MODEL]
+# What a box with no audio config gets: the on-box engine first when it is
+# installed here (`_clawbox_local_stt_row`), then the cloud row while a
+# ClawBox AI credential backs it — the order `resolveSttPrimary` in
+# src/lib/stt-preference.ts gives a box nobody has chosen for. The on-box
+# engine is a `type: "cli"` row running the workspace's stt-client.py. The
+# script name is duplicated from src/lib/stt-local.ts; an existing row is
+# matched by name rather than full path because HOME is the script's to
+# resolve, and a path check here would call a moved workspace foreign.
 CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+# The modes `isKeyModeProfile` (src/lib/auth-profile-mode.ts) reads as a
+# key of the profile's own; anything else — `oauth` above all — is not.
+CLAWBOX_KEY_PROFILE_MODES = ("token", "api_key", "api-key")
 # v2 keeps baseUrl under tools.media.audio; the model list moved to
 # tools.media.models with capabilities: ["audio"] per row. Bound via
 # globals() because the unit tests run this block extracted from the file.
@@ -3379,6 +3758,112 @@ def _is_clawbox_audio_model(_entry):
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
         return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
     return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
+
+
+def _is_clawbox_cloud_audio_model(_entry):
+    """Is one row the ClawBox AI cloud row (as opposed to the on-box CLI row)?"""
+    return isinstance(_entry, dict) and _entry.get("type") != "cli" and _is_clawbox_audio_model(_entry)
+
+
+def _openai_signed_in_with_oauth(_cfg):
+    """Is the openai provider's credential a ChatGPT sign-in (an OAuth profile)?
+
+    The cloud row is `provider: "openai"` with our proxy as the endpoint, and
+    the pinned core refuses that pair for an OAuth credential: "Custom
+    endpoints and request overrides require an API-key profile" (OpenClaw
+    2026.10.7 docs/nodes/audio.md). On a real box that had moved to a ChatGPT
+    sign-in every Telegram voice note came back "OpenAI OAuth audio
+    transcription requires the official endpoint without custom request
+    overrides", and the repair below kept re-stamping the row at every start.
+    So with a sign-in like that this migration neither seeds the row nor keeps
+    it; src/lib/stt-channel.ts (`decideCloudSttBacking`) withholds it on the
+    same rule, and puts the box's own engine in its place.
+
+    Read from openclaw.json's `auth.profiles` — the provider field, else the
+    id's prefix, the rule `profileProviderId` in
+    src/lib/chatgpt-subscription.ts uses — so this block stays runnable on its
+    own (the unit tests run it extracted from the file).
+    """
+    _auth = _cfg.get("auth") if isinstance(_cfg, dict) else None
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    if not isinstance(_profiles, dict):
+        return False
+    for _id, _entry in _profiles.items():
+        if not isinstance(_entry, dict):
+            continue
+        _provider = _entry.get("provider")
+        if not (isinstance(_provider, str) and _provider.strip()):
+            _provider = str(_id).split(":")[0]
+        _mode = _entry.get("mode")
+        if (
+            _provider.strip().lower() == "openai"
+            and isinstance(_mode, str)
+            and _mode.strip().lower() == "oauth"
+        ):
+            return True
+    return False
+
+
+def _clawai_transcribe_profile_problem(_cfg):
+    """Why the row's own profile cannot carry it, or None when it can.
+
+    The cloud row names CLAWBOX_TRANSCRIBE_AUTH_PROFILE as its bearer, and
+    ClawBox records that profile in openclaw.json's `auth.profiles` as
+    `{provider: "deepseek", mode: "api_key"}` with every ClawBox AI sign-in.
+    A release that signed in by subscription recorded `mode: "oauth"`; on a
+    box still carrying that row the core took the bearer for an OAuth
+    credential and refused our endpoint on every voice note ("OpenAI OAuth
+    audio transcription requires the official endpoint without custom request
+    overrides"), and the repair below re-stamped the profile at every start.
+    No record at all says the profile was never ours to name.
+
+    `transcribeProfileProblem` in src/lib/stt-preference.ts is this rule over
+    the same field, and src/lib/stt-channel.ts withholds the row on it; keep
+    the two in step, or each boot undoes the other.
+    """
+    _auth = _cfg.get("auth") if isinstance(_cfg, dict) else None
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    _entry = _profiles.get(CLAWBOX_TRANSCRIBE_AUTH_PROFILE) if isinstance(_profiles, dict) else None
+    if not _entry:
+        return "the %s auth profile is not recorded" % CLAWBOX_TRANSCRIBE_AUTH_PROFILE
+    _mode = _entry.get("mode") if isinstance(_entry, dict) else None
+    if isinstance(_mode, str) and _mode.strip().lower() in CLAWBOX_KEY_PROFILE_MODES:
+        return None
+    return (
+        "the %s auth profile is not an API key (a ClawBox AI sign-in left over as OAuth)"
+        % CLAWBOX_TRANSCRIBE_AUTH_PROFILE
+    )
+
+
+def _clawbox_local_stt_row():
+    """The on-box engine's CLI row when it is installed here, else None.
+
+    The three checks `localSttInstalled` (src/lib/stt-local.ts) makes: the
+    client script in the workspace, the whisper-server unit, and faster-whisper
+    on python3's path — LOCATED rather than imported, so a gateway start does
+    not load the engine's libraries to learn it is there. The row is the one
+    `buildAudioModels` (src/lib/stt-preference.ts) writes, field for field, so
+    the web server's own pass finds it already in force.
+    """
+    import importlib.util
+    import os
+
+    _home = os.environ.get("HOME") or "/home/clawbox"
+    _script = os.path.join(_home, ".openclaw", "workspace", "scripts", CLAWBOX_STT_CLIENT_SCRIPT)
+    _unit = os.path.join(_home, ".config", "systemd", "user", "whisper-server.service")
+    if not (os.path.exists(_script) and os.path.exists(_unit)):
+        return None
+    try:
+        if importlib.util.find_spec("faster_whisper") is None:
+            return None
+    except (ImportError, ValueError):
+        return None
+    return {
+        "type": "cli",
+        "command": "/usr/bin/python3",
+        "args": [_script, "{{MediaPath}}"],
+        "timeoutSeconds": 120,
+    }
 
 
 def _is_clawbox_audio_models(_models):
@@ -3574,10 +4059,45 @@ if _clawai_openai_route_is_ours:
         _audio_models = _audio.get("models")
         _audio_models_move_in_flight = True
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
+    # Asked once: the seed and the repair below both stand down on it. The
+    # reason why, or None while a ClawBox AI credential backs the cloud row.
+    _audio_cloud_refused = (
+        "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
+        if _openai_signed_in_with_oauth(cfg)
+        else _clawai_transcribe_profile_problem(cfg)
+    )
     _audio_route_taken = bool(
         (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
         or (_audio_models is not None and not _is_clawbox_audio_models(_audio_models))
     )
+    # A box with no list at all gets one, and the box's own engine leads it
+    # once it is installed: see CLAWBOX_STT_CLIENT_SCRIPT. Never where the
+    # LEGACY key is still present, whatever it holds — a
+    # `tools.media.audio.models: null` leaves `_audio_models` None, and seeding
+    # the v2 home beside a key the core refuses is the dual-home write the
+    # image guard in this file stands down over (TASK-743).
+    _audio_seed = None
+    if not _audio_route_taken and _audio_models is None and not _audio_models_move_in_flight:
+        _audio_local_row = _clawbox_local_stt_row()
+        _audio_seed = ([_audio_local_row] if _audio_local_row else []) + (
+            [] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)]
+        )
+        if _audio_local_row:
+            print("  Channel voice notes try the Whisper engine installed on this box first")
+
+    def _audio_write_seed(_rows):
+        _rows = [dict(_row) for _row in _rows]
+        if _clawbox_v2:
+            for _row in _rows:
+                _row["capabilities"] = ["audio"]
+            _media["models"] = _rows
+        else:
+            _audio["models"] = _rows
+        if _audio or not _clawbox_v2:
+            _media["audio"] = _audio
+        _tools["media"] = _media
+        cfg["tools"] = _tools
+
     if _audio_route_taken:
         # A list this migration does not recognise is the owner's own route —
         # UNLESS it is the legacy list above, which is a migration in flight and
@@ -3592,26 +4112,31 @@ if _clawai_openai_route_is_ours:
                 else "tools.media.audio already names its own transcription route"
             )
         )
-    elif _audio_base_url != _clawai_proxy_base_url or _audio_models is None:
+    elif _audio_cloud_refused:
+        # No cloud row and no endpoint: see `_openai_signed_in_with_oauth` and
+        # `_clawai_transcribe_profile_problem`. The box's own engine is seeded
+        # alone when it is installed; the withdrawal below takes back what an
+        # earlier boot wrote.
+        if _audio_seed:
+            _audio_write_seed(_audio_seed)
+            changed = True
+    elif _audio_models is None or (
+        # The endpoint only ever travels WITH the cloud row. A list Settings
+        # wrote without one — the box's own engine alone, because no ClawBox
+        # AI credential backs the cloud row (src/lib/stt-channel.ts) — has no
+        # row that reads it, and writing it back at every start would undo
+        # what Settings just took away.
+        _audio_base_url != _clawai_proxy_base_url
+        and any(_is_clawbox_cloud_audio_model(_row) for _row in _audio_models)
+    ):
         _audio["baseUrl"] = _clawai_proxy_base_url
-        # Seed the list only where there is none. A list this migration
-        # recognises is left exactly as Settings wrote it, order included.
-        #
-        # …and never where the LEGACY key is still present, whatever it holds.
-        # A `tools.media.audio.models: null` leaves `_audio_models` None, so the
-        # bare `is None` test above seeded the v2 home beside a key the core
-        # refuses — the same dual-home write the image guard in this file now
-        # stands down over (TASK-743). `baseUrl` is still written either way:
+        # Seed the list only where there is none (`_audio_seed`). A list this
+        # migration recognises is left exactly as Settings wrote it, order
+        # included. `baseUrl` is still written beside a legacy key in flight:
         # it lives at the same address in both generations, which is what the
         # comment on the in-flight flag says.
-        if _audio_models is None and not _audio_models_move_in_flight:
-            _seed = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
-            if _clawbox_v2:
-                for _row in _seed:
-                    _row["capabilities"] = ["audio"]
-                _media["models"] = _seed
-            else:
-                _audio["models"] = _seed
+        if _audio_seed is not None:
+            _audio_write_seed(_audio_seed)
         _media["audio"] = _audio
         _tools["media"] = _media
         cfg["tools"] = _tools
@@ -3630,7 +4155,27 @@ if _clawai_openai_route_is_ours:
     # so a list the owner wrote is never touched; the ORDER is his speech-to-text
     # preference and is preserved row for row. Idempotent: a row that already
     # names the profile is left alone, so the next boot writes nothing.
-    if not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+    #
+    # WITHDRAWN instead of repaired once no ClawBox AI credential backs it —
+    # the openai credential is a ChatGPT sign-in, or the profile the row names
+    # is not recorded as a key: a profile re-stamped onto a row the core
+    # refuses is the row that answered every voice note on a real box with
+    # "requires the official endpoint". src/lib/stt-channel.ts leaves the row
+    # out on the same rule, so this never puts back what Settings left out.
+    # Only OUR rows and OUR endpoint go; the on-box CLI row stays, in its
+    # place, and is then the first thing a voice note tries.
+    if not _audio_route_taken and _audio_cloud_refused:
+        if isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
+            _audio_kept = [_row for _row in _audio_models if not _is_clawbox_cloud_audio_model(_row)]
+            if len(_audio_kept) != len(_audio_models):
+                _audio_models[:] = _audio_kept
+                print("  Withdrew the ClawBox AI transcription row: %s" % _audio_cloud_refused)
+                changed = True
+        if _audio_has_base_url and _same_endpoint(_audio_base_url, _clawai_proxy_base_url):
+            del _audio["baseUrl"]
+            print("  Removed the ClawBox AI transcription endpoint along with its row")
+            changed = True
+    elif not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
         _audio_repaired = False
         for _row in _audio_models:
             if not isinstance(_row, dict) or _row.get("type") == "cli":
@@ -3979,6 +4524,287 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
             changed = True
 
 
+# --- memory index defaults ---
+# The memory-search index lives in each agent's database
+# (agents/<id>/agent/openclaw-agent.sqlite). On a customer box with ~10 GB agent
+# databases it was 82 % of a 9.4 GB file — embedding cache, chunks and
+# 3,072-dimension vectors, ~155 KB a chunk — growing ~710 KB a request, and at
+# least 95 % of that growth was the index of SESSION TRANSCRIPTS:
+# `memory.search.rememberAcrossConversations` defaults ON for a personal
+# install and, on, adds `sessions` to the indexed sources, so `sources:
+# ["memory"]` alone does not stop it (OpenClaw's memory-config reference says
+# so). The box's defaults, written only where the key is ABSENT, so an owner who
+# asked for transcript recall keeps it:
+#   - rememberAcrossConversations: false, sources: ["memory"] — the index holds
+#     MEMORY.md, USER.md and memory/*.md, not every conversation again;
+#   - the ClawBox AI cloud embedder on text-embedding-3-small (1,536
+#     dimensions) instead of text-embedding-3-large (3,072): ONCE, and only the
+#     value the box itself wrote (the ClawBox AI token is the key) — see
+#     OPENCLAW_CLOUD_EMBEDDING_MODEL in src/lib/clawai-cloud-embeddings.ts.
+# OpenClaw has no index size cap to set (2026.10.6, like 2026.10.3, has no memory.search cap key).
+#
+# Any of these changes the index's IDENTITY, and OpenClaw then pauses vector
+# search rather than re-embedding everything — there is no storm to fear from
+# the change itself, but there is a dead vector search until a rebuild. So a
+# change that lands asks for exactly one, recorded in CLAWBOX_MEMORY_REBUILD_RECORD
+# and run after the gateway starts (`memory reset` + `memory index --force`):
+# the old rows — 3,072-d vectors, transcript chunks, their embedding cache — are
+# dropped by the reset, only the memory files are embedded again, and the pages
+# they leave are compacted at the next gateway start.
+_memory_index_changes = []
+_memory_rebuild_record = os.environ.get("CLAWBOX_MEMORY_REBUILD_RECORD") or ""
+
+
+def _memory_rebuild_state():
+    if not _memory_rebuild_record:
+        return {}
+    try:
+        with open(_memory_rebuild_record, "r", encoding="utf-8") as _fh:
+            _state = json.load(_fh)
+        return _state if isinstance(_state, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        # Unreadable: claim the one-shot model move has happened, so a record
+        # this pass cannot read never repeats it.
+        return {"modelMigrated": True}
+
+
+def _record_memory_rebuild(changes, note=None, extra=None):
+    """Ask for the rebuild — only once the config these changes are in landed."""
+    if not changes or not _memory_rebuild_record:
+        return False
+    _state = _memory_rebuild_state()
+    _state.update({
+        "pending": True,
+        "reasons": sorted(set(list(_state.get("reasons") or []) + list(changes)) if _state.get("pending") else sorted(set(changes))),
+        "requestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "attempts": 0,
+    })
+    _state.pop("resetAt", None)
+    _state.pop("doneAt", None)
+    _state.pop("lastError", None)
+    if "model" in changes:
+        _state["modelMigrated"] = True
+    _state.update(extra or {})
+    _tmp = _memory_rebuild_record + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(_memory_rebuild_record), exist_ok=True)
+        with open(_tmp, "w", encoding="utf-8") as _fh:
+            json.dump(_state, _fh, indent=2, sort_keys=True)
+        os.replace(_tmp, _memory_rebuild_record)
+        print(note or "  Memory index: settings changed (%s); one rebuild runs after the gateway starts" % ", ".join(sorted(set(changes))))
+        return True
+    except Exception as exc:
+        print("  WARN: could not record the memory index rebuild (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+        return False
+
+
+# --- a memory index built keyword-only ---
+# The first-boot rebuild above runs before the box has set any embedder (the
+# ClawBox AI cloud is wired by the web server minutes later, the on-device one
+# only once it is installed), and for an unset provider the core's documented
+# creation-time fallback indexes TEXT ONLY: `memory_index_meta` says model
+# `fts-only`, provider `none`, and no vector table exists. Once `memory.search`
+# names an embedder the core pauses vector search over that index and
+# re-embeds nothing by itself, so the agent's memory search matched words only
+# until somebody forced a rebuild — on a box whose Memory Shard was never
+# switched on, nobody did (a lab board, for nine hours). A box swapped to Hermes
+# and back comes up on the same index: nothing rebuilds it while Hermes runs.
+#
+# So: an index built keyword-only, under a config that names an embedder now,
+# asks for the same one rebuild (`keyword_only`, no reset: there are no
+# vectors to drop). ONCE per embedder setting — `keywordOnlyFor` remembers the
+# setting it was asked for — so a provider that falls back instead of failing
+# (`local`) costs one rebuild, not one at every gateway start.
+#
+# Read from the agent databases directly, READ-ONLY, through the helper the
+# post-start rebuild reads them with (scripts/openclaw-db-maintenance.py, the
+# same agent inventory, `agents.entries.<id>.agentDir` included): the core's own
+# reading (`openclaw memory status`) boots the whole CLI, 8-10 s on a Jetson,
+# and has no place inside a pre-start that runs before the gateway. The row is
+# the one the pinned core writes; a core without it, or a helper that cannot be
+# loaded, reads as "not keyword-only", which asks for nothing.
+#
+# THE KEY IS PART OF THE SETTING. A rebuild against a key the endpoint refuses
+# fails its attempts and stops; correcting the key changes neither provider,
+# model nor endpoint, so `keywordOnlyFor` alone would never ask again. The key
+# is compared through a salted digest in its own 0600 file beside the record —
+# never in the record, which is plain JSON other tools read.
+_NO_EMBEDDER = ("", "auto", "none")
+
+
+def _embedder_setting(search):
+    """`provider/model` and a digest of where it embeds, or None when no embedder is named."""
+    import hashlib
+    if not isinstance(search, dict):
+        return None
+    _provider = search.get("provider")
+    if not isinstance(_provider, str) or _provider.strip().lower() in _NO_EMBEDDER:
+        return None
+    _model = search.get("model") if isinstance(search.get("model"), str) else ""
+    _remote = search.get("remote") if isinstance(search.get("remote"), dict) else {}
+    _base = _remote.get("baseUrl") if isinstance(_remote.get("baseUrl"), str) else ""
+    _label = "%s/%s" % (_provider.strip(), _model.strip() or "its default model")
+    _key = hashlib.sha256(json.dumps([_provider.strip(), _model.strip(), _base.strip()]).encode("utf-8")).hexdigest()[:16]
+    return _label, _key, _remote.get("apiKey")
+
+
+def _agent_index_keyword_only():
+    """Does any agent's memory index say it was built with no embeddings?"""
+    _helper = os.environ.get("CLAWBOX_DB_MAINTENANCE_PY") or ""
+    if not _helper:
+        return False
+    try:
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location("clawbox_db_maintenance", _helper)
+        _dbm = importlib.util.module_from_spec(_spec)
+        # No __pycache__ left in the checkout: it runs as a script everywhere else.
+        _bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            _spec.loader.exec_module(_dbm)
+        finally:
+            sys.dont_write_bytecode = _bytecode
+        _state_dir = os.environ.get("OPENCLAW_STATE_DIR") or os.path.dirname(cfg_path)
+        return bool(_dbm.keyword_only_agent_dbs(_state_dir, cfg_path))
+    except Exception as exc:
+        print("  WARN: could not read how the memory index was built (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+        return False
+
+
+def _credential_file():
+    return os.path.join(os.path.dirname(_memory_rebuild_record), "openclaw-memory-rebuild.credential")
+
+
+def _credential_digest(api_key, salt):
+    import hashlib
+    return hashlib.sha256((salt + json.dumps(api_key, sort_keys=True)).encode("utf-8")).hexdigest()
+
+
+def _credential_unchanged(api_key):
+    """Is this the key the last keyword-only rebuild was asked for under? No record of one reads as changed."""
+    try:
+        with open(_credential_file(), "r", encoding="utf-8") as _fh:
+            _kept = json.load(_fh)
+        return isinstance(_kept, dict) and _kept.get("digest") == _credential_digest(api_key, str(_kept.get("salt") or ""))
+    except Exception:
+        return False
+
+
+def _remember_credential(api_key):
+    _path = _credential_file()
+    _salt = secrets.token_hex(16)
+    _tmp = _path + ".tmp"
+    try:
+        _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(_fd, "w", encoding="utf-8") as _fh:
+            json.dump({"salt": _salt, "digest": _credential_digest(api_key, _salt)}, _fh)
+        os.chmod(_tmp, 0o600)
+        os.replace(_tmp, _path)
+    except Exception as exc:
+        print("  WARN: could not record which key the memory index rebuild was asked for under (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+
+
+_keyword_only_rebuild = None
+
+
+def _record_keyword_only_rebuild():
+    if not _keyword_only_rebuild:
+        return
+    _label, _key, _api_key = _keyword_only_rebuild
+    if _record_memory_rebuild(
+        ["keyword_only"],
+        note="  Memory index: built keyword-only (no embeddings); %s is set now, so one rebuild runs after the gateway starts" % _label,
+        extra={"keywordOnlyFor": _key},
+    ):
+        _remember_credential(_api_key)
+
+
+# Read through globals() like the other migrations here, so a suite that runs a
+# neighbouring block verbatim without the flag gets a no-op, not a NameError.
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
+    _memory_block = cfg.get("memory")
+    if _memory_block is None:
+        _memory_block = {}
+        cfg["memory"] = _memory_block
+    _memory_search = _memory_block.get("search") if isinstance(_memory_block, dict) else None
+    if isinstance(_memory_block, dict) and _memory_search is None:
+        _memory_search = {}
+        _memory_block["search"] = _memory_search
+    if isinstance(_memory_search, dict):
+        if "rememberAcrossConversations" not in _memory_search:
+            _memory_search["rememberAcrossConversations"] = False
+            _memory_index_changes.append("rememberAcrossConversations")
+        if "sources" not in _memory_search:
+            _memory_search["sources"] = ["memory"]
+            _memory_index_changes.append("sources")
+        _memory_remote = _memory_search.get("remote")
+        _memory_key = _memory_remote.get("apiKey") if isinstance(_memory_remote, dict) else None
+        if (
+            _memory_search.get("model") == "text-embedding-3-large"
+            and _memory_search.get("provider") == "openai-compatible"
+            and isinstance(_memory_key, str)
+            and _memory_key.startswith("claw_")
+            and not _memory_rebuild_state().get("modelMigrated")
+        ):
+            _memory_search["model"] = "text-embedding-3-small"
+            _memory_index_changes.append("model")
+        _setting = _embedder_setting(_memory_search)
+        if (
+            _setting
+            and (
+                _memory_rebuild_state().get("keywordOnlyFor") != _setting[1]
+                or not _credential_unchanged(_setting[2])
+            )
+            and _agent_index_keyword_only()
+        ):
+            _keyword_only_rebuild = _setting
+    if _memory_index_changes:
+        changed = True
+# --- end memory index defaults ---
+
+# Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
+#
+# Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
+# rule src/lib/local-tool-search.ts applies when a route moves the primary,
+# applied here on every boot for a box that was already on the local model
+# before this shipped and for the migrations above, which move the primary
+# themselves. The ~2B on-device model cannot drive tool_search/tool_call (it
+# sent tool_call with no id and claimed success), and the core's switch is
+# global, so it follows the primary. ClawBox writes {"enabled": false} and
+# removes only that exact value: an owner's own setting is never touched.
+# After every migration that moves the primary, so it sees the one they left
+# (only the DeepSeek V4 row defaults below follow, and they never move it).
+_LOCAL_TOOL_SEARCH_OFF = {"enabled": False}
+_ts_agents = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+_ts_defaults = _ts_agents.get("defaults") if isinstance(_ts_agents.get("defaults"), dict) else {}
+_ts_model = _ts_defaults.get("model")
+_ts_primary = _ts_model if isinstance(_ts_model, str) else (
+    _ts_model.get("primary") if isinstance(_ts_model, dict) else None
+)
+_ts_on_device = isinstance(_ts_primary, str) and _ts_primary.strip().startswith("llamacpp/")
+_ts_tools = cfg.get("tools")
+_ts_value = _ts_tools.get("toolSearch") if isinstance(_ts_tools, dict) else None
+_ts_ours = (
+    isinstance(_ts_value, dict)
+    and list(_ts_value.keys()) == ["enabled"]
+    and _ts_value["enabled"] is False
+)
+if _ts_on_device and (_ts_tools is None or (isinstance(_ts_tools, dict) and "toolSearch" not in _ts_tools)):
+    # 2026.10+ only: a key an older core's strict schema could refuse.
+    if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
+        if _ts_tools is None:
+            _ts_tools = {}
+            cfg["tools"] = _ts_tools
+        _ts_tools["toolSearch"] = dict(_LOCAL_TOOL_SEARCH_OFF)
+        changed = True
+        print("  Turned OpenClaw's Tool Search off: the primary is the on-device model, which needs its few tools as direct schemas")
+elif not _ts_on_device and _ts_ours:
+    del _ts_tools["toolSearch"]
+    changed = True
+    print("  Restored OpenClaw's Tool Search default: the primary is no longer the on-device model")
+
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:
@@ -4014,6 +4840,21 @@ if isinstance(ds_models, list):
         # written when absent or empty.
         if model.get("contextWindow") in (None, 128000, 131072, 200000):
             model["contextWindow"] = 1000000
+            changed = True
+        # contextTokens: the ACTIVE-input cap, OpenClaw's own key for it
+        # (models.providers.*.models[].contextTokens, explicit wins over the
+        # catalog). Its compaction threshold is the active window minus the
+        # built-in reserve, so with only the native 1M window a long session
+        # was never trimmed early: input per request grew from 0.7M to 1.4M
+        # tokens with session age on a box measured for this. 131,072 makes
+        # it compact near 128K. The native window above stays 1M: the cap
+        # limits what OpenClaw sends, it does not misdescribe the model.
+        # Written only when absent — a cap someone set is theirs, larger or
+        # smaller. Mirrors CLAWBOX_AI_CONTEXT_TOKENS in
+        # src/app/setup-api/ai-models/configure/route.ts.
+        # 2026.10+ only (CLAWBOX_OPENCLAW_2026_10): not a key to hand an older core.
+        if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)) and model.get("contextTokens") is None:
+            model["contextTokens"] = 131072
             changed = True
         # maxTokens: filled in when absent, and corrected when it holds a
         # number this migration itself put there. 384000 shipped first and is
@@ -4054,6 +4895,8 @@ if changed:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
         print("  Updated gateway config")
+        _record_memory_rebuild(_memory_index_changes)
+        _record_keyword_only_rebuild()
     except Exception as exc:
         if tmp_path is not None:
             try:
@@ -4067,8 +4910,11 @@ if changed:
         )
 else:
     print("  Gateway config already correct, skipping write")
+    # It changes nothing in the config, so it needs no write to land first.
+    _record_keyword_only_rebuild()
 PY
 
+"${CLAWBOX_STEP:-:}" "legacy auth sweep"
 # OpenClaw 2 refuses to start while any legacy auth-profiles.json remains,
 # even when the credentials were already copied into SQLite. Provider setup
 # normally runs doctor before restarting, but an interrupted configure or a
@@ -4089,7 +4935,10 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
     _authdoc_rc=0
     _authdoc_out="$(timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _authdoc_rc=$?
     printf '%s\n' "$_authdoc_out"
-    if printf '%s\n' "$_authdoc_out" | grep -q 'Legacy exec approvals exist at'; then
+    # A here-string, not `printf | grep -q`: printf still writing the lines
+    # after the match when grep exits is SIGPIPE, a false "not blocked" under
+    # pipefail, and that fails this boot in the elif below.
+    if grep -q 'Legacy exec approvals exist at' <<<"$_authdoc_out"; then
       echo "  WARN: openclaw doctor is blocked by a legacy exec approvals file, so the auth profiles were NOT migrated; starting the gateway anyway rather than failing this boot" >&2
     elif [ "$_authdoc_rc" -ne 0 ]; then
       echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2
@@ -4100,6 +4949,8 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
     fi
   fi
 fi
+
+"${CLAWBOX_STEP:-:}" "provider plugin payload and local AI auth"
 
 # ── Where the DeepSeek provider plugin's payload lives (TASK-1302) ──────────
 #
@@ -4286,7 +5137,7 @@ PY
 )" || LEGACY_CODEX_PRIMARY=""
 if [ -n "$LEGACY_CODEX_PRIMARY" ]; then
   NEW_CODEX_PRIMARY="codex/${LEGACY_CODEX_PRIMARY#*/}"
-  if "$OPENCLAW_BIN" config set agents.defaults.model.primary "$NEW_CODEX_PRIMARY" >/dev/null 2>&1; then
+  if "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set agents.defaults.model.primary "$NEW_CODEX_PRIMARY" >/dev/null 2>&1; then
     echo "  Migrated primary model $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY (openai-codex provider renamed to codex in OpenClaw 2026.6.x)"
   else
     echo "  WARN: failed to migrate $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY; Codex chats may fail with 'Unknown model'"
@@ -4427,7 +5278,7 @@ PY
 # `enabled: false`.
 clawbox_plugin_disable() {
   local id="$1"
-  timeout -k 5 60 "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" false --strict-json \
+  timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" false --strict-json \
     >/dev/null 2>&1 || true
   CLAWBOX_PLUGIN_ID="$id" python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null
 import json, os, sys
@@ -4450,7 +5301,7 @@ PY
 # when the file itself now says `enabled: true`.
 clawbox_plugin_reenable() {
   local id="$1"
-  timeout -k 5 60 "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" true --strict-json \
+  timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" true --strict-json \
     >/dev/null 2>&1 || true
   CLAWBOX_PLUGIN_ID="$id" python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null
 import json, os, sys
@@ -4823,10 +5674,10 @@ clawbox_run_openclaw_capture() {
   CLAWBOX_CLI_OUT=""
   file="$(mktemp 2>/dev/null)" || file=""
   if [ -z "$file" ]; then
-    timeout -k 5 "$secs" "$OPENCLAW_BIN" "$@" </dev/null >/dev/null 2>&1 || rc=$?
+    timeout -k 5 "$secs" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" "$@" </dev/null >/dev/null 2>&1 || rc=$?
     return "$rc"
   fi
-  timeout -k 5 "$secs" "$OPENCLAW_BIN" "$@" </dev/null >"$file" 2>&1 || rc=$?
+  timeout -k 5 "$secs" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" "$@" </dev/null >"$file" 2>&1 || rc=$?
   # `cat` has no grandchildren, so this substitution cannot stall the way the
   # one above would.
   CLAWBOX_CLI_OUT="$(cat "$file" 2>/dev/null || true)"
@@ -5071,10 +5922,22 @@ CAUSEPY
 # can conservatively miss a newly accepted surface, but cannot invent one.
 # A payload install CAN change a surface: invalidate the snapshot before that
 # operation so a later id never uses an answer from before the install.
-# The snapshot is in memory for this boot only, never persisted across boots.
+#
+# ACROSS BOOTS, only through the `plugin-consent` stamp (see "the checks a
+# start may take on trust" near the top): the first ask of a boot may take the
+# report the last full check recorded, when nothing the report depends on has
+# changed and the last start came up. A report that still had a consent
+# PENDING is never recorded, and a report taken on trust only ever settles a
+# plugin it names as consented or unrecorded — for any other answer the core
+# is asked again, then and there (`clawbox_plugin_consent_state`).
 CLAWBOX_CONSENT_STATES=""
 CLAWBOX_CONSENT_STATES_READY=0
 CLAWBOX_CONSENT_POSTWRITE_READY=0
+# 1 while CLAWBOX_CONSENT_STATES is the recorded report rather than the core's
+# answer this boot; the key the core's first answer this boot is recorded under.
+CLAWBOX_CONSENT_FROM_STAMP=0
+CLAWBOX_CONSENT_STAMP_ASKED=0
+CLAWBOX_CONSENT_STAMP_KEY=""
 
 # `@openclaw/discord`, `openclaw-discord` and `discord` are one plugin: the
 # registry answers to all three and `ensureChannelPlugin` enables whichever one
@@ -5101,6 +5964,25 @@ clawbox_plugin_canonical_id() {
 clawbox_consent_states_load() {
   local rc=0 file=""
   [ "$CLAWBOX_CONSENT_STATES_READY" = "0" ] || return "$CLAWBOX_CONSENT_STATES_READY"
+  CLAWBOX_CONSENT_FROM_STAMP=0
+  if [ "${CLAWBOX_CONSENT_STAMP_ASKED:-0}" = "0" ] && [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ]; then
+    CLAWBOX_CONSENT_STAMP_ASKED=1
+    if clawbox_stamp_check plugin-consent plugins --config "$OPENCLAW_CONFIG" --openclaw-home "$OPENCLAW_HOME_DIR" \
+        --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules"; then
+      case "$CLAWBOX_STAMP_VALUE" in
+        ok|"ok "*)
+          CLAWBOX_CONSENT_STAMP_KEY="$CLAWBOX_STAMP_KEY"
+          CLAWBOX_CONSENT_STATES=" ${CLAWBOX_STAMP_VALUE#ok} "
+          CLAWBOX_CONSENT_STATES_READY=1
+          CLAWBOX_CONSENT_FROM_STAMP=1
+          echo "  Plugin consent: nothing the core's report depends on changed since the last full check; reusing that report instead of asking again"
+          return 1
+          ;;
+      esac
+    fi
+    CLAWBOX_CONSENT_STAMP_KEY="${CLAWBOX_STAMP_KEY:-}"
+    [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Plugin consent: asking the core (${CLAWBOX_STAMP_WHY})"
+  fi
   # THROUGH A FILE, not through the environment. Measured on a box: this answer
   # is 285 KB for 65 plugin reports, and Linux caps a single environment string
   # at MAX_ARG_STRLEN (131 072), so the `VAR="$out" python3 -` idiom the rest of
@@ -5113,7 +5995,7 @@ clawbox_consent_states_load() {
   # plugin that makes that call cost tens of seconds on an Orin. One CLI start
   # answers for every id, which is what keeps this affordable in a blocking
   # ExecStartPre.
-  timeout -k 5 60 "$OPENCLAW_BIN" plugins inspect --all --json </dev/null >"$file" 2>/dev/null || rc=$?
+  timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins inspect --all --json </dev/null >"$file" 2>/dev/null || rc=$?
   if [ "$rc" != "0" ]; then
     rm -f "$file" 2>/dev/null || true
     CLAWBOX_CONSENT_STATES_READY=2
@@ -5203,6 +6085,16 @@ PY
   rm -f "$file" 2>/dev/null || true
   case "$CLAWBOX_CONSENT_STATES" in
     ok|"ok "*)
+      # Recorded for the next start once, under the key taken before this
+      # boot's first ask — and never with a consent still pending, which the
+      # enable below is about to change.
+      if [ -n "${CLAWBOX_CONSENT_STAMP_KEY:-}" ]; then
+        case " $CLAWBOX_CONSENT_STATES " in
+          *" pending:"*) ;;
+          *) clawbox_stamp_remember plugin-consent "$CLAWBOX_CONSENT_STAMP_KEY" "$CLAWBOX_CONSENT_STATES" ;;
+        esac
+        CLAWBOX_CONSENT_STAMP_KEY=""
+      fi
       CLAWBOX_CONSENT_STATES=" ${CLAWBOX_CONSENT_STATES#ok} "
       CLAWBOX_CONSENT_STATES_READY=1
       return 1
@@ -5222,16 +6114,27 @@ PY
 #   3  it does not name the plugin, names it in a state it would not load, or
 #      could not be asked at all
 clawbox_plugin_consent_state() {
-  local id ready=0
+  local id ready=0 state=3 again=0
   id="$(clawbox_plugin_canonical_id "$1")"
   clawbox_consent_states_load || ready=$?
   [ "$ready" = "1" ] || return 3
   case "$CLAWBOX_CONSENT_STATES" in
-    *" pending:$id "*) return 1 ;;
-    *" consented:$id "*) return 0 ;;
-    *" seen:$id "*) return 2 ;;
+    *" pending:$id "*) state=1 ;;
+    *" consented:$id "*) state=0 ;;
+    *" seen:$id "*) state=2 ;;
   esac
-  return 3
+  # The last full check's report, taken on trust, settles a plugin only when
+  # it says consented or unrecorded. Anything else may be what has changed, so
+  # the core is asked now, before an enable is spent on a stale answer.
+  if [ "$state" != "0" ] && [ "$state" != "2" ] && [ "${CLAWBOX_CONSENT_FROM_STAMP:-0}" = "1" ]; then
+    echo "  Plugin consent: the recorded report does not settle $id; asking the core"
+    CLAWBOX_CONSENT_FROM_STAMP=0
+    CLAWBOX_CONSENT_STATES=""
+    CLAWBOX_CONSENT_STATES_READY=0
+    clawbox_plugin_consent_state "$1" || again=$?
+    return "$again"
+  fi
+  return "$state"
 }
 
 # Set by clawbox_plugin_consent_outcome for its caller's own message.
@@ -5376,6 +6279,7 @@ clawbox_deepseek_switch_on_for_row() {
   clawbox_plugin_boot_without deepseek "$stage" "$lead$detail"
 }
 
+"${CLAWBOX_STEP:-:}" "Codex plugin check"
 # A `.openclaw` INSIDE the state directory is what the CLI leaves behind when
 # it was run with OPENCLAW_HOME pointing at the state directory (see the pin
 # near the top): a second config, a second empty index, nothing the gateway
@@ -5436,7 +6340,7 @@ fi
 # on the box — over the codex plugin-repair probe.
 if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(
-    timeout -k 5 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+    timeout -k 5 20 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, os, sys
 try:
     data = json.load(sys.stdin)
@@ -5466,11 +6370,25 @@ fi
 # be a completely healthy global/project install. Retain the filesystem check
 # as the fallback for older CLIs or malformed registry output.
 CODEX_REGISTRY_DEPS_OK=0
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+_codex_registry_key=""
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ] \
+  && [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] \
+  && clawbox_stamp_check codex-registry plugins --config "$OPENCLAW_CONFIG" --openclaw-home "$OPENCLAW_HOME_DIR" \
+    --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules" \
+  && [ "$CLAWBOX_STAMP_VALUE" = "1" ]; then
+  # A CLI cold start on every boot for an answer that cannot have changed:
+  # only a POSITIVE verdict is ever recorded, and only reused while nothing it
+  # reads has changed and the last start came up (see "the checks a start may
+  # take on trust" near the top).
+  CODEX_REGISTRY_DEPS_OK=1
+  echo "  Codex plugin dependencies: nothing they depend on changed since the last full check, which the core's registry passed; not asked again"
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  _codex_registry_key="${CLAWBOX_STAMP_KEY:-}"
+  [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Codex plugin dependencies: asking the core's registry (${CLAWBOX_STAMP_WHY})"
   # `-k 5` for the reason spelled out above the sibling call: without it the
   # ceiling is not one, because a survivor holds this substitution's pipe.
   CODEX_REGISTRY_DEPS_OK="$(
-    timeout -k 5 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+    timeout -k 5 20 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, sys
 try:
     data = json.load(sys.stdin)
@@ -5486,6 +6404,9 @@ for plugin in plugins:
 else:
     print("0")'
   )" || CODEX_REGISTRY_DEPS_OK=0
+  if [ "$CODEX_REGISTRY_DEPS_OK" = "1" ] && [ -n "$_codex_registry_key" ]; then
+    clawbox_stamp_remember codex-registry "$_codex_registry_key" 1
+  fi
 fi
 # TOTAL, like the reader in the background-job block below and the two
 # assignments above: this is a BLOCKING ExecStartPre under `set -euo
@@ -5559,6 +6480,7 @@ print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
 PY
 )" || CODEX_PLUGIN_ENABLED=1
 fi
+"${CLAWBOX_STEP:-:}" "background job defaults"
 # ── OpenClaw 2's three background jobs, brought to their defaults ONCE ─────
 #
 # Owner ruling 2026-09-15, reversing TASK-609's opt-outs of 2026-09-03: the box
@@ -5574,7 +6496,9 @@ fi
 #                    cron job." the first time it runs.
 #   self-learning    `skills.workshop.autonomous.mode` — `auto` by default, and
 #                    the core's own table says `auto` "also enables weekly
-#                    collection review".
+#                    collection review" (up to 2026.10.3; 2026.10.6 retired that
+#                    cron, and `auto` is background review plus archiving learned
+#                    skills unused for 30 days).
 #
 # TASK-609 seeded the OPT-OUTS once per box — `0m`, `false`, `off` — and
 # recorded it in `data/background-optouts.json` as `{"seeded": [<key>...]}`.
@@ -5728,7 +6652,8 @@ def at_optout(value, literal):
 
 # Only a key still AT the literal ClawBox seeded is ClawBox's to take back.
 # Anything else — absent (the core's default, already on), the owner's own
-# cadence, `propose` — is his and is left exactly where it is. The seeded list
+# cadence, `propose` (up to 2026.10.3; 2026.10.6's doctor moves it to `off`) —
+# is the owner's and is left exactly where it is. The seeded list
 # is deliberately NOT the gate: a fresh box's config restored from an opted-out
 # backup carries the same literals with no record at all, and the two cases
 # want the same answer.
@@ -5786,11 +6711,11 @@ SEEDPY
       # finds the landed key no longer at its literal and retries only the rest.
       CLAWBOX_JOBS_OK=1
       if [ "$CLAWBOX_JOBS_WRITES" != "[]" ] \
-        && ! timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_JOBS_WRITES" >/dev/null 2>&1; then
+        && ! timeout -k 5 90 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_JOBS_WRITES" >/dev/null 2>&1; then
         CLAWBOX_JOBS_OK=0
       fi
       if [ "$CLAWBOX_JOBS_OK" = "1" ] && [ "$CLAWBOX_JOBS_UNSET" = "1" ] \
-        && ! timeout -k 5 90 "$OPENCLAW_BIN" config unset agents.defaults.heartbeat.every >/dev/null 2>&1; then
+        && ! timeout -k 5 90 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config unset agents.defaults.heartbeat.every >/dev/null 2>&1; then
         CLAWBOX_JOBS_OK=0
       fi
       if [ "$CLAWBOX_JOBS_OK" != "1" ]; then
@@ -5854,6 +6779,7 @@ STATEPY
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "Codex install and consent"
 CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_PLUGIN_ENABLED" = "1" ]; then
   CODEX_SHOULD_LOAD=1
@@ -6009,6 +6935,8 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
       "$CODEX_CONSENT_SPEC"
   fi
 fi
+
+"${CLAWBOX_STEP:-:}" "managed plugin consent"
 
 # ── Capability consent for the OTHER ClawBox-managed plugins ────────────────
 #
@@ -6191,6 +7119,8 @@ MANAGEDPY
       "$(clawbox_managed_plugin_row_spec "$MANAGED_PLUGIN")"
   done
 fi
+
+"${CLAWBOX_STEP:-:}" "plugin repair retry"
 
 # ── Re-attempting a plugin a PREVIOUS boot switched off ─────────────────────
 #
@@ -6501,6 +7431,7 @@ REATTEMPTPY
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "Codex auth mirror"
 # Codex reads its ChatGPT session from a Codex CLI-style auth.json. Without
 # one the app-server falls back to api.openai.com with no bearer -> 401
 # "Missing bearer or basic authentication in header", which is what users hit
@@ -6562,6 +7493,7 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "embeddings and memory helpers"
 # Semantic memory embeddings default. OpenClaw's memory search defaults to
 # OpenAI embeddings, which need an OPENAI_API_KEY many boxes don't have
 # (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
@@ -6603,12 +7535,68 @@ if update_owns_box; then
   echo "  Local embeddings check skipped: an update owns this box (the next gateway start after it runs the check)"
 elif [ -x "$LOCAL_EMBEDDINGS" ]; then
   mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
-  setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
+  # It runs while this gateway starts: told so, it writes the config only once
+  # the gateway has started (a write inside startup admission is exit 78).
+  CLAWBOX_AFTER_GATEWAY_START=1 setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
   echo "  Local embeddings check running in the background (see $LOCAL_EMBEDDINGS_LOG)"
 else
   echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"
 fi
 
+# After a start-loop recovery (the start-guard at the top of this script) the
+# core's restart-loop breaker holds channel auto-start back on the recovered
+# start — the failed starts before it were unclean boots — so Telegram, Discord
+# and the rest stay silent while chat in the app works. The core lifts it itself
+# once the gateway has run through the breaker's window. `breaker-watch` follows
+# that in the gateway's own output after this start, records in
+# data/openclaw-start-guard.json whether channels are still held back (the
+# owner's notice says so), and only if the core has not lifted it in time starts
+# them with the core's own manual override (`openclaw gateway call
+# channels.start`). Detached for the same reason as the rebuild below, so it dies
+# with this unit's cgroup when the gateway is stopped; the next start looks
+# again for as long as the record asks (`"watch": true`).
+CLAWBOX_START_GUARD_RECORD="$CLAWBOX_ROOT/data/openclaw-start-guard.json"
+BREAKER_WATCH_LOG="$CLAWBOX_ROOT/data/openclaw-breaker-watch.log"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_START_GUARD_RECORD" ] \
+   && grep -Eq '"watch"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_START_GUARD_RECORD" \
+   && [ -f "$SCRIPT_DIR/openclaw-db-maintenance.py" ]; then
+  mkdir -p "$(dirname "$BREAKER_WATCH_LOG")" 2>/dev/null || true
+  setsid nohup python3 -I "$SCRIPT_DIR/openclaw-db-maintenance.py" breaker-watch \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --config "$OPENCLAW_CONFIG" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --unit "${CLAWBOX_GATEWAY_UNIT:-clawbox-gateway.service}" \
+    --gateway-port "${GATEWAY_PORT:-18789}" >>"$BREAKER_WATCH_LOG" 2>&1 &
+  echo "  Restart-loop breaker watch running in the background once the gateway is up (see $BREAKER_WATCH_LOG)"
+fi
+
+# The one memory-index rebuild the defaults block in the config pass above asked
+# for (CLAWBOX_MEMORY_REBUILD_RECORD): `openclaw memory reset --yes`, then
+# `openclaw memory index --force`, once, after this gateway has started. Detached
+# for the same reason as the embeddings check above, and it waits on its own
+# while an update owns the box rather than being skipped — every gateway start
+# inside an update would otherwise skip it, and vector search stays paused until
+# it runs. It is niced, takes the embeddings check's lock (so the two forced
+# reindexes never overlap), bounds each command, and dies with this unit's
+# cgroup if the gateway is stopped; an unfinished rebuild stays pending for the
+# next start.
+CLAWBOX_DB_MAINTENANCE="$SCRIPT_DIR/openclaw-db-maintenance.py"
+MEMORY_REBUILD_LOG="$CLAWBOX_ROOT/data/openclaw-memory-rebuild.log"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_MEMORY_REBUILD_RECORD" ] \
+   && grep -Eq '"pending"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_MEMORY_REBUILD_RECORD" \
+   && [ -f "$CLAWBOX_DB_MAINTENANCE" ]; then
+  mkdir -p "$(dirname "$MEMORY_REBUILD_LOG")" 2>/dev/null || true
+  setsid nohup python3 -I "$CLAWBOX_DB_MAINTENANCE" memory-rebuild \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --state-dir "$OPENCLAW_STATE_DIR" \
+    --config "$OPENCLAW_CONFIG" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --device-store "$CLAWBOX_DEVICE_STORE" \
+    --gateway-port "${GATEWAY_PORT:-18789}" >>"$MEMORY_REBUILD_LOG" 2>&1 &
+  echo "  Memory index rebuild running in the background once the gateway is up (see $MEMORY_REBUILD_LOG)"
+fi
+
+"${CLAWBOX_STEP:-:}" "MCP registration"
 # Ensure the per-install MCP bearer token exists and is wired into the
 # openclaw MCP server registration. The token lets the MCP subprocess
 # (mcp/clawbox-mcp.ts) authenticate back to /setup-api/* on port 80 —
@@ -6903,6 +7891,8 @@ then
 fi
 unset CLAWBOX_MCP_TOKEN_VAL
 
+"${CLAWBOX_STEP:-:}" "ClawBox hook plugins"
+
 # ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ────────────
 #
 # ONE INSTALLER FOR BOTH of the plugins ClawBox ships (the protected-path deny
@@ -6989,11 +7979,26 @@ install_clawbox_hook_plugin() {
   # disk, a partition remounted read-only after an unclean shutdown) would
   # otherwise re-raise out of the write below, fail the unit, and leave the box
   # with no agent at all — over a hook this very block calls optional.
-  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" python3 - "$OPENCLAW_CONFIG" <<'PY'
+  #
+  # CLAWBOX_HOOK_PLUGIN_WANT (on|off|unknown, default on) is the owner's switch
+  # for a plugin that has one (the path guard, TASK-1661): off writes
+  # `enabled: false` so the files stay installed but the gateway does not load
+  # them, unknown (a device store that exists and cannot be read) leaves the
+  # entry exactly as the last readable boot left it.
+  #
+  # CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 also writes the core's own grant
+  # `plugins.entries.<id>.hooks.allowConversationAccess: true`, without which a
+  # non-bundled plugin's prompt hooks (`before_prompt_build` among them) are
+  # not dispatched (docs/plugins/hooks.md, "Permissions and scope"). Only the
+  # plugin that needs it asks; the others' entries are untouched.
+  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" CLAWBOX_HOOK_PLUGIN_WANT="${CLAWBOX_HOOK_PLUGIN_WANT:-on}" \
+    CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS="${CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS:-0}" python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
 plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
+want = os.environ.get("CLAWBOX_HOOK_PLUGIN_WANT", "on")
+conversation_access = os.environ.get("CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS") == "1"
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
@@ -7022,11 +8027,27 @@ if not isinstance(entry, dict):
     entry = {}
     entries[plugin_id] = entry
 
-if entry.get("enabled") is True:
-    print(f"  {plugin_id} already enabled, skipping write")
+if want == "unknown":
+    print(f"  WARN: the device store could not be read; {plugin_id} is left exactly as it is")
     sys.exit(0)
+desired = want != "off"
 
-entry["enabled"] = True
+changed = []
+if entry.get("enabled") is not desired:
+    entry["enabled"] = desired
+    changed.append("enabled" if desired else "disabled (owner switch)")
+if conversation_access:
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        entry["hooks"] = hooks
+    if hooks.get("allowConversationAccess") is not True:
+        hooks["allowConversationAccess"] = True
+        changed.append("hooks.allowConversationAccess")
+
+if not changed:
+    print(f"  {plugin_id} already {'enabled' if desired else 'disabled by the owner'}, skipping write")
+    sys.exit(0)
 tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
 try:
     with os.fdopen(tmp_fd, "w") as f:
@@ -7038,7 +8059,7 @@ except Exception:
     except Exception:
         pass
     raise
-print(f"  Enabled {plugin_id}")
+print(f"  {plugin_id}: wrote {', '.join(changed)}")
 PY
   then
     echo "  WARNING: could not enable the $plugin_id plugin in $OPENCLAW_CONFIG — $consequence" >&2
@@ -7070,7 +8091,30 @@ CLAWBOX_PATH_GUARD_ID="clawbox-path-guard"
 CLAWBOX_PATH_GUARD_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_PATH_GUARD_ID"
 CLAWBOX_PATH_GUARD_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_PATH_GUARD_ID"
 CLAWBOX_PATH_GUARD_TABLE="$CLAWBOX_ROOT/config/protected-paths.json"
-install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
+# The owner's switch (Settings -> "Protect ClawBox files from the agent",
+# TASK-1661): `clawbox_path_guard_enabled` in the device store, the same rule
+# as src/lib/path-guard-switch.ts — only the boolean false is off, an absent
+# key or store is on, and a store that exists but cannot be read is unknown.
+# The plugin is installed either way; the switch only decides
+# plugins.entries.<id>.enabled.
+CLAWBOX_PATH_GUARD_WANT="$(CLAWBOX_DEVICE_STORE="${CLAWBOX_DEVICE_STORE:-}" python3 -c '
+import json, os
+p = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+if not p:
+    print("on"); raise SystemExit
+try:
+    with open(p, encoding="utf-8") as fh:
+        store = json.load(fh)
+except FileNotFoundError:
+    print("on"); raise SystemExit
+except Exception:
+    print("unknown"); raise SystemExit
+if not isinstance(store, dict):
+    print("unknown")
+else:
+    print("off" if store.get("clawbox_path_guard_enabled") is False else "on")
+' 2>/dev/null || echo unknown)"
+CLAWBOX_HOOK_PLUGIN_WANT="$CLAWBOX_PATH_GUARD_WANT" install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
   "the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" \
   "$CLAWBOX_PATH_GUARD_SRC/openclaw.plugin.json" \
   "$CLAWBOX_PATH_GUARD_SRC/package.json" \
@@ -7094,6 +8138,8 @@ install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
 CLAWBOX_PATH_GUARD_NODE="$(command -v node 2>/dev/null || true)"
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" != "1" ]; then
   :
+elif [ "$CLAWBOX_PATH_GUARD_WANT" = "off" ]; then
+  echo "  NOTE: the owner switched $CLAWBOX_PATH_GUARD_ID off in Settings — the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" >&2
 elif [ -z "$CLAWBOX_PATH_GUARD_NODE" ]; then
   echo "  NOTE: no node on PATH, so the installed $CLAWBOX_PATH_GUARD_ID plugin was not exercised here — it is installed and enabled, and the gateway loads it with its own node" >&2
 else
@@ -7114,47 +8160,66 @@ else
   fi
 fi
 
-# ── Field cleanup: the retired clawbox-web-taint plugin ─────────────────────
+# ── Field cleanup: retired ClawBox plugins ──────────────────────────────────
 #
-# `clawbox-web-taint` (TASK-735) was a hook plugin that, once a turn had read
-# a web page, a search result or a mailbox, made every shell and spawner tool
-# in that turn raise an approval card in the chat. The owner's decision of
-# 2026-09-15 — "we want the coding agent to just work, no warnings and
-# pop-ups" — retired it: the plugin is gone from the checkout, nothing installs
-# it any more, and this block is what takes it off a box already in the field,
-# where an earlier boot copied it into ~/.openclaw/extensions and wrote
-# `plugins.entries.<id>.enabled: true`. Left there, the gateway keeps loading
-# the copy — the gate outlives its own removal — and once the copy is gone the
-# entry names a plugin that is not on disk, which the core's own doctor
-# reports as a box needing a repair for a plugin nobody wants back.
+# Hook plugins ClawBox once shipped and no longer does. An earlier boot copied
+# each into ~/.openclaw/extensions and wrote `plugins.entries.<id>.enabled:
+# true`; left there, the gateway keeps loading the copy — the plugin outlives
+# its own removal — and once the copy is gone the entry names a plugin that is
+# not on disk, which the core's own doctor reports as a box needing a repair
+# for a plugin nobody wants back. The plugins are gone from the checkout and
+# nothing installs them any more; this block is what takes them off a box
+# already in the field.
 #
-# Idempotent and cheap: one existence test on a directory that is absent on
-# every box after its first boot on this build, and one python read of
-# openclaw.json that writes only when the file still names the plugin. It
-# prints ONE line when something was removed and nothing otherwise, and — like
-# the MCP reconcile above — a failure costs one WARN line, never the boot: this
-# is an ExecStartPre under `set -euo pipefail`, so the `rm` and the python are
-# both under `if`, and a config that cannot be read is left exactly as it is
-# (the blocks above have already reported on it).
-CLAWBOX_RETIRED_PLUGIN_ID="clawbox-web-taint"
-CLAWBOX_RETIRED_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_RETIRED_PLUGIN_ID"
-CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED=0
-if [ -e "$CLAWBOX_RETIRED_PLUGIN_DST" ] || [ -L "$CLAWBOX_RETIRED_PLUGIN_DST" ]; then
-  if rm -rf "$CLAWBOX_RETIRED_PLUGIN_DST" 2>/dev/null; then
-    CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED=1
-  else
-    echo "  WARN: could not remove the retired $CLAWBOX_RETIRED_PLUGIN_ID plugin at $CLAWBOX_RETIRED_PLUGIN_DST — the gateway may still load it" >&2
+#   clawbox-web-taint           TASK-735's approval gate: once a turn had read
+#                               a web page, a search result or a mailbox, every
+#                               shell and spawner tool in that turn raised an
+#                               approval card in the chat. Retired by the
+#                               owner's decision of 2026-09-15 — "we want the
+#                               coding agent to just work, no warnings and
+#                               pop-ups".
+#   clawbox-prime-radiant-core  The Prime Radiant "core block": the wiki's
+#                               most-linked pages as system context in the
+#                               owner's main agent's every session, read from
+#                               <data>/prime-radiant/core-context.json. Retired
+#                               with that feature; its leftover file goes too
+#                               (after the plugins, below).
+#
+# HARNESS FIRST, AND WHY NOT ITS UNINSTALL. The pinned core's own remover,
+# `openclaw plugins uninstall <id>`, works from the core's install records,
+# and these copies have none: install_clawbox_hook_plugin placed them in the
+# extensions root and wrote the one config key, so undoing exactly that — the
+# folder and the key — is the whole removal. It would also cost a CLI cold
+# start on every boot, which the header of this file exists to avoid.
+#
+# Idempotent and cheap: one existence test per plugin on a directory that is
+# absent on every box after its first boot on this build, and one python read
+# of openclaw.json per plugin that writes only when the file still names it.
+# It prints ONE line per plugin it removed something of and nothing otherwise,
+# and — like the MCP reconcile above — a failure costs one WARN line, never the
+# boot: this is an ExecStartPre under `set -euo pipefail`, so the `rm` and the
+# python are both under `if`, and a config that cannot be read is left exactly
+# as it is (the blocks above have already reported on it).
+retire_clawbox_plugin() {
+  local plugin_id="$1"
+  local dst="$OPENCLAW_HOME_DIR/extensions/$plugin_id"
+  local dir_removed=0
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    if rm -rf "$dst" 2>/dev/null; then
+      dir_removed=1
+    else
+      echo "  WARN: could not remove the retired $plugin_id plugin at $dst — the gateway may still load it" >&2
+    fi
   fi
-fi
-if ! CLAWBOX_RETIRED_PLUGIN_ID="$CLAWBOX_RETIRED_PLUGIN_ID" \
-  CLAWBOX_RETIRED_PLUGIN_DST="$CLAWBOX_RETIRED_PLUGIN_DST" \
-  CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED="$CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED" \
-  python3 - "$OPENCLAW_CONFIG" <<'PY'
+  if ! CLAWBOX_RETIRED_PLUGIN_ID="$plugin_id" \
+    CLAWBOX_RETIRED_PLUGIN_DST="$dst" \
+    CLAWBOX_RETIRED_PLUGIN_DIR_REMOVED="$dir_removed" \
+    python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
 plugin_id = os.environ["CLAWBOX_RETIRED_PLUGIN_ID"]
-# The one line this block prints names everything it took away, the directory
+# The one line printed for this plugin names everything it took away, the directory
 # the shell half removed included, so the journal says what changed in one
 # place.
 removed = []
@@ -7215,9 +8280,33 @@ except Exception:
     raise
 report()
 PY
-then
-  echo "  WARN: could not drop the retired $CLAWBOX_RETIRED_PLUGIN_ID plugin from $OPENCLAW_CONFIG — the gateway may still try to load it" >&2
+  then
+    echo "  WARN: could not drop the retired $plugin_id plugin from $OPENCLAW_CONFIG — the gateway may still try to load it" >&2
+  fi
+}
+retire_clawbox_plugin clawbox-web-taint
+retire_clawbox_plugin clawbox-prime-radiant-core
+
+# The core block's own file, which ClawBox wrote while the owner had the Prime
+# Radiant `context` setting on: derived from the vault, and read by nothing
+# now. Found where the retired plugin read it — `PRIME_RADIANT_DIR` when that
+# is an absolute path, else <ClawBox root>/data/prime-radiant — and removed,
+# not kept: the vault it was built from is the copy that matters. Silent when
+# there is none; a removal that fails is one WARN, never the boot.
+CLAWBOX_RETIRED_PR_DIR="$CLAWBOX_ROOT/data/prime-radiant"
+case "${PRIME_RADIANT_DIR:-}" in
+  /*) CLAWBOX_RETIRED_PR_DIR="$PRIME_RADIANT_DIR" ;;
+esac
+CLAWBOX_RETIRED_PR_BLOCK="$CLAWBOX_RETIRED_PR_DIR/core-context.json"
+if [ -f "$CLAWBOX_RETIRED_PR_BLOCK" ] || [ -L "$CLAWBOX_RETIRED_PR_BLOCK" ]; then
+  if rm -f "$CLAWBOX_RETIRED_PR_BLOCK" 2>/dev/null; then
+    echo "  Removed the retired Prime Radiant core block: $CLAWBOX_RETIRED_PR_BLOCK"
+  else
+    echo "  WARN: could not remove the retired Prime Radiant core block at $CLAWBOX_RETIRED_PR_BLOCK — nothing reads it any more" >&2
+  fi
 fi
+
+"${CLAWBOX_STEP:-:}" "email directive hook"
 
 # ── The outbound EMAIL:-directive hook plugin ───────────────────────────────
 #
@@ -7454,7 +8543,7 @@ PY
       printf '%s' "$up"
     }
     CLAWBOX_HOOK_BEGAN="$(clawbox_hook_uptime || true)"
-    CLAWBOX_HOOK_JSON="$(timeout -k 5 "$CLAWBOX_HOOK_CEILING" "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
+    CLAWBOX_HOOK_JSON="$(timeout -k 5 "$CLAWBOX_HOOK_CEILING" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
       || CLAWBOX_HOOK_RC=$?
     CLAWBOX_HOOK_ENDED="$(clawbox_hook_uptime || true)"
     if [ -n "$CLAWBOX_HOOK_BEGAN" ] && [ -n "$CLAWBOX_HOOK_ENDED" ]; then
@@ -7603,6 +8692,7 @@ PY
   fi
 fi
 
+"${CLAWBOX_STEP:-:}" "DeepSeek provider plugin"
 # Seed CLAWBOX.md in the OpenClaw workspace so the agent's session-start
 # context includes ClawBox-specific guidance (where user-installed skills
 # actually live, how to control the desktop Chromium via the browser_*
@@ -7756,6 +8846,7 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$(clawbox_deepseek_row_needs_switch_
   # See `clawbox_deepseek_switch_on_for_row`.
   clawbox_deepseek_switch_on_for_row
 fi
+"${CLAWBOX_STEP:-:}" "workspace and bootstrap"
 # Resolve the workspace from agents.defaults.workspace in openclaw.json,
 # matching the same logic getSkillsDir() uses on the ClawBox API side —
 # falls back to ~/.openclaw/workspace when unset, handles absolute vs
@@ -7810,9 +8901,136 @@ PY
 # the directory the gateway would create it on the first turn and seed the
 # stock ritual before we ever got a say. An empty workspace directory is not
 # itself evidence of a configured agent, so creating it changes nothing else.
+#
+# NEVER ON A SET-UP BOX (TASK-1528). Once the setup wizard is complete the box
+# answers its first chat message like any other: no introductions, no "what
+# should I call you". So the seed is for a box whose wizard is still running,
+# and on a set-up box this block does the opposite — it RETIRES a ritual that
+# is still pending, which is how boxes updated with one armed stop running it.
+# The wizard's last step and the five-minute heartbeat do the same from the app
+# (retireOnboardingRitual in src/lib/language-persona.ts); this is the boot
+# path, and the one that covers a workspace OpenClaw creates after setup — a
+# switch from Hermes, a workspace someone emptied.
+#
+# Retiring is two steps, in this order. USER.md first, if there is none: a
+# USER.md that differs from OpenClaw's template is what makes it treat the
+# workspace as configured, so taking BOOTSTRAP.md away from a workspace it has
+# not seen yet without one would have it seed its STOCK ritual in place of ours.
+# Then BOOTSTRAP.md is MOVED, never deleted, into .clawbox-retired/ inside the
+# workspace, where OpenClaw injects nothing; with it gone OpenClaw stamps the
+# workspace complete. A USER.md that is already there is the agent's and is
+# never rewritten. The USER.md written here is byte-for-byte clawboxUserMd() in
+# src/lib/language-persona.ts; the onboarding test drives both and compares.
 CLAWBOX_BOOTSTRAP_SRC="$CLAWBOX_ROOT/config/clawbox-bootstrap.md"
 CLAWBOX_BOOTSTRAP_DST="$CLAWBOX_WORKSPACE/BOOTSTRAP.md"
-if [ -r "$CLAWBOX_BOOTSTRAP_SRC" ] \
+CLAWBOX_SETUP_STORE="${CLAWBOX_DEVICE_STORE:-$CLAWBOX_ROOT/data/config.json}"
+CLAWBOX_SETUP_DONE=0
+# A grep, like update_owns_box: the store is JSON.stringify's `"key": value`.
+# A store that cannot be read says "not set up", which keeps today's behaviour.
+if [ -r "$CLAWBOX_SETUP_STORE" ] \
+  && grep -Eq '"setup_complete"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_SETUP_STORE" 2>/dev/null; then
+  CLAWBOX_SETUP_DONE=1
+fi
+# Not while Hermes is the harness in play on a dual box, whose OpenClaw gateway
+# keeps running beside it. A USER.md here would have clawbox-identity-sync.sh
+# read this workspace as introduced and, with the canonical identity still
+# marked provisional, copy it over the USER.md Hermes has been keeping. The
+# switch back to OpenClaw retires the ritual from the app (harness/select) —
+# this start read the store before that switch was persisted.
+if [ "$CLAWBOX_SETUP_DONE" = 1 ] \
+  && grep -Eq '"active_harness"[[:space:]]*:[[:space:]]*"hermes"' "$CLAWBOX_SETUP_STORE" 2>/dev/null; then
+  echo "  Setup is complete and Hermes is the active harness: the OpenClaw workspace waits for the switch back"
+elif [ "$CLAWBOX_SETUP_DONE" = 1 ]; then
+  CLAWBOX_USER_MD="$CLAWBOX_WORKSPACE/USER.md"
+  if [ ! -e "$CLAWBOX_USER_MD" ] && [ ! -L "$CLAWBOX_USER_MD" ]; then
+    # Written whole to a temporary name and LINKED into place, so a write cut
+    # short (a full eMMC) never leaves a fragment under the real name, and a
+    # USER.md that appeared in the meantime is never replaced (`ln` refuses).
+    CLAWBOX_USER_TMP="$CLAWBOX_USER_MD.clawbox-$$.tmp"
+    if mkdir -p "$CLAWBOX_WORKSPACE" 2>/dev/null \
+      && CLAWBOX_SETUP_STORE="$CLAWBOX_SETUP_STORE" CLAWBOX_USER_OUT="$CLAWBOX_USER_TMP" python3 - <<'PY_USER'
+import json, os, re, unicodedata
+
+# The owner's name, if the agent ever stored one: the setup wizard does not ask.
+# Free text that lands in the agent's system prompt, so the same rule as
+# personaOwnerName() in src/lib/language-persona.ts — letters, marks, digits,
+# spaces and .'- only, and nothing longer than the 64 characters the
+# preferences_set tool accepts.
+name = None
+try:
+    with open(os.environ.get("CLAWBOX_SETUP_STORE", ""), encoding="utf-8") as fh:
+        raw = json.load(fh).get("pref:ui_user_name")
+except (OSError, ValueError, AttributeError):
+    raw = None
+if isinstance(raw, str):
+    # Whitespace by category, not `\s`: Python's and JavaScript's differ, and
+    # this must match personaOwnerName() byte for byte.
+    cleaned = "".join(
+        " " if unicodedata.category(c)[0] == "Z" or c in "\t\n\v\f\r" else c
+        for c in raw
+    )
+    cleaned = "".join(
+        c for c in cleaned if unicodedata.category(c)[0] in "LMN" or c in " .'-"
+    )
+    cleaned = re.sub(r" {2,}", " ", cleaned).strip()
+    if cleaned and len(cleaned) <= 64:
+        name = cleaned
+value = " " + name if name else ""
+
+text = "\n".join([
+    "# USER.md - About Your Human",
+    "",
+    "_ClawBox started this file when the owner finished setting up the box. Fill it in as you learn about them._",
+    "",
+    "- **Name:**" + value,
+    "- **What to call them:**" + value,
+    "- **Timezone:**",
+    "- **Notes:**",
+    "",
+    "## Context",
+    "",
+    "_The owner has already set this box up. Answer their first message like any other: no introductions, and no",
+    "asking what to call you or them. When they mention their name or how they like to be addressed, record it here._",
+    "",
+])
+with open(os.environ["CLAWBOX_USER_OUT"], "w", encoding="utf-8") as fh:
+    fh.write(text)
+PY_USER
+    then
+      # `mv -n` is the fallback for a filesystem without hard links; it, too,
+      # never replaces a file that is already there.
+      if ln "$CLAWBOX_USER_TMP" "$CLAWBOX_USER_MD" 2>/dev/null \
+        || { [ ! -e "$CLAWBOX_USER_MD" ] && mv -n "$CLAWBOX_USER_TMP" "$CLAWBOX_USER_MD" 2>/dev/null \
+          && [ -e "$CLAWBOX_USER_MD" ]; }; then
+        echo "  Setup is complete: started USER.md so OpenClaw treats the workspace as configured"
+      elif [ ! -e "$CLAWBOX_USER_MD" ]; then
+        echo "  WARNING: could not write USER.md; the first-conversation ritual stays until the next start" >&2
+      fi
+    else
+      echo "  WARNING: could not write USER.md; the first-conversation ritual stays until the next start" >&2
+    fi
+    rm -f "$CLAWBOX_USER_TMP" 2>/dev/null || true
+    unset CLAWBOX_USER_TMP
+  fi
+  if { [ -e "$CLAWBOX_BOOTSTRAP_DST" ] || [ -L "$CLAWBOX_BOOTSTRAP_DST" ]; } \
+    && { [ -e "$CLAWBOX_USER_MD" ] || [ -L "$CLAWBOX_USER_MD" ]; }; then
+    CLAWBOX_RETIRED_DIR="$CLAWBOX_WORKSPACE/.clawbox-retired"
+    CLAWBOX_RETIRED_DST="$CLAWBOX_RETIRED_DIR/BOOTSTRAP.md"
+    if [ -e "$CLAWBOX_RETIRED_DST" ] || [ -L "$CLAWBOX_RETIRED_DST" ]; then
+      CLAWBOX_RETIRED_DST="$CLAWBOX_RETIRED_DIR/BOOTSTRAP-$(date -u +%Y-%m-%dT%H-%M-%S)-$$.md"
+    fi
+    # `mv -n`: a move, never a delete, and never over an earlier retired copy.
+    if mkdir -p "$CLAWBOX_RETIRED_DIR" 2>/dev/null \
+      && mv -n "$CLAWBOX_BOOTSTRAP_DST" "$CLAWBOX_RETIRED_DST" 2>/dev/null \
+      && [ ! -e "$CLAWBOX_BOOTSTRAP_DST" ]; then
+      echo "  Setup is complete: retired the first-conversation ritual to $CLAWBOX_RETIRED_DST"
+    else
+      echo "  WARNING: could not retire BOOTSTRAP.md; the first-conversation ritual may still run" >&2
+    fi
+    unset CLAWBOX_RETIRED_DIR CLAWBOX_RETIRED_DST
+  fi
+  unset CLAWBOX_USER_MD
+elif [ -r "$CLAWBOX_BOOTSTRAP_SRC" ] \
   && [ ! -e "$CLAWBOX_BOOTSTRAP_DST" ] \
   && [ ! -e "$CLAWBOX_WORKSPACE/USER.md" ] \
   && [ ! -e "$CLAWBOX_WORKSPACE/IDENTITY.md" ] \
@@ -7858,6 +9076,282 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
 
+"${CLAWBOX_STEP:-:}" "language, Prime Radiant and backup hooks"
+
+# ── Each ClawBox user's own language ───────────────────────────────────────
+#
+# A ClawBox user other than the owner may pick a language of their own in
+# Settings → Language. ClawBox keeps it in the device store
+# (`ui_language_by_user`), apart from the box default the persona carries
+# (src/lib/user-language.ts), so one person's pick never changes the agent's
+# language for the owner, another user or a cron run. This plugin hands it to
+# the agent in that user's own chat, and nowhere else.
+#
+# HARNESS FIRST: the core's typed `before_prompt_build` hook returning
+# `appendSystemContext` — rebuilt with the system prompt on every turn, never
+# written into the transcript, and read again after a pick with no gateway
+# restart. A non-bundled plugin's prompt hook needs the core's
+# `hooks.allowConversationAccess` grant, which the installer writes for this
+# plugin. Installed on every box: with no user picks there is nothing to add.
+CLAWBOX_USER_LANG_ID="clawbox-user-language"
+CLAWBOX_USER_LANG_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_USER_LANG_ID"
+CLAWBOX_USER_LANG_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_USER_LANG_ID"
+CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 install_clawbox_hook_plugin "$CLAWBOX_USER_LANG_ID" "$CLAWBOX_USER_LANG_DST" \
+  "a ClawBox user's chat answers in the box's language rather than their own" \
+  "$CLAWBOX_USER_LANG_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_USER_LANG_SRC/package.json" \
+  "$CLAWBOX_USER_LANG_SRC/index.mjs" \
+  "$CLAWBOX_USER_LANG_SRC/user-language.mjs"
+
+# Cheap proof the installed copy loads, registers its hook, and speaks only in
+# a user's own chat — one `node` start, no CLI.
+CLAWBOX_USER_LANG_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_USER_LANG_NODE" ]; then
+  if ! CLAWBOX_USER_LANG_DST="$CLAWBOX_USER_LANG_DST" "$CLAWBOX_USER_LANG_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_USER_LANG_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const hooks = [];
+    plugin.register({ on: (name) => hooks.push(name), config: {} });
+    if (!hooks.includes("before_prompt_build")) throw new Error("no before_prompt_build hook");
+    const { promptContext } = await import(`${dir}/user-language.mjs`);
+    const languages = async () => new Map([["alice", "de"]]);
+    if (!(await promptContext({ sessionKey: "agent:main:clawbox-user-alice" }, languages))) throw new Error("a user chat would not get its language");
+    if (await promptContext({ sessionKey: "agent:main:main" }, languages)) throw new Error("the owner chat would get a user language");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_USER_LANG_ID plugin did not load or did not register its hook — a ClawBox user's chat answers in the box's language rather than their own" >&2
+  fi
+fi
+
+# ── Lean mode for the on-device model ─────────────────────────────────────
+#
+# scripts/openclaw-plugins/clawbox-local-lean: a turn on the llamacpp model
+# gets a short system prompt and six tools; every cloud turn keeps OpenClaw's
+# full prompt and tools. HARNESS FIRST: the core's typed `before_prompt_build`
+# hook, which may return `systemPrompt` and `toolsAllow` for one turn and names
+# the attempt's provider — the core has no per-model prompt setting. Its prompt
+# hook needs the `hooks.allowConversationAccess` grant: it reads the current
+# message to tell which language to answer in.
+CLAWBOX_LOCAL_LEAN_ID="clawbox-local-lean"
+CLAWBOX_LOCAL_LEAN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_LOCAL_LEAN_ID"
+CLAWBOX_LOCAL_LEAN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_LOCAL_LEAN_ID"
+CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 install_clawbox_hook_plugin "$CLAWBOX_LOCAL_LEAN_ID" "$CLAWBOX_LOCAL_LEAN_DST" \
+  "the on-device model gets OpenClaw's full system prompt and tool catalog, which a ~2B model cannot follow" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/package.json" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/index.mjs" \
+  "$CLAWBOX_LOCAL_LEAN_SRC/local-lean.mjs"
+
+CLAWBOX_LOCAL_LEAN_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_LOCAL_LEAN_NODE" ]; then
+  if ! CLAWBOX_LOCAL_LEAN_DST="$CLAWBOX_LOCAL_LEAN_DST" "$CLAWBOX_LOCAL_LEAN_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_LOCAL_LEAN_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const handlers = {};
+    plugin.register({ on: (name, fn) => { handlers[name] = fn; }, config: {} });
+    const hook = handlers.before_prompt_build;
+    if (typeof hook !== "function") throw new Error("no before_prompt_build hook");
+    const local = await hook({ prompt: "hi" }, { modelProviderId: "llamacpp" });
+    if (!local?.systemPrompt || !Array.isArray(local.toolsAllow)) throw new Error("a local turn would not get the lean prompt");
+    if (await hook({ prompt: "hi" }, { modelProviderId: "deepseek" })) throw new Error("a cloud turn would lose the full prompt");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_LOCAL_LEAN_ID plugin did not load or did not register its hook — the on-device model gets OpenClaw's full system prompt and tool catalog" >&2
+  fi
+fi
+
+# ── What a backup can leave out ─────────────────────────────────────────────
+#
+# `clawbox-backup-scope`, a manifest-only plugin whose `backupResources` mark
+# the state dir's `backups/` `regenerable` — the box's own archives — and the
+# two folders `openclaw doctor` moves the owner's originals into
+# (`backups/tools-md-migration`, `backups/heartbeat-migration`) `include`:
+# `openclaw backup create` — ClawKeep's snapshot, the pre-update archive —
+# leaves the archives out by itself and keeps those. Nothing else is named:
+# only paths the pinned core writes. HARNESS FIRST: the core has no exclude
+# flag or config key; this
+# manifest field is its own way to say it (scripts/openclaw-plugins/
+# clawbox-backup-scope/index.mjs has the measurement). 2026.10 cores only: the
+# field arrived with them, and an older core is not handed a manifest it may
+# not read. Never fatal: without it a snapshot is only bigger.
+CLAWBOX_BACKUP_SCOPE_ID="clawbox-backup-scope"
+CLAWBOX_BACKUP_SCOPE_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_BACKUP_SCOPE_ID"
+CLAWBOX_BACKUP_SCOPE_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_BACKUP_SCOPE_ID"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ]; then
+  install_clawbox_hook_plugin "$CLAWBOX_BACKUP_SCOPE_ID" "$CLAWBOX_BACKUP_SCOPE_DST" \
+    "backups carry the box's own archives in backups/" \
+    "$CLAWBOX_BACKUP_SCOPE_SRC/openclaw.plugin.json" \
+    "$CLAWBOX_BACKUP_SCOPE_SRC/package.json" \
+    "$CLAWBOX_BACKUP_SCOPE_SRC/index.mjs"
+else
+  echo "  $CLAWBOX_BACKUP_SCOPE_ID: not installed — the core predates 2026.10 (no backupResources)"
+fi
+
+
+"${CLAWBOX_STEP:-:}" "default skills and cron alerts"
+
+# ── Default skills (TASK-1639): ClawBox's own first-party skills, seeded ────
+#
+# config/default-skills/<id>/ holds a small reviewed set (the ClawBox handbook
+# plus everyday-work skills: leads, email outreach, inbox triage, documents,
+# reminders, research). No third-party ClawHub skills are shipped by default.
+#
+# Each skill is copied into <workspace>/skills/<id>/ ONCE, and the record
+# data/default-skills.json remembers what was seeded and the sha256 of the
+# SKILL.md that was written:
+#   not in the record, not on disk  copy it, record it
+#   not in the record, on disk      the owner's own skill of that name: left
+#                                   alone, recorded so it is never overwritten
+#   in the record, missing on disk  the owner removed it: NOT re-added
+#   in the record, unchanged on disk and the shipped copy changed
+#                                   refreshed to the shipped copy (an update)
+#   in the record, edited on disk   the owner's edit: left alone
+# An unreadable record means nothing is written. This is a blocking
+# ExecStartPre, so the step is total: any failure is a WARN, never a stop, and
+# a boot with nothing to do is one small file read per skill.
+CLAWBOX_DEFAULT_SKILLS_SRC="$CLAWBOX_ROOT/config/default-skills"
+CLAWBOX_DEFAULT_SKILLS_STATE="$CLAWBOX_ROOT/data/default-skills.json"
+if [ -d "$CLAWBOX_DEFAULT_SKILLS_SRC" ] && [ -d "$CLAWBOX_WORKSPACE/skills" ]; then
+  python3 - "$CLAWBOX_DEFAULT_SKILLS_SRC" "$CLAWBOX_WORKSPACE/skills" "$CLAWBOX_DEFAULT_SKILLS_STATE" <<'SKILLSPY' || echo "  WARN: default skills not seeded this boot" >&2
+import hashlib, json, os, shutil, sys, tempfile
+
+src_root, dst_root, state_path = sys.argv[1:4]
+
+
+def sha(path):
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        state = json.load(fh)
+    if not isinstance(state, dict) or not isinstance(state.get("skills"), dict):
+        raise ValueError("shape")
+except FileNotFoundError:
+    state = {"skills": {}}
+except (OSError, ValueError, RecursionError):
+    print("  WARN: data/default-skills.json cannot be read; default skills left as they are", file=sys.stderr)
+    raise SystemExit(0)
+
+skills = state["skills"]
+changed, seeded, refreshed = False, [], []
+for sid in sorted(os.listdir(src_root)):
+    src = os.path.join(src_root, sid)
+    src_md = os.path.join(src, "SKILL.md")
+    if sid.startswith(".") or not os.path.isfile(src_md):
+        continue
+    dst = os.path.join(dst_root, sid)
+    dst_md = os.path.join(dst, "SKILL.md")
+    want = sha(src_md)
+    row = skills.get(sid)
+    written = row.get("sha256") if isinstance(row, dict) else None
+    try:
+        if row is None:
+            if os.path.exists(dst):
+                skills[sid] = {"sha256": None, "owner": True}
+            else:
+                tmp = tempfile.mkdtemp(prefix="." + sid + ".", dir=dst_root)
+                shutil.copytree(src, os.path.join(tmp, sid))
+                os.rename(os.path.join(tmp, sid), dst)
+                os.rmdir(tmp)
+                skills[sid] = {"sha256": want}
+                seeded.append(sid)
+            changed = True
+        elif written and os.path.isfile(dst_md) and sha(dst_md) == written and want != written:
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            skills[sid] = {"sha256": want}
+            refreshed.append(sid)
+            changed = True
+    except OSError as exc:
+        print(f"  WARN: could not seed default skill {sid}: {exc}", file=sys.stderr)
+
+if changed:
+    try:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        tmp = state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+        os.replace(tmp, state_path)
+    except OSError as exc:
+        print(f"  WARN: could not record default skills: {exc}", file=sys.stderr)
+if seeded:
+    print("  Seeded default skills: " + ", ".join(seeded))
+if refreshed:
+    print("  Refreshed default skills: " + ", ".join(refreshed))
+SKILLSPY
+fi
+
+# ── Cron failure alerts to the owner's chat, ONCE (TASK-1639) ───────────────
+#
+# A reminder or digest the owner set up from chat that starts failing should
+# say so in that chat, not only in the Control UI. The core's own key
+# `cron.failureAlert` (schema-validated, written through `config set
+# --batch-json`) is set to enabled, announce, channel "last" (the channel the
+# owner last talked on), with the core's own threshold and cooldown — only when
+# the key is ABSENT, and only once: the attempt is recorded under "config" in
+# data/default-skills.json, so an owner who later removes or changes it is
+# never overridden. One CLI start on the one boot that seeds it.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$OPENCLAW_CONFIG" ]; then
+  CLAWBOX_ALERT_NEEDED="$(python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_DEFAULT_SKILLS_STATE" <<'ALERTPY' || echo 0
+import json, sys
+try:
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        state = json.load(fh)
+except FileNotFoundError:
+    state = {}
+except (OSError, ValueError, RecursionError):
+    print("0"); raise SystemExit(0)
+done = state.get("config", []) if isinstance(state, dict) else []
+if not isinstance(done, list) or "cron.failureAlert" in done:
+    print("0"); raise SystemExit(0)
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (OSError, ValueError, RecursionError):
+    print("0"); raise SystemExit(0)
+cron = cfg.get("cron") if isinstance(cfg, dict) else None
+print("2" if isinstance(cron, dict) and "failureAlert" in cron else "1")
+ALERTPY
+)"
+  CLAWBOX_ALERT_OK=0
+  if [ "$CLAWBOX_ALERT_NEEDED" = "1" ]; then
+    if timeout -k 5 90 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set --batch-json \
+      '[{"path":"cron.failureAlert","value":{"enabled":true,"mode":"announce","channel":"last"}}]' >/dev/null 2>&1; then
+      echo "  Enabled cron failure alerts to the owner's last chat (cron.failureAlert)"
+      CLAWBOX_ALERT_OK=1
+    else
+      echo "  WARN: could not enable cron failure alerts; will retry next boot" >&2
+    fi
+  fi
+  # Recorded when it landed, or when the owner already had his own value.
+  if [ "$CLAWBOX_ALERT_OK" = "1" ] || [ "$CLAWBOX_ALERT_NEEDED" = "2" ]; then
+    python3 - "$CLAWBOX_DEFAULT_SKILLS_STATE" <<'ALERTREC' || echo "  WARN: could not record the cron failure-alert seed" >&2
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        state = json.load(fh)
+except FileNotFoundError:
+    state = {}
+if not isinstance(state, dict):
+    raise SystemExit(1)
+done = state.setdefault("config", [])
+if not isinstance(done, list):
+    raise SystemExit(1)
+if "cron.failureAlert" not in done:
+    done.append("cron.failureAlert")
+state.setdefault("skills", {})
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + ".tmp", "w", encoding="utf-8") as fh:
+    json.dump(state, fh, indent=2, sort_keys=True)
+os.replace(path + ".tmp", path)
+ALERTREC
+  fi
+fi
+
+"${CLAWBOX_STEP:-:}" "workspace guide"
 CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # Topping an existing CLAWBOX.md up, section by section.
@@ -8467,6 +9961,21 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     clawbox_agents_append "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_RULE_TEXT" \
       "Appended the system-actions rule to AGENTS.md" \
       "could not append the system-actions rule to AGENTS.md"
+
+    # WHAT TO SAY WHEN A VOICE NOTE COULD NOT BE HEARD. When every engine in
+    # `tools.media.models` fails, the core hands the turn on with a bounded
+    # model-visible marker in place of a transcript (OpenClaw 2026.10.7
+    # docs/nodes/media-understanding.md) and has no setting for what the reply
+    # says. Left to itself the model answered a Telegram voice note on a real
+    # box with "can't recognise audio, send text" — true, and no help to an
+    # owner whose box could transcribe after one install. So the rule names
+    # the two ways in, in the words Settings uses. Its own marker, so it lands
+    # on every box once, like the rule above.
+    CLAWBOX_AGENTS_VOICE_RULE="## Voice notes on this ClawBox"
+    printf -v CLAWBOX_AGENTS_VOICE_RULE_TEXT '\n\n%s\n\nA voice note or audio message that reaches you with no transcript (no `[Audio]` block, or a marker that the audio could not be transcribed) means speech-to-text is not available on this ClawBox right now. Do not just ask for text. Say that voice notes cannot be transcribed here yet, and how the owner turns it on: Settings -> Local AI -> Whisper -> Install (transcribes on the box itself), or connect ClawBox AI under Settings -> Providers for cloud transcription. Then answer anything they also typed, and offer to carry on in text meanwhile.\n' "$CLAWBOX_AGENTS_VOICE_RULE"
+    clawbox_agents_append "$CLAWBOX_AGENTS_VOICE_RULE" "$CLAWBOX_AGENTS_VOICE_RULE_TEXT" \
+      "Appended the voice-notes rule to AGENTS.md" \
+      "could not append the voice-notes rule to AGENTS.md"
   fi
 
   # --- clawbox language re-apply ---
@@ -8533,21 +10042,43 @@ line = "- **Language:** %s (%s)" % (name, lang)
 if lang != "en":
     line += " — Always respond in %s" % name
 
-SOUL_SECTION = re.compile(r"\n## Language\n[\s\S]*?(?=\n## |\n\Z|\Z)")
+SOUL_HEADING = re.compile(r"## Language[ \t]*\r?")
+SECTION_END = re.compile(r"#{1,2}[ \t]")
+
+
+def without_language_section(text):
+    # EVERY "## Language" section, from its heading to the next level-one or
+    # level-two heading or the end — withoutLanguageSection() in
+    # src/lib/language-persona.ts, line for line.
+    kept, in_section = [], False
+    for row in text.split("\n"):
+        if SOUL_HEADING.fullmatch(row):
+            in_section = True
+            continue
+        if in_section and SECTION_END.match(row):
+            in_section = False
+        if not in_section:
+            kept.append(row)
+    return "\n".join(kept)
 
 
 def user_md(text):
-    text = re.sub(r"\n- \*\*Language:\*\*.*\n", "\n", text)
-    if "- **Name:**" in text:
-        return re.sub(r"(- \*\*Name:\*\*.*\n)", lambda m: m.group(1) + line + "\n", text, count=1)
-    return text.rstrip() + "\n" + line + "\n"
+    # withLanguageLine() in src/lib/language-persona.ts: every language line
+    # out, this one in after the name line, else at the end.
+    rows = [row for row in text.split("\n") if not row.startswith("- **Language:**")]
+    for i, row in enumerate(rows):
+        if row.startswith("- **Name:**"):
+            rows.insert(i + 1, line)
+            out = "\n".join(rows)
+            return out if out.endswith("\n") else out + "\n"
+    return "\n".join(rows).rstrip() + "\n" + line + "\n"
 
 
 def soul_md(text):
-    stripped = SOUL_SECTION.sub("", text, count=1)
+    stripped = without_language_section(text)
     if lang == "en":
         # English is the absence of the instruction, not another instruction.
-        return stripped.rstrip() + "\n" if "## Language" in text else text
+        return stripped.rstrip() + "\n" if stripped != text else text
     return stripped.rstrip() + (
         "\n\n## Language\n\nYou MUST respond in %s. The user's preferred language is %s (%s). "
         "All messages, explanations, and summaries must be in %s. Only use English for code, "
@@ -8557,7 +10088,10 @@ def soul_md(text):
 
 def rewrite(path, transform, default=None):
     try:
-        with open(path, encoding="utf-8") as fh:
+        # newline="": no universal-newline translation, so a CRLF file reaches
+        # the transforms with its CRs, exactly as fs.readFile hands it to
+        # writeLanguagePersona — else this writer alone would turn it into LF.
+        with open(path, encoding="utf-8", newline="") as fh:
             before = fh.read()
     except FileNotFoundError:
         # Only the non-English SOUL.md is worth creating; see soul_md above.
@@ -8589,6 +10123,8 @@ PY_LANG
 fi
 # --- end guide seeding ---
 
+"${CLAWBOX_STEP:-:}" "Claude Code version report"
+
 # ── Report the installed Claude Code to Anthropic ─────────────────────────
 #
 # On the subscription (OAuth) path the core presents itself to Anthropic as
@@ -8611,15 +10147,25 @@ fi
 # Never fails the boot: a failed rewrite means the old number and a chat that
 # says so, which is where the box was.
 
-clawbox_installed_claude_code_version() {
-  # The unit's PATH is systemd's; the coding agent installs `claude` under the
-  # user's own bin dirs, so those are looked in explicitly.
-  local candidate out version
+# Every Claude Code binary the version question below would ask, in its order,
+# one path per line. The unit's PATH is systemd's; the coding agent installs
+# `claude` under the user's own bin dirs, so those are looked in explicitly.
+clawbox_claude_code_candidates() {
+  local candidate
   for candidate in claude "$HOME/.local/bin/claude" "$HOME/.npm-global/bin/claude" claude-code; do
     case "$candidate" in
       */*) [ -x "$candidate" ] || continue ;;
-      *) command -v "$candidate" >/dev/null 2>&1 || continue ;;
+      *) candidate="$(command -v "$candidate" 2>/dev/null)" || continue ;;
     esac
+    printf '%s\n' "$candidate"
+  done
+}
+
+clawbox_installed_claude_code_version() {
+  local candidate out version candidates=()
+  mapfile -t candidates < <(clawbox_claude_code_candidates)
+  for candidate in "${candidates[@]}"; do
+    [ -n "$candidate" ] || continue
     out="$(timeout 5 "$candidate" --version 2>/dev/null | head -n 1)" || continue
     version="${out%% *}"
     if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -8721,12 +10267,88 @@ PY
 # `@openclaw/ai` from the package's own node_modules, and that bundle carries
 # its own copy of the constant.
 CLAWBOX_CORE_DIST="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw"
-if CLAWBOX_INSTALLED_CLAUDE_CODE="$(clawbox_installed_claude_code_version)"; then
+# Asking costs a Claude Code start and a read of every bundle file in the core,
+# on every boot, for an answer that only a new core or a new Claude Code can
+# change — so a box whose core package and Claude Code binaries are both what
+# the last full check saw takes that check's answer (see "the checks a start
+# may take on trust" near the top).
+_ccv_args=()
+_ccv_key=""
+while IFS= read -r _ccv_candidate; do
+  [ -n "$_ccv_candidate" ] && _ccv_args+=(--candidate "$_ccv_candidate")
+done < <(clawbox_claude_code_candidates)
+CLAWBOX_STAMP_KEY=""
+CLAWBOX_STAMP_WHY=""
+if [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && [ "${#_ccv_args[@]}" -gt 0 ] \
+  && clawbox_stamp_check claude-code claude "${_ccv_args[@]}"; then
+  echo "  Anthropic client version: the core and Claude Code are unchanged since the last full check (Claude Code ${CLAWBOX_STAMP_VALUE:-as installed}); not asked again"
+elif CLAWBOX_INSTALLED_CLAUDE_CODE="$(clawbox_installed_claude_code_version)"; then
+  _ccv_key="${CLAWBOX_STAMP_KEY:-}"
+  [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Anthropic client version: checking the core's bundle (${CLAWBOX_STAMP_WHY})"
   if ! clawbox_report_installed_claude_code_version "$CLAWBOX_CORE_DIST" "$CLAWBOX_INSTALLED_CLAUDE_CODE"; then
     echo "  WARN: could not rewrite the core's Claude Code version — Anthropic keeps seeing the core's own number" >&2
+  elif [ -n "$_ccv_key" ]; then
+    clawbox_stamp_remember claude-code "$_ccv_key" "$CLAWBOX_INSTALLED_CLAUDE_CODE"
   fi
 else
   echo "  Anthropic client version: no Claude Code on this box; the core's own number is kept"
+fi
+
+"${CLAWBOX_STEP:-:}" "agent databases"
+
+# ── Agent databases: migration status, compaction, migration copies ─────────
+#
+# The gateway is stopped here, which is the one moment OpenClaw's own offline
+# SQLite maintenance may run. scripts/openclaw-db-maintenance.py (`prestart`):
+#   - records in data/openclaw-migration-status.json whether every database is
+#     on the schema the installed core declares — the web server's health route
+#     reads it, so a gateway that starts with its agents degraded by an
+#     unfinished migration is reported instead of looking ready;
+#   - ONLY when the owner turned nightly maintenance on (Settings → System →
+#     Agent databases, `openclaw_db_maintenance.enabled: true` in the device
+#     store passed below; OFF until they do): runs `openclaw doctor
+#     --session-sqlite compact --session-sqlite-agent <id>` (and `--state-sqlite
+#     compact`) for each database whose free pages are over 30 %, or that a
+#     schema migration left a rollback copy beside, when the disk has the
+#     database's size free — a 9.x -> 10.x migration left ~48 % of a customer
+#     box's 9.8 GB agent database as free pages that incremental auto_vacuum
+#     never returns (5.0 GB after compaction, 4 min on a Nano);
+#   - removes the migration's rollback copies once every database is on the
+#     declared schema and has passed a compaction's integrity checks — with the
+#     switch off too, but then only on a check already recorded (a "Run now"):
+#     nothing is compacted to earn one, and an unchecked copy stays.
+#
+# LAST in the script, so it is budgeted against the time the rest of this
+# pre-start has already taken: the unit kills ExecStartPre at TimeoutStartSec
+# (600 s), and the updater waits for a pre-start no longer than that. A
+# database that does not fit what is left is logged and compacted at a later
+# start. Every failure is a WARN: the gateway starts on the databases as they are.
+CLAWBOX_DB_MAINTENANCE="$SCRIPT_DIR/openclaw-db-maintenance.py"
+CLAWBOX_PRESTART_CEILING_S="${CLAWBOX_PRESTART_CEILING_S:-600}"
+CLAWBOX_DB_COMPACT_BUDGET_S="${CLAWBOX_DB_COMPACT_BUDGET_S:-360}"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_DB_MAINTENANCE" ] && command -v python3 >/dev/null 2>&1; then
+  # 90 s held back: 30 s of slack for the helper itself, a minute for systemd
+  # and the gateway's own start. Non-numeric overrides fall back to the defaults.
+  [[ "$CLAWBOX_PRESTART_CEILING_S" =~ ^[0-9]+$ ]] || CLAWBOX_PRESTART_CEILING_S=600
+  [[ "$CLAWBOX_DB_COMPACT_BUDGET_S" =~ ^[0-9]+$ ]] || CLAWBOX_DB_COMPACT_BUDGET_S=360
+  "${CLAWBOX_ELAPSED:-:}"
+  _dbm_left=$(( CLAWBOX_PRESTART_CEILING_S - 90 - ${CLAWBOX_PRESTART_ELAPSED_S:-0} ))
+  _dbm_budget="$CLAWBOX_DB_COMPACT_BUDGET_S"
+  if [ "$_dbm_left" -lt "$_dbm_budget" ]; then _dbm_budget="$_dbm_left"; fi
+  if [ "$_dbm_budget" -lt 0 ]; then _dbm_budget=0; fi
+  echo "  Agent databases: checking (compaction budget ${_dbm_budget}s)"
+  _dbm_rc=0
+  timeout -k 10 "$(( _dbm_budget + 30 ))" python3 -I "$CLAWBOX_DB_MAINTENANCE" prestart \
+    --state-dir "$OPENCLAW_STATE_DIR" \
+    --config "$OPENCLAW_CONFIG" \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --device-store "$CLAWBOX_ROOT/data/config.json" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --core-pkg "$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json" \
+    --budget-seconds "$_dbm_budget" || _dbm_rc=$?
+  if [ "$_dbm_rc" -ne 0 ]; then
+    echo "  WARN: agent database housekeeping stopped (exit $_dbm_rc); the gateway starts on the databases as they are" >&2
+  fi
 fi
 
 # ── End of pre-start ────────────────────────────────────────────────────────

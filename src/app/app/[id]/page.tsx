@@ -6,13 +6,16 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
-import { mayUseOwnerApis } from "@/lib/use-session-user";
+import { mayUseOwnerApis, useSettledSessionUser } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
-import { customWallpaperId, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
+import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
   brandingHarness,
   brandWallpaperId,
   builtinWallpapers,
+  defaultWallpaperId,
   paintedWallpaperOpacity,
   renderedWallpaperId as resolveRenderedWallpaperId,
 } from "@/lib/builtin-wallpapers";
@@ -41,6 +44,8 @@ const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: fal
 const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
 const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false });
 const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ssr: false });
+const PrimeRadiantApp = dynamic(() => import("@/components/PrimeRadiantApp"), { ssr: false });
+const ScreenshotApp = dynamic(() => import("@/components/ScreenshotApp"), { ssr: false });
 
 
 // This window is the same app the desktop shows, so its title comes from the
@@ -199,11 +204,20 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   // This browser's list is read synchronously into the state above, so it is
   // never "not read yet" here — the desktop's third argument is what carries
   // that case.
-  const renderedWallpaperId = resolveRenderedWallpaperId(
-    wallpaperId,
-    wallpaperHarness,
-    customWallpapers.length,
-  );
+  //
+  // A slot that exists but holds no picture (a text file an older build let
+  // through, or one that does not decode) shows the default — the desktop's
+  // rule, healed in the render and never written.
+  const savedCustomIdx = wallpaperId === null ? null : customWallpaperIndex(wallpaperId);
+  const savedCustomWp = savedCustomIdx === null ? undefined : customWallpapers[savedCustomIdx];
+  const savedCustomUndecodable = useUndecodableImage(savedCustomWp);
+  const renderedWallpaperId = savedCustomWp !== undefined && !isShowableCustomWallpaper(savedCustomWp, savedCustomUndecodable)
+    ? defaultWallpaperId(wallpaperHarness)
+    : resolveRenderedWallpaperId(
+      wallpaperId,
+      wallpaperHarness,
+      customWallpapers.length,
+    );
 
   // Painted, not persisted: the wallpaper's own default while the box holds
   // no `wp_opacity`, an uploaded picture having none of its own — the
@@ -240,23 +254,31 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   // commit; arming here leaves every later change — the owner's — saved.
   useEffect(() => { if (hydrated) loaded.current = true; }, [hydrated]);
 
+  // Set when the picked file was not a picture; the page shows it as an alert
+  // (there is no toast surface on this route) and the next pick clears it.
+  const [uploadRefused, setUploadRefused] = useState(false);
   const onUploadFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const next = [...customRef.current, reader.result as string];
+    e.target.value = "";
+    setUploadRefused(false);
+    // The desktop's check: declared as an image and decoded by the browser.
+    void readWallpaperFile(file).then((dataUrl) => {
+      if (dataUrl === null) {
+        setUploadRefused(true);
+        return;
+      }
+      const next = [...customRef.current, dataUrl];
       // The picture is not there to be selected unless it was stored.
       if (!storeCustomWallpapers(next)) return;
       setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
+    });
   }, [storeCustomWallpapers]);
 
   return {
     uploadRef,
+    uploadRefused,
     onUploadFile,
     ui: {
       // What is on screen, not what the box holds. `wp_id` is box-wide and the
@@ -342,6 +364,20 @@ function AppNotFound({ id }: { id: string }) {
   );
 }
 
+/** Said when the file picked as a wallpaper was not a picture. Inside the provider, like the others. */
+function WallpaperRefusedNotice() {
+  const { t } = useT();
+  return (
+    <div
+      role="alert"
+      data-testid="standalone-wallpaper-refused"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 max-w-[90vw] rounded-lg bg-[var(--bg-elevated)] border border-white/10 px-4 py-2 text-sm text-white shadow-lg"
+    >
+      {t("settings.wallpaperNotImage")}
+    </div>
+  );
+}
+
 function BackToDesktopLabel() {
   const { t } = useT();
   const hit = t("app.backToDesktop");
@@ -354,6 +390,9 @@ export default function StandaloneAppPage() {
   // sign-in or sign-out made in another tab, reopening this same app on the
   // session that now holds (TASK-1247).
   useFollowSessionSwitch();
+  // …and a session that runs out takes this page to /login like the desktop,
+  // chat and its socket included, and back to this app after signing in.
+  useSessionExpiryGuard();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
   // null while unresolved — a harness-only app must not paint before we know
@@ -367,6 +406,9 @@ export default function StandaloneAppPage() {
   // The chat's fullscreen mode on a phone folds this page's title bar away
   // too; the chat then carries the link back to the desktop (TASK-1157).
   const [chatChromeHidden, setChatChromeHidden] = useState(false);
+  // The chat is the signed-in person's own (src/lib/chat-scope.ts): drawn
+  // once /users/me has said whose.
+  const chatUserState = useSettledSessionUser();
 
   useEffect(() => {
     const probe = new AbortController();
@@ -380,10 +422,8 @@ export default function StandaloneAppPage() {
     // window used to wear the wrong product for the life of the tab. The
     // desktop has always retried; this is the same helper, not a second copy.
     //
-    // Only for the owner (TASK-1256). The harness route is the owner's, and a
-    // non-owner's session — which reaches this page for /app/terminal alone —
-    // would be refused every retry of the probe. Their answer is "unknown",
-    // the fail-closed one, and the Terminal never waits on it.
+    // Once /users/me has answered: every signed-in ClawBox user gets the
+    // owner's apps on this page as on the desktop.
     void mayUseOwnerApis().then((may) => {
       if (probe.signal.aborted) return;
       if (!may) {
@@ -515,7 +555,9 @@ export default function StandaloneAppPage() {
     }
     switch (id) {
       case "clawbox":
-        return <ChatApp onPhoneChromeHiddenChange={setChatChromeHidden} />;
+        return chatUserState === undefined
+          ? loading
+          : <ChatApp chatUser={chatUserState && !chatUserState.isOwner ? chatUserState.username : null} onPhoneChromeHiddenChange={setChatChromeHidden} />;
       case "clawkeep":
         return <ClawKeepApp />;
       case "system_update":
@@ -530,14 +572,16 @@ export default function StandaloneAppPage() {
         return <CodingAgentApp />;
       case "files":
         return <FilesApp />;
-      case "projects":
-        return <FilesApp initialPlace="projects" />;
       case "memory-shard":
         return <MemoryShardApp />;
+      case "prime-radiant":
+        return <PrimeRadiantApp />;
       case "browser":
         return <BrowserApp />;
       case "vnc":
         return <VNCApp />;
+      case "screenshot":
+        return <ScreenshotApp />;
       case "settings":
         return (
           <div className="h-full overflow-y-auto">
@@ -554,6 +598,7 @@ export default function StandaloneAppPage() {
               data-testid="standalone-wallpaper-upload"
               onChange={appearance.onUploadFile}
             />
+            {appearance.uploadRefused && <WallpaperRefusedNotice />}
           </div>
         );
       case "store":

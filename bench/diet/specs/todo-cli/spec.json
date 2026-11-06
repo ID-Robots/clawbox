@@ -1,0 +1,14 @@
+{
+  "id": "todo-cli",
+  "tier": "control",
+  "project": "todo-cli",
+  "task": "Add a `--json` output flag to `list`, keep existing behaviour, add tests, run the tests. Commit nothing yourself.",
+  "source": { "kind": "seed" },
+  "setup": "npm ci --no-audit --no-fund",
+  "accept": [
+    { "name": "own tests (npm test)", "cmd": "npm test", "timeoutSec": 120 },
+    { "name": "hidden: list --json", "cmd": "node --test __acceptance__/list-json.accept.mjs", "timeoutSec": 60 },
+    { "name": "tests were added", "cmd": "c() { awk -F: '{s+=$NF} END {print s+0}'; }; before=$(git grep -cE '\\b(it|test)\\(' \"$BASE\" -- ':(glob)**/*test*' ':(exclude)__acceptance__' | c); after=$(git grep --untracked -cE '\\b(it|test)\\(' -- ':(glob)**/*test*' ':(exclude)__acceptance__' | c); echo \"test cases: $before -> $after\"; [ \"$after\" -gt \"$before\" ]", "timeoutSec": 30 }
+  ],
+  "rubric": "The flag should be parsed only for `list` (no global argv hacks) and produce exactly one JSON document on stdout (no extra log lines), ideally pretty or compact consistently. Plain `list` text, `add` and `done` must be byte-for-byte unchanged, including the `(no todos)` empty case. New tests should exercise both the JSON and the plain path through `run()` or the CLI with a temp TODO_FILE, not the user's real todos.json. No leftover debug output, no new dependencies."
+}

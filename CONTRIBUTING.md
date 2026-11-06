@@ -50,7 +50,7 @@ We welcome pull requests from the community. External contributors can open PRs 
 
 ### Security
 
-Found a vulnerability? **Do not open a public issue.** Email **yanko@idrobots.com** directly.
+Found a vulnerability? **Do not open a public issue.** Report it privately as described in [SECURITY.md](SECURITY.md).
 
 ## Guidelines
 

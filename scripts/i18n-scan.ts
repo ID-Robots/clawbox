@@ -43,8 +43,10 @@ import ts from "typescript";
 import { clawkeepTranslations } from "../src/lib/clawkeep-translations";
 import { desktopTranslations } from "../src/lib/desktop-translations";
 import { editionTranslations } from "../src/lib/edition-translations";
-import { projectBackupTranslations } from "../src/lib/project-backup-translations";
 import { monitorsTranslations } from "../src/lib/monitors-translations";
+import { screenshotTranslations } from "../src/lib/screenshot-translations";
+import { primeRadiantTranslations } from "../src/lib/prime-radiant-translations";
+import { chatStepTranslations } from "../src/lib/chat-step-translations";
 import { translations } from "../src/lib/translations";
 import type { Locale } from "../src/lib/i18n";
 
@@ -72,8 +74,10 @@ const MODULES: { name: string; table: Record<Locale, Record<string, string>> }[]
   { name: "translations.ts", table: translations },
   { name: "clawkeep-translations", table: clawkeepTranslations },
   { name: "edition-translations", table: editionTranslations },
-  { name: "project-backup-translations", table: projectBackupTranslations },
   { name: "monitors-translations", table: monitorsTranslations },
+  { name: "screenshot-translations", table: screenshotTranslations },
+  { name: "prime-radiant-translations", table: primeRadiantTranslations },
+  { name: "chat-step-translations", table: chatStepTranslations },
 ];
 
 /** Where (c) looks. JSX only lives in `.tsx`, and tests may say what they like. */

@@ -55,6 +55,8 @@ vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/openclaw-state-store", () => ({
   statePath: vi.fn(),
   readStateSchemaVersion: vi.fn(),
+  // No agent databases: this suite is about the state store alone.
+  readAgentSchemaVersions: vi.fn(() => []),
 }));
 
 // No gateway to quiesce around `openclaw_install`: the cases that dispatch it
@@ -65,7 +67,7 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   openclawIsAbsent: () => false,
 }));
 
-vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: () => false }));
+vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: () => false, hasX64Install: () => false, X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000, X64_DESKTOP_GATEWAY_READY_WAIT_MS: 240_000 }));
 
 import { get, set, setMany } from "@/lib/config-store";
 import * as childProcess from "child_process";
@@ -155,6 +157,9 @@ beforeEach(() => {
   process.env.GATEWAY_HEALTH_WAIT_MS = "1";
   process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
   process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
+  process.env.GATEWAY_START_LIMIT_MS = "1";
+  process.env.GATEWAY_START_POLL_MS = "1";
+  process.env.GATEWAY_START_POLL_MAX_MS = "1";
   delete process.env.OPENCLAW_PIN_VERSION;
   vi.mocked(get).mockReset();
   vi.mocked(get).mockResolvedValue(undefined as never);
@@ -175,6 +180,9 @@ afterEach(() => {
   delete process.env.GATEWAY_HEALTH_WAIT_MS;
   delete process.env.GATEWAY_RECOVERY_WAIT_MS;
   delete process.env.GATEWAY_WAIT_INTERVAL_MS;
+  delete process.env.GATEWAY_START_LIMIT_MS;
+  delete process.env.GATEWAY_START_POLL_MS;
+  delete process.env.GATEWAY_START_POLL_MAX_MS;
 });
 
 afterAll(() => {

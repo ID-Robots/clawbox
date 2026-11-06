@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { checkInstallDisk } from "@/lib/install-disk";
 import { ensureLocalAiReady, getOllamaBaseUrl, getOllamaModelsDir } from "@/lib/local-ai-runtime";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 const OLLAMA_BASE = getOllamaBaseUrl();
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
   // somebody asks for it, which means this is the person's verb, exactly like
   // the voice and memory-model installs beside it. Same origin too: a
   // multi-gigabyte download started by another site's page is the same spend.
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Downloading a model needs a signed-in browser session.", code: "owner_only" },
       { status: 403 },

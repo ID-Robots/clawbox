@@ -20,20 +20,46 @@
 // This is a second, narrower check INSIDE a route middleware has already let
 // through — never a replacement for it.
 //
-// And since TASK-1256 (multi-user ClawBox OS) "the person" means THE OWNER: a
-// box can have other users, each a real Linux account with a session of their
-// own, and none of them may approve the owner's mail, switch the coding agent
-// on or reach any other route that asks this question. Who a cookie speaks for
-// is decided by src/lib/session-identity.ts; this check only needs to know
-// whether that is the owner, which the cookie alone answers — a non-owner is
-// refused here whether or not the registry still lists them.
+// THE PERSON is any signed-in ClawBox user. A box can have users besides the
+// owner, each a real Linux account with a session of their own, and every one
+// of them gets the owner's desktop — the approvals, the coding agent, ClawKeep
+// and the rest — so `hasPersonSession` is the check those routes ask. Who a
+// cookie speaks for is decided by src/lib/session-identity.ts.
+//
+// `hasOwnerSession` is the narrower question, kept for the few things that are
+// the owner's alone: the gateway's shared token (it reads every conversation
+// on the box, src/lib/gateway-proxy.ts) and the owner's account itself.
 
 import { getSessionGeneration, getSessionSigningSecret, getSystemUsername, readSessionClaims } from "@/lib/auth";
-import { identityFromClaims } from "@/lib/session-identity";
+import { get } from "@/lib/config-store";
+import { identityFromClaims, parseUserRegistry, registryVersions, USERS_CONFIG_KEY, type SessionIdentity } from "@/lib/session-identity";
 
 const NO_USERS: ReadonlyMap<string, string> = new Map();
 
 const SESSION_COOKIE_RE = /(?:^|;\s*)clawbox_session=([^;]+)/;
+
+/** The verified claims of the request's session cookie, or null. Never throws. */
+async function cookieClaims(request: Request): Promise<Record<string, unknown> | null> {
+  const match = SESSION_COOKIE_RE.exec(request.headers.get("cookie") ?? "");
+  if (!match) return null;
+
+  let cookie: string;
+  try {
+    cookie = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+
+  try {
+    const secret = await getSessionSigningSecret();
+    if (!secret) return null;
+    // The generation check is what makes "change the password" revoke a
+    // stolen cookie here too, exactly as it does in middleware.
+    return readSessionClaims(cookie, secret, await getSessionGeneration());
+  } catch {
+    return null;
+  }
+}
 
 /**
  * True only when the request carries a valid, unexpired, un-revoked session
@@ -44,25 +70,40 @@ const SESSION_COOKIE_RE = /(?:^|;\s*)clawbox_session=([^;]+)/;
  * a 500 that a client might read as "try again".
  */
 export async function hasOwnerSession(request: Request): Promise<boolean> {
-  const match = SESSION_COOKIE_RE.exec(request.headers.get("cookie") ?? "");
-  if (!match) return false;
-
-  let cookie: string;
+  const claims = await cookieClaims(request);
+  if (!claims) return false;
   try {
-    cookie = decodeURIComponent(match[1]);
-  } catch {
-    return false;
-  }
-
-  try {
-    const secret = await getSessionSigningSecret();
-    if (!secret) return false;
-    // The generation check is what makes "change the password" revoke a
-    // stolen cookie here too, exactly as it does in middleware.
-    const claims = readSessionClaims(cookie, secret, await getSessionGeneration());
-    if (!claims) return false;
     return identityFromClaims(claims, getSystemUsername(), NO_USERS)?.isOwner === true;
   } catch {
     return false;
   }
+}
+
+/**
+ * The person a session cookie speaks for — the owner or another ClawBox user
+ * the registry still lists under the cookie's session version — or null for
+ * no cookie, a revoked one, or one of a removed user. Never the MCP bearer.
+ */
+export async function personSession(request: Request): Promise<SessionIdentity | null> {
+  const claims = await cookieClaims(request);
+  if (!claims) return null;
+  try {
+    const owner = getSystemUsername();
+    // The owner's cookie needs no registry; anyone else's is checked against it.
+    const owned = identityFromClaims(claims, owner, NO_USERS);
+    if (owned) return owned;
+    const users = registryVersions(parseUserRegistry(await get(USERS_CONFIG_KEY), owner));
+    return identityFromClaims(claims, owner, users);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a PERSON signed in to this box is asking — the owner or any other
+ * ClawBox user — and false for the agent's MCP bearer, a revoked cookie or
+ * none. The check every "the person, not the agent" route asks.
+ */
+export async function hasPersonSession(request: Request): Promise<boolean> {
+  return (await personSession(request)) !== null;
 }

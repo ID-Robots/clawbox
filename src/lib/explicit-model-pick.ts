@@ -282,6 +282,87 @@ export async function forgetClawboxAiPickIfMovedOff(model: string): Promise<void
 }
 
 /**
+ * Forget the owner's ClawBox AI pick, whatever it is: the box has signed out
+ * of the account it was made on (src/lib/provider-sign-out.ts), and the next
+ * account must not inherit it (TASK-713's rule for a re-link). Serialised with
+ * the other writers; fail-soft like them, but it answers whether the map is
+ * known to be without one.
+ */
+export async function forgetClawboxAiPick(): Promise<boolean> {
+  return forgetProviderPicks((slot) => slot === "clawai");
+}
+
+/**
+ * Forget the owner's pick for every slot `belongs` claims — the sign-out of
+ * one provider (src/lib/provider-sign-out.ts), whose slots are spelled the
+ * harness's way (`openai`, `openai-codex` and `codex` are all one OpenAI
+ * row on OpenClaw). The same serialised, fail-soft write as
+ * {@link forgetClawboxAiPick}, which is this with the one ClawBox AI slot;
+ * true when the map is known to hold none of them now.
+ */
+export async function forgetProviderPicks(belongs: (slot: string) => boolean): Promise<boolean> {
+  let cleared = false;
+  await serialise(async () => {
+    try {
+      const { value, known } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+      if (!known) return;
+      let picks = explicitPicksFrom(value);
+      let changed = false;
+      for (const slot of Object.keys(picks)) {
+        if (!belongs(slot)) continue;
+        const next = picksWithoutProvider(picks, slot);
+        if (next) {
+          picks = next;
+          changed = true;
+        }
+      }
+      if (changed) await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: picks });
+      cleared = true;
+    } catch (err) {
+      console.warn(
+        "[explicit-model-pick] could not clear the pick of a signed-out provider:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
+  return cleared;
+}
+
+/**
+ * Forget the owner's pick for `ref`'s provider when the pick IS `ref` — the box
+ * has just proven this account cannot run that model (a limit of zero, a model
+ * the provider no longer serves; src/lib/provider-model-fallback.ts) and moved
+ * the chat to another one.
+ *
+ * Why a proven refusal may clear a CHOICE, when TASK-713 says a default never
+ * overwrites one: what the owner chose was a model that answers. Left on
+ * record, the pick would keep the newest-model default from ever applying to
+ * the provider again (src/lib/provider-follow-newest.ts) over a model nobody can
+ * use on this account. A pick of any OTHER model is left exactly as it is.
+ *
+ * FAIL-SOFT like its siblings: bookkeeping behind a switch that has landed.
+ */
+export async function forgetPickOfUnavailableModel(ref: string): Promise<void> {
+  const trimmed = ref.trim();
+  const slot = trimmed ? pickSlotFor(trimmed) : null;
+  if (!slot) return;
+  return serialise(async () => {
+    try {
+      const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+      const picks = explicitPicksFrom(value);
+      if (picks[slot] !== trimmed) return;
+      const next = picksWithoutProvider(picks, slot);
+      if (next) await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: next });
+    } catch (err) {
+      console.warn(
+        "[explicit-model-pick] could not clear a pick the account cannot run:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
+}
+
+/**
  * The picks map without one provider's entry, or null when it had none.
  *
  * The shape every ClawBox AI token writer needs: a pick belongs to the ACCOUNT

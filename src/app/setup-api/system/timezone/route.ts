@@ -3,9 +3,11 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { get, set } from "@/lib/config-store";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { startRootStep } from "@/lib/root-step-runner";
+import { hasX64Install } from "@/lib/x64-integration";
+import { x64RootContractRepairCommand } from "@/lib/x64-install-update";
 import {
   TIMEZONE_APPLIED_KEY,
   TIMEZONE_SOURCE_KEY,
@@ -43,6 +45,32 @@ async function readState(): Promise<{
     source: source ?? null,
     applied: !!timezone && appliedZone === timezone,
   };
+}
+
+function projectRoot(): string {
+  return process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+}
+
+/** An install-x64.sh PC for this checkout. A host file that cannot be judged is "no". */
+function onX64Install(): boolean {
+  try {
+    return hasX64Install(projectRoot());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `/etc/localtime` already names `tz`. Only the link counts: unlike
+ * readOsTimeZone this never falls back to Node's zone, which is cached per
+ * process and is not the OS's answer.
+ */
+async function osClockAlreadyOn(tz: string): Promise<boolean> {
+  try {
+    return /zoneinfo\/(.+)$/.exec(await fs.readlink("/etc/localtime"))?.[1] === tz;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -108,9 +136,10 @@ export async function GET() {
   return NextResponse.json({
     ...state,
     os: await readOsTimeZone(),
-    // Whether a browser's offer would be taken. A zone a PERSON chose is never
-    // overridden by whoever happens to open the dashboard next.
-    acceptsAdoption: state.source !== "explicit",
+    // Whether a browser's offer would be taken: only while the box has no zone,
+    // or still owes the harness the one it adopted. After that it changes only
+    // in Settings (see `transition`).
+    acceptsAdoption: !state.timezone || (state.source !== "explicit" && !state.applied),
   });
 }
 
@@ -121,7 +150,7 @@ export async function POST(request: Request) {
   // its cron — and a same-site proxied webapp under /apps/<id>/ carrying the
   // owner's cookie could do it too. Neither is the person whose day this
   // setting is about.
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing the timezone needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },
@@ -171,17 +200,16 @@ export async function POST(request: Request) {
 async function transition(tz: string, adopting: boolean): Promise<NextResponse> {
   const state = await readState();
 
-  // ADOPTION is a repair, not a sync. The desktop offers the browser's zone on
-  // every load so a box that shipped before this existed heals on the owner's
-  // next visit; a zone a PERSON chose is never overwritten by it.
-  //
-  // It is deliberately NOT once-per-box. "First browser to open the desktop
-  // wins, for ever" is the failure the one-time rule creates: a box QA'd in one
-  // country and used in another would keep the wrong zone with no way back. An
-  // adopted zone therefore follows the owner's browser, which means a support
-  // engineer looking from elsewhere moves it — and the owner's next load moves
-  // it back. Self-correcting beats permanently wrong.
-  if (adopting && state.source === "explicit") {
+  // ADOPTION IS ONCE PER BOX (owner's ruling, 2026-10-15): a browser's zone is
+  // taken only while the box has none, and after that the zone changes only
+  // in Settings. It used to follow every browser that opened the desktop, and
+  // two owner browsers in different zones ping-ponged it all day (seven
+  // rewrites on one box), each one a write of the harness config — two of
+  // them inside a gateway's startup, which stopped the gateway. The kiosk and
+  // any other browser are bound by the same rule. The one repeat is the same
+  // zone again while the harness has not taken it yet, which is a retry and
+  // not a change.
+  if (adopting && state.timezone && (state.source === "explicit" || state.timezone !== tz)) {
     return NextResponse.json({ success: true, changed: false, timezone: state.timezone });
   }
   if (adopting && state.timezone === tz && state.applied) {
@@ -254,8 +282,15 @@ async function transition(tz: string, adopting: boolean): Promise<NextResponse> 
   // assistant reads. One landing without the other is HALF a fix, and the owner
   // is told which half is outstanding rather than a flat success.
   let osFailure: string | undefined;
+  const x64Install = onX64Install();
   try {
-    await startRootStep("set_timezone");
+    // A PC installed with install-x64.sh whose clock is ALREADY on this zone —
+    // the usual case, since the browser offering it runs on the same desktop —
+    // has nothing for the root step to do, and the root helper that PC shipped
+    // with had no set_timezone at all: it failed this step on every dashboard
+    // load, because a failed OS leg leaves the marker unset and the adopter
+    // retries. install.sh's step answers "already" for the same state.
+    if (!(x64Install && await osClockAlreadyOn(tz))) await startRootStep("set_timezone");
   } catch (err) {
     console.warn("[timezone] Failed to trigger set_timezone service:", err);
     // NOT "until the next reboot": nothing reads data/timezone.env at boot and
@@ -264,7 +299,10 @@ async function transition(tz: string, adopting: boolean): Promise<NextResponse> 
     // below.
     osFailure = "The device clock could not be changed — the Terminal and the logs stay on the old "
       + "zone. It is not recorded as applied: an adopted zone is retried on the next dashboard load, "
-      + "an explicit one has to be sent again.";
+      + "an explicit one has to be sent again."
+      + (x64Install
+        ? ` If this PC's root helper predates the timezone step, install the current one from the Terminal: ${x64RootContractRepairCommand(projectRoot())}`
+        : "");
   }
   if (!osFailure) {
     // The web server's OWN clock, which the OS leg does not reach: Node fixed

@@ -9,7 +9,7 @@ import {
   setBackgroundJob,
   type BackgroundJobId,
 } from "@/lib/background-jobs";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 
 /**
  * The three background jobs and their switches (TASK-609).
@@ -34,7 +34,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
   }
   // `null`, `[]` and `"x"` are all valid JSON, and the cast changes nothing at

@@ -42,7 +42,8 @@ function names(profile: Profile, edition: "openclaw" | "hermes" = "openclaw"): s
 let restore: () => void;
 
 beforeEach(() => {
-  restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR", "CLAWBOX_RUN_MEDIA", "CLAWBOX_MCP_PROFILE");
+  restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR", "CLAWBOX_RUN_MEDIA", "CLAWBOX_MCP_PROFILE", "CLAWBOX_RUN_BROWSER");
+  delete process.env.CLAWBOX_RUN_BROWSER;
   delete process.env.CLAWBOX_RUN_DIR;
   delete process.env.CLAWBOX_RUN_ARTIFACTS_DIR;
   delete process.env.CLAWBOX_RUN_MEDIA;
@@ -96,6 +97,24 @@ describe("the browser profile", () => {
     expect(names("browser")).toContain("generate_audio");
     delete process.env.CLAWBOX_RUN_MEDIA;
     expect(names("browser")).not.toContain("generate_audio");
+  });
+
+  it("registers no browser tool in a run the token diet judged not visual (CLAWBOX_RUN_BROWSER=0)", () => {
+    process.env.CLAWBOX_RUN_DIR = "/home/clawbox/Projects/site";
+    process.env.CLAWBOX_RUN_ARTIFACTS_DIR = "/home/clawbox/clawbox/data/coding-agent-artifacts/run-abc12345";
+    process.env.CLAWBOX_RUN_BROWSER = "0";
+    const run = names("browser");
+    expect(run.filter((n) => n.startsWith("browser_") || n === "describe_image")).toEqual([]);
+    // The runner names no media for such a run either; the family's other
+    // members (a team's message tool, here the ride-along) still register.
+    expect(run).toContain("family_member");
+    // Anything but the exact "0" is today's behaviour, and outside a run the
+    // variable means nothing at all.
+    process.env.CLAWBOX_RUN_BROWSER = "no";
+    expect(names("browser")).toContain("browser_open");
+    process.env.CLAWBOX_RUN_BROWSER = "0";
+    delete process.env.CLAWBOX_RUN_DIR;
+    expect(names("browser")).toContain("browser_open");
   });
 
   it("is selectable through CLAWBOX_MCP_PROFILE", () => {

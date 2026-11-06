@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { ensureLocalAiReady, getOllamaBaseUrl } from "@/lib/local-ai-runtime";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 const OLLAMA_URL = getOllamaBaseUrl();
@@ -29,7 +29,7 @@ export async function POST(request: Request) {
   // the agent could delete the owner's local models. Removing one is the
   // person's verb, the same as installing it — and with the pull route it is
   // now the pair Settings -> Local AI drives.
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Removing a model needs a signed-in browser session.", code: "owner_only" },
       { status: 403 },

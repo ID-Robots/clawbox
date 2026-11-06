@@ -12,12 +12,14 @@ import {
   BOOT_MIGRATIONS_KEY,
   parseRanMigrations,
   dropRemovedConsentMigration,
+  dropRemovedProjectsMigration,
   hermesWallpaperDefaultMigration,
   legacyWebappStorageMigration,
   openclawWallpaperDefaultMigration,
   PRE_BRAND_WALLPAPER_ID,
   REMOVED_CONSENT_KEY,
   REMOVED_INCIDENTS_FILE,
+  REMOVED_PROJECTS_KEYS,
   runBootMigrations,
   WALLPAPER_STORE_KEY,
   type BootMigration,
@@ -181,6 +183,71 @@ describe("the removed feature cleanup", () => {
       expect(removeFile).toHaveBeenCalledWith(REMOVED_INCIDENTS_FILE);
     } finally {
       errors.mockRestore();
+    }
+  });
+});
+
+describe("the removed Projects app cleanup", () => {
+  it("names exactly the three keys the Projects app kept", () => {
+    expect([...REMOVED_PROJECTS_KEYS]).toEqual([
+      "files_project_folders",
+      "files_project_backups",
+      "files_backup_suggestion_dismissed_at",
+    ]);
+  });
+
+  it("drops the pinned folders, the backup records and the dismissal, and nothing else", async () => {
+    const s = store({
+      files_project_folders: [{ path: "projects/site" }],
+      files_project_backups: [{ path: "projects/site", owner: "someone", repo: "site", auto: true }],
+      files_backup_suggestion_dismissed_at: 1_760_000_000_000,
+      coding_agent_enabled: true,
+      other: "kept",
+    });
+    const changed = await dropRemovedProjectsMigration({ get: s.get, set: s.set }).run();
+    expect(changed).toBe(true);
+    for (const key of REMOVED_PROJECTS_KEYS) expect(key in s.values).toBe(false);
+    expect(s.values).toEqual({ coding_agent_enabled: true, other: "kept" });
+  });
+
+  it("writes nothing on a box that never pinned a folder", async () => {
+    const s = store({ other: "kept" });
+    expect(await dropRemovedProjectsMigration({ get: s.get, set: s.set }).run()).toBe(false);
+    expect(s.set).not.toHaveBeenCalled();
+    expect(s.values).toEqual({ other: "kept" });
+  });
+
+  it("drops whichever of the keys a box holds, even only one", async () => {
+    const s = store({ files_backup_suggestion_dismissed_at: 1 });
+    expect(await dropRemovedProjectsMigration({ get: s.get, set: s.set }).run()).toBe(true);
+    expect(s.set).toHaveBeenCalledTimes(1);
+    expect(s.values).toEqual({});
+  });
+
+  it("runs once through the register, and a store that will not write is asked again at the next boot", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const s = store({ files_project_folders: [{ path: "projects" }] });
+      const unwritable = {
+        get: s.get,
+        set: async (key: string, value: unknown) => {
+          if (key !== BOOT_MIGRATIONS_KEY) throw new Error("read-only");
+          await s.set(key, value);
+        },
+      };
+      expect(await runBootMigrations([dropRemovedProjectsMigration(unwritable)], unwritable)).toEqual([]);
+      expect(parseRanMigrations(s.values[BOOT_MIGRATIONS_KEY])).not.toContain("drop-removed-projects");
+      expect(s.values.files_project_folders).toEqual([{ path: "projects" }]);
+
+      const ran = await runBootMigrations([dropRemovedProjectsMigration({ get: s.get, set: s.set })], s);
+      expect(ran).toEqual(["drop-removed-projects"]);
+      expect("files_project_folders" in s.values).toBe(false);
+      // Recorded: the next boot does not ask again.
+      expect(await runBootMigrations([dropRemovedProjectsMigration({ get: s.get, set: s.set })], s)).toEqual([]);
+    } finally {
+      errors.mockRestore();
+      logs.mockRestore();
     }
   });
 });
@@ -418,6 +485,7 @@ describe("the wiring into register()", () => {
 
   it("has both wallpaper migrations in the list", () => {
     expect(block).toContain("dropRemovedConsentMigration(");
+    expect(block).toContain("dropRemovedProjectsMigration({ get, set })");
     expect(block).toContain("openclawWallpaperDefaultMigration({ get, set, harness })");
     expect(block).toContain("hermesWallpaperDefaultMigration({ get, set, harness })");
   });

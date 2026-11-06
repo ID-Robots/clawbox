@@ -46,12 +46,34 @@ export interface ClawAiConnectSession {
    * the UI polling `configuring` forever.
    */
   configuringStartedAt?: number;
+  /**
+   * The provider sign-in task finishing this session (src/lib/provider-auth-tasks.ts),
+   * once the token landed: the poll answers from it while it runs, and from
+   * how it ended when a web server that restarted under it never wrote the
+   * session.
+   */
+  taskId?: string;
 }
 
 const STATE_PATH = path.join(DATA_DIR, "clawai-connect-state.json");
 const SESSION_TTL_MS = 15 * 60 * 1000;
 
 export const CLAWAI_USER_CODE_LENGTH = 8;
+
+/**
+ * Max time a session may sit in `configuring` before the poll route gives up
+ * on the background configure and surfaces a retryable error. A gateway
+ * restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
+ * The sign-out (src/lib/provider-sign-out.ts) reads the same window as "a
+ * sign-in is still writing its token".
+ */
+export const CLAWAI_CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
+
+/** Is this session's background configure still within its window? */
+export function isClawAiSessionConfiguring(session: ClawAiConnectSession, now = Date.now()): boolean {
+  return session.status === "configuring"
+    && now - (session.configuringStartedAt ?? session.createdAt) <= CLAWAI_CONFIGURING_TIMEOUT_MS;
+}
 
 export function createClawAiUserCode(): string {
   // Crockford's Base32 minus easily-confused characters. Eight chars

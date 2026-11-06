@@ -55,6 +55,19 @@ journalctl -u clawbox-setup -n 50 --no-pager
 journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
 ```
 
+The desktop chat and the **Hermes** app run through the dashboard units above. Once a messaging
+channel such as Telegram is set up, Hermes also runs its **messaging gateway** — what receives
+channel messages and runs scheduled tasks. Hermes manages that service with its own command, and
+it usually runs as the `clawbox` user's service:
+
+```bash
+hermes gateway status                                   # running or not, user or system service
+hermes gateway restart --yes                            # lets a turn in progress finish first
+journalctl --user -u hermes-gateway -n 50 --no-pager
+```
+
+On a box with no channel set up, `hermes gateway status` saying it is not running is normal.
+
 Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If it recurs, capture the logs above before the
 next restart.
 
@@ -95,7 +108,7 @@ The script defaults to `main`; `CLAWBOX_BRANCH` keeps a box on its own channel.
 ## D — Factory reset (wipes everything)
 
 <Warning>
-**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, shell history, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
+**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, the files in Documents, Downloads, Desktop, Projects, Music, Pictures, Videos, Public and Templates (the folders themselves are kept), loose files in the home folder, SSH authorized keys, shell history, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
 </Warning>
 
 <Info>
@@ -103,7 +116,7 @@ The script defaults to `main`; `CLAWBOX_BRANCH` keeps a box on its own channel.
 internet and could not re-download them:
 
 - `data/network.env` and `data/llamacpp/models/` — the offline on-device model weights (several GB).
-- `~/.hermes/hermes-agent/` and the whole of `~/.hermes/bin/` on the Hermes edition — the agent checkout and its Python venv (`~/.local/bin/hermes` is a shim that execs the interpreter inside it), plus everything in `bin/`, which is where the agent installs `tirith`, the pre-exec shell scanner it runs every command past. The scanner is downloaded from a GitHub release on first use, so a box that lost it and has no internet runs commands unscanned. The reset keeps `bin/` entire rather than filtering it down to `tirith`: nothing on the device has an authoritative inventory of that directory, so removing its other entries could brick a box with no internet to restore them.
+- `~/.hermes/hermes-agent/`, `~/.hermes/installs/`, `~/.hermes/tools/` and the whole of `~/.hermes/bin/` on the Hermes edition — the agent checkout, the Python environment it runs on and the interpreter its launcher execs (`~/.local/bin/hermes` is a small launcher into them), plus everything in `bin/`, which is where the agent installs `tirith`, the pre-exec shell scanner it runs every command past. The scanner is downloaded from a GitHub release on first use, so a box that lost it and has no internet runs commands unscanned. The reset keeps `bin/` entire rather than filtering it down to `tirith`: nothing on the device has an authoritative inventory of that directory, so removing its other entries could brick a box with no internet to restore them.
 - `~/.cache/huggingface` voice models (only the `token` / `stored_tokens` credential files are removed).
 
 The device's **portal identity is also not cleared**: the cached id in `data/cloudflared/device-id`
@@ -113,15 +126,16 @@ portal as the same device.
 
 ### From the UI (preferred)
 
-Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into the **ClawBox-Setup** hotspot. This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
+Open **Settings → About → Factory Reset**, enter the system password and type **RESET** to confirm. The device wipes itself and reboots into the **ClawBox-Setup** hotspot; a Hermes box starts its assistant again once setup is done. This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
 
 ### Over SSH (when you can't log in to the UI)
 
 <Warning>
 Do **not** shortcut this with `rm -rf ~/.hermes` or `rm -rf data/*`. Both are actively destructive:
 
-- `rm -rf ~/.hermes` deletes `hermes-agent/`, leaving a `hermes` command whose interpreter no longer
-  exists (`~/.hermes/hermes-agent/venv/bin/python: No such file or directory`) and
+- `rm -rf ~/.hermes` deletes the agent install, leaving a `hermes` command whose interpreter no longer
+  exists (`…/python3: not found`, or `…/hermes-agent/venv/bin/python: No such file or directory` on
+  an older agent) and
   `clawbox-hermes-dashboard.service` crash-looping on status 127. A reset box has no internet to
   re-download it — that is a reflash.
 - `rm -rf data/*` deletes `network.env` and the offline model weights under `data/llamacpp/models/`,
@@ -172,10 +186,10 @@ step fails you can stop and retry without stranding the box.
     # OpenClaw state and ClawKeep backup pairing (both editions — harmless if empty).
     find ~/.openclaw ~/.clawkeep -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
 
-    # Hermes edition only — everything except the agent install and bin/, which
-    # holds the pre-exec shell scanner. Both are kept whole, exactly as the UI
-    # reset keeps them.
-    find ~/.hermes -maxdepth 1 -mindepth 1 ! -name hermes-agent ! -name bin -exec rm -rf {} +
+    # Hermes edition only — everything except the agent install (the checkout,
+    # installs/ and tools/) and bin/, which holds the pre-exec shell scanner.
+    # All four are kept whole, exactly as the UI reset keeps them.
+    find ~/.hermes -maxdepth 1 -mindepth 1 ! -name hermes-agent ! -name installs ! -name tools ! -name bin -exec rm -rf {} +
     ```
 
     `~/.hermes` is where a Hermes box keeps its `config.yaml` (billing token, dashboard signing

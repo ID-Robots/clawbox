@@ -1,3 +1,5 @@
+import { CHANNEL_SETUP_GROUP, CHANNEL_SETUP_KIND } from "@/lib/background-task-kinds";
+import { routeAsSettingsJob } from "@/lib/settings-jobs";
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { ensureHermesGateway } from "@/lib/hermes-telegram";
@@ -152,7 +154,30 @@ async function configureOpenclaw(body: ConfigureBody): Promise<NextResponse> {
   });
 }
 
+/** POST — enablement and access. With `background: true` (Settings, TASK-2148) a job of the box (src/lib/settings-jobs.ts). */
 export async function POST(request: Request) {
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/whatsapp/configure",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: (body) => ({
+      subject: "whatsapp",
+      action: "configure",
+      label: "WhatsApp",
+      title: body.enabled === false ? "Turning WhatsApp off" : "Saving WhatsApp settings",
+      status: "Saving WhatsApp and restarting the assistant…",
+      done: "WhatsApp settings saved.",
+    }),
+    handler: configureWhatsapp,
+    messages: {
+      allowlist_unsupported: "This box's WhatsApp channel has no allowed-numbers list or mode to set; it answers its own linked number.",
+    },
+  });
+  return job ?? configureWhatsapp(request);
+}
+
+async function configureWhatsapp(request: Request): Promise<Response> {
   try {
     let parsed: unknown;
     try {

@@ -531,3 +531,92 @@ def test_the_idle_run_puts_back_before_anything_else(
     heartbeat.assert_not_called()
     assert held["original"].read_bytes() == b"ours"
     assert not held["journal"].exists()
+
+
+# ── temporary trees an unfinished run left behind ───────────────────────────
+#
+# The core's tool installer stages in `<agent dir>/bin/install_tmp_<bin>_<pid>_
+# <uuid>` and removes it when the install ends; a package manager names its
+# staging `_tmp_<pid>_<hash>`. One that outlived its run goes into every
+# snapshot unless it is set aside like the box's own archives.
+
+HOUR = 3600.0
+
+
+def _age(tree: Path, seconds: float) -> None:
+    """Make everything in `tree` look last changed `seconds` ago."""
+    when = os.path.getmtime(tree) - seconds
+    for root, dirs, files in os.walk(tree):
+        for name in dirs + files:
+            os.utime(os.path.join(root, name), (when, when), follow_symlinks=False)
+    os.utime(tree, (when, when))
+
+
+@pytest.mark.parametrize(
+    ("path", "workspaces", "idle", "rule"),
+    [
+        (f"{S}/agents/main/agent/bin/install_tmp_rg_41_9f2c", [], 2 * HOUR, own_backups.RULE_TMP_TREE),
+        (f"{S}/extensions/x/node_modules/.pnpm/_tmp_812_ab12", [], 2 * HOUR, own_backups.RULE_TMP_TREE),
+        # still being written: a run may own it
+        (f"{S}/agents/main/agent/bin/install_tmp_rg_41_9f2c", [], 60.0, ""),
+        # the owner's folder, whatever its name
+        (f"{S}/workspace/my_tmp_notes", [f"{S}/workspace"], 2 * HOUR, ""),
+        # outside the state dir, or not a temporary name
+        ("/srv/elsewhere/install_tmp_rg_1_x", [], 2 * HOUR, ""),
+        (f"{S}/agents/main/agent/bin/rg", [], 2 * HOUR, ""),
+    ],
+)
+def test_the_tmp_tree_rule(path: str, workspaces: list[str], idle: float, rule: str) -> None:
+    now = 1_800_000_000.0
+    assert own_backups.tmp_tree_rule(path, S, workspaces, now - idle, now) == rule
+
+
+def test_a_stale_tmp_tree_is_left_out_whole_and_put_back_as_the_same_tree(
+    box: dict[str, Path],  # noqa: F811
+) -> None:
+    state_dir = box["state"]
+    stale = state_dir / "agents" / "main" / "agent" / "bin" / "install_tmp_rg_41_9f2c"
+    _file(stale / "rg", b"r" * 4000)
+    _file(stale / "lib" / "x.so", b"l" * 96)
+    _age(stale, 3 * HOUR)
+    fresh = state_dir / "extensions" / "x" / "node_modules" / "_tmp_812_ab12"
+    _file(fresh / "pkg.json", b"{}")
+    mine = state_dir / "workspace" / "my_tmp_notes"
+    _file(mine / "n.txt", b"the owner's")
+    _age(mine, 3 * HOUR)
+    inode = stale.stat().st_ino
+
+    made = backup_guard.create_archive(_cfg(box["cli"]), output_dir=box["out"])
+
+    names = _names(made.path)
+    assert not any(n.startswith(_ap(stale)) for n in names), "a stale temporary tree went into the snapshot"
+    assert _ap(fresh / "pkg.json") in names  # a run may still be writing it
+    assert _ap(mine / "n.txt") in names  # the owner's folder
+    assert stale.stat().st_ino == inode and (stale / "rg").read_bytes() == b"r" * 4000
+    assert (stale / "lib" / "x.so").exists()
+    # Not one of the "backup archives" the app names.
+    assert made.left_out_count == 0
+    assert not (box["data"] / own_backups.JOURNAL_NAME).exists()
+
+
+def test_a_tmp_tree_a_killed_run_set_aside_is_put_back_and_never_over_a_new_one(
+    box: dict[str, Path],  # noqa: F811
+) -> None:
+    state_dir = box["state"]
+    tree = state_dir / "agents" / "main" / "agent" / "bin" / "install_tmp_rg_7_00"
+    _file(tree / "rg", b"old")
+    journal = box["data"] / own_backups.JOURNAL_NAME
+    found = [own_backups.ArchiveFile(str(tree), 3, own_backups.RULE_TMP_TREE, str(state_dir), is_dir=True)]
+
+    moved = own_backups.set_aside(found, [str(state_dir)], journal, box["data"])
+    assert [a.path for a in moved] == [str(tree)] and not tree.exists()
+    assert json.loads(journal.read_text())["files"][0]["dir"] is True
+    # Something made a new tree of that name meanwhile: neither is overwritten.
+    _file(tree / "rg", b"new")
+
+    returned = own_backups.put_back(journal)
+
+    assert returned == [str(tree) + own_backups.RETURNED_SUFFIX]
+    assert (tree / "rg").read_bytes() == b"new"
+    assert (Path(returned[0]) / "rg").read_bytes() == b"old"
+    assert not journal.exists()

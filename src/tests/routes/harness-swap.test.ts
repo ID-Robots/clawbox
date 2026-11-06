@@ -61,9 +61,11 @@ const h = vi.hoisted(() => ({
   journal: [] as string[],
   /** Every child_process call, for the legs that run a script. */
   execCalls: [] as string[][],
+  /** Settings → Local AI's Enable, which the way back to OpenClaw repeats for a Local AI turned on under Hermes. */
+  configure: vi.fn(async (_req: Request) => Response.json({ success: true })),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: h.owner }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: h.owner }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
 vi.mock("@/lib/root-step-follow", async (orig) => ({
   ...(await orig<typeof import("@/lib/root-step-follow")>()),
@@ -80,6 +82,7 @@ vi.mock("@/lib/harness-mcp-refresh", () => ({ refreshHarnessToolsIfSwitched: h.r
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: h.codingStatus }));
 vi.mock("@/lib/update-lock", () => ({ isUpdateLocked: h.updateLocked }));
 vi.mock("@/lib/hermes-clawai", () => ({ applyClawaiToHermes: h.applyClawaiToHermes }));
+vi.mock("@/app/setup-api/ai-models/configure/route", () => ({ POST: h.configure }));
 vi.mock("@/lib/hermes-telegram", () => ({
   setHermesTelegramToken: h.setHermesTelegramToken,
   ensureHermesGateway: h.ensureHermesGateway,
@@ -498,6 +501,52 @@ describe("POST /setup-api/harness/swap — the stream", () => {
     expect(collectingAt).toBeGreaterThan(installAt);
   });
 
+  it("lists every phase the step passed even when no scan of the journal caught its marker", async () => {
+    // 2026-10-14, Hermes → OpenClaw on the box: the journal has `phase=lock`
+    // and `phase=provision`, the stream went request → install → carry →
+    // done. The scans saw `install` and nothing after it; a step that ended
+    // well with the lock flipped is the proof it passed both.
+    h.invocationId = "8f0c2e1d4b6a4c0e9a7d3e5f1b2c3d4e";
+    h.journal = ["[harness-swap] phase=request", "[harness-swap] phase=install"];
+    h.follow.mockImplementation(async (_step, opts) => {
+      opts.onStatus("  -> install.sh --step openclaw_install (as the OpenClaw edition)");
+      opts.onStatus("added 812 packages in 3m");
+      opts.onStatus("  -> install.sh --step gateway_setup (as the OpenClaw edition)");
+      opts.onStatus("  This box is now the OpenClaw edition");
+      h.edition = { edition: "openclaw", defaulted: false };
+      return { ok: true };
+    });
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+
+    const out = await expectLanded(await POST(post({ harness: "openclaw" })), "openclaw");
+
+    expect(out.filter((l) => l.phase).map((l) => l.phase)).toEqual(["request", "install", "lock", "provision", "carry", "done"]);
+  });
+
+  it("waits for a cold gateway as long as the box's own installer does before it calls the bot unconfirmed", async () => {
+    // 2026-10-14: the swapped-in gateway was `ready` 35.5 s after its start
+    // and Telegram was serving a second later, yet the carry-over said "The
+    // OpenClaw gateway has not confirmed the bot yet: gateway did not come
+    // back" — its wait was the 30 s a warm restart is given.
+    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    h.restartGateway.mockImplementation(async (opts?: { readyWaitMs?: number }) => {
+      if ((opts?.readyWaitMs ?? 30_000) < 35_500) throw new GatewayNotReadyError();
+    });
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+    h.get.mockImplementation(async (key: string) => ({ telegram_bot_token: "123:bot" } as Record<string, string>)[key]);
+    followLandsOn("openclaw");
+
+    const out = await lines(await POST(post({ harness: "openclaw" })));
+
+    const last = out[out.length - 1];
+    expect(last).toMatchObject({ success: true, active: "openclaw" });
+    expect(last.notes).not.toContain(SWAP_NOTES.telegramPending);
+    expect(out.find((l) => l.status === "Telegram bot carried over.")).toBeDefined();
+    expect(out.find((l) => typeof l.status === "string" && l.status.includes("did not come back"))).toBeUndefined();
+  });
+
   it("carries the credentials and the persona into OpenClaw on the way back, and asks no Hermes dashboard for a tool reload", async () => {
     h.edition = { edition: "hermes", defaulted: false };
     h.active.mockResolvedValue("hermes");
@@ -521,6 +570,80 @@ describe("POST /setup-api/harness/swap — the stream", () => {
     // The refresh reloads HERMES' MCP children, and the Hermes dashboard was
     // just torn down — asking it would only log a refusal under the wrong tag.
     expect(h.refresh).not.toHaveBeenCalled();
+  });
+
+  it("registers a Local AI turned on under Hermes with OpenClaw on the way back", async () => {
+    // The picker offers it from the store; without an OpenClaw row every turn
+    // on it went to the cloud fallback.
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+    const store: Record<string, unknown> = {
+      local_ai_configured: true, local_ai_provider: "llamacpp", local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    };
+    h.get.mockImplementation(async (key: string) => store[key]);
+    h.readConfig.mockResolvedValue({ models: { providers: { deepseek: { apiKey: "claw_abc" } } } });
+    h.configure.mockClear();
+    followLandsOn("openclaw");
+
+    const out = await lines(await POST(post({ harness: "openclaw" })));
+
+    expect(h.configure).toHaveBeenCalledTimes(1);
+    const req = (h.configure.mock.calls[0] as unknown as [Request])[0];
+    // Settings → Local AI's Enable: available, not made the chat model.
+    expect(await req.json()).toEqual({
+      provider: "llamacpp", apiKey: "gemma4-e2b-it-q4_0", authMode: "local", scope: "local", activate: false,
+    });
+    const last = out[out.length - 1];
+    expect(last).toMatchObject({ success: true, active: "openclaw" });
+    expect(last.notes).toContain(SWAP_NOTES.localAiCarried);
+  });
+
+  it("leaves Local AI alone when OpenClaw still has it, when it is off, and on the way to Hermes", async () => {
+    const store: Record<string, unknown> = {
+      local_ai_configured: true, local_ai_provider: "llamacpp", local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    };
+    h.get.mockImplementation(async (key: string) => store[key]);
+    h.configure.mockClear();
+
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+    h.readConfig.mockResolvedValue({ models: { providers: { llamacpp: { baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" } } } });
+    followLandsOn("openclaw");
+    let out = await lines(await POST(post({ harness: "openclaw" })));
+    expect(out[out.length - 1]).toMatchObject({ success: true, active: "openclaw" });
+
+    store.local_ai_configured = false;
+    h.edition = { edition: "hermes", defaulted: false };
+    h.readConfig.mockResolvedValue({});
+    followLandsOn("openclaw");
+    out = await lines(await POST(post({ harness: "openclaw" })));
+    expect(out[out.length - 1]).toMatchObject({ success: true, active: "openclaw" });
+
+    store.local_ai_configured = true;
+    h.edition = { edition: "openclaw", defaulted: false };
+    h.active.mockResolvedValue("openclaw");
+    followLandsOn("hermes");
+    out = await lines(await POST(post({ harness: "hermes" })));
+    expect(out[out.length - 1]).toMatchObject({ success: true, active: "hermes" });
+
+    expect(h.configure).not.toHaveBeenCalled();
+  });
+
+  it("says so, and still lands on OpenClaw, when Local AI could not be registered", async () => {
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+    const store: Record<string, unknown> = { local_ai_configured: true, local_ai_provider: "llamacpp", local_ai_model: "" };
+    h.get.mockImplementation(async (key: string) => store[key]);
+    h.readConfig.mockResolvedValue({});
+    h.configure.mockResolvedValueOnce(Response.json({ error: "Failed to configure llama.cpp" }, { status: 500 }));
+    followLandsOn("openclaw");
+
+    const out = await lines(await POST(post({ harness: "openclaw" })));
+
+    const last = out[out.length - 1];
+    expect(last).toMatchObject({ success: true, active: "openclaw" });
+    expect(last.notes).toContain(SWAP_NOTES.localAiNotCarried);
+    expect(out.some((line) => String(line.status ?? "").includes("Local AI could not be carried over: Failed to configure llama.cpp"))).toBe(true);
   });
 
   it("closes with the step's error, deletes the request and skips the carry-over when the step failed before the lock flipped", async () => {

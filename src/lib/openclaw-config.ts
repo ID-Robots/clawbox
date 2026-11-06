@@ -1,12 +1,19 @@
 import fs from "fs/promises";
-import { GatewayWsUnavailableError, gatewayWsCall, gatewayWsPatchConfig } from "@/lib/openclaw-gateway-ws";
+import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  GatewayRpcError,
+  GatewayWsUnavailableError,
+  gatewayWsCall,
+  gatewayWsPatchConfig,
+} from "@/lib/openclaw-gateway-ws";
 import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
 import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
+import { defaultTelegramAccount, telegramAccountAllowFrom, telegramAccountDmPolicy } from "./openclaw-telegram-account";
 import fsSync from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { execFile, spawn } from "child_process";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { isDeepStrictEqual, promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
@@ -17,6 +24,16 @@ import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-s
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isDiscordSnowflake, isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
+import { markGatewayRestartBegun } from "@/lib/gateway-restart-tracker";
+import {
+  GatewayRestartFailedError,
+  describeUnitState,
+  readUnitState,
+  runUnitJob,
+  unitIsStopped,
+  type UnitJobOutcome,
+  type UnitState,
+} from "@/lib/gateway-unit-job";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
 import {
@@ -26,6 +43,9 @@ import {
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { isConfigMutationConflict } from "@/lib/config-conflict";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { doctorFixBudgetMs, openclawDatabaseBytes } from "@/lib/openclaw-migration-status";
+import { ConfigChangedWhileHeldError, cliWritesConfig, holdWhileGatewayStarts } from "@/lib/gateway-start-guard";
 
 const exec = promisify(execFile);
 
@@ -129,141 +149,1040 @@ export interface OpenclawConfigSetOptions {
  * and only a write this process can SEE there is reported as success; every
  * other failure, including an unreadable config, still throws. See
  * {@link configSetLanded}.
+ *
+ * The running gateway is asked FIRST (see {@link configWritesViaGateway}), and
+ * inside a {@link beginConfigWriteTransaction} transaction the write is staged
+ * for the transaction's one commit instead of made here.
  */
 export async function runOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
-  if (await configSetViaGateway([args], options)) return;
-  await runConfigSetVerified([args], options, () =>
+  await runConfigWrite({ form: "set", args }, options);
+}
+
+/**
+ * One config write as its caller issued it. The form is part of the meaning,
+ * not just of the transport: it is how the CLI is asked when the gateway is
+ * not, and the CLI honours `--replace` on a single `config set` but drops every
+ * per-entry flag from a `--batch-json` payload.
+ */
+type ConfigWrite =
+  | { form: "set"; args: OpenclawConfigSetArgs }
+  | { form: "batch"; batch: readonly OpenclawConfigSetArgs[] }
+  | { form: "unset"; path: string };
+
+/**
+ * Make one write now, or stage it when the request has a transaction open.
+ * The single funnel for `runOpenclawConfigSet`, `…SetBatch` and `…Unset`.
+ */
+async function runConfigWrite(write: ConfigWrite, options: OpenclawConfigSetOptions): Promise<void> {
+  const transaction = openConfigWriteTransaction();
+  if (transaction) {
+    transaction.stage(write, options);
+    return;
+  }
+  await executeConfigWrite(write, options);
+}
+
+/**
+ * The gateway first, the CLI as before when the gateway did not take it.
+ * `skipGateway` is for a replay that already knows the gateway is not there:
+ * asking again per write would only add a connect timeout to each.
+ */
+async function executeConfigWrite(
+  write: ConfigWrite,
+  options: OpenclawConfigSetOptions,
+  skipGateway = false,
+): Promise<void> {
+  if (!skipGateway) {
+    const outcome = await configWritesViaGateway([write], options);
+    if ("done" in outcome) return;
+    // A gateway that is starting does not answer yet. Wait it out (never write
+    // the file under it, see `@/lib/gateway-start-guard`), then ask it again.
+    if (outcome.declined === "unavailable" && (await holdWhileGatewayStarts("config write"))
+      && "done" in (await configWritesViaGateway([write], options))) return;
+  }
+  await executeConfigWriteWithCli(write, options);
+}
+
+/** The CLI half: the exact spawns these writes have always been made with. */
+async function executeConfigWriteWithCli(write: ConfigWrite, options: OpenclawConfigSetOptions): Promise<void> {
+  if (write.form === "unset") {
+    await unsetWithCli(write.path, options);
+    return;
+  }
+  if (write.form === "set" || write.batch.length === 1) {
+    const args = write.form === "set" ? write.args : write.batch[0];
+    await runConfigSetVerified([args], options, () =>
+      withConfigMutationRetry(
+        (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
+        options,
+        "runOpenclawConfigSet",
+      ),
+    );
+    return;
+  }
+  const batch = write.batch;
+  const payload = JSON.stringify(batch.map(parseConfigSetArgs));
+  await runConfigSetVerified(batch, options, () =>
     withConfigMutationRetry(
-      (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
+      (timeoutMs) =>
+        spawnOpenclaw(["config", "set", "--batch-json", payload], {
+          labelArgs: configSetBatchLabelArgs(batch),
+          timeoutMs,
+          uid: options.uid,
+          gid: options.gid,
+          cwd: options.cwd,
+          env: options.env,
+        }).then(() => undefined),
       options,
-      "runOpenclawConfigSet",
+      "runOpenclawConfigSetBatch",
     ),
   );
 }
 
 /**
- * The same assignments as ONE `config.patch` through the running gateway.
+ * Writes through the running gateway: the same assignments and removals as ONE
+ * `config.patch`, exact, or not at all.
  *
- * `openclaw config set` is a validated read-modify-write of openclaw.json by
- * a process that costs ~3 s to start; the gateway's `config.patch` is the
- * same validated write by the process that is already running, in ~50 ms,
- * and it hot-applies what it can on the way. Answers true when the write
- * landed that way. Answers false — and the caller runs the CLI as before —
- * when the gateway is not there, when the assignments carry options only the
- * CLI honours (another user's uid/gid, a cwd, an env), when the argv carries
- * a `config set` FLAG this path cannot honour, when a path cannot be turned
- * into a merge, when the gateway's answer does not SHOW the write, or when
- * the gateway REFUSED it: the CLI's refusal carries the wording callers parse
- * (`refuseUnresolvableModel` reads "Cannot set model reference"), so a
- * refusal is re-asked of the CLI rather than re-worded here. That costs a CLI
- * start only on the failing path.
+ * `openclaw config set` is a validated read-modify-write of openclaw.json by a
+ * process that costs 5-14 s to start on a Jetson; the gateway's `config.patch`
+ * is the same validated write by the process that is already running, in tens
+ * of milliseconds — and for a change the gateway hot-applies it answers only
+ * once the running gateway has APPLIED it (`docs/gateway/configuration/
+ * config-rpc.md` in the pinned core). Answers `done` when the write is on disk
+ * that way, or was already there. Answers `declined` — and the caller runs the
+ * CLI as before — when the gateway is not there; when the options are ones only
+ * a spawn honours (a cwd, an env, a uid or gid other than this process's own);
+ * when a flag, a value or a path is one this module cannot apply the way the
+ * CLI would; when the CLI itself would refuse the write; when the gateway
+ * refused it; or when the file afterwards does not hold it. A refusal is
+ * re-asked of the CLI rather than re-worded here: its sentence is what callers
+ * parse (`refuseUnresolvableModel` reads "Cannot set model reference") and
+ * what owners are shown. That costs a CLI start only on the failing path.
  *
- * THE FLAGS ARE PART OF THE DECISION, not noise to filter away.
- * `openclaw config set <path> <json-object>` REPLACES the value at the path;
- * `config.patch` applies an RFC-7396-style MERGE (`applyMergePatch`, with
- * `mergeObjectArraysById: true` at the gateway's own call site), so an object
- * value is merged key by key and an id-keyed array is merged by id. The core's
- * `rejectDestructiveArrayPatchWithoutIntent` refuses only the subset that
- * REMOVES entries — a non-removing replacement would land silently as a merge,
- * which is a different config from the one the caller asked for. So anything
- * beyond the two value-mode flags {@link parseConfigSetArgs} understands sends
- * the whole batch to the CLI. `--replace` is deliberately NOT translated into
- * `replacePaths` here: the gateway's replace applies to ARRAY paths, the CLI's
- * to the value at the path, and mapping one onto the other is a semantic claim
- * no caller has asked for.
+ * EXACT, which is the whole difficulty. `config set <path> <value>` REPLACES
+ * the value at the path; `config.patch` is an RFC-7396 MERGE — objects merge
+ * key by key, `null` deletes, and arrays of `{id}` objects merge BY ID
+ * (`mergeObjectArraysById`) unless their path is in `replacePaths`. So the
+ * patch sent is not the caller's value. The config as the CLI would leave it
+ * is computed from the file ({@link applyConfigOps}, which also asks the CLI's
+ * own protected-path guard), and the merge that turns the file into it is what
+ * goes out ({@link planExactConfigPatch}), with every array it replaces named
+ * in `replacePaths`: nothing then merges by id, and the core's destructive-array
+ * guard sees the intent `config set` always carried. An empty diff is a write
+ * with nothing to do — the CLI answers that one `No change` and leaves the file
+ * untouched, and so does this.
+ *
+ * AND READ BACK. The answer is not the proof: what was asked for has to be in
+ * the file afterwards, path by path — the rule {@link configSetLanded} already
+ * holds the CLI to.
+ *
+ * NOT RUN BY THE GATEWAY: the CLI's catalogue check on a CHANGED model
+ * reference (`checkTouchedTextModelRefs`, "Cannot set model reference …"). The
+ * gateway validates the schema, the plugins and the SecretRefs and refuses an
+ * invalid config before anything lands; it does not resolve model ids. The
+ * chat picker has written its primary this way for a while; a caller that
+ * needs the catalogue's opinion asks for it itself.
  */
-const GATEWAY_PATCHABLE_CONFIG_SET_FLAGS = new Set(["--json", "--strict-json"]);
+async function configWritesViaGateway(
+  writes: readonly ConfigWrite[],
+  options: OpenclawConfigSetOptions,
+): Promise<GatewayWriteOutcome> {
+  if (!gatewayCanWriteFor(options) || gatewayIsAbsent()) return { declined: "unsupported" };
+  const ops: ParsedConfigOp[] = [];
+  for (const write of writes) {
+    const parsed = parseConfigWriteOps(write);
+    if (!parsed) return { declined: "unsupported" };
+    ops.push(...parsed);
+  }
+  if (ops.length === 0) return { done: "unchanged" };
+  const areas = loggedConfigAreas(ops.map((op) => op.path));
+  const timeoutMs = Math.min(options.timeoutMs ?? GATEWAY_CONFIG_PATCH_TIMEOUT_MS, GATEWAY_CONFIG_PATCH_TIMEOUT_MS);
+  for (let attempt = 1; attempt <= GATEWAY_PATCH_CONFLICT_ATTEMPTS; attempt++) {
+    let baseHash: string | null;
+    try {
+      const current = await gatewayWsCall("config.get", {}, {
+        timeoutMs: Math.min(timeoutMs, GATEWAY_CONFIG_GET_TIMEOUT_MS),
+      });
+      baseHash = typeof current.hash === "string" && current.hash ? current.hash : null;
+    } catch (err) {
+      if (!(err instanceof GatewayWsUnavailableError)) {
+        console.warn(`[openclaw-config] gateway config.get failed before a write (${areas}); asking the CLI`);
+      }
+      return { declined: "unavailable" };
+    }
+    // The FILE, not `config.get`'s copy of it: that one is redacted, and the
+    // read-back below compares against the file too. The hash ties the two
+    // together — a file that changes after `config.get` is refused below as a
+    // conflict, and read again.
+    let base: Record<string, unknown>;
+    try {
+      base = await readConfigFileStrict();
+    } catch {
+      return { declined: "unsupported" };
+    }
+    const desired = structuredClone(base);
+    if (!applyConfigOps(desired, ops, "exact")) return { declined: "unsupported" };
+    const plan = planExactConfigPatch(base, desired);
+    if (plan === "unchanged") return { done: "unchanged" };
+    // No hash is no config file yet: the gateway refuses a hashless patch for
+    // most paths, and the first config is the CLI's to create.
+    if (!plan || !baseHash) return { declined: "unsupported" };
+    const landed = async (): Promise<boolean> => {
+      try {
+        return opsLanded(await readConfigFileStrict(), desired, ops);
+      } catch {
+        return false;
+      }
+    };
+    let answer: { noop: boolean };
+    try {
+      try {
+        answer = await gatewayWsPatchConfig(plan.patch, { baseHash, replacePaths: plan.replacePaths, timeoutMs });
+      } catch (err) {
+        // The core checks its array guard against the RUNTIME config, defaults
+        // included: removing an entry can remove an array the file never had.
+        // The refusal names those paths; inside this patch's own footprint they
+        // go with the value the CLI would have replaced too, so name them once.
+        const named = arrayPathsToConfirm(err, plan);
+        if (named.length === 0) throw err;
+        plan.replacePaths.push(...named);
+        answer = await gatewayWsPatchConfig(plan.patch, { baseHash, replacePaths: plan.replacePaths, timeoutMs });
+      }
+    } catch (err) {
+      // `config.get` and `config.patch` are two calls, and the gateway touching
+      // the file between them is ordinary rather than a rejection of this write.
+      if (isConfigMutationConflict(err) && attempt < GATEWAY_PATCH_CONFLICT_ATTEMPTS) continue;
+      // A refusal is the gateway's verdict BEFORE it writes. Anything else — a
+      // timeout, a dropped socket, `UNAVAILABLE` ("persisted but not applied",
+      // or a write it took a restart for) — may have landed, and the file says.
+      const refused = err instanceof GatewayRpcError && err.code !== "UNAVAILABLE";
+      if (!refused && (await landed())) return { done: "written" };
+      // The code is the gateway's own vocabulary and the name a class's; the
+      // message would quote the caller's paths back (see LOGGED_CONFIG_AREAS).
+      const why = err instanceof GatewayRpcError ? err.code : err instanceof Error ? err.name : "error";
+      console.warn(`[openclaw-config] gateway config.patch did not take a write (${areas}: ${why}); asking the CLI`);
+      return { declined: err instanceof GatewayWsUnavailableError ? "unavailable" : "refused" };
+    }
+    // `noop` after a non-empty exact patch is the gateway's canonical form of a
+    // value that is already there (`normalizeSubmittedConfigModelRefs`). The
+    // keys a merge would silently DROP — what made a noop prove nothing — are
+    // refused before anything is sent ({@link planExactConfigPatch}).
+    if (answer.noop) return { done: "unchanged" };
+    if (await landed()) return { done: "written" };
+    console.warn(`[openclaw-config] gateway config.patch answered, but the file does not hold the write (${areas}); asking the CLI`);
+    return { declined: "unverified" };
+  }
+  return { declined: "refused" };
+}
+
+/**
+ * What {@link configWritesViaGateway} did. `unavailable` is the one decline
+ * that says something about the NEXT write too: no gateway answered, so a
+ * replay does not ask it again for every write.
+ */
+type GatewayWriteOutcome =
+  | { done: "written" | "unchanged" }
+  | { declined: "unsupported" | "unavailable" | "refused" | "unverified" };
 
 /** How many times the gateway's optimistic-concurrency refusal is re-tried on
- *  the socket before the batch is handed to the CLI. `gatewayWsPatchConfig`
- *  does `config.get` then `config.patch`, and the gateway touching
- *  `meta.lastTouchedAt` on a reload between the two is the documented race
+ *  the socket before the write is handed to the CLI. `config.get` then
+ *  `config.patch` are two calls, and the gateway touching `meta.lastTouchedAt`
+ *  on a reload between the two is the documented race
  *  {@link withConfigMutationRetry} exists for — losing it here means the fast
  *  path pays a full CLI start on exactly the collision it was built for, plus
- *  a misleading "refused" journal line. Each retry re-reads the hash and costs
- *  milliseconds; the CLI start costs ~3 s on a Jetson. */
+ *  a misleading "refused" journal line. Each retry re-reads the hash and the
+ *  file and costs milliseconds; the CLI start costs 5-14 s on a Jetson. */
 const GATEWAY_PATCH_CONFLICT_ATTEMPTS = 3;
 
-async function configSetViaGateway(
-  batch: readonly OpenclawConfigSetArgs[],
-  options: OpenclawConfigSetOptions,
-): Promise<boolean> {
-  if (options.uid !== undefined || options.gid !== undefined || options.cwd || options.env) return false;
-  if (gatewayIsAbsent()) return false;
-  const patch: Record<string, unknown> = {};
-  /** Every asked-for path as the gateway spells a changed leaf: the same
-   *  segments, dot-joined, which is what its own `diffConfigLeafPaths` builds. */
-  const askedPaths: string[] = [];
-  for (const args of batch) {
-    if (args.some((arg) => arg.startsWith("--") && !GATEWAY_PATCHABLE_CONFIG_SET_FLAGS.has(arg))) return false;
+/** Bound on one `config.patch`, which for a hot change waits until the running
+ *  gateway has applied it. Below the CLI budgets callers pass, which include
+ *  the CLI's own start-up; a write that outlives it is read back, not assumed. */
+const GATEWAY_CONFIG_PATCH_TIMEOUT_MS = 20_000;
+
+/** Bound on the `config.get` before it, which the gateway answers from a cache. */
+const GATEWAY_CONFIG_GET_TIMEOUT_MS = 5_000;
+
+/**
+ * Options only a spawn honours keep the CLI. A uid or gid says WHO the CLI
+ * runs as: equal to this process's own, it is the spawn this process makes
+ * anyway — and the configure route passes exactly that (`process.getuid()`)
+ * on every write, which is what kept every one of them on a 5-14 s CLI start.
+ * The gateway writes as the gateway, the same account on a box. A cwd or an
+ * env can point the CLI at another HOME, and so at another openclaw.json.
+ */
+function gatewayCanWriteFor(options: OpenclawConfigSetOptions): boolean {
+  if (options.cwd || options.env) return false;
+  if (options.uid !== undefined && options.uid !== process.getuid?.()) return false;
+  if (options.gid !== undefined && options.gid !== process.getgid?.()) return false;
+  return true;
+}
+
+/** One assignment or removal, read the way the CLI reads it. */
+type ParsedConfigOp =
+  | { kind: "set"; path: string; segments: string[]; value: unknown; allowReplace: boolean }
+  | { kind: "unset"; path: string; segments: string[] };
+
+/** The `config set` flags applied exactly here: the two value modes, and `--replace`. */
+const EXACT_CONFIG_SET_FLAGS = new Set(["--json", "--strict-json", "--replace"]);
+
+/**
+ * The keys a merge patch never carries — the core's `isBlockedObjectKey`. As
+ * data they would be dropped on the way; as a path segment here they would
+ * reach a prototype.
+ */
+const BLOCKED_CONFIG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function isBlockedConfigKey(key: string): boolean {
+  return BLOCKED_CONFIG_KEYS.has(key);
+}
+
+/**
+ * A write's ops, or null when one of them is something this module will not
+ * claim to apply the way the CLI would: a flag it does not know (`--merge`, a
+ * builder mode), a value that does not parse, a path it cannot split
+ * ({@link configPathSegments}). Null sends the write to the CLI.
+ *
+ * `--replace` counts on a single `config set` only. A `--batch-json` payload
+ * carries `{path, value}` and nothing else, so the CLI never saw it there
+ * either — and the guard it lifts stays up for a batch here too.
+ */
+function parseConfigWriteOps(write: ConfigWrite): ParsedConfigOp[] | null {
+  if (write.form === "unset") {
+    const segments = configPathSegments(write.path);
+    if (!segments || segments.some(isBlockedConfigKey)) return null;
+    return [{ kind: "unset", path: write.path, segments }];
+  }
+  const entries = write.form === "set" ? [write.args] : write.batch;
+  const ops: ParsedConfigOp[] = [];
+  for (const args of entries) {
+    const flags = args.filter((arg) => arg.startsWith("--"));
+    if (flags.some((flag) => !EXACT_CONFIG_SET_FLAGS.has(flag))) return null;
     let entry: { path: string; value: unknown };
     try {
       entry = parseConfigSetArgs(args);
     } catch {
-      return false;
+      return null;
     }
     const segments = configPathSegments(entry.path);
-    if (!segments || segments.length === 0) return false;
-    // A container value is a REPLACEMENT for the CLI and a MERGE for
-    // `config.patch`: a key the caller left out survives the merge, which is
-    // a different config from the one asked for (a stale `apiKey` under a
-    // provider entry, say). Only a scalar means the same thing to both
-    // writers, so objects and arrays keep the CLI they always had.
-    if (entry.value !== null && typeof entry.value === "object") return false;
-    askedPaths.push(segments.join("."));
-    let node: Record<string, unknown> = patch;
-    for (const key of segments.slice(0, -1)) {
-      const next = node[key];
-      if (next && typeof next === "object" && !Array.isArray(next)) {
-        node = next as Record<string, unknown>;
-      } else {
-        const fresh: Record<string, unknown> = {};
-        node[key] = fresh;
-        node = fresh;
-      }
-    }
-    node[segments[segments.length - 1]] = entry.value;
+    if (!segments || segments.some(isBlockedConfigKey)) return null;
+    ops.push({
+      kind: "set",
+      path: entry.path,
+      segments,
+      value: entry.value,
+      allowReplace: write.form === "set" && flags.includes("--replace"),
+    });
   }
-  for (let attempt = 1; attempt <= GATEWAY_PATCH_CONFLICT_ATTEMPTS; attempt++) {
-    try {
-      const { noop, changedPaths } = await gatewayWsPatchConfig(patch, { timeoutMs: options.timeoutMs });
-      // The read-back this module is built on ({@link configSetLanded}: "only a
-      // write this process can SEE there is reported as success"), applied to
-      // the answer the gateway already sends. `config.patch` reports `noop`
-      // whenever the merged config equals the source — which covers the
-      // assignment that was DROPPED rather than applied (`applyMergePatch`
-      // silently skips a key `isMergePatchObjectKeyAllowed` blocks, and any
-      // merge it cannot express, with no error frame) as well as the value
-      // that was already there. The two are indistinguishable from here, so
-      // neither is claimed: the CLI re-reads the file and settles it. An
-      // already-correct value therefore costs a CLI start it used to skip;
-      // that is the price of never reporting a write that did not happen.
-      if (noop) {
-        console.warn(`[openclaw-config] gateway config.patch changed nothing (${loggedConfigAreas(batch.map(configSetEntryPath))}); asking the CLI`);
-        return false;
+  return ops;
+}
+
+/**
+ * Apply ops to a config the way `config set` / `config unset` would, in order.
+ *
+ * "exact" is the gateway path's model of the CLI, so it answers false — send
+ * the write to the CLI — wherever the CLI does something this does not
+ * reproduce: a parent that is not an object (the CLI reshapes a model-shorthand
+ * string into `{primary}` and indexes into an array), the removal of a path
+ * that is not there (the CLI exits 1), and a replacement the CLI's
+ * protected-path guard refuses ({@link cliRefusesReplacement}). "view" is a
+ * transaction's read overlay, which only has to show the staged values: it
+ * replaces a parent in the way and skips a removal of nothing.
+ */
+function applyConfigOps(
+  root: Record<string, unknown>,
+  ops: readonly ParsedConfigOp[],
+  mode: "exact" | "view",
+): boolean {
+  for (const op of ops) {
+    const last = op.segments[op.segments.length - 1];
+    let node: Record<string, unknown> | null = root;
+    for (const segment of op.segments.slice(0, -1)) {
+      const next: unknown = Object.hasOwn(node, segment) ? node[segment] : undefined;
+      if (isPlainObject(next)) {
+        node = next;
+        continue;
       }
-      const uncovered = askedPaths.filter(
-        (asked) => !changedPaths.some((changed) => changed === asked || changed.startsWith(`${asked}.`)),
-      );
-      if (uncovered.length > 0) {
-        console.warn(`[openclaw-config] gateway config.patch did not report ${loggedConfigAreas(uncovered)} as changed; asking the CLI`);
-        return false;
+      if (op.kind === "unset" || (next !== undefined && mode === "exact")) {
+        node = null;
+        break;
       }
-      return true;
-    } catch (err) {
-      if (err instanceof GatewayWsUnavailableError) return false;
-      // The conflict is the one refusal a repeat settles: `config.get` and
-      // `config.patch` are two calls, and the gateway touching the file
-      // between them is ordinary rather than a rejection of this write.
-      if (isConfigMutationConflict(err) && attempt < GATEWAY_PATCH_CONFLICT_ATTEMPTS) continue;
-      console.warn(`[openclaw-config] gateway config.patch refused (${loggedConfigAreas(batch.map(configSetEntryPath))}); asking the CLI`);
+      const fresh: Record<string, unknown> = {};
+      node[segment] = fresh;
+      node = fresh;
+    }
+    if (op.kind === "unset") {
+      if (node && Object.hasOwn(node, last)) delete node[last];
+      else if (mode === "exact") return false;
+      continue;
+    }
+    if (!node) return false;
+    if (mode === "exact" && cliRefusesReplacement(Object.hasOwn(node, last) ? node[last] : undefined, op)) {
       return false;
     }
+    node[last] = structuredClone(op.value);
+  }
+  return true;
+}
+
+/**
+ * Would `config set` refuse this replacement? The CLI's own
+ * `assertNonDestructiveReplacement` (`config-cli-path` in the pinned core), as a
+ * question: without `--replace`, a write may not drop a key from one of the
+ * maps owners add to by hand, nor a model id from a provider's `models` list.
+ * The gateway has no such rule — only its array guard, which `replacePaths`
+ * satisfies — so a write the CLI would refuse is left for the CLI to refuse,
+ * in its own words.
+ */
+function cliRefusesReplacement(existing: unknown, op: Extract<ParsedConfigOp, { kind: "set" }>): boolean {
+  if (op.allowReplace || existing === undefined) return false;
+  const joined = op.segments.join(".");
+  const protectedMap = PROTECTED_CONFIG_MAPS.has(joined)
+    || (op.segments.length === 3 && op.segments[0] === "models" && op.segments[1] === "providers");
+  if (protectedMap && isPlainObject(existing)) {
+    if (!isPlainObject(op.value)) return false;
+    const next = op.value;
+    return Object.keys(existing).some((key) => !Object.hasOwn(next, key));
+  }
+  const providerModelList = op.segments.length === 4
+    && op.segments[0] === "models" && op.segments[1] === "providers" && op.segments[3] === "models";
+  if (!providerModelList) return false;
+  const existingIds = modelListIds(existing);
+  const nextIds = modelListIds(op.value);
+  if (!existingIds || !nextIds) return false;
+  return [...existingIds].some((id) => !nextIds.has(id));
+}
+
+/** The maps `config set` will not shrink without `--replace` (plus `models.providers.<id>`). */
+const PROTECTED_CONFIG_MAPS = new Set([
+  "agents.defaults.models",
+  "agents.entries",
+  "models.providers",
+  "plugins.entries",
+  "auth.profiles",
+]);
+
+/** The CLI's `modelArrayIds`: the ids of a list of `{id}` rows, or null for anything else. */
+function modelListIds(value: unknown): Set<string> | null {
+  if (!Array.isArray(value)) return null;
+  const ids = new Set<string>();
+  for (const entry of value) {
+    if (!isPlainObject(entry) || typeof entry.id !== "string" || !entry.id.trim()) return null;
+    ids.add(entry.id.trim());
+  }
+  return ids;
+}
+
+/** A merge patch, and the array paths it replaces on purpose. */
+interface ConfigPatchPlan {
+  patch: Record<string, unknown>;
+  replacePaths: string[];
+}
+
+/**
+ * The merge patch that turns `base` into `desired` on the gateway, exactly:
+ * "unchanged" when there is nothing to do, null when a merge patch cannot say
+ * it — an explicit `null` value (a merge patch reads that as "delete") or a
+ * blocked key (it drops those).
+ *
+ * Objects on both sides are diffed key by key; a key `desired` lacks is a
+ * `null`; anything else that differs is sent WHOLE — a scalar, an array, an
+ * object where there was none. `replacePaths` then names, in the gateway's own
+ * spelling (`formatConfigPatchPath`: segments joined by dots, `[]` for the
+ * entries of an array), every array the patch replaces or removes and every
+ * array inside the entries of one it sends. That is what the core's
+ * `rejectDestructiveArrayPatchWithoutIntent` checks, and what keeps
+ * `mergeObjectArraysById` off an array the CLI would have replaced. Naming an
+ * array that did not need it changes nothing.
+ */
+function planExactConfigPatch(
+  base: Record<string, unknown>,
+  desired: Record<string, unknown>,
+): ConfigPatchPlan | "unchanged" | null {
+  const replacePaths = new Set<string>();
+  const patch = diffConfigObjects(base, desired, "", replacePaths);
+  if (patch === null) return null;
+  if (Object.keys(patch).length === 0) return "unchanged";
+  return { patch, replacePaths: [...replacePaths] };
+}
+
+function diffConfigObjects(
+  base: Record<string, unknown>,
+  desired: Record<string, unknown>,
+  path: string,
+  replacePaths: Set<string>,
+): Record<string, unknown> | null {
+  const patch: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(desired)])) {
+    const inBase = Object.hasOwn(base, key);
+    const inDesired = Object.hasOwn(desired, key);
+    const before = inBase ? base[key] : undefined;
+    const after = inDesired ? desired[key] : undefined;
+    if (inBase && inDesired && isDeepStrictEqual(before, after)) continue;
+    if (isBlockedConfigKey(key)) return null;
+    const keyPath = path ? `${path}.${key}` : key;
+    if (!inDesired) {
+      patch[key] = null;
+      collectReplacedArrayPaths(before, keyPath, replacePaths);
+      continue;
+    }
+    if (isPlainObject(before) && isPlainObject(after)) {
+      const nested = diffConfigObjects(before, after, keyPath, replacePaths);
+      if (nested === null) return null;
+      if (Object.keys(nested).length > 0) patch[key] = nested;
+      continue;
+    }
+    if (!mergePatchCarries(after)) return null;
+    patch[key] = after;
+    if (inBase) collectReplacedArrayPaths(before, keyPath, replacePaths);
+    collectSentArrayPaths(after, keyPath, replacePaths);
+  }
+  return patch;
+}
+
+/**
+ * Can a merge patch deliver this value as it is? Not a `null` (that deletes),
+ * and no `null` or blocked key inside an object, which is merged on the way.
+ * An array travels whole, so what it holds is its own business.
+ */
+function mergePatchCarries(value: unknown): boolean {
+  if (value === null) return false;
+  if (!isPlainObject(value)) return true;
+  return Object.entries(value).every(([key, child]) => !isBlockedConfigKey(key) && mergePatchCarries(child));
+}
+
+/** The arrays a patch removes or replaces at `path` — the core's `collectBaseArrayPaths`: stop at an array, walk objects. */
+function collectReplacedArrayPaths(value: unknown, path: string, out: Set<string>): void {
+  if (Array.isArray(value)) {
+    out.add(path);
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, child] of Object.entries(value)) collectReplacedArrayPaths(child, `${path}.${key}`, out);
+}
+
+/** The arrays a patch SENDS at or under `path`, and the arrays inside their entries (`[]`), which the core checks entry by entry. */
+function collectSentArrayPaths(value: unknown, path: string, out: Set<string>): void {
+  if (Array.isArray(value)) {
+    out.add(path);
+    for (const entry of value) {
+      if (isPlainObject(entry)) collectSentArrayPaths(entry, `${path}[]`, out);
+    }
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, child] of Object.entries(value)) collectSentArrayPaths(child, `${path}.${key}`, out);
+}
+
+/**
+ * The array paths a `config.patch` refusal asks to have named, when naming them
+ * says nothing the patch did not already say: the core's
+ * `rejectDestructiveArrayPatchWithoutIntent` ("config.patch would remove
+ * entries from array path(s): a.b, c[].d. Pass replacePaths …"), each path
+ * under a key this patch removes or replaces whole and not named yet. Anything
+ * else — another refusal, a path outside the patch — answers nothing, and the
+ * refusal stands.
+ */
+function arrayPathsToConfirm(err: unknown, plan: ConfigPatchPlan): string[] {
+  if (!(err instanceof GatewayRpcError)) return [];
+  const listed = /would remove entries from array path\(s\): (.+?)\. Pass replacePaths/.exec(err.message)?.[1];
+  if (!listed) return [];
+  const named = new Set(plan.replacePaths);
+  const paths = listed.split(", ").map((p) => p.trim()).filter(Boolean);
+  if (paths.some((p) => named.has(p) || !insideReplacedValue(plan.patch, p))) return [];
+  return paths;
+}
+
+/**
+ * Is `arrayPath` (the gateway's spelling: dots, `[]` for an array's entries)
+ * at or under a value this patch deletes (`null`) or sends whole (anything but
+ * an object it merges into)? Keys are matched greedily against the patch, so a
+ * key that itself holds dots still resolves.
+ */
+function insideReplacedValue(patch: Record<string, unknown>, arrayPath: string): boolean {
+  let node: unknown = patch;
+  let rest = arrayPath;
+  while (isPlainObject(node)) {
+    const key = Object.keys(node)
+      .filter((candidate) => rest === candidate || rest.startsWith(`${candidate}.`) || rest.startsWith(`${candidate}[]`))
+      .sort((a, b) => b.length - a.length)[0];
+    if (key === undefined) return false;
+    const value = node[key];
+    // An object sent AT the flagged path is one sent where the gateway holds an
+    // array: a replacement too.
+    if (value === null || !isPlainObject(value) || rest === key) return true;
+    node = value;
+    rest = rest.slice(key.length + 1);
   }
   return false;
+}
+
+/** Does `after` hold, at every path the ops touched, what `desired` holds there? */
+function opsLanded(after: unknown, desired: unknown, ops: readonly ParsedConfigOp[]): boolean {
+  return ops.every((op) =>
+    isDeepStrictEqual(valueAtConfigPath(after, op.segments), valueAtConfigPath(desired, op.segments)));
+}
+
+/**
+ * ONE WRITE PER REQUEST (TASK-1535).
+ *
+ * A route that changes several things in openclaw.json — the configure route
+ * writes the auth profile, the primary, the provider, the vision and image
+ * slots, the fallbacks and the plugin gate, each from its own helper with its
+ * own idea of what a failure means — made each of them on its own: a CLI start
+ * apiece (5-14 s on a Jetson), and a gateway reload after every one, the
+ * running config passing through each half-written state in between. Measured
+ * on a board: a ClawBox AI re-save spent 50 s in four such rounds.
+ *
+ * A transaction collects them instead. Inside it the three writers stage
+ * rather than write, the readers answer with the staged values laid over the
+ * file, and {@link ConfigWriteTransaction.commit} makes them ONE exact
+ * `config.patch` ({@link configWritesViaGateway}): validated as a whole by the
+ * gateway, landed whole or not at all, and applied once.
+ *
+ * What a caller does about a failure travels with the write
+ * ({@link configWriteBoundary}). When the one patch cannot be made — no
+ * gateway, a refusal, a write only the CLI may make — every staged write is
+ * replayed in order through the per-write path, gateway first, inside those
+ * same boundaries: the sequence and the error handling the request had before
+ * transactions existed, at the speed it had before.
+ *
+ * Scoped to a request by {@link withConfigWriteScope}, opened by
+ * {@link beginConfigWriteTransaction}, and ABANDONED — nothing staged is
+ * written — when the request ends without committing: a save that failed
+ * half-way does not land the half it got through.
+ *
+ * WHAT IT CANNOT SEE. A direct writer of the file (`writeConfig`,
+ * {@link readConfigForWrite}, the sidecar lock) flushes the staged writes first,
+ * so program order holds. A CLI subprocess that writes the file itself
+ * (`models auth paste-api-key`, `plugins install`) does not pass through here;
+ * a caller that spawns one inside a transaction calls
+ * {@link flushConfigWrites} before it. Readers that open the file themselves
+ * see the file.
+ */
+export class ConfigWriteTransaction {
+  private staged: StagedConfigWrite[] = [];
+  private state: "open" | "settling" | "closed" = "open";
+  private settledAs: ConfigWriteSettlement | null = null;
+  /** The failure no boundary took, from a flush that closed the transaction. */
+  private fatal: unknown = null;
+
+  /** `label` names the transaction in the journal; a literal, never request text. */
+  constructor(readonly label: string) {}
+
+  /**
+   * How what it staged reached the file: `gateway` — as one exact
+   * `config.patch` (per flush), so the CLI's own checks never ran; `unchanged`
+   * — the file already held all of it; `one-by-one` — replayed write by
+   * write, each through the gateway or the CLI. Null when nothing was staged.
+   * Across several flushes, the least of them.
+   */
+  get committedAs(): ConfigWriteSettlement | null {
+    return this.settledAs;
+  }
+
+  get isOpen(): boolean {
+    return this.state === "open";
+  }
+
+  /** Writes staged and not yet made. */
+  get pending(): number {
+    return this.staged.length;
+  }
+
+  stage(write: ConfigWrite, options: OpenclawConfigSetOptions): void {
+    // The CLI refuses a value it cannot parse before it writes anything; so
+    // does staging, where the caller's own `try` can still see it.
+    if (write.form !== "unset") {
+      for (const args of write.form === "set" ? [write.args] : write.batch) parseConfigSetArgs(args);
+    }
+    const boundary = configWriteBoundaryStorage.getStore() ?? null;
+    for (let node = boundary; node; node = node.parent) node.pending += 1;
+    this.staged.push({ write, options, boundary, ops: parseConfigWriteOps(write) });
+  }
+
+  /** `config` with every staged write laid over it, as the commit would leave it. */
+  overlay(config: OpenClawConfig): OpenClawConfig {
+    if (this.staged.length === 0) return config;
+    const view = structuredClone(config) as Record<string, unknown>;
+    for (const entry of this.staged) {
+      if (entry.ops) applyConfigOps(view, entry.ops, "view");
+    }
+    return view as OpenClawConfig;
+  }
+
+  /**
+   * Make what is staged so far, and stay open. A fatal failure — one no
+   * boundary takes — closes the transaction and is thrown: what follows it in
+   * the request must not be staged into a commit that has already failed.
+   *
+   * The failure is the REQUEST's. A flush runs wherever the request happens to
+   * be — inside a best-effort boundary around a key paste, say — and that
+   * boundary's `catch` is not the failed write's: {@link configWriteBoundary}
+   * rethrows it untouched, and {@link commit} throws it again if anything
+   * swallowed it on the way.
+   */
+  async flush(): Promise<void> {
+    if (this.state !== "open" || this.staged.length === 0) return;
+    const staged = this.staged;
+    this.staged = [];
+    this.state = "settling";
+    try {
+      const settled = await settleStagedWrites(this.label, staged);
+      const rank: Record<ConfigWriteSettlement, number> = { unchanged: 0, gateway: 1, "one-by-one": 2 };
+      if (!this.settledAs || rank[settled] > rank[this.settledAs]) this.settledAs = settled;
+      this.state = "open";
+    } catch (err) {
+      this.state = "closed";
+      const fatal = err instanceof Object ? err : new Error(String(err));
+      fatalConfigWriteFailures.add(fatal);
+      this.fatal = fatal;
+      throw fatal;
+    }
+  }
+
+  /** Make everything staged, and close: later writes in the request are made as they come. */
+  async commit(): Promise<void> {
+    try {
+      await this.flush();
+    } finally {
+      this.state = "closed";
+    }
+    if (this.fatal) throw this.fatal;
+  }
+
+  /** Close without writing what is staged. */
+  abandon(): void {
+    if (this.state === "open" && this.staged.length > 0) {
+      console.warn(
+        `[openclaw-config] ${this.label}: the request ended without committing; ${this.staged.length} staged config write(s) were not made`,
+      );
+    }
+    this.staged = [];
+    this.state = "closed";
+  }
+}
+
+interface StagedConfigWrite {
+  write: ConfigWrite;
+  options: OpenclawConfigSetOptions;
+  /** The innermost {@link configWriteBoundary} it was staged in. */
+  boundary: ConfigWriteBoundaryNode | null;
+  /** Parsed for the read overlay; null where only the CLI can read it. */
+  ops: ParsedConfigOp[] | null;
+}
+
+/**
+ * What one {@link configWriteBoundary} call has to know at commit time: its
+ * handlers, the boundary around it, and whether its writes — and its own code
+ * — have all gone well.
+ */
+interface ConfigWriteBoundaryNode {
+  readonly handlers: ConfigWriteHandlers;
+  readonly parent: ConfigWriteBoundaryNode | null;
+  /** Its code is still running: more writes may come. */
+  open: boolean;
+  /** Writes staged inside it (or inside a boundary within it) and not settled. */
+  pending: number;
+  /** Its own code threw while staging; its handler has run. */
+  failed: boolean;
+  /** One of its writes failed and its handler took that: the rest are skipped. */
+  aborted: boolean;
+}
+
+/**
+ * The handling a caller used to wrap around a config write's `await`.
+ *
+ * A transaction's writes only learn their outcome at its commit, long after
+ * the caller's own `try` has returned. The handlers travel with the write
+ * instead, through {@link configWriteBoundary}.
+ */
+export interface ConfigWriteHandlers {
+  /** Called INSTEAD of throwing when a write in the boundary fails; the boundary's remaining writes are not made. */
+  onError?: (err: unknown) => void | Promise<void>;
+  /** Called once every write in the boundary is on disk. */
+  onApplied?: () => void | Promise<void>;
+}
+
+/**
+ * `try { await body() } catch (err) { onError(err) }`, then `onApplied()` —
+ * for the config writes `body` makes.
+ *
+ * Outside a transaction it is exactly that. Inside one, `body`'s writes are
+ * staged, and the boundary is what the commit holds them to: when the one
+ * patch lands every boundary's `onApplied` runs; when it has to be replayed, a
+ * write that fails goes to the innermost boundary around it with an `onError`
+ * — the `catch` that would have caught it — whose remaining writes are then
+ * skipped, as the rest of its `try` would have been. A failure no boundary
+ * takes is thrown from the commit.
+ */
+export async function configWriteBoundary(
+  handlers: ConfigWriteHandlers,
+  body: () => Promise<void>,
+): Promise<void> {
+  if (!openConfigWriteTransaction()) {
+    try {
+      await body();
+    } catch (err) {
+      if (!handlers.onError) throw err;
+      await handlers.onError(err);
+      return;
+    }
+    await handlers.onApplied?.();
+    return;
+  }
+  const node: ConfigWriteBoundaryNode = {
+    handlers,
+    parent: configWriteBoundaryStorage.getStore() ?? null,
+    open: true,
+    pending: 0,
+    failed: false,
+    aborted: false,
+  };
+  try {
+    await configWriteBoundaryStorage.run(node, body);
+  } catch (err) {
+    node.open = false;
+    node.failed = true;
+    // A failure a flush inside `body` met in a write no boundary took — staged
+    // before this boundary, or outside it — is the request's, not this catch's.
+    if (!handlers.onError || (err instanceof Object && fatalConfigWriteFailures.has(err))) throw err;
+    // A flush inside `body` already handed this boundary a failure.
+    if (!node.aborted) await handlers.onError(err);
+    return;
+  }
+  node.open = false;
+  if (node.pending === 0 && !boundaryAborted(node)) await handlers.onApplied?.();
+}
+
+function boundaryAborted(node: ConfigWriteBoundaryNode | null): boolean {
+  for (let current = node; current; current = current.parent) {
+    if (current.aborted) return true;
+  }
+  return false;
+}
+
+/** The boundary whose `catch` a failed write lands in: the innermost with an `onError`. */
+function handlingBoundary(node: ConfigWriteBoundaryNode | null): ConfigWriteBoundaryNode | null {
+  for (let current = node; current; current = current.parent) {
+    if (current.handlers.onError) return current;
+  }
+  return null;
+}
+
+/** A staged write is done with — made, failed or skipped: the boundaries it closes may now say so. */
+async function settleBoundaries(entry: StagedConfigWrite): Promise<void> {
+  for (let node = entry.boundary; node; node = node.parent) {
+    node.pending -= 1;
+    if (node.pending === 0 && !node.open && !node.failed && !boundaryAborted(node)) {
+      await node.handlers.onApplied?.();
+    }
+  }
+}
+
+/** Every path a write names, for the journal ({@link loggedConfigAreas} keeps the caller's text out of it). */
+function configWritePaths(write: ConfigWrite): string[] {
+  if (write.form === "unset") return [write.path];
+  return (write.form === "set" ? [write.args] : write.batch).map(configSetEntryPath);
+}
+
+/** Options one combined write can honour for all of its writes, or null. */
+function combinedWriteOptions(staged: readonly StagedConfigWrite[]): OpenclawConfigSetOptions | null {
+  if (!staged.every((entry) => gatewayCanWriteFor(entry.options))) return null;
+  const budgets = staged.map((entry) => entry.options.timeoutMs).filter((ms): ms is number => ms !== undefined);
+  return budgets.length > 0 ? { timeoutMs: Math.max(...budgets) } : {};
+}
+
+/** How one flush of a transaction reached the file — see {@link ConfigWriteTransaction.committedAs}. */
+export type ConfigWriteSettlement = "gateway" | "unchanged" | "one-by-one";
+
+async function settleStagedWrites(
+  label: string,
+  staged: readonly StagedConfigWrite[],
+): Promise<ConfigWriteSettlement> {
+  const started = Date.now();
+  const areas = loggedConfigAreas(staged.flatMap((entry) => configWritePaths(entry.write)));
+  const options = combinedWriteOptions(staged);
+  let outcome: GatewayWriteOutcome = options
+    ? await configWritesViaGateway(staged.map((entry) => entry.write), options)
+    : { declined: "unsupported" };
+  // A starting gateway does not answer yet: wait it out, then ask it again.
+  if (options && "declined" in outcome && outcome.declined === "unavailable"
+    && (await holdWhileGatewayStarts(`${label} config writes`))) {
+    outcome = await configWritesViaGateway(staged.map((entry) => entry.write), options);
+  }
+  if ("done" in outcome) {
+    const how = outcome.done === "written" ? "landed as one gateway config.patch" : "were already in the file";
+    console.log(
+      `[openclaw-config] ${label}: ${staged.length} config write(s) (${areas}) ${how} in ${Date.now() - started} ms`,
+    );
+    for (const entry of staged) await settleBoundaries(entry);
+    return outcome.done === "written" ? "gateway" : "unchanged";
+  }
+  console.warn(
+    `[openclaw-config] ${label}: ${staged.length} config write(s) (${areas}) could not land as one (${outcome.declined}); making them one by one`,
+  );
+  const skipGateway = outcome.declined === "unavailable";
+  /** Below this index the writes belong to a run that already failed as a batch. */
+  let oneByOneUntil = 0;
+  for (let index = 0; index < staged.length;) {
+    // No gateway: every write below is a CLI start (5-14 s on a Jetson). A run
+    // of plain `config set`s goes as ONE `--batch-json` first — the combined
+    // write `applyConfigSetGroups` always tried before its per-group fallback —
+    // and only a run that fails is made write by write. A batch lands whole or
+    // not at all, so nothing is made twice.
+    const run = skipGateway && index >= oneByOneUntil ? cliBatchableRun(staged, index) : [];
+    if (run.length > 1) {
+      const batch = run.flatMap((entry) => cliBatchEntries(entry.write) ?? []);
+      try {
+        await executeConfigWriteWithCli({ form: "batch", batch }, combinedCliOptions(run));
+        for (const entry of run) await settleBoundaries(entry);
+        index += run.length;
+        continue;
+      } catch {
+        // One by one below, each inside its own boundary.
+        oneByOneUntil = index + run.length;
+      }
+    }
+    const entry = staged[index];
+    if (!boundaryAborted(entry.boundary)) {
+      try {
+        await executeConfigWrite(entry.write, entry.options, skipGateway);
+      } catch (err) {
+        await deliverConfigWriteFailure(entry.boundary, err);
+      }
+    }
+    await settleBoundaries(entry);
+    index += 1;
+  }
+  return "one-by-one";
+}
+
+/**
+ * A write's `config set` argvs if the CLI makes it the same way inside a
+ * `--batch-json` payload, or null: a removal has no batch form, and a single
+ * set carrying a flag the payload cannot carry (`--replace`, `--merge`) means
+ * something else in a batch.
+ */
+function cliBatchEntries(write: ConfigWrite): readonly OpenclawConfigSetArgs[] | null {
+  if (write.form === "unset") return null;
+  if (write.form === "batch") return write.batch;
+  const flags = write.args.filter((arg) => arg.startsWith("--"));
+  return flags.every((flag) => flag === "--json" || flag === "--strict-json") ? [write.args] : null;
+}
+
+/** The CLI options that decide WHICH process makes a write; a batch needs one set of them. */
+function sameCliProcess(a: OpenclawConfigSetOptions, b: OpenclawConfigSetOptions): boolean {
+  return a.uid === b.uid && a.gid === b.gid && a.cwd === b.cwd && isDeepStrictEqual(a.env, b.env);
+}
+
+/** The staged writes from `start` on that one CLI batch can make: batchable, not skipped, one process. */
+function cliBatchableRun(staged: readonly StagedConfigWrite[], start: number): StagedConfigWrite[] {
+  const run: StagedConfigWrite[] = [];
+  for (let index = start; index < staged.length; index++) {
+    const entry = staged[index];
+    if (boundaryAborted(entry.boundary) || !cliBatchEntries(entry.write)) break;
+    if (run.length > 0 && !sameCliProcess(run[0].options, entry.options)) break;
+    run.push(entry);
+  }
+  return run;
+}
+
+/** One run's CLI options: its process, and the longest budget any of its writes was given. */
+function combinedCliOptions(run: readonly StagedConfigWrite[]): OpenclawConfigSetOptions {
+  const budgets = run.map((entry) => entry.options.timeoutMs).filter((ms): ms is number => ms !== undefined);
+  const { uid, gid, cwd, env } = run[0].options;
+  return { uid, gid, cwd, env, ...(budgets.length > 0 ? { timeoutMs: Math.max(...budgets) } : {}) };
+}
+
+/**
+ * Hand a failed write to the `catch` that would have caught it: the innermost
+ * boundary with an `onError`, then — if that handler throws, as a `catch` that
+ * rethrows would — the next one out. Thrown when no boundary takes it.
+ */
+async function deliverConfigWriteFailure(from: ConfigWriteBoundaryNode | null, err: unknown): Promise<void> {
+  let failure = err;
+  for (let handler = handlingBoundary(from); handler; handler = handlingBoundary(handler.parent)) {
+    handler.aborted = true;
+    try {
+      await handler.handlers.onError?.(failure);
+      return;
+    } catch (rethrown) {
+      failure = rethrown;
+    }
+  }
+  throw failure;
+}
+
+interface ConfigWriteScopeStore {
+  transaction: ConfigWriteTransaction | null;
+}
+
+const configWriteScopeStorage = new AsyncLocalStorage<ConfigWriteScopeStore>();
+const configWriteBoundaryStorage = new AsyncLocalStorage<ConfigWriteBoundaryNode>();
+
+/** Failures a flush threw because no boundary took them — see {@link ConfigWriteTransaction.flush}. */
+const fatalConfigWriteFailures = new WeakSet<object>();
+
+/**
+ * The request a transaction may be opened in. Wrapped around a route's whole
+ * handler; nothing changes for the code inside until it calls
+ * {@link beginConfigWriteTransaction}, and a transaction still open when the
+ * handler returns is abandoned.
+ */
+export async function withConfigWriteScope<T>(body: () => Promise<T>): Promise<T> {
+  const scope: ConfigWriteScopeStore = { transaction: null };
+  try {
+    return await configWriteScopeStorage.run(scope, body);
+  } finally {
+    scope.transaction?.abandon();
+  }
+}
+
+/**
+ * Open the request's config write transaction: from here until its
+ * {@link ConfigWriteTransaction.commit}, the config writers stage and the
+ * config readers see what is staged. Outside a {@link withConfigWriteScope}
+ * there is no request to hold one, and the transaction answered stages
+ * nothing — every write is made as it comes, the way it always was.
+ */
+export function beginConfigWriteTransaction(label: string): ConfigWriteTransaction {
+  const transaction = new ConfigWriteTransaction(label);
+  const scope = configWriteScopeStorage.getStore();
+  if (!scope) {
+    console.warn(`[openclaw-config] ${label}: no config write scope around this request; writes are made one by one`);
+    transaction.abandon();
+    return transaction;
+  }
+  if (scope.transaction?.isOpen) throw new Error("A config write transaction is already open in this request.");
+  scope.transaction = transaction;
+  return transaction;
+}
+
+function openConfigWriteTransaction(): ConfigWriteTransaction | null {
+  const transaction = configWriteScopeStorage.getStore()?.transaction;
+  return transaction?.isOpen ? transaction : null;
+}
+
+/** Is a write made here staged rather than made? */
+export function inConfigWriteTransaction(): boolean {
+  return openConfigWriteTransaction() !== null;
+}
+
+/**
+ * Make the open transaction's staged writes now. For a caller about to spawn a
+ * CLI that writes openclaw.json itself, so the staged writes that came first
+ * land first. No transaction, nothing staged: nothing happens.
+ */
+export async function flushConfigWrites(): Promise<void> {
+  await openConfigWriteTransaction()?.flush();
+}
+
+/** `config` as the open transaction would leave it. */
+function overlayConfigWrites(config: OpenClawConfig): OpenClawConfig {
+  return openConfigWriteTransaction()?.overlay(config) ?? config;
 }
 
 /**
@@ -368,11 +1287,46 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   if (openclawIsAbsent()) {
     return Promise.reject(new OpenclawUnavailableError());
   }
+  // The core refuses every command that reads its config while a gateway start
+  // or a doctor run holds the state for maintenance, and says to retry when it
+  // finishes; it refuses before acting, so the command is asked again here,
+  // inside the caller's own timeout. See `@/lib/openclaw-maintenance`. The
+  // first two words name it in the log: they are the verb, never a value.
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
+  const label = `openclaw ${(options.labelArgs ?? args).slice(0, 2).join(" ")}`;
+  // A verb that writes openclaw.json waits out a gateway that is starting: a
+  // write inside its startup admission makes it exit 78 and stay down (see
+  // `@/lib/gateway-start-guard`). This is where the gateway-first write path
+  // falls back to the CLI, so it is where the wait belongs.
+  const held = cliWritesConfig(args) ? holdWhileGatewayStarts(label) : Promise.resolve();
+  return held.then(() => withOpenclawMaintenanceRetry(
+    (remainingMs) => spawnOpenclawOnce(args, { ...options, timeoutMs: remainingMs }),
+    { timeoutMs, label },
+  ));
+}
+
+function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
   const bin = findOpenclawBin();
   const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
-  const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
+  // A `config` child reads and writes THE FILE THIS MODULE READS BACK. The
+  // CLI finds its config from OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR, else
+  // `$OPENCLAW_HOME/.openclaw` (the ACCOUNT home to the CLI, the `.openclaw`
+  // directory itself to ClawBox), else `$HOME/.openclaw`; `CONFIG_PATH` honours
+  // `CLAWBOX_OPENCLAW_HOME` and ClawBox's meaning of `OPENCLAW_HOME`. Unpinned,
+  // a `memory.search` write could land in a file that neither `readConfig` nor
+  // the memory status probe (pinned the same way in clawkeep-memory.ts) reads,
+  // and the core would go on indexing with no embedder. Only `config`: doctor
+  // and the rest keep the environment they always had. A caller's own env wins.
+  const pinConfig = args[0] === "config";
+  const env: NodeJS.ProcessEnv = {
+    HOME: "/home/clawbox",
+    ...process.env,
+    ...(pinConfig ? { OPENCLAW_CONFIG_PATH: CONFIG_PATH, OPENCLAW_STATE_DIR: path.dirname(CONFIG_PATH) } : {}),
+    ...(options.env ?? {}),
+  };
+  if (pinConfig && !(options.env && "OPENCLAW_HOME" in options.env)) delete env.OPENCLAW_HOME;
   const label = `${bin} ${(options.labelArgs ?? args).join(" ")}`;
 
   return new Promise((resolve, reject) => {
@@ -745,7 +1699,8 @@ function loggedConfigAreas(configPaths: readonly string[]): string {
 async function configSetLanded(batch: readonly OpenclawConfigSetArgs[]): Promise<boolean> {
   let config: OpenClawConfig;
   try {
-    config = await readConfigStrict();
+    // The FILE: what a transaction has staged is exactly what is not on disk.
+    config = await readConfigFileStrict();
   } catch {
     return false;
   }
@@ -813,7 +1768,7 @@ async function configUnsetLanded(configPath: string): Promise<boolean> {
   // state to report, not to bless.
   if (!fsSync.existsSync(CONFIG_PATH)) return false;
   try {
-    return valueAtConfigPath(await readConfigStrict(), segments) === undefined;
+    return valueAtConfigPath(await readConfigFileStrict(), segments) === undefined;
   } catch {
     return false;
   }
@@ -855,36 +1810,19 @@ export function configSetBatchLabelArgs(batch: readonly OpenclawConfigSetArgs[])
  * atomicity — a batch either lands whole or not at all — so a caller that needs
  * two failures kept apart must issue two batches, not one.
  *
- * A single-entry batch is sent through {@link runOpenclawConfigSet} unchanged:
- * there is nothing to save, and the plain form is the one every other caller
- * has been using.
+ * A single-entry batch is sent as a plain `config set`: there is nothing to
+ * save, and the plain form is the one every other caller has been using.
+ *
+ * The running gateway is asked first, the whole batch as one exact
+ * `config.patch` ({@link configWritesViaGateway}) — atomic the same way — and
+ * inside a transaction the batch is staged for its one commit.
  */
 export async function runOpenclawConfigSetBatch(
   batch: readonly OpenclawConfigSetArgs[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
   if (batch.length === 0) return;
-  if (batch.length === 1) {
-    await runOpenclawConfigSet(batch[0], options);
-    return;
-  }
-  if (await configSetViaGateway(batch, options)) return;
-  const payload = JSON.stringify(batch.map(parseConfigSetArgs));
-  await runConfigSetVerified(batch, options, () =>
-    withConfigMutationRetry(
-      (timeoutMs) =>
-        spawnOpenclaw(["config", "set", "--batch-json", payload], {
-          labelArgs: configSetBatchLabelArgs(batch),
-          timeoutMs,
-          uid: options.uid,
-          gid: options.gid,
-          cwd: options.cwd,
-          env: options.env,
-        }).then(() => undefined),
-      options,
-      "runOpenclawConfigSetBatch",
-    ),
-  );
+  await runConfigWrite(batch.length === 1 ? { form: "set", args: batch[0] } : { form: "batch", batch }, options);
 }
 
 /**
@@ -906,11 +1844,19 @@ export async function runOpenclawConfigSetBatch(
  * by the file rather than assumed failed: the removal is reported as done only
  * when the path is provably gone from a config this process could read. See
  * {@link configUnsetLanded}.
+ *
+ * Like it too, the running gateway is asked first — a removal is a `null` in
+ * a merge patch — and an absent path is left for the CLI to refuse in its own
+ * words. Inside a transaction the removal is staged for its commit.
  */
 export async function runOpenclawConfigUnset(
   configPath: string,
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
+  await runConfigWrite({ form: "unset", path: configPath }, options);
+}
+
+async function unsetWithCli(configPath: string, options: OpenclawConfigSetOptions): Promise<void> {
   try {
     await withConfigMutationRetry(
       (timeoutMs) =>
@@ -1156,6 +2102,9 @@ export async function applyModelOverrideToAllAgentSessions(
   /** The legacy-file mutation. */
   const applyToSession = (session: Record<string, unknown>): boolean => {
     if (keepsUserPick(session)) return false;
+    // Read before the override below rewrites it: the provider this session's
+    // reasoning level was chosen for.
+    const previousProvider = session.modelProvider ?? session.providerOverride;
     session.providerOverride = update.provider;
     session.modelOverride = update.modelId;
     session.modelOverrideSource = source;
@@ -1171,9 +2120,16 @@ export async function applyModelOverrideToAllAgentSessions(
     // next turn with `thinkingLevel "high" is not supported for llamacpp/…
     // (use off)`. Only rewrite when the existing level is actually
     // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
+    //
+    // The one exception is a move ONTO the on-device model from another
+    // provider: Gemma takes `high` too (LLAMACPP_REASONING_COMPAT), but there
+    // it means thinking on every turn at about twice the answer time, so a
+    // level picked for a cloud model is not carried over — the session starts
+    // at the local model's own default (`off`) and the owner opts in there.
     if (isThinkingLevel(session.thinkingLevel)) {
       const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
-      if (!reasoning.levels.includes(session.thinkingLevel)) {
+      const ontoDevice = update.provider === "llamacpp" && previousProvider !== "llamacpp";
+      if (ontoDevice || !reasoning.levels.includes(session.thinkingLevel)) {
         session.thinkingLevel = reasoning.default;
       }
     }
@@ -1186,6 +2142,7 @@ export async function applyModelOverrideToAllAgentSessions(
   // reads, and is left alone below.
   const migratedAgents = new Set<string>();
   const model = `${update.provider}/${update.modelId}`;
+  const localThinkingDefault = getProviderReasoningConfig(update.provider, model).default;
   for (const agentId of listAgentIds(agentsDir)) {
     if (!sessionStorePath(agentId, agentsDir)) continue;
     migratedAgents.add(agentId);
@@ -1194,12 +2151,31 @@ export async function applyModelOverrideToAllAgentSessions(
       console.warn(`[openclaw-config] could not list the sessions of agent ${agentId}; they keep their previous model`);
       continue;
     }
-    const targets = rows
-      .filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry))
-      .map(({ key }) => ({ key, agentId }));
-    if (targets.length === 0) continue;
+    const eligible = rows.filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry));
+    if (eligible.length === 0) continue;
+    // The legacy path's rule above, the core's way: a sticky level picked for
+    // another provider is not carried onto the on-device model, so those
+    // sessions get the local default in the same patch. The core folds only a
+    // level the new model cannot take, and Gemma takes `high`.
+    const resetsThinking = (entry: Record<string, unknown>): boolean =>
+      update.provider === "llamacpp"
+      && (entry.modelProvider ?? entry.providerOverride) !== "llamacpp"
+      && isThinkingLevel(entry.thinkingLevel)
+      && entry.thinkingLevel !== localThinkingDefault;
+    const batches = [
+      { targets: eligible.filter(({ entry }) => !resetsThinking(entry)), thinkingLevel: undefined },
+      { targets: eligible.filter(({ entry }) => resetsThinking(entry)), thinkingLevel: localThinkingDefault },
+    ].filter((batch) => batch.targets.length > 0);
+    const outcomes = [];
+    for (const batch of batches) {
+      outcomes.push(...await patchSessionModels(
+        batch.targets.map(({ key }) => ({ key, agentId })),
+        model,
+        { call: callGateway, ...(batch.thinkingLevel === undefined ? {} : { thinkingLevel: batch.thinkingLevel }) },
+      ));
+    }
     let patched = 0;
-    for (const outcome of await patchSessionModels(targets, model, { call: callGateway })) {
+    for (const outcome of outcomes) {
       if (outcome.ok) {
         patched += 1;
         continue;
@@ -1302,6 +2278,8 @@ export interface OpenClawConfig {
   };
   tools?: {
     profile?: string;
+    /** OpenClaw's Tool Search; unset means on. Off while the primary is on the device (src/lib/local-tool-search.ts). */
+    toolSearch?: boolean | { enabled?: boolean; mode?: string; [key: string]: unknown };
     web?: { search?: { enabled?: boolean } };
     // Media understanding — the surface a channel voice note is transcribed
     // through. Not a models[] row: it has its own endpoint and its own ordered
@@ -1355,7 +2333,9 @@ export interface OpenClawConfig {
       // `imageGenerationModel`; nothing aliases the two.
       imageModel?: ToolModelSlot;
       workspace?: string;
-      compaction?: { reserveTokensFloor?: number };
+      // `model`: OpenClaw 2026.10's summarization model, written while the
+      // primary is on the box (src/lib/local-compaction-model.ts).
+      compaction?: { reserveTokensFloor?: number; model?: string };
     };
   };
 }
@@ -1441,11 +2421,18 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 export async function readConfig(): Promise<OpenClawConfig> {
   // Same file, same root rule as the writers' reader — an unreadable file is
   // the one place they differ: a reader gets `{}`, a writer gets the throw.
+  //
+  // Inside a config write transaction the answer is the file with the staged
+  // writes laid over it — the config the commit will leave — so a step that
+  // reads what an earlier step of the same request wrote still sees it. An
+  // unreadable file stays `{}`: there is nothing to lay them over.
+  let config: OpenClawConfig;
   try {
-    return await readConfigForWrite();
+    config = await readConfigFileForWrite();
   } catch {
     return {};
   }
+  return overlayConfigWrites(config);
 }
 
 /**
@@ -1465,8 +2452,16 @@ export async function readConfig(): Promise<OpenClawConfig> {
  *
  * So: ENOENT returns `{}` (there is nothing to read, and nothing to repair),
  * and every other read or parse failure throws.
+ *
+ * Inside a config write transaction the staged writes are laid over the file,
+ * as for {@link readConfig}.
  */
 export async function readConfigStrict(): Promise<OpenClawConfig> {
+  return overlayConfigWrites(await readConfigFileStrict());
+}
+
+/** {@link readConfigStrict} of the FILE, whatever a transaction has staged. */
+async function readConfigFileStrict(): Promise<OpenClawConfig> {
   const parsed = await parseConfigFileIfPresent();
   if (parsed === undefined) return {};
   // Deliberately the OPPOSITE of readConfig's answer for the same file. This
@@ -1500,8 +2495,18 @@ export async function readConfigStrict(): Promise<OpenClawConfig> {
  * {@link ensurePlainObject}). That last case is the one difference from
  * {@link readConfigStrict}, whose callers are about to SKIP a repair and must
  * not be told "already clean" by a root that is not a config.
+ *
+ * A writer that reads here writes the whole file back, so an open config write
+ * transaction is flushed first: what it staged lands — validated — before the
+ * read, and the write cannot carry it unvalidated or drop it.
  */
 export async function readConfigForWrite(): Promise<OpenClawConfig> {
+  await flushConfigWrites();
+  return readConfigFileForWrite();
+}
+
+/** {@link readConfigForWrite} without the flush: the file as it is. */
+async function readConfigFileForWrite(): Promise<OpenClawConfig> {
   const parsed = await parseConfigFileIfPresent();
   // The ROOT is a container too, and it is the one every helper below stands
   // on. A file holding `[]` parses fine, so without this the writers attach
@@ -1653,7 +2658,46 @@ async function writeSecretJsonAtomically(file: string, data: unknown): Promise<v
   await fs.rename(tmpPath, file);
 }
 
+/**
+ * The config file's content, as a digest; "absent" when there is no file, and
+ * "unreadable" when there is one this process could not read. The content
+ * alone: an in-place rewrite of the same size inside one mtime tick is a
+ * change, while a rename that left the same bytes, or a touch, is not one. The
+ * file is small and usually in the page cache; one synchronous read per
+ * whole-file write.
+ */
+function configFileFingerprint(): string {
+  try {
+    return createHash("sha256").update(fsSync.readFileSync(CONFIG_PATH)).digest("hex");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable";
+  }
+}
+
 export async function writeConfig(config: OpenClawConfig): Promise<void> {
+  // A whole-file write inside an open config write transaction: what the
+  // transaction staged lands first (validated), so this write — read through
+  // the overlay or not — neither carries it unvalidated nor drops it.
+  await flushConfigWrites();
+  // Never under a gateway that is starting (`@/lib/gateway-start-guard`). The
+  // caller read the file before this wait; a file that moved during it (the
+  // gateway's own start writes it) is not written over with that snapshot, and
+  // neither is one that could not be read: unread is not unchanged.
+  const readAs = configFileFingerprint();
+  if (await holdWhileGatewayStarts("writeConfig")) {
+    const nowAs = configFileFingerprint();
+    if (nowAs !== readAs || nowAs === "unreadable") throw new ConfigChangedWhileHeldError();
+  }
+  await writeConfigFile(config);
+}
+
+/**
+ * The whole-file write alone, for a caller inside the core's config lock that
+ * already flushed and waited out a starting gateway before taking it: holding
+ * again with the lock taken would keep the gateway's own pre-start CLI writes
+ * out of the lock for the whole pre-start.
+ */
+async function writeConfigFile(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   await writeSecretJsonAtomically(CONFIG_PATH, config);
 }
@@ -1905,6 +2949,12 @@ async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, own
  * CLI mutations as well as other setup writers that acquire this lock.
  */
 async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
+  // BEFORE the lock: the flush is a gateway or CLI write, and those take this
+  // same lock — flushed from inside it, each would wait on the other.
+  await flushConfigWrites();
+  // Also before it: a starting gateway is waited out with the lock free, so
+  // the read inside `mutate` is taken after the wait, not before it.
+  await holdWhileGatewayStarts("locked config write");
   const lockPath = untraced(`${CONFIG_PATH}.lock`);
   const reclaimGuardPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + 30_000;
@@ -1990,7 +3040,7 @@ export async function setPrimaryModelWithoutCatalogValidation(modelRef: string):
     const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
     const model = (defaults.model ??= {}) as Record<string, unknown>;
     model.primary = modelRef;
-    await writeConfig(config);
+    await writeConfigFile(config);
   });
 }
 
@@ -2010,7 +3060,7 @@ export async function repairClawboxAiFlashModelPolicy(): Promise<boolean> {
     const allow = config.agents?.defaults?.modelPolicy?.allow;
     if (!allow || !needsClawboxAiFlashPolicyRepair(config)) return false;
     allow.push(CLAWBOX_AI_MODEL_BY_TIER.flash);
-    await writeConfig(config);
+    await writeConfigFile(config);
     return true;
   });
 }
@@ -2741,13 +3791,27 @@ export async function listTelegramPairingRequests(): Promise<TelegramPairingRequ
 }
 
 /**
+ * The Telegram channel block, for the readers below to find this box's bot in
+ * — the account telegram-bot-identity.ts reports (see defaultTelegramAccount),
+ * not the literal "default", which on a multi-account channel can be an
+ * account nobody talks to. The lenient reader: an unreadable openclaw.json
+ * reads as no block, whose account is "default", the answer every box had
+ * before.
+ */
+async function readTelegramChannel(): Promise<unknown> {
+  return (await readConfig()).channels?.telegram;
+}
+
+/**
  * Pending Telegram DM pairing requests read straight from OpenClaw's pairing
  * store — a plain read with no CLI cold-start, so it's cheap enough to poll
  * for the desktop "new request" popup. OpenClaw 2 answers from the state
  * database; the legacy file path mirrors the allowFrom store, with the default
- * account unsuffixed (`telegram-pairing.json`).
+ * account unsuffixed (`telegram-pairing.json`). `account` defaults to the
+ * box's bot, as {@link readTelegramAllowFrom}'s does.
  */
-export async function readTelegramPairingRequests(account = "default"): Promise<TelegramPairingRequest[]> {
+export async function readTelegramPairingRequests(account?: string): Promise<TelegramPairingRequest[]> {
+  account ??= defaultTelegramAccount(await readTelegramChannel()).id;
   const fromStore = readPairingRequests("telegram", account);
   if (fromStore) return withDerivedNames(fromStore);
   const file = path.join(
@@ -2777,16 +3841,38 @@ export async function approveTelegramPairing(code: string): Promise<void> {
 }
 
 /**
- * Approved Telegram sender ids, read from the allowFrom store (empty on any
- * failure). `account` is OpenClaw's channel account id; ClawBox is single-account
- * so it defaults to "default". The v2 state database wins whenever it exists:
- * it is what the gateway enforces, and a migrated box's leftover JSON is a
- * stale copy that must not shadow it. Without one, the legacy file
- * (`telegram-default-allowFrom.json`) is the store.
+ * Approved Telegram sender ids for one channel account (empty on any failure):
+ * the senders the pairing store has approved, then the numeric ids the
+ * account's config `allowFrom` lets in — its own list, else the channel
+ * root's, which is how OpenClaw inherits it. `account` is OpenClaw's channel
+ * account id and defaults to this box's bot (see readTelegramChannel); a
+ * caller that already holds the bot's account (telegram-bot-identity.ts
+ * reports it) passes it, so the senders and the token come from one account.
+ *
+ * The v2 state database wins whenever it exists: it is what the gateway
+ * enforces, and a migrated box's leftover JSON is a stale copy that must not
+ * shadow it. Without one, the legacy file (`telegram-default-allowFrom.json`)
+ * is the store.
  */
-export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
+export async function readTelegramAllowFrom(account?: string): Promise<string[]> {
+  const channel = await readTelegramChannel();
+  account ??= defaultTelegramAccount(channel).id;
+  // Only senders who can actually DM the bot: a pairing-store approval admits
+  // one under `dmPolicy: "pairing"` alone (see telegramAccountDmPolicy). Under
+  // `pairing` it admits them whatever a top-level allowFrom lists, so it is not
+  // filtered by that list — doing so would drop an owner who paired normally.
+  const policy = telegramAccountDmPolicy(channel, account);
+  if (policy === "disabled") return [];
+  const approved = policy === "pairing" ? await readPairedTelegramSenders(account) : [];
+  for (const id of telegramAccountAllowFrom(channel, account)) {
+    if (!approved.includes(id)) approved.push(id);
+  }
+  return approved;
+}
+
+async function readPairedTelegramSenders(account: string): Promise<string[]> {
   const fromStore = readPairingAllowEntries("telegram", account);
-  if (fromStore) return fromStore;
+  if (fromStore) return [...fromStore];
   const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { allowFrom?: unknown };
@@ -2807,6 +3893,10 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
  * the gateway enforces, so this throws — before the legacy files are touched,
  * leaving the state exactly as it was — and the caller must not report a
  * reset that did not happen.
+ *
+ * Unlike the readers above, `account` stays "default" rather than following the
+ * box's bot: this is the reset for setTelegramToken's write, and the root
+ * `botToken` it writes is the default account's credential in OpenClaw.
  */
 export async function clearTelegramPairingState(account = "default"): Promise<void> {
   if (!clearPairingState("telegram", account)) {
@@ -2862,11 +3952,10 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
 // plugin runtime)"), and a plugin flipped through the gateway's own
 // `config.patch` was measured applying in 400 ms with the process id unchanged
 // (a box, 2026-09-17). So `src/app/setup-api/chat/model/route.ts` restarts
-// nothing. The ONE caller that still does is
-// `src/app/setup-api/ai-models/configure/route.ts`, and not for this write:
-// that route also rewrites provider entries and auth profiles during a
-// first-run save, where one restart is cheaper than reasoning about which of
-// the keys in that batch hot-applies.
+// nothing, and since TASK-1535 neither does
+// `src/app/setup-api/ai-models/configure/route.ts` for a save whose changes
+// all hot-apply: it classifies the batch with the core's reload table
+// (`@/lib/gateway-hot-apply`) instead of restarting to be safe.
 
 /**
  * Does this box hold an Anthropic credential the owner has not switched off —
@@ -2948,24 +4037,29 @@ export async function setProviderPlugins(activeProvider: string): Promise<string
   const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
     ?.entries?.anthropic?.enabled ?? true;
   if (current === wanted) return null;
-  try {
-    await runOpenclawConfigSet([ANTHROPIC_PLUGIN_ENABLED_KEY, wanted ? "true" : "false", "--json"]);
-    // WHICH provider's catalogue just changed, for the caller to pass on. This
-    // gate governs exactly one plugin, and switching it off is what empties
-    // `openclaw models list --provider anthropic`; returning the id keeps that
-    // fact here rather than hand-copied into every call site, and returning
-    // `null` on the no-op paths means a caller cannot announce a change that
-    // did not happen.
-    return "anthropic";
-  } catch (err) {
-    // Non-fatal: a gate left wrong costs prep seconds or one catalog refresh,
-    // never correctness, and the next switch or save re-applies it.
-    console.warn(
-      "[openclaw-config] Failed to toggle anthropic plugin:",
-      err instanceof Error ? err.message : err,
-    );
-  }
-  return null;
+  let failed = false;
+  await configWriteBoundary(
+    {
+      // Non-fatal: a gate left wrong costs prep seconds or one catalog refresh,
+      // never correctness, and the next switch or save re-applies it.
+      onError: (err) => {
+        failed = true;
+        console.warn(
+          "[openclaw-config] Failed to toggle anthropic plugin:",
+          err instanceof Error ? err.message : err,
+        );
+      },
+    },
+    () => runOpenclawConfigSet([ANTHROPIC_PLUGIN_ENABLED_KEY, wanted ? "true" : "false", "--json"]),
+  );
+  // WHICH provider's catalogue just changed, for the caller to pass on. This
+  // gate governs exactly one plugin, and switching it off is what empties
+  // `openclaw models list --provider anthropic`; returning the id keeps that
+  // fact here rather than hand-copied into every call site, and returning
+  // `null` on the no-op paths means a caller cannot announce a change that
+  // did not happen. Inside a config write transaction the flip is STAGED, and
+  // a caller announces it once the transaction has committed.
+  return failed ? null : "anthropic";
 }
 
 /**
@@ -3029,16 +4123,52 @@ export function gatewayIsAbsent(): boolean {
 export type OpenclawDoctorFixOutcome =
   | "completed"
   | "blocked-by-legacy-exec-approvals"
-  | "blocked-by-service-ownership";
+  | "blocked-by-service-ownership"
+  /** Doctor was not run: the gateway's stop has not finished (an x64 bridge's drain). */
+  | "gateway-still-stopping"
+  /** Doctor was not run: the gateway is up or coming up (another surface restarted it). */
+  | "gateway-not-stopped";
 
 export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
   if (gatewayIsAbsent()) return "completed";
+  // A stop that outlives its client is waited for rather than raced: on an
+  // x64 bridge the stop waits for OpenClaw's own drain, and doctor started
+  // beside a gateway still draining finds a second owner of its state. Doctor
+  // runs only beside a unit that is down; a gateway still stopping, or there
+  // at all, is answered as an outcome the caller words for the owner, and the
+  // caller restores the unit. The waits are the factory reset's, sized so the
+  // whole answer reaches the page inside the tunnel's ~100 s: client 15 +
+  // settle 45 + the last show 10, then the caller's rollback and, for either
+  // refusal, a restore that only asks (reset-failed, a 5 s restart client, one
+  // show).
+  const stopAskedAt = Date.now();
+  let state: UnitState | null = null;
+  let stillStopping = false;
   try {
-    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
-      timeout: 30000,
+    const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: 15_000,
+      settleBudgetMs: 45_000,
     });
+    if (stop.kind === "in-flight") stillStopping = true;
+    else if (stop.kind === "settled") state = stop.state;
   } catch {
-    /* older sudoers or already stopped — doctor itself reports real trouble */
+    // A stop that failed outright (an older sudoers, or a stop cancelled by a
+    // restart another surface queued) proves nothing either way, so the unit
+    // is asked. Only a unit that cannot be asked at all keeps the old leniency
+    // of going on: doctor itself reports real trouble.
+    state = await readUnitState("clawbox-gateway.service");
+  }
+  if (state && !unitIsStopped(state)) {
+    if (state.activeState === "deactivating") stillStopping = true;
+    else {
+      console.warn(`[openclaw-config] doctor --fix not run: the gateway did not stop (${describeUnitState(state)})`);
+      return "gateway-not-stopped";
+    }
+  }
+  if (stillStopping) {
+    console.warn(`[openclaw-config] doctor --fix not run: the gateway was still stopping after ${Math.round((Date.now() - stopAskedAt) / 1000)}s`);
+    return "gateway-still-stopping";
   }
   try {
     // The stop above is necessary and was never sufficient: the core refused
@@ -3046,8 +4176,12 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
     // environment is the other half — see `@/lib/openclaw-doctor-ownership`.
     // It goes last in `spawnOpenclaw`'s merge, so an inherited supervisor mode
     // cannot put the refusal back.
+    //
+    // The bound grows with the agent databases, as the update's does: doctor
+    // reads every one of them, a flat 180 s stopped it half-way on a box with
+    // a few GB of them, and a stopped doctor here is a rolled-back sign-in.
     await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], {
-      timeoutMs: 180_000,
+      timeoutMs: doctorFixBudgetMs(await openclawDatabaseBytes(OPENCLAW_HOME).catch(() => 0), 180_000),
       env: withExternalGatewaySupervisor(),
     });
   } catch (err) {
@@ -3100,9 +4234,10 @@ export class GatewayNotReadyError extends Error {
  * Erring long is the point: a slow but healthy restart reported as a failure
  * would be the exact inverse of the bug this wait exists to fix.
  *
- * The wait begins AFTER `systemctl restart` returns, so it covers only the new
- * process's startup — not the drain (`TimeoutStopSec=30`) and not the pre-start
- * (`TimeoutStartSec=600`, already bounded by this call's own 60 s exec budget).
+ * The wait begins AFTER the restart job has finished, so it covers only the new
+ * process's startup — not the drain and not the pre-start. A job that outlives
+ * the call's 60 s client (OpenClaw's own drain on an x64 bridge, a slow
+ * pre-start) is waited for on the unit first; see `assertRestartLanded`.
  *
  * Read per call rather than frozen at import, so a box that needs longer can be
  * given it without a rebuild. Nothing in the repo sets `GATEWAY_READY_WAIT_MS`
@@ -3118,6 +4253,17 @@ export function gatewayReadyWaitMs(): number {
   const override = Number(process.env.GATEWAY_READY_WAIT_MS);
   return Number.isFinite(override) && override > 0 ? override : 30000;
 }
+
+/**
+ * How long a gateway starting COLD — just installed or provisioned, its
+ * plugins loading for the first time — is given to bind its port: install.sh's
+ * own `wait_for_gateway_port` budget (`CLAWBOX_GATEWAY_READY_BUDGET_S`, 180 s),
+ * so the web server never calls a gateway dead that the installer would still
+ * be waiting for. On 2026-10-14 the gateway an edition swap had just put on the
+ * box was `ready` after 35.5 s, and the 30 s a warm restart is given reported
+ * its Telegram bot as unconfirmed. A caller passes it as `readyWaitMs`.
+ */
+export const GATEWAY_COLD_START_WAIT_MS = 180_000;
 
 // Validated: this is the port awaitGatewayReady hands to waitForPortOpen, and
 // `net.Socket.connect` throws ERR_SOCKET_BAD_PORT synchronously on a malformed
@@ -3135,7 +4281,34 @@ export interface RestartGatewayOptions {
    * legacy-state recovery it exists to perform.
    */
   awaitReady?: boolean;
+  /**
+   * The readiness budget for this one restart, when the caller can afford to
+   * wait longer than {@link gatewayReadyWaitMs} (a background caller nobody is
+   * waiting on). Never shorter than that default.
+   */
+  readyWaitMs?: number;
+  /**
+   * How long a restart that outlived its client is waited for on the
+   * unit. Default {@link GATEWAY_RESTART_SETTLE_MS}, sized for a request a
+   * person is waiting on: past it the answer is GatewayNotReadyError ("still
+   * restarting") and the restart lands on its own. The updater, which nobody
+   * waits on, passes the unit's whole stop-and-start budget.
+   */
+  restartSettleMs?: number;
+  /**
+   * The `systemctl restart` client's own bound. Default
+   * {@link GATEWAY_RESTART_CLIENT_MS}. A caller that only needs systemd to
+   * TAKE the restart, behind a stop that is still draining, passes a few
+   * seconds with `restartSettleMs: 0`: a client still waiting then means the
+   * job is queued, and the answer is GatewayNotReadyError.
+   */
+  restartClientMs?: number;
 }
+
+/** See {@link RestartGatewayOptions.restartSettleMs}: with the 60 s client, under a tunnel's ~100 s. */
+export const GATEWAY_RESTART_SETTLE_MS = 30_000;
+/** See {@link RestartGatewayOptions.restartClientMs}. */
+export const GATEWAY_RESTART_CLIENT_MS = 60_000;
 
 /**
  * Block until the gateway is listening again, or say it never came back.
@@ -3161,7 +4334,8 @@ export interface RestartGatewayOptions {
  */
 async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> {
   if (options.awaitReady === false) return;
-  const budgetMs = gatewayReadyWaitMs();
+  const requested = options.readyWaitMs;
+  const budgetMs = Math.max(gatewayReadyWaitMs(), Number.isFinite(requested) && requested! > 0 ? requested! : 0);
   // 250 ms, not the updater's 1 500 ms: a person is waiting on this one, and
   // OpenClaw polls the same port at 200 ms for the same question. A loopback
   // connect that is refused costs nothing.
@@ -3209,6 +4383,19 @@ export function gatewayRestartGeneration(): number {
 
 export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // Held for the whole call, so `/setup-api/gateway/health` does not call the
+  // OLD process "available" while systemd is still stopping it — the window a
+  // page waiting on a restart it was answered early about would otherwise
+  // mistake for the gateway being back (see `@/lib/gateway-restart-tracker`).
+  const restartOver = markGatewayRestartBegun();
+  try {
+    await restartGatewayOnce(options);
+  } finally {
+    restartOver();
+  }
+}
+
+async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void> {
   // The FIRST of the two bumps — see gatewayRestartCount. Before the restart,
   // so a row read from the gateway that is about to go down is already stale.
   gatewayRestartCount += 1;
@@ -3225,16 +4412,19 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
     /* older sudoers, or nothing to reset — the restart below tells the truth */
   }
   try {
-    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
-      timeout: 60000,
+    const restart = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: options.restartClientMs ?? GATEWAY_RESTART_CLIENT_MS,
+      settleBudgetMs: options.restartSettleMs ?? GATEWAY_RESTART_SETTLE_MS,
     });
+    assertRestartLanded(restart, "clawbox-gateway.service");
     await awaitGatewayReady(options);
     // The SECOND bump: everything read while this restart was in flight belongs
     // to the generation that is now behind us.
     gatewayRestartCount += 1;
     return;
   } catch (err) {
-    if (err instanceof GatewayNotReadyError) throw err;
+    if (err instanceof GatewayNotReadyError || err instanceof GatewayRestartFailedError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     // Fall back only when this installation genuinely has no ClawBox system
     // unit. A runtime mask is an update/factory-reset lock: starting the legacy
@@ -3245,14 +4435,18 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
       /clawbox-gateway\.service[^\n]*(?:not found|could not be found)/i.test(message);
     if (!systemGatewayMasked && systemGatewayMissing) {
       try {
-        await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
-          timeout: 60000,
+        const restart = await runUnitJob("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
+          unit: "openclaw-gateway.service",
+          user: true,
+          timeoutMs: options.restartClientMs ?? GATEWAY_RESTART_CLIENT_MS,
+          settleBudgetMs: options.restartSettleMs ?? GATEWAY_RESTART_SETTLE_MS,
           env: {
             ...process.env,
             HOME: process.env.HOME || "/home/clawbox",
             XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`,
           },
         });
+        assertRestartLanded(restart, "openclaw-gateway.service");
         // The legacy user unit serves the same port, so it owes the same proof.
         await awaitGatewayReady(options);
         gatewayRestartCount += 1;
@@ -3260,7 +4454,9 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
       } catch (fallbackErr) {
         // A gateway that was restarted but never came back must not be reported
         // as the missing-unit error that sent us down this branch.
-        if (fallbackErr instanceof GatewayNotReadyError) throw fallbackErr;
+        if (fallbackErr instanceof GatewayNotReadyError || fallbackErr instanceof GatewayRestartFailedError) {
+          throw fallbackErr;
+        }
         console.error(
           "[openclaw-config] Failed to restart fallback OpenClaw user gateway:",
           fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
@@ -3273,6 +4469,40 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
     );
     throw err;
   }
+}
+
+/**
+ * What a restart that outlived its client came to. The client returning is
+ * systemd's own answer and needs nothing more. A client killed by that
+ * deadline left the job running (see `@/lib/gateway-unit-job`): the restart
+ * landed when the job finished with the unit active, failed when it finished
+ * any other way, and is still going when the job outlasted the wait, which is
+ * the not-back-yet answer GatewayNotReadyError already carries. A unit systemd
+ * never answered about is none of those, and is reported as unconfirmed.
+ */
+function assertRestartLanded(outcome: UnitJobOutcome, unit: string): void {
+  if (outcome.kind === "returned") return;
+  const seconds = Math.round(outcome.waitedMs / 1000);
+  // Never read once: "could not look" is not "still restarting", and callers
+  // take GatewayNotReadyError as a restart systemd holds.
+  if (outcome.kind === "in-flight" && outcome.state === null) {
+    throw new GatewayRestartFailedError(
+      `The gateway's restart could not be confirmed: systemd did not answer about ${unit} after the restart's client gave up.`,
+    );
+  }
+  if (outcome.kind === "in-flight") {
+    console.error(`[openclaw-config] ${unit} was still restarting ${seconds}s after its client gave up`);
+    throw new GatewayNotReadyError(
+      `the gateway is still restarting (${unit} has not finished after ${seconds}s more); it comes back on its own when the old one has drained`,
+    );
+  }
+  if (outcome.state.activeState === "active") {
+    console.log(`[openclaw-config] ${unit} restart landed ${seconds}s after its client gave up`);
+    return;
+  }
+  throw new GatewayRestartFailedError(
+    `The gateway did not start again after the restart: ${unit} is ${describeUnitState(outcome.state)}. Its service log names the cause.`,
+  );
 }
 
 /*

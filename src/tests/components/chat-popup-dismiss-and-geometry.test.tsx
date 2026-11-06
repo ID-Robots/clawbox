@@ -297,18 +297,6 @@ describe("the floating chat when the window changes size", () => {
     return popup;
   }
 
-  /** jsdom has no layout: the rect follows the inline style, the way a browser's would. */
-  function followStyleRect(el: HTMLElement) {
-    vi.spyOn(el, "getBoundingClientRect").mockImplementation(() => {
-      const left = Number.parseFloat(el.style.left) || 0;
-      const top = 200;
-      return {
-        x: left, y: top, left, top, right: left + SIZE.w, bottom: top + SIZE.h,
-        width: SIZE.w, height: SIZE.h, toJSON: () => ({}),
-      } as DOMRect;
-    });
-  }
-
   it("moves with the mascot's place when the window is narrowed, and back when it is widened", async () => {
     resizeTo(1920, 1080);
     const popup = await mountSettled(<ChatPopup isOpen onClose={() => {}} mascotX={85} />);
@@ -320,16 +308,6 @@ describe("the floating chat when the window changes size", () => {
 
     resizeTo(1920, 1080);
     expect(popup.style.left).toBe(`${anchoredLeft(1920)}px`);
-  });
-
-  it("tells the desktop where it moved to, so its notices dodge the new place", async () => {
-    resizeTo(1920, 1080);
-    const onFloatingRectChange = vi.fn();
-    const popup = await mountSettled(<ChatPopup isOpen onClose={() => {}} mascotX={85} onFloatingRectChange={onFloatingRectChange} />);
-    followStyleRect(popup);
-
-    resizeTo(1280, 800);
-    expect(onFloatingRectChange).toHaveBeenLastCalledWith(expect.objectContaining({ left: anchoredLeft(1280) }));
   });
 
   it("stays where the owner put it once it has been dragged", async () => {

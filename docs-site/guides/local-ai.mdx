@@ -41,8 +41,17 @@ Rows are grouped by job: *AI agent model*, *Voice (text to speech)*, *Speech to 
 row for a model that is installed and running, so you can see what a model costs before you keep it.
 
 <Frame caption="Settings → Local AI on an OpenClaw-edition box">
-  <img src="/images/local-ai.webp" alt="The Local AI panel, with rows for the agent model, voice, speech to text and other models, each showing what it is doing." />
+  <img src="/images/4.3/settings-local-ai.png" alt="Settings → Local AI: the Local-only mode switch, Gemma 4 ready as the agent's on-box fallback, the Kokoro voice switched off, and Whisper speech to text off until you speak" />
 </Frame>
+
+### Installs run in the background
+
+Every **Install** is accepted at once and runs as a background task with a card in the
+desktop's corner, so you can close Settings while it works. An install that cannot run beside
+what is already running waits its turn — its row says what it waits for, for example
+"Queued — starts after Kokoro" — and starts by itself when that work ends. Model downloads
+work the same way. **Cancel** on the corner card removes a task that is still waiting and stops a
+model download; an install that is already running as a system step finishes.
 
 <Warning>
 **Uninstall** is not offered while Gemma is the primary model — pick another primary
@@ -57,8 +66,22 @@ update puts it back: it is the one model ClawBox installs on every box.
   period is slower than the ones that follow.
 - **Its reasoning control depends on the edition.** On the **Hermes** edition it is a
   two-state switch — *Thinking off* / *Thinking on* — rather than an effort scale, because
-  that is what its backend accepts. On the **OpenClaw** edition the model takes no
-  reasoning level at all, so no reasoning pill is shown while it is answering.
+  that is what its backend accepts. On the **OpenClaw** edition it is *Off* / *High*:
+  High makes Gemma think before it answers, which takes about twice as long and helps
+  most on multi-step questions. It starts at Off in every new chat and on your channels;
+  pick High for a hard question, or start one message with `/think high`.
+- **On the OpenClaw edition, Gemma works in a lean mode.** A model this small cannot
+  follow the full instructions and tool list a cloud model gets, so while Gemma answers it
+  gets a short brief — reply in the language you wrote in, do what you ask instead of
+  asking back, keep it short — and six tools: read and write files, make a web app, read a
+  web page, search the web, and open a page in the browser. While Gemma is your primary
+  model, OpenClaw's tool search is off so it sees those tools directly. Switch back to a
+  cloud model and it gets the full instructions and every tool again.
+- **On the Hermes edition, Gemma works in the same lean mode** — the same short brief and
+  the same six tools, shown to it directly, with thinking off unless you switch it on. It
+  does not matter whether Gemma is your default model or you picked it in the chat header.
+  Hermes needs a model window of at least 64K tokens, so while Hermes is your assistant
+  Gemma runs with a 64K window instead of 32K.
 - **Turning a local model on makes it available. It does not take over.** Making it your
   default is a separate, explicit choice.
 - **Kokoro** starts cold: the first sound can take fifteen seconds or more unless you
@@ -81,6 +104,11 @@ provider off, fallbacks included, and switching it back restores the providers i
 Until the local model has one of those two roles the switch is not drawn — there would be
 nothing for it to route to.
 
+On OpenClaw, installing or switching Local AI and the local-only switch take effect without
+restarting the assistant wherever the change can be applied live. Turning Local AI off
+removes only the local model from the fallback list: ClawBox AI, or another cloud model you
+chose, stays as the backup, and a local primary is moved back to a cloud model.
+
 Use it when nothing may leave the box. Note that it is about the **AI providers** — see
 [Networking](/technical/networking) for what else a ClawBox talks to.
 
@@ -96,8 +124,8 @@ a later default.
 ## What the hardware can run
 
 <Note>
-**ClawBox** (Jetson Orin Nano, 8 GB) runs a small model comfortably and is best
-paired with a cloud provider for heavier work. **ClawBox Workstation** (DGX Spark, 128 GB
+**ClawBox** (Jetson Orin Nano Super, 8 GB) runs a small model comfortably and is
+best paired with a cloud provider for heavier work. **ClawBox Workstation** (DGX Spark, 128 GB
 unified memory) runs models up to roughly 200B parameters locally. See
 [Requirements](/hardware/requirements).
 </Note>

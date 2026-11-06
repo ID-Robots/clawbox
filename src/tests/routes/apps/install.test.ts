@@ -82,6 +82,10 @@ const AMBIGUOUS = {
   ],
 };
 
+/** The store's icon for an app: a PNG (signature and a little after it), fresh per request. */
+const pngIcon = () =>
+  new Response(Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(8)]), { status: 200 });
+
 /** What each upstream answers; unset hosts answer a network failure. */
 function upstream(answers: { clawhub?: unknown; store?: unknown; icon?: unknown }) {
   mockFetch.mockImplementation(async (url: string) => {
@@ -95,7 +99,8 @@ function upstream(answers: { clawhub?: unknown; store?: unknown; icon?: unknown 
     }
     if (url.startsWith(STORE_ICONS)) {
       if (answers.icon === undefined) throw new Error("fetch failed");
-      return answers.icon;
+      // A body is read once: an icon answer may be a factory for a fresh one.
+      return typeof answers.icon === "function" ? answers.icon() : answers.icon;
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -128,7 +133,7 @@ describe("/setup-api/apps/install", () => {
     upstream({
       clawhub: jsonResponse(200, { skill: { slug: "test-app" }, owner: { handle: "someone" } }),
       store: jsonResponse(200, { slug: "test-app", name: "Test App", category: "developer", developer: "someone" }),
-      icon: jsonResponse(200, null),
+      icon: pngIcon,
     });
     const mod = await import("@/app/setup-api/apps/install/route");
     POST = mod.POST;
@@ -242,7 +247,7 @@ describe("/setup-api/apps/install", () => {
     upstream({
       clawhub: jsonResponse(409, AMBIGUOUS),
       store: jsonResponse(200, { slug: "weather", name: "Weather", developer: "ClawHub Community" }),
-      icon: jsonResponse(200, null),
+      icon: pngIcon,
     });
     const res = await POST(install({ appId: "weather" }));
     const body = await res.json();
@@ -258,7 +263,7 @@ describe("/setup-api/apps/install", () => {
     upstream({
       clawhub: jsonResponse(409, AMBIGUOUS),
       store: jsonResponse(200, { slug: "weather", name: "Weather", developer: "THCJP" }),
-      icon: jsonResponse(200, null),
+      icon: pngIcon,
     });
     const res = await POST(install({ appId: "weather" }));
     expect(res.status).toBe(200);
@@ -266,7 +271,7 @@ describe("/setup-api/apps/install", () => {
   });
 
   it("falls back to the bare slug when the ClawHub lookup itself is unreachable", async () => {
-    upstream({ store: jsonResponse(200, { slug: "test-app", name: "Test App" }), icon: jsonResponse(200, null) });
+    upstream({ store: jsonResponse(200, { slug: "test-app", name: "Test App" }), icon: pngIcon });
     const res = await POST(install({ appId: "test-app" }));
     expect(res.status).toBe(200);
     expect(installedRef()).toBe("test-app");
@@ -358,5 +363,25 @@ describe("/setup-api/apps/install", () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.iconSaved).toBe(false);
+  });
+
+  it("does not save a 200 icon answer that is not a PNG, or one larger than an icon", async () => {
+    // The icon route serves the saved file as image/png from then on, so an
+    // error page answered 200 would be the app's icon for good.
+    for (const icon of [
+      () => new Response("<html><body>Not found</body></html>", { status: 200 }),
+      () => new Response(new Uint8Array(16), { status: 200, headers: { "Content-Length": String(1024 * 1024 + 1) } }),
+    ]) {
+      writeFile.mockClear();
+      upstream({
+        clawhub: jsonResponse(200, { owner: { handle: "someone" } }),
+        store: jsonResponse(200, { slug: "test-app", name: "Test App" }),
+        icon,
+      });
+      const body = await (await POST(install({ appId: "test-app" }))).json();
+      expect(body.ok).toBe(true);
+      expect(body.iconSaved).toBe(false);
+      expect(writeFile).not.toHaveBeenCalled();
+    }
   });
 });

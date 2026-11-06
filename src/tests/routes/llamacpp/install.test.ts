@@ -4,6 +4,7 @@ import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { NextResponse } from "next/server";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { getBackgroundTask, resetBackgroundTasksForTests } from "@/lib/background-tasks";
 // Imported rather than spelled out so a GGUF swap cannot leave this suite
 // asserting a filename the app no longer asks for.
 import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
@@ -36,6 +37,18 @@ vi.mock("@/app/setup-api/ai-models/configure/route", () => ({
 
 vi.mock("@/lib/local-ai-runtime", () => ({
   stopLocalAiProvider: vi.fn(),
+}));
+
+// A configure that restarted the gateway answers before it is back; the stream
+// follows it (TASK-1535).
+vi.mock("@/lib/gateway-hot-apply", () => ({
+  waitForGatewayBack: vi.fn(async () => true),
+}));
+
+// The window the server starts with follows the runtime (Hermes has a floor).
+const mockGetActiveHarness = vi.fn(async () => "openclaw");
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: () => mockGetActiveHarness(),
 }));
 
 const mockSpawn = vi.mocked(childProcess.spawn);
@@ -113,6 +126,9 @@ describe("POST /setup-api/llamacpp/install", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // The install is a background task of the server, kept per PROCESS: one a
+    // test left running would be followed by the next test's POST.
+    resetBackgroundTasksForTests();
     const configureMod = await import("@/app/setup-api/ai-models/configure/route");
     mockConfigureAiModel = vi.mocked(configureMod.POST);
     mockFs.mkdir.mockResolvedValue(undefined);
@@ -130,8 +146,10 @@ describe("POST /setup-api/llamacpp/install", () => {
       }
       throw new Error("ENOENT");
     }) as typeof fsp.stat);
+    // systemd answers: a unit that has finished (the root step's follow
+    // treats an unanswered query as "ask again", never as an ending).
     setupExecFileMock({
-      systemctl: { stdout: "", stderr: "" },
+      systemctl: { stdout: "ActiveState=inactive\nResult=success\n", stderr: "" },
       journalctl: { stdout: "", stderr: "" },
     });
     mockConfigureAiModel.mockResolvedValue(
@@ -174,6 +192,133 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(mockConfigureAiModel).toHaveBeenCalled();
     expect(text).toContain("already running");
     expect(text).toContain("\"success\":true");
+  });
+
+  describe("as a background task", () => {
+    // The install belongs to the server, not to the request that started it.
+    // It used to run inside the response stream, whose enqueue throws once the
+    // client is gone: a reload mid-install ended the flow at its next status
+    // line, and the runtime was never started nor configured.
+    function slowConfigure() {
+      let finish!: () => void;
+      mockConfigureAiModel.mockImplementation(() => new Promise((resolve) => {
+        finish = () => resolve(NextResponse.json({ success: true }));
+      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+      }));
+      return () => finish();
+    }
+
+    it("runs on to the configuration after its stream is cancelled", async () => {
+      const finish = slowConfigure();
+      const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      const reader = res.body!.getReader();
+      const first = JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]) as { taskId: string };
+      await reader.cancel();
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      finish();
+      await vi.waitFor(() => expect(getBackgroundTask(first.taskId)?.state).toBe("succeeded"));
+      expect(getBackgroundTask(first.taskId)?.result).toMatchObject({ model: "gemma4-e2b-it-q4_0" });
+    });
+
+    it("follows the running install when the same install is asked for again", async () => {
+      const finish = slowConfigure();
+      const first = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      const again = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      expect(again.status).toBe(200);
+      finish();
+      const [a, b] = await Promise.all([readStream(first), readStream(again)]);
+      expect(mockConfigureAiModel).toHaveBeenCalledTimes(1);
+      const taskOf = (text: string) => (JSON.parse(text.split("\n")[0]) as { taskId: string }).taskId;
+      expect(taskOf(b)).toBe(taskOf(a));
+      expect(b).toContain("\"success\":true");
+    });
+
+    it("queues different settings while one runs — never a refusal — and starts them when it ends", async () => {
+      // Resolves the LATEST configure call each time it is called.
+      const finish = slowConfigure();
+      const first = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local" }));
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalledTimes(1));
+      const primary = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local", activate: true }));
+      expect(primary.status).toBe(200);
+      const queuedText = readStream(primary);
+      // A third press of the same "make primary" follows the queued one.
+      const again = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "local", activate: true }));
+      const againText = readStream(again);
+
+      finish();
+      expect(await readStream(first)).toContain("\"success\":true");
+      // Its turn: the queued install starts by itself and configures with ITS settings.
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalledTimes(2));
+      const second = mockConfigureAiModel.mock.calls[1][0] as Request;
+      expect(await second.clone().json()).toMatchObject({ activate: true, scope: "local" });
+      finish();
+
+      const lines = (await queuedText).trim().split("\n").map((line) => JSON.parse(line));
+      expect(lines[0]).toMatchObject({ queued: true, behind: { kind: "llamacpp-install", label: "Gemma 4" } });
+      expect(lines.some((line) => line.queued === false)).toBe(true);
+      expect(lines.at(-1)).toMatchObject({ success: true });
+      const taskOf = (text: string) => (JSON.parse(text.split("\n")[0]) as { taskId: string }).taskId;
+      expect(taskOf(await againText)).toBe(lines[0].taskId);
+      expect(mockConfigureAiModel).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("follows a gateway restart the configure answered early, and only then says configured", async () => {
+    const { waitForGatewayBack } = await import("@/lib/gateway-hot-apply");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+    }));
+    mockConfigureAiModel.mockResolvedValue(
+      NextResponse.json({ success: true, gatewayRestarting: true, restartingNotice: "Saved. Restarting." }),
+    );
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const lines = (await readStream(res)).trim().split("\n").map((line) => JSON.parse(line));
+
+    expect(waitForGatewayBack).toHaveBeenCalledTimes(1);
+    const restarting = lines.findIndex((line) => typeof line.status === "string" && /restarting/.test(line.status));
+    const success = lines.findIndex((line) => line.success === true);
+    expect(restarting).toBeGreaterThanOrEqual(0);
+    // Keeps the overlay on its "applying configuration" step.
+    expect(lines[restarting].status).toMatch(/^Applying configuration/);
+    expect(success).toBeGreaterThan(restarting);
+  });
+
+  it("does not wait for a gateway the configure applied the change to live", async () => {
+    const { waitForGatewayBack } = await import("@/lib/gateway-hot-apply");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+    }));
+
+    const text = await readStream(await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" })));
+
+    expect(text).toContain("\"success\":true");
+    expect(waitForGatewayBack).not.toHaveBeenCalled();
+  });
+
+  it("still finishes the install when the restarted gateway is slower than its wait", async () => {
+    const { waitForGatewayBack } = await import("@/lib/gateway-hot-apply");
+    vi.mocked(waitForGatewayBack).mockResolvedValueOnce(false);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+    }));
+    mockConfigureAiModel.mockResolvedValue(NextResponse.json({ success: true, gatewayRestarting: true }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const text = await readStream(await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" })));
+
+    // A slow gateway is not a failed install: the model is configured, and the
+    // gateway comes back on its own.
+    expect(text).toContain("\"success\":true");
+    expect(text).not.toContain("\"error\"");
+    warn.mockRestore();
   });
 
   /**
@@ -249,14 +394,31 @@ describe("POST /setup-api/llamacpp/install", () => {
         detached: true,
       })
     );
-    // The trailing "0" is the ctx-size argument, which tells llama-server
-    // to load the full trained context window from the model metadata.
-    expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("0");
+    // The trailing argument is the ctx-size: the same window OpenClaw's row is
+    // told (DEFAULT_LLAMACPP_CONTEXT_WINDOW), no longer "0" — the model's
+    // trained 128k, which the row never claimed.
+    expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("32768");
     expect(mockConfigureAiModel).toHaveBeenCalled();
     expect(text).toContain("Starting preinstalled Gemma 4");
     expect(text).toContain("Returning it to standby");
     expect(text).toContain("will wake automatically");
     expect(mockStopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
+  });
+
+  it("starts llama-server with Hermes' window floor on a Hermes box", async () => {
+    // Hermes refuses a session on a window under 64,000 tokens, which it reads
+    // off the running server, so the 32k OpenClaw default cannot serve it.
+    mockGetActiveHarness.mockResolvedValueOnce("hermes");
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) }));
+    mockSpawn.mockReturnValue(createSpawnedProcess());
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    await readStream(res);
+
+    expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("65536");
+    expect(mockConfigureAiModel).toHaveBeenCalled();
   });
 
   it("forwards local scope to the configure route during llama.cpp install", async () => {
@@ -337,6 +499,54 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("Installing Gemma 4 for offline use — Installing llama.cpp server (CUDA=ON)...");
     expect(text).toContain("\"success\":true");
   });
+
+  it("records the provisioning unit's run on its task, so a restarted server adopts it and keeps its place in the queue", async () => {
+    let finished = false;
+    mockFs.stat.mockImplementation((async (target: unknown) => {
+      const normalized = String(target);
+      const isRuntimeArtifact = normalized === "/usr/local/bin/llama-server" || normalized.endsWith(DEFAULT_LLAMACPP_HF_FILE);
+      if (isRuntimeArtifact && finished) return { size: 1 } as never;
+      throw new Error("ENOENT");
+    }) as typeof fsp.stat);
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+      const key = `${cmd} ${args.join(" ")}`;
+      let stdout = "";
+      if (key.includes("systemctl show") && key.includes("InvocationID")) stdout = `InvocationID=${"c".repeat(32)}\n`;
+      else if (key.includes("systemctl show")) stdout = finished ? "ActiveState=inactive\nResult=success\n" : "ActiveState=activating\nResult=success\n";
+      else if (key.includes("journalctl")) stdout = "pam_unix(su-l:session): session closed for user clawbox\n";
+      callback?.(null, { stdout, stderr: "" });
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
+      .mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) }));
+    mockSpawn.mockReturnValue(createSpawnedProcess(12345));
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const reader = res.body!.getReader();
+    const taskId = (JSON.parse(new TextDecoder().decode((await reader.read()).value).split("\n")[0]) as { taskId: string }).taskId;
+    await vi.waitFor(() => expect(getBackgroundTask(taskId)?.unit).toMatchObject({
+      step: "llamacpp_install",
+      invocationId: "c".repeat(32),
+      taskStep: "install",
+    }));
+    // su's session line is the newest journal line: never the headline.
+    expect(getBackgroundTask(taskId)?.status).not.toMatch(/pam_unix/);
+    finished = true;
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += new TextDecoder().decode(value);
+    }
+    expect(rest).toContain("\"success\":true");
+  }, 20_000);
 
   it("fails fast with the journal line when the provisioning unit fails", async () => {
     mockFs.stat.mockImplementation((async () => {

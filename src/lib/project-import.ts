@@ -507,7 +507,7 @@ async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: 
  * deployment check — the exact fault the resolver exists to prevent, reached
  * through the one door it did not watch.
  */
-async function ensureRepository(directory: string, from: string): Promise<{ initialized: boolean; detail: string | null }> {
+export async function ensureRepository(directory: string, from: string): Promise<{ initialized: boolean; detail: string | null }> {
   const dotGit = await fs.promises.stat(path.join(directory, ".git")).catch(() => null);
   if (dotGit?.isDirectory()) return { initialized: false, detail: null };
   // Resolved BEFORE `git init`, for the reason `initRepo` gives: afterwards the

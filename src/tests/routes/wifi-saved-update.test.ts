@@ -123,7 +123,7 @@ describe("/setup-api/wifi/update", () => {
     const body = await res.json();
     expect(body).toEqual({ success: true, action: "forget" });
     const calls = execFileMock.mock.calls.map(([cmd, args]) => `${cmd} ${args.join(" ")}`);
-    expect(calls).toContain("nmcli connection delete TestNet-Home");
+    expect(calls).toContain("bash /usr/local/libexec/clawbox/wifi-radio.sh --nmcli connection delete TestNet-Home");
   });
 
   it("rejects passwords shorter than 8 chars", async () => {
@@ -152,7 +152,7 @@ describe("/setup-api/wifi/update", () => {
 
   it("reports reactivateError when nmcli connection up fails", async () => {
     execFileMock.mockImplementation((_cmd: string, args: string[]) => {
-      if (args[0] === "connection" && args[1] === "up") {
+      if (args[0] === "/usr/local/libexec/clawbox/wifi-radio.sh" && args[2] === "connection" && args[3] === "up") {
         return { error: new Error("802-11-wireless: AP not found") };
       }
       return { stdout: "" };

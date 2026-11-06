@@ -174,9 +174,10 @@ describe("a legacy stub whose project declares its port", () => {
       // The stub points at a port nothing serves; the manifest is the truth.
       installApp("tinder-clone", "Tinder Clone", legacyStub(4230));
 
-      const body = await (await get("tinder-clone")).text();
-      expect(body).toContain("/apps/tinder-clone/");
-      expect(body).not.toContain("location.hostname");
+      // Sent on by a redirect, not a script: see the next block.
+      const res = await get("tinder-clone");
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/apps/tinder-clone/");
 
       // Written through, so the next open costs no listener check…
       const onDisk = fs.readFileSync(path.join(root, "data", "webapps", "tinder-clone", "index.html"), "utf-8");
@@ -212,5 +213,36 @@ describe("a legacy stub whose project declares its port", () => {
     } finally {
       await running.close();
     }
+  });
+});
+
+// The desktop opened a server app at /setup-api/webapps?app=<id> once its
+// icon was drawn (src/lib/webapp-icon.ts). That page was the stub, whose
+// `location.replace` — a navigation the sandboxed frame makes itself — sends
+// no cookie, so the signed-in owner got the box's login screen in the app.
+describe("a registered server app's page", () => {
+  it("sends the frame to /apps/<id>/ with a redirect, which keeps the owner's session", async () => {
+    installApp("audiobook-player", "Audiobook Player", "<script>location.replace(\"/apps/audiobook-player/\")</script>");
+    fs.writeFileSync(
+      path.join(root, "data", "webapps", "audiobook-player", "meta.json"),
+      JSON.stringify({ name: "Audiobook Player", port: 4240, directory: path.join(projects, "audiobook-player") }),
+    );
+    const res = await get("audiobook-player");
+    expect(res.status).toBe(302);
+    // Relative: through a tunnel the owner's address is not this server's.
+    expect(res.headers.get("Location")).toBe("/apps/audiobook-player/");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    // Its other files are still served as files.
+    fs.writeFileSync(path.join(root, "data", "webapps", "audiobook-player", "x.txt"), "x");
+    const asset = await GET(new NextRequest(new URL("http://localhost/setup-api/webapps?app=audiobook-player&file=x.txt")));
+    expect(asset.status).toBe(200);
+  });
+
+  it("leaves a page with no port on its registration exactly as it was", async () => {
+    const app = "<!doctype html><h1>Notes</h1>";
+    installApp("notes", "Notes", app);
+    const res = await get("notes");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(app);
   });
 });

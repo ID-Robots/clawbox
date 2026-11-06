@@ -141,6 +141,59 @@ describe("SetupWizard", () => {
     expect(screen.getByTestId("progress-step")).toHaveTextContent("5");
   });
 
+  // The security step can only set a FIRST password. A box that reaches the
+  // update step with an owner's password already on the account was walked into
+  // it anyway, where the save was refused for a current password the step has
+  // no field for. The page-load resume already goes past it; so does this.
+  it("goes past the security step after the update when a password already exists", async () => {
+    let passwordConfigured = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/setup/status") {
+        return jsonResponse({
+          setup_complete: false,
+          wifi_configured: true,
+          update_completed: false,
+          password_configured: passwordConfigured,
+          ai_model_configured: false,
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<SetupWizard />);
+    const updateNext = await screen.findByText("update-next");
+    // The owner's password lands on the account while the update step is up.
+    passwordConfigured = true;
+    fireEvent.click(updateNext);
+
+    expect(await screen.findByTestId("mock-primary-ai")).toBeInTheDocument();
+    expect(screen.getByTestId("progress-step")).toHaveTextContent("4");
+    expect(screen.queryByText("credentials-next")).toBeNull();
+  });
+
+  it("still shows the security step after the update on a box with no password", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/setup/status") {
+        return jsonResponse({
+          setup_complete: false,
+          wifi_configured: true,
+          update_completed: false,
+          password_configured: false,
+          ai_model_configured: false,
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<SetupWizard />);
+    fireEvent.click(await screen.findByText("update-next"));
+
+    expect(await screen.findByText("credentials-next")).toBeInTheDocument();
+    expect(screen.getByTestId("progress-step")).toHaveTextContent("3");
+  });
+
   // `telegram_configured` changed meaning: it used to be written only by the
   // wizard's own Telegram step, and it now reports that SOME HARNESS on this box
   // holds a bot — which a restore with ~/.openclaw or ~/.hermes intact answers

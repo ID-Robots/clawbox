@@ -261,7 +261,14 @@ export const browserManage = (action: "install-chromium" | "enable" | "disable" 
   );
 
 export const getBrowserManage = () =>
-  request<{ chromium: { installed: boolean }; browser: { running: boolean; cdpReady: boolean }; enabled: boolean }>(
+  request<{
+    chromium: { installed: boolean };
+    browser: { running: boolean; cdpReady: boolean; pid?: number; shared?: boolean };
+    enabled: boolean;
+    profileDir?: string;
+    /** One browser for the owner and the assistant — the default on every box. */
+    sharedWithAssistant?: boolean;
+  }>(
     "/setup-api/browser/manage",
   );
 

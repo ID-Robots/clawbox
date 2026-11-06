@@ -18,11 +18,13 @@ const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
  * `clawbox_context`'s output cap. 24,000 until TASK-1080 moved the caveats out
  * of the tool descriptions and into the tool notes it now serves too; the
  * widest box (a dual install with every family registered, the coding family
- * too) came to about 27,600. The cap truncates the TAIL — the browser guide
- * goes first — so
+ * too) came to about 27,600 then, and 32,000 held it until TASK-2177 added the
+ * docs tools' section and house rule to the guide and their two notes, with
+ * the widest OpenClaw box measured at about 32,600. The cap truncates the TAIL
+ * — the browser guide goes first — so
  * src/tests/unit/clawbox-field-guide-edition.test.ts holds every box under it.
  */
-export const FIELD_GUIDE_MAX_CHARS = 32_000;
+export const FIELD_GUIDE_MAX_CHARS = 36_000;
 
 // The OpenClaw answer to CURRENT_CHAT_MODEL_NOTE, and it is the opposite one.
 // The chat header's pick is POSTed to /setup-api/chat/model, which writes
@@ -109,9 +111,31 @@ the tunnel, and after the tunnel's address changes — a link that names a host
 or a port is dead the next morning. Three things make it work:
 
 1. Write clawbox.json at the project's root, the ClawBox app manifest:
-     { "name": "Tinder Clone", "description": "…", "kind": "server", "port": 4230, "start": "bun run dev" }
+     { "name": "Tinder Clone", "description": "…", "kind": "server", "port": 4230, "start": "bun run start" }
    The box reads the port from it and puts the app on the desktop when the
-   run settles; the same file marks the repository as a ClawBox app.
+   run settles — if nothing is listening on the port by then, it runs "start"
+   in the project folder itself, so always name it, and make it the command
+   that SERVES the app (build first if it serves a build). The same file marks
+   the repository as a ClawBox app.
+
+   NOT a dev server. "bun run dev" / "npm run dev" / "next dev" is the wrong
+   command for this file: it compiles on demand, so the first visitor waits,
+   it watches and re-reads the tree for ever, and it is the single biggest
+   reason an app on this box burned CPU and disk while nobody was using it.
+   Build in the run ("bun run build"), then start what serves the build — and
+   record the START only. The box reruns the recorded command to bring the app
+   back after a reboot and waits about a minute for its listener, so a command
+   that builds first may spend that minute compiling and come back as nothing.
+
+   And never write a systemd unit of your own for the app — no
+   ~/.config/systemd/user/clawbox-app-*.service, no "systemctl --user enable".
+   The box runs "start" itself in a scope it owns and caps (memory, CPU and
+   I/O, sized to this board's RAM) and brings that app back after a reboot and
+   after an update, from the "start" command it records in the app's
+   meta.json. A unit of your own bypasses every one of those: uncapped, it is
+   what OOM-killed the desktop; unmanaged, it keeps serving a project that was
+   uninstalled; and it is invisible to the desktop that is supposed to show
+   it.
 2. Serve the app under the base path /apps/<folder> — the path reaches it
    unchanged. Next.js: basePath: "/apps/<folder>" in next.config; Vite:
    base: "/apps/<folder>/"; Express: app.use("/apps/<folder>", router).

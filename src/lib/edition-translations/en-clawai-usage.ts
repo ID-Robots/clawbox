@@ -16,7 +16,7 @@ export const clawaiUsageEn: Record<string, string> = {
 
   // The weekly chat pool and the burst ceiling over it.
   "clawaiUsage.weeklyTitle": "Weekly chat allowance",
-  "clawaiUsage.burstTitle": "5-hour burst",
+  "clawaiUsage.burstTitle": "Short-term limit (5 hours)",
   "clawaiUsage.percentUsed": "{percent}% used",
   "clawaiUsage.tokensOf": "{used} of {limit} tokens",
   "clawaiUsage.countOf": "{used} of {limit}",
@@ -59,4 +59,6 @@ export const clawaiUsageEn: Record<string, string> = {
   "chat.allowanceFreesUpAt": "It frees up at {time}.",
   "chat.allowanceFreesUpLater": "It frees up as older usage leaves the rolling window.",
   "chat.allowanceSeeUsage": "Your usage is in Settings, under Providers.",
+  "chat.allowanceGeneric": "That message did not go through — a ClawBox AI usage limit is reached.",
+  "chat.allowanceExtraUsage": "To keep going before then, add an extra-usage pack: {url}",
 };

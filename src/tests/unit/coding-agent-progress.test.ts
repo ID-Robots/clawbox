@@ -56,6 +56,16 @@ describe("describeProgressLine", () => {
       expect(d.label).toBe("some other tool");
       expect(d.labelKey).toBeUndefined();
     });
+
+    it("a project's own MCP server is a tool step too, whatever name its allowlist admits", () => {
+      // src/lib/project-mcp-servers.ts takes a single `_` or a `-` in a server
+      // name and a `-` in a tool name; only a double underscore never.
+      for (const line of ["mcp__admin_board__list_tasks", "mcp__admin-board__list_tasks", "mcp__board__list-tasks", "mcp__a_b-c__list_tasks", "mcp__board___list_tasks"]) {
+        const d = describeProgressLine(line);
+        expect(d.kind, line).toBe("tool");
+        expect(d.label, line).toBe("list tasks");
+      }
+    });
   });
 
   describe("files", () => {
@@ -211,9 +221,9 @@ describe("the runner's own sentences are keyed", () => {
   it.each([
     [RUNNER_STEP.thinking, "thinking"],
     [RUNNER_STEP.continuing, "continuing"],
-    [RUNNER_STEP.tokenLimit, "tokenLimit"],
     [RUNNER_STEP.resuming, "resuming"],
     [RUNNER_STEP.noRepository, "noRepository"],
+    [RUNNER_STEP.notRepositoryRoot("/srv/projects"), "notRepositoryRoot"],
     [RUNNER_STEP.merged, "merged"],
     [RUNNER_STEP.providerSilent, "providerSilent"],
     [RUNNER_STEP.paused, "paused"],
@@ -252,6 +262,8 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.helperSettled({ workflow: true, type: "workflow", refused: true }), "workflowRefused"],
     [RUNNER_STEP.dropped(41), "droppedSteps"],
     [RUNNER_STEP.evidencePruned("venv-attempt/venv/, latest.txt"), "evidencePruned"],
+    [RUNNER_STEP.contextCompacted(1, 2, 1_017_351, 1_048_576), "contextCompacted"],
+    [RUNNER_STEP.contextCompacted(2, 2, null, null), "contextCompactedUnsized"],
   ])("%s", (line, key) => {
     expect(describeProgressLine(line).labelKey, line).toBe(key);
   });
@@ -267,6 +279,14 @@ describe("the runner's own sentences are keyed", () => {
       .toEqual({ branch: "clawbox/run-1", base: "main" });
     expect(describeProgressLine(RUNNER_STEP.dropped(41)).params).toEqual({ count: 41 });
     expect(describeProgressLine(RUNNER_STEP.evidencePruned("venv/, python")).params).toEqual({ paths: "venv/, python" });
+    expect(describeProgressLine(RUNNER_STEP.contextCompacted(1, 2, 1_017_351, 1_048_576)).params)
+      .toEqual({ context: 1_017_351, window: 1_048_576, n: 1, max: 2 });
+    expect(describeProgressLine(RUNNER_STEP.contextCompacted(2, 2, null, null)).params).toEqual({ n: 2, max: 2 });
+  });
+
+  it("fits the context step, numbers and all, inside the runner's 160-character line", () => {
+    // pushProgress cuts a longer line, and a cut line no longer matches its key.
+    expect(RUNNER_STEP.contextCompacted(2, 2, 99_999_999, 99_999_999).length).toBeLessThanOrEqual(160);
   });
 
   it("shows a helper's type and description beside the label, never inside it", () => {

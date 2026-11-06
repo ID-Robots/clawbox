@@ -85,7 +85,7 @@ const REGISTER_SCRIPT = path.join("scripts", "register-mcp.sh");
 const REGISTER_SCRIPT_TIMEOUT_MS = 180_000;
 
 /** Which harnesses THIS edition runs, from one read of the lock. */
-function harnessesHere(): { openclaw: boolean; hermes: boolean } {
+export function harnessesHere(): { openclaw: boolean; hermes: boolean } {
   const edition = readEdition();
   return { openclaw: edition !== "hermes", hermes: edition === "hermes" || edition === "dual" };
 }
@@ -265,7 +265,7 @@ async function applyHermes(
  * a foreground `hermes gateway run` alone, the way `stopHermesEmailPolling`
  * does and for its reasons. Best-effort: null when nothing was running.
  */
-async function restartHermesGatewayIfRunning(): Promise<boolean | null> {
+export async function restartHermesGatewayIfRunning(): Promise<boolean | null> {
   try {
     const { value: before, answered } = await readHermesGatewayStatus();
     if (!answered) return false;

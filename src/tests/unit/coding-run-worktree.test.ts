@@ -21,7 +21,7 @@ import {
   removeRunWorktree,
   restoreRunWorktree,
   runWorktreePath,
-  sweepRunWorktrees,
+  worktreeHasChanges,
 } from "@/lib/coding-run-worktree";
 
 // Starts a real process (git): vitest's 5 s test and 10 s hook defaults are
@@ -62,6 +62,37 @@ describe("a run's worktree", () => {
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("master");
     expect(git(dir, "status", "--porcelain")).toBe("");
     expect(fs.readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8")).toContain("/.clawbox/");
+  });
+
+  it("never forks a coding team's branch a team left checked out: it forks the project's base, and leaves the checkout where it is", async () => {
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    fs.writeFileSync(path.join(dir, "fix.js"), "the failed team's fix\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "old team fix");
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-ccccdddd", protectedRoot: PROTECTED });
+    expect(made).toMatchObject({ ok: true, branch: "clawbox/run-ccccdddd", base: "master" });
+    if (!made.ok) return;
+    expect(git(made.path, "rev-parse", "HEAD")).toBe(git(dir, "rev-parse", "master"));
+    expect(fs.existsSync(path.join(made.path, "fix.js"))).toBe(false);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+  });
+
+  it("forks from a named base branch instead of the checkout's unrelated branch, and refuses a branch that is not there", async () => {
+    git(dir, "branch", "beta");
+    git(dir, "checkout", "-q", "-b", "feature/unrelated");
+    fs.writeFileSync(path.join(dir, "other.js"), "another branch's work\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "unrelated");
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-bbbbcccc", protectedRoot: PROTECTED, baseBranch: "beta" });
+    expect(made).toMatchObject({ ok: true, branch: "clawbox/run-bbbbcccc", base: "beta" });
+    if (!made.ok) return;
+    expect(git(made.path, "rev-parse", "HEAD")).toBe(git(dir, "rev-parse", "beta"));
+    expect(fs.existsSync(path.join(made.path, "other.js"))).toBe(false);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature/unrelated");
+
+    const missing = await addRunWorktree({ projectDir: dir, runId: "run-ddddeeee", protectedRoot: PROTECTED, baseBranch: "nope" });
+    expect(missing).toMatchObject({ ok: false, reason: "no_base_branch" });
+    expect(fs.existsSync(runWorktreePath(dir, "run-ddddeeee"))).toBe(false);
   });
 
   it("gives two runs of one project trees that cannot see each other's half-written files", async () => {
@@ -177,36 +208,6 @@ describe("a run's worktree", () => {
     }
   });
 
-  it("sweeps a merged worktree older than the age and keeps a young one, an unmerged one and one in use", async () => {
-    const old = new Date(Date.now() - 30 * 24 * 60 * 60_000);
-    const merged = await addRunWorktree({ projectDir: dir, runId: "run-old-mrgd", protectedRoot: PROTECTED });
-    const unmerged = await addRunWorktree({ projectDir: dir, runId: "run-old-work", protectedRoot: PROTECTED });
-    const young = await addRunWorktree({ projectDir: dir, runId: "run-young000", protectedRoot: PROTECTED });
-    const busy = await addRunWorktree({ projectDir: dir, runId: "run-busy0000", protectedRoot: PROTECTED });
-    if (!merged.ok || !unmerged.ok || !young.ok || !busy.ok) throw new Error("fixtures");
-    fs.writeFileSync(path.join(unmerged.path, "work.js"), "kept\n");
-    git(unmerged.path, "add", "-A");
-    git(unmerged.path, "commit", "-q", "-m", "unmerged work");
-    for (const p of [merged.path, unmerged.path, busy.path]) fs.utimesSync(p, old, old);
-
-    const outcome = await sweepRunWorktrees(dir, { inUse: new Set([busy.path]) });
-    expect(outcome.removed).toEqual([merged.path]);
-    expect(outcome.kept.sort()).toEqual([busy.path, unmerged.path, young.path].sort());
-    expect(fs.existsSync(merged.path)).toBe(false);
-    // A swept branch that held nothing is gone too; the unmerged one stays.
-    expect(await branchExists(dir, merged.branch)).toBe(false);
-    expect(await branchExists(dir, unmerged.branch)).toBe(true);
-  });
-
-  it("prunes a worktree whose files somebody deleted by hand", async () => {
-    const made = await addRunWorktree({ projectDir: dir, runId: "run-handgone", protectedRoot: PROTECTED });
-    if (!made.ok) throw new Error(made.detail);
-    fs.rmSync(made.path, { recursive: true, force: true });
-    const outcome = await sweepRunWorktrees(dir);
-    expect(outcome.removed).toEqual([made.path]);
-    expect(await listRunWorktrees(dir)).toEqual([]);
-  });
-
   it("says whether the files are actually gone, not whether git was happy", async () => {
     const made = await addRunWorktree({ projectDir: dir, runId: "run-report00", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
@@ -241,6 +242,46 @@ describe("a run's worktree", () => {
     await removeRunWorktree(dir, made.path);
     expect(await deleteRunBranch(dir, made.branch)).toBe(true);
     expect(await branchExists(dir, made.branch)).toBe(false);
+  });
+
+  /**
+   * What a settle asks before it forces a tree away: `commitsAhead` sees only
+   * the branch, and a commit that failed after `git add -A` leaves the work
+   * staged in the tree with the branch where it was.
+   */
+  it("says whether the tree holds work its branch does not, never counting the linked node_modules", async () => {
+    // `node_modules/` (trailing slash) matches directories only; the box also
+    // excludes `/node_modules`, so the worktree's LINK is neither untracked
+    // nor swept into the branch by a settle's `git add -A`.
+    fs.mkdirSync(path.join(dir, "node_modules"));
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-unsaved0", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    expect(fs.lstatSync(path.join(made.path, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(git(made.path, "status", "--porcelain")).not.toContain("node_modules");
+    git(made.path, "add", "-A");
+    expect(git(made.path, "diff", "--cached", "--name-only")).not.toContain("node_modules");
+    expect(await worktreeHasChanges(made.path)).toBe(false);
+
+    fs.writeFileSync(path.join(made.path, "draft.txt"), "untracked\n");
+    expect(await worktreeHasChanges(made.path)).toBe(true);
+    git(made.path, "add", "draft.txt");
+    // Staged and never committed: the branch holds nothing, the tree does.
+    expect(await commitsAhead(dir, made.branch, made.base)).toBe(0);
+    expect(await worktreeHasChanges(made.path)).toBe(true);
+    git(made.path, "commit", "-q", "-m", "draft");
+    expect(await worktreeHasChanges(made.path)).toBe(false);
+    fs.writeFileSync(path.join(made.path, "index.html"), "<h1>Edited</h1>\n");
+    expect(await worktreeHasChanges(made.path)).toBe(true);
+
+    // Not a repository git will answer for: no answer, which a settle reads
+    // as "keep it".
+    const stranger = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-stranger-"));
+    try {
+      expect(await worktreeHasChanges(stranger)).toBeNull();
+      expect(await worktreeHasChanges(path.join(stranger, "gone"))).toBeNull();
+    } finally {
+      fs.rmSync(stranger, { recursive: true, force: true });
+    }
   });
 });
 
@@ -293,6 +334,83 @@ describe("merging a run's branch home", () => {
     expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toContain("mine, not committed");
     expect(fs.readFileSync(path.join(dir, "scratch.txt"), "utf8")).toBe("untracked\n");
     expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+  });
+
+  /** What the box draws into the project folder at a run's start, while the run is out in its worktree. */
+  const drawBoxFavicons = () => {
+    fs.writeFileSync(path.join(dir, "favicon.png"), "box-png");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "box-ico");
+  };
+  const untracked = () => git(dir, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).sort();
+
+  it("does not count the box's own untracked favicons at the root as the owner's changes, and never commits them", async () => {
+    const made = await withWork("run-icons0001");
+    drawBoxFavicons();
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true });
+    expect(fs.existsSync(path.join(dir, "feature.js"))).toBe(true);
+    // Still there, still untracked, still the box's bytes: in nobody's history.
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+    expect(git(dir, "log", "--all", "--format=", "--name-only")).not.toMatch(/favicon/);
+  });
+
+  it("still refuses `dirty` over any other untracked file beside the favicons, one in a sub-folder, and a favicon the project tracks", async () => {
+    const made = await withWork("run-icons0002");
+    const head = git(dir, "rev-parse", "HEAD");
+    drawBoxFavicons();
+    fs.writeFileSync(path.join(dir, "notes.txt"), "the owner's\n");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    expect(fs.readFileSync(path.join(dir, "notes.txt"), "utf8")).toBe("the owner's\n");
+    fs.rmSync(path.join(dir, "notes.txt"));
+
+    // The root only: a favicon in a sub-folder is the project's own.
+    fs.mkdirSync(path.join(dir, "assets"));
+    fs.writeFileSync(path.join(dir, "assets", "favicon.png"), "the owner's");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    fs.rmSync(path.join(dir, "assets"), { recursive: true });
+
+    // Untracked only: a favicon the project committed and then changed is the owner's change.
+    fs.rmSync(path.join(dir, "favicon.png"));
+    fs.writeFileSync(path.join(dir, "favicon.png"), "committed");
+    git(dir, "add", "favicon.png");
+    git(dir, "commit", "-q", "-m", "the owner's favicon");
+    fs.writeFileSync(path.join(dir, "favicon.png"), "changed, not committed");
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "dirty" });
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("changed, not committed");
+    expect(git(dir, "log", "-1", "--format=%s")).toBe("the owner's favicon");
+    expect(git(dir, "rev-list", "--count", `${head}..HEAD`)).toBe("1");
+  });
+
+  it("lets a favicon the branch brought win over the box's untracked copy, and leaves the one it did not bring alone", async () => {
+    const made = await withWork("run-icons0003");
+    fs.writeFileSync(path.join(made.path, "favicon.png"), "the run's png");
+    git(made.path, "add", "favicon.png");
+    git(made.path, "commit", "-q", "-m", "the run's favicon");
+    drawBoxFavicons();
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true });
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("the run's png");
+    expect(git(dir, "ls-files", "favicon.png")).toBe("favicon.png");
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("box-ico");
+    expect(untracked()).toEqual(["favicon.ico"]);
+  });
+
+  it("puts the box's favicon back when a merge that brought one does not land", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-icons0004", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    fs.writeFileSync(path.join(made.path, "index.html"), "<h1>the run's line</h1>\n");
+    fs.writeFileSync(path.join(made.path, "favicon.png"), "the run's png");
+    git(made.path, "add", "-A");
+    git(made.path, "commit", "-q", "-m", "the run's edit and favicon");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>the owner's line</h1>\n");
+    git(dir, "commit", "-q", "-am", "the owner's edit");
+    const head = git(dir, "rev-parse", "HEAD");
+    drawBoxFavicons();
+    expect(await merge(made.branch, made.base)).toMatchObject({ ok: false, reason: "conflict" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(head);
+    expect(fs.readFileSync(path.join(dir, "favicon.png"), "utf8")).toBe("box-png");
+    expect(untracked()).toEqual(["favicon.ico", "favicon.png"]);
   });
 
   it("refuses `not_on_base` when the project has moved to another branch, and never moves it back", async () => {

@@ -7,22 +7,29 @@ import {
   describePool,
   markLimited,
   readAccounts,
+  refreshPoolUsage,
   relistLogin,
   removeAccount,
   renameAccount,
   reorderAccounts,
   replaceCredential,
+  setPickMode,
   setReturnToPrimary,
   type AnthropicAccount,
   type OAuthTokens,
 } from "@/lib/anthropic-accounts";
+import { PICK_MODES, type PickMode } from "@/lib/anthropic-limit";
+import { syncGatewayNow, putChatOnPool } from "@/lib/anthropic-gateway";
+import { getActiveHarness } from "@/lib/harness";
 import { startAnthropicSwap } from "@/lib/anthropic-swap";
 import { looksLikeAnthropicKey, MAX_ANTHROPIC_KEY_CHARS, verifyAnthropicKey } from "@/lib/coding-anthropic";
 import { simulateAnthropicLimit } from "@/lib/coding-agent";
 import { clearHandoffTokens, readHandoffTokens } from "@/lib/oauth-handoff";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { gatewayIsAbsent, openclawIsAbsent } from "@/lib/openclaw-config";
+import { hasPersonSession } from "@/lib/owner-session";
 import { hasValidSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
+import { POST as setDefaultProvider } from "@/app/setup-api/providers/default/route";
 
 export const dynamic = "force-dynamic";
 
@@ -35,12 +42,16 @@ export const dynamic = "force-dynamic";
  * order, the ACTIVE account every Claude consumer on the box uses now
  * (TASK-1260), the pool's health (`healthy`, `allLimited`, `nextResetAt`), the
  * owner's `returnToPrimary` preference, the last swap with what each consumer
- * did about it, and whether the gateway's Claude subscription follows the
- * active account. Readable with the owner's cookie AND
+ * did about it, and whether the chat runs on the pool's Claude accounts (and
+ * which one its order leads with). Readable with the owner's cookie AND
  * with the MCP bearer: it is what the `anthropic_accounts` tool reads, so the
  * assistant running a queue knows how many accounts can answer and waits for
  * the reset instead of spending attempts. It never carries a credential — not
- * a key, not a token, not a masked form of either.
+ * a key, not a token, not a masked form of either. Each account also says
+ * the model weeks spent on it (`modelLimits`, TASK-2141: only runs on those
+ * models wait, the account is not `limited`) and, with `?usage=1`,
+ * Anthropic's own percents (`usage`: session, the account's week, the active
+ * model weeks).
  *
  * POST is OWNER-ONLY and OUR PAGE ONLY, like `coding-agent/anthropic`: it
  * decides which accounts a delegated shell and the assistant spend, and the
@@ -67,6 +78,24 @@ export const dynamic = "force-dynamic";
  *  - `set_return_to_primary` `{ on }` — the owner's preference: back to the
  *    first account the moment it can answer again, instead of staying on the
  *    account the box moved to (the default).
+ *  - `set_pick_mode` `{ mode }` — how the next account is picked when the
+ *    active one has to move: `order`, the owner's order (the default), or
+ *    `most-room`, the subscription with the most room left in its fullest
+ *    usage window, an API key never ahead of a subscription. Moves nothing by
+ *    itself. GET says it as `pickMode`.
+ *  - `use_for_chat` — "Use these accounts for the chat too": every Claude
+ *    account of the pool goes into the OpenClaw gateway as an auth profile of
+ *    its own (src/lib/anthropic-gateway.ts), and then the chat's model is set
+ *    to Claude through Settings → AI Models' own path
+ *    (`/setup-api/providers/default`), so the chat, Telegram and the crons
+ *    rotate between them on a limit — no third sign-in. Refused with a code
+ *    (`no_gateway` — also while the active harness is not OpenClaw, a dual
+ *    box on Hermes — `no_claude_account`, `gateway_write_failed`,
+ *    `model_not_set` with the accounts out again, `model_unknown` with them
+ *    left in because openclaw.json could not be read) when it cannot be done;
+ *    the chat is never left on Claude without the accounts. A model route
+ *    that failed over a chat whose model is on Claude anyway is done: 200,
+ *    with what it reported as `warning` and no `model`.
  *  - `simulate_limit` `{ id, minutes? }` — THE TEST HOOK: every live coding run
  *    on that account ends as if Anthropic had answered "You've hit your session
  *    limit · resets <then>", and the real switch path takes it from there; with
@@ -74,8 +103,11 @@ export const dynamic = "force-dynamic";
  *    limit, swaps every consumer (the gateway included) to the next account
  *    and sends the owner's notice. Owner-only like the rest.
  *
- * Every answer is the re-read GET shape (plus `verified` for a key and
- * `interrupted` for the test hook), so the panel never has to guess.
+ * Every answer is the re-read GET shape (plus `verified` for a key,
+ * `interrupted` for the test hook, the chat's `model` and any `warning` for
+ * `use_for_chat`),
+ * so the panel never has to guess. `gateway.available` says whether this
+ * box's chat runs on OpenClaw at all, which is where `use_for_chat` applies.
  */
 
 function forbidden() {
@@ -106,12 +138,58 @@ const REFUSAL_STATUS: Record<AnthropicAccountError["code"], number> = {
   store_unavailable: 503,
 };
 
+/**
+ * Does the chat the owner is using run on OpenClaw right now? The pool goes
+ * into OpenClaw's gateway, and the model switch below follows whichever
+ * harness is ACTIVE — on a dual box with Hermes active it would move Hermes'
+ * chat instead.
+ */
+async function chatRunsOnOpenclaw(): Promise<boolean> {
+  if (openclawIsAbsent() || gatewayIsAbsent()) return false;
+  return (await getActiveHarness().catch(() => null)) === "openclaw";
+}
+
+/** The pool as the card draws it: plus whether the chat can run on it here and now. */
+async function poolView() {
+  const view = await describePool();
+  return { ...view, gateway: { ...view.gateway, available: await chatRunsOnOpenclaw() } };
+}
+
+/** Changes that alter which Claude accounts the gateway holds, or their order, without necessarily moving the active one. */
+const GATEWAY_FOLLOWS = new Set(["connect_oauth", "reauth_oauth", "remove", "reorder", "clear_limit"]);
+
+/** Settings → AI Models' own "make this the default", for Anthropic. */
+async function setChatModelToClaude(extra: Record<string, unknown>): Promise<{ ok: true } | { ok: false; error: string; status: number }> {
+  const res = await setDefaultProvider(new Request("http://localhost/setup-api/providers/default", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "anthropic" }),
+  }));
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (res.ok) {
+    extra.model = typeof data.model === "string" ? data.model : null;
+    if (typeof data.warning === "string" && data.warning) extra.warning = data.warning;
+    return { ok: true };
+  }
+  const error = data.kind === "provider_disabled"
+    ? "Anthropic is switched off in Settings → Providers. Switch it on first."
+    : data.error === "provider_unconfigured"
+      ? "The chat found no Claude model to use. See the box's log."
+      : typeof data.error === "string" && data.error.trim() ? data.error : "The chat's model could not be set.";
+  return { ok: false, error, status: res.status };
+}
+
 export async function GET(request: Request) {
   if (!(await hasValidSession(request))) {
     return refusal("Sign in first.", "unauthorized", 401);
   }
   try {
-    return NextResponse.json(await describePool());
+    // `?usage=1` (the owner's card, the anthropic_accounts tool): Anthropic is
+    // asked first about each Claude account's windows not read in the last ten
+    // minutes, so the view carries the weekly percent and the model weeks
+    // (TASK-2141). A few seconds at most; what is still out lands next time.
+    if (new URL(request.url).searchParams.get("usage") === "1") await refreshPoolUsage();
+    return NextResponse.json(await poolView());
   } catch (err) {
     return refusal(`The Anthropic accounts could not be read: ${err instanceof Error ? err.message : String(err)}`, "store_unavailable", 503);
   }
@@ -158,7 +236,7 @@ async function takeHandoff(): Promise<{ tokens: OAuthTokens; email: string | nul
 }
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   if (!isSameOriginRequest(request)) return crossOrigin();
   // Every change below may move the active account; the swap has to be
   // listening in this process when it does (the boot hook normally is first).
@@ -253,6 +331,22 @@ export async function POST(request: Request) {
         await setReturnToPrimary(body.on);
         console.error(`[anthropic-accounts] the owner turned "return to the first account" ${body.on ? "on" : "off"}`);
         break;
+      case "set_pick_mode":
+        if (typeof body.mode !== "string" || !(PICK_MODES as readonly string[]).includes(body.mode)) {
+          return refusal(`\`mode\` must be one of: ${PICK_MODES.join(", ")}.`, "invalid", 400);
+        }
+        await setPickMode(body.mode as PickMode);
+        console.error(`[anthropic-accounts] the owner set the account pick to "${body.mode}"`);
+        break;
+      case "use_for_chat": {
+        if (!(await chatRunsOnOpenclaw())) {
+          return refusal("This ClawBox's chat does not run on OpenClaw right now, so it cannot use these accounts.", "no_gateway", 409);
+        }
+        const result = await putChatOnPool(() => setChatModelToClaude(extra));
+        if (!result.ok) return refusal(result.error, result.code, result.status);
+        if (result.warning) extra.warning = result.warning;
+        break;
+      }
       case "simulate_limit": {
         const minutes = typeof body.minutes === "number" && Number.isFinite(body.minutes)
           ? Math.min(Math.max(Math.round(body.minutes), 1), MAX_SIMULATED_LIMIT_MINUTES)
@@ -279,5 +373,8 @@ export async function POST(request: Request) {
     if (err instanceof AnthropicAccountError) return refusal(err.message, err.code, REFUSAL_STATUS[err.code], err.details);
     return refusal(`The Anthropic accounts could not be changed: ${err instanceof Error ? err.message : String(err)}`, "store_unavailable", 503);
   }
-  return NextResponse.json({ ...(await describePool()), ...extra });
+  // The gateway follows a change of the owner's at once rather than at the
+  // keeper's next pass; it answers nothing to wait for.
+  if (typeof body.action === "string" && GATEWAY_FOLLOWS.has(body.action)) void syncGatewayNow();
+  return NextResponse.json({ ...(await poolView()), ...extra });
 }

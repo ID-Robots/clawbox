@@ -51,7 +51,9 @@ import { registerSystemTools } from "../../../mcp/tools/system";
 import { registerHermesPluginTools } from "../../../mcp/tools/hermes-plugins";
 import { registerLocalAiTools } from "../../../mcp/tools/local-ai";
 import { registerMemoryTools } from "../../../mcp/tools/memory";
+import { registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
+import { registerDocsTools } from "../../../mcp/tools/docs";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { registerAiTools } from "../../../mcp/tools/ai";
 import { registerBrowserTools } from "../../../mcp/tools/browser";
@@ -84,6 +86,7 @@ function toolNames(edition: Ed): Set<string> {
   const h = captureRegistrar(edition);
   const c = ctx(edition);
   registerOrientationTools(h.reg, c);
+  registerDocsTools(h.reg);
   registerSkillTools(h.reg);
   registerAiTools(h.reg, c);
   registerSystemTools(h.reg, c);
@@ -109,9 +112,11 @@ function widestServer(edition: Ed, install: Install) {
   process.env.CLAWBOX_MCP_CODING_TOOLS = "1";
   try {
     registerOrientationTools(h.reg, c);
+    registerDocsTools(h.reg);
     registerSkillTools(h.reg);
     registerHermesPluginTools(h.reg);
     registerMemoryTools(h.reg);
+    registerPrimeRadiantTools(h.reg);
     registerAiTools(h.reg, c);
     registerLocalAiTools(h.reg);
     registerSystemTools(h.reg, c);

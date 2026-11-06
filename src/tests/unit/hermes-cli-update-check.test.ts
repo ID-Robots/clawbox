@@ -1,5 +1,7 @@
 import { EventEmitter } from "events";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
@@ -172,6 +174,40 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
       expect(spawnedEnv(0).PYTHONPATH).toBe(path.join("/opt/hermes-home", "hermes-agent"));
     } finally {
       delete process.env.HERMES_HOME;
+    }
+  });
+
+  it("runs the environment upstream's package manager recorded, not a venv in the checkout", async () => {
+    // From v0.21.7 the venv lives in <hermes_home>/installs/<key>/environments
+    // and `<agent_dir>/venv` does not exist (measured on a Nano); the record in
+    // facts.json names it. A record that points anywhere else is not followed.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-home-"));
+    const agent = path.join(home, "hermes-agent");
+    fs.mkdirSync(agent, { recursive: true });
+    const key = createHash("sha256").update(fs.realpathSync(agent)).digest("hex").slice(0, 16);
+    const state = path.join(home, "installs", key);
+    const venv = path.join(state, "environments", "gen1", "venv");
+    fs.mkdirSync(path.join(venv, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(venv, "pyvenv.cfg"), "");
+    const facts = (environment: string) =>
+      fs.writeFileSync(path.join(state, "facts.json"), JSON.stringify({ packages: { venv: { environment } } }));
+    process.env.HERMES_HOME = home;
+    try {
+      facts(venv);
+      mockSpawn.mockImplementation(() => answers(SILENT_BANNER) as never);
+      await runHermesCli(["--version"], { silenceUpdateCheck: true });
+      expect(mockSpawn.mock.calls[0][0]).toBe(path.join(fs.realpathSync(venv), "bin", "python"));
+      expect(spawnedEnv(0).PYTHONPATH).toBe(agent);
+
+      mockSpawn.mockReset();
+      facts(path.join(home, "somewhere-else"));
+      mockSpawn.mockImplementation(() => answers(NOISY_BANNER) as never);
+      await runHermesCli(["--version"], { silenceUpdateCheck: true });
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mockSpawn.mock.calls[0][0]).toBe(HERMES_BIN);
+    } finally {
+      delete process.env.HERMES_HOME;
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

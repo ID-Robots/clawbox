@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
 import { listProjectDir, MAX_TREE_WRITE_BYTES, readProjectFile, writeProjectFile } from "@/lib/coding-project-tree";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -103,7 +103,7 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json({ error: "Editing a project's files needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
   const read = await readCappedJson(request, MAX_PUT_BODY_BYTES);

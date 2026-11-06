@@ -3,7 +3,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { ClawaiImageError, generateClawaiImage } from "@/lib/harness/clawai-images";
 import { appendTranscript } from "@/lib/harness/transcript-store";
-import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
+import { transcriptKeyFor } from "@/lib/chat-scope-server";
 
 export const dynamic = "force-dynamic";
 
@@ -81,11 +81,13 @@ export async function POST(req: NextRequest) {
   // The conversation the picture belongs to — the desktop thread unless the
   // surface named a tab. Validated for the reason the history route validates
   // it: the key becomes a filename.
-  const rawKey = (body as { sessionKey?: unknown } | null)?.sessionKey;
-  const sessionKey = typeof rawKey === "string" && rawKey ? rawKey : DESKTOP_TRANSCRIPT_KEY;
-  if (!transcriptKeyIsSafe(sessionKey)) {
-    return NextResponse.json({ error: "Invalid session key" }, { status: 400 });
+  // Only the caller's own conversation (src/lib/chat-scope.ts), and their own
+  // main thread when they name none.
+  const which = await transcriptKeyFor(req, (body as { sessionKey?: unknown } | null)?.sessionKey);
+  if (!which.ok) {
+    return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
+  const sessionKey = which.key;
 
   const durable = await transcriptLivesHere();
   // The REQUEST is recorded before the upstream call, the same way the chat

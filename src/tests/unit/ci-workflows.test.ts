@@ -301,6 +301,7 @@ describe("the checks CI runs, and their blocking status", () => {
       "bun run scripts/i18n-scan.ts", "bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint",
       "bash scripts/vitest-shard.sh", "node scripts/check-lockfiles.mjs", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
       "shellcheck -x scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
+      "node scripts/check-claude-md-no-loss.mjs",
     ]) {
       const runners = [...jobs].filter(([, text]) => runsOfEachStep(text).some((body) => body.includes(command))).map(([key]) => key);
       expect(runners.length, `${command} is not run by any step of any job`).toBeGreaterThan(0);

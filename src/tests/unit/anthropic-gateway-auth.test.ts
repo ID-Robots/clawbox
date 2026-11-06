@@ -1,34 +1,32 @@
 /**
- * The gateway's Claude subscription credential, rewritten in the gateway's own
- * stores (TASK-1260) — on real SQLite files shaped like OpenClaw's.
+ * The gateway's Anthropic profiles, the order core tries them in and the
+ * failures it recorded against each, as the account pool reads them
+ * (TASK-1260, the chat on the pool) — on real SQLite files shaped like
+ * OpenClaw 2026.10.2's.
  *
- * What would make the swap worthless or harmful if it broke:
+ * What would make the chat's rotation worthless or harmful if it broke:
  *
- *  1. EVERY AGENT, EVERY STORE. The legacy auth-profiles.json, each agent's
- *     `auth_profile_store`, and the shared state-db row when — and only when —
- *     `auth.sharedStore` says the gateway reads it.
- *  2. ONLY THE CREDENTIAL. The profile's type and id stay; other providers'
- *     profiles, and an anthropic API-key profile, are untouched; nothing is
- *     created where there was nothing.
- *  3. NEVER THE REFRESH TOKEN, and the old account's cooldown goes with it.
+ *  1. THE STORE CORE RESOLVES — the main agent's under `legacy-main`, the
+ *     shared row ONLY when `auth.sharedStore` says `state-db`, with the main
+ *     agent's own copies merged over it the way core merges them.
+ *  2. ONE PROVIDER, EVERY KIND — its oauth sign-ins, setup tokens and API
+ *     keys (an explicit order is core's whole candidate list, so the pool must
+ *     see every one), never another provider's, and never a token.
+ *  3. CORE'S OWN BOOKKEEPING — the stored order and the failure windows from
+ *     the STATE row beside the credentials; and nothing is ever written.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { DatabaseSync } from "node:sqlite";
-import {
-  listGatewayAnthropicProfiles,
-  tokenFingerprint,
-  writeGatewayAnthropicToken,
-  type GatewayAuthPaths,
-} from "@/lib/anthropic-gateway-auth";
+import { tokenFingerprint, type GatewayAuthPaths } from "@/lib/anthropic-gateway-auth";
+import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
 
 let home = "";
 let paths: GatewayAuthPaths;
 
 const OLD = "sk-ant-oat01-old-account-token";
-const NEW = "sk-ant-oat01-new-account-token";
 
 function agentDir(id: string): string {
   const dir = path.join(home, "agents", id, "agent");
@@ -36,6 +34,10 @@ function agentDir(id: string): string {
   return dir;
 }
 
+/**
+ * The CREDENTIALS as core 2026.10.2 persists them: `{version, profiles}` and
+ * nothing else (`buildPersistedAuthProfileSecretsStore`).
+ */
 function storeBlob(extra: Record<string, unknown> = {}) {
   return {
     version: 1,
@@ -44,55 +46,73 @@ function storeBlob(extra: Record<string, unknown> = {}) {
       "openai:chatgpt": { type: "oauth", provider: "openai", access: "openai-access", refresh: "openai-refresh", expires: 2_000 },
       "anthropic:manual": { type: "api_key", provider: "anthropic", key: "sk-ant-api03-a-key" },
     },
-    usageStats: {
-      "anthropic:default": { cooldownUntil: 9_999_999_999_999, errorCount: 3 },
-      "openai:chatgpt": { errorCount: 1 },
-    },
     ...extra,
   };
 }
 
-function writeAgentDb(id: string, blob: unknown): string {
+/**
+ * The runtime STATE beside them, a row of its own — order, last-good, usage
+ * stats and cooldowns (`buildPersistedAuthProfileState`) — which core merges
+ * OVER the credentials when it loads the store.
+ */
+function stateBlob() {
+  return {
+    version: 1,
+    order: { anthropic: ["anthropic:default", "anthropic:manual"] },
+    usageStats: {
+      "anthropic:default": { cooldownUntil: 9_999_999_999_999, errorCount: 3 },
+      "openai:chatgpt": { errorCount: 1 },
+    },
+  };
+}
+
+const AGENT_STORE_DDL = "CREATE TABLE auth_profile_store (store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL) STRICT";
+const AGENT_STATE_DDL = "CREATE TABLE auth_profile_state (state_key TEXT NOT NULL PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL) STRICT";
+const SHARED_DDL = "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT";
+
+/** An agent database as 2026.10.2 lays it out; `state: null` is one with no state row. */
+function writeAgentDb(id: string, blob: unknown, state: unknown = stateBlob()): string {
   const file = path.join(agentDir(id), "openclaw-agent.sqlite");
   const db = new DatabaseSync(file);
-  db.exec("CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+  db.exec(AGENT_STORE_DDL);
+  db.exec(AGENT_STATE_DDL);
   db.prepare("INSERT INTO auth_profile_store VALUES (?, ?, ?)").run("primary", JSON.stringify(blob), 1);
+  if (state !== null) db.prepare("INSERT INTO auth_profile_state VALUES (?, ?, ?)").run("primary", JSON.stringify(state), 1);
   db.close();
   return file;
 }
 
-/** A store blob as the assertions read it. */
+/** A store or state blob as the assertions read it. */
 interface Blob {
   version?: number;
   profiles: Record<string, Record<string, unknown>>;
-  usageStats: Record<string, unknown>;
+  order?: unknown;
+  usageStats?: Record<string, unknown>;
 }
 
-function readAgentDb(file: string): Blob {
+function readJsonCell(file: string, sql: string): Blob | undefined {
   const db = new DatabaseSync(file, { readOnly: true });
-  const row = db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = 'primary'").get() as { store_json: string };
+  const row = db.prepare(sql).get() as { json: string } | undefined;
   db.close();
-  return JSON.parse(row.store_json);
+  return row ? JSON.parse(row.json) : undefined;
 }
 
-function writeSharedDb(owned: boolean, blob: unknown): string {
+const readAgentDb = (file: string): Blob => readJsonCell(file, "SELECT store_json AS json FROM auth_profile_store WHERE store_key = 'primary'")!;
+
+function writeSharedDb(owned: boolean, blob: unknown, state: unknown = stateBlob()): string {
   const dir = path.join(home, "state");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "openclaw.sqlite");
   const db = new DatabaseSync(file);
-  db.exec("CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
-  if (owned) db.prepare("INSERT INTO config_machine_state VALUES (?, ?)").run("auth.sharedStore", JSON.stringify({ location: "state-db" }));
-  db.prepare("INSERT INTO config_machine_state VALUES (?, ?)").run("authProfiles.store", JSON.stringify(blob));
+  db.exec(SHARED_DDL);
+  const put = db.prepare("INSERT INTO config_machine_state VALUES (?, ?, ?)");
+  if (owned) put.run("auth.sharedStore", JSON.stringify({ location: "state-db" }), 1);
+  put.run("authProfiles.store", JSON.stringify(blob), 1);
+  if (state !== null) put.run("authProfiles.state", JSON.stringify(state), 1);
   db.close();
   return file;
 }
 
-function readSharedDb(file: string): Blob {
-  const db = new DatabaseSync(file, { readOnly: true });
-  const row = db.prepare("SELECT value_json FROM config_machine_state WHERE state_key = 'authProfiles.store'").get() as { value_json: string };
-  db.close();
-  return JSON.parse(row.value_json);
-}
 
 beforeEach(() => {
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-gw-auth-")));
@@ -103,96 +123,53 @@ afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
-describe("finding the gateway's Claude subscription", () => {
-  it("lists every anthropic sign-in profile in every agent and store — and no other provider's, and no API key", () => {
-    writeAgentDb("main", storeBlob());
-    writeAgentDb("pro-agent", storeBlob());
-    fs.writeFileSync(path.join(agentDir("legacy"), "auth-profiles.json"), JSON.stringify(storeBlob()));
-    writeSharedDb(true, storeBlob());
-    const found = listGatewayAnthropicProfiles(paths);
-    expect(found.map((p) => [p.store, p.agentId, p.profileId, p.type]).sort()).toEqual([
-      ["agent", "main", "anthropic:default", "oauth"],
-      ["agent", "pro-agent", "anthropic:default", "oauth"],
-      ["json", "legacy", "anthropic:default", "oauth"],
-      ["shared", null, "anthropic:default", "oauth"],
-    ].sort());
-    // The token is never in the answer, only what stands in for it.
-    expect(JSON.stringify(found)).not.toContain(OLD);
-    expect(found[0].fingerprint).toBe(tokenFingerprint(OLD));
+const ids = (read: ReturnType<typeof readGatewayProviderAuth>) => (read.kind === "present" ? read.profiles.map((p) => p.profileId).sort() : read.kind);
+
+describe("one provider's profiles, order and failures, as core resolves them", () => {
+  it("reads the main agent's store: every kind of anthropic profile, the stored order and core's failure windows — no token", () => {
+    writeAgentDb("main", storeBlob({ profiles: { ...storeBlob().profiles, "anthropic:clawbox-0a1b2c3d": { type: "token", provider: "anthropic", token: "sk-ant-oat01-pool", expires: 5 } } }));
+    // Another agent's store is not what a chat turn resolves.
+    writeAgentDb("pro-agent", { profiles: { "anthropic:other": { type: "token", provider: "anthropic", token: "x" } } });
+    const read = readGatewayProviderAuth("anthropic", paths);
+    expect(ids(read)).toEqual(["anthropic:clawbox-0a1b2c3d", "anthropic:default", "anthropic:manual"]);
+    if (read.kind !== "present") throw new Error(read.kind);
+    expect(read.profiles.find((p) => p.profileId === "anthropic:clawbox-0a1b2c3d")).toMatchObject({ type: "token", fingerprint: tokenFingerprint("sk-ant-oat01-pool"), expires: 5 });
+    expect(read.profiles.find((p) => p.profileId === "anthropic:default")).toMatchObject({ type: "oauth", fingerprint: tokenFingerprint(OLD) });
+    expect(read.order).toEqual(["anthropic:default", "anthropic:manual"]);
+    expect(read.failures).toEqual({
+      "anthropic:default": { cooldownUntil: 9_999_999_999_999, cooldownReason: null, disabledUntil: null, disabledReason: null, blockedUntil: null, lastFailureAt: null },
+    });
+    expect(JSON.stringify(read)).not.toContain(OLD);
+    expect(JSON.stringify(read)).not.toContain("old-refresh");
   });
 
-  it("does not read the shared row unless the gateway does (`auth.sharedStore` is `state-db`)", () => {
+  it("reads the shared row only when the gateway does (`auth.sharedStore` is `state-db`), with the main agent's own copies over it", () => {
+    const main = writeAgentDb("main", { profiles: { "anthropic:default": { type: "token", provider: "anthropic", token: "main-own-copy" } } }, {
+      order: { anthropic: ["anthropic:default"] },
+      usageStats: { "anthropic:default": { cooldownUntil: 7, cooldownReason: "rate_limit", lastFailureAt: 3 } },
+    });
     writeSharedDb(false, storeBlob());
-    expect(listGatewayAnthropicProfiles(paths)).toEqual([]);
+    // Not owned: the main agent's store is the store.
+    expect(ids(readGatewayProviderAuth("anthropic", paths))).toEqual(["anthropic:default"]);
+    fs.rmSync(paths.sharedDb);
+    writeSharedDb(true, storeBlob());
+    const read = readGatewayProviderAuth("anthropic", paths);
+    if (read.kind !== "present") throw new Error(read.kind);
+    expect(ids(read)).toEqual(["anthropic:default", "anthropic:manual"]);
+    expect(read.profiles.find((p) => p.profileId === "anthropic:default")?.fingerprint).toBe(tokenFingerprint("main-own-copy"));
+    expect(read.order).toEqual(["anthropic:default"]);
+    expect(read.failures["anthropic:default"]).toMatchObject({ cooldownUntil: 7, cooldownReason: "rate_limit", lastFailureAt: 3 });
+    expect(fs.existsSync(main)).toBe(true);
   });
 
-  it("finds a setup-token profile too", () => {
-    writeAgentDb("main", { profiles: { "anthropic:setup": { type: "token", provider: "anthropic", token: OLD } } });
-    expect(listGatewayAnthropicProfiles(paths)).toEqual([
-      expect.objectContaining({ profileId: "anthropic:setup", type: "token", fingerprint: tokenFingerprint(OLD) }),
-    ]);
-  });
-
-  it("answers nothing for a box with no OpenClaw at all", () => {
-    expect(listGatewayAnthropicProfiles({ agentsDir: path.join(home, "none"), sharedDb: path.join(home, "none.sqlite") })).toEqual([]);
-  });
-});
-
-describe("putting the active account in", () => {
-  it("replaces the access token everywhere, empties the refresh token and drops the old account's cooldown", () => {
+  it("answers no-store for a box with no OpenClaw store, unreadable for one it cannot ask — and never writes", () => {
+    expect(readGatewayProviderAuth("anthropic", { agentsDir: path.join(home, "none"), sharedDb: path.join(home, "none.sqlite") })).toEqual({ kind: "no-store" });
     const main = writeAgentDb("main", storeBlob());
-    const legacy = path.join(agentDir("legacy"), "auth-profiles.json");
-    fs.writeFileSync(legacy, JSON.stringify(storeBlob()), { mode: 0o600 });
-    const shared = writeSharedDb(true, storeBlob());
-    const expires = Date.now() + 8 * 3_600_000;
-
-    expect(writeGatewayAnthropicToken({ access: NEW, expires }, paths)).toEqual({ written: 3, failed: 0 });
-
-    for (const blob of [readAgentDb(main), JSON.parse(fs.readFileSync(legacy, "utf-8")) as Blob, readSharedDb(shared)]) {
-      expect(blob.profiles["anthropic:default"]).toEqual({ type: "oauth", provider: "anthropic", access: NEW, refresh: "", expires });
-      // Everything else exactly as core left it.
-      expect(blob.profiles["openai:chatgpt"]).toEqual({ type: "oauth", provider: "openai", access: "openai-access", refresh: "openai-refresh", expires: 2_000 });
-      expect(blob.profiles["anthropic:manual"]).toEqual({ type: "api_key", provider: "anthropic", key: "sk-ant-api03-a-key" });
-      expect(blob.usageStats["anthropic:default"]).toBeUndefined();
-      expect(blob.usageStats["openai:chatgpt"]).toEqual({ errorCount: 1 });
-      expect(blob.version).toBe(1);
-    }
-    expect((fs.statSync(legacy).mode & 0o777).toString(8)).toBe("600");
-    expect(listGatewayAnthropicProfiles(paths).every((p) => p.fingerprint === tokenFingerprint(NEW))).toBe(true);
-  });
-
-  it("leaves `expires` out when the account did not say, rather than keeping the old account's", () => {
-    const main = writeAgentDb("main", storeBlob());
-    writeGatewayAnthropicToken({ access: NEW, expires: null }, paths);
-    expect(readAgentDb(main).profiles["anthropic:default"]).not.toHaveProperty("expires");
-  });
-
-  it("writes a setup-token profile's token field", () => {
-    const main = writeAgentDb("main", { profiles: { "anthropic:setup": { type: "token", provider: "anthropic", token: OLD, expires: 5 } } });
-    writeGatewayAnthropicToken({ access: NEW, expires: 7 }, paths);
-    expect(readAgentDb(main).profiles["anthropic:setup"]).toEqual({ type: "token", provider: "anthropic", token: NEW, expires: 7 });
-  });
-
-  it("creates nothing where the gateway holds no Claude subscription", () => {
-    const main = writeAgentDb("main", { profiles: { "openai:chatgpt": { type: "oauth", provider: "openai", access: "x" } } });
-    expect(writeGatewayAnthropicToken({ access: NEW, expires: 1 }, paths)).toEqual({ written: 0, failed: 0 });
-    expect(readAgentDb(main).profiles).toEqual({ "openai:chatgpt": { type: "oauth", provider: "openai", access: "x" } });
-    expect(fs.existsSync(path.join(home, "agents", "main", "agent", "auth-profiles.json"))).toBe(false);
-    expect(fs.existsSync(paths.sharedDb)).toBe(false);
-  });
-
-  it("never writes the shared row the gateway does not read", () => {
-    const shared = writeSharedDb(false, storeBlob());
-    writeGatewayAnthropicToken({ access: NEW, expires: 1 }, paths);
-    expect(readSharedDb(shared).profiles["anthropic:default"].access).toBe(OLD);
-  });
-
-  it("counts a store it cannot write and still writes the rest", () => {
-    writeAgentDb("main", storeBlob());
-    const broken = path.join(agentDir("broken"), "openclaw-agent.sqlite");
-    fs.writeFileSync(broken, "this is not a database");
-    const result = writeGatewayAnthropicToken({ access: NEW, expires: 1 }, paths);
-    expect(result.written).toBe(1);
-    expect(result.failed).toBe(1);
+    const before = fs.readFileSync(main);
+    readGatewayProviderAuth("anthropic", paths);
+    expect(fs.readFileSync(main).equals(before)).toBe(true);
+    expect(readAgentDb(main).profiles["anthropic:default"].access).toBe(OLD);
+    fs.writeFileSync(main, "this is not a database");
+    expect(readGatewayProviderAuth("anthropic", paths).kind).toBe("unreadable");
   });
 });

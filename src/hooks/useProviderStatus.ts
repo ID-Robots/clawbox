@@ -78,7 +78,16 @@ export interface UseProviderStatus {
    */
   defaultWarning: string | null;
   setDefault: (providerId: string) => Promise<void>;
-  refresh: () => void;
+  /**
+   * Read the box again. Answers the number of the read it asked for, which the
+   * two counters below can be held against: a caller that changed something
+   * (a sign-out) waits for THAT read, never one that was already on its way.
+   */
+  refresh: () => number;
+  /** The number of the newest read that has finished, answered or failed (0 before any). */
+  readNonce: number;
+  /** The number of the read `summary` came from (0 before any). */
+  summaryNonce: number;
 }
 
 export function useProviderStatus(options: { enabled?: boolean } = {}): UseProviderStatus {
@@ -89,6 +98,12 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   const [defaultError, setDefaultError] = useState<string | null>(null);
   const [defaultWarning, setDefaultWarning] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const nonceRef = useRef(0);
+  // Which read each answer belongs to: a read finishes as the nonce it was
+  // asked under, so a caller holding a nonce can tell an answer to its own
+  // read from one that was already in flight.
+  const [readNonce, setReadNonce] = useState(0);
+  const [summaryNonce, setSummaryNonce] = useState(0);
   // Guards a setState after unmount, and lets a slow answer for a previous
   // nonce be discarded rather than overwriting a newer one.
   const controllerRef = useRef<AbortController | null>(null);
@@ -102,7 +117,11 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
   // on the first transient 500 with the spinner frozen on screen.
   const checkingRef = useRef(false);
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), []);
+  const refresh = useCallback(() => {
+    nonceRef.current += 1;
+    setNonce(nonceRef.current);
+    return nonceRef.current;
+  }, []);
 
   useEffect(() => {
     if (!enabled) return;
@@ -130,6 +149,8 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // Settings pane.
         if (!data || !Array.isArray(data.providers)) throw new Error("Malformed status");
         setSummary(data);
+        setSummaryNonce(nonce);
+        setReadNonce(nonce);
         setError(false);
         // A `checking` row is a promise that this answer is going to change,
         // and nothing else on the page emits a signal when a harness finishes
@@ -144,6 +165,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
         // transient failure reads as "everything disconnected", which is the one
         // thing it must never say by accident.
         setError(true);
+        setReadNonce(nonce);
         scheduleRetry();
       });
 
@@ -200,5 +222,7 @@ export function useProviderStatus(options: { enabled?: boolean } = {}): UseProvi
     defaultWarning,
     setDefault,
     refresh,
+    readNonce,
+    summaryNonce,
   };
 }

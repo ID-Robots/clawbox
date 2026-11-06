@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render } from "@/tests/helpers/test-utils";
 import {
   groupConsecutiveBy,
+  prettifyToolName,
+  toolBrand,
   ToolCallPills,
   ToolCallSummaryChips,
   type ChatToolCall,
@@ -101,5 +103,59 @@ describe("ToolCallSummaryChips", () => {
     // … and the failed call stands alone: ok, failed, ok — no counts anywhere.
     expect(container.textContent).not.toContain("(");
     expect(container.textContent).toContain("!");
+  });
+});
+
+describe("the box's knowledge tools carry their app's name and mark", () => {
+  it.each([
+    ["wiki_status", "Prime Radiant Status"],
+    ["wiki_search", "Prime Radiant Search"],
+    ["wiki_get", "Prime Radiant Page"],
+    ["memory_search", "Memory Shard Search"],
+    ["memory_get", "Memory Shard Read"],
+    ["openclaw__wiki_search", "Prime Radiant Search"],
+  ])("names %s as %s", (name, label) => {
+    expect(prettifyToolName(name)).toBe(label);
+  });
+
+  it("leaves every other tool as it was", () => {
+    expect(prettifyToolName("exec")).toBe("exec");
+    expect(prettifyToolName("web_search")).toBe("web search");
+    expect(prettifyToolName("constructor")).toBe("constructor");
+    expect(toolBrand("exec")).toBeNull();
+    expect(toolBrand("toString")).toBeNull();
+  });
+
+  it("draws the tesseract on a Prime Radiant row and the shard on a Memory Shard row, live and replayed", () => {
+    const live = render(
+      <ToolCallPills
+        toolCalls={[
+          { id: "1", name: "wiki_search", prettyName: prettifyToolName("wiki_search"), phase: "done", startedAt: 0 },
+          { id: "2", name: "wiki_search", prettyName: prettifyToolName("wiki_search"), phase: "done", startedAt: 0 },
+          { id: "3", name: "memory_search", prettyName: prettifyToolName("memory_search"), phase: "done", startedAt: 0 },
+          { id: "4", name: "exec", prettyName: "exec", phase: "done", startedAt: 0 },
+        ]}
+        runningLabel="Running"
+      />,
+    );
+    expect(live.container.textContent).toContain("Prime Radiant Search (2)");
+    expect(live.container.textContent).toContain("Memory Shard Search");
+    expect(live.container.querySelectorAll("[data-testid=prime-radiant-icon]")).toHaveLength(1);
+    expect(live.container.querySelectorAll("[data-testid=memory-shard-mark]")).toHaveLength(1);
+    live.unmount();
+
+    const replay = render(
+      <ToolCallSummaryChips
+        toolCalls={[
+          { name: "wiki_status", status: "ok" } as ChatToolSummary,
+          { name: "memory_search", status: "ok" } as ChatToolSummary,
+        ]}
+        label="Steps"
+      />,
+    );
+    fireEvent.click(replay.getByTestId("chat-tool-summary-toggle"));
+    expect(replay.container.textContent).toContain("Prime Radiant Status");
+    expect(replay.container.querySelectorAll("[data-testid=prime-radiant-icon]")).toHaveLength(1);
+    expect(replay.container.querySelectorAll("[data-testid=memory-shard-mark]")).toHaveLength(1);
   });
 });

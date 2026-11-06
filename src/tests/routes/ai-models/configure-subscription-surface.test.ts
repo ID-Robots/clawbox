@@ -96,7 +96,12 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({
   GatewayRpcError: class GatewayRpcError extends Error {},
 }));
 
-vi.mock("@/lib/openclaw-config", () => ({
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
+vi.mock("@/lib/openclaw-config", async () => ({
+  ...(await import("./config-write-passthrough")).configWritePassthrough,
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
   // finished coming back" from "the restart was refused", and `instanceof
@@ -140,6 +145,9 @@ vi.mock("@/lib/llamacpp", () => ({
   getLlamaCppContextWindow: vi.fn().mockReturnValue(131072),
   getLlamaCppMaxTokens: vi.fn().mockReturnValue(131072),
   getLlamaCppProxyBaseUrl: vi.fn().mockReturnValue("http://127.0.0.1/llamacpp/v1"),
+  // The real declaration: the row a 2026.10+ core gets (src/lib/llamacpp.ts).
+  LLAMACPP_REASONING_COMPAT: { supportedReasoningEfforts: ["none", "high"], reasoningEffortMap: { off: "none" } },
+  llamaCppThinkingDefaultOp: (ref: string) => [`agents.defaults.models[${JSON.stringify(ref)}].params.thinking`, "off"],
 }));
 
 vi.mock("@/lib/local-ai-runtime", () => ({
@@ -779,6 +787,20 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
     // Next's 500 either way — so waiting out the readiness budget for it buys
     // nothing but latency on a request that has already failed.
     expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("only asks, restoring after its own error handling throws, behind a gateway doctor found busy", async () => {
+    // A pre-SQLite core carries on past a doctor that was not run; a later
+    // throw then restores through the outer catch, behind the same running job.
+    vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("gateway-still-stopping");
+    mockFs.readdir.mockResolvedValueOnce([] as never);
+    vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+    const poisoned = new Error("boom") as unknown as { message: unknown };
+    poisoned.message = null;
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(poisoned);
+
+    await expect(configurePost(subscribe())).rejects.toThrow();
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 });
   });
 
   it("leaves the gateway alone when an API-key save fails — nothing stopped it", async () => {

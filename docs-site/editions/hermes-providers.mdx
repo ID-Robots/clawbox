@@ -108,6 +108,14 @@ the old name across would produce a device configured with a model its provider
 has never heard of.
 </Warning>
 
+## Signing out of a provider
+
+Each connected provider in **Settings → Providers** has **Sign out of &lt;provider&gt;**;
+tap it, then tap again to confirm. The box removes that provider's key or sign-in from
+Hermes' credential pool and configuration, restarts Hermes, and checks with Hermes that it
+is gone. The default provider cannot be signed out — make another provider the default
+first.
+
 If a provider has no usable model yet — not signed in, or no key — saving is
 refused with a message saying so rather than leaving the device pointed at
 something that cannot answer.
@@ -122,6 +130,12 @@ it works the same way on both editions.
 - It runs with **on-demand standby**: the model wakes on the first request and
   sleeps again afterwards to give the RAM back. The first message after a quiet
   period is therefore slower than the ones that follow.
+- It runs in a **lean mode**: a turn on the on-device model gets a short set of
+  instructions and only the tools a small model can drive, with a 64k context window, so
+  it answers sooner. Every cloud turn keeps the full set.
+- A conversation that grows too long for it offers a new chat rather than a
+  minutes-long shortening on the box.
+- Local AI stays on when the box is switched to the other edition and back.
 - Its reasoning control is a **two-state switch — *Thinking off* / *Thinking on***,
   not the eight-level effort scale. Its backend takes a boolean
   (`enable_thinking`) and has no graded middle, so offering Low/Medium/High
@@ -130,8 +144,8 @@ it works the same way on both editions.
   default is a separate, explicit choice.
 
 <Note>
-ClawBox (Jetson Orin Nano, 8 GB) runs a small model comfortably and is
-best paired with a cloud provider for heavier work. See
+ClawBox (Jetson Orin Nano Super, 8 GB) runs a small model comfortably and
+is best paired with a cloud provider for heavier work. See
 [Hardware](/hardware/clawbox-connect).
 </Note>
 

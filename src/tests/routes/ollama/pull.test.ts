@@ -10,7 +10,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 // Pulling a model is the OWNER's verb: `requireSession` here also admitted the
 // MCP bearer, which middleware hands to every /setup-api route.
 const owner = { value: true };
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
 
 // The disk check the route makes on each layer's `total`.
 const free = { bytes: 100 * 1024 * 1024 * 1024 };

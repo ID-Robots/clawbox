@@ -85,16 +85,16 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.9.4"
+OPENCLAW_VERSION="2026.10.9"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 OPENCLAW_HOME="$CLAWBOX_HOME/.openclaw"
 UI_SERVICE="clawbox-setup.service"
 GATEWAY_SERVICE="clawbox-gateway.service"
-# Must satisfy $OPENCLAW_NODE_ENGINE below — 24.15.0 no longer does, and this
+# Must satisfy $OPENCLAW_NODE_ENGINE below — 24.21.0 no longer does, and this
 # fallback exists precisely for the machines where apt cannot deliver one.
-NODE_DIST_VERSION="24.21.0"
+NODE_DIST_VERSION="24.22.1"
 NODE_DIST_ROOT="/opt/clawbox/node"
 export PATH="$NODE_DIST_ROOT/bin:$PATH"
 
@@ -120,8 +120,10 @@ as_user_login() {
 # The pinned core's `engines.node`, and the same table install.sh carries: with
 # 2026.9.3 that became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is rejected and
 # 24 must be at least 24.16.0 (`node:sqlite` truncates TEXT at an embedded NUL
-# below those builds).
-OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+# below those builds). 2026.10.6 raised it to `>=24.22.1 <25 || >=26.12.1`, the
+# October 2026 Node.js security releases (TLS chains signed with compromised
+# certificate keys are rejected from those builds on).
+OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"
 
 # The table itself, over a VERSION STRING rather than over whatever `node` is on
 # PATH — because two callers need it: the guard below asks about the installed
@@ -133,8 +135,8 @@ node_version_satisfies_openclaw_engine() {
   [ -n "$version" ] || return 1
   major="${version%%.*}"
   case "$major" in
-    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
-    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    24) dpkg --compare-versions "$version" ge "24.22.1" ;;
+    26) dpkg --compare-versions "$version" ge "26.12.1" ;;
     # Three digits and up as well: `[3-9][0-9]` alone made the open-ended half
     # of the range stop at 99, which is a ceiling nobody wrote down.
     2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
@@ -426,9 +428,16 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
+  # poppler-utils (pdftotext) and libreoffice-writer are the document
+  # extractors Memory Shard and Prime Radiant spawn (src/lib/memory-extract.ts):
+  # without libreoffice-writer every .docx/.odt/.rtf an import reads fails as
+  # "extract-failed" (seen on the owner's laptop, 2026-10-15). Same packages as
+  # install.sh's Jetson list; this step also runs on every update, so an
+  # installed PC picks them up too.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     git curl python3 python3-pip pipx build-essential cmake ninja-build \
-    pkg-config openssl ffmpeg ca-certificates sudo
+    pkg-config openssl ffmpeg ca-certificates sudo \
+    poppler-utils libreoffice-writer
   ensure_openclaw_node_engine
 }
 
@@ -850,10 +859,15 @@ try {
     // it does not restore an older bot over one `openclaw config set` re-pointed.
     // An env REFERENCE under `token` ({source:'env',…}) is a bot OpenClaw holds
     // too — see the same block in install.sh.
-    const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
-    // `token: null`/`token: ""` is an UNSET reference, not a credential - see
-    // the same block in install.sh.
-    const openclawHasBot=existingToken!==''||(rest.token!==undefined&&rest.token!==null&&rest.token!=='');
+    // `token: null`/`token: ""` is an UNSET reference, not a credential; a
+    // reference in `botToken` itself, a `tokenFile`, and any multi-account
+    // `accounts.<id>` credential are bots OpenClaw holds - see the same block
+    // in install.sh.
+    const holdsBot=(b)=>!!b&&typeof b==='object'&&(
+      (typeof b.botToken==='string'?b.botToken.trim()!=='':b.botToken!=null)||
+      (b.token!==undefined&&b.token!==null&&b.token!=='')||
+      (typeof b.tokenFile==='string'&&b.tokenFile.trim()!==''));
+    const openclawHasBot=holdsBot(rest)||(!!rest.accounts&&typeof rest.accounts==='object'&&Object.values(rest.accounts).some(holdsBot));
     c.channels.telegram=openclawHasBot?{...rest,enabled:true}:{...rest,enabled:true,botToken:cb.telegram_bot_token};
     process.stderr.write(openclawHasBot
       ? '  Telegram channel registered in OpenClaw config (kept the bot OpenClaw already holds)\n'
@@ -965,10 +979,15 @@ step_directories_permissions() {
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
+  # Same values and migration as install.sh (src/lib/llamacpp.ts says why).
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
   echo "  Done"
 }
 
@@ -1075,6 +1094,91 @@ step_chromium_install() {
   fi
 
   ensure_playwright_chromium
+}
+
+# Google Chrome stable — the real thing, not Chromium — for Monitor Mode's
+# "Google Chrome" desktop icon (src/lib/desktop-chrome.ts). The device
+# installer's twin, kept line for line with install.sh::step_google_chrome_install;
+# read the reasons there. What differs: no architecture check, because this
+# installer refuses anything but x86_64 before it does anything else, and no
+# test mode, because it has none.
+#
+# From Google's own apt repo, trusted through a keyring of its own under
+# /etc/apt/keyrings that the one source line names with `signed-by`. The
+# package's cron job is told not to rewrite that line (repo_add_once="false"),
+# and a refresh that fails with the repo in place takes it out again, so a
+# conflicting source can never break apt for the rest of this PC.
+#
+# Idempotent: a Chrome already where desktop-chrome.ts looks for it is left
+# alone. Returns 1 when Chrome could not be installed: the full install treats
+# that as a warning, while a dispatched `--step google_chrome_install` (the
+# root-step dispatcher's, on an update) exits non-zero.
+GOOGLE_CHROME_KEY_URL="https://dl.google.com/linux/linux_signing_key.pub"
+GOOGLE_CHROME_KEYRING="/etc/apt/keyrings/google-chrome.asc"
+GOOGLE_CHROME_SOURCE_LIST="/etc/apt/sources.list.d/google-chrome.list"
+GOOGLE_CHROME_DEFAULTS="/etc/default/google-chrome"
+
+# Where src/lib/desktop-chrome.ts looks: google-chrome-stable or google-chrome
+# on PATH, then the package's own binary.
+google_chrome_installed() {
+  command -v google-chrome-stable &>/dev/null \
+    || command -v google-chrome &>/dev/null \
+    || [ -x /opt/google/chrome/chrome ]
+}
+
+step_google_chrome_install() {
+  if google_chrome_installed; then
+    echo "  Google Chrome already installed"
+    return 0
+  fi
+
+  # Into a temp file first and checked for what it should be, so an HTML page
+  # from a captive portal or a proxy never becomes a keyring apt trusts.
+  local key
+  key="$(mktemp)"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --retry 3 --retry-connrefused \
+       "$GOOGLE_CHROME_KEY_URL" -o "$key" \
+     || [ "$(head -n 1 "$key")" != "-----BEGIN PGP PUBLIC KEY BLOCK-----" ]; then
+    echo "  WARNING: could not download Google's package signing key; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  # Checked, not left to errexit: the full install runs this step in an
+  # OR-list, where errexit is off for the whole body.
+  if ! install -d -m 0755 "${GOOGLE_CHROME_KEYRING%/*}" \
+     || ! install -m 0644 "$key" "$GOOGLE_CHROME_KEYRING"; then
+    echo "  WARNING: could not write $GOOGLE_CHROME_KEYRING; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  rm -f "$key"
+
+  if [ -f "$GOOGLE_CHROME_DEFAULTS" ]; then
+    sed -i 's/^[[:space:]]*repo_add_once=.*/repo_add_once="false"/' "$GOOGLE_CHROME_DEFAULTS"
+  else
+    echo 'repo_add_once="false"' > "$GOOGLE_CHROME_DEFAULTS"
+  fi
+  # `arch=amd64` first: that is the shape the cron job recognises as its own
+  # repo, already configured, and so leaves alone.
+  echo "deb [arch=amd64 signed-by=$GOOGLE_CHROME_KEYRING] https://dl.google.com/linux/chrome/deb/ stable main" \
+    > "$GOOGLE_CHROME_SOURCE_LIST"
+
+  # A full refresh rather than this one source: a standalone dispatch may run
+  # when step_apt_update has not, and Chrome's dependencies come from the
+  # distribution's lists, not Google's.
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+    echo "  WARNING: apt-get update failed with Google's repo added; removed it again so this PC's own updates keep working. Google Chrome not installed" >&2
+    rm -f "$GOOGLE_CHROME_SOURCE_LIST" "$GOOGLE_CHROME_KEYRING"
+    return 1
+  fi
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq google-chrome-stable; then
+    echo "  WARNING: apt-get install google-chrome-stable failed; Google Chrome not installed" >&2
+    return 1
+  fi
+  echo "  Google Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo google-chrome-stable)"
 }
 
 # ── The OpenAI Codex CLI (TASK-439) ──────────────────────────────────────────
@@ -1256,6 +1360,84 @@ step_ffmpeg_install() {
   fi
 }
 
+# The SHA256 GitHub publishes for one asset of a release: from the release
+# JSON in $1, the asset whose "name" is exactly $2, its "digest". Parsed as
+# JSON, so neither field order nor whitespace decides it; prints nothing when
+# there is no such asset or it carries no sha256 digest.
+github_release_asset_sha256() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1]) as fh:
+        release = json.load(fh)
+except Exception:
+    sys.exit(0)
+assets = release.get("assets") if isinstance(release, dict) else None
+for item in assets if isinstance(assets, list) else []:
+    if isinstance(item, dict) and item.get("name") == sys.argv[2]:
+        digest = item.get("digest")
+        match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", digest) if isinstance(digest, str) else None
+        if match:
+            print(match.group(1).lower())
+        break
+PY
+}
+
+# Cloudflare Tunnel (cloudflared), the binary Settings → Remote Control
+# starts. The appliance's step runs scripts/setup-tunnel.sh; here the same
+# download is INLINED, because this function runs out of the root-owned
+# installer copy and root never executes a file the install user can write
+# (TASK-733). Same release pin, same published-SHA256 check, same idempotence:
+# a binary already in place is left alone.
+step_cloudflared_install() {
+  local install_path="/usr/local/bin/cloudflared"
+  local version="${CLOUDFLARED_VERSION:-2026.3.0}"
+  if [ -x "$install_path" ] && [ -z "${CLOUDFLARED_FORCE_REINSTALL:-}" ]; then
+    echo "  cloudflared already installed at $install_path"
+    "$install_path" --version 2>/dev/null || true
+    return 0
+  fi
+  local cf_arch
+  case "$(uname -m)" in
+    x86_64|amd64) cf_arch="amd64" ;;
+    aarch64|arm64) cf_arch="arm64" ;;
+    *) echo "  cloudflared: unsupported architecture $(uname -m); remote control will be unavailable" >&2; return 0 ;;
+  esac
+  local asset="cloudflared-linux-${cf_arch}"
+  local url="https://github.com/cloudflare/cloudflared/releases/download/${version}/${asset}"
+  local meta_url="https://api.github.com/repos/cloudflare/cloudflared/releases/tags/${version}"
+  local tmp meta sums expected
+  tmp="$(mktemp)"; meta="$(mktemp)"; sums="$(mktemp)"
+  # A failed download or a bad checksum is a WARNING, as on the appliance:
+  # the box still installs, and the Remote Control panel's button runs this
+  # step again on demand.
+  # `--connect-timeout` bounds a black hole and `--speed-time` a transfer that
+  # has stopped moving (under 1 byte/s for a minute); `--retry` retries both.
+  # No `--max-time`, which would fail a download that is merely slow.
+  if ! curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+    echo "  WARNING: cloudflared download failed ($url); remote control will be unavailable until installed" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  if ! curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3 --retry-delay 2 -H "Accept: application/vnd.github+json" -o "$meta" "$meta_url"; then
+    echo "  WARNING: could not fetch the cloudflared ${version} release metadata; not installing an unverified binary" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  expected="$(github_release_asset_sha256 "$meta" "$asset" || true)"
+  if [ -z "$expected" ]; then
+    echo "  WARNING: no published SHA256 for ${asset} in ${version}; not installing an unverified binary" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  printf '%s  %s\n' "$expected" "$tmp" > "$sums"
+  if ! sha256sum --check --status "$sums"; then
+    echo "  WARNING: cloudflared SHA256 mismatch for ${asset}; not installing" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  chmod 0755 "$tmp"
+  mv "$tmp" "$install_path"
+  rm -f "$meta" "$sums"
+  echo "  cloudflared installed: $("$install_path" --version 2>/dev/null || echo "$version")"
+}
+
 step_fix_git_perms() {
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
   echo "  Fixed .git ownership"
@@ -1270,7 +1452,23 @@ x64_sudoers_rule() {
   if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
     printf '%s' ", /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service"
   fi
+  # Remote Control: the web server starts, stops, enables and disables the
+  # tunnel unit — the exact verbs and the exact unit name src/lib/cloudflared.ts
+  # passes, never a `start` (a restart is what it uses) and never a wildcard.
+  printf '%s' ", /usr/bin/systemctl restart clawbox-tunnel.service, /usr/bin/systemctl stop clawbox-tunnel.service, /usr/bin/systemctl enable clawbox-tunnel.service, /usr/bin/systemctl disable clawbox-tunnel.service"
   printf '%s\n' ", /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service"
+}
+
+# Settings → Users: a ClawBox user's sign-in check and their own Terminal
+# (`sudo -n clawbox-user-helper.sh verify|shell <user>`, src/lib/clawbox-users.ts
+# and scripts/terminal-server.mjs), the appliance's config/clawbox-sudoers grant
+# for the same root-owned helper. Its own drop-in, written by
+# step_root_step_contract beside the helper it names, so the one repair command
+# the app prints brings both — and never rewrites the service grants above,
+# whose desktop half depends on how this PC was first installed.
+X64_USERS_SUDOERS="/etc/sudoers.d/clawbox-x64-users"
+x64_user_helper_sudoers_rule() {
+  printf '%s\n' "$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-user-helper.sh"
 }
 
 reserved_port_env_keys() {
@@ -1370,9 +1568,29 @@ step_root_step_contract() {
     return 1
   fi
 
+  # The multi-user helper ships in config/, beside the appliance's copy of it.
+  local helper="$src/../../config/clawbox-user-helper.sh"
+  if [ ! -f "$helper" ]; then
+    echo "Error: config/clawbox-user-helper.sh not found beside $src" >&2
+    return 1
+  fi
+
   install -d -o root -g root -m 0755 "$ROOT_STEP_DIR" "$ROOT_STEP_CONF_DIR"
   install -o root -g root -m 0755 "$src/clawbox-x64-run-root-step.sh" "$ROOT_STEP_DIR/clawbox-run-root-step.sh"
   install -o root -g root -m 0755 "$src/clawbox-x64-root-step.sh" "$ROOT_STEP_DIR/clawbox-root-step.sh"
+  install -o root -g root -m 0755 "$helper" "$ROOT_STEP_DIR/clawbox-user-helper.sh"
+
+  local users_sudoers_tmp
+  users_sudoers_tmp=$(mktemp)
+  x64_user_helper_sudoers_rule > "$users_sudoers_tmp"
+  chmod 440 "$users_sudoers_tmp"
+  if ! visudo -cf "$users_sudoers_tmp" >/dev/null; then
+    rm -f "$users_sudoers_tmp"
+    echo "Error: generated x64 users sudoers rule is invalid" >&2
+    return 1
+  fi
+  install -o root -g root -m 440 "$users_sudoers_tmp" "$X64_USERS_SUDOERS"
+  rm -f "$users_sudoers_tmp"
 
   # Root runs a root-owned copy of this installer, never $PROJECT_DIR/install-x64.sh:
   # that tree belongs to the install user, so exec'ing it as root would make the
@@ -1400,7 +1618,7 @@ UNIT
   systemctl daemon-reload
 
   reconcile_owner_password_flag
-  echo "  Root-step contract installed (launcher, dispatcher, template unit)"
+  echo "  Root-step contract installed (launcher, dispatcher, users helper and its grant, template unit)"
 }
 
 step_systemd_services() {
@@ -1413,6 +1631,7 @@ step_systemd_services() {
   local vnc_unit="/etc/systemd/system/clawbox-vnc.service"
   local websockify_unit="/etc/systemd/system/clawbox-websockify.service"
   local browser_unit="/etc/systemd/system/clawbox-browser.service"
+  local tunnel_unit="/etc/systemd/system/clawbox-tunnel.service"
 
   cat > "$gateway_unit" <<EOF
 [Unit]
@@ -1440,7 +1659,42 @@ RestartSec=5
 RestartPreventExitStatus=78
 SuccessExitStatus=0 143
 TimeoutStartSec=600
-TimeoutStopSec=30
+# OpenClaw sizes its drain from this and its own template writes 330 (TASK-1604).
+TimeoutStopSec=330
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # The Quick Tunnel behind Settings → Remote Control. Written, never enabled:
+  # the panel's Start is what enables it (sudoers below grants exactly the
+  # verbs src/lib/cloudflared.ts uses), and a tunnel enabled by default would
+  # loop forever on a box without cloudflared. The appliance ships this unit
+  # as config/clawbox-tunnel.service with its user and paths hard-wired; this
+  # box's are the installer's own.
+  cat > "$tunnel_unit" <<EOF
+[Unit]
+Description=ClawBox Cloudflare Quick Tunnel
+After=network-online.target $UI_SERVICE
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+WorkingDirectory=$PROJECT_DIR
+Environment=HOME=$CLAWBOX_HOME
+Environment=USER=$CLAWBOX_USER
+Environment=CLAWBOX_ROOT=$PROJECT_DIR
+Environment=LOCAL_SERVICE_URL=http://localhost:$PORT
+ExecStart=$PROJECT_DIR/scripts/run-tunnel.sh
+Restart=always
+RestartSec=5
+SuccessExitStatus=143 SIGTERM
+TimeoutStartSec=30
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target
@@ -1868,8 +2122,8 @@ DISPATCH_STEPS=(
   apt_update install_bun git_pull build
   openclaw_setup openclaw_install openclaw_patch openclaw_config
   directories_permissions
-  ollama_install llamacpp_install chromium_install ai_tools_install
-  vnc_install ffmpeg_install fix_git_perms clawkeep_install
+  ollama_install llamacpp_install chromium_install google_chrome_install ai_tools_install
+  vnc_install ffmpeg_install cloudflared_install fix_git_perms clawkeep_install
   systemd_services root_step_contract start_gateway start_ui
 )
 
@@ -1893,7 +2147,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=17
+TOTAL_STEPS=19
 step=0
 log() {
   step=$((step + 1))
@@ -1937,6 +2191,12 @@ step_llamacpp_install
 log "Installing Chromium..."
 step_chromium_install
 
+log "Installing Google Chrome..."
+# Guarded: under errexit a bare call would abort the whole install over an
+# optional browser.
+step_google_chrome_install \
+  || echo "  Warning: Google Chrome did not install; Monitor Mode's Chrome icon will say it is missing until it does"
+
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install
 
@@ -1945,6 +2205,9 @@ step_vnc_install
 
 log "Installing ffmpeg..."
 step_ffmpeg_install
+
+log "Installing Cloudflare Tunnel (cloudflared)..."
+step_cloudflared_install
 
 log "Installing ClawKeep CLI..."
 step_clawkeep_install

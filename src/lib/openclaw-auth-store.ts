@@ -1,0 +1,655 @@
+/**
+ * One profile of the OpenClaw gateway's auth store, read and replaced in the
+ * row the gateway resolves (the Claude sign-in incident of 2026-10-10).
+ *
+ * WHY. A Claude subscription sign-in was landed by writing auth-profiles.json
+ * and running `openclaw doctor --fix`, and "completed" was its only proof. But
+ * core's JSON → sqlite migration only ADDS profile ids the store does not
+ * hold: for an id already there it keeps the stored profile, archives the file
+ * and still reports "completed", so every RE-sign-in was discarded (7 of 8 on
+ * the box this was found on). What it kept was a failed OAuth refresh FENCE —
+ * core swaps a credential for inert marker strings before each refresh, and
+ * any refresh error (here a DNS failure right after resume) makes the marker
+ * terminal. A fence reads as a stored sign-in and is one the gateway never
+ * uses: every turn died with "No API key found for provider anthropic".
+ *
+ * So ClawBox reads the row to learn what the gateway really holds, and writes
+ * the profile itself when the migration did not — what core was proven to
+ * honour: a profile written straight in is read at once, a later doctor
+ * leaves it alone, and the row carries no integrity signature. (The account
+ * pool's profiles are not written here: core's own `models auth paste-token`
+ * writes them, src/lib/anthropic-gateway.ts.)
+ *
+ * WHICH STORE: the one core's `resolveSharedAuthStorePath` answers — the
+ * `config_machine_state` row `authProfiles.store` in
+ * `<stateDir>/state/openclaw.sqlite` when, and only when, `auth.sharedStore`
+ * is exactly `{location: "state-db"}`; otherwise (core's `legacy-main`) the
+ * main agent's `auth_profile_store` row `primary`. Usage stats and cooldowns
+ * are a SEPARATE row of the same database, and a replace clears the
+ * profile's: a cooldown the credential that was there earned keeps a good
+ * one unused.
+ *
+ * AND THE MAIN AGENT'S OWN COPY. Under `state-db` ownership core still merges
+ * the main agent's `auth_profile_store` row OVER the shared one, id by id
+ * (`mergeAuthProfileStores`), and its usage stats the same way. Proven on
+ * 2026.9.4 in isolated homes: with a fenced copy there the resolver throws the
+ * incident's sentence whatever the shared row holds, core's own writes for
+ * the main agent go to the shared row and leave that copy standing, and
+ * `doctor --fix` leaves it too. No core verb was found that creates such a
+ * copy; the one producer found is ClawBox's own v1-gated
+ * `scripts/migrate-auth-profiles.js`, and whether a box in the field carries
+ * one is not known. So where that row holds the id, the READ answers that
+ * copy — what a turn resolves — with the shared row's beside it as
+ * `sharedCopy` (core hands out the shared one instead when it is usable and
+ * expires later, so a sign-in has landed only when BOTH are it), and the PUT
+ * replaces it after the shared write. Only a copy that is already there: a
+ * row without the id, a missing row, table or database is left exactly as it
+ * was.
+ *
+ * TWO RULES for whoever calls or edits this:
+ *  1. THE GATEWAY MUST BE STOPPED when the write runs. A running gateway may
+ *     flush its own copy of the store on the way down, and its copy is the
+ *     one with the fence in it.
+ *  2. READ BACK AFTER WRITING. `ok: true` says the transaction committed, not
+ *     that the gateway's store holds the sign-in; readGatewayAuthProfile's
+ *     fingerprint is what says that.
+ *
+ * Creates nothing — no database, table or row: a store that is not there is
+ * core's to make, and `no-store` is the caller's to act on. Nothing here
+ * throws, and no token leaves it: a fingerprint stands in for one. The one
+ * exception is `readGatewayProviderSecret`, for the model probe, which says why.
+ */
+
+import path from "./runtime-path";
+import { openSqlite } from "./openclaw-session-store";
+import {
+  AUTH_STATE_CELLS,
+  clearUsageStats,
+  gatewayAuthPaths,
+  isFile,
+  ownsSharedStore,
+  parseBlob,
+  readRow,
+  tokenFingerprint,
+  type AuthStoreCell as Cell,
+  type GatewayAuthPaths,
+} from "./anthropic-gateway-auth";
+
+export type GatewayAuthStoreKind = "shared" | "agent";
+
+/**
+ * The two states of core's refresh marker. `pending` is a renewal IN FLIGHT:
+ * core commits it before it calls the token endpoint and swaps the new
+ * credential in when that answers, so every healthy sign-in holds one for the
+ * length of that round trip, about three times a day (measured on 2026.9.4:
+ * visible to an outside reader from the claim until the endpoint answered).
+ * `failed` is terminal — the refresh errored and core never uses the profile
+ * again. So is a `pending` one whose owner is gone: core waits out its
+ * two-minute refresh ceiling on it, throws, and leaves it pending.
+ */
+export type OAuthRefreshFenceState = "pending" | "failed";
+
+/** One stored profile, as much of it as may leave this module. */
+export interface GatewayAuthProfileCopy {
+  type: string;
+  fingerprint: string | null;
+  refreshFingerprint: string | null;
+  expires: number | null;
+  /** `fence !== null`: either state is a profile that holds no credential NOW. */
+  fenced: boolean;
+  fence: OAuthRefreshFenceState | null;
+}
+
+export type GatewayAuthProfileRead =
+  /** No sqlite store the gateway would read: a v1 box, Hermes, a fresh home. */
+  | { kind: "no-store" }
+  /**
+   * A store exists and could not be read: corrupt, locked past the busy
+   * timeout, no node:sqlite. `cause` is what threw, in its own words — never
+   * logged here, because the Providers strip and the chat header ask on every
+   * poll; the caller that needs the reason says it once.
+   */
+  | { kind: "unreadable"; cause?: string }
+  /** The store is there and holds no profile at this id. */
+  | { kind: "absent"; store: GatewayAuthStoreKind }
+  | (GatewayAuthProfileCopy & {
+      kind: "present";
+      /** The store the gateway resolves — also when the answer is the main agent's own copy. */
+      store: GatewayAuthStoreKind;
+      /**
+       * When the row this answer was read from was last written, by its own
+       * timestamp column (core's `Date.now()`, and this module's). Never
+       * earlier than the write that put the profile there, so it bounds a
+       * fence's age from below. Null when the column holds no number.
+       */
+      storeUpdatedAtMs: number | null;
+      /**
+       * Set only when the answer is the MAIN AGENT'S OWN COPY (see the
+       * header): what the shared row holds at the id beside it, or null when
+       * it holds nothing there. A sign-in has landed when both are it.
+       */
+      sharedCopy?: GatewayAuthProfileCopy | null;
+    });
+
+export interface GatewayOAuthBundle {
+  type: "oauth";
+  provider: string;
+  access: string;
+  refresh: string;
+  expires: number;
+  [extra: string]: unknown;
+}
+
+export type GatewayAuthPutResult =
+  | { ok: true; store: GatewayAuthStoreKind }
+  | { ok: false; reason: "no-store" | "unreadable" | "write-failed" };
+
+const FENCE_PREFIX = "openclaw-oauth-refresh-fence:";
+const FENCE_ACCESS = /^openclaw-oauth-refresh-fence:v1:([a-f0-9]{32}):(failed:)?access:[a-f0-9]{64}$/;
+const FENCE_REFRESH = /^openclaw-oauth-refresh-fence:v1:([a-f0-9]{32}):(failed:)?refresh:[a-f0-9]{64}$/;
+
+/**
+ * The core's own fence rule (`parseOAuthRefreshFence`, 2026.9.4): an oauth
+ * profile whose `expires` is exactly 1 and whose access and refresh are both
+ * markers of ONE claim in ONE state — and which state that is. Anything short
+ * of that core treats as an ordinary credential, so it is no fence here
+ * either. Pure.
+ */
+export function oauthRefreshFenceState(entry: unknown): OAuthRefreshFenceState | null {
+  if (!entry || typeof entry !== "object") return null;
+  const e = entry as Record<string, unknown>;
+  if (e.type !== "oauth" || e.expires !== 1) return null;
+  if (typeof e.access !== "string" || typeof e.refresh !== "string") return null;
+  const access = FENCE_ACCESS.exec(e.access);
+  const refresh = FENCE_REFRESH.exec(e.refresh);
+  if (access === null || refresh === null || access[1] !== refresh[1] || access[2] !== refresh[2]) return null;
+  return access[2] ? "failed" : "pending";
+}
+
+/** A refresh marker in either state: a profile that holds no credential now. Pure. */
+export function isOAuthRefreshFence(entry: unknown): boolean {
+  return oauthRefreshFenceState(entry) !== null;
+}
+
+const SHARED_SELECT = "SELECT value_json AS json, updated_at_ms AS at FROM config_machine_state WHERE state_key = ?";
+const SHARED_UPDATE = "UPDATE config_machine_state SET value_json = ?, updated_at_ms = ? WHERE state_key = ?";
+
+const OWNERSHIP = { table: "config_machine_state", key: "auth.sharedStore", select: SHARED_SELECT };
+
+/**
+ * Per store, the row its credentials are in. Their usage stats and cooldowns
+ * are in a row of their own beside it, AUTH_STATE_CELLS[kind] — looked up when
+ * a write runs, not here, so that loading this module reads nothing from
+ * another (see "a store that cannot be used" in its suite).
+ */
+const STORE_CELLS: Record<GatewayAuthStoreKind, Cell> = {
+  shared: { table: "config_machine_state", key: "authProfiles.store", select: SHARED_SELECT, update: SHARED_UPDATE },
+  agent: {
+    table: "auth_profile_store",
+    key: "primary",
+    select: "SELECT store_json AS json, updated_at AS at FROM auth_profile_store WHERE store_key = ?",
+    update: "UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?",
+  },
+};
+
+/** A row's timestamp column, when it holds a number. */
+const stampOf = (at: unknown): number | null => (typeof at === "number" && Number.isFinite(at) ? at : null);
+
+/** The main agent's own database: the store itself under `legacy-main`, and the home of its own copy under `state-db`. */
+const mainAgentDb = (paths: GatewayAuthPaths): string => path.join(paths.agentsDir, "main", "agent", "openclaw-agent.sqlite");
+
+interface Found {
+  store: GatewayAuthStoreKind;
+  dbPath: string;
+  /** The store row's JSON text as it stood. */
+  json: unknown;
+  /** The store row's timestamp as it stood. */
+  at: number | null;
+}
+
+/** The store row the gateway resolves, or null when there is none. Throws when a database that is there cannot be asked. */
+function findStore(paths: GatewayAuthPaths): Found | null {
+  if (isFile(paths.sharedDb)) {
+    const db = openSqlite(paths.sharedDb, true);
+    try {
+      if (ownsSharedStore(readRow(db, OWNERSHIP)?.json)) {
+        const row = readRow(db, STORE_CELLS.shared);
+        return row ? { store: "shared", dbPath: paths.sharedDb, json: row.json, at: stampOf(row.at) } : null;
+      }
+    } finally {
+      db.close();
+    }
+  }
+  const dbPath = mainAgentDb(paths);
+  if (!isFile(dbPath)) return null;
+  const db = openSqlite(dbPath, true);
+  try {
+    const row = readRow(db, STORE_CELLS.agent);
+    return row ? { store: "agent", dbPath, json: row.json, at: stampOf(row.at) } : null;
+  } finally {
+    db.close();
+  }
+}
+
+type Json = Record<string, unknown>;
+
+/** The blob's profile map. None at all is an empty store; one that is not a map is a blob this module will not guess at. */
+function profilesOf(blob: Json): Json | null {
+  const profiles = blob.profiles;
+  if (profiles === undefined) return {};
+  return profiles && typeof profiles === "object" && !Array.isArray(profiles) ? (profiles as Json) : null;
+}
+
+/** The profile a map holds at `profileId`: its own entry, and an object — anything else is no profile. */
+function profileAt(profiles: Json, profileId: string): Json | null {
+  const entry = Object.hasOwn(profiles, profileId) ? profiles[profileId] : null;
+  return entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Json) : null;
+}
+
+/**
+ * The main agent's OWN profile at `profileId` under shared ownership (see the
+ * header), with its row's timestamp — or null when it holds none: no
+ * database, table or row, a row that is no profile map, or no profile there.
+ * Throws when a database that is there cannot be asked.
+ */
+function findAgentLocalCopy(paths: GatewayAuthPaths, profileId: string): { entry: Json; at: number | null } | null {
+  const dbPath = mainAgentDb(paths);
+  if (!isFile(dbPath)) return null;
+  const db = openSqlite(dbPath, true);
+  try {
+    const row = readRow(db, STORE_CELLS.agent);
+    const blob = row ? (parseBlob(row.json) as Json | null) : null;
+    const profiles = blob && profilesOf(blob);
+    const entry = profiles ? profileAt(profiles, profileId) : null;
+    return row && entry ? { entry, at: stampOf(row.at) } : null;
+  } finally {
+    db.close();
+  }
+}
+
+/** A marker is not a token: its digest would read as a credential the store does not hold. */
+function fingerprintOf(value: unknown): string | null {
+  return typeof value === "string" && value && !value.startsWith(FENCE_PREFIX) ? tokenFingerprint(value) : null;
+}
+
+/** What may be said of one stored profile: its type, fingerprints in place of its credential, and whether it is a fence. */
+function describeCopy(e: Json): GatewayAuthProfileCopy {
+  const type = typeof e.type === "string" ? e.type : "";
+  const credential = type === "oauth" ? e.access : type === "token" ? e.token : type === "api_key" ? e.key : null;
+  const fence = oauthRefreshFenceState(e);
+  return {
+    type,
+    fingerprint: fingerprintOf(credential),
+    refreshFingerprint: type === "oauth" ? fingerprintOf(e.refresh) : null,
+    expires: typeof e.expires === "number" && Number.isFinite(e.expires) ? e.expires : null,
+    fenced: fence !== null,
+    fence,
+  };
+}
+
+/**
+ * What the gateway resolves at `profileId`. Never throws. `fingerprint` is
+ * tokenFingerprint() of the access token for type "oauth", of `token` for
+ * "token", of `key` for "api_key"; null for a fence or any other marker
+ * string, or when the field is empty. `refreshFingerprint` likewise for an
+ * oauth profile's `refresh`. `expires` as stored when it is a finite number.
+ * Where the main agent holds its own copy of the id (see the header), the
+ * answer is that copy and `sharedCopy` is the shared row's.
+ */
+export function readGatewayAuthProfile(profileId: string, paths?: GatewayAuthPaths): GatewayAuthProfileRead {
+  try {
+    const where = paths ?? gatewayAuthPaths();
+    const found = findStore(where);
+    if (!found) return { kind: "no-store" };
+    const blob = parseBlob(found.json) as Json | null;
+    const profiles = blob && profilesOf(blob);
+    if (!profiles) return { kind: "unreadable" };
+    const stored = profileAt(profiles, profileId);
+    const local = found.store === "shared" ? findAgentLocalCopy(where, profileId) : null;
+    if (local) {
+      return {
+        kind: "present",
+        store: found.store,
+        ...describeCopy(local.entry),
+        storeUpdatedAtMs: local.at,
+        sharedCopy: stored ? describeCopy(stored) : null,
+      };
+    }
+    if (!stored) return { kind: "absent", store: found.store };
+    return { kind: "present", store: found.store, ...describeCopy(stored), storeUpdatedAtMs: found.at };
+  } catch (err) {
+    return { kind: "unreadable", cause: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Does the store the gateway resolves hold EXACTLY this API key at
+ * `profileId`, for `provider` — in every copy a turn could be answered from?
+ * (TASK-1535)
+ *
+ * What `openclaw models auth paste-api-key --profile-id <id>` puts there is
+ * `{type: "api_key", provider, key}` (core's `saveModelProviderApiKey`, which
+ * keeps the profile's other metadata and leaves its usage stats alone). A store
+ * that already holds that — the shared row, and the main agent's own copy where
+ * there is one (see the header) — gains nothing from the paste but its 5-14 s
+ * CLI start, and a settings save that re-sends the credential the box already
+ * has used to pay that twice. Everything else answers false and the paste runs
+ * as it always did: a `keyRef` (a key behind a SecretRef), any other type, a
+ * fence, another provider, a different key, no store, a store that cannot be
+ * read. Never throws; the key is compared here and nothing about it leaves.
+ */
+export function gatewayAuthStoreHoldsApiKey(
+  profileId: string,
+  provider: string,
+  key: string,
+  paths?: GatewayAuthPaths,
+): boolean {
+  const wanted = provider.trim().toLowerCase();
+  const holdsKey = (entry: Json | null): boolean => !!entry
+    && entry.type === "api_key"
+    && typeof entry.provider === "string" && entry.provider.trim().toLowerCase() === wanted
+    && typeof entry.key === "string" && entry.key !== "" && entry.key === key
+    && entry.keyRef === undefined;
+  try {
+    const where = paths ?? gatewayAuthPaths();
+    const found = findStore(where);
+    if (!found) return false;
+    const blob = parseBlob(found.json) as Json | null;
+    const profiles = blob && profilesOf(blob);
+    if (!profiles || !holdsKey(profileAt(profiles, profileId))) return false;
+    if (found.store !== "shared") return true;
+    const local = findAgentLocalCopy(where, profileId);
+    return local === null || holdsKey(local.entry);
+  } catch {
+    return false;
+  }
+}
+
+/** One stored profile of a provider, as much of it as may leave this module. */
+export interface ProviderAuthProfile extends GatewayAuthProfileCopy {
+  profileId: string;
+}
+
+/**
+ * Core's own failure bookkeeping for one profile (`usageStats[<id>]` in the
+ * state row, `computeNextProfileUsageStats` on 2026.10.2): a rate limit or a
+ * refused credential sets a COOLDOWN, billing and a permanent refusal a
+ * DISABLE, a provider-reported subscription window a BLOCK. Times are core's
+ * own `Date.now()` values; a field core did not write is null.
+ */
+export interface ProfileFailureState {
+  cooldownUntil: number | null;
+  cooldownReason: string | null;
+  disabledUntil: number | null;
+  disabledReason: string | null;
+  blockedUntil: number | null;
+  lastFailureAt: number | null;
+}
+
+export type GatewayProviderAuthRead =
+  | { kind: "no-store" }
+  | { kind: "unreadable"; cause?: string }
+  | {
+      kind: "present";
+      /** Every profile of the provider a turn could resolve, the main agent's own copy over the shared row's. */
+      profiles: ProviderAuthProfile[];
+      /** Core's STORED order for the provider (`models auth order set`), or null when none is stored. */
+      order: string[] | null;
+      /** Core's failure state per profile of the provider that has any. */
+      failures: Record<string, ProfileFailureState>;
+    };
+
+const numberOr = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const stringOr = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+
+/** The provider a stored profile belongs to: its own field, else its id's prefix — the rule core lists profiles by. */
+function providerOf(profileId: string, entry: Json): string {
+  return String(entry.provider ?? profileId.split(":")[0] ?? "").trim().toLowerCase();
+}
+
+/** A state row's blob, or null when the database has no such row (or none at all). Throws when one that is there cannot be asked. */
+function readStateBlob(dbPath: string, kind: GatewayAuthStoreKind): Json | null {
+  if (!isFile(dbPath)) return null;
+  const db = openSqlite(dbPath, true);
+  try {
+    return parseBlob(readRow(db, AUTH_STATE_CELLS[kind])?.json) as Json | null;
+  } finally {
+    db.close();
+  }
+}
+
+/** A blob's map under `key`, or an empty one. */
+function mapOf(blob: Json | null, key: string): Json {
+  const value = blob?.[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {};
+}
+
+/**
+ * Everything the store core resolves holds for ONE provider (TASK-1260, the
+ * account pool in the chat): its profiles, the order core will try them in,
+ * and the failures core recorded against each — read-only, the way
+ * `readGatewayAuthProfile` reads one profile. Writes stay core's own (the
+ * `openclaw models auth` verbs); this is how ClawBox learns what they and the
+ * gateway's turns left behind.
+ *
+ * Under `state-db` ownership the main agent's own rows are merged over the
+ * shared ones, id by id, as core merges them (see the header). Never throws;
+ * no token leaves it.
+ */
+export function readGatewayProviderAuth(provider: string, paths?: GatewayAuthPaths): GatewayProviderAuthRead {
+  const wanted = provider.trim().toLowerCase();
+  try {
+    const read = readMergedStore(paths ?? gatewayAuthPaths());
+    if (read === "no-store") return { kind: "no-store" };
+    if (read === "unreadable") return { kind: "unreadable" };
+    const { merged, localState, baseState } = read;
+    const profiles: ProviderAuthProfile[] = [];
+    for (const profileId of Object.keys(merged)) {
+      const entry = profileAt(merged, profileId);
+      if (entry && providerOf(profileId, entry) === wanted) profiles.push({ profileId, ...describeCopy(entry) });
+    }
+    const orderOf = (state: Json | null) => storedOrderOf(state, wanted);
+    const stats = { ...mapOf(baseState, "usageStats"), ...mapOf(localState, "usageStats") };
+    const failures: Record<string, ProfileFailureState> = {};
+    for (const { profileId } of profiles) {
+      const s = stats[profileId];
+      if (!s || typeof s !== "object" || Array.isArray(s)) continue;
+      const e = s as Json;
+      failures[profileId] = {
+        cooldownUntil: numberOr(e.cooldownUntil),
+        cooldownReason: stringOr(e.cooldownReason),
+        disabledUntil: numberOr(e.disabledUntil),
+        disabledReason: stringOr(e.disabledReason),
+        blockedUntil: numberOr(e.blockedUntil),
+        lastFailureAt: numberOr(e.lastFailureAt),
+      };
+    }
+    return { kind: "present", profiles, order: orderOf(localState) ?? orderOf(baseState), failures };
+  } catch (err) {
+    return { kind: "unreadable", cause: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Core's stored try-order for `provider` in a state row, or null when none is stored. */
+function storedOrderOf(state: Json | null, provider: string): string[] | null {
+  const list = mapOf(state, "order")[provider];
+  return Array.isArray(list) && list.every((id) => typeof id === "string") ? (list as string[]) : null;
+}
+
+/**
+ * The profile map a turn resolves — the main agent's own copy merged over the
+ * shared row's under `state-db` ownership, id by id, as core merges them (see
+ * the header) — and the two state rows beside it. Throws when a database that
+ * is there cannot be asked.
+ */
+function readMergedStore(where: GatewayAuthPaths): { merged: Json; localState: Json | null; baseState: Json | null } | "no-store" | "unreadable" {
+  const found = findStore(where);
+  if (!found) return "no-store";
+  const blob = parseBlob(found.json) as Json | null;
+  const stored = blob && profilesOf(blob);
+  if (!stored) return "unreadable";
+  const merged: Json = { ...stored };
+  let localState: Json | null = null;
+  let baseState: Json | null;
+  if (found.store === "shared") {
+    const mainDb = mainAgentDb(where);
+    if (isFile(mainDb)) {
+      const db = openSqlite(mainDb, true);
+      try {
+        const local = profilesOf((parseBlob(readRow(db, STORE_CELLS.agent)?.json) as Json | null) ?? {});
+        if (local) Object.assign(merged, local);
+      } finally {
+        db.close();
+      }
+      localState = readStateBlob(mainDb, "agent");
+    }
+    baseState = readStateBlob(found.dbPath, "shared");
+  } else {
+    baseState = readStateBlob(found.dbPath, "agent");
+  }
+  return { merged, localState, baseState };
+}
+
+/**
+ * THE ONE READ THAT HANDS A CREDENTIAL OUT of this module: the one a turn on
+ * `provider` would be answered with — the first usable profile in core's
+ * stored order for it, then the rest in the store's own order.
+ *
+ * Its only caller is the model probe (src/lib/provider-model-probe.ts), which
+ * spends it on ONE request to that provider's own API about one model and
+ * keeps nothing. It exists because core has no per-model check while its
+ * gateway runs: `models.probe` (pinned 2026.10.7) tries only the provider's
+ * configured primary — the very model that has just failed — and reports a
+ * stated limit of zero as a plain `rate_limit`.
+ *
+ * An API key, a static token, or a sign-in's access token that has not
+ * expired. A fence, an expired sign-in, a key behind a SecretRef (`keyRef`) —
+ * nothing this module could spend — answer null, as does a store that is not
+ * there or cannot be read. Never throws, never logs.
+ */
+export function readGatewayProviderSecret(provider: string, paths?: GatewayAuthPaths, now: number = Date.now()): string | null {
+  const wanted = provider.trim().toLowerCase();
+  try {
+    const read = readMergedStore(paths ?? gatewayAuthPaths());
+    if (read === "no-store" || read === "unreadable") return null;
+    const { merged, localState, baseState } = read;
+    const ids = Object.keys(merged).filter((id) => {
+      const entry = profileAt(merged, id);
+      return !!entry && providerOf(id, entry) === wanted;
+    });
+    const order = storedOrderOf(localState, wanted) ?? storedOrderOf(baseState, wanted) ?? [];
+    const ranked = [...order.filter((id) => ids.includes(id)), ...ids.filter((id) => !order.includes(id))];
+    for (const id of ranked) {
+      const entry = profileAt(merged, id);
+      if (!entry || oauthRefreshFenceState(entry) !== null) continue;
+      const type = typeof entry.type === "string" ? entry.type : "";
+      const secret = type === "oauth" ? entry.access : type === "token" ? entry.token : type === "api_key" ? entry.key : null;
+      if (typeof secret !== "string" || !secret || secret.startsWith(FENCE_PREFIX)) continue;
+      const expires = numberOr(entry.expires);
+      if (type !== "api_key" && expires !== null && expires <= now) continue;
+      return secret;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A sign-in worth storing: an access token, a refresh STRING (empty is what a
+ * sign-in that returned none is written as) and a real expiry. A marker is
+ * refused with the rest — writing one would rebuild the incident by hand.
+ */
+function wellFormed(bundle: unknown): bundle is GatewayOAuthBundle {
+  if (!bundle || typeof bundle !== "object" || Array.isArray(bundle)) return false;
+  const b = bundle as Json;
+  return b.type === "oauth"
+    && typeof b.provider === "string" && b.provider !== ""
+    && typeof b.access === "string" && b.access !== "" && !b.access.startsWith(FENCE_PREFIX)
+    && typeof b.refresh === "string" && !b.refresh.startsWith(FENCE_PREFIX)
+    && typeof b.expires === "number" && Number.isFinite(b.expires) && b.expires > 0;
+}
+
+/**
+ * The read-modify-write, in ONE IMMEDIATE transaction: a concurrent writer
+ * waits out the busy timeout instead of being overwritten, and the credential
+ * and its cleared cooldown land together or not at all. Throws when the write
+ * does not land.
+ *
+ * `existingOnly` is the main agent's own copy: replaced where it stands, never
+ * made — `false` then says the row holds none (any more), with nothing written.
+ * Without it `false` is a row this module cannot rewrite.
+ */
+function replaceProfile(dbPath: string, kind: GatewayAuthStoreKind, profileId: string, bundle: GatewayOAuthBundle, existingOnly: boolean): boolean {
+  const store = STORE_CELLS[kind];
+  const db = openSqlite(dbPath, false);
+  let open = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    open = true;
+    // Read again under the lock; the look that led here was before it. No blob to rewrite here is no write, and no row is made.
+    const blob = parseBlob(readRow(db, store)?.json) as Json | null;
+    const profiles = blob && profilesOf(blob);
+    if (!blob || !profiles) return false;
+    if (existingOnly && !profileAt(profiles, profileId)) return false;
+    profiles[profileId] = bundle;
+    blob.profiles = profiles;
+    const now = Date.now();
+    db.prepare(store.update).run(JSON.stringify(blob), now, store.key);
+    clearUsageStats(db, AUTH_STATE_CELLS[kind], [profileId], now);
+    db.exec("COMMIT");
+    open = false;
+    return true;
+  } finally {
+    if (open) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* closing rolls it back anyway */
+      }
+    }
+    db.close();
+  }
+}
+
+/**
+ * Put `bundle` at `profileId` in the store the gateway resolves, replacing
+ * whatever is there — a fence, another account's sign-in, an api_key — or
+ * adding it, and drop that id's usage stats from the state row beside it.
+ * Then, where the main agent holds its own copy of the id (see the header),
+ * the same over that copy and its stats. Every other profile and every other
+ * key of the blobs stays as it was. Never throws, creates nothing (a store
+ * with no store ROW is `no-store`), and writes nothing for a malformed bundle
+ * (`write-failed`). See the two rules in the header: gateway stopped, and read
+ * back afterwards.
+ *
+ * Two databases cannot commit as one, so one answer is not all-or-nothing:
+ * `write-failed` from the main agent's copy comes AFTER the shared row took
+ * the sign-in, and nothing takes that back — the copy a turn resolves is then
+ * still the old one. The journal line says which half it was.
+ */
+export function putGatewayOAuthProfile(profileId: string, bundle: GatewayOAuthBundle, paths?: GatewayAuthPaths): GatewayAuthPutResult {
+  let reason: "unreadable" | "write-failed" = "write-failed";
+  let writing = "the gateway's auth store";
+  try {
+    // `__proto__` would be assigned as the map's prototype and serialise as nothing — an `ok` over no write.
+    if (typeof profileId !== "string" || !profileId || profileId === "__proto__" || !wellFormed(bundle)) return { ok: false, reason };
+    reason = "unreadable";
+    const where = paths ?? gatewayAuthPaths();
+    const found = findStore(where);
+    if (!found) return { ok: false, reason: "no-store" };
+    // Looked for BEFORE anything is written: an agent database that cannot be asked fails the put whole.
+    const local = found.store === "shared" && findAgentLocalCopy(where, profileId) !== null;
+    reason = "write-failed";
+    if (!replaceProfile(found.dbPath, found.store, profileId, bundle, false)) return { ok: false, reason: "unreadable" };
+    if (local) {
+      writing = "the main agent's own copy of the profile (the shared row took the sign-in)";
+      replaceProfile(mainAgentDb(where), "agent", profileId, bundle, true);
+    }
+    return { ok: true, store: found.store };
+  } catch (err) {
+    // sqlite's own words (locked, read-only, not a database) are the only clue to WHY; they never carry a bound value.
+    console.error(`[auth-store] ${writing} could not be ${reason === "unreadable" ? "read" : "written"}:`, err instanceof Error ? err.message : err);
+    return { ok: false, reason };
+  }
+}

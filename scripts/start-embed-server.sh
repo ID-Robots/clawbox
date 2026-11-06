@@ -76,26 +76,116 @@ if ! [[ "$BATCH" =~ ^[0-9]+$ ]] || [ "$BATCH" -lt 512 ]; then
   BATCH=1024
 fi
 
-echo "[embed] Starting llama-server (embedding) with ${MODEL_PATH} ngl=${N_GPU_LAYERS} batch=${BATCH}"
 # --embd-normalize 2: OpenClaw's ollama adapter L2-normalised vectors on the
 # client; its openai-compatible adapter does not, so the server has to.
 # --fit off: llama.cpp would otherwise resize "unset" arguments to fill the
 # GPU, which on unified memory means taking RAM from everything else.
-exec "$BIN_PATH" \
-  --host "$HOST" \
-  --port "$PORT" \
-  --alias "$MODEL_ALIAS" \
-  --model "$MODEL_PATH" \
-  --embedding \
-  --pooling last \
-  --embd-normalize 2 \
-  --ctx-size "$BATCH" \
-  --batch-size "$BATCH" \
-  --ubatch-size "$BATCH" \
-  --parallel 1 \
-  --n-gpu-layers "$N_GPU_LAYERS" \
-  --fit off \
-  --flash-attn on \
-  --cache-type-k "$CACHE_TYPE_K" \
-  --cache-type-v "$CACHE_TYPE_V" \
+ARGS=(
+  --host "$HOST"
+  --port "$PORT"
+  --alias "$MODEL_ALIAS"
+  --model "$MODEL_PATH"
+  --embedding
+  --pooling last
+  --embd-normalize 2
+  --ctx-size "$BATCH"
+  --batch-size "$BATCH"
+  --ubatch-size "$BATCH"
+  --parallel 1
+  --n-gpu-layers "$N_GPU_LAYERS"
+  --fit off
+  --flash-attn on
+  --cache-type-k "$CACHE_TYPE_K"
+  --cache-type-v "$CACHE_TYPE_V"
   --no-webui
+)
+
+# Every flag above, asked of the binary BEFORE it is exec'd. llama-server
+# refuses an argument it does not know and exits, and a unit that dies on its
+# first line left only "error: invalid argument: …" in this log — the proxy and
+# Settings → Local AI could say no more than that the embedder stopped. A box
+# can hold an older llama-server than this script: the install step used to
+# keep whatever binary was already there through every move of the llama.cpp
+# pin, and a field box was still on a May build that rejects --embd-normalize
+# (TASK-2166). Its own --help says which flags it takes. That costs a CUDA
+# init, so the answer is kept per binary (inode, size, mtime) in the runtime
+# directory, where a rebuild — a new inode — invalidates it.
+#
+#   --embd-normalize  missing: dropped, with a warning. It spells out the
+#                     server's own default — every llama-server without the
+#                     flag L2-normalises pooled embeddings per request
+#                     (embd_normalize = 2 in tools/server) — so the vectors
+#                     are the same unit vectors with or without it.
+#   --fit             missing: dropped. A build that predates it never fits,
+#                     which is what "off" asks for.
+#   anything else     the embedder cannot run as designed on this binary:
+#                     refuse, naming the flags and the fix on the log's LAST
+#                     line, which is the line the proxy and Settings → Local
+#                     AI show the owner.
+FLAGS_CACHE="$(dirname "$LOG_PATH")/llama-server-flags"
+BIN_SIG="$(stat -L -c '%d:%i:%s:%Y' "$BIN_PATH" 2>/dev/null || true)"
+BIN_VERSION=""
+SUPPORTED=""
+if [ -n "$BIN_SIG" ] && [ -f "$FLAGS_CACHE" ] && [ "$(head -n 1 "$FLAGS_CACHE" 2>/dev/null)" = "$BIN_SIG" ]; then
+  BIN_VERSION="$(sed -n 2p "$FLAGS_CACHE")"
+  SUPPORTED="$(tail -n +3 "$FLAGS_CACHE")"
+else
+  if ! HELP="$(timeout 120 "$BIN_PATH" --help 2>&1)"; then
+    echo "[embed] To repair it: sudo bash ${PROJECT_DIR}/install.sh --step llamacpp_runtime"
+    echo "[embed] This box's llama-server does not start: $(printf '%s\n' "$HELP" | grep -v '^[[:space:]]*$' | tail -n 1)"
+    exit 1
+  fi
+  BIN_VERSION="$(timeout 120 "$BIN_PATH" --version 2>&1 | sed -n 's/^\(version: .*\)$/\1/p' | head -n 1 || true)"
+  # Only the option column: a line that starts with a flag in column 0 —
+  # llama.cpp indents every wrapped description line — cut where the
+  # description starts (two or more spaces, then a word), so a flag a
+  # description merely mentions is never taken for one the binary has.
+  SUPPORTED="$(printf '%s\n' "$HELP" \
+    | sed -nE 's/^(-.*)$/\1/p' \
+    | sed -E 's/[[:space:]]{2,}[^-[:space:]].*$//' \
+    | grep -oE -- '--[a-z0-9][a-z0-9-]*' | sort -u || true)"
+  if [ -n "$SUPPORTED" ] && [ -n "$BIN_SIG" ]; then
+    { printf '%s\n%s\n' "$BIN_SIG" "$BIN_VERSION"; printf '%s\n' "$SUPPORTED"; } > "$FLAGS_CACHE.tmp" 2>/dev/null \
+      && mv -f "$FLAGS_CACHE.tmp" "$FLAGS_CACHE" 2>/dev/null || rm -f "$FLAGS_CACHE.tmp"
+  fi
+fi
+
+supports() { printf '%s\n' "$SUPPORTED" | grep -qxF -- "$1"; }
+# Drop flag $1 and the value after it, when it has one ($2 = 1).
+drop_flag() {
+  local flag="$1" takes_value="$2" kept=() i
+  for ((i = 0; i < ${#ARGS[@]}; i++)); do
+    if [ "${ARGS[i]}" = "$flag" ]; then
+      [ "$takes_value" = 1 ] && i=$((i + 1))
+      continue
+    fi
+    kept+=("${ARGS[i]}")
+  done
+  ARGS=("${kept[@]}")
+}
+
+# A help that names no flags at all is not a verdict on any of them — the
+# server itself is the judge then, as it always was.
+if [ -n "$SUPPORTED" ]; then
+  if ! supports --embd-normalize; then
+    drop_flag --embd-normalize 1
+    echo "[embed] WARN: this llama-server (${BIN_VERSION:-version unknown}) predates --embd-normalize; starting without it. It L2-normalises embeddings by default, so the vectors are unchanged. Updating ClawBox rebuilds llama.cpp at the version it pins."
+  fi
+  if ! supports --fit; then
+    drop_flag --fit 1
+  fi
+  MISSING=()
+  for arg in "${ARGS[@]}"; do
+    case "$arg" in
+      --*) supports "$arg" || MISSING+=("$arg") ;;
+    esac
+  done
+  if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo "[embed] To rebuild it now: sudo bash ${PROJECT_DIR}/install.sh --step llamacpp_runtime"
+    echo "[embed] This box's llama-server (${BIN_VERSION:-version unknown}) is too old for the memory embedder: it does not accept ${MISSING[*]}. Updating ClawBox rebuilds llama.cpp at the version it pins."
+    exit 1
+  fi
+fi
+
+echo "[embed] Starting llama-server (embedding) with ${MODEL_PATH} ngl=${N_GPU_LAYERS} batch=${BATCH}"
+exec "$BIN_PATH" "${ARGS[@]}"

@@ -88,6 +88,24 @@ describe("the app proxy", () => {
     expect(seen[0].headers["x-forwarded-prefix"]).toBe("/apps/site");
   });
 
+  it("never lets the app write the box's cookie jar — clawbox_session least of all", async () => {
+    // A page the window reopens goes out WITH the owner's session and is
+    // same-site, so a Set-Cookie on its answer would be stored for the box's
+    // origin: an app could sign the owner out, or shadow their cookie on its
+    // own path. No app cookie ever comes back through this proxy anyway.
+    meta("site");
+    handler = (_r, res) => {
+      res.setHeader("set-cookie", ["clawbox_session=evil; Path=/; HttpOnly; SameSite=Lax", "clawbox_session=shadow; Path=/apps/site/", "theme=dark; Path=/apps/site/"]);
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<p>page</p>");
+    };
+    const res = await routes.GET(req("/apps/site/", { headers: { accept: "text/html" }, cookie: "clawbox_session=owner" }), ctx("site"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(await res.text()).toBe("<p>page</p>");
+  });
+
   it("strips the base path when the manifest asks", async () => {
     meta("site", { stripBasePath: true });
     await routes.GET(req("/apps/site/"), ctx("site"));
@@ -185,18 +203,147 @@ describe("the app proxy", () => {
     expect(styled.headers.get("access-control-allow-origin")).toBe("https://studio.example");
   });
 
-  it("gives the app's DATA no CORS answer, only its code", async () => {
+  it("gives the app's pages and files no CORS answer beyond its code", async () => {
     // `Origin: null` proves nothing — any page on the web can send it from a
     // sandboxed iframe of its own, and over plain HTTP no second header tells
-    // the two apart. So the answer reaches the types that are CORS-fetched by
-    // construction and carry no per-request data; a notes app's notes are
-    // JSON, and JSON stays unreadable to another origin.
+    // the two apart. So outside the app's own /api tree the answer reaches
+    // the types that are CORS-fetched by construction and carry no
+    // per-request data; a JSON file or an HTML page stays unreadable.
     meta("site");
     for (const type of ["application/json", "text/html", "text/plain", "image/png"]) {
       handler = (_r, res) => { res.writeHead(200, { "content-type": type }); res.end("{}"); };
-      const res = await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]));
+      const res = await routes.GET(req("/apps/site/data/notes", { headers: { origin: "null" } }), ctx("site", ["data", "notes"]));
       expect(res.headers.get("access-control-allow-origin"), type).toBeNull();
     }
+  });
+
+  it("answers the sandboxed document's calls to the app's OWN /api: any type, no credentials, range headers readable, preflight 204", async () => {
+    // The document the proxy serves has the origin `null` (its CSP sandbox),
+    // so the app's fetch of its own API was a CORS request its server never
+    // answered: every app with an API loaded and then did nothing.
+    meta("site");
+    handler = (_r, res) => { res.writeHead(206, { "content-type": "audio/mpeg", "content-range": "bytes 0-3/4", "accept-ranges": "bytes" }); res.end("abcd"); };
+    const res = await routes.GET(req("/apps/site/api/track/1", { headers: { origin: "null", range: "bytes=0-3" } }), ctx("site", ["api", "track", "1"]));
+    expect(res.status).toBe(206);
+    expect(res.headers.get("access-control-allow-origin")).toBe("null");
+    expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(res.headers.get("access-control-expose-headers")).toContain("Content-Range");
+    expect(res.headers.get("vary")).toBe("Origin");
+    expect(res.headers.get("content-security-policy")).toContain("sandbox");
+
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); };
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBe("null");
+    // Only the opaque origin the proxy itself makes — no other page's.
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "https://evil.example" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBeNull();
+    expect((await routes.GET(req("/apps/site/api/notes"), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBeNull();
+    // An app that sets its own policy keeps it.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "https://partner.example" }); res.end("{}"); };
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBe("https://partner.example");
+    // …and the range and paging headers are readable whenever the final answer
+    // admits the caller, merged into whatever the app chose to expose.
+    handler = (_r, res) => { res.writeHead(206, { "content-type": "audio/mpeg", "content-range": "bytes 0-3/4", "access-control-allow-origin": "*" }); res.end("abcd"); };
+    expect((await routes.GET(req("/apps/site/api/track/1", { headers: { origin: "null" } }), ctx("site", ["api", "track", "1"]))).headers.get("access-control-expose-headers")).toContain("Content-Range");
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "null", "access-control-expose-headers": "X-Request-Id" }); res.end("{}"); };
+    const merged = (await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-expose-headers") ?? "";
+    expect(merged.split(", ")[0]).toBe("X-Request-Id");
+    expect(merged).toContain("Content-Range");
+    // An app answer that does not admit the caller exposes nothing extra.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "https://partner.example" }); res.end("{}"); };
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-expose-headers")).toBeNull();
+
+    // A JSON POST preflights; the proxy answers it so a server that never
+    // heard of OPTIONS still works from inside the frame. Nothing reaches it.
+    seen.length = 0;
+    const preflight = await routes.OPTIONS(req("/apps/site/api/notes", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "POST", "access-control-request-headers": "content-type" } }), ctx("site", ["api", "notes"]));
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("null");
+    expect(preflight.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(preflight.headers.get("access-control-allow-headers")).toBe("content-type");
+    expect(seen).toHaveLength(0);
+    // A preflight for anything but the API, or from any other origin, goes to the app as before.
+    handler = (_r, res) => { res.writeHead(200, { allow: "GET" }); res.end(); };
+    const other = await routes.OPTIONS(req("/apps/site/page", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "POST" } }), ctx("site", ["page"]));
+    expect(other.status).toBe(200);
+    expect(other.headers.get("access-control-allow-origin")).toBeNull();
+    expect(seen).toHaveLength(1);
+  });
+
+  it("answers the App Router's own fetches from the sandboxed document — a link click, a prefetch, a server action — so a Next app's window navigates in place", async () => {
+    // A Next.js <Link> click is a fetch with `RSC: 1` (+ Next-Router-State-Tree);
+    // from the opaque origin it preflights. The preflight went to the app,
+    // which never answers one; the fetch failed, Next fell back to a full
+    // page load made by the frame itself, with no cookie: the login screen.
+    meta("site");
+    seen.length = 0;
+    const preflight = await routes.OPTIONS(req("/apps/site/books/2", {
+      method: "OPTIONS",
+      headers: { origin: "null", "access-control-request-method": "GET", "access-control-request-headers": "next-router-state-tree,next-url,rsc" },
+    }), ctx("site", ["books", "2"]));
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("null");
+    expect(preflight.headers.get("access-control-allow-headers")).toBe("next-router-state-tree,next-url,rsc");
+    expect(preflight.headers.get("access-control-allow-methods")).toBe("GET, HEAD, POST, OPTIONS");
+    expect(preflight.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(seen).toHaveLength(0);
+
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/x-component", vary: "rsc, next-router-state-tree, next-router-prefetch", "x-nextjs-postponed": "1" }); res.end("0:{}"); };
+    const nav = await routes.GET(req("/apps/site/books/2?_rsc=abc", { headers: { origin: "null", rsc: "1", "next-router-state-tree": "%5B%5D" } }), ctx("site", ["books", "2"]));
+    expect(nav.status).toBe(200);
+    expect(nav.headers.get("access-control-allow-origin")).toBe("null");
+    expect(nav.headers.get("access-control-allow-credentials")).toBeNull();
+    // The router reads Vary and its own x-nextjs-* headers off the answer.
+    expect(nav.headers.get("access-control-expose-headers")).toBe("*");
+    expect(nav.headers.get("vary")).toContain("Origin");
+    expect(nav.headers.get("content-security-policy")).toContain("sandbox");
+    // The request reached the app as the router sent it — and never with a cookie.
+    expect(seen.at(-1)?.headers.rsc).toBe("1");
+    expect(seen.at(-1)?.headers.origin).toBe("null");
+    expect(seen.at(-1)?.headers.cookie).toBeUndefined();
+
+    // The box's own Next.js deletes Next-Url before this handler runs; the
+    // middleware carries it under x-clawbox-next-url and it reaches the app
+    // under its own name again — the app hashes it into `_rsc`.
+    await routes.GET(req("/apps/site/books/2?_rsc=abc", { headers: { origin: "null", rsc: "1", "x-clawbox-next-url": "/books" } }), ctx("site", ["books", "2"]));
+    expect(seen.at(-1)?.headers["next-url"]).toBe("/books");
+    expect(seen.at(-1)?.headers["x-clawbox-next-url"]).toBeUndefined();
+
+    // A server action: a POST with Next-Action to the page's own path.
+    const actionPreflight = await routes.OPTIONS(req("/apps/site/books/new", {
+      method: "OPTIONS",
+      headers: { origin: "null", "access-control-request-method": "POST", "access-control-request-headers": "content-type, next-action, next-router-state-tree" },
+    }), ctx("site", ["books", "new"]));
+    expect(actionPreflight.status).toBe(204);
+    expect(actionPreflight.headers.get("access-control-allow-origin")).toBe("null");
+    handler = (_r, res) => { res.writeHead(303, { "content-type": "text/x-component", "x-action-redirect": "/apps/site/books;push", "access-control-expose-headers": "X-Request-Id" }); res.end(); };
+    const action = await routes.POST(req("/apps/site/books/new", { method: "POST", body: "[]", headers: { origin: "null", "next-action": "7f00", accept: "text/x-component", "content-type": "text/plain;charset=UTF-8" } }), ctx("site", ["books", "new"]));
+    expect(action.status).toBe(303);
+    expect(action.headers.get("access-control-allow-origin")).toBe("null");
+    expect(action.headers.get("access-control-expose-headers")).toBe("X-Request-Id, *");
+    expect(seen.at(-1)?.body).toBe("[]");
+    // Next.js refuses an action from `Origin: null` (its CSRF guard), and this
+    // hop carries no cookie for that guard to protect: the action arrives from
+    // the origin the browser is on. Nothing else has its Origin touched.
+    expect(seen.at(-1)?.headers.origin).toBe("http://box.local");
+    await routes.POST(req("/apps/site/api/notes", { method: "POST", body: "{}", headers: { origin: "null", "content-type": "application/json" } }), ctx("site", ["api", "notes"]));
+    expect(seen.at(-1)?.headers.origin).toBe("null");
+
+    // Only for the opaque origin the proxy itself makes, and only for the router's own fetches.
+    expect((await routes.GET(req("/apps/site/books/2?_rsc=abc", { headers: { origin: "https://evil.example", rsc: "1" } }), ctx("site", ["books", "2"]))).headers.get("access-control-allow-origin")).toBeNull();
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<p>page</p>"); };
+    const page = await routes.GET(req("/apps/site/books/2", { headers: { origin: "null" } }), ctx("site", ["books", "2"]));
+    expect(page.headers.get("access-control-allow-origin")).toBeNull();
+    expect(page.headers.get("access-control-expose-headers")).toBeNull();
+    // An app that sets its own policy keeps it, and exposes what it chose.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/x-component", "access-control-allow-origin": "https://partner.example" }); res.end("0:{}"); };
+    const own = await routes.GET(req("/apps/site/books/2?_rsc=abc", { headers: { origin: "null", rsc: "1" } }), ctx("site", ["books", "2"]));
+    expect(own.headers.get("access-control-allow-origin")).toBe("https://partner.example");
+    expect(own.headers.get("access-control-expose-headers")).toBeNull();
+    // A preflight that asks for no router header still goes to the app.
+    seen.length = 0;
+    handler = (_r, res) => { res.writeHead(200, { allow: "GET" }); res.end(); };
+    const plainPreflight = await routes.OPTIONS(req("/apps/site/books/2", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "PUT", "access-control-request-headers": "x-custom" } }), ctx("site", ["books", "2"]));
+    expect(plainPreflight.headers.get("access-control-allow-origin")).toBeNull();
+    expect(seen).toHaveLength(1);
   });
 
   it("carries a POST body through and hands a redirect back rather than following it", async () => {

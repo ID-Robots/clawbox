@@ -7,8 +7,16 @@ import { NextRequest } from "next/server";
 // and several unauthenticated paths used to reach it. Mocked here so each test
 // states which caller it is.
 const ownerSession = vi.fn<() => Promise<boolean>>();
+const person = vi.fn<() => Promise<{ username: string; isOwner: boolean } | null>>(async () => null);
 vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: () => ownerSession(),
+  personSession: () => person(),
+}));
+// The owner's "Share OpenClaw with all users" switch, as config.json holds it.
+const sharing = vi.hoisted(() => ({ shared: false }));
+vi.mock("@/lib/config-store", () => ({
+  get: async (key: string) => (key === "openclaw_shared_with_users" ? sharing.shared : undefined),
+  set: async () => undefined,
 }));
 
 vi.mock("fs/promises", () => ({
@@ -230,6 +238,25 @@ describe("gateway-proxy", () => {
       expect(html).toContain("/app/clawbox?email=");
     });
 
+    it("injects the lapsed-session guard first in <head>, ahead of the Control UI's own scripts", async () => {
+      // The gateway's own chat is the one page the box serves that is not a
+      // page of ours: without this, a session that ran out left it on screen
+      // with a dead socket instead of taking it to /login.
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve('<!doctype html><html><head><script type="module" src="/assets/index.js"></script></head><body>Gateway Content</body></html>'),
+      }));
+
+      const html = await (
+        await gatewayProxy.serveGatewayHTML(createRequest("http://clawbox.local/chat"))
+      ).text();
+
+      const guard = html.indexOf("__clawboxSessionGuard");
+      expect(guard).toBeGreaterThan(html.indexOf("<head>"));
+      expect(guard).toBeLessThan(html.indexOf("/assets/index.js"));
+      expect(html.startsWith("<!doctype html>")).toBe(true);
+    });
+
     it("injects it for a caller with no owner session too", async () => {
       // The shell is served without a session (first boot, the login redirect)
       // and simply carries no token. The directive handling is not a credential
@@ -290,6 +317,32 @@ describe("gateway-proxy", () => {
       expect(html).not.toContain("my-secret-token");
       // Still the app shell, so first boot and the login redirect keep working.
       expect(html).toContain("clawbox-bar");
+    });
+
+    it("hands another ClawBox user's page the token only while the owner shares OpenClaw", async () => {
+      ownerSession.mockResolvedValue(false);
+      person.mockResolvedValue({ username: "alice", isOwner: false });
+      mockFs.readFile.mockResolvedValue(JSON.stringify({
+        gateway: { auth: { token: "my-secret-token" } },
+      }));
+      const page = async () => {
+        vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+          ok: true,
+          text: () => Promise.resolve("<html><body></body></html>"),
+        }));
+        return (await gatewayProxy.serveGatewayHTML(createRequest("http://clawbox.local/chat"))).text();
+      };
+      try {
+        expect(await page()).not.toContain("my-secret-token");
+        sharing.shared = true;
+        expect(await page()).toContain("my-secret-token");
+        // Sharing is for signed-in people: still nothing without a session.
+        person.mockResolvedValue(null);
+        expect(await page()).not.toContain("my-secret-token");
+      } finally {
+        sharing.shared = false;
+        person.mockResolvedValue(null);
+      }
     });
 
     it("redirects to setup when gateway returns error", async () => {

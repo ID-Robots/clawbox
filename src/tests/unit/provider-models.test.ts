@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CATALOG_PROVIDERS,
   PROVIDER_CATALOGS,
   fetchProviderCatalog,
   getProviderCatalog,
+  isCatalogProvider,
   isNonChatModelId,
   isValidModelId,
   parseModelSlug,
@@ -52,6 +54,35 @@ describe("provider-models", () => {
       expect(opus5?.hint?.startsWith("Default")).toBe(false);
     });
 
+    // Fable 5.1 joined the list beside the default, not in its place: the
+    // "Default." hint and `defaultModelId` above still name Opus 5.5.
+    it("offers Claude Fable 5.1 as a non-default row", () => {
+      const catalog = getProviderCatalog("anthropic");
+      const fable = catalog?.models.find((m) => m.id === "claude-fable-5-1");
+      expect(fable).toMatchObject({ id: "claude-fable-5-1", label: "Claude Fable 5.1" });
+      expect(fable?.hint?.startsWith("Default")).toBe(false);
+      expect(catalog?.defaultModelId).toBe("claude-opus-5-5");
+    });
+
+    // xAI (Grok): the cold-start list is the three ids the core's bundled xai
+    // plugin leads its manifest with, and the default is its curated default,
+    // Grok 4.7 (core 2026.10.7). 4.6 and 4.5 stay: xAI still serves both.
+    it("carries an xai catalogue whose default is a row it lists", () => {
+      const catalog = getProviderCatalog("xai");
+      expect(catalog?.provider).toBe("xai");
+      expect(catalog?.defaultModelId).toBe("grok-4.7");
+      expect(catalog?.models.map((m) => m.id)).toEqual(["grok-4.7", "grok-4.6", "grok-4.5"]);
+      expect(catalog?.allowCustom).toBe(true);
+      expect(
+        (catalog?.models ?? []).filter((m) => m.hint?.startsWith("Default")).map((m) => m.id),
+      ).toEqual(["grok-4.7"]);
+      expect(catalog?.models[0]).toMatchObject({ id: "grok-4.7", label: "Grok 4.7" });
+      // The live-catalogue gate and the curated table have to agree, or the
+      // picker asks the route for a provider it then calls unknown.
+      expect(isCatalogProvider("xai")).toBe(true);
+      expect(CATALOG_PROVIDERS).toContain("xai");
+    });
+
     it("does not return inherited Object prototype members", () => {
       expect(getProviderCatalog("toString")).toBeNull();
       expect(getProviderCatalog("constructor")).toBeNull();
@@ -87,6 +118,13 @@ describe("provider-models", () => {
       expect(isValidModelId("openai", "openai/gpt-5")).toBe(false);
       expect(isValidModelId("openrouter", "anthropic/claude-haiku-4.5")).toBe(true);
       expect(isValidModelId("openrouter", "anthropic/claude/")).toBe(false);
+    });
+
+    it("takes xai ids on the generic no-slash shape", () => {
+      expect(isValidModelId("xai", "grok-4.6")).toBe(true);
+      expect(isValidModelId("xai", "grok-4.20-0309-reasoning")).toBe(true);
+      expect(isValidModelId("xai", "xai/grok-4.6")).toBe(false);
+      expect(isValidModelId("xai", "")).toBe(false);
     });
   });
 

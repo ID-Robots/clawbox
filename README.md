@@ -34,14 +34,14 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/desktop.webp" alt="The ClawBox desktop — a Chrome OS-style environment served straight from the device" width="920" />
+  <img src="docs-site/images/4.3/desktop.webp" alt="The ClawBox desktop: app icons down the left, Files open on a project folder, and the Coding Agent in front, its live chart showing a run and its reviewer at work on that project" width="920" />
 </p>
 
 ---
 
 ## What is ClawBox?
 
-**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd. that runs the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription.
+**ClawBox is a dedicated personal AI assistant appliance made by ID Robots Ltd. that runs the [OpenClaw](https://github.com/openclaw/openclaw) AI agent.** It is a private AI server for your desk: an NVIDIA Jetson Orin Nano Super (8 GB) running local AI models at 67 TOPS, with your files, chats and settings stored on the device itself. You buy it once at [clawbox.com](https://clawbox.com) — there is no mandatory subscription. **Using your own API key or an AI subscription you already pay for (Claude, ChatGPT, Gemini, OpenRouter, and xAI on the OpenClaw edition) is free**: no ClawBox plan is needed for that, and every box also gets a free ClawBox AI allowance (DeepSeek) out of the box. The optional paid ClawBox AI plans only add more included usage and extras such as backups, Remote Desktop and the Coding Agent.
 
 This repository contains **OpenClaw OS**, the operating system that ships on every ClawBox. Local-first: with local models nothing leaves the box — cloud AI (Claude, GPT, Gemini) is strictly opt-in. On first boot it broadcasts a WiFi access point so you can set it up from any phone; then it joins your network and serves a Chrome OS-style desktop with built-in apps.
 
@@ -62,18 +62,34 @@ This repository contains **OpenClaw OS**, the operating system that ships on eve
 The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox **an OS the AI can operate**, not just a UI the user clicks through:
 
 <p align="center">
-  <img src=".github/assets/chat-agent.webp" alt="The ClawBox chat panel answering on the desktop, with provider, model and reasoning pills under the message box" width="920" />
+  <img src="docs-site/images/4.3/chat-agent.webp" alt="The chat docked beside Files on the ClawBox desktop: asked to make a Recipes folder and save a shopping list in it, the assistant has done both — the file is open in Files on the left — and then lists what is on it; the ClawBox provider pill and the Medium reasoning pill sit under the message box" width="920" />
 </p>
 
-<p align="center"><sub><em>A real session on a box: the assistant says what it can do here, with the provider, model and reasoning-effort pills under the composer — change any of them mid-conversation, no restart.</em></sub></p>
+<p align="center"><sub><em>A real session on a box: asked for a shopping list, the assistant made the folder and wrote the file itself, then read it back. The pills under the message box switch provider, model and reasoning effort mid-conversation, with no restart.</em></sub></p>
 
 ---
+
+## ✨ New in 4.3
+
+| | |
+|---|---|
+| 📸 **Screenshots, built in** | The new **Screenshot** app captures the whole screen, an area or one window and lets you mark the picture up before it is saved to the Screenshots folder in **Files**. **Print Screen**, **Ctrl+Shift+S** or the button beside the clock takes one in a single step. |
+| 🌐 **One browser for you and your assistant** | The assistant now uses the browser on the box's own desktop, shown in **Agent Browser**. Sign in to a site there once and the assistant can use it, and you can watch it work; it opens and closes only its own tabs. |
+| 🔗 **Share an app with a public link** | Right-click an app the Coding Agent built and choose **Create public link**. Visitors reach only that app, for a set time or until you disable the link, with an optional password. |
+| 🤖 **xAI Grok, and model changes without a restart** | On OpenClaw, xAI Grok works with an API key or a SuperGrok or X Premium sign-in. Changing the model, or switching Local AI on or off, no longer restarts the assistant in most cases. |
+| 🎙️ **Hold to talk** | Hold the chat's microphone button, or **F8**, while you speak and let go to send. Spoken replies download several times smaller, and **Settings → Voice** can play every reply aloud. |
+| 🧩 **The Coding Agent, on a live chart** | The Coding Agent opens on a chart of its agents at work. Message a run while it works, let extra runs and teams wait in line, and hand a pull request with failing checks back with **Fix CI**. |
+| 📚 **Prime Radiant, a living wiki** | A new app, on both editions, that keeps a wiki for you: point it at your documents and it writes a page for each one, listing the facts it found with where each came from and how sure it is. ClawBox AI writes the pages, so adding documents needs the box signed in to it and sends their text there, with anything that looks like a secret removed first. Every night it tidies the wiki, looks for facts that contradict each other and asks you about anything it cannot settle alone. |
+| 🔁 **Switching between Anthropic accounts, fixed** | An account is no longer marked expired because the box was off or offline, an account whose organization switched off subscription access is left at once, and a failure counts only against the account the assistant was really using. |
+| 🛠️ **Smaller things** | **Settings → Appearance** sets the remote desktop to 1280 × 720, 1600 × 900 or 1920 × 1080. When the cloud voice does not answer, a spoken reply gives up in about 20 seconds and says so, and the chat shows coding runs started elsewhere without a reload. The Projects app and its GitHub backup are gone; your folders stay where they are and open in **Files**. |
+
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
 
 ## ✨ New in 4.2
 
 | | |
 |---|---|
-| 👥 **Several people, one ClawBox** | The owner adds users in **Settings → Users**. Each person signs in with their own name and password and gets a desktop and a Terminal of their own; settings and installed apps stay with the owner. |
+| 👥 **Several people, one ClawBox** | The owner adds users in **Settings → System → Users**. Each person signs in with their own name and password and gets a desktop and a Terminal of their own; settings and installed apps stay with the owner. |
 | 🖥️ **Monitor mode, with a drop-down terminal** | With the ClawBox desktop session, one desktop spans a row of monitors, arranged in **Settings → Monitors**. **Win+Down** drops a terminal down from the top of the screen. |
 | ☁️ **Back up project folders to GitHub** | **Files → Projects → Back up** copies a folder to a private GitHub repository, with an optional daily backup. Likely secrets and very large files are left out, and listed. |
 | 🧭 **Kiosk mode** | When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field. |
@@ -81,7 +97,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🛟 **ClawKeep backups fixed** | Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped instead of failing the backup, and a full account no longer turns auto-backup off for good. |
 | 🛠️ **Fixes from hardware testing** | Testing on real ClawBox hardware found and fixed problems with voice input, spoken replies, the ClawBox AI plugin's **Retry**, and updating a box left on an older build. |
 
-Full detail, and how to upgrade: **[RELEASE-NOTES-4.2.0.md](RELEASE-NOTES-4.2.0.md)**.
+Full detail: **[RELEASE-NOTES-4.2.0.md](RELEASE-NOTES-4.2.0.md)**.
 
 ## ✨ New in 4.1
 
@@ -109,12 +125,12 @@ Full detail: **[RELEASE-NOTES-4.1.0.md](RELEASE-NOTES-4.1.0.md)**.
 | 🖥️ **Local AI is one inventory** | **Settings → Local AI** lists every model that can run on the box with Install, Enable and Uninstall on each row. On OpenClaw and dual, **Local-only mode** routes everything to the box and switches every cloud provider off. |
 
 <p align="center">
-  <img src="docs-site/images/4.0/coding-agent-run-detail.png" alt="A Coding Agent run on the ClawBox desktop, showing its progress, changed files and the pull request it opened" width="920" />
+  <img src="docs-site/images/4.3/coding-agent-run.png" alt="A finished Coding Agent run: the four files it changed and its commit, buttons to see the diff, continue in the chat or open a terminal, the run's steps, files, duration and tokens, and the screenshots it kept as evidence, showing the app it changed in light and dark" width="800" />
 </p>
 
 <p align="center">
-  <img src="docs-site/images/4.0/settings-remote-access.png" alt="Settings, Remote Control: the box's persistent clawbox.tech hostname and the tunnel state" width="440" />
-  <img src="docs-site/images/4.0/chat-mobile-portrait.png" alt="ClawBox chat on a phone, with the thumb-sized microphone beside the text box" width="440" />
+  <img src="docs-site/images/4.3/settings-remote-control.png" alt="Settings → Remote Control with the tunnel online: the box's permanent clawbox.tech address, its name blanked out here, with Copy, a note that the address stays the same when the tunnel or the box restarts, Add device for quick access, and Stop Remote Access" width="500" />
+  <img src="docs-site/images/4.3/chat-phone.png" alt="The ClawBox chat full screen on a phone, carrying on the shopping-list conversation from the desktop: asked what can replace coconut milk, the assistant lists swaps; the microphone sits beside the text box" width="280" />
 </p>
 
 Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
@@ -127,15 +143,15 @@ Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
 |---------|-------------|
 | 🧙 **5-minute setup** | Guided wizard: WiFi → updates → password → AI provider → messaging → done |
 | 🖥️ **Desktop environment** | Chrome OS-style desktop with windowed apps, taskbar, system tray and a desktop mascot |
-| 🤖 **AI-controlled OS** | Up to 78 MCP tools on the OpenClaw edition (67 on Hermes) let the AI agent operate the entire device |
+| 🤖 **AI-controlled OS** | Up to 119 MCP tools on the OpenClaw edition (117 on Hermes) let the AI agent operate the entire device |
 | 🔒 **Local-first** | Your data stays on the box; no telemetry, no data collection. Cloud AI only if you opt in |
-| 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude / GPT / Gemini with **your own key or a subscription you already pay for**, OpenRouter, or models that run on the box |
+| 🧠 **Flexible AI** | ClawBox AI out of the box — or Claude / GPT / Gemini (and xAI Grok on OpenClaw) with **your own key or a subscription you already pay for**, OpenRouter, or models that run on the box |
 | 🔁 **Switch model mid-chat** | Provider, model and reasoning effort are pills under the composer, hot-applied with no gateway restart |
 | 🧠 **Memory Shard** | Indexes your notes, conversations and your own document folders so the assistant can search them — in the ClawBox AI cloud by default on a paid plan, or entirely on the box |
-| 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
+| 🌐 **Browser automation** | AI controls a real browser — the one on the box's own desktop, which you can watch in Agent Browser — to fill forms, scrape data and post content |
 | 💬 **Multi-platform** | Telegram, Discord, WhatsApp and email — all guided in Settings — plus the built-in web chat |
-| 🗣️ **Voice in and out** | Speak to it, and have replies read back; the voice runs in the cloud or on the box |
-| 💻 **Built-in apps** | Terminal, Coding Agent, file manager, remote desktop, app store or Hermes Skills, AI chat, Memory Shard, ClawKeep backups |
+| 🗣️ **Voice in and out** | Hold the chat's microphone button (or F8 while the chat is open) to talk, and have replies read back; the voice runs in the cloud or on the box |
+| 💻 **Built-in apps** | Terminal, Coding Agent, file manager, Screenshot, Agent Browser, remote desktop, app store or Hermes Skills, AI chat, Memory Shard, Prime Radiant, ClawKeep backups |
 | 🛠️ **Coding Agent** | Delegate a whole task to a headless Claude Code run: it works in a copy of your project, opens a pull request and reviews its own diff |
 | 🌐 **Reachable from anywhere** | A named Cloudflare tunnel gives the box a persistent `<boxHandle>.clawbox.tech` address, with a quick tunnel as fallback |
 | 🗄️ **Backups** | ClawKeep encrypts a snapshot on the device and uploads it to Cloudflare R2 on a daily timer, with restore from the UI |
@@ -144,15 +160,15 @@ Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
 <table>
   <tr>
     <td width="33%" align="center">
-      <img src=".github/assets/memory-shard.webp" alt="Memory Shard on a ClawBox: the memory index card with file, chunk and source counts, health, and the indexing schedule" width="300" /><br/>
+      <img src="docs-site/images/4.3/memory-shard.png" alt="Memory Shard on a ClawBox: the memory index card, embedding on the device with qwen3-embedding-0.6b and marked Healthy, with its file, chunk and source counts, Index now and Full reindex, and indexing every day at 03:00" width="300" /><br/>
       <sub><strong>Memory Shard</strong> — your notes, conversations and document folders, indexed and searchable.</sub>
     </td>
     <td width="33%" align="center">
-      <img src=".github/assets/local-ai.webp" alt="Settings → Local AI: one row per model on the box — the agent model, the voice, speech to text and memory search" width="300" /><br/>
+      <img src="docs-site/images/4.3/settings-local-ai.png" alt="Settings → Local AI: the Local-only mode switch, Gemma 4 ready as the agent's on-box fallback, the Kokoro voice switched off, and Whisper speech to text off until you speak" width="300" /><br/>
       <sub><strong>Local AI</strong> — every model that runs on the box, and what each one is doing right now.</sub>
     </td>
     <td width="33%" align="center">
-      <img src=".github/assets/mascot-pets.webp" alt="Settings → Appearance: the Mascot Pet picker with the built-in ClawBox crab and the community gallery" width="300" /><br/>
+      <img src="docs-site/images/4.3/settings-mascot-pet.webp" alt="Settings → Appearance → Mascot Pet: the built-in ClawBox crab selected among pets from the community gallery, with a link to browse the full gallery" width="300" /><br/>
       <sub><strong>Mascot Pet</strong> — the built-in ClawBox crab, or a companion from the community gallery.</sub>
     </td>
   </tr>
@@ -164,7 +180,7 @@ Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
 
 | Component | Spec |
 |-----------|------|
-| **Processor** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **Processor** | NVIDIA Jetson Orin Nano Super (8 GB) |
 | **AI Performance** | 67 TOPS |
 | **Storage** | 512GB NVMe SSD |
 | **Power** | 7–15 W typical, USB-C |
@@ -199,7 +215,7 @@ Full documentation lives at **[docs.clawbox.com](https://docs.clawbox.com)**:
 
 | | Supported |
 |---|---|
-| **Device** | NVIDIA Jetson Orin Nano 8GB (Super) |
+| **Device** | NVIDIA Jetson Orin Nano Super (8 GB), or an Orin Nano 8 GB Developer Kit flashed with JetPack 6.2 (which enables Super mode) |
 | **OS image** | **JetPack 6.2** (Ubuntu 22.04 / L4T R36.x) — [download](https://developer.nvidia.com/embedded/jetpack-sdk-62) |
 
 > ⚠️ **JetPack 7.x (Ubuntu 24.04) is not supported yet.** NVIDIA's newest images
@@ -265,7 +281,7 @@ An install is one of three **editions**, chosen when the device is produced:
 | `dual` | Both, switchable at runtime | Both | Premium — the switcher requires a licence issued by ID Robots |
 
 <p align="center">
-  <img src=".github/assets/memory-cloud-hermes.webp" alt="Memory Shard settings on a Hermes-edition ClawBox: the embedding model card with ClawBox AI cloud selected and On this box beside it" width="920" /><br/>
+  <img src="docs-site/images/4.3/memory-shard-hermes.png" alt="Memory Shard settings on a Hermes-edition ClawBox: memory indexing switched on, the embedding model card with ClawBox AI cloud selected and On this box beside it, the folder it reads, and Start over" width="640" /><br/>
   <sub><strong>Hermes edition</strong> — Memory Shard indexes through the ClawBox AI cloud by default, with the model on the box one tap away.</sub>
 </p>
 
@@ -352,7 +368,7 @@ Browser (http://<box-ip>)
   │     ├── /setup          → Setup wizard (React SPA)
   │     ├── /login          → Authentication
   │     ├── /               → Desktop environment (post-setup)
-  │     ├── /setup-api/*    → 217 API routes (system, files, coding agent, browser, …)
+  │     ├── /setup-api/*    → 280 API routes (system, files, coding agent, browser, …)
   │     ├── /api/*          → Proxy to OpenClaw gateway
   │     └── WebSocket       → Proxy to gateway + terminal PTY + noVNC
   │
@@ -396,14 +412,14 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 | **Language** | TypeScript 5 |
 | **Runtime & tooling** | Node.js 24 (production), Bun (dev/build/packages) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) or [Hermes Agent](https://nousresearch.com), via MCP |
-| **ClawBox AI** | DeepSeek V4 Flash by default (`deepseek-v4-flash`), DeepSeek 4.1 on the Max plan |
-
-ClawBox AI plans also cover image generation, cloud voice, voice transcription and memory indexing; the Coding Agent, Memory Shard and persistent `<boxHandle>.clawbox.tech` links need Pro or Max; the one-click OpenClaw/Hermes switch needs Max.
+| **ClawBox AI** | DeepSeek V4 Flash on every plan (`deepseek-v4-flash`; `deepseek-v4-pro` is the Max plan's id for the same model) |
 | **Local Models** | llama.cpp (Gemma 4 E2B ships preinstalled) + Ollama · Kokoro TTS · faster-whisper STT · Qwen3 embeddings |
 | **Coding Agent** | Headless Claude Code (`claude-ds`) in a git worktree, `gh` for pull requests |
 | **Backups** | ClawKeep (Python) → Cloudflare R2 |
 | **Networking** | NetworkManager (WiFi AP), Avahi (mDNS), cloudflared (named + quick tunnels) |
 | **Testing** | Vitest + Playwright |
+
+ClawBox AI plans also cover image generation, cloud voice, voice transcription and memory indexing; the Coding Agent, Memory Shard and persistent `<boxHandle>.clawbox.tech` links need Pro or Max; the one-click OpenClaw/Hermes switch needs Max.
 
 Full runtime topology in the [Architecture reference](https://docs.clawbox.com/technical/architecture).
 
@@ -421,7 +437,7 @@ Full runtime topology in the [Architecture reference](https://docs.clawbox.com/t
 ├── public/                 Static assets (icons, wallpapers, manifest)
 ├── scripts/                WiFi AP, terminal server, voice/TTS, tunnels, firewall, Jetson tuning
 ├── src/
-│   ├── app/                Next.js App Router (pages + 217 API routes)
+│   ├── app/                Next.js App Router (pages + 289 routes, 280 of them in setup-api/)
 │   │   └── setup-api/      WiFi, AI models, local AI, memory, coding agent, pets,
 │   │                       channels, files, browser, portal/tunnel, update, system
 │   ├── components/         Setup wizard, desktop environment, built-in apps
@@ -450,12 +466,17 @@ bun run test:e2e         # End-to-end tests (Playwright)
 bun run check:mcp-tools  # Assert the MCP tool matrix matches mcp/README.md
 ```
 
-**On real hardware:** every pull request of ours into `beta` or `main`, drafts
-included, runs [Nano hardware tests](.github/workflows/nano-hardware-tests.yml):
-the on-device suite on one free Jetson from the nano lab, after which the board
-is cleaned up and released. `skip-nano` opts a PR out, a docs-only PR is
-skipped, and a fork's PR never reaches the lab. What it checks, how cleanup
-works and how to add a test: [docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
+**On real hardware:** [Nano hardware tests](.github/workflows/nano-hardware-tests.yml)
+runs the on-device suite on one free Jetson from the nano lab, after which the
+board is cleaned up and released. It runs on every pull request of ours into
+`main` (drafts included: the tests its changes reach plus a core smoke set),
+on a pull request into `beta` labelled `nano-full` (all tests) or `nano-long`
+(all, the long tier too), and on a dispatch; pushes no longer start it. The
+every-second-night run on `beta` starts only once its schedule is on `main`,
+the default branch — until then, dispatch `beta` by hand. `skip-nano` opts a
+PR out, a docs-only PR is skipped, and a fork's PR never reaches the lab. What
+it checks, how cleanup works and how to add a test:
+[docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
 
 ### Environment Variables
 
@@ -523,13 +544,13 @@ ClawBox is made by **ID Robots Ltd.**, a robotics and AI company based in Plovdi
 [OpenClaw](https://github.com/openclaw/openclaw) is the open-source AI agent. **ClawBox is the dedicated hardware appliance that runs it 24/7**, preconfigured, with OpenClaw OS on top — desktop environment, setup wizard, built-in apps, backups and updates. OpenClaw is the software; ClawBox is the box built for it by ID Robots.
 
 **Does ClawBox need a subscription?**
-No. The hardware is a **one-time purchase (€749)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop, Memory Shard, the Coding Agent and priority support — and you can instead bring your own Claude, GPT, Gemini or OpenRouter key, sign in with a subscription you already pay for, or run entirely on local models with no external account at all.
+No. The hardware is a **one-time purchase (€749)**. Optional ClawBox AI plans (Pro / Max) add higher usage limits, ClawKeep backups, Remote Desktop, Memory Shard, the Coding Agent and priority support — and you can instead bring your own Claude, GPT, Gemini, OpenRouter or (on OpenClaw) xAI Grok key, sign in with a subscription you already pay for, or run entirely on local models with no external account at all.
 
 **Does ClawBox work without internet?**
 Yes, for local models. **Gemma 4 E2B** (`gemma4-e2b-it-q4_0`, a 3.1 GB Q4_0 build) ships preinstalled on the box's own llama.cpp, and on the OpenClaw and dual editions **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
 
 **Which AI model answers by default?**
-On ClawBox AI it is **DeepSeek V4 Flash** (`deepseek-v4-flash`), with a 1M-token context window. The Max plan uses **DeepSeek 4.1**. You can instead use your own Anthropic, OpenAI, Google or OpenRouter key, sign in with a Claude Pro/Max, ChatGPT Plus/Pro or Google One AI Premium subscription you already pay for, or stay entirely on the box.
+On ClawBox AI it is **DeepSeek V4 Flash** (`deepseek-v4-flash`), with a 1M-token context window. The Max plan runs the same DeepSeek V4 Flash. You can instead use your own Anthropic, OpenAI, Google or OpenRouter key, sign in with a Claude Pro/Max, ChatGPT Plus/Pro or Google One AI Premium subscription you already pay for, use xAI Grok with an API key or a SuperGrok or X Premium sign-in on the OpenClaw edition, or stay entirely on the box.
 
 **What is the Coding Agent?**
 A headless Claude Code run you hand a whole task to. It works in a git worktree copy of your project (`<project>/.clawbox/worktrees/<runId>`) so it never edits your checkout under you, opens a pull request with `gh`, and then runs an automatic review pass that adversarially reviews its own diff. Runs continue in the background, several can run at once, and you can send a message to one mid-flight to steer it. It needs a Pro or Max plan. Each run keeps its screenshots, test output and a `report.md` in its own evidence folder.
@@ -541,7 +562,7 @@ Turn on **Settings → Remote Control**. A provisioned box gets a persistent `<b
 Only from **[clawbox.com](https://clawbox.com)**. ID Robots ships to 108 countries via DHL Express. Products sold elsewhere under a similar name are not ClawBox and are not covered by our warranty or support.
 
 **Can I run OpenClaw OS on my own Jetson?**
-Yes — this repository is source-available and installs on an NVIDIA Jetson Orin Nano 8GB running JetPack 6.2. See [Quick Start](#-quick-start). Buying a ClawBox gets you the assembled, tested device with case, NVMe storage, warranty and support.
+Yes — this repository is source-available and installs on an NVIDIA Jetson Orin Nano Super 8GB (or an Orin Nano 8GB developer kit on JetPack 6.2). See [Quick Start](#-quick-start). Buying a ClawBox gets you the assembled, tested device with case, NVMe storage, warranty and support.
 
 ---
 

@@ -29,6 +29,18 @@ if [ ! -f "$PROJECT_DIR/install.sh" ]; then
     tar --exclude=node_modules --exclude=.next --exclude=.next-old --exclude=.git/logs -cf - . \
       | (cd "$PROJECT_DIR" && tar -xf -)
   )
+  # The framework's build cache, when the harness mounted one
+  # (docker-compose.test.yml, cache-seed/README.md): the install's `next build`
+  # then starts warm. Only into a fresh project, before install.sh runs, and a
+  # copy that fails is only a slower build.
+  if [ -d /var/cache/clawbox-e2e/next-cache ]; then
+    if mkdir -p "$PROJECT_DIR/.next" && cp -a /var/cache/clawbox-e2e/next-cache "$PROJECT_DIR/.next/cache"; then
+      echo "[entrypoint] Seeded .next/cache from the harness's build cache ($(du -sh "$PROJECT_DIR/.next/cache" 2>/dev/null | cut -f1))"
+    else
+      echo "[entrypoint] Could not seed .next/cache from the harness's build cache; building without it"
+      rm -rf "$PROJECT_DIR/.next"
+    fi
+  fi
   chown -R clawbox:clawbox "$PROJECT_DIR"
   # Mark that install.sh has not yet run on this volume.
   touch "$PROJECT_DIR/.needs-install"

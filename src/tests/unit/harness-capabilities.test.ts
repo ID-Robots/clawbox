@@ -140,9 +140,14 @@ describe("capabilitiesFor", () => {
       // There is no socket, so there is nothing a connection banner could
       // honestly describe.
       expect(caps.hasLiveConnection).toBe(false);
-      // `--image` is image-only and the agent's path resolver matches picture
-      // extensions by design; a document has no way in.
-      expect(caps.canAttachDocuments).toBe(false);
+    }
+  });
+
+  it("takes documents on every Hermes box: the agent opens them with its file tools", () => {
+    // Named in the prompt as `[Attached file: …]`, OpenClaw's shape; needs no
+    // vision route and no image flag (2026-10-13 smoke test).
+    for (const facts of [linked, bare, seeing]) {
+      expect(capabilitiesFor("hermes", facts).canAttachDocuments).toBe(true);
     }
   });
 

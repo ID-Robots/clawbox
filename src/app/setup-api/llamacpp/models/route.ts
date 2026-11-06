@@ -5,12 +5,14 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { POST as disableLocalAi } from "@/app/setup-api/local-ai/route";
+import { liveBackgroundTasks } from "@/lib/background-tasks";
+import { LLAMACPP_INSTALL_KIND } from "@/lib/background-task-kinds";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
 import { getLlamaCppLaunchSpec, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { safeGgufName, safeHfRepo } from "@/lib/local-install";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { dirBytes } from "@/lib/install-disk";
@@ -130,7 +132,7 @@ export async function GET(request: Request) {
   // makes to the internet on someone else's word is the person's, and the MCP
   // bearer is the party the install gates exist for.
   if (askedRepo !== null || askedFile !== null) {
-    if (!(await hasOwnerSession(request))) {
+    if (!(await hasPersonSession(request))) {
       return NextResponse.json({ error: "Checking a model's size needs a signed-in browser session.", code: "owner_only" }, { status: 403 });
     }
     // Rebuilt, not tested: from here on the caller's own strings are out of
@@ -181,7 +183,7 @@ export async function GET(request: Request) {
 }
 
 async function guard(req: Request, verb: string): Promise<NextResponse | null> {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: `${verb} needs a signed-in browser session.`, code: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {
@@ -361,6 +363,16 @@ export async function DELETE(req: Request) {
 async function uninstallEngine(): Promise<NextResponse> {
   if (inFlight) {
     return NextResponse.json({ error: "A model is being downloaded right now.", code: "busy" }, { status: 409 });
+  }
+  // A Gemma install running — or queued behind another install, from another
+  // browser whose row this one does not see busy — would download the GGUF
+  // this unlinks, or start llama-server on it (TASK-2128).
+  const installing = liveBackgroundTasks({ kinds: [LLAMACPP_INSTALL_KIND] })[0];
+  if (installing) {
+    return NextResponse.json(
+      { error: "Gemma 4 is being installed right now. Uninstall it once that has finished, or cancel it.", code: "busy", taskId: installing.id },
+      { status: 409 },
+    );
   }
   const spec = getLlamaCppLaunchSpec();
   const target = path.join(spec.modelDir, spec.hfFile);

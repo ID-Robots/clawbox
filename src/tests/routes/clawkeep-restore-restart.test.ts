@@ -31,11 +31,30 @@ const h = vi.hoisted(() => ({
   bounceCalls: 0,
   execCalls: [] as { file: string; args: string[] }[],
   execFailure: null as string | null,
+  // The restart killed at its client deadline, and what `systemctl show` says after.
+  restartTimesOut: false,
+  unitShow: "",
   gatewayUp: true,
   ownerSession: true,
   sameOrigin: true,
   restoreCalls: 0,
   restoreExtra: {} as Record<string, unknown>,
+  tunnelState: "inactive" as string,
+  namedCred: false,
+  tunnelCalls: [] as { hasNamedCredential: boolean }[],
+}));
+
+// The tunnel re-arm (TASK-1754) is unit-tested in cloudflared-restore.test.ts;
+// here only the route's wiring is asserted.
+vi.mock("@/lib/cloudflared", () => ({
+  getTunnelServiceState: async () => h.tunnelState,
+  reenableTunnelAfterRestore: async (o: { hasNamedCredential: boolean }) => {
+    h.tunnelCalls.push(o);
+    return { enabled: true, started: h.tunnelState !== "active", running: true, warnings: [] };
+  },
+}));
+vi.mock("@/lib/named-tunnel", () => ({
+  readNamedTunnelCredential: async () => (h.namedCred ? { hostname: "x.clawbox.tech", token: "t" } : null),
 }));
 
 // A restore is OWNER-ONLY and same-origin: middleware admits the MCP bearer to
@@ -43,7 +62,7 @@ const h = vi.hoisted(() => ({
 // so the route re-checks. These cases are about what the OWNER gets, so both
 // answer yes; the refusal itself is asserted in its own block below.
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => h.ownerSession),
+  hasPersonSession: vi.fn(async () => h.ownerSession),
 }));
 vi.mock("@/lib/same-origin", () => ({
   isSameOriginRequest: vi.fn(() => h.sameOrigin),
@@ -57,7 +76,10 @@ vi.mock("node:child_process", () => ({
     cb: (err: Error | null, res?: { stdout: string; stderr: string }) => void,
   ) => {
     h.execCalls.push({ file, args });
-    if (h.execFailure) cb(new Error(h.execFailure));
+    if (h.restartTimesOut && args.includes("restart")) {
+      cb(Object.assign(new Error(`Command failed: ${file} ${args.join(" ")}`), { killed: true, signal: "SIGTERM", code: null }));
+    } else if (args.includes("show")) cb(null, { stdout: h.unitShow, stderr: "" });
+    else if (h.execFailure) cb(new Error(h.execFailure));
     else cb(null, { stdout: "", stderr: "" });
   },
 }));
@@ -119,11 +141,46 @@ beforeEach(() => {
   h.bounceCalls = 0;
   h.execCalls.length = 0;
   h.execFailure = null;
+  h.restartTimesOut = false;
+  h.unitShow = "";
   h.gatewayUp = true;
   h.ownerSession = true;
   h.sameOrigin = true;
   h.restoreCalls = 0;
   h.restoreExtra = {};
+  h.tunnelState = "inactive";
+  h.namedCred = false;
+  h.tunnelCalls.length = 0;
+});
+
+describe("POST /setup-api/clawkeep/restore — remote access (TASK-1754)", () => {
+  it("re-arms and starts the tunnel after every restore, even with no credential", async () => {
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: false }]);
+    expect(body.tunnelEnabled).toBe(true);
+    expect(body.tunnelStarted).toBe(true);
+    expect(body.tunnelRunning).toBe(true);
+  });
+
+  it("asks for a start when a named tunnel is configured", async () => {
+    h.namedCred = true;
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: true }]);
+    expect(body.tunnelStarted).toBe(true);
+  });
+
+  it("re-arms the tunnel even when it was already running before the restore", async () => {
+    h.tunnelState = "active";
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: false }]);
+    expect(body.tunnelRunning).toBe(true);
+  });
+
+  it("does not touch the tunnel when the owner gate refuses", async () => {
+    h.ownerSession = false;
+    await post();
+    expect(h.tunnelCalls).toEqual([]);
+  });
 });
 
 describe("POST /setup-api/clawkeep/restore — who may ask", () => {
@@ -190,6 +247,62 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     expect(body.restartErrors[0]).toMatch(/^clawbox-gateway\.service: /);
     expect(body.restartErrors[0]).toContain("a password is required");
     expect(body.restartPending).toEqual([]);
+  });
+
+  // On an x64 bridge the restart waits for OpenClaw's own drain (up to 330 s),
+  // so the 30 s client is killed while systemd carries on (F2, 2026-10-15).
+  it("waits for a restart that outlived its client and serves the restore once it landed", async () => {
+    h.restartTimesOut = true;
+    h.unitShow = "Job=\nActiveState=active\nSubState=exited\nResult=success\n";
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const body = await (await post()).json();
+    quiet.mockRestore();
+    expect(body.restartErrors).toEqual([]);
+    expect(body.restartPending).toEqual([]);
+    expect(h.execCalls.some((c) => c.args.includes("show"))).toBe(true);
+  });
+
+  it("names the unit's state when a restart that outlived its client did not come back", async () => {
+    h.restartTimesOut = true;
+    h.unitShow = "Job=\nActiveState=failed\nSubState=failed\nResult=exit-code\n";
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const body = await (await post()).json();
+    quiet.mockRestore();
+    expect(body.restartErrors).toEqual(["clawbox-gateway.service: did not start again after the restore: it is failed (failed, exit-code)"]);
+    expect(body.restartErrors[0]).not.toMatch(/Command failed/);
+  });
+
+  // Still running at the settle budget, and what that means depends on whether
+  // systemd answered at all: a job it reported is a restart it holds; no answer
+  // on any poll is a restart nobody can vouch for.
+  it.each<[string, string, "pending" | "error", RegExp]>([
+    [
+      "a job systemd still reports",
+      "Job=4711\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n",
+      "pending",
+      /is still restarting with the restored state/,
+    ],
+    ["no answer from systemd on any poll", "", "error", /restart could not be confirmed/],
+  ])("answers a restart still in flight at the budget with %s", async (_what, show, kind, said) => {
+    vi.useFakeTimers();
+    try {
+      h.restartTimesOut = true;
+      h.unitShow = show;
+      const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const pending = post();
+      await vi.advanceTimersByTimeAsync(35_000);
+      const body = await (await pending).json();
+      quiet.mockRestore();
+      const [hit, other] = kind === "pending"
+        ? [body.restartPending, body.restartErrors]
+        : [body.restartErrors, body.restartPending];
+      expect(other).toEqual([]);
+      expect(hit).toHaveLength(1);
+      expect(hit[0]).toMatch(/^clawbox-gateway\.service: /);
+      expect(hit[0]).toMatch(said);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not call the OpenClaw restore done until the gateway is serving again", async () => {

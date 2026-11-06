@@ -242,6 +242,14 @@ describe("checking a key against Anthropic", () => {
     }
   });
 
+  it("does not take a page from something in between for Anthropic refusing the key", async () => {
+    // Anthropic answers every refusal in JSON; a proxy's or a CDN's block page
+    // says nothing about the key, and the account probe would mark it dead.
+    const page = "<!DOCTYPE html><html><head><title>Attention Required!</title></head><body>Sorry, you have been blocked</body></html>";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(page, { status: 403, headers: { "content-type": "text/html; charset=UTF-8" } })));
+    expect(await verifyAnthropicKey(KEY)).toBe("unreachable");
+  });
+
   it("is 'unreachable' for anything else, so an offline box can still save a key", async () => {
     // 429 and 500 say nothing about whether the credential is good, and this
     // appliance is regularly behind a captive portal.

@@ -67,6 +67,7 @@ function envProfile(env: NodeJS.ProcessEnv): ProfileRequest | null {
   if (raw === "core") return "core";
   if (raw === "full") return "full";
   if (raw === "browser") return "browser";
+  if (raw === "run-read") return "run-read";
   if (raw === "auto") return "auto";
   return null;
 }

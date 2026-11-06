@@ -25,6 +25,10 @@ import {
   parseClawaiAllowanceRefusal,
   type ClawaiAllowanceKind,
 } from "@/lib/clawai-allowance";
+import { PORTAL_CREDITS_URL, type ClawaiUsage } from "@/lib/clawai-usage";
+import { creditConsoleFor, statesZeroRateLimit } from "@/lib/zero-quota";
+import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
+import type { ChatNoticeActions } from "@/lib/chat-history-cache";
 
 /**
  * The failure OpenClaw reports when the session file changes under a running
@@ -92,6 +96,54 @@ function isCredentialRejected(raw: string): boolean {
 }
 
 /**
+ * This box holds no sign-in the gateway can use for the provider the chat is
+ * set to — so the provider was never asked.
+ *
+ * 2026-10-10: a Claude sign-in the gateway's store never received left every
+ * turn dying on `No API key found for provider "anthropic". Auth store:
+ * /home/…/openclaw.sqlite … (openclaw models auth paste-api-key …)`. A device
+ * path and a CLI instruction, so the sanitizer dropped it and the owner read
+ * the generic "send it again" — which could never work, however often.
+ *
+ * Matched on the gateway's own wording, like the predicates above: its raw
+ * error, the user copy it renders from that (`Missing API key for provider
+ * "x"`, `… for the selected provider`) and the `missing-provider-auth` tag it
+ * appends. Answers the provider id the wording names, `{}` when it names
+ * none, null when this is some other failure.
+ *
+ * The id is captured through a strict alphabet and nothing looser: the line is
+ * untrusted text on its way into a sentence, and the id is the one part of it
+ * that is echoed. No path, space or slash can ride along — an id that is not
+ * a plain provider id is simply not named.
+ */
+function missingCredential(raw: string): { provider?: string } | null {
+  const named = /\b(?:No API key found|Missing API key) for provider "([a-z0-9][a-z0-9._-]{0,63})"/i.exec(raw);
+  if (named) return { provider: named[1] };
+  return /\b(?:No API key found|Missing API key) for provider\b|\bMissing API key for the selected provider\b|\bmissing-provider-auth\b/i.test(raw)
+    ? {}
+    : null;
+}
+
+/**
+ * The first attempt of the gateway's summary of a chain it walked — `All
+ * models failed (N): a/b: … (reason) | c/d: … (reason)` — or null for any
+ * other line. The first attempt is the model the chat is set to; the rest are
+ * fallbacks, and a fallback with no sign-in is not why the turn failed.
+ *
+ * The run's second `chat` error frame carries the same summary inside the
+ * gateway's wrapper (`⚠️ Agent failed before reply: … To view logs, …`), and
+ * that frame is all there is to read when the first one is gone — a page
+ * reloaded between the two, a run the ledger no longer holds.
+ */
+function requestedAttempt(text: string): string | null {
+  const head = /^(?:Error:\s*)?(?:⚠️?\s*)?(?:Agent failed before reply:\s*)?All models failed \((\d+)\):\s*/i.exec(text);
+  if (!head || Number(head[1]) < 2) return null;
+  const attempts = text.slice(head[0].length);
+  const next = attempts.indexOf(" | ");
+  return next >= 0 ? attempts.slice(0, next) : attempts;
+}
+
+/**
  * What the gateway knew about the run when it declared the turn dead — see
  * `chat-run-failure.ts` for where each field comes from on the wire. Every
  * field is optional: a turn can fail before the provider was ever asked.
@@ -132,7 +184,15 @@ const PROVIDER_LABELS: Record<string, string> = {
 function providerLabel(provider: string | undefined): string {
   const id = provider?.trim().toLowerCase();
   if (!id) return "the AI provider";
-  return PROVIDER_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+  // An OWN entry only: the id can come out of error text, and `constructor`
+  // answered Object's own function — printed into the sentence as its source.
+  const known = Object.hasOwn(PROVIDER_LABELS, id) ? PROVIDER_LABELS[id] : undefined;
+  return known ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/** The provider's name as the customer knows it — for the other chat lines that name one. */
+export function providerDisplayName(provider: string | undefined): string {
+  return providerLabel(provider);
 }
 
 /** The provider segment of a `provider/model` reference, when it has one. */
@@ -313,8 +373,16 @@ export function describeFallbackReply(context: ChatRunFailureContext): string | 
   const because = (() => {
     switch (reason) {
       case "auth":
-      case "auth_permanent":
+      case "auth_permanent": {
+        // The same reason token covers a sign-in the box does not have at
+        // all: nobody refused anything, so do not say that somebody did.
+        const missing = missingCredential(context.detail ?? "");
+        if (missing) {
+          const absent = missing.provider ? providerLabel(missing.provider) : provider;
+          return `this box has no working sign-in for ${absent}. Connect ${absent} again in Settings, under Providers, to get ${picked} back.`;
+        }
         return `${provider} did not accept this box's sign-in for ${picked}${quoted}. Reconnect it in Settings, under Providers, to get ${picked} back.`;
+      }
       case "rate_limit":
         return `${provider} is rate-limiting this box for ${picked}. It comes back on its own.`;
       case "model_not_found":
@@ -353,6 +421,21 @@ const RATE_LIMIT = "That message did not go through — the AI provider is rate-
  * one thing they can act on is two taps away.
  */
 const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
+
+/**
+ * There is no sign-in to refuse (see `missingCredential`). Its own sentence,
+ * not `CREDENTIAL_REJECTED`: the gateway tags this failure `reason=auth` too,
+ * but "not accepting this box's sign-in any more" is false here — nobody was
+ * asked — and "send it again" alone is the advice that cannot work. The two
+ * things that do: connect the provider, or pick a model the box can reach.
+ */
+const NO_SIGN_IN = "That message did not go through — this box has no working sign-in for the provider this chat is set to. Connect it again in Settings, under Providers, or pick another model in the header, then send it again.";
+
+function noSignInSentence(provider: string | undefined): string {
+  if (!provider?.trim()) return NO_SIGN_IN;
+  const name = providerLabel(provider);
+  return `That message did not go through — this box has no working sign-in for ${name}, the provider this chat is set to. Connect ${name} again in Settings, under Providers, or pick another model in the header, then send it again.`;
+}
 
 /**
  * The gateway never ACKNOWLEDGED the turn — the chat's own request timer ran
@@ -402,6 +485,8 @@ const ALLOWANCE_EN: Record<string, string> = {
   "chat.allowanceFreesUpAt": "It frees up at {time}.",
   "chat.allowanceFreesUpLater": "It frees up as older usage leaves the rolling window.",
   "chat.allowanceSeeUsage": "Your usage is in Settings, under Providers.",
+  "chat.allowanceGeneric": "That message did not go through — a ClawBox AI usage limit is reached.",
+  "chat.allowanceExtraUsage": "To keep going before then, add an extra-usage pack: {url}",
 };
 
 /** What a chat surface hands in so the sentence comes out in the owner's language and clock. */
@@ -410,25 +495,208 @@ export interface ChatFailureWords {
   locale: string;
   /** The zone "frees up at" is read in; the browser's own when absent. */
   timeZone?: string | null;
+  /**
+   * The last ClawBox AI usage answer this surface read (`/setup-api/ai-models/usage`),
+   * when it has one. Used only when a turn died on a bare rate limit: the
+   * gateway can word the proxy's allowance refusal as its generic "rate-limited"
+   * line and drop the envelope, and then the usage data is the only place left
+   * that says which allowance is spent and when it frees up (TASK-1602).
+   */
+  clawaiUsage?: ClawaiUsage | null;
+}
+
+type Say = (key: string, params?: Record<string, string | number>) => string;
+
+function sayWith(words: ChatFailureWords | undefined): Say {
+  // A translator that does not know a key answers the key itself (and, with no
+  // provider above it, ignores the params) — the English floor covers both.
+  return (key, params) => {
+    const hit = words?.t(key, params);
+    let out = hit && hit !== key ? hit : (ALLOWANCE_EN[key] ?? modelAvailabilityEn[key]);
+    for (const [name, value] of Object.entries(params ?? {})) out = out.replaceAll(`{${name}}`, String(value));
+    return out;
+  };
+}
+
+/**
+ * The full sentence for a spent allowance: which one, when it frees up, and
+ * the one thing to do now. Extra-usage packs are offered only for the weekly
+ * pool (or a limit the proxy did not name): the burst and memory-indexing
+ * windows have their own remedies, and promising a pack would unlock them is
+ * a promise this box cannot check.
+ */
+function allowanceWords(kind: ClawaiAllowanceKind | "generic", resetAt: string | null, words: ChatFailureWords | undefined): string {
+  const say = sayWith(words);
+  const time = formatFreesUpAt(resetAt, { locale: words?.locale ?? "en", timeZone: words?.timeZone ?? null });
+  const parts = [
+    say(kind === "generic" ? "chat.allowanceGeneric" : ALLOWANCE_KEY[kind]),
+    time ? say("chat.allowanceFreesUpAt", { time }) : say("chat.allowanceFreesUpLater"),
+  ];
+  if (kind === "weekly" || kind === "generic") parts.push(say("chat.allowanceExtraUsage", { url: PORTAL_CREDITS_URL }));
+  parts.push(say("chat.allowanceSeeUsage"));
+  return parts.join(" ");
+}
+
+/**
+ * The proxy's own refusal type. Its 429 for a spent allowance carries
+ * `"type":"usage_limit"` with a `resetAt`; a refusal that names no window
+ * still gets the honest "a usage limit" rather than "wait a minute".
+ */
+const USAGE_LIMIT_TYPE_RE = /\busage_limit\b/;
+const RESET_AT_ANY_RE = /resetAt\\?"?\s*[:=]\s*\\?"?(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?)/;
+
+/**
+ * The provider ids ClawBox AI runs under: its own names, and `deepseek` — the
+ * core provider its proxy is configured as (`models.providers.deepseek`, base
+ * URL the ClawBox AI proxy), which is the id every frame and every error line
+ * of a ClawBox AI turn carries.
+ */
+function isClawaiProviderId(provider: string | undefined): boolean {
+  const id = provider?.trim().toLowerCase();
+  return id === "clawai" || id === "clawbox" || id === "clawbox-ai" || id === "deepseek";
+}
+
+/** Is the turn's provider ClawBox AI, as far as the context can tell? Unknown answers null. */
+function isClawaiTurn(context: ChatRunFailureContext | undefined): boolean | null {
+  const id = (context?.provider ?? providerFromRef(context?.model))?.trim();
+  if (!id) return null;
+  return isClawaiProviderId(id);
+}
+
+/**
+ * The ClawBox AI proxy's own refusal of a credential: `{"error":{"message":
+ * "Invalid token","type":"auth_error","code":"invalid_token"}}`. Names the
+ * proxy as surely as a provider id does, for a line that arrives without one —
+ * but only as that whole envelope: the type AND the code in one object. A bare
+ * `invalid_token` is the standard OAuth bearer error (RFC 6750) any signed-in
+ * provider can answer with, and reading it as ClawBox AI's would put a
+ * "Sign in to ClawBox AI again" button under a ChatGPT sign-in's 401.
+ */
+function isClawaiProxyCredentialRefusal(raw: string): boolean {
+  for (const [object] of raw.matchAll(/\{[^{}]*\}/g)) {
+    if (/"type"\s*:\s*"auth_error"/i.test(object) && /"code"\s*:\s*"(?:invalid|missing)_token"/i.test(object)) return true;
+  }
+  return false;
+}
+
+/**
+ * The account behind the sign-in is refused for what it pays for, in the
+ * words a portal answers with: "Payment Required", or a subscription or plan
+ * stated as expired, inactive or required. Narrow, like the predicates above:
+ * a bare "plan" is an ordinary word, and a bare 402 is not enough either — the
+ * proxy's 402 for spent credits ("Your credits are exhausted") has its own
+ * sentence, which quotes it, and signing in again does not fix it.
+ */
+function isSubscriptionRefusal(raw: string): boolean {
+  return /\bpayment[ _-]?required\b/i.test(raw)
+    || /\b(?:subscription|plan)[ _-]?(?:expired|inactive|required|cancell?ed|ended|not[ _-]?active)\b/i.test(raw);
+}
+
+/** Why a ClawBox AI turn could not use this box's ClawBox AI sign-in. */
+export type ClawaiSignInFailure = "missing" | "rejected" | "subscription";
+
+/**
+ * A failed turn whose remedy is signing in to ClawBox AI again, or null.
+ *
+ * "missing": the gateway holds no ClawBox AI credential it can use — a sign-in
+ * that expired, one a re-login could not replace (an older box's device login
+ * stored at the same id), or one never saved. "rejected": the proxy refused
+ * the credential (401/403, `invalid_token`). "subscription": the account is
+ * refused for its plan (402, an expired or inactive subscription).
+ *
+ * Asked in `describeChatFailure`'s order, so the two can never disagree: a
+ * spent allowance, a zero quota and a rate limit keep their own sentences —
+ * signing in again fixes none of them.
+ */
+export function clawaiSignInFailure(raw: unknown, context?: ChatRunFailureContext): ClawaiSignInFailure | null {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
+  if (!evidence || isSessionTakeover(text)) return null;
+  const missing = missingCredential(requestedAttempt(text) ?? evidence);
+  if (missing) {
+    return isClawaiProviderId(missing.provider ?? context?.provider ?? providerFromRef(context?.model)) ? "missing" : null;
+  }
+  if (allowanceSentence(evidence, undefined) || statesZeroRateLimit(evidence)) return null;
+  const clawai = isClawaiTurn(context);
+  if (clawai === false) return null;
+  // A line that names no provider is ClawBox AI's only when the proxy's own
+  // refusal says so; anyone else's 403 keeps the generic reconnect sentence.
+  if (clawai === null && !isClawaiProxyCredentialRefusal(evidence)) return null;
+  // Words only, never the gateway's `billing` reason alone: that one also
+  // covers spent credits, which signing in again does not fix, and its own
+  // sentence quotes the provider's words (`describeProviderFailure`).
+  if (isSubscriptionRefusal(evidence)) return "subscription";
+  if (isRateLimit(evidence)) return null;
+  if (isCredentialRejected(evidence) || isClawaiProxyCredentialRefusal(evidence)
+    || context?.reason === "auth" || context?.reason === "auth_permanent") return "rejected";
+  return null;
+}
+
+/**
+ * ClawBox AI's own sentences, one per remedy. They name the one action that
+ * works — signing in to ClawBox AI again, which the button under the line
+ * starts — rather than a status code or the core provider id (`deepseek`),
+ * which is not a name the owner has ever been shown.
+ */
+const CLAWAI_SIGN_IN_SENTENCE: Record<ClawaiSignInFailure, string> = {
+  missing: "That message did not go through — this box has no working ClawBox AI sign-in (it expired, was replaced, or was never saved). Sign in to ClawBox AI again in Settings, under Providers, then send it again.",
+  rejected: "That message did not go through — ClawBox AI is not accepting this box's sign-in any more. Sign in to ClawBox AI again in Settings, under Providers, then send it again.",
+  subscription: "That message did not go through — ClawBox AI refused this account: its plan does not cover this right now. Sign in to ClawBox AI again in Settings, under Providers, or check the plan on your ClawBox account, then send it again.",
+};
+
+/**
+ * A bare rate limit, read against the usage data: a spent weekly pool (or
+ * burst ceiling) explains it. Only when the turn is ClawBox AI's or the
+ * context cannot say, and only off a window the portal read as over its
+ * limit — a 429 from another provider, or from a ClawBox AI window that still
+ * has room, keeps the ordinary rate-limit sentence.
+ */
+function allowanceFromUsage(context: ChatRunFailureContext | undefined, words: ChatFailureWords | undefined): string | null {
+  const usage = words?.clawaiUsage;
+  if (!usage || usage.shape !== "weekly") return null;
+  if (isClawaiTurn(context) === false) return null;
+  if (!usage.weekly.unavailable && usage.weekly.isOverLimit) return allowanceWords("weekly", usage.weekly.resetAt, words);
+  if (usage.burst && !usage.burst.unavailable && usage.burst.isOverLimit) return allowanceWords("burst", usage.burst.resetAt, words);
+  return null;
 }
 
 function allowanceSentence(raw: string, words: ChatFailureWords | undefined): string | null {
   const refusal = parseClawaiAllowanceRefusal(raw);
-  if (!refusal) return null;
-  // A translator that does not know a key answers the key itself (and, with no
-  // provider above it, ignores the params) — the English floor covers both.
-  const say = (key: string, params?: Record<string, string | number>): string => {
-    const hit = words?.t(key, params);
-    let out = hit && hit !== key ? hit : ALLOWANCE_EN[key];
-    for (const [name, value] of Object.entries(params ?? {})) out = out.replaceAll(`{${name}}`, String(value));
-    return out;
-  };
-  const time = formatFreesUpAt(refusal.resetAt, { locale: words?.locale ?? "en", timeZone: words?.timeZone ?? null });
-  return [
-    say(ALLOWANCE_KEY[refusal.kind]),
-    time ? say("chat.allowanceFreesUpAt", { time }) : say("chat.allowanceFreesUpLater"),
-    say("chat.allowanceSeeUsage"),
-  ].join(" ");
+  if (refusal) return allowanceWords(refusal.kind, refusal.resetAt, words);
+  if (!USAGE_LIMIT_TYPE_RE.test(raw)) return null;
+  const at = RESET_AT_ANY_RE.exec(raw)?.[1] ?? null;
+  return allowanceWords("generic", at && !Number.isNaN(Date.parse(at)) ? at : null, words);
+}
+
+/**
+ * The model this chat is on is not available on the owner's account at all:
+ * its rate limit is zero. Names the model and the provider when the gateway
+ * said which, and the two remedies that work — another model, or credit where
+ * that provider takes it.
+ */
+function zeroQuotaSentence(context: ChatRunFailureContext | undefined, words: ChatFailureWords | undefined): string {
+  const providerId = context?.provider ?? providerFromRef(context?.model);
+  const provider = providerLabel(providerId);
+  return sayWith(words)("chat.modelUnavailableNoQuota", {
+    model: modelLabel(context?.model),
+    provider,
+    console: creditConsoleFor(providerId) ?? provider,
+  });
+}
+
+/**
+ * Is `describeChatFailure`'s sentence for this failure the zero-quota one? That
+ * sentence is a fact about the owner's account — the provider gives it no API
+ * quota for the model right now — not a fault, and the chat draws it as a calm
+ * notice rather than a red error. The same tests in the same order as there.
+ */
+export function isAccountQuotaFailure(raw: unknown, context?: ChatRunFailureContext): boolean {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
+  if (!evidence || isSessionTakeover(text)) return false;
+  if (missingCredential(requestedAttempt(text) ?? evidence)) return false;
+  if (allowanceSentence(evidence, undefined)) return false;
+  return statesZeroRateLimit(evidence);
 }
 
 /**
@@ -445,6 +713,20 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
+  // Ahead of everything that reads the reason or a status: the gateway tags a
+  // missing sign-in `reason=auth`, which the refused-credential rule below
+  // would answer with a sentence that is false here, and its line quotes a
+  // device path — a folder with 429 in its name would read as a rate limit.
+  //
+  // Of a chain of models, only the FIRST attempt is asked: the last step's
+  // detail is the last fallback's, and a fallback with no sign-in, behind a
+  // picked model that hit its allowance or a rate limit, used to outrank that
+  // and name the fallback's provider as "the provider this chat is set to".
+  const missing = missingCredential(requestedAttempt(text) ?? evidence);
+  if (missing) {
+    if (clawaiSignInFailure(text, context) === "missing") return CLAWAI_SIGN_IN_SENTENCE.missing;
+    return noSignInSentence(missing.provider ?? context?.provider ?? providerFromRef(context?.model));
+  }
   // Ahead of the rate limit: a spent allowance also arrives as a 429, and the
   // generic "wait a minute" is exactly the wrong advice for a window that frees
   // up days from now. The refusal names which allowance and when, so say that.
@@ -452,12 +734,23 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   // the provider's detail line when the gateway's own sentence is the generic one.
   const allowance = allowanceSentence(evidence, words);
   if (allowance) return allowance;
+  // A 429 that states the account's limit as ZERO, ahead of the rate limit it
+  // also is: "wait a minute and send it again" is the advice that cannot work
+  // here, however long the owner waits (src/lib/zero-quota.ts). Read off the
+  // same evidence — the provider's words reach this function when the core
+  // passes a short refusal through, and on the Hermes path.
+  if (statesZeroRateLimit(evidence)) return zeroQuotaSentence(context, words);
+  // A ClawBox AI sign-in the proxy refused, or an account its plan does not
+  // cover: the remedy is the ClawBox AI sign-in, which the chat offers as a
+  // button under this line (`chatFailureNote`).
+  const clawai = clawaiSignInFailure(text, context);
+  if (clawai) return CLAWAI_SIGN_IN_SENTENCE[clawai];
   // Before the sanitizer: the raw rate-limit wording would itself pass the leak
   // rules ("API rate limit reached…" carries no path or handle), so without
   // this the customer would get that bare operator line instead of the calm,
   // actionable one — and a 429 buried in an otherwise unsafe string would be
   // dropped to the generic fallback, losing the one fact that explains it.
-  if (isRateLimit(evidence)) return RATE_LIMIT;
+  if (isRateLimit(evidence)) return allowanceFromUsage(context, words) ?? RATE_LIMIT;
   // Before the sanitizer for the same reason as the rate limit: "HTTP 403:
   // Invalid token" carries no path or handle, so it would otherwise pass the
   // leak rules and be relayed verbatim — which is exactly the bubble TASK-419
@@ -479,6 +772,35 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   // generic line would throw that away.
   return safe ? `Error: ${safe}` : GENERIC;
 }
+
+/** The system row a failed turn leaves in the chat: the sentence, its tone, and the button that fixes it. */
+export interface ChatFailureNote {
+  text: string;
+  /** A fact about the owner's account (no API quota), drawn calm; absent is the red of an error. */
+  variant?: "notice";
+  actions?: ChatNoticeActions;
+}
+
+/**
+ * The one place a failed turn becomes a chat row, for both chat surfaces and
+ * the history read (src/lib/harness/openclaw-gateway-adapter.ts), so the line
+ * a live error frame paints and the one a re-read restores from the box's
+ * transcript are the same line. Zero quota stays calm; a ClawBox AI sign-in
+ * the box can no longer use carries the button that signs in again.
+ */
+export function chatFailureNote(raw: unknown, context?: ChatRunFailureContext, words?: ChatFailureWords): ChatFailureNote {
+  const text = describeChatFailure(raw, context, words);
+  if (isAccountQuotaFailure(raw, context)) return { text, variant: "notice" };
+  if (clawaiSignInFailure(raw, context)) return { text, actions: { signInClawai: true } };
+  return { text };
+}
+
+/**
+ * A turn that ENDED with nothing to show: the run finished, no error frame,
+ * and neither the live `final` nor the box's transcript holds a reply. Said,
+ * because a question with nothing under it reads as a box still thinking.
+ */
+export const EMPTY_RUN_TEXT = "No reply came back for this message — the model finished without answering. Send it again, or pick another model in the header.";
 
 /** A picture could not be drawn, and we will not say why, because we cannot say it safely. */
 const IMAGE_GENERIC = "That picture could not be made. Try again — the details stayed in this box's log.";

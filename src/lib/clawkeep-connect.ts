@@ -14,6 +14,7 @@ import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
+import { migrateLegacyPortalUrl } from "@/lib/portal-legacy-domain";
 
 // `configuring` matches the ClawAI session machine: the upstream issued a
 // token, we're writing it to disk, and the next poll resolves to `complete`.
@@ -85,7 +86,17 @@ export async function readClawKeepSession(): Promise<ClawKeepConnectSession | nu
   try {
     const raw = await fs.readFile(STATE_PATH, "utf8");
     const parsed: unknown = JSON.parse(raw);
-    return isValidSession(parsed) ? parsed : null;
+    if (!isValidSession(parsed)) return null;
+    // Legacy portal domain (TASK-1600/TASK-1754): a pairing started before the
+    // move stored the old verification URL. Rewrite it and persist once;
+    // custom portals and already-migrated URLs are left untouched.
+    const migrated = migrateLegacyPortalUrl(parsed.verificationUrl);
+    if (migrated !== parsed.verificationUrl) {
+      const next = { ...parsed, verificationUrl: migrated };
+      await writeClawKeepSession(next).catch(() => {});
+      return next;
+    }
+    return parsed;
   } catch {
     return null;
   }

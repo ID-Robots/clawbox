@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { declaredTooLong, readJsonObject } from "@/lib/bounded-json";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   BOX_SCOPE,
@@ -64,7 +64,7 @@ function refuse(status: number, kind: string, error: string, code?: string) {
 
 /** Owner session, and — for the two writes — this box's own page. */
 async function guard(request: Request, write: boolean): Promise<NextResponse | null> {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return refuse(403, "owner_only", "Reading or changing this ClawBox's stored secrets needs a signed-in browser session.");
   }
   if (write && !isSameOriginRequest(request)) {

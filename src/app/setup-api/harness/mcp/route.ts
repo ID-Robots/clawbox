@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 import { applyClawboxMcpSwitch, readClawboxMcpRegistration } from "@/lib/clawbox-mcp-registration";
 import { CLAWBOX_MCP_ENABLED_KEY, readClawboxMcpEnabled } from "@/lib/clawbox-mcp-switch";
 import { set } from "@/lib/config-store";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
@@ -47,7 +47,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse(403, "owner_only", "Switching the assistant's device tools needs a signed-in browser session.");
   }
   if (!isSameOriginRequest(req)) {

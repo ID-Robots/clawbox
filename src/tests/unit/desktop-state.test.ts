@@ -12,6 +12,7 @@ import {
   desktopLayoutKey,
   pickDesktopState,
   restoreDesktopWindows,
+  RETIRED_APP_IDS,
   sanitizeDesktopState,
   snapshotDesktop,
   stateFromLegacyWindows,
@@ -159,6 +160,24 @@ describe("sanitizeDesktopState", () => {
     expect(state?.windows.map((w) => w.id)).toEqual(["ok-1", "nan-1", "t-1"]);
     expect(state?.windows[1]).toEqual({ id: "nan-1", appId: "files", minimized: false });
     expect(state?.windows[2]).toEqual({ id: "t-1", appId: "terminal", minimized: false, meta: { command: "htop" }, terminal: { tabs: [{ id: 2 }], activeId: 2, nextId: 3 } });
+    expect(state?.focusedId).toBeNull();
+  });
+
+  it("drops a window of a retired built-in app (the removed Projects app), and the focus it held", () => {
+    const state = sanitizeDesktopState({
+      v: 1,
+      savedAt: 5,
+      focusedId: "projects-1",
+      windows: [
+        { id: "files-1", appId: "files", minimized: false, meta: { path: "projects" } },
+        { id: "projects-1", appId: "projects", minimized: false, x: 10, y: 10, width: 900, height: 620, meta: { place: "projects" } },
+        { id: "installed-projects-1", appId: "installed-projects", minimized: false },
+      ],
+    });
+    expect(RETIRED_APP_IDS.has("projects")).toBe(true);
+    // A Files window that merely shows a folder called `projects` is the
+    // owner's folder, and an installed app is never a retired built-in.
+    expect(state?.windows.map((w) => w.id)).toEqual(["files-1", "installed-projects-1"]);
     expect(state?.focusedId).toBeNull();
   });
 

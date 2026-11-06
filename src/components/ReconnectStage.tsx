@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import CrabWaitMark from "./CrabWaitMark";
 
@@ -47,6 +47,9 @@ export interface ReconnectStageProps {
   aside?: ReactNode;
 }
 
+/** Nothing ever changes: the store only tells a hydrating render from a live one. */
+const subscribeToNothing = () => () => undefined;
+
 /**
  * Shared full-screen presentational shell for the setup reconnect/handoff
  * overlays — pulse rings, orbiting dots, the bobbing crab mascot, a title +
@@ -67,9 +70,17 @@ export default function ReconnectStage({
   doneTone = "emerald",
   aside,
 }: ReconnectStageProps) {
-  // These overlays only render after a client-side interaction, so the portal
-  // target is always present; guard against SSR where document is undefined.
-  if (typeof document === "undefined") return null;
+  // A portal has no server rendering, so the server sends nothing here — and
+  // the client's HYDRATING render has to send nothing too. `typeof document`
+  // could not say that: it is true on the client's first render as well, so on
+  // the one page that mounts this from server HTML (/updating) hydration met a
+  // portal the server never rendered and React threw error #418 as the update
+  // screen opened. `useSyncExternalStore` answers with the server snapshot
+  // while hydrating and the client one straight after, with no effect and no
+  // extra paint for the overlays that mount after an interaction (they are
+  // never hydrated, so they get `true` on their first render).
+  const live = useSyncExternalStore(subscribeToNothing, () => true, () => false);
+  if (!live) return null;
 
   // Palette-token cyan for the wizard's own steps, generic emerald otherwise.
   // `--cyan-bright` is the DONE colour every other wizard surface uses.
@@ -146,7 +157,7 @@ export default function ReconnectStage({
 
   return createPortal(
     <div
-      className="reconnect-stage fixed inset-0 flex items-center justify-center px-6 overflow-y-auto py-8"
+      className="reconnect-stage main-screen-scrim fixed inset-0 flex items-center justify-center px-6 overflow-y-auto py-8"
       data-agent={hermes ? "hermes" : undefined}
       // The wizard's own ground token, not a hardcoded near-black: #0d1117
       // matched nothing in the palette. --ground is the page ground the rest

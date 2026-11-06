@@ -50,12 +50,27 @@ describe("VoiceTunnelDialog", () => {
     const { navigate } = renderDialog();
 
     const go = await screen.findByTestId("voice-tunnel-go");
-    expect(go.textContent).toBe(translations.en["chat.voice.tunnel.open"]);
+    // The copy arrives with the locale's chunk, a moment after the button does.
+    await waitFor(() => expect(go.textContent).toBe(translations.en["chat.voice.tunnel.open"]));
 
     fireEvent.click(go);
     // The whole point of the card: the destination is the LIVE address the
     // box published, not a hardcoded or remembered one.
     expect(navigate).toHaveBeenCalledWith("https://lively-crab.trycloudflare.com/");
+  });
+
+  it("takes the owner to the page they are on, not the tunnel's root (TASK-2058)", async () => {
+    window.history.pushState({}, "", "/apps/chat?tab=2#voice");
+    try {
+      stubPortalStatus({ tunnel: { installed: true, service: "active", url: "https://lively-crab.trycloudflare.com" } });
+      const { navigate } = renderDialog();
+
+      fireEvent.click(await screen.findByTestId("voice-tunnel-go"));
+
+      expect(navigate).toHaveBeenCalledWith("https://lively-crab.trycloudflare.com/apps/chat?tab=2#voice");
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
   });
 
   it("says the tunnel is off and names the setting, with no dead link", async () => {

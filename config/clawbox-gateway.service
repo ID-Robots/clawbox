@@ -88,7 +88,15 @@ SuccessExitStatus=0 143
 # and carries on. The gateway process itself being the victim still ends the
 # unit, and Restart=always brings it back as before.
 OOMPolicy=continue
-TimeoutStopSec=30
+# How long systemd waits after SIGTERM before SIGKILL. OpenClaw sizes its own
+# graceful drain from this value (it reads the unit's TimeoutStopUSec) and its
+# own systemd template writes TimeoutStopSec=330; its service audit reports
+# anything shorter as "required for the Gateway drain and final cleanup"
+# (OpenClaw 2026.10.3, gateway-shutdown-budget / service-audit). At 30 s a stop
+# that lands while a SQLite transaction is still held was SIGKILLed mid-cleanup
+# and the unit recorded "Failed with result 'timeout'" (TASK-1604). A clean
+# stop still returns as soon as the gateway exits; 330 s is only the ceiling.
+TimeoutStopSec=330
 # gateway-pre-start.sh runs as a blocking ExecStartPre. The default
 # ~90s start timeout could kill a legitimately slow first-boot pre-start
 # (plugin fetch/unpack on a cold Jetson) mid-flight and wedge the unit into

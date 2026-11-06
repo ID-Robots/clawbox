@@ -30,9 +30,12 @@ export type Ed = "openclaw" | "hermes";
 // What the SERVER runs as. `browser` is the coding-agent run profile: only
 // tools declaring `family: "browser"` register, so a delegated run drives
 // Chromium to verify its work without inheriting the assistant's device-wide
-// tool set (email, power, files, …). Distinct from the per-tool declarations
+// tool set (email, power, files, …). `run-read` is the same run profile for a
+// project whose owner ticked "ClawBox read-only tools": the browser family
+// plus every tool declaring `readOnly: true`, and still nothing that writes
+// (src/lib/clawbox-run-read-tools.ts). Distinct from the per-tool declarations
 // below — one axis is the server's mode, the other is what a tool claims.
-export type Profile = "core" | "full" | "browser";
+export type Profile = "core" | "full" | "browser" | "run-read";
 
 export interface ToolOpts {
   /** Editions this tool is registered on. Default: both. */
@@ -63,6 +66,16 @@ type ContentPart =
 export interface ToolResult {
   content: ContentPart[];
   isError?: boolean;
+  /**
+   * A machine-readable copy of what the prose says, for the harness's UI —
+   * the MCP `structuredContent` field. Only `coding_agent_run` and
+   * `coding_team_run` set it (the id and status of what they started, so a
+   * chat client can draw its own card); no tool here declares an
+   * `outputSchema`, so the SDK passes it through unvalidated. The cap below
+   * leaves it alone: it is data the agent's host reads, not text the model
+   * does, and it is small by construction.
+   */
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface RegisteredToolInfo {
@@ -379,6 +392,9 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
       if (opts.editions && !opts.editions.includes(edition)) return;
       if (profile === "core" && opts.profile !== "core") return;
       if (profile === "browser" && opts.family !== "browser") return;
+      // The declaration again, never the name: a tool that reads is in, and a
+      // tool that declares nothing is a write as far as a run is concerned.
+      if (profile === "run-read" && opts.family !== "browser" && opts.readOnly !== true) return;
 
       const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
       const info: RegisteredToolInfo = {

@@ -2,6 +2,8 @@
 // Defining them in one place avoids typo drift between the dispatch and
 // listen sites.
 
+import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK } from "./coding-agent-harness-test";
+
 export const OPEN_APP_EVENT = "clawbox:open-app";
 export const FIX_ERROR_EVENT = "clawbox:fix-error";
 /**
@@ -89,6 +91,44 @@ export function takePendingCodingRun(): string | null {
   return id;
 }
 
+/**
+ * "Open the Coding Agent app on this TEAM."
+ *
+ * The run trio above, for a coding team: the chat's team card and the
+ * desktop's team finish card end here, and the app opens on the team rather
+ * than on its home. The same two handoffs — the `window` slot survives a
+ * cold open, the event reaches an app already on screen — and the same
+ * take-once read on the app's side. The app opens the team's own page
+ * (CodingTeamPage, since the redesign's step 5), its project behind it.
+ */
+export const OPEN_CODING_TEAM_EVENT = "clawbox:open-coding-team";
+
+type PendingTeamWindow = Window & { __clawboxPendingCodingTeam?: unknown };
+
+/** The handoff WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingTeam(teamId: string): void {
+  if (typeof window === "undefined") return;
+  const w = window as PendingTeamWindow;
+  w.__clawboxPendingCodingTeam = teamId;
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_TEAM_EVENT, { detail: { teamId } }));
+}
+
+/** Open the Coding Agent app on a team, in the window's own size and place — never maximized, like the run's. */
+export function dispatchOpenCodingTeam(teamId: string): void {
+  if (typeof window === "undefined") return;
+  handoffCodingTeam(teamId);
+  dispatchOpenApp("coding");
+}
+
+/** The team handed off before the app mounted, taken exactly once. */
+export function takePendingCodingTeam(): string | null {
+  if (typeof window === "undefined") return null;
+  const w = window as PendingTeamWindow;
+  const id = typeof w.__clawboxPendingCodingTeam === "string" ? w.__clawboxPendingCodingTeam : null;
+  delete w.__clawboxPendingCodingTeam;
+  return id;
+}
+
 
 
 /**
@@ -141,10 +181,15 @@ export function dispatchOpenApp(appId: string, opts: OpenAppOptions = {}): void 
  * is the sequence `page.tsx` open-a-section helpers also perform — named here
  * so the event string and the `__clawboxPendingSettingsSection` handoff live
  * in one place instead of drifting across each dispatch site.
+ *
+ * `focus` names a block inside the section to open and bring into view (the
+ * closed set is `NOTIFY_ACTION_FOCUS` in src/lib/notify-action.ts); it rides
+ * both handoffs beside the section, and SettingsApp ignores one it does not
+ * know, exactly as it ignores an unknown section.
  */
-export function dispatchOpenSettingsSection(section: string): void {
+export function dispatchOpenSettingsSection(section: string, focus?: string): void {
   if (typeof window === "undefined") return;
-  handoffSettingsSection(section);
+  handoffSettingsSection(section, focus);
   dispatchOpenApp("settings");
 }
 
@@ -154,10 +199,31 @@ export function dispatchOpenSettingsSection(section: string): void {
  * `/app/settings?section=…` route, where there is no desktop to open a window
  * into and nothing listens for OPEN_APP_EVENT.
  */
-export function handoffSettingsSection(section: string): void {
+export function handoffSettingsSection(section: string, focus?: string): void {
   if (typeof window === "undefined") return;
-  (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
-  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section } }));
+  const w = window as Window & { __clawboxPendingSettingsSection?: string; __clawboxPendingSettingsFocus?: string };
+  w.__clawboxPendingSettingsSection = section;
+  // Replaced by EVERY link, a plain one included: a focus left over from a
+  // link Settings never took would otherwise ride along on the next cold open.
+  if (focus) w.__clawboxPendingSettingsFocus = focus;
+  else delete w.__clawboxPendingSettingsFocus;
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: focus ? { section, focus } : { section } }));
+}
+
+/**
+ * "Open Settings → AI and start the ClawBox AI sign-in": the same offer the
+ * ClawBox AI pitch card's Connect makes — ClawBox AI selected and its device
+ * login started, so the owner lands on the code to enter rather than on a
+ * list to search. SettingsApp listens for it; the `window` flag is the cold
+ * open's handoff, taken by whichever of the two paths reads it first.
+ */
+export const OPEN_CLAWAI_OFFER_EVENT = "clawbox:open-clawai-offer";
+
+export function dispatchClawaiSignIn(): void {
+  if (typeof window === "undefined") return;
+  (window as Window & { __clawboxPendingClawAiOffer?: boolean }).__clawboxPendingClawAiOffer = true;
+  window.dispatchEvent(new Event(OPEN_CLAWAI_OFFER_EVENT));
+  dispatchOpenSettingsSection("ai");
 }
 
 /** The query parameter `/app/settings` reads its opening section from. */
@@ -210,6 +276,29 @@ export function dispatchChatMessage(text: string): void {
   window.dispatchEvent(new CustomEvent<ChatMessageDetail>(CHAT_MESSAGE_EVENT, { detail: { text } }));
 }
 
+/**
+ * "Open the chat — and put these words in the composer, UNSENT."
+ *
+ * The run page's **Message in chat** (and the agent chart's panel) end here
+ * rather than at a text box of their own: the chat composes, the app shows
+ * (the 2026-10-30 redesign). `page.tsx` opens the popup; `ChatPopup` seeds
+ * its composer with `draft` and focuses it, and NOTHING is sent until the
+ * owner presses Send — a draft is a draft. `dispatchChatMessage` stays for a
+ * prompt that needs no editing.
+ */
+export const OPEN_CHAT_EVENT = "clawbox:open-chat";
+
+export interface OpenChatDetail {
+  /** Words for the composer, left for the owner to finish and send. */
+  draft?: string;
+}
+
+export function dispatchOpenChat(opts: OpenChatDetail = {}): void {
+  if (typeof window === "undefined") return;
+  const detail: OpenChatDetail = opts.draft ? { draft: opts.draft } : {};
+  window.dispatchEvent(new CustomEvent<OpenChatDetail>(OPEN_CHAT_EVENT, { detail }));
+}
+
 /** The starter a new app is scaffolded from — initProject's two templates. */
 /** The wizard's starters, in the order the select shows them; "nextjs" is the default. */
 export type NewAppTemplate = "nextjs" | "react" | "app" | "blank";
@@ -237,8 +326,8 @@ export const DEFAULT_NEW_APP_TEMPLATE: NewAppTemplate = "nextjs";
  * of their own like everything else.
  */
 const SCAFFOLD_SENTENCE: Record<NewAppTemplate, string> = {
-  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port under the base path /apps/<folder> (basePath in next.config), write a clawbox.json at the root naming the app and that port so the box serves it at /apps/<folder>/ and puts it on my desktop, verify it in the browser, and give it an icon.",
-  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port under the base path /apps/<folder> (base in vite.config), write a clawbox.json at the root naming the app and that port so the box serves it at /apps/<folder>/ and puts it on my desktop, verify it in the browser, and give it an icon.",
+  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port under the base path /apps/<folder> (basePath in next.config), write a clawbox.json at the root naming the app, that port and the command that starts the server (\"start\") so the box can start it, serve it at /apps/<folder>/ and put it on my desktop, verify it in the browser, and give it an icon.",
+  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port under the base path /apps/<folder> (base in vite.config), write a clawbox.json at the root naming the app, that port and the command that starts the server (\"start\") so the box can start it, serve it at /apps/<folder>/ and put it on my desktop, verify it in the browser, and give it an icon.",
   app: "Scaffold it as a small HTML/CSS/JS app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
   blank: "Scaffold it as a single-page HTML app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
 };
@@ -250,6 +339,91 @@ export interface NewAppRequest {
 }
 
 /**
+ * The Create card's two toggles (2026-10-30), as every prompt builder takes
+ * them: run the work as a coding TEAM, and ask for the highest effort.
+ */
+export interface PromptOptions {
+  /** The work goes to a coding team (coding_team_run) rather than one run. */
+  team?: boolean;
+  /**
+   * The owner asked for the highest effort on this one: the prompt ends with
+   * the sentence that tells the assistant to pass `effort: "ultracode"` to the
+   * tool it starts the work with — a real parameter of coding_agent_run and
+   * coding_team_run (the per-request override, src/lib/coding-effort.ts).
+   */
+  ultracode?: boolean;
+  /**
+   * Pictures the owner put in the Create planner (pasted, dropped or picked),
+   * as the ABSOLUTE paths the chat's staging route wrote them to, in the
+   * order the brief numbers them (`[image 1]` is the first). A path only
+   * named in a task is never read by a run, so the prompt tells the assistant
+   * how to hand them over (`referencesSentence`).
+   */
+  references?: readonly string[];
+  /**
+   * "Show me the plan first": the assistant writes the plan it would hand
+   * the coding agent and waits for the owner's OK before starting anything.
+   */
+  planFirst?: boolean;
+}
+
+/**
+ * The lines that name the planner's pictures and say how a run gets them:
+ * `input_files` on coding_agent_run (the run's own copy, the only way a run
+ * reads a file), or — for a team, whose tool takes no input files — a copy in
+ * the project folder that the goal names. Empty for no pictures.
+ */
+export function referencesLines(paths: readonly string[] | undefined, tool: "coding_agent_run" | "coding_team_run"): string[] {
+  const list = (paths ?? []).filter((p) => typeof p === "string" && p.trim());
+  if (list.length === 0) return [];
+  return [
+    "",
+    "Reference images (the brief calls them [image 1], [image 2], …):",
+    // No colon after the name: `[image 1]: /path` is a Markdown link
+    // definition, and the chat's bubble would draw the line as nothing.
+    ...list.map((p, i) => `- [image ${i + 1}] ${p.trim()}`),
+    tool === "coding_agent_run"
+      ? `Give them to the run: pass these paths as input_files to coding_agent_run (comma-separated) — a path only written in the task is never read — and keep the [image N] names in the task so the run knows which is which.`
+      : `A team's tool takes no input files, and its workers build in their own git worktrees of the team's branch, which only hold what is COMMITTED: copy these pictures into a "design" folder in the project and commit them before you start coding_team_run, then name them by those project paths in the goal.`,
+  ];
+}
+
+/** The closing line of a prompt whose "plan first" switch was on. */
+export const PLAN_FIRST_SENTENCE =
+  "Before you start anything, reply with the plan you would hand the coding agent — the tasks, the order, how each is verified — and wait for my OK. Start the work only after I approve it (with any changes I ask for).";
+
+/**
+ * The owner's brief, as the opening of a prompt. One line reads as the end of
+ * the sentence that introduces it (the shape every prompt had before the
+ * planner); a multi-line brief — headings, lists, a checklist — is quoted as a
+ * block under that sentence, so its structure reaches the assistant intact.
+ */
+function briefLines(intro: string, brief: string): string[] {
+  const trimmed = brief.trim();
+  if (!trimmed.includes("\n")) {
+    // One sentence, whatever punctuation the owner typed: strip a trailing
+    // full stop so the description does not end "...timer.." after ours. A
+    // brief that is nothing but periods keeps what the owner typed.
+    const one = trimmed.replace(/[.\s]+$/u, "") || trimmed;
+    return [`${intro}: ${one}.`];
+  }
+  return [`${intro}. The brief:`, "", trimmed, ""];
+}
+
+/**
+ * The closing sentence of a prompt whose Ultracode toggle was on. Named for
+ * the tool the prompt asks for, so the assistant is told where the argument
+ * goes rather than left to guess; exported so the card's test can pin it.
+ */
+export function ultracodeSentence(tool: "coding_agent_run" | "coding_team_run"): string {
+  return `The owner asked for the highest effort on this one: pass effort "ultracode" to ${tool} when you start it.`;
+}
+
+/** The new-app prompt's extra line when the team toggle is on: the scaffold stays, the build goes to a team. */
+const NEW_APP_TEAM_SENTENCE =
+  "Once the folder is scaffolded, start the work as a coding TEAM with coding_team_run in that folder (its directory), with the description above as the goal — the planner splits it into tasks, workers do them and a reviewer checks each; do not start single runs for the parts yourself.";
+
+/**
  * The one message the New wizard hands to the chat.
  *
  * English on purpose, like buildFixErrorPrompt: it is addressed to the
@@ -258,14 +432,41 @@ export interface NewAppRequest {
  * — so the request lands as a plan rather than a wish. The template is named
  * the way code_project_init's argument is spelled.
  */
-export function buildNewAppPrompt(req: NewAppRequest): string {
+export function buildNewAppPrompt(req: NewAppRequest, opts: PromptOptions = {}): string {
   const name = req.name.trim();
-  // One sentence, whatever punctuation the owner typed: strip a trailing full
-  // stop so the description does not end "...timer.." after ours.
-  const what = req.description.trim().replace(/[.\s]+$/u, "");
+  const tool = opts.team ? "coding_team_run" : "coding_agent_run";
   return [
-    `Create a new ClawBox app called "${name}": ${what}.`,
+    ...briefLines(`Create a new ClawBox app called "${name}"`, req.description),
     SCAFFOLD_SENTENCE[req.template],
+    // With the team toggle on the scaffold is still the assistant's; the
+    // build itself goes to a team in the folder it made.
+    ...(opts.team ? [NEW_APP_TEAM_SENTENCE] : []),
+    ...referencesLines(opts.references, tool),
+    ...(opts.ultracode ? [ultracodeSentence(tool)] : []),
+    ...(opts.planFirst ? [PLAN_FIRST_SENTENCE] : []),
+  ].join("\n");
+}
+
+/**
+ * The one message "Test in the chat" (Settings' owner tools) and "Try it in
+ * the chat" (the wizard's last step) hand to the chat.
+ *
+ * English and addressed to the assistant, like buildNewAppPrompt. Until the
+ * 2026-10-30 redesign both buttons posted to `coding-agent/browse` and
+ * `coding-agent/run` from the app itself; now the assistant does what the
+ * app did — makes the scratch folder inside the owner's default project
+ * folder and starts ONE run there with the canned task — so the run shows up
+ * where every other run does: as a card in the chat. The folder is named
+ * BARE on purpose: the run resolver reads a bare name as "inside the default
+ * project folder", which keeps the default the one place that decides where
+ * "inside" is.
+ */
+export function buildHarnessTestPrompt(): string {
+  return [
+    "Run the coding agent's harness self-test for me.",
+    `Inside my default project folder, create a folder named "${HARNESS_TEST_PROJECT}" if it is not there yet, then start exactly one coding run in it with coding_agent_run, directory "${HARNESS_TEST_PROJECT}", and this task, word for word:`,
+    HARNESS_TEST_TASK,
+    "Tell me when the run has started; when it finishes, tell me what it built and what the browser description confirmed.",
   ].join("\n");
 }
 
@@ -291,12 +492,11 @@ export interface ResumeProjectRequest {
  * before any change, the verification and commit after, and — for a code
  * project — the rebuild that puts the result back on the desktop.
  */
-export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
-  const what = req.instructions.trim().replace(/[.\s]+$/u, "");
+export function buildResumeProjectPrompt(req: ResumeProjectRequest, opts: PromptOptions = {}): string {
   const last = req.latestRun;
   const lastTask = last ? last.task.trim().split(/\r?\n/)[0].slice(0, 160) : "";
   const lines = [
-    `Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${what}.`,
+    ...briefLines(`Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}`, req.instructions),
     `Start a coding agent run in that folder (coding_agent_run with directory "${req.directory}") — do not scaffold a new project.`,
     last
       ? `Its last run (${last.id}, ${last.status}) was: "${lastTask}". Read that run's summary and the project's recent commits before changing anything, so this run picks up where it left off.`
@@ -306,6 +506,9 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
       : "When the run is done, tell me what changed, what was verified, and what is left for the next run.",
   ];
   if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
+  lines.push(...referencesLines(opts.references, "coding_agent_run"));
+  if (opts.ultracode) lines.push(ultracodeSentence("coding_agent_run"));
+  if (opts.planFirst) lines.push(PLAN_FIRST_SENTENCE);
   return lines.join("\n");
 }
 
@@ -316,18 +519,24 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
  * project page's "Plan with the assistant" button opens the Create App card
  * with the team switch on, and this is what the card then hands the chat.
  */
-export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">): string {
+export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">, opts: PromptOptions = {}): string {
   // Trailing periods come off so the sentence reads as one; a goal that is
   // nothing but periods keeps what the owner typed rather than becoming an
   // empty request.
-  const trimmed = req.instructions.trim();
-  const goal = trimmed.replace(/[.\s]+$/u, "") || trimmed;
   const target = req.kind === "codeProject" ? `project_id "${req.folder}"` : `directory "${req.directory}"`;
   return [
-    `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
+    ...briefLines(`Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}`, req.instructions),
     `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
-    "Tell me when it is running, and check on it later with coding_team_status; when it is done, summarise what each task did and what was verified.",
+    // How the assistant hears that the team finished differs per edition (a
+    // chat line on OpenClaw, the desktop on Hermes: TEAM_SETTLE_WORD in
+    // mcp/tools/coding-agent.ts), and this prompt knows no edition — the tool
+    // reply says it, so the prompt points there rather than promising a line
+    // a Hermes box never posts (the assistant would wait on it for ever).
+    "Tell me when it is running, and do not poll it — the coding_team_run reply says how you will hear that it finished; then read coding_team_status and summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
+    ...referencesLines(opts.references, "coding_team_run"),
+    ...(opts.ultracode ? [ultracodeSentence("coding_team_run")] : []),
+    ...(opts.planFirst ? [PLAN_FIRST_SENTENCE] : []),
   ].join("\n");
 }
 
@@ -562,8 +771,47 @@ export function onCodingRunStarted(listener: () => void): () => void {
 }
 
 /**
- * Settings → Voice saved the spoken-replies switch: `{ autoReply: boolean }`.
- * The open chat listens so its next voice turn honours the new position
- * without a reopen.
+ * "A coding TEAM was just started, or just settled, somewhere this browser
+ * can see." The team's counterpart of CODING_RUN_STARTED_EVENT: the chat's
+ * cards poll the team list on the same beat as the runs, and this is the
+ * nudge that makes a team started from another device, or one the ring just
+ * reported settled, show up before the next slow poll. A signal, not data:
+ * the listener re-asks the team route.
+ */
+export const CODING_TEAM_CHANGED_EVENT = "clawbox:coding-team-changed";
+
+/** Emit the signal above — once the team route has ANSWERED, or when the desktop hears a team settled; never on the click. */
+export function notifyCodingTeamChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CODING_TEAM_CHANGED_EVENT));
+}
+
+/** Subscribe to "a coding team changed" and return the unsubscribe. */
+export function onCodingTeamChanged(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(CODING_TEAM_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(CODING_TEAM_CHANGED_EVENT, listener);
+}
+
+/**
+ * Settings → Voice saved the spoken-replies switches:
+ * `{ autoReply: boolean, autoPlayAll: boolean, shortSpoken?: boolean, engines }`.
+ * The open chat listens so its next reply honours the new positions without a
+ * reopen; a field that is absent leaves the chat's reading of it alone.
+ * `shortSpoken` (Short spoken answers) is optional for that reason: a writer
+ * from before it existed never names it, and must not switch it off.
  */
 export const VOICE_SETTINGS_CHANGED_EVENT = "clawbox:voice-settings-changed";
+
+/**
+ * The ClawBox AI plan this box records moved — an upgrade or downgrade on the
+ * portal while the box was running, seen by the status poll
+ * (`use-clawbox-login`). What follows the plan re-reads on it: Settings → Voice
+ * (the cloud voice comes with Max) among them. No detail.
+ */
+export const CLAWAI_PLAN_CHANGED_EVENT = "clawbox:clawai-plan-changed";
+
+export function notifyClawaiPlanChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CLAWAI_PLAN_CHANGED_EVENT));
+}

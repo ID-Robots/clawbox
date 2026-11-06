@@ -45,7 +45,7 @@ const WHISPER_STATE = {
 };
 const EMBED_STATUS = { installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 640 * 1024 * 1024, model: "qwen3-embedding-0.6b", engine: "llama.cpp" };
 
-function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
+function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; sttChain?: string[]; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
   posts = [];
   deletes = [];
   const json = (body: unknown, status = 200) =>
@@ -81,7 +81,7 @@ function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?:
       return json({
         primary,
         engines: { cloud: { configured: cloud, label: "c" }, local: { installed: true, label: "l" } },
-        chain: cloud ? ["cloud", "local"] : ["local"],
+        chain: over.sttChain ?? (cloud ? ["cloud", "local"] : ["local"]),
       });
     }
     if (url.startsWith("/setup-api/local-ai/exclusive")) return json({ enabled: false });
@@ -228,6 +228,23 @@ describe("LocalAiPanel", () => {
     fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
     fireEvent.click(await screen.findByTestId("local-model-action-whisper-fallback"));
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "cloud" } }));
+  });
+
+  /**
+   * A token the transcribe route will not send — an owner's own DeepSeek key,
+   * or a ClawBox AI sign-in whose profile is recorded as OAuth — still reads
+   * `engines.cloud.configured`, while `chain` leaves the cloud out. "Use as
+   * fallback" there put the box's only working engine behind one that hears
+   * nothing.
+   */
+  it("does not offer it behind a configured cloud that no chain uses", async () => {
+    stubFetch({ sttPrimary: "local", sttChain: ["local"] });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/primary/i));
+
+    expect(screen.queryByTestId("local-model-menu-whisper")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-action-whisper-fallback")).not.toBeInTheDocument();
   });
 
   /**
@@ -531,7 +548,7 @@ describe("LocalAiPanel", () => {
     expect(screen.queryByTestId("local-model-progress-llamacpp")).not.toBeInTheDocument();
   });
 
-  it("keeps each row's own spinner while two actions are in flight, and holds the poll until both settle", async () => {
+  it("keeps each row's own spinner while two actions are in flight, and re-reads the rows that are done while the other runs on", async () => {
     const json = (body: unknown) =>
       new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     const releases: Record<string, () => void> = {};
@@ -560,14 +577,19 @@ describe("LocalAiPanel", () => {
     const inventoryReads = () => (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
       .filter((c) => String(c[0]).startsWith("/setup-api/local-models") && (c[1] as RequestInit | undefined)?.method !== "POST").length;
     const readsBefore = inventoryReads();
-    // The first to settle must not clear the other row, nor let the poll in.
+    // The first to settle must not clear the other row. It DOES read the
+    // inventory again — with several installs going at once, the one that
+    // ended has to show its new state now — and the row still in flight
+    // keeps what it showed.
     releases["/setup-api/tts"]();
     await waitFor(() => expect(within(kokoro).queryByText("progress_activity")).not.toBeInTheDocument());
+    await waitFor(() => expect(inventoryReads()).toBeGreaterThan(readsBefore));
     expect(within(whisper).getByText("progress_activity")).toBeInTheDocument();
-    expect(inventoryReads()).toBe(readsBefore);
+    expect(whisper).toHaveAttribute("aria-busy", "true");
+    const readsBetween = inventoryReads();
     releases["/setup-api/local-models"]();
     await waitFor(() => expect(within(whisper).queryByText("progress_activity")).not.toBeInTheDocument());
-    await waitFor(() => expect(inventoryReads()).toBeGreaterThan(readsBefore));
+    await waitFor(() => expect(inventoryReads()).toBeGreaterThan(readsBetween));
   });
 
   it("says so under the skeleton when the first inventory read fails, and recovers on the next", async () => {
@@ -829,12 +851,28 @@ describe("LocalAiPanel", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("offers no Uninstall on Gemma while it is the model the box answers with — the menu's Use as fallback comes first", async () => {
+  it("shows Gemma's Uninstall greyed out while it is the model the box answers with, saying to switch the chat first", async () => {
     stubFetch({ llmDefault: true });
     renderPanel();
     await screen.findByTestId("local-model-llamacpp");
-    expect(screen.queryByTestId("local-model-action-llamacpp-uninstall")).not.toBeInTheDocument();
+    const uninstall = screen.getByTestId("local-model-action-llamacpp-uninstall");
+    expect(uninstall).toHaveAttribute("aria-disabled", "true");
+    const hint = screen.getByTestId("local-model-blocked-llamacpp");
+    expect(hint).toHaveTextContent("Switch the chat to another model first");
+    expect(uninstall).toHaveAttribute("aria-describedby", hint.id);
+    // Pressing it asks nothing and removes nothing: the menu's Use as fallback comes first.
+    fireEvent.click(uninstall);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(deletes).toEqual([]);
     expect(screen.getByTestId("local-model-action-llamacpp-disable")).toBeInTheDocument();
+  });
+
+  it("offers Gemma's Uninstall with no hint once it is only the fallback", async () => {
+    stubFetch({ llmDefault: false });
+    renderPanel();
+    await screen.findByTestId("local-model-llamacpp");
+    expect(screen.getByTestId("local-model-action-llamacpp-uninstall")).toHaveAttribute("aria-disabled", "false");
+    expect(screen.queryByTestId("local-model-blocked-llamacpp")).not.toBeInTheDocument();
   });
 
   it("cancels an uninstall without touching the box, and warns on Gemma that the next update puts it back", async () => {
@@ -935,4 +973,62 @@ describe("LocalAiPanel", () => {
     expect(await screen.findByTestId("local-model-action-llamacpp-primary")).toBeInTheDocument();
   });
 
+});
+
+describe("LocalAiPanel: an Install pressed while another runs (TASK-2128)", () => {
+  it("is accepted: the row says it is queued behind the other with Cancel, then shows its own progress", async () => {
+    const absent = MODELS.map((m) => (m.id === "whisper" ? { ...m, installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed." } : m));
+    const ndjson = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
+    let release: () => void = () => {};
+    stubFetch({
+      models: absent,
+      post: (url) => {
+        if (url !== "/setup-api/whisper") return undefined;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(ndjson({
+              taskId: "w1",
+              kind: "whisper-engine-install",
+              status: "Queued — starts after Kokoro",
+              queued: true,
+              behind: { kind: "voice-kokoro-install", label: "Kokoro" },
+            }));
+            release = () => {
+              controller.enqueue(ndjson({ status: "Installing speech on this box (faster-whisper)…", queued: false }));
+              controller.enqueue(ndjson({ success: true, status: "Speech on this box is installed.", taskId: "w1" }));
+              controller.close();
+            };
+          },
+        }), { status: 200, headers: { "content-type": "application/x-ndjson" } });
+      },
+    });
+    // The task record the row's inline view reads while the install waits.
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString().startsWith("/setup-api/background-jobs/tasks?id=w1")) {
+        return new Response(JSON.stringify({ task: {
+          id: "w1", kind: "whisper-engine-install", title: "Installing speech (Whisper)", state: "queued",
+          status: "Queued — starts after Kokoro", steps: [{ id: "install", label: "Build faster-whisper", state: "pending", weight: 9 }],
+          percent: 0, etaSeconds: null, completed: null, total: null, cancellable: false, cancelRequested: false,
+          log: ["Queued — starts after Kokoro"], logCount: 1,
+          queuedBehind: { id: "k1", kind: "voice-kokoro-install", title: "Installing the voice (Kokoro)", label: "Kokoro" },
+        } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return answer(input, init);
+    });
+
+    renderPanel();
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-install"));
+    await waitFor(() => expect(screen.getByTestId("local-model-progress-whisper")).toHaveTextContent("Queued — starts after Kokoro"));
+    // No refusal, no red banner — and the row's own Cancel for the queued install.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("local-model-task-whisper-cancel"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/background-jobs/tasks", body: { id: "w1", action: "cancel" } }));
+
+    // (The box started it after all — the stream says what really happened.)
+    release();
+    await waitFor(() => expect(screen.queryByTestId("local-model-progress-whisper")).not.toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });

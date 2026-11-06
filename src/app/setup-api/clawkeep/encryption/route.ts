@@ -6,7 +6,7 @@ import {
   isEncryptionConfigured,
   setPassphrase,
 } from "@/lib/clawkeep";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
   // Owner-only, on the person's own page: the middleware admits the MCP bearer
   // to every /setup-api route, and no MCP tool exists for this — the same gate
   // restore, unpair and the snapshot mutations carry (security scan #20).
-  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+  if (!(await hasPersonSession(request)) || !isSameOriginRequest(request)) {
     return NextResponse.json(
       {
         error: "Changing the backup passphrase needs a signed-in browser session on this ClawBox's own pages.",
@@ -107,7 +107,7 @@ export async function DELETE(request: NextRequest) {
   // Owner-only, on the person's own page: the middleware admits the MCP bearer
   // to every /setup-api route, and no MCP tool exists for this — the same gate
   // restore, unpair and the snapshot mutations carry (security scan #20).
-  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+  if (!(await hasPersonSession(request)) || !isSameOriginRequest(request)) {
     return NextResponse.json(
       {
         error: "Clearing the backup passphrase needs a signed-in browser session on this ClawBox's own pages — without it the next backup is plaintext and restorable by anyone who can read the account's storage.",

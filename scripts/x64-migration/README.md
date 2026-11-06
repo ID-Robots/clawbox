@@ -9,19 +9,28 @@ package manager.
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
 python3 scripts/x64-migration/build-package.py \
+  --node-dir "$(dirname "$(readlink -f "$(command -v node)")")" \
   --staging /tmp/clawbox-x64-integration-stage \
-  --output /tmp/clawbox-x64-integration_1.0.4_amd64.deb
-dpkg-deb --info /tmp/clawbox-x64-integration_1.0.4_amd64.deb
-dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.4_amd64.deb
-sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.4_amd64.deb
+  --output /tmp/clawbox-x64-integration_1.0.6_amd64.deb
+dpkg-deb --info /tmp/clawbox-x64-integration_1.0.6_amd64.deb
+dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.6_amd64.deb
+sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.6_amd64.deb
 ```
 
 By default the package is for the account that runs the builder (under `sudo`,
-the one that ran `sudo`): project `~/clawbox`, interpreter `/usr/bin/node`, and
-package prefix `~/.nvm/versions/node/v24.0.0`. Override the builder arguments
-for another desktop. These non-secret paths live in root-owned
+the one that ran `sudo`): project `~/clawbox`, interpreter the `node` on the
+builder's PATH (else `/usr/bin`), and package prefix
+`~/.nvm/versions/node/v24.0.0`. Override the builder arguments for another
+desktop. These non-secret paths live in root-owned
 `/etc/clawbox/x64-integration.env`. The CLI wrapper checks that it runs as the
 configured desktop owner before loading the owner-writable OpenClaw package.
+`--node-dir` is the Node every core command and the staged core's own install
+and `--version` gate run on, so it has to satisfy the pinned core's
+`engines.node` (`>=24.22.1 <25 || >=26.12.1` since 2026.10.6). The builder
+refuses a `--node-dir` whose `node --version` the pinned core would refuse, and
+the core step checks the same table before npm stages anything — a package
+once rebuilt without the flag named the distro's Node 22, and the only word of
+it the owner got was npm's own refusal, inside the root unit, naming no repair.
 
 The package installs a system `clawbox-gateway.service` bridge to the existing
 user `openclaw-gateway.service`. Initial activation uses **start**, preserving
@@ -55,6 +64,14 @@ happens before core maintenance; a failed dependency or coding install stops
 the update before the gateway is cycled. No root package replacement is needed,
 so additional repairs in an installed desktop adapter remain intact.
 
+**1.0.6** gives the bridge a 360 s stop timeout: its ExecStop waits for
+OpenClaw's own drain, whose user unit stops within 330 s, and at 120 s the
+bridge recorded a timeout failure over every restart that met a draining
+gateway. The dashboard waits for such a restart on the unit whatever the
+installed package. The installed adapter is not replaced by a dashboard update:
+a desktop receives this only by building and installing the package again (the
+commands at the top of this file).
+
 For new package installations, **1.0.4** additionally delivers the same harness
 from bootstrap and post-update root steps, dropping to the desktop owner.
 The installer preserves an existing Claude Code installation and installs the
@@ -87,11 +104,57 @@ bash scripts/x64-migration/install-coding-harness.sh scripts/claude-ds "$PWD"
 The Coding app checks readiness on its next status request. A running agent's
 MCP server discovers newly installed tools on its next restart.
 
-The already-installed OpenClaw version is validated without running migrations.
-The owner's idempotent backup compatibility patch is reapplied as that owner.
-A changed core pin is deliberately refused before package/database modification:
-a new core version requires a reviewed state snapshot and rollback workflow.
-This package does not promise safe downgrades of a migrated SQLite schema.
+An OpenClaw core already at the pin is validated without running migrations.
+The owner's compatibility patches under `~/bin` are reapplied as that owner; one
+pinned to another core version answers "Review required" and is reported on a
+`CLAWBOX-WARN[core-patch-skipped]` line rather than failing the step.
+
+**A changed core pin replaces the core with a recovery point** (package 1.0.5;
+earlier packages refused it). Inside the maintenance guard, with the gateway
+stopped, the step stages the pinned core in a prefix of its own and gates it on
+its own `--version`; then writes the recovery point under
+`~/backups/openclaw-core-update/<UTC stamp>-<from>-to-<to>/`: `archive/`, a
+verified archive the INSTALLED core writes with
+`openclaw backup create --verify --no-include-workspace` (config, credentials,
+the state database, every agent database), and `state/`, a plain copy of the
+exact pre-update `openclaw.json`, `state/openclaw.sqlite` and every
+`agents/<id>/agent/openclaw-agent.sqlite` with their `-wal`/`-shm` — one
+generation, listed in `snapshot.txt` (each of those database files that did not
+exist is listed as `absent:<path>`), with `recovery.txt` saying how to use it.
+Only then are the trees swapped (two renames, the previous core retained at
+`<prefix>/lib/node_modules/.openclaw-previous` until the next replacement) and
+`openclaw doctor --fix --non-interactive` run on the new core. The archiver
+refuses, while writing, every symbolic link whose target is outside its
+declared assets (an absolute target whose real path is outside or does not
+exist, a relative one that lands outside) and has no exclusion, so before the
+archive the step finds those links by that rule over the roots the archiver's
+own dry run declares, journals them in `set-aside-links.txt`, unlinks them for
+the archive and recreates them afterwards, pass or fail (`.restored.txt` once
+they are back); links a cut-short run left set aside are put back at the start
+of the next core step, and a point still holding some is never pruned. A migration that
+fails, or reports a blocker (a lost maintenance lease, changed inputs, a legacy
+store still to migrate), puts the previous core and the `state/` copy back
+before the step returns — and removes what the new core created: a database
+the snapshot recorded absent, a `-wal`/`-shm` beside a restored one, the
+database of an agent that had none — so the gateway the guard restarts is the
+one the desktop had. The newest three recovery points are kept, after a
+rollback as after a success.
+
+From just before the swap until the migration is confirmed or rolled back,
+`<prefix>/.openclaw-migration-pending` names the recovery point, both
+versions and the phase. A step cut short in between (a reboot, a power loss,
+the unit's `TimeoutStartSec`) leaves it, and the next core step settles it
+before comparing versions: with the new core in place it runs the migration
+again and rolls back to the recorded point if the core refuses; with the
+previous core still in place nothing was migrated, so the mark goes and the
+update proceeds; a rollback already begun is finished, and the following
+Retry replaces the core afresh. A mark that names no recovery point under
+`~/backups/openclaw-core-update/` stops the step untouched. The archive excludes
+workspaces (tens of gigabytes on a long-lived desktop) and the `state/`
+copy covers the default layout; an agent database at a configured path outside
+it is in the archive only. Package rollback alone never reverses a migration:
+to go back by hand, restore `state/` and the previous core together, as
+`recovery.txt` says.
 
 The package also installs timezone support, the existing owner-password update
 capability with root-side account validation, a tunnel wrapper that ignores

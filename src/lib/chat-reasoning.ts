@@ -47,7 +47,7 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
 // `isClawboxAiProvider`) defaulted to `off` so simple prompts stayed fast; the
 // owner's ruling of 2026-09-15 is Medium, so a fresh ClawBox AI session thinks
 // before it answers and the owner turns it DOWN rather than up. Both legacy
-// ClawBox AI model ids serve Flash 4.1 and share the same default.
+// ClawBox AI model ids serve DeepSeek V4 Flash and share the same default.
 export interface ProviderReasoningConfig {
   levels: readonly ThinkingLevel[];
   default: ThinkingLevel;
@@ -71,12 +71,18 @@ export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   // same default: a fresh ClawBox AI session runs at Medium.
   clawai: { levels: UNIFORM_LEVELS, default: "medium" },
   openrouter: { levels: UNIFORM_LEVELS, default: "medium" },
-  // Local Gemma (llama.cpp) exposes no reasoning-effort control — the gateway
-  // rejects any thinkingLevel other than `off` ("thinkingLevel … is not
-  // supported for llamacpp/gemma… (use off)"). Declaring it off-only hides the
-  // picker (the header only renders it when there's more than one level) and
-  // keeps the wire value at `off`, which the gateway accepts.
-  llamacpp: { levels: ["off"], default: "off" },
+  // The bundled plugin's manifest marks every current Grok chat model
+  // `reasoning: true` except the explicit `-non-reasoning` variant; the
+  // gateway's own per-model `thinkingLevels` (chat/model's
+  // readGatewayThinkingLevels) override this ladder wherever it states one.
+  xai: { levels: UNIFORM_LEVELS, default: "medium" },
+  // Local Gemma (llama.cpp) thinks per request, and only in two states: its row
+  // declares binary reasoning (LLAMACPP_REASONING_COMPAT in src/lib/llamacpp.ts)
+  // and every enabled level clamps to `high`, so the picker offers Off and High
+  // — High meaning "think first", about twice as slow — and starts at Off. A box
+  // whose row predates that still publishes `off` alone from the gateway, and
+  // the intersection below keeps the picker hidden there.
+  llamacpp: { levels: ["off", "high"], default: "off" },
 };
 
 export const FALLBACK_REASONING_CONFIG: ProviderReasoningConfig = {

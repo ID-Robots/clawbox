@@ -3,6 +3,7 @@ import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { pushPendingAction } from "@/lib/pending-actions";
+import { appProxyPath, isProxyablePort } from "@/lib/clawbox-manifest";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { generateClawaiImage } from "@/lib/harness/clawai-images";
 
@@ -111,6 +112,9 @@ export function safeAppId(appId: unknown, maxChars: number = MAX_APP_ID_CHARS): 
 
 /** The 8-byte PNG signature; the icon route serves `image/png` and nothing else. */
 const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
+
+/** The largest icon fetched from a store: a desktop tile, never a body of any size. */
+export const ICON_MAX_BYTES = 1024 * 1024;
 
 /** The desktop's own default tile colour (see webapp-registry.ts). */
 const DEFAULT_COLOR = "#f97316";
@@ -666,7 +670,7 @@ async function nudgeDesktop(appId: string, hints: WebappIconHints): Promise<void
       appId,
       name: oneLine(hints.name, MAX_NAME_CHARS) || appId,
       color,
-      url: `/setup-api/webapps?app=${appId}`,
+      url: await desktopUrlOf(appId),
       iconUrl: `/setup-api/apps/icon/${appId}?v=${Date.now()}`,
     });
   } catch {
@@ -674,8 +678,59 @@ async function nudgeDesktop(appId: string, hints: WebappIconHints): Promise<void
   }
 }
 
+/**
+ * Where the desktop opens the app the nudge is about. A server app registered
+ * under `/apps/<id>/` (its meta.json carries the port — src/lib/app-proxy.ts)
+ * opens THERE. Its `/setup-api/webapps` page is only a stub that moves the
+ * frame on with a script, and a navigation a sandboxed frame makes itself
+ * carries no cookie: the owner, signed in, met the box's login screen inside
+ * the app's window the moment its icon arrived and this nudge replaced the
+ * window's address. Anything else opens its page, as before.
+ */
+async function desktopUrlOf(appId: string): Promise<string> {
+  try {
+    const meta = JSON.parse(await fsp.readFile(path.join(WEBAPPS_DIR, appId, "meta.json"), "utf-8")) as { port?: unknown } | null;
+    if (isProxyablePort(meta?.port)) return appProxyPath(appId);
+  } catch {
+    // No registration, or one that cannot be read: the app's page.
+  }
+  return `/setup-api/webapps?app=${appId}`;
+}
+
 export function isPng(bytes: Buffer): boolean {
   return bytes.length >= PNG_SIGNATURE.length && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+}
+
+/**
+ * The body of a fetched icon, or null when it is larger than `max`.
+ *
+ * Counted as it arrives rather than buffered whole and measured after: the far
+ * side decides how long a body is, and `arrayBuffer()` would hold all of it in
+ * memory before any cap could refuse it. A declared Content-Length over the
+ * cap is refused before a byte is read. A body that breaks off throws, so the
+ * caller's own failure path runs, as it did for `arrayBuffer()`.
+ */
+export async function readIconBytes(res: Response, max: number = ICON_MAX_BYTES): Promise<Buffer<ArrayBuffer> | null> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = res.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
 }
 
 /**

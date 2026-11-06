@@ -15,8 +15,11 @@ the entry says so.
 Entries are grouped by release, newest first.
 
 <Columns cols={2}>
-  <Card title="4.2" href="#clawbox-42" icon="sparkles">
-    Current release candidate: several users on one box, monitor mode, kiosk mode and GitHub backup.
+  <Card title="4.3" href="#clawbox-43" icon="sparkles">
+    Screenshots, one shared browser, public app links, xAI Grok, Prime Radiant and updates that ask before they stop your agents.
+  </Card>
+  <Card title="4.2" href="#clawbox-42" icon="users">
+    Several users on one box, monitor mode, kiosk mode and GitHub backup.
   </Card>
   <Card title="4.1" href="#clawbox-41" icon="mobile">
     A fuller chat on phones, reliable conversation restores and auto-merging pull requests.
@@ -34,11 +37,221 @@ Looking for your installed version? Open **Settings → About**. To update, open
 **Settings → System Update**.
 </Tip>
 
-## ClawBox 4.2
+## ClawBox 4.3
 
 <Note>
-**Release status:** 4.2.0 is being validated on beta devices before the stable release.
+**Release status:** 4.3.0 is being validated on beta devices before the stable release. A box on
+`main` is offered it as `v4.3.0` once it is released; see [Updating ClawBox](/support/updating).
 </Note>
+
+ClawBox 4.3 adds a Screenshot app and gives you and your assistant one shared browser. An
+app the Coding Agent built can now be shared through a public link. xAI Grok joins the AI
+providers, most model changes no longer restart the assistant, you can hold to talk, and the
+Coding Agent shows its agents at work on a live chart. Prime Radiant, a new app, writes a wiki
+from your own documents and checks it every night. After updating, the desktop shows a
+**What's new in 4.3** card. Choose **Got it** to hide it on all your browsers.
+
+### Screenshots, built in
+
+The new **Screenshot** app captures the whole screen, an area or a single window, right away
+or after a delay. Mark the picture up in its editor, then save it as PNG or JPG to the
+Screenshots folder, which the **Files** app shows. Print Screen or Ctrl+Shift+S takes the
+whole screen and Shift+Print Screen or Alt+Shift+S an area, anywhere on the desktop and with
+the app closed, and the **Screenshot** button beside the clock does the same in one click.
+The keys are left alone while you type in a text field or a Terminal.
+
+### One browser for you and your assistant
+
+The browser on the box's desktop and the browser your assistant uses are now the same
+browser, shown in **Agent Browser** (the app called Browser before 4.3). Sign in to a site
+there once and the assistant can use it, and you can watch what it does. The assistant opens
+its own tabs and leaves yours alone. The browser stays running, so closing it in Agent
+Browser no longer stops it. If your assistant had signed in to sites in its old hidden
+browser, sign in to them once in the shared one; Agent Browser's settings show where the old
+profile is kept. See [The desktop browser](/technical/filesystem#the-desktop-browser) for the
+details and for how to get a separate assistant browser back.
+
+### Share an app with a public link
+
+Right-click an app the Coding Agent built, on the desktop, and choose **Create public link**:
+**Temporary**, which stops working after the time you choose, or **Permanent**, which stays on
+until you disable it. Visitors reach only that app, never your desktop, files or other apps.
+For an app with its own server, by default they can load its data from its own `/api` but not
+change it: **The app's own data** in the dialog is **Read only** unless you choose **Read and
+write**, or **Off** to serve only the app's pages. Choose **Require a password** to give the
+link a password of its own, which you can change or remove later without changing the link. The
+link's address changes when the box restarts.
+
+### xAI Grok, and model changes without a restart
+
+On the OpenClaw edition, Settings and the setup wizard list **xAI Grok**: paste an API key,
+or choose **Sign in with Grok** and approve the sign-in with your SuperGrok or X Premium
+subscription on any device. Changing the model, installing or switching Local AI, and the
+local-only switch now take effect without restarting the assistant wherever the change can be
+applied live, so the chat no longer goes quiet for a minute each time.
+
+### Hold to talk
+
+Hold the chat's microphone button while you speak and let go to send; a quick click still
+starts and stops a recording. Holding **F8** while the chat is open does the same, and Esc
+cancels. Spoken replies download several times smaller, and **Auto-play every spoken reply**
+in **Settings → Voice** plays the reply to a question you typed aloud as well. See
+[Chat](/guides/chat).
+
+### The Coding Agent, on a live chart
+
+The Coding Agent opens on a chart of its agents at work: the planner, each worker, each
+reviewer and the lead. Choose one to see what it is doing, open its run page, message it or
+stop it. A message to a working run reaches it right after the step under way. Runs and
+teams beyond the box's limit wait in line instead of being refused. When a pull request's
+checks fail, the run's page shows what failed and **Fix CI** starts a run that fixes it.
+Each project keeps run notes of what earlier runs learned, which you can view and edit on the
+project page.
+
+Runs use fewer tokens by default. Under **Advanced**, the Coding Agent's settings have a new
+**Token use** group: **Run instructions** (**Short instructions** by default), **Helper
+agents** (**Only when it pays off**) and **Browser and media tools** (**Only for visual
+work**). Unless you changed them, a new run takes at most 200 steps instead of 400 and gets one
+attempt at what it had to deliver instead of three. A box with no effort saved starts runs at
+**Very high** instead of **Ultracode**; a box whose Coding Agent setup was finished before 4.3
+keeps the Ultracode that setup saved until you change it. A run whose task and folder do not
+look visual no longer gets the browser, picture or speech tools; set **Browser and media
+tools** to **Always** to give them to every run.
+
+### Prime Radiant, a living wiki
+
+**Prime Radiant** is a new app, on both editions, that keeps a wiki for you. Point it at your
+documents and it writes a page for each one, listing the facts it found with where each came
+from and how sure it is. Every night it tidies the wiki, looks for facts that contradict each
+other, and asks you in **Review** about anything it cannot settle alone; a page you verified
+is never rewritten without asking you first. **History** shows every change and **Undo**
+reverses one. Open it from its icon on the desktop, next to Memory Shard. Adding documents
+needs the box signed in to ClawBox AI. See [Prime Radiant](/guides/prime-radiant).
+
+### Updates that ask before they stop your agents
+
+An update stops the assistant and restarts the box's web server, which used to cut off any
+agent work in progress. Now, when coding runs or assistant tasks are working, **Update** first
+says **Agents are working right now** — how many runs are active, and that the update stops
+them mid-task — with **Cancel** to wait and **Update anyway** to go ahead. The **System
+Update** screen was redesigned around the steps it runs, with what is new in the version being
+installed beside them; on a beta box it names the build it installs. The box reboots only when
+the update brings something that needs a boot, and otherwise just restarts its services. An
+update that fails puts the box's code back to match the build it is still running, one that was
+cut short resumes from the step it was on, and an OpenClaw update that is already at the pinned
+version skips the reinstall and keeps the assistant running. The assistant can no longer start a
+system or OpenClaw update by itself: when it asks, you confirm. See
+[Updating ClawBox](/support/updating).
+
+### Sign out of a provider, and protect ClawBox's own files
+
+Every connected AI provider in **Settings → Providers** now has **Sign out of &lt;provider&gt;**,
+on OpenClaw and Hermes alike, and you can sign the box out of ClawBox AI there too. **Protect
+ClawBox files from the agent**, a new switch in **Settings → Harness** that is on by default,
+stops the assistant's own file and shell tools from deleting or overwriting ClawBox's own files
+and the local AI models.
+
+### Switching between Anthropic accounts, fixed
+
+- An account is no longer marked expired because the box could not reach Anthropic to renew
+  its sign-in, for example after the box was off. The box tries again on the next request;
+  only Anthropic itself refusing the sign-in takes an account out.
+- An account whose organization has switched off Claude subscription access for Claude Code
+  is marked **Needs re-authentication** straight away, and the chat and coding runs move to
+  the next account.
+- The account the box switches to is used right away, and a failure is counted only against
+  the account the assistant was really running on, so a switch is not undone by a failure
+  that came from the account before it.
+- Claude's new per-model weekly limits are read too: a model whose week is spent moves only the
+  runs on that model to the next account.
+- On OpenClaw, a chat whose account reached its usage limit moves to another account on its next
+  message instead of answering with the limit message.
+
+See [Multiple Anthropic Accounts](/guides/anthropic-accounts).
+
+### Smaller things
+
+- **Settings → Appearance → Remote desktop resolution** sets the remote desktop to
+  1280 × 720, 1600 × 900 or 1920 × 1080. Changing it restarts the remote desktop briefly.
+- When the cloud voice does not answer, a spoken reply gives up after about 20 seconds and a
+  line under the reply says so, instead of a silent minute.
+- A coding run started from another browser or device shows its card in the open chat within
+  about half a minute, without a reload.
+- The Store app has a **ClawBox Apps** category: **Install** puts a published app in the
+  Coding Agent's project folder and on the desktop. A Coding Agent project with a
+  `clawbox.json` gets **Publish to ClawBox Store**, which says it is coming soon until
+  publishing is open to your account.
+- In the Terminal, Ctrl+V pastes a picture into Claude Code as an attachment.
+- On a laptop, the tray shows the battery level beside the clock.
+- On the ClawBox desktop session, a **Google Chrome** icon opens your own Chrome as a window
+  on the box's screen.
+- Pressing Stop in the chat leaves a grey "Stopped." line under the reply.
+- On Hermes, documents attached in the chat reach the assistant.
+- When ClawKeep refuses a backup, it says why, with the sizes involved.
+- On your own x64 machine, a Cloudflare Tunnel download that stalls no longer holds up the
+  install.
+- OpenClaw is updated to 2026.10.9 and Hermes Agent to v0.22.5.
+- Coding runs can also run on OpenAI, through the Codex CLI: connect an API key or a ChatGPT
+  sign-in in the Coding Agent's settings. A run can tell the assistant that started it about a
+  question or a blocker while it works, and the chat that started a run hears when it ends.
+- Long Settings tasks — installs, model downloads, provider sign-ins, channel setup — run in the
+  background with a card in the desktop's corner and survive closing Settings; a waiting task or a
+  download can be cancelled.
+  A Local AI install that cannot run beside another one waits in line instead of being refused.
+- On the on-device model, a conversation that grows too long offers a new chat instead of a
+  minutes-long shortening. On OpenClaw with ClawBox AI, a long chat is shortened automatically.
+- On OpenClaw, memory search reads the assistant's memory and no longer indexes every past chat,
+  which kept its databases growing; the index is rebuilt once after the update. **Settings →
+  System → Device → Agent databases** can compact those databases, off until you turn it on.
+- **Users** moved into **Settings → System → Users**, and the owner can share the OpenClaw app
+  with all users from there (off by default).
+- On Hermes, the chat resumes the same conversation after a reload, a restart or an update,
+  documents you attach reach the assistant, and the chat shows the Hermes icon.
+- The ClawBox AI usage card calls the five-hour allowance **Short-term limit (5 hours)**, and a
+  message that failed on a spent allowance says which one and when it frees up.
+- The Telegram card no longer says the channel is active while the bot is not receiving
+  messages.
+- When one of the assistant's scheduled jobs fails, keeps being skipped or does not run when it
+  is due, the desktop tells you, and Telegram too when a bot is connected. **Settings → Harness →
+  Scheduled job alerts** lists the jobs in trouble.
+- Factory reset now also empties Projects, Music, Pictures, Videos, Public and Templates and
+  removes loose files in the home folder, keeping the folders themselves.
+- Only the owner can finish first setup, and the password step says as you type when a
+  password is too short or the two entries do not match.
+- A box that cannot read its own settings for a moment shows its plan as unknown, not Free.
+- The Projects app has been removed, together with its pinned folders and the GitHub backup in
+  Files. Your folders stay where they are and still open in Files; copies already on GitHub stay
+  there, and their daily backup stops.
+
+### Before you update to 4.3
+
+- Update from 4.2.x, 4.1.x or 4.0.x in **Settings → System Update**. On the OpenClaw edition
+  `sudo bash install.sh` over SSH works too; on the Hermes edition System Update is the only
+  route.
+- **The move to 4.3 is one-way on OpenClaw.** The update moves OpenClaw's data to the newer
+  format OpenClaw 2026.10.6 and later use, so the box cannot go back to an earlier release
+  afterwards. An update that lacks the disk space for the move stops before it changes OpenClaw
+  and says how much it needs.
+- The update moves the box to Node.js 24.22.1 or newer, the October 2026 Node.js security
+  release, on every edition.
+- Sites the assistant was signed in to in its old, separate browser need one sign-in in
+  **Agent Browser**.
+- Your data is preserved, and the edition lock is untouched.
+
+### What works differently
+
+- The assistant uses the browser on the box's desktop rather than a hidden one of its own. See
+  [The desktop browser](/technical/filesystem#the-desktop-browser) for giving it a separate
+  browser again.
+- The Coding Agent no longer merges a finished run's work into the project folder by hand; the
+  work stays on the run's branch.
+- A coding run whose task and folder do not look visual no longer gets the browser, picture or
+  speech tools, even with **Let runs draw pictures** or **Let runs record speech** on. Set
+  **Browser and media tools** to **Always** to give them to every run.
+
+## ClawBox 4.2
+
+**Released October 5, 2026**
 
 ClawBox 4.2 lets several people share one box, each with a user of their own. It spreads
 the desktop over several monitors, adds a drop-down terminal and a proper kiosk mode.
@@ -303,9 +516,9 @@ See [Switching editions](/editions/switching).
 
 ### ClawBox AI runs on DeepSeek V4
 
-ClawBox AI has two models and your plan picks one. **Free/Pro Tier** is DeepSeek V4
-Flash, the default and the faster of the two. **Max Tier** is the 1.6T frontier model and
-needs the Max plan. Both take a one-million-token context window and both are text in,
+ClawBox AI runs DeepSeek V4 Flash on every plan. **Free/Pro Tier** is the default;
+**Max Tier** is the same DeepSeek V4 Flash with the Max plan's limits and needs the Max
+plan. Both take a one-million-token context window and both are text in,
 text out. You do not have to choose a model on ClawBox AI: the chat names the provider
 and the plan decides the rest. See [ClawBox AI](/guides/clawbox-ai).
 

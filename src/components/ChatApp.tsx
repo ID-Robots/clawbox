@@ -1,13 +1,24 @@
 'use client'
 
+import { useClawaiUsageSnapshot } from "@/hooks/useClawaiUsageSnapshot"
+import type { ChatFailureWords } from "@/lib/chat-error-text"
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
-import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
+import { chatFailureNote, describeChatFailure, describeFallbackReply, EMPTY_RUN_TEXT } from '@/lib/chat-error-text'
+import {
+  SESSION_EXPIRED_CHAT_MESSAGE,
+  SESSION_EXPIRED_EVENT,
+  confirmSessionStillValid,
+  isSessionExpiredClose,
+  isSessionExpiredResponse,
+} from '@/lib/session-expiry'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
+import { modelAvailabilityText, modelFallbackNotice, ModelFallbackWatch, openProvidersSettings, reportModelFallback, switchChatToProvider, type ModelFallbackSignal } from '@/lib/model-fallback-chat'
+import ChatNoticeActions from '@/components/ChatNoticeActions'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -27,6 +38,9 @@ import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { CodingChatCards, NewAppCardSlot, NewAppToggleButton, useCodingChatCards, useNewAppCard } from '@/components/CodingChatCards'
+import { CHAT_MESSAGE_EVENT, type ChatMessageDetail } from '@/lib/ui-events'
 import { useChatFullscreen, useChatTextScale, usePhoneViewport } from '@/lib/use-chat-phone-layout'
 import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
@@ -59,12 +73,14 @@ import {
   cancelTranscriptReconcile,
   claimHistoryRead,
   isAckOnlyReply,
+  isEmptyReply,
   mergeRestoredTranscript,
   pushedSpokenReply,
   readLiveReply,
   scheduleTranscriptReconcile,
   sessionMessagePush,
   withAssistantReply,
+  withEmptyRunNote,
   withPushedSpokenReply,
   type HistoryReadOrder,
   type ReconcileTimer,
@@ -95,7 +111,7 @@ import {
   type TurnEvent,
   type TurnResult,
 } from '@/lib/harness/transport'
-import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
+import { defaultTranscriptKeyFor } from '@/lib/chat-scope'
 // Staging, its refusals and its thumbnails, from the module both chats share.
 // The adapter names an attachment by its absolute path on the box, so this
 // surface stages through the same edition-neutral route the mascot chat uses
@@ -106,7 +122,7 @@ import {
   attachmentAcceptAttribute,
   classifyStagingFailure,
   createPreviewUrl,
-  partitionAttachments,
+  partitionAttachments, refusalReason,
   revokePreviews,
   type ChatAttachment,
   type StagingFailure,
@@ -138,6 +154,12 @@ import { useTr } from '@/lib/i18n-floor'
 
 
 interface ChatAppProps {
+  /**
+   * The ClawBox user this chat belongs to when it is not the owner's: their
+   * main transcript on a harness with no handshake (src/lib/chat-scope.ts).
+   * The gateway's hello names theirs itself, through the user-chat relay.
+   */
+  chatUser?: string | null
   onThinkingChange?: (thinking: boolean) => void
   hideHeader?: boolean
   /**
@@ -153,6 +175,9 @@ interface ChatAppProps {
 const HEADER_REGION_ID = 'chatapp-header-region'
 const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
 const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+// The pause before a dropped live chat opens a new socket — ChatPopup's
+// RETRY_DELAY: long enough that a gateway bouncing under it is not hammered.
+const DROP_RECONNECT_DELAY_MS = 3000
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -176,6 +201,9 @@ interface ChatAppMessageRowProps {
   msg: ChatMessage
   t: Translate
   onOpenEmail: (uid: number) => void
+  /** A notice's "Settings → Providers" and one-click switch (ChatNoticeActions). Stable. */
+  onOpenProviders?: () => void
+  onSwitchTo?: (target: { model: string; label: string; provider: string | null }) => void
 }
 
 // The message by VALUE: a history read rebuilds every message object from the
@@ -185,10 +213,12 @@ interface ChatAppMessageRowProps {
 function sameChatAppRowProps(prev: ChatAppMessageRowProps, next: ChatAppMessageRowProps): boolean {
   return prev.t === next.t
     && prev.onOpenEmail === next.onOpenEmail
+    && prev.onOpenProviders === next.onOpenProviders
+    && prev.onSwitchTo === next.onSwitchTo
     && samePlainData(prev.msg, next.msg)
 }
 
-const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail }: ChatAppMessageRowProps) {
+const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail, onOpenProviders, onSwitchTo }: ChatAppMessageRowProps) {
   // `MEDIA:` is lifted on the way INTO state — by the shared history
   // projection and by the live `final` handler — so what is stored
   // already carries its pictures and clips and the bubble just draws
@@ -196,7 +226,13 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
   // fetched when the owner opens it and must not be built from a turn
   // that is still streaming.
   const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
-  const bodyText = emailRefs ? emailRefs.text : msg.text
+  // Where the owner pressed Stop: neutral, and worded here so a marker replayed
+  // from the box's transcript reads in the chat's current language.
+  const isStopped = msg.role === 'system' && msg.variant === 'stopped'
+  // A fact about the owner's account (no API quota right now), not a fault:
+  // calm blue, never the red of an error.
+  const isNotice = msg.role === 'system' && msg.variant === 'notice'
+  const bodyText = isStopped ? t("chat.stopped") : emailRefs ? emailRefs.text : msg.text
   const images = msg.images ?? []
   const audio = msg.audio ?? []
   const files = msg.files ?? []
@@ -211,10 +247,14 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
         borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
         background: msg.role === 'user'
           ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
-          : msg.role === 'system'
+          : isStopped
+            ? 'rgba(255,255,255,0.04)'
+            : isNotice
+            ? 'rgba(59,130,246,0.12)'
+            : msg.role === 'system'
             ? 'rgba(239,68,68,0.15)'
             : 'rgba(255,255,255,0.06)',
-        color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
+        color: msg.role === 'user' ? '#fff' : isStopped ? 'rgba(255,255,255,0.55)' : isNotice ? '#bfdbfe' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
         fontSize: 13.5,
         lineHeight: 1.45,
         wordBreak: 'break-word',
@@ -238,6 +278,7 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
           </div>
         )}
         {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
+        {msg.role === 'system' && msg.actions && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {files.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
             {files.map(src => <ChatFileCard key={src} src={src} />)}
@@ -315,7 +356,7 @@ const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }:
   )
 })
 
-function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
+function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The phone layout (TASK-1157), the same view settings the mascot chat uses
@@ -346,8 +387,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const headerHidden = fullscreenChat && !headerPeek
   // The words a failed turn is said in — a ref, for the handlers that
   // outlive the render that created them.
-  const failureWordsRef = useRef({ t, locale })
-  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
+  const clawaiUsageSnapshot = useClawaiUsageSnapshot()
+  const failureWordsRef = useRef<ChatFailureWords>({ t, locale })
+  useEffect(() => {
+    failureWordsRef.current = { t, locale, clawaiUsage: clawaiUsageSnapshot.usage, timeZone: clawaiUsageSnapshot.timeZone }
+  }, [t, locale, clawaiUsageSnapshot])
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Welcome-to-portal banner: show in the chat empty state when the user
   // hasn't signed in to a ClawBox account yet. Dismissible, persisted in
@@ -405,6 +449,19 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   }, [])
   const [sending, setSending] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
+  // The coding cards — one per run of its own, one per team, live then
+  // settled — and the Create card over the composer, the SAME host the mascot
+  // chat renders (src/components/CodingChatCards.tsx). This page is the
+  // owner's chat on a phone and behind "Open in new tab"; it used to show
+  // none of them. Only for the owner's own transcript: another user's chat
+  // (`chatUser`) has no coding agent to watch, and the team route is the
+  // owner's.
+  const codingCards = useCodingChatCards(chatUser === null)
+  const nudgeCodingCards = codingCards.nudge
+  // This page draws one app and no desktop, so "open this and get out of the
+  // way" is just "open this": the desktop around /app/<id> is a plain link.
+  const openFromChat = useCallback((open: () => void) => { open() }, [])
+  const newApp = useNewAppCard(openFromChat)
   const [errorMsg, setErrorMsg] = useState('')
   /**
    * The conversation being brought back, or one that could not be (TASK-1158).
@@ -438,6 +495,27 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
+  /**
+   * A push-driven read that arrived while this page was in a background tab,
+   * and that ONE read will therefore be owed when it comes back.
+   *
+   * A hidden tab is pushed exactly as much as a visible one, and each append
+   * used to cost a full `chat.history` — the same 50 messages, and the same
+   * synchronous scan behind them — to repaint a page nobody was looking at. So
+   * the read waits: one flag, not one per push, paid off by the catch-up effect
+   * below. ChatPopup.tsx carries the long form of the argument; this page has no
+   * open/closed state of its own, so the tab being visible IS "someone is
+   * looking".
+   */
+  const historyCatchUpOwedRef = useRef(false)
+  /**
+   * Whether a push-driven history read has to wait: this page is a background
+   * tab, so anything it reads is for nobody.
+   */
+  const historyReadMustWait = useCallback((): boolean =>
+    // Nothing here runs on the server, but the guard keeps a shallow render
+    // from throwing rather than silently reading the transcript.
+    typeof document !== 'undefined' && document.visibilityState !== 'visible', [])
   // The coalesced re-read a `session.message` push schedules: one read per
   // burst of appends, the same 400 ms the mascot chat waits (TASK-1364,
   // TASK-1372). Cleared on unmount.
@@ -455,6 +533,20 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // as it was, on the next account — only when the failed run IS that turn,
   // and only for words, never for attachments.
   const turnsRef = useRef(new TurnLedger())
+  // Runs stuck on a model this account cannot run, reported to the box once
+  // each (lib/model-fallback-chat.ts) — and the "Stopped." a box-made stop owes.
+  const fallbackWatchRef = useRef(new ModelFallbackWatch())
+  // A calm notice's one-click move to another provider the box has set up:
+  // this page has no header picker, so the picker's request is sent here, and
+  // the line under it says whether it landed. Stable for the memoised rows.
+  const switchFromNotice = useCallback((target: { model: string; label: string; provider: string | null }) => {
+    void switchChatToProvider(target).then((result) => {
+      const words = failureWordsRef.current
+      setMessages(prev => [...prev, result.ok
+        ? { role: 'system', variant: 'notice', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchedTo', { provider: target.label }) }
+        : { role: 'system', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchFailed', { provider: target.label }) }])
+    })
+  }, [])
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -467,6 +559,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // The conversation read a restore is running, so a newer socket or the page
   // going away can call it off.
   const restoreAbortRef = useRef<AbortController | null>(null)
+  // Set once the box has said this page's session is over: nothing reconnects
+  // while the page leaves for /login (src/lib/session-expiry.ts).
+  const signedOutRef = useRef(false)
+  // …and drawn: a signed-out chat offers no Retry or Reconnect, which could only do nothing.
+  const [signedOut, setSignedOut] = useState(false)
   // Has this component gone? The starting-retry timer is the one deferred piece
   // of work here that OPENS A SOCKET rather than touching state, so a pending
   // one on an unmounted component is up to two minutes of sockets and ws-config
@@ -612,8 +709,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const hasLiveConnectionRef = useRef(true)
   useEffect(() => { hasLiveConnectionRef.current = caps.hasLiveConnection }, [caps])
   // The agent's "Task progress" card for this session — see ChatPopup, which
-  // reads it the same way (TASK-896).
-  const { card: progressCard, onChanged: onProgressCardChanged } = useGatewayProgressCard({
+  // reads it the same way (TASK-896), with the same trash and refresh (TASK-2147).
+  const {
+    card: progressCard,
+    onChanged: onProgressCardChanged,
+    clear: clearProgressCard,
+    refresh: refreshProgressCard,
+    refreshState: progressCardRefreshState,
+  } = useGatewayProgressCard({
     request: wsRequest,
     sessionKey: boundSessionKey,
     enabled: caps.hasLiveConnection && status === 'connected',
@@ -689,7 +792,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       // It used to be this single read with its failure sent to the console: a
       // conversation the gateway was still rebuilding came back empty, looking
       // exactly like a new one, with nothing to press.
-      const read = () => transport.loadHistory()
+      const read = () => transport.loadHistory({ failureWords: failureWordsRef.current })
       const { messages: chatMsgs } = restoreCtl
         ? await restoreWithRetry(read, {
           signal: restoreCtl.signal,
@@ -735,7 +838,53 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // and read the adapter through the ref above.
   }, [])
 
+  // The session is over: end the socket and the timer that would open a new
+  // one. Same reasons and same three triggers as ChatPopup's.
+  const stopForSignedOut = useCallback(() => {
+    signedOutRef.current = true
+    setSignedOut(true)
+    for (const timer of [startingRetryTimerRef, handshakeTimerRef]) {
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = null
+    }
+    restoreAbortRef.current?.abort()
+    const socket = wsRef.current
+    wsRef.current = null
+    if (socket) {
+      socket.onclose = null
+      socket.onmessage = null
+      try { socket.close() } catch { /* already closing */ }
+    }
+    failPending('Signed out')
+    setStatus('error')
+    setErrorMsg(SESSION_EXPIRED_CHAT_MESSAGE)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, stopForSignedOut)
+  }, [stopForSignedOut])
+
+  // The live socket went away and the page may still be signed in — the box
+  // closes a socket when the cookie it was OPENED on ends, which a password
+  // changed in this browser does while handing the page a new one. Ask: a
+  // lapsed session signs the page out (SESSION_EXPIRED_EVENT stops this chat),
+  // a live one gets a new socket after a pause. On the starting-retry timer,
+  // which unmount and sign-out already cancel.
+  const reconnectIfStillSignedIn = useCallback(() => {
+    void confirmSessionStillValid().then((live) => {
+      if (!live || signedOutRef.current || unmountedRef.current) return
+      if (startingRetryTimerRef.current) clearTimeout(startingRetryTimerRef.current)
+      startingRetryTimerRef.current = setTimeout(() => {
+        startingRetryTimerRef.current = null
+        if (!signedOutRef.current && !unmountedRef.current) void connectRef.current()
+      }, DROP_RECONNECT_DELAY_MS)
+    })
+  }, [])
+
   const connect = useCallback(async () => {
+    // A signed-out page opens nothing: the next stop is /login.
+    if (signedOutRef.current) return
     // A box with no socket has nothing to open. The adapter reports such a
     // harness connected by itself; this guard is for the Retry button and the
     // mount effect, which reach `connect` directly and must never open a gateway
@@ -781,6 +930,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       // on every reconnect — which the gateway refuses for ever. Newly reachable
       // now that the adapter effect can ask for a connect as well as mount.
       const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store' })
+      // The session gate refused it. Not on this answer alone — it may predate
+      // a sign-in in another tab — so ask about the current session: a lapsed
+      // one signs the page out (SESSION_EXPIRED_EVENT stops this chat), a live
+      // one is an ordinary failure below, with its Reconnect.
+      if (isSessionExpiredResponse(res)) {
+        if (!(await confirmSessionStillValid())) return
+        throw new Error('ws-config was refused for a session the box still accepts')
+      }
       const config = await res.json()
       token = config.token
       wsUrl = config.wsUrl
@@ -901,6 +1058,23 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       }))
     }
 
+    // A turn stuck on a model this account cannot run — a 429 stating a limit
+    // of zero, retried for a minute by the core, or a model the provider no
+    // longer offers: the box confirms it, moves the chat to the next newest
+    // model and sends the turn again; the chat says what happened, once.
+    const reportModelFallbackFor = (signal: ModelFallbackSignal) => {
+      const forKey = sessionKeyRef.current
+      fallbackWatchRef.current.begin(signal.runId)
+      void reportModelFallback({ ...signal, sessionKey: forKey || null, message: turnsRef.current.resendable(signal.runId) })
+        .then((answer) => {
+          const owesStop = fallbackWatchRef.current.settle(signal.runId, answer)
+          if (sessionKeyRef.current !== forKey) return
+          const notice = modelFallbackNotice(answer, failureWordsRef.current)
+          if (notice) setMessages(prev => [...prev, { role: 'system', timestamp: Date.now(), ...notice }])
+          else if (owesStop) setMessages(prev => [...prev, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
+        })
+    }
+
     const onMessage = (event: MessageEvent) => {
       let data: Record<string, unknown>
       try { data = JSON.parse(String(event.data)) } catch { return }
@@ -943,8 +1117,13 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
           if (payload.stream === 'tool') {
-            applyToolEvent(payload.data as Record<string, unknown> | undefined)
+            const toolData = payload.data as Record<string, unknown> | undefined
+            applyToolEvent(toolData)
+            // A coding tool went past: the cards re-ask the box at once.
+            if (typeof toolData?.name === 'string' && isCodingAgentTool(toolData.name)) nudgeCodingCards()
           }
+          const stuck = fallbackWatchRef.current.fromAgentFrame(payload, runFailureRef.current.peek(payload.runId))
+          if (stuck) reportModelFallbackFor(stuck)
           return
         }
 
@@ -961,7 +1140,24 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           // `chat.history` is shown from the push itself.
           const spoken = pushedSpokenReply(push.message)
           if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
-          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void loadHistory() })
+          // A push only means the stored transcript moved: reading it for a
+          // background tab is pure cost, so the append is owed ONCE and paid
+          // when the tab comes forward (see `historyCatchUpOwedRef`).
+          if (historyReadMustWait()) {
+            historyCatchUpOwedRef.current = true
+            return
+          }
+          // Coalesce the burst an agent turn produces into one read — and
+          // re-check the gate when it fires, because the tab can go hidden
+          // inside the delay: the read would then be for an empty room, so it
+          // joins the one owed read instead.
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => {
+            if (historyReadMustWait()) {
+              historyCatchUpOwedRef.current = true
+              return
+            }
+            void loadHistory()
+          })
           return
         }
 
@@ -973,6 +1169,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
 
           const state = payload.state as string
           const msg = payload.message
+          // The gateway reports a failed run TWICE (lib/chat-run-failure.ts):
+          // the ledger settles it once, and says when this frame is the repeat.
+          const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
 
           if (state === 'delta') {
             const text = extractText(msg)
@@ -999,6 +1198,13 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             // below. The same shared check ChatPopup uses, so the two
             // components can't drift on which finals count as ack-only.
             const isAckOnly = isAckOnlyReply({ text, images, audio, files })
+            // A run that ended with nothing at all — see the re-read below.
+            const endedEmpty = isEmptyReply({ text, images, audio, files })
+            // This chat's own turn only: a run something else started in the
+            // conversation (a scheduled turn, a channel) ending empty is not a
+            // question this page asked.
+            const endedRun = runIdRef.current && (payload.runId === undefined || payload.runId === runIdRef.current) ? runIdRef.current : null
+            const endedKey = sessionKeyRef.current
             // Same suppression as the history path, so the bubble cannot
             // appear in real time either — only the append is skipped, the
             // ack-only refetch below still runs. Asked of the ORIGINAL text: a
@@ -1032,14 +1238,39 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             // a page refresh. Only fires on the ack-only case so normal
             // streamed replies don't pay an extra round-trip.
             if (isAckOnly) {
+              // Same rule as the pushed append above: a hidden tab owes the read
+              // rather than spending it, inside the delay as well as before it.
+              if (historyReadMustWait()) {
+                historyCatchUpOwedRef.current = true
+                return
+              }
               if (ackOnlyHistoryTimerRef.current !== null) {
                 window.clearTimeout(ackOnlyHistoryTimerRef.current)
               }
               ackOnlyHistoryTimerRef.current = window.setTimeout(() => {
                 ackOnlyHistoryTimerRef.current = null
-                void loadHistory()
+                if (historyReadMustWait()) {
+                  historyCatchUpOwedRef.current = true
+                  return
+                }
+                // A run that ended empty gets its line once this read is in
+                // and still holds nothing under the question: a question with
+                // nothing under it reads as a box still thinking.
+                void loadHistory().then(() => {
+                  if (!endedEmpty || !endedRun || sessionKeyRef.current !== endedKey) return
+                  setMessages(prev => withEmptyRunNote(prev, { role: 'system', text: EMPTY_RUN_TEXT, timestamp: Date.now(), failedRun: endedRun, variant: 'notice' }))
+                })
               }, 3_000)
             }
+          } else if (settledError?.repeat) {
+            // The second `error` frame for a run the first one already ended,
+            // some seven seconds on. The owner may have sent the next message
+            // by now: nothing of the turn in flight is touched, and nothing is
+            // reported to the account swap again. Nor is anything owed the
+            // transcript: the sentence is still on screen, because this chat's
+            // history reads carry its notes (`keepLocalNotes`) and nothing
+            // else here takes one away. The mascot chat, whose re-read drops
+            // them, is the one that puts it back.
           } else if (state === 'aborted' || state === 'error') {
             // Read, clear, THEN append — all three outside any updater. This
             // append used to sit inside `setStreaming(prev => …)`, where React
@@ -1080,6 +1311,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 unconfirmed: true,
               }])
             }
+            // Say that the reply was stopped: a question with nothing under
+            // it read as an answer that got lost (2026-10-13 smoke test).
+            // Not for a run the BOX stopped to move it off a model this account
+            // cannot run: the fallback's own line says what happened instead.
+            if (state === 'aborted' && !fallbackWatchRef.current.holdStop(payload.runId)) setMessages(msgs => [...msgs, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
@@ -1088,8 +1324,22 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              const failureContext = runFailureRef.current.settle(payload)
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current), timestamp: Date.now() }])
+              const failureContext = settledError?.context
+              // The sentence, its tone — no API quota on the owner's account is
+              // a fact, not a fault: calm, not red — and the button that fixes
+              // it (a ClawBox AI sign-in the box can no longer use). Tagged with
+              // its run: the box records the failure too, and the history read
+              // restores that record as this same line, never beside it.
+              const note = chatFailureNote(payload.errorMessage, failureContext, failureWordsRef.current)
+              const failedRun = settledError?.runId ?? (typeof payload.runId === 'string' ? payload.runId : undefined)
+              setMessages(prev => [...prev, {
+                role: 'system',
+                text: note.text,
+                timestamp: Date.now(),
+                ...(failedRun ? { failedRun } : {}),
+                ...(note.variant ? { variant: note.variant } : {}),
+                ...(note.actions ? { actions: note.actions } : {}),
+              }])
               // A Claude account at its limit, or refused (TASK-1260): the box
               // moves every Claude consumer to the next account and sends the
               // turn again; the chat says which of those happened.
@@ -1104,24 +1354,45 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 // Said in the conversation it happened in, or not at all.
                 if (line && sessionKeyRef.current === forKey) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
               })
+              // A model the provider no longer offers to this account: the box
+              // moves the chat to the next newest one and sends the turn again.
+              const notOffered = fallbackWatchRef.current.fromChatError(settledError?.runId ?? payload.runId, failureContext, payload.errorMessage)
+              if (notOffered) reportModelFallbackFor(notOffered)
             }
           }
         }
       }
     }
 
-    const onClose = () => {
-      // Its own clock only: a late close from a socket a newer connect has
-      // already replaced must not disarm the newer attempt's.
-      if (wsRef.current === ws) clearHandshakeTimer()
+    const onClose = (event?: CloseEvent) => {
+      // Only the socket that is CURRENTLY installed may tear anything down or
+      // reconnect, the rule ChatPopup keeps: a late close from one a newer
+      // connect or the link's own close already let go of describes a
+      // connection nobody is using.
+      if (wsRef.current !== ws) return
+      clearHandshakeTimer()
       wsRef.current = null
       // Same reason as the reconnect path: a request still waiting on a socket
       // that has gone away has to be told, or it never settles.
       failPending('Not connected')
-      if (!connectedOnceRef.current) {
-        setStatus('error')
-        setErrorMsg('Could not connect to gateway')
+      // A socket that never got as far as a hello is a failed connect — unless
+      // the box closed it for its session (4401, scripts/upgrade-session-watch.js).
+      // Or refused it for one: the session gate answers an upgrade with a plain
+      // 401, which a browser reports as a bare close, so a session that ran out
+      // after ws-config was read reached the error panel and its Reconnect
+      // instead of /login. Ask first; only a live session is a failed connect.
+      if (!connectedOnceRef.current && !isSessionExpiredClose(event)) {
+        void confirmSessionStillValid().then((live) => {
+          if (!live || signedOutRef.current || unmountedRef.current || wsRef.current) return
+          setStatus('error')
+          setErrorMsg('Could not connect to gateway')
+        })
+        return
       }
+      // A live chat dropped: with 4401, or over plain HTTP — where the box cuts
+      // a lapsed session's socket — with no code at all. This page has no poll
+      // of its own to hear the 401s the desktop hears, so it asks.
+      reconnectIfStillSignedIn()
     }
 
     try {
@@ -1180,7 +1451,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // from.
     const { accepted, refused } = partitionAttachments(files, caps)
     if (refused.length > 0) {
-      setAttachmentError({ reason: 'imagesOnly', detail: null, file: refused[0].name || '' })
+      setAttachmentError({ reason: refusalReason(refused[0]), detail: null, file: refused[0].name || '' })
     }
     if (accepted.length === 0) return
     const stampBase = Date.now()
@@ -1356,8 +1627,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         } else if (event.kind === 'tool' && runIdRef.current === idempotencyKey) {
           // The same pills the gateway's own `agent` events already feed.
           // `applyToolEvent` reads `toolCallId`, so the transport's stable `id`
-          // is handed over under that name.
-          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+          // is handed over under that name, and `detail` (a shell step's
+          // command) is what names the app the step reached.
+          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
+          if (isCodingAgentTool(event.name)) nudgeCodingCards()
         }
       })
     } catch (err) {
@@ -1382,7 +1655,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       clearToolCalls()
       setSending(false)
       runIdRef.current = null
-      if (!failure) return
+      if (!failure) {
+        // The owner pressed Stop; the Hermes route records the same marker.
+        setMessages(prev => [...prev, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
+        return
+      }
       setMessages(prev => [...prev, { role: 'system', text: failure, timestamp: Date.now() }])
       return
     }
@@ -1412,7 +1689,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     clearToolCalls()
     setSending(false)
     runIdRef.current = null
-  }, [applyStreaming, applyToolEvent, clearToolCalls, appendAssistantReply])
+  }, [applyStreaming, applyToolEvent, clearToolCalls, appendAssistantReply, nudgeCodingCards])
 
   const sendMessage = useCallback(async () => {
     const text = input.trim()
@@ -1472,6 +1749,28 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     await dispatchSend(text, staged, idempotencyKey)
   }, [input, sending, pendingAttachments, caps.hasLiveConnection, status, dispatchSend, applyStreaming])
 
+  // The Create card — and the Coding Agent app's hand-off buttons — send
+  // their one message through CHAT_MESSAGE_EVENT, the way the mascot chat
+  // takes it: into the composer, then sent on the render that sees it there
+  // (sendMessage reads the composer). This page had no listener, so a card
+  // here composed a message nobody sent.
+  const handoffPendingRef = useRef(false)
+  useEffect(() => {
+    const onMessage = (e: Event) => {
+      const text = (e as CustomEvent<ChatMessageDetail>).detail?.text
+      if (typeof text !== 'string' || !text.trim()) return
+      handoffPendingRef.current = true
+      setInput(text)
+    }
+    window.addEventListener(CHAT_MESSAGE_EVENT, onMessage)
+    return () => window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage)
+  }, [])
+  useEffect(() => {
+    if (!handoffPendingRef.current || !input.trim()) return
+    handoffPendingRef.current = false
+    void sendMessage()
+  }, [input, sendMessage])
+
   // Drain queued sends on connect; flush them as system errors on error.
   // Sequential dispatch preserves user-typed order — chat.send acks fast
   // (per OpenClaw docs the response streams asynchronously), but firing
@@ -1516,9 +1815,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // below reads it, and to the SAME key the mascot chat binds, so the two
     // surfaces show one conversation the way they already do on the gateway's
     // `mainSessionKey`.
-    if (!caps.hasLiveConnection) sessionKeyRef.current = DESKTOP_TRANSCRIPT_KEY
+    if (!caps.hasLiveConnection) sessionKeyRef.current = defaultTranscriptKeyFor(chatUser ? { username: chatUser, isOwner: false } : null)
     void adapter.connect()
-  }, [adapter, harnessLoaded, caps.hasLiveConnection])
+  }, [adapter, harnessLoaded, caps.hasLiveConnection, chatUser])
 
   // Replay the stored conversation on a harness that has no handshake to hang it
   // on. The gateway path bootstraps its history the moment auth resolves — there
@@ -1564,6 +1863,32 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       clearInterval(tick)
     }
   }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
+
+  // The read the suppressed pushes owe, paid once.
+  //
+  // Coming back to this tab is the first moment the appends that landed while
+  // it was hidden can be seen, so ONE read carries all of them — a
+  // `chat.history` per push, for a page in the background, was the cost this
+  // replaces. The effect above serves a harness with no socket at all; this one
+  // serves the gateway's pushes, and the two cannot both be owed on one box
+  // (`isAckOnly` and `session.message` are socket events).
+  useEffect(() => {
+    if (!caps.canListHistory) return
+    const catchUp = () => {
+      if (!historyCatchUpOwedRef.current) return
+      // Re-owed, not lost: a hidden tab is temporary.
+      if (document.visibilityState !== 'visible') return
+      historyCatchUpOwedRef.current = false
+      void loadHistory()
+    }
+    catchUp()
+    document.addEventListener('visibilitychange', catchUp)
+    window.addEventListener('focus', catchUp)
+    return () => {
+      document.removeEventListener('visibilitychange', catchUp)
+      window.removeEventListener('focus', catchUp)
+    }
+  }, [caps.canListHistory, loadHistory])
 
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
   // dependencies, so this is where the socket and the deferred refetch were
@@ -1745,7 +2070,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           borderBottom: '1px solid rgba(249,115,22,0.15)',
           flexShrink: 0,
         }}>
-          <img src="/clawbox-crab.png" alt="" style={{ width: 14, height: 14, objectFit: 'contain', opacity: 0.7 }} />
+          <img src={harnessId === 'hermes' ? '/hermes-agent.png' : '/clawbox-crab.png'} alt="" style={{ width: 14, height: 14, objectFit: 'contain', opacity: 0.7 }} />
           <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>{t("chat.title")}</span>
           {/* A connection indicator is honest only where there IS a connection
               that can be down. On a harness with no socket the adapter reports
@@ -1763,7 +2088,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           {caps.hasLiveConnection && status === 'connected' && (
             <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
           )}
-          {caps.hasLiveConnection && status === 'error' && (
+          {caps.hasLiveConnection && status === 'error' && !signedOut && (
             <button
               onClick={connect}
               style={{
@@ -1832,20 +2157,22 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center', padding: 20 }}>
             <span style={{ fontSize: 28 }}>⚠️</span>
             <span>{errorMsg || t("chat.connectionFailed")}</span>
-            <button
-              onClick={connect}
-              style={{
-                background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
-                color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
-                fontSize: 13, fontWeight: 500,
-              }}
-            >{t("chat.retry")}</button>
+            {!signedOut && (
+              <button
+                onClick={connect}
+                style={{
+                  background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)',
+                  color: '#f97316', borderRadius: 8, padding: '6px 16px', cursor: 'pointer',
+                  fontSize: 13, fontWeight: 500,
+                }}
+              >{t("chat.retry")}</button>
+            )}
           </div>
         )}
 
         {status === 'connected' && messages.length === 0 && !streaming && !restoreState && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
-            <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
+            <img src={harnessId === 'hermes' ? '/hermes-agent.png' : '/clawbox-crab.png'} alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
             {!clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
               <div style={{
@@ -1895,10 +2222,38 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         {/* One memoised row per message: a render of this page no longer
             parses the conversation — see ChatAppMessageRow. */}
         {messages.map((msg, i) => (
-          <ChatAppMessageRow key={i} msg={msg} t={t} onOpenEmail={setOpenEmailUid} />
+          <ChatAppMessageRow key={i} msg={msg} t={t} onOpenEmail={setOpenEmailUid} onOpenProviders={openProvidersSettings} onSwitchTo={switchFromNotice} />
         ))}
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
+
+        {/* The coding cards, after the pills and before the reply in flight:
+            a team's card, then each run's — they stay once the work ends and
+            report the outcome (CodingChatCards.tsx). */}
+        {chatUser === null && <CodingChatCards cards={codingCards} openFromChat={openFromChat} canControl />}
+        {chatUser === null && codingCards.autoHiddenCount > 0 && (
+          <div data-testid="coding-agent-restore-row" style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}>
+            <button
+              type="button"
+              data-testid="coding-agent-restore"
+              onClick={codingCards.restore}
+              title={t("codingAgent.chatRestore")}
+              aria-label={t("codingAgent.chatRestore")}
+              style={{
+                pointerEvents: 'auto',
+                width: 42, height: 42, borderRadius: '50%',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                padding: 0, fontSize: 20, lineHeight: 1, cursor: 'pointer',
+                background: 'rgba(13,17,23,0.92)',
+                border: '1px solid rgba(252,211,77,0.45)',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.45)',
+                color: '#fcd34d',
+              }}
+            >
+              <span aria-hidden="true">🤖</span>
+            </button>
+          </div>
+        )}
 
         {streaming && <ChatAppStreamingBubble text={streaming} t={t} />}
 
@@ -1976,7 +2331,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
 
       {/* The agent's progress card, over the composer and in the column —
           never over the messages or the text box. */}
-      {progressCard && <ChatProgressCard card={progressCard} />}
+      {progressCard && (
+        <ChatProgressCard
+          card={progressCard}
+          onClear={clearProgressCard}
+          onRefresh={refreshProgressCard}
+          refreshState={progressCardRefreshState}
+        />
+      )}
 
       {/* Hidden file inputs. The filter follows the capability, so a box that can
           look at pictures but not documents never offers one. */}
@@ -2067,16 +2429,22 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         </div>
       )}
 
+      {/* The Create card, over the composer (the mascot chat's place for it). */}
+      {chatUser === null && <NewAppCardSlot card={newApp} />}
+
       {/* Input area */}
       <div style={{
         padding: '10px 14px 12px',
-        borderTop: pendingAttachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
+        borderTop: (pendingAttachments.length > 0 || newApp.show) ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
         // A phone's unfolded attachment buttons take a line of their own.
         flexWrap: tuckable ? 'wrap' : undefined,
       }}>
         {!tuckable && attachControls}
+        {/* Create: the Coding Agent's New app card, right here — the chat is
+            where the request lands, so it is where it starts. */}
+        {!tuckable && chatUser === null && <NewAppToggleButton card={newApp} />}
         {/* A phone: the fold control leads the row, so the button just
             pressed never moves; the attachment buttons it folds away sit
             on a line of their own after Send when unfolded (below). */}
@@ -2194,6 +2562,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             style={{ flexBasis: '100%', display: 'flex', gap: 8, alignItems: 'center' }}
           >
             {attachControls}
+            {chatUser === null && <NewAppToggleButton card={newApp} />}
           </div>
         )}
       </div>

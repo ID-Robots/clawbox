@@ -12,23 +12,29 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 /**
  * TASK-788 — the Node engine floor both installers hold the box to.
  *
- * The pinned core's `engines.node` moved with 2026.9.3:
+ * The pinned core's `engines.node` moved with 2026.9.3, and again with 2026.10.6:
  *
- *   2026.8.1  >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0
- *   2026.9.3  >=24.16.0 <25 || >=26.1.0
+ *   2026.8.1   >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0
+ *   2026.9.3   >=24.16.0 <25 || >=26.1.0
+ *   2026.10.6  >=24.22.1 <25 || >=26.12.1
  *
- * (read off the registry, 2026-09-10). Node 22 is not merely deprecated there —
- * every `openclaw` command exits 1 under it with a requirement banner, because
- * `node:sqlite` truncates a TEXT value at an embedded NUL on 22.23.x, 24.15.0,
- * 25.9.0 and 26.0.0, and the first fixed builds are 24.16.0 and 26.1.0.
+ * (read off the registry, 2026-09-10 and 2026-10-22). Node 22 is not merely
+ * deprecated there — every `openclaw` command exits 1 under it with a
+ * requirement banner, because `node:sqlite` truncates a TEXT value at an
+ * embedded NUL on 22.23.x, 24.15.0, 25.9.0 and 26.0.0, and the first fixed
+ * builds are 24.16.0 and 26.1.0. 2026.10.6 then moved both floors to the
+ * October 2026 Node.js security releases, which reject TLS chains signed with
+ * compromised certificate keys, so 24.16.0–24.22.0 and 26.1.0–26.12.0 are
+ * refused too.
  *
  * So a guard that still accepts Node 22 does not just mis-report: it installs
  * Node 22 (`ensure_openclaw_node_engine`) and then installs a core that cannot
  * run on it, leaving the box with a gateway that never comes up. The three
  * versions that matter are therefore pinned as REJECTED here — `v22.23.2` (what
- * every shipped image has), `v24.15.0` (the old floor, and what install-x64's
- * verified tarball used to fetch) and `v26.0.0` — and the table is run, not
- * read, so a future edit to either installer's `case` is measured.
+ * every shipped image has), `v24.15.0` (an old floor, and what install-x64's
+ * verified tarball used to fetch), `v24.22.0` (one patch below today's floor)
+ * and `v26.0.0` — and the table is run, not read, so a future edit to either
+ * installer's `case` is measured.
  *
  * Both installers are held to the SAME table: arm64 boxes take install.sh and
  * the x64 dev/demo path takes install-x64.sh, and they install the same core.
@@ -37,7 +43,18 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const INSTALLERS = {
   "install.sh": readFileSync(path.join(REPO, "install.sh"), "utf-8"),
   "install-x64.sh": readFileSync(path.join(REPO, "install-x64.sh"), "utf-8"),
+  // The x64 integration package's root step carries the third copy: it asks
+  // the Node the PACKAGE names (`$NODE_DIR/node`, as the owner) before npm
+  // stages a core on it — a package rebuilt without --node-dir once pointed it
+  // at the distro's Node 22, and the refusal was npm's, naming no repair.
+  "scripts/x64-migration/clawbox-x64-step.sh": readFileSync(
+    path.join(REPO, "scripts/x64-migration/clawbox-x64-step.sh"),
+    "utf-8",
+  ),
 } as const;
+
+/** build-package.py's Python copy of the same table; test_integration.py runs it, this suite holds its text. */
+const BUILDER = readFileSync(path.join(REPO, "scripts/x64-migration/build-package.py"), "utf-8");
 
 const HAS_BASH = spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
 const HAS_DPKG = spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0;
@@ -106,6 +123,9 @@ function verdicts(installer: keyof typeof INSTALLERS): Map<string, boolean> {
 
   const source = INSTALLERS[installer];
   const program = [
+    // The step asks through `as_owner` (runuser as the desktop owner): here it
+    // is the stub itself, asked directly.
+    'as_owner() { "$@"; }',
     optionalShellFunction(source, "node_version_satisfies_openclaw_engine"),
     shellFunction(source, "node_satisfies_openclaw_engine"),
     `for v in ${[...REJECTED, ...ACCEPTED, DIST_VERSION].join(" ")}; do`,
@@ -114,7 +134,8 @@ function verdicts(installer: keyof typeof INSTALLERS): Map<string, boolean> {
     "done",
   ].join("\n");
   const r = spawnSync("bash", ["-c", program], {
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    // NODE_DIR is what the x64 step asks; the installers ask the node on PATH.
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, NODE_DIR: bin },
     encoding: "utf-8",
   });
   if (r.status !== 0) throw new Error(`the guard could not be run (status ${r.status}): ${r.stderr}`);
@@ -147,21 +168,26 @@ const REJECTED = [
   "22.22.3", // the OLD floor: accepted by 2026.8.1, refused by 2026.9.3
   "22.23.2", // what every shipped ClawBox image runs today
   "23.11.0", // 23 was never in any of these ranges
-  "24.15.0", // the old 24 floor — one patch below the NUL fix
+  "24.15.0", // an old 24 floor — one patch below the NUL fix
+  "24.16.0", // the 2026.9.3 floor: has the NUL fix, not the TLS one
+  "24.21.0", // what the installers provisioned before 2026.10.6
+  "24.22.0", // one patch below the October 2026 security release
   "25.9.0", // inside the retired `>=25.9.0` arm; `<25` now excludes all of 25
-  "26.0.0", // 26 is allowed only from 26.1.0
+  "26.0.0", // 26 is allowed only from 26.12.1
+  "26.1.0", // the 2026.9.3 floor of the 26 line
+  "26.12.0", // one patch below the 26 line's security release
 ] as const;
 
 const ACCEPTED = [
-  "24.16.0", // the floor itself
-  "24.21.0", // the LTS build the installers provision
-  "26.1.0", // the floor of the other allowed line
-  "26.8.2", // current 26.x
-  "27.0.0", // the next major above the open-ended `>=26.1.0`
+  "24.22.1", // the floor itself, and the LTS build the installers provision
+  "24.23.0", // a later 24 minor
+  "26.12.1", // the floor of the other allowed line
+  "26.13.0", // a later 26 minor
+  "27.0.0", // the next major above the open-ended `>=26.12.1`
   "100.0.0", // three digits: the case a two-digit-only pattern rejected
 ] as const;
 
-describe("install.sh / install-x64.sh Node engine table", () => {
+describe("install.sh / install-x64.sh / clawbox-x64-step.sh Node engine table", () => {
   // ASSERTED, NOT SKIPPED ON, the way email-directive-parity.test.ts puts it:
   // `describe.skip` on a missing tool turns the only proof of the engine floor
   // into a green no-op, and the next edit to either `case` table would ship
@@ -193,16 +219,32 @@ describe("install.sh / install-x64.sh Node engine table", () => {
     // guard and its own error message come to disagree after a bump. One
     // variable, and the same text in both installers.
     for (const source of Object.values(INSTALLERS)) {
-      expect(source).toContain('OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"');
+      expect(source).toContain('OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"');
       expect(source).not.toMatch(/requires Node >=22/);
     }
+    expect(BUILDER).toContain('OPENCLAW_NODE_ENGINE = ">=24.22.1 <25, or >=26.12.1"');
+  });
+
+  it("holds the e2e-install runtime check to the same floors", () => {
+    // e2e-install/07-runtime-pin.spec.ts asks the installed box whether its Node
+    // is one the pinned core accepts, from a floor per major of its own. A floor
+    // left behind by a bump passes a box the core refuses.
+    const engineLine = /^OPENCLAW_NODE_ENGINE="([^"]*)"/m.exec(INSTALLERS["install.sh"])?.[1] ?? "";
+    const expected = [...engineLine.matchAll(/>=((\d+)\.\d+\.\d+)/g)].map((m) => `"${m[2]}": "${m[1]}"`);
+    expect(expected).toEqual(['"24": "24.22.1"', '"26": "26.12.1"']);
+    const spec = readFileSync(path.join(REPO, "e2e-install/07-runtime-pin.spec.ts"), "utf-8");
+    const table = /const ENGINE_FLOORS[^=]*=\s*\{([^}]*)\}/.exec(spec)?.[1] ?? "";
+    for (const pair of expected) expect(table, "ENGINE_FLOORS in e2e-install/07-runtime-pin.spec.ts").toContain(pair);
   });
 
   it("fetches the NodeSource channel of the major it accepts, and never the retired one", () => {
     // A guard that rejects 22 while the install line still pipes `setup_22.x`
     // is the worst of both: the box takes the apt transaction, lands on a Node
     // the guard refuses, and the step exits 1 having replaced the runtime.
-    for (const [name, source] of Object.entries(INSTALLERS)) {
+    // The two INSTALLERS only: the x64 step installs no Node at all (the
+    // package names one, and the step refuses a core on the wrong one).
+    for (const name of ["install.sh", "install-x64.sh"] as const) {
+      const source = INSTALLERS[name];
       expect(source, name).toContain("deb.nodesource.com/setup_24.x");
       expect(source, name).not.toContain("setup_22.x");
     }
@@ -226,48 +268,8 @@ describe("install.sh / install-x64.sh Node engine table", () => {
     expect(accepts("install-x64.sh", DIST_VERSION), DIST_VERSION).toBe(true);
   });
 
-  it("pins the same core version everywhere it is written down", () => {
-    // FOUR places, and every one of them is a fallback for the same moment: the
-    // pin file cannot be read. `OPENCLAW_VERSION` in each installer is the
-    // version a corrupted or partial install lands on; `OPENCLAW_VERSION_FALLBACK`
-    // in the updater is what the UI's "Latest" column and the managed-plugin
-    // reinstall use. They drifted once, and the cost was not a cosmetic one:
-    // install.sh fell back to the new pin while updater.ts fell back to the old,
-    // so the UI answered "no OpenClaw update available" over a box that had one
-    // (false success) and the channel plugins were pinned to the previous core's
-    // version on the new core. Nothing can derive these — they exist for the
-    // moment the shared file is unavailable — so this case is the guard.
-    const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
-    expect(pinned).toBe("2026.9.4");
-    for (const [name, source] of Object.entries(INSTALLERS)) {
-      expect(source, name).toContain(`OPENCLAW_VERSION="${pinned}"`);
-    }
-    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
-    expect(updater, "src/lib/updater.ts").toContain(
-      `const OPENCLAW_VERSION_FALLBACK = "${pinned}";`,
-    );
-  });
-
-  it("records which state schema the pinned core supports", () => {
-    // A FIFTH thing the pin has to carry, and the one a bump forgets most
-    // easily: OpenClaw migrates `state/openclaw.sqlite` forward and never back,
-    // so a core that meets a newer file refuses to open it and the box loses its
-    // assistant mid-update. `OPENCLAW_STATE_SCHEMA_BY_VERSION` is what the
-    // updater's pre-flight compares against, and `openclawStateSchemaFor`
-    // answers null for a version it has never been told about — which makes the
-    // pre-flight stand down silently. Bumping the pin without adding its row
-    // would therefore not fail anything at runtime; it would just quietly switch
-    // the guard off. This is the guard for the guard.
-    //
-    // Read from the source rather than imported, like every other case here:
-    // importing the updater pulls its whole Node surface into a test that only
-    // ever wanted to read four files.
-    const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
-    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
-    const table = /OPENCLAW_STATE_SCHEMA_BY_VERSION[^{]*\{([^}]*)\}/.exec(updater)?.[1];
-    expect(table, "OPENCLAW_STATE_SCHEMA_BY_VERSION in src/lib/updater.ts").toBeTypeOf("string");
-    expect(table, `no state schema recorded for the pinned ${pinned}`).toMatch(
-      new RegExp(`"${pinned.replaceAll(".", "\\.")}"\\s*:\\s*\\d+`),
-    );
-  });
+  // The pin itself — one source, every fallback equal to it, its state-schema
+  // row — is guarded in harness-pins.test.ts; the pinned package's own
+  // `engines.node` is checked against OPENCLAW_NODE_ENGINE by the
+  // harness-contract CI job.
 });

@@ -849,6 +849,45 @@ describe("middleware", () => {
     });
   });
 
+  describe("an expired session on the chat's own routes", () => {
+    // The chat reads its socket's address and token from ws-config and sends
+    // through /setup-api/chat; a session that ran out must be refused there
+    // like everywhere else, with the 401 the page reads as "signed out"
+    // (src/lib/session-expiry.ts) — not a route's own 401 for a wrong password.
+    const past = () => Math.floor(Date.now() / 1000) - 1;
+    const future = () => Math.floor(Date.now() / 1000) + 60;
+
+    for (const route of ["/setup-api/gateway/ws-config", "/setup-api/chat/tabs", "/api/chat"]) {
+      it(`refuses ${route} with the session gate's marked 401 once the cookie has expired`, async () => {
+        process.env.SESSION_SECRET = "test-secret";
+        writeConfig({ setup_complete: true, password_configured: true });
+        vi.resetModules();
+        const mod = await import("@/middleware");
+        const { SESSION_EXPIRED_HEADER, isSessionExpiredResponse } = await import("@/lib/session-expiry");
+
+        const res = await mod.middleware(new NextRequest(new URL(`http://localhost${route}`), {
+          headers: { cookie: `clawbox_session=${await createSignedSessionCookie(past())}` },
+        }));
+        expect(res.status).toBe(401);
+        expect(res.headers.get(SESSION_EXPIRED_HEADER)).toBe("expired");
+        expect(isSessionExpiredResponse(res)).toBe(true);
+        await expect(res.json()).resolves.toEqual({ error: "Authentication required" });
+      });
+    }
+
+    it("lets the same request through while the session is live", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const res = await mod.middleware(new NextRequest(new URL("http://localhost/setup-api/gateway/ws-config"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
+      }));
+      expect(res.status).toBe(200);
+    });
+  });
+
   describe("pre-auth sensitive-surface gate (setup window)", () => {
     // SESSION_SECRET is provisioned but setup_complete is NOT yet written — the
     // pre-setup wizard window. Sensitive desktop/agent backends must stay gated
@@ -1224,6 +1263,126 @@ describe("middleware", () => {
       fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(path.join(dataDir, "config.json"), "{ not json");
       expect((await authed("/")).status).toBe(200);
+    });
+  });
+
+  describe("a server app's window (/apps/<id>/, src/lib/app-window.ts)", () => {
+    // What Chromium sends for the requests a CSP-sandboxed document makes
+    // itself (measured over plain-HTTP LAN): no cookie, no Sec-Fetch-*, no
+    // Referer — a link it follows carries `Accept: text/html` and nothing
+    // else; a form it posts and a fetch it makes add `Origin: null`. Through
+    // the tunnel the same requests say `Sec-Fetch-Site: cross-site`.
+    const PAGE_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+    async function load() {
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      return (await import("@/middleware")).middleware;
+    }
+
+    function request(pathname: string, init: { method?: string; headers?: Record<string, string> } = {}) {
+      return new NextRequest(new URL(`http://localhost${pathname}`), { method: init.method ?? "GET", headers: init.headers ?? {} });
+    }
+
+    async function ownerCookie(exp = Math.floor(Date.now() / 1000) + 60) {
+      return `clawbox_session=${await createSignedSessionCookie(exp)}`;
+    }
+
+    it("answers a page the frame navigated to without a cookie with the page that asks the desktop to reopen it — not the login redirect", async () => {
+      const mw = await load();
+      const variants: Record<string, string>[] = [
+        // plain-HTTP LAN: nothing but the Accept header
+        { accept: PAGE_ACCEPT },
+        // the tunnel: a frame navigation, cross-site
+        { accept: PAGE_ACCEPT, "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate", "sec-fetch-site": "cross-site" },
+      ];
+      for (const headers of variants) {
+        const res = await mw(request("/apps/notes/notes/2", { headers }));
+        expect(res.status, JSON.stringify(headers)).toBe(401);
+        expect(res.headers.get("location")).toBeNull();
+        expect(res.headers.get("content-type")).toContain("text/html");
+        expect(res.headers.get("cache-control")).toBe("no-store");
+        // The same opaque origin as the app it stands in for.
+        expect(res.headers.get("content-security-policy")).toMatch(/^sandbox allow-scripts;/);
+        const html = await res.text();
+        expect(html).toContain("clawboxAppReopen");
+        expect(html).toContain("window.parent.postMessage");
+        // Nobody answers → /login, back to this page once signed in.
+        expect(html).toContain(JSON.stringify("/login?redirect=%2Fapps%2Fnotes%2Fnotes%2F2"));
+      }
+    });
+
+    it("still sends a visitor's top-level navigation straight to /login", async () => {
+      const mw = await load();
+      const res = await mw(request("/apps/notes/", { headers: { accept: PAGE_ACCEPT, "sec-fetch-dest": "document", "sec-fetch-mode": "navigate", "sec-fetch-site": "none" } }));
+      expect(res.status).toBe(307);
+      expect(new URL(res.headers.get("location")!).pathname).toBe("/login");
+    });
+
+    it("lets the desktop's reopened navigation — the owner's cookie — through to the app", async () => {
+      const mw = await load();
+      const res = await mw(request("/apps/notes/notes/2", { headers: { accept: PAGE_ACCEPT, cookie: await ownerCookie() } }));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-middleware-next")).toBe("1");
+    });
+
+    it("does not ask again when the desktop's own navigation came back signed out — that would loop", async () => {
+      const mw = await load();
+      const res = await mw(request("/apps/notes/notes/2", { headers: { accept: PAGE_ACCEPT, cookie: await ownerCookie(Math.floor(Date.now() / 1000) - 60) } }));
+      expect(res.status).toBe(401);
+      const { appReopenPage } = await import("@/lib/app-window");
+      const login = "/login?redirect=%2Fapps%2Fnotes%2Fnotes%2F2";
+      expect(await res.text()).toBe(appReopenPage(login, false));
+      // …while a request with no cookie at all asks.
+      expect(await (await mw(request("/apps/notes/notes/2", { headers: { accept: PAGE_ACCEPT } }))).text()).toBe(appReopenPage(login, true));
+    });
+
+    it("lets a form the frame posts reach the app, as the frame's other requests do — never a top-level one", async () => {
+      const mw = await load();
+      const post = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "null", "content-type": "application/x-www-form-urlencoded" } }));
+      expect(post.headers.get("x-middleware-next")).toBe("1");
+      const tunnelPost = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "null", "sec-fetch-dest": "iframe", "sec-fetch-site": "cross-site" } }));
+      expect(tunnelPost.headers.get("x-middleware-next")).toBe("1");
+      // A fetch for HTML (htmx and friends) from the same document.
+      const htmlFetch = await mw(request("/apps/notes/fragment", { headers: { accept: "text/html", origin: "null" } }));
+      expect(htmlFetch.headers.get("x-middleware-next")).toBe("1");
+      const topLevel = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "null", "sec-fetch-dest": "document" } }));
+      expect(topLevel.status).toBe(307);
+      // A POST from a real origin is not the app's frame: the session gate as before.
+      const foreign = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "http://evil.example" } }));
+      expect(foreign.status).toBe(307);
+    });
+
+    it("carries the App Router's Next-Url past the box's own Next.js, which deletes it before the proxy runs", async () => {
+      // Without it the app's server recomputes the `_rsc` hash without it,
+      // answers 307, and every client navigation turns into a full page load.
+      const mw = await load();
+      const nav = await mw(request("/apps/notes/books/2?_rsc=sx22p", { headers: { origin: "null", rsc: "1", "next-router-state-tree": "%5B%5D", "next-url": "/books" } }));
+      expect(nav.headers.get("x-middleware-next")).toBe("1");
+      expect(nav.headers.get("x-middleware-request-x-clawbox-next-url")).toBe("/books");
+      expect(nav.headers.get("x-middleware-override-headers")).toContain("x-clawbox-next-url");
+      // Everything else passes untouched.
+      const asset = await mw(request("/apps/notes/_next/static/chunks/a.js", { headers: { accept: "*/*" } }));
+      expect(asset.headers.get("x-middleware-next")).toBe("1");
+      expect(asset.headers.get("x-middleware-override-headers")).toBeNull();
+      // And it is never a way past the session gate for anything else.
+      const elsewhere = await mw(request("/setup-api/system/version", { headers: { rsc: "1", "next-url": "/x" } }));
+      expect(elsewhere.status).toBe(401);
+    });
+
+    it("keeps the box's own API and pages closed to the frame: no session, no reopen page", async () => {
+      const mw = await load();
+      for (const pathname of ["/setup-api/system/version", "/setup-api/webapps?app=notes", "/api/sessions"]) {
+        const res = await mw(request(pathname, { headers: { accept: "*/*", origin: "null" } }));
+        expect(res.status, pathname).toBe(401);
+        expect(res.headers.get("content-type"), pathname).toContain("application/json");
+      }
+      // A navigation to the desktop from inside the frame is the login redirect, never the reopen page.
+      const desktop = await mw(request("/", { headers: { accept: PAGE_ACCEPT } }));
+      expect(desktop.status).toBe(307);
+      const other = await mw(request("/app/notes", { headers: { accept: PAGE_ACCEPT } }));
+      expect(other.status).toBe(307);
     });
   });
 

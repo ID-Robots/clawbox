@@ -327,6 +327,39 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(body.defaultProvider).toBe("anthropic");
   });
 
+  it("offers an xAI row, disconnected until a key is on the box", async () => {
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
+    });
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "xai")).toMatchObject({
+      label: "xAI Grok",
+      state: "disconnected",
+      isDefault: false,
+      section: "ai",
+    });
+  });
+
+  it("counts an xai api-key profile as connected, and as the default when the primary is a Grok model", async () => {
+    // What the configure route leaves behind for xAI: the `xai:default`
+    // profile metadata and the primary — and NO `models.providers.xai`, since
+    // the bundled plugin routes it.
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "xai:default": { provider: "xai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "xai/grok-4.6" } } },
+    });
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "xai")!.state).toBe("connected");
+    expect(rowFor(body, "xai")!.isDefault).toBe(true);
+    expect(body.defaultProvider).toBe("xai");
+    // Listed once: the panel row and the "whatever the box is set to" row are
+    // the same id.
+    expect(body.providers.filter((row: { id: string }) => row.id === "xai")).toHaveLength(1);
+  });
+
   it("does not call OpenAI connected when its slot only carries ClawBox AI's own token", async () => {
     // ClawBox AI's image generation and cloud voice are registered under the
     // `openai` provider (its OpenAI-compatible routes on our proxy) with the
@@ -479,8 +512,11 @@ describe("the response carries statuses, never credentials", () => {
       ["defaultProvider", "degraded", "harness", "providers", "unrunnable"],
     );
     for (const row of body.providers) {
-      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
+      // `credentialHeld` is a yes/no, never the credential: it tells the two
+      // "needs sign-in" rows apart for the row's sign-out (TASK-2114).
+      expect(Object.keys(row).sort()).toEqual(["credentialHeld", "enabled", "id", "isDefault", "label", "section", "state"]);
       expect(typeof row.isDefault).toBe("boolean");
+      expect(typeof row.credentialHeld).toBe("boolean");
       expect(typeof row.enabled).toBe("boolean");
       // The owner's switch is an orthogonal FIELD — never a state.
       expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
@@ -502,7 +538,7 @@ describe("the response carries statuses, never credentials", () => {
     );
     expect(body.providers.some((row: Row) => row.state === "checking")).toBe(true);
     for (const row of body.providers) {
-      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
+      expect(Object.keys(row).sort()).toEqual(["credentialHeld", "enabled", "id", "isDefault", "label", "section", "state"]);
       expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
     }
   });

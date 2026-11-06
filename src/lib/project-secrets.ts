@@ -61,20 +61,25 @@ import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { getOrCreateSecret } from "@/lib/auth";
+import { appendSecretAudit, type SecretImportSource } from "@/lib/secrets-audit";
 import {
   BOX_SCOPE,
   isDeviceSecretScope,
   isReservedSecretName,
+  isSecretExpired,
   isValidSecretScope,
   MAX_DEVICE_SECRETS,
   MAX_SECRET_VALUE_CHARS,
   MAX_SECRETS,
   MIN_SECRET_VALUE_CHARS,
+  readSecretExpiry,
+  SECRET_EXPIRY_RUN,
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
   SecretStoreError,
   type DeviceSecretScope,
+  type SecretExpiry,
   type SecretView,
 } from "@/lib/project-secrets-shape";
 
@@ -92,12 +97,14 @@ export {
   MAX_SECRET_VALUE_CHARS,
   MAX_SECRETS,
   MIN_SECRET_VALUE_CHARS,
+  SECRET_EXPIRY_RUN,
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRET_SCOPE_RE,
   SECRETS_FILE_NAME,
   SecretStoreError,
   type DeviceSecretScope,
+  type SecretExpiry,
   type SecretRefusal,
   type SecretView,
 } from "@/lib/project-secrets-shape";
@@ -121,6 +128,16 @@ interface StoredSecret {
   value: string;
   /** Which derived key sealed it — see the header. */
   keyId: string;
+  /**
+   * OPTIONAL, and only on a copy the owner limited (`importSecret`): "run" or an
+   * ISO instant — see SecretExpiry. Unauthenticated like the rest of the label,
+   * and that is safe in one direction only, which is the one that matters: a
+   * hand edit can shorten or break an expiry (an unreadable one reads as over),
+   * but anyone able to remove it could equally read `.session-secret`.
+   */
+  expiresAt?: SecretExpiry;
+  /** The run a "run" entry was handed to. Set once, by `resolveSecretsForRun`. */
+  usedBy?: string;
 }
 
 // ── the key ─────────────────────────────────────────────────────────────────
@@ -285,8 +302,42 @@ function requireSecretValue(value: unknown): string {
   return trimmed;
 }
 
+/**
+ * True when `requireSecretValue` would accept it. For a list that must only
+ * offer what a save can keep — the assistant's keys (src/lib/assistant-secrets.ts),
+ * where a button that always ends in a refusal is no offer at all.
+ */
+export function isStorableSecretValue(value: unknown): boolean {
+  try {
+    requireSecretValue(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A copy's expiry as the owner asked for it: none (absent, null or ""), "run",
+ * or an ISO-8601 instant still to come — normalised to `toISOString`'s form.
+ * A date already over is refused rather than stored: a copy that could never
+ * reach a run is not what the owner meant.
+ */
+export function requireSecretExpiry(value: unknown): SecretExpiry | null {
+  if (value === undefined || value === null || value === "") return null;
+  const expiry = readSecretExpiry(value);
+  if (expiry === SECRET_EXPIRY_RUN) return SECRET_EXPIRY_RUN;
+  if (typeof expiry !== "number" || !Number.isFinite(expiry) || expiry <= Date.now()) {
+    throw new SecretStoreError("invalid_expiry", 'A copy expires after one run ("run") or at a date still to come.');
+  }
+  return new Date(expiry).toISOString();
+}
+
 // ── the file ────────────────────────────────────────────────────────────────
 
+// A copy from the assistant (`importSecret`) is a row of this shape, plus an
+// optional `expiresAt` (and, once a one-run copy is handed out, `usedBy`).
+// Neither is checked here: an older build reads such a row unchanged, and this
+// one reads an unreadable expiry as over (`isSecretExpired`).
 function isStoredSecret(value: unknown): value is StoredSecret {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -388,6 +439,9 @@ function viewOf(entry: StoredSecret, k: StoreKey): SecretView {
     updatedAt: entry.updatedAt,
     inject: entry.inject,
     readable: entry.keyId === k.id && open(entry, k) !== null,
+    ...(entry.expiresAt !== undefined && entry.expiresAt !== null
+      ? { expiresAt: String(entry.expiresAt), expired: isSecretExpired(entry.expiresAt, entry.usedBy) }
+      : {}),
   };
 }
 
@@ -424,11 +478,73 @@ export async function setSecret(input: { name: unknown; value: unknown; scope?: 
   const scope = requireSecretScope(input.scope);
   const value = requireSecretValue(input.value);
   const inject = typeof input.inject === "boolean" ? input.inject : null;
+  return putSecret({ name, scope, value, inject, createOnly: false, audit: { action: "save" } });
+}
+
+/**
+ * Save a value COPIED from where the box already holds it — the "Import from
+ * assistant" button (src/lib/assistant-secrets.ts is the only caller, and it
+ * reads the value server-side; no surface ever sends or receives one).
+ *
+ * Two differences from `setSecret`, and both are the safe reading of a copy:
+ *
+ *  - A NEW ENTRY ONLY. A name already stored in that scope is refused
+ *    (`exists`), never replaced: the owner's own value under that name, and
+ *    their tick on it, are a decision this button must not overwrite.
+ *  - NEVER TICKED. `inject` is false whatever is asked, so a copied key reaches
+ *    no run until the owner ticks it — the same three gates as a typed one.
+ *
+ * And one thing a typed entry does not have: an optional EXPIRY (SecretExpiry)
+ * — one run, or a date — because a key borrowed from the assistant for one job
+ * is exactly the grant that should not outlive the job. It is the row's only
+ * extra field, and an optional one, so an older build after a rollback still
+ * reads and keeps the row (without honouring the expiry). Where the copy came
+ * from is on the audit line instead (src/lib/secrets-audit.ts).
+ */
+export async function importSecret(input: {
+  name: unknown;
+  value: unknown;
+  scope?: unknown;
+  source: SecretImportSource;
+  expiresAt?: unknown;
+}): Promise<SecretView> {
+  const name = requireSecretName(input.name);
+  const scope = requireSecretScope(input.scope);
+  const value = requireSecretValue(input.value);
+  const expiresAt = requireSecretExpiry(input.expiresAt);
+  return putSecret({
+    name,
+    scope,
+    value,
+    inject: false,
+    createOnly: true,
+    expiresAt,
+    audit: { action: "import", source: input.source, ...(expiresAt ? { expiresAt } : {}) },
+  });
+}
+
+/** The one write path for an owner entry: `setSecret` and `importSecret`. */
+function putSecret(input: {
+  name: string;
+  scope: string;
+  value: string;
+  inject: boolean | null;
+  createOnly: boolean;
+  /** A new entry's expiry. A REPLACED entry keeps its own: a re-typed value is not a wider grant. */
+  expiresAt?: SecretExpiry | null;
+  audit: { action: "save" | "import"; source?: SecretImportSource; expiresAt?: SecretExpiry };
+}): Promise<SecretView> {
+  const { name, scope, value, inject } = input;
   return serialised(async () => {
     const k = await storeKey();
     const entries = await readStore();
     const at = indexOf(entries, name, scope);
     const now = Date.now();
+    if (at >= 0 && input.createOnly) {
+      // Checked inside the chain, against the list as it stands now — a check
+      // made before it could be beaten by a save landing in between.
+      throw new SecretStoreError("exists", `There is already a secret called ${name} in that scope on this ClawBox. Remove it first to copy the assistant's.`);
+    }
     if (at < 0 && ownerEntries(entries).length >= MAX_SECRETS) {
       // Refused, never evicted: the list is what the owner believes a run can
       // reach, and a save that quietly dropped the oldest entry would take a
@@ -437,11 +553,12 @@ export async function setSecret(input: { name: unknown; value: unknown; scope?: 
     }
     const sealed = seal(value, name, scope, k);
     const entry: StoredSecret = at < 0
-      ? { name, scope, createdAt: now, updatedAt: now, inject: inject ?? false, ...sealed }
+      ? { name, scope, createdAt: now, updatedAt: now, inject: inject ?? false, ...sealed, ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}) }
       : { ...entries[at], updatedAt: now, inject: inject ?? entries[at].inject, ...sealed };
     if (at < 0) entries.push(entry);
     else entries[at] = entry;
     await writeStore(entries);
+    await appendSecretAudit({ ...input.audit, name, scope });
     return viewOf(entry, k);
   });
 }
@@ -461,6 +578,7 @@ export async function setSecretInject(input: { name: unknown; scope?: unknown; i
     if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
     entries[at] = { ...entries[at], inject, updatedAt: Date.now() };
     await writeStore(entries);
+    await appendSecretAudit({ action: inject ? "tick" : "untick", name, scope });
     return viewOf(entries[at], k);
   });
 }
@@ -491,6 +609,7 @@ export async function deleteSecretsForScope(scope: unknown): Promise<string[]> {
     const removed = entries.filter((entry) => entry.scope === key).map((entry) => entry.name);
     if (!removed.length) return [];
     await writeStore(entries.filter((entry) => entry.scope !== key));
+    await appendSecretAudit({ action: "delete", names: removed, scope: key, reason: "project_deleted" });
     return removed;
   });
 }
@@ -506,6 +625,7 @@ export async function deleteSecret(input: { name: unknown; scope?: unknown }): P
     if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
     entries.splice(at, 1);
     await writeStore(entries);
+    await appendSecretAudit({ action: "delete", name, scope });
     return sortViews(ownerEntries(entries).map((e) => viewOf(e, k)));
   });
 }
@@ -517,12 +637,22 @@ export async function getInjectSecrets(): Promise<boolean> {
   return (await configGet(SECRET_INJECT_CONFIG_KEY)) === true;
 }
 
+/**
+ * Flip the owner's switch. The audit line is written after the config store
+ * has saved it, and only when it actually changed: the trail records a consent
+ * given or withdrawn, not every click on a switch already where it was. On the
+ * store's chain, so two windows flipping it at once cannot both read "off".
+ */
 export async function setInjectSecrets(on: unknown): Promise<boolean> {
   if (typeof on !== "boolean") {
     throw new SecretStoreError("invalid_value", "The secret-injection switch must be true or false.");
   }
-  await configSet(SECRET_INJECT_CONFIG_KEY, on);
-  return on;
+  return serialised(async () => {
+    const was = await getInjectSecrets();
+    await configSet(SECRET_INJECT_CONFIG_KEY, on);
+    if (was !== on) await appendSecretAudit({ action: on ? "switch_on" : "switch_off" });
+    return on;
+  });
 }
 
 // ── what a run gets ─────────────────────────────────────────────────────────
@@ -534,9 +664,17 @@ export interface ResolvedRunSecrets {
   names: string[];
   /** Ticked entries this box could not open — named so the owner can re-enter them. */
   unreadable: string[];
+  /** Name → the scope its value came FROM, for the audit line (`recordRunSecretsHanded`). Names only. */
+  scopes: Record<string, string>;
+  /**
+   * Name → the instant (ms) a DATED copy among `env` stops being handed, for
+   * the one continuation that cannot read the store again (`withoutPastDueSecrets`).
+   * No entry for an undated or a one-run copy.
+   */
+  expiresAt: Record<string, number>;
 }
 
-const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [] };
+const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} };
 
 /**
  * The secrets ONE run may have: the box-scoped ticked entries plus the ticked
@@ -561,50 +699,231 @@ const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [] };
  * would have made a project secret reach code projects only, which is the
  * minority of runs. `projectScopeFor` in coding-agent.ts is the resolver.
  *
+ * A COPY WITH AN EXPIRY (SecretExpiry) is a fourth gate, on that entry alone:
+ * past its date it reaches no run at all, and a one-run copy reaches the first
+ * run that resolves it and no other — that run's id is written onto the row
+ * here, before the run is handed anything, so two runs starting together cannot
+ * both have it. The entry itself is removed when that run ends
+ * (`releaseRunSecrets`). A resolve that names no run cannot claim one.
+ *
+ * Writes NO audit line: resolving is not handing, and the child it is for may
+ * never start. The caller records the hand-off once it knows
+ * (`recordRunSecretsHanded`).
+ *
  * Never throws. A store this box cannot read is reported as nothing injected:
  * failing the run over it would be the worse outcome, and the resolved names go
  * on the record so a run that got nothing can be told why.
  */
-export async function resolveSecretsForRun(run: { project?: string | null }): Promise<ResolvedRunSecrets> {
+export async function resolveSecretsForRun(run: { project?: string | null; runId?: string }): Promise<ResolvedRunSecrets> {
   try {
     if (!(await getInjectSecrets())) return NOTHING;
-    const [entries, k] = await Promise.all([readStore(), storeKey()]);
-    const project = typeof run.project === "string" && isValidSecretScope(run.project) ? run.project : null;
-    const env: Record<string, string> = {};
-    const unreadable: string[] = [];
-    // Box scope first, the project's over the top: see the precedence note. A
-    // project scope can never BE the box scope — `BOX_SCOPE` is outside the
-    // project alphabet — so the two passes are always distinct.
-    for (const scope of project ? [BOX_SCOPE, project] : [BOX_SCOPE]) {
-      for (const entry of entries) {
-        if (entry.scope !== scope || !entry.inject) continue;
-        // Checked again here rather than trusted from the save: the floor only
-        // ever grows, and a name that was allowed under an older build must not
-        // reach a run's environment unchecked.
-        if (!SECRET_NAME_RE.test(entry.name) || isReservedSecretName(entry.name)) continue;
-        const value = open(entry, k);
-        if (value === null) {
-          // The OVERRIDE could not be opened, so the box-wide value under the
-          // same name must go with it. Keeping it would hand the run a
-          // different credential from the one the owner chose for this project
-          // — silently, which is the worst of the three outcomes (found in
-          // review). Nothing, and a named reason, is the honest answer.
-          delete env[entry.name];
-          if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
-          continue;
-        }
-        env[entry.name] = value;
-        // The other direction: a box-wide entry this box cannot open, overridden
-        // by a project entry it can, is not a problem to report.
-        const stale = unreadable.indexOf(entry.name);
-        if (stale >= 0) unreadable.splice(stale, 1);
-      }
-    }
-    return { env, names: Object.keys(env), unreadable };
+    // On the store's chain: a one-run copy is claimed by a write, and two runs
+    // resolving at once must see each other's claim. The switch is asked again
+    // in there, where the owner turning it off (setInjectSecrets, on the same
+    // chain) cannot land between the answer and the hand-out.
+    return await serialised(async () => ((await getInjectSecrets()) ? resolveRunSecrets(run) : NOTHING));
   } catch (err) {
     console.error("[secrets] could not resolve the secrets for a run:", err instanceof Error ? err.message : err);
     return NOTHING;
   }
+}
+
+/** A run id as the coding agent mints them; anything else claims nothing. */
+const CLAIM_RUN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+async function resolveRunSecrets(run: { project?: string | null; runId?: string }): Promise<ResolvedRunSecrets> {
+  const [entries, k] = await Promise.all([readStore(), storeKey()]);
+  const project = typeof run.project === "string" && isValidSecretScope(run.project) ? run.project : null;
+  const runId = typeof run.runId === "string" && CLAIM_RUN_ID_RE.test(run.runId) ? run.runId : null;
+  const now = Date.now();
+  const env: Record<string, string> = {};
+  const scopes: Record<string, string> = {};
+  const expiresAt: Record<string, number> = {};
+  const unreadable: string[] = [];
+  /** The one-run copies this resolve hands out, by name — to be claimed for this run below. */
+  const claims = new Map<string, StoredSecret>();
+  // Box scope first, the project's over the top: see the precedence note. A
+  // project scope can never BE the box scope — `BOX_SCOPE` is outside the
+  // project alphabet — so the two passes are always distinct.
+  for (const scope of project ? [BOX_SCOPE, project] : [BOX_SCOPE]) {
+    for (const entry of entries) {
+      if (entry.scope !== scope || !entry.inject) continue;
+      // Checked again here rather than trusted from the save: the floor only
+      // ever grows, and a name that was allowed under an older build must not
+      // reach a run's environment unchecked.
+      if (!SECRET_NAME_RE.test(entry.name) || isReservedSecretName(entry.name)) continue;
+      // The expiry. Skipped like an un-ticked entry — no override is dropped
+      // for it: a project copy that has expired is simply not there, and the
+      // box-wide entry of the same name is what the owner left in place.
+      const expiry = readSecretExpiry(entry.expiresAt);
+      if (expiry === SECRET_EXPIRY_RUN) {
+        if (!runId || (entry.usedBy !== undefined && entry.usedBy !== runId)) continue;
+      } else if (expiry !== undefined && expiry <= now) {
+        continue;
+      }
+      const value = open(entry, k);
+      if (value === null) {
+        // The OVERRIDE could not be opened, so the box-wide value under the
+        // same name must go with it. Keeping it would hand the run a
+        // different credential from the one the owner chose for this project
+        // — silently, which is the worst of the three outcomes (found in
+        // review). Nothing, and a named reason, is the honest answer.
+        delete env[entry.name];
+        delete scopes[entry.name];
+        delete expiresAt[entry.name];
+        claims.delete(entry.name);
+        if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
+        continue;
+      }
+      env[entry.name] = value;
+      scopes[entry.name] = scope;
+      if (typeof expiry === "number") expiresAt[entry.name] = expiry;
+      else delete expiresAt[entry.name];
+      // Only the entry whose value the run actually gets is claimed: a
+      // one-run box-wide copy overridden by the project's own entry stays
+      // free for the next run.
+      if (expiry === SECRET_EXPIRY_RUN) claims.set(entry.name, entry);
+      else claims.delete(entry.name);
+      // The other direction: a box-wide entry this box cannot open, overridden
+      // by a project entry it can, is not a problem to report.
+      const stale = unreadable.indexOf(entry.name);
+      if (stale >= 0) unreadable.splice(stale, 1);
+    }
+  }
+  const unclaimed = [...claims.values()].filter((entry) => entry.usedBy === undefined);
+  if (unclaimed.length > 0) {
+    for (const entry of unclaimed) entry.usedBy = runId!;
+    try {
+      await writeStore(entries);
+    } catch (err) {
+      // Not written means not claimed, and an unclaimed one-run copy could go
+      // to a second run as well. So this run does not get it either — nor a
+      // box-wide value of the same name it was overriding, for the reason an
+      // unopenable override takes it (see above) — and it is NAMED, like an
+      // unreadable entry, so the run's feed says what it went without.
+      console.error("[secrets] could not claim a one-run secret for a run:", err instanceof Error ? err.message : err);
+      for (const entry of unclaimed) {
+        delete env[entry.name];
+        delete scopes[entry.name];
+        delete expiresAt[entry.name];
+        if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
+      }
+    }
+  }
+  return { env, names: Object.keys(env), unreadable, scopes, expiresAt };
+}
+
+/**
+ * A run's values carried on to a later spawn of the same run (the account
+ * switch), less every copy whose date has gone by since they were resolved. The
+ * carry is otherwise deliberate — the same run's next try at the same work — but
+ * a dated copy is never handed after its day, whoever is handing it. A store this
+ * box cannot read leaves the carry as it was: nothing is known about any entry.
+ */
+export async function withoutExpiredSecrets(
+  env: Readonly<Record<string, string>>,
+  scopes: Readonly<Record<string, string>>,
+): Promise<Record<string, string>> {
+  let entries: StoredSecret[];
+  try {
+    entries = await readStore();
+  } catch (err) {
+    console.error("[secrets] could not re-check carried secrets for expiry:", err instanceof Error ? err.message : err);
+    return { ...env };
+  }
+  const now = Date.now();
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    const scope = scopes[name] ?? BOX_SCOPE;
+    const entry = entries.find((e) => e.name === name && e.scope === scope);
+    const expiry = entry ? readSecretExpiry(entry.expiresAt) : undefined;
+    if (typeof expiry === "number" && expiry <= now) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * The same cut without the store, for the carry that cannot wait on a read: the
+ * automatic transient retry, respawned synchronously from the child's `close`
+ * handler. `expiresAt` is what the resolve recorded for the dated copies among
+ * `env` (`ResolvedRunSecrets.expiresAt`); a name it does not list is undated.
+ */
+export function withoutPastDueSecrets(
+  env: Readonly<Record<string, string>>,
+  expiresAt: Readonly<Record<string, number>>,
+  now: number = Date.now(),
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    const at = expiresAt[name];
+    if (typeof at === "number" && at <= now) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * The audit line for a hand-off, written by the caller once it KNOWS: after the
+ * child it resolved them for has started (`handed: true` → "inject"), or after
+ * it failed to (`false` → "not_handed", reason "spawn_failed").
+ *
+ * Names only, one line per scope the values came FROM: a box-wide key handed to
+ * a project's run is still a box-wide key, and a line that filed it under the
+ * project would tell the owner the project holds it. Nothing at all for a run
+ * that was handed none. Never throws (appendSecretAudit does not).
+ */
+export async function recordRunSecretsHanded(input: {
+  runId: string;
+  names: readonly string[];
+  scopes: Readonly<Record<string, string>>;
+  handed: boolean;
+}): Promise<void> {
+  const byScope = new Map<string, string[]>();
+  for (const name of input.names) {
+    const scope = input.scopes[name] ?? BOX_SCOPE;
+    byScope.set(scope, [...(byScope.get(scope) ?? []), name]);
+  }
+  for (const [scope, names] of byScope) {
+    await appendSecretAudit(input.handed
+      ? { action: "inject", names, scope, runId: input.runId }
+      : { action: "not_handed", names, scope, runId: input.runId, reason: "spawn_failed" });
+  }
+}
+
+/**
+ * Remove every one-run copy whose run is over. Answers the names removed.
+ *
+ * `isOver` is the caller's: the store knows which run a copy went to
+ * (`usedBy`), never whether that run is still going — the coding agent does.
+ * It calls this when a run ends (finished, failed, stopped, or never started)
+ * and before it hands anything out, which also clears a copy whose run ended
+ * while this server was down. A copy nobody has been handed yet is never
+ * touched.
+ *
+ * One audit line per run and scope, after the store has been written.
+ */
+export async function releaseRunSecrets(isOver: (runId: string) => boolean): Promise<string[]> {
+  return serialised(async () => {
+    const entries = await readStore();
+    const spent = entries.filter((entry) =>
+      readSecretExpiry(entry.expiresAt) === SECRET_EXPIRY_RUN
+      && typeof entry.usedBy === "string"
+      && isOver(entry.usedBy));
+    if (!spent.length) return [];
+    await writeStore(entries.filter((entry) => !spent.includes(entry)));
+    const lines = new Map<string, { runId: string; scope: string; names: string[] }>();
+    for (const entry of spent) {
+      const key = `${entry.usedBy}\u0000${entry.scope}`;
+      const line = lines.get(key) ?? { runId: entry.usedBy!, scope: entry.scope, names: [] };
+      line.names.push(entry.name);
+      lines.set(key, line);
+    }
+    for (const line of lines.values()) {
+      await appendSecretAudit({ action: "delete", names: line.names, scope: line.scope, runId: line.runId, reason: "run_ended" });
+    }
+    return spent.map((entry) => entry.name);
+  });
 }
 
 /**

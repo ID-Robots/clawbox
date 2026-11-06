@@ -1,4 +1,5 @@
 import net from "net";
+import { monotonicNow } from "./monotonic-clock";
 
 /**
  * A port read from the environment, or the caller's default.
@@ -83,10 +84,11 @@ export async function waitForPortOpen(
   { timeoutMs, intervalMs = DEFAULT_WAIT_INTERVAL_MS, probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS }: PortWaitOptions,
 ): Promise<boolean> {
   // A malformed budget must not become an unbounded hot spin: every caller's
-  // timeout comes from `Number(process.env…)`, and `Date.now() + NaN` makes
-  // every later comparison false. Zero means "one probe, then give up".
+  // timeout comes from `Number(process.env…)`, and `now + NaN` makes every
+  // later comparison false. Zero means "one probe, then give up". Monotonic:
+  // the updater waits here at boot, while timesyncd steps the clock.
   const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
-  const deadline = Date.now() + budgetMs;
+  const deadline = monotonicNow() + budgetMs;
   for (;;) {
     // ONE probe may not outlive the WHOLE wait: a connect timeout fired just
     // before the deadline would spend the caller's budget a second time, which
@@ -94,10 +96,10 @@ export async function waitForPortOpen(
     // zero or exhausted budget still asks once, at full length — "give up at
     // once" must not become "never ask". (A positive budget shorter than one
     // probe caps that first probe too, which is the point.)
-    const leftBeforeProbe = deadline - Date.now();
+    const leftBeforeProbe = deadline - monotonicNow();
     const probeMs = leftBeforeProbe > 0 ? Math.min(probeTimeoutMs, leftBeforeProbe) : probeTimeoutMs;
     if (await isPortOpen(port, host, probeMs)) return true;
-    const remaining = deadline - Date.now();
+    const remaining = deadline - monotonicNow();
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
   }

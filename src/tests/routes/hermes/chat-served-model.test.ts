@@ -161,16 +161,18 @@ describe("/setup-api/hermes/chat — what the CLI path records as the served mod
     expect(body).not.toHaveProperty("provider");
   });
 
-  it("does not fill a half from config.yaml on a RESUMED run, which may be on a session override", async () => {
+  it("records no model on a RESUMED run, which the session's own route answers", async () => {
     // The dashboard transport pins per-session overrides with `/model … --session`
     // and a conversation crosses between the transports (an attachment turn is
     // forced onto this one). config.yaml's default is not that session's model,
-    // and whether `-m` even beats such an override is unverified on a box.
+    // and from Hermes v0.22.4 a resumed run carries no `-m` at all (the gateway
+    // refuses one that differs from the session's frozen launch), so neither
+    // the request nor config.yaml is the record: nothing is.
     const res = await post({ message: "hi", model: "deepseek-v4-flash", sessionId: "20260823_185842_1eabd5" });
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ model: "deepseek-v4-flash" });
+    expect(body).not.toHaveProperty("model");
     expect(body).not.toHaveProperty("provider");
     expect(mockReadCurrent).not.toHaveBeenCalled();
   });
@@ -217,5 +219,66 @@ describe("/setup-api/hermes/chat — what the dashboard transport is told about 
     await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" }, stream);
     expect(mockOpenDashboardTurn).toHaveBeenCalledTimes(1);
     expect(mockOpenDashboardTurn.mock.calls[0][0]).not.toHaveProperty("providerIsUserDefined");
+  });
+});
+
+/**
+ * Hermes v0.22.4 runs `hermes chat` through the gateway. Its sessions are named
+ * `local-` + 64 hex (hermes_state_keys.local_identity), which is what the
+ * `session_id:` banner prints, and a resume keeps the session's frozen launch:
+ * a `-m`, `--provider`, `--reasoning` or `-t` that differs from it is refused
+ * with exit 2 ("Resume retains gateway session policy; …").
+ */
+describe("/setup-api/hermes/chat — the CLI path on a gateway-routed Hermes", () => {
+  const LOCAL_ID = `local-${"0123456789abcdef".repeat(4)}`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
+    mockReadCurrent.mockResolvedValue(current("clawai", "deepseek-v4-flash"));
+    mockSpawn.mockImplementation(() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn();
+      setImmediate(() => {
+        child.stderr.emit("data", Buffer.from(`session_id: ${LOCAL_ID}\n`));
+        child.stdout.emit("data", Buffer.from("hello"));
+        child.emit("close", 0);
+      });
+      return child as never;
+    });
+  });
+
+  const chatArgs = () => {
+    const call = mockSpawn.mock.calls.find((c) => (c[1] as string[]).includes("-q"));
+    return (call?.[1] ?? []) as string[];
+  };
+
+  it("threads the gateway's `local-` session id the run prints", async () => {
+    const res = await post({ message: "hi", model: "deepseek-v4-flash" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ sessionId: LOCAL_ID });
+  });
+
+  it("resumes a `local-` id without any creation flag", async () => {
+    const res = await post({
+      message: "and this?", model: "deepseek-v4-flash", provider: "clawai", reasoning: "high", sessionId: LOCAL_ID,
+    });
+
+    expect(res.status).toBe(200);
+    const args = chatArgs();
+    expect(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2)).toEqual(["--resume", LOCAL_ID]);
+    for (const flag of ["-m", "--provider", "--reasoning", "-t"]) expect(args).not.toContain(flag);
+  });
+
+  it("still names the model and provider when it opens a conversation", async () => {
+    await post({ message: "hi", model: "deepseek-v4-flash", provider: "clawai" });
+
+    const args = chatArgs();
+    expect(args.slice(args.indexOf("-m"), args.indexOf("-m") + 2)).toEqual(["-m", "deepseek-v4-flash"]);
+    expect(args.slice(args.indexOf("--provider"), args.indexOf("--provider") + 2)).toEqual(["--provider", "clawai"]);
+    expect(args).not.toContain("--resume");
   });
 });

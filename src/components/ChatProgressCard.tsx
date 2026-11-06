@@ -1,15 +1,18 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { boxNowMs, formatBoxTime } from "@/lib/box-clock";
 import {
   PROGRESS_CARD_COLLAPSED_KEY,
   progressCardAge,
   progressCardCounts,
   progressCardCurrentStep,
   readProgressCardCollapsed,
+  useProgressCardDismissal,
   writeProgressCardCollapsed,
   type ProgressCard,
+  type ProgressCardRefreshState,
   type ProgressStepStatus,
 } from "@/lib/chat-progress-card";
 import {
@@ -36,6 +39,13 @@ import {
 // see CARD_CSS) and scrolls inside itself, so a long card cannot push the text
 // box away.
 // Folding it is remembered in localStorage and shared by both chat surfaces.
+//
+// Beside the header sit the Control UI's controls for putting it away
+// (TASK-2147): refresh (ask the agent to bring the card up to date), clear
+// (trash: the session's saved card, for every client) and dismiss (X: this
+// chat only, until the agent writes a newer card — remembered across reloads).
+// Refresh and clear need a card with a home on the server and are drawn only
+// where the caller hands them in; the X works on any card.
 
 const CARD_BORDER = "1px solid rgba(249,115,22,0.24)";
 const CARD_BG = "rgba(249,115,22,0.06)";
@@ -54,6 +64,11 @@ const AGE_TICK_MS = 30_000;
 // third of the screen — the chat panel is shorter than the window, and on a
 // short screen (a laptop browser, a phone with its keyboard up) the transcript
 // has to keep most of the height. Anything taller scrolls inside the card.
+// The header's break point is measured on the fold toggle, not the card, so
+// the buttons beside it count against the room the title and time have; the
+// buttons grow to a finger's size on a touch screen. The summary has no width
+// of its own (`flex: 1 1 0`): it fills what the time leaves, so on a phone the
+// time stays whole while any summary is left to give up.
 const CARD_CSS = `
 .chat-progress-body { max-height: min(300px, 34dvh); }
 @media (max-height: 760px) { .chat-progress-body { max-height: min(220px, 28dvh); } }
@@ -66,16 +81,22 @@ const CARD_CSS = `
   .chat-progress-spinner { animation: none; }
   .chat-progress-indeterminate { animation: none; transform: translateX(75%); }
 }
-.chat-progress-body a:focus-visible, .chat-progress-toggle:focus-visible { outline: 2px solid ${CORAL}; outline-offset: 2px; }
-.chat-progress-card { container: chat-progress / inline-size; }
+.chat-progress-body a:focus-visible, .chat-progress-toggle:focus-visible, .chat-progress-action:focus-visible { outline: 2px solid ${CORAL}; outline-offset: 2px; }
+.chat-progress-toggle { container: chat-progress / inline-size; }
+.chat-progress-actions { display: flex; align-items: center; gap: 2px; padding-right: 6px; flex-shrink: 0; }
+.chat-progress-action { width: 28px; height: 28px; padding: 0; border: none; border-radius: 8px; background: none; color: ${MUTED_FG}; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.15s, color 0.15s; }
+.chat-progress-action:hover:not([aria-disabled="true"]) { background: rgba(249,115,22,0.15); color: ${CORAL}; }
+.chat-progress-action.chat-progress-danger:hover:not([aria-disabled="true"]) { background: rgba(239,68,68,0.15); color: #f87171; }
+.chat-progress-action[aria-disabled="true"] { cursor: default; }
+@media (pointer: coarse) { .chat-progress-action { width: 34px; height: 34px; } }
 .chat-progress-head { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
 .chat-progress-title { flex-shrink: 0; }
 .chat-progress-meta { display: contents; }
 .chat-progress-sep { flex-shrink: 0; }
 .chat-progress-time, .chat-progress-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chat-progress-time { flex-shrink: 1; }
-.chat-progress-summary { flex-shrink: 1000; }
-@container chat-progress (max-width: 400px) {
+.chat-progress-summary { flex: 1 1 0; }
+@container chat-progress (max-width: 374px) {
   .chat-progress-head { flex-direction: column; align-items: stretch; gap: 1px; }
   .chat-progress-title { overflow: hidden; text-overflow: ellipsis; }
   .chat-progress-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; }
@@ -83,11 +104,32 @@ const CARD_CSS = `
 }
 `;
 
-export function ChatProgressCard({ card }: { card: ProgressCard }) {
+export function ChatProgressCard({
+  card,
+  onClear,
+  onRefresh,
+  refreshState = "idle",
+}: {
+  card: ProgressCard;
+  /**
+   * Clear the session's saved card (the trash). Resolves true once it is
+   * gone, false when a newer card was kept instead; rejects on a refusal.
+   * Absent where the card has no server-side state to clear.
+   */
+  onClear?: (card: ProgressCard) => Promise<boolean>;
+  /** Ask the agent to bring the card up to date. Absent where nothing can. */
+  onRefresh?: () => void;
+  refreshState?: ProgressCardRefreshState;
+}) {
   const { t, locale } = useT();
   const bodyId = useId();
   const [collapsed, setCollapsed] = useState(() => readProgressCardCollapsed());
-  const [now, setNow] = useState(() => Date.now());
+  // The box's clock (src/lib/box-clock.ts): the gateway stamped `updatedAt`.
+  const [now, setNow] = useState(() => boxNowMs());
+  const { dismissed, dismiss, forget } = useProgressCardDismissal(card);
+  const sectionRef = useRef<HTMLElement>(null);
+  // A clear in flight, or the one that failed — for the revision it was asked on.
+  const [clearing, setClearing] = useState<{ revision: number; state: "pending" | "failed" } | null>(null);
 
   // A second chat surface (the popup and the full page in two tabs) folding the card folds this one.
   useEffect(() => {
@@ -102,7 +144,7 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   // revision re-reads the clock at once so it never says "5m ago" for a write
   // that just landed.
   useEffect(() => {
-    const tick = () => setNow(Date.now());
+    const tick = () => setNow(boxNowMs());
     const first = window.setTimeout(tick, 0);
     const timer = window.setInterval(tick, AGE_TICK_MS);
     return () => {
@@ -118,25 +160,68 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
 
   // Everything the agent wrote was stripped (a note of nothing but raw HTML): nothing left to show.
   if (blocks.length === 0 && card.steps.length === 0) return null;
+  // The owner put this very card away; the agent's next write brings it back.
+  if (dismissed) return null;
 
   const age = progressCardAge(card.updatedAt, now);
+  const updatedIso = card.updatedAt !== null ? new Date(card.updatedAt).toISOString() : undefined;
+  const updatedFull = card.updatedAt !== null ? formatBoxTime(card.updatedAt, locale) : undefined;
+  // Far ahead of the box's clock there is no age to give: the time itself.
   const agoText = age === null
     ? null
-    : age.unit === "now"
-      ? t("chat.progressCard.justNow")
-      : age.unit === "minutes"
-        ? t("chat.progressCard.minutesAgo", { n: age.n })
-        : age.unit === "hours"
-          ? t("chat.progressCard.hoursAgo", { n: age.n })
-          : t("chat.progressCard.daysAgo", { n: age.n });
-  const updatedIso = card.updatedAt !== null ? new Date(card.updatedAt).toISOString() : undefined;
-  const updatedFull = card.updatedAt !== null ? formatLocalTime(card.updatedAt, locale) : undefined;
+    : age.unit === "ahead"
+      ? updatedFull ?? null
+      : age.unit === "now"
+        ? t("chat.progressCard.justNow")
+        : age.unit === "minutes"
+          ? t("chat.progressCard.minutesAgo", { n: age.n })
+          : age.unit === "hours"
+            ? t("chat.progressCard.hoursAgo", { n: age.n })
+            : t("chat.progressCard.daysAgo", { n: age.n });
 
   const toggle = () => {
     const next = !collapsed;
     setCollapsed(next);
     writeProgressCardCollapsed(next);
   };
+
+  // Busy buttons stay focusable (aria-disabled, not disabled), so a keyboard
+  // user's focus is not dropped while a request is out; a button that takes
+  // the card away hands that focus on past it, to the composer.
+  const clearPending = clearing?.state === "pending";
+  const clear = (event: MouseEvent<HTMLButtonElement>) => {
+    if (!onClear || clearPending) return;
+    const next = viaKeyboard(event) ? focusTargetAfter(sectionRef.current) : null;
+    const revision = card.revision;
+    setClearing({ revision, state: "pending" });
+    onClear(card).then(
+      (gone) => {
+        if (gone) {
+          forget();
+          next?.focus();
+        }
+        setClearing(null);
+      },
+      () => setClearing({ revision, state: "failed" }),
+    );
+  };
+  const putAway = (event: MouseEvent<HTMLButtonElement>) => {
+    const next = viaKeyboard(event) ? focusTargetAfter(sectionRef.current) : null;
+    dismiss();
+    next?.focus();
+  };
+
+  // What the last clear or refresh came to, when it did not do what was asked.
+  // A newer card answers the clear's failure (it was about the old one).
+  const notice = clearing?.state === "failed" && clearing.revision === card.revision
+    ? t("chat.progressCard.clearFailed")
+    : refreshState === "failed"
+      ? t("chat.progressCard.refreshFailed")
+      : refreshState === "timeout"
+        ? t("chat.progressCard.refreshTimeout")
+        : null;
+  const refreshPending = refreshState === "pending";
+  const refreshLabel = refreshPending ? t("chat.progressCard.refreshPending") : t("chat.progressCard.refresh");
 
   const statusLabel = (status: ProgressStepStatus) =>
     status === "completed"
@@ -147,6 +232,7 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
 
   return (
     <section
+      ref={sectionRef}
       className="chat-progress-card"
       data-testid="chat-progress-card"
       data-collapsed={collapsed ? "true" : "false"}
@@ -156,86 +242,143 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
     >
       <style>{CARD_CSS}</style>
       <div style={{ border: CARD_BORDER, background: CARD_BG, borderRadius: 10, overflow: "hidden" }}>
-        <button
-          type="button"
-          className="chat-progress-toggle"
-          data-testid="chat-progress-card-toggle"
-          aria-expanded={!collapsed}
-          aria-controls={bodyId}
-          title={collapsed ? t("chat.progressCard.expand") : t("chat.progressCard.collapse")}
-          onClick={toggle}
-          style={{
-            width: "100%", minHeight: 36, display: "flex", alignItems: "center", gap: 8,
-            padding: "6px 10px", border: "none", background: "none", cursor: "pointer",
-            color: BODY_FG, fontFamily: "inherit", fontSize: 12.5, textAlign: "left",
-          }}
-        >
-          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 17, color: CORAL, flexShrink: 0 }}>
-            checklist
-          </span>
-          {/* One line where it fits. On a narrow card (a phone, a long locale)
-              the time and summary move under the title; either way the summary
-              gives way first and the time last, with an ellipsis, never cut. */}
-          <span className="chat-progress-head">
-            <span data-testid="chat-progress-card-title" className="chat-progress-title" style={{ fontWeight: 600, color: TITLE_FG }}>
-              {t("chat.progressCard.title")}
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <button
+            type="button"
+            className="chat-progress-toggle"
+            data-testid="chat-progress-card-toggle"
+            aria-expanded={!collapsed}
+            aria-controls={bodyId}
+            title={collapsed ? t("chat.progressCard.expand") : t("chat.progressCard.collapse")}
+            onClick={toggle}
+            style={{
+              flex: 1, minWidth: 0, minHeight: 36, display: "flex", alignItems: "center", gap: 8,
+              padding: "6px 6px 6px 10px", border: "none", background: "none", cursor: "pointer",
+              color: BODY_FG, fontFamily: "inherit", fontSize: 12.5, textAlign: "left",
+            }}
+          >
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 17, color: CORAL, flexShrink: 0 }}>
+              checklist
             </span>
-            {(agoText !== null || summary) && (
-              <span className="chat-progress-meta">
-                {agoText !== null && (
-                  <>
-                    <span className="chat-progress-sep" aria-hidden="true" style={{ color: MUTED_FG }}>·</span>
-                    <time
-                      data-testid="chat-progress-card-updated"
-                      className="chat-progress-time"
-                      dateTime={updatedIso}
-                      title={updatedFull}
-                      style={{ color: MUTED_FG, fontSize: 11.5 }}
-                    >
-                      {t("chat.progressCard.updated", { ago: agoText })}
-                    </time>
-                  </>
-                )}
-                {summary && (
-                  <>
-                    <span className="chat-progress-sep" aria-hidden="true" style={{ color: MUTED_FG }}>·</span>
-                    <span
-                      data-testid="chat-progress-card-summary"
-                      className="chat-progress-summary"
-                      style={{ color: "rgba(255,255,255,0.72)" }}
-                    >
-                      {summary}
-                    </span>
-                  </>
-                )}
+            {/* One line where it fits. On a narrow card (a phone, a long locale)
+                the time and summary move under the title; either way the summary
+                gives way first and the time last, with an ellipsis, never cut. */}
+            <span className="chat-progress-head">
+              <span data-testid="chat-progress-card-title" className="chat-progress-title" style={{ fontWeight: 600, color: TITLE_FG }}>
+                {t("chat.progressCard.title")}
+              </span>
+              {(agoText !== null || summary) && (
+                <span className="chat-progress-meta">
+                  {agoText !== null && (
+                    <>
+                      <span className="chat-progress-sep" aria-hidden="true" style={{ color: MUTED_FG }}>·</span>
+                      <time
+                        data-testid="chat-progress-card-updated"
+                        className="chat-progress-time"
+                        dateTime={updatedIso}
+                        title={updatedFull}
+                        style={{ color: MUTED_FG, fontSize: 11.5 }}
+                      >
+                        {t("chat.progressCard.updated", { ago: agoText })}
+                      </time>
+                    </>
+                  )}
+                  {summary && (
+                    <>
+                      <span className="chat-progress-sep" aria-hidden="true" style={{ color: MUTED_FG }}>·</span>
+                      <span
+                        data-testid="chat-progress-card-summary"
+                        className="chat-progress-summary"
+                        style={{ color: "rgba(255,255,255,0.72)" }}
+                      >
+                        {summary}
+                      </span>
+                    </>
+                  )}
+                </span>
+              )}
+            </span>
+            {total > 0 && (
+              <span
+                data-testid="chat-progress-card-count"
+                style={{
+                  flexShrink: 0, fontSize: 11, fontWeight: 600, fontVariantNumeric: "tabular-nums",
+                  padding: "1px 7px", borderRadius: 999,
+                  color: done === total ? DONE_GREEN : TITLE_FG,
+                  background: done === total ? "rgba(34,197,94,0.12)" : "rgba(249,115,22,0.14)",
+                }}
+              >
+                {/* The words are for assistive tech, the figures for the eye: an
+                    aria-label on a role-less span is prohibited and not reliably
+                    read, so the spoken form is real (visually hidden) text. */}
+                <span aria-hidden="true">{done}/{total}</span>
+                <span className="sr-only" data-testid="chat-progress-card-count-label">{t("chat.progressCard.count", { done, total })}</span>
               </span>
             )}
-          </span>
-          {total > 0 && (
             <span
-              data-testid="chat-progress-card-count"
-              style={{
-                flexShrink: 0, fontSize: 11, fontWeight: 600, fontVariantNumeric: "tabular-nums",
-                padding: "1px 7px", borderRadius: 999,
-                color: done === total ? DONE_GREEN : TITLE_FG,
-                background: done === total ? "rgba(34,197,94,0.12)" : "rgba(249,115,22,0.14)",
-              }}
+              className="material-symbols-rounded"
+              aria-hidden="true"
+              style={{ fontSize: 18, color: MUTED_FG, flexShrink: 0, transition: "transform 120ms ease", transform: collapsed ? "none" : "rotate(180deg)" }}
             >
-              {/* The words are for assistive tech, the figures for the eye: an
-                  aria-label on a role-less span is prohibited and not reliably
-                  read, so the spoken form is real (visually hidden) text. */}
-              <span aria-hidden="true">{done}/{total}</span>
-              <span className="sr-only" data-testid="chat-progress-card-count-label">{t("chat.progressCard.count", { done, total })}</span>
+              expand_more
             </span>
-          )}
-          <span
-            className="material-symbols-rounded"
-            aria-hidden="true"
-            style={{ fontSize: 18, color: MUTED_FG, flexShrink: 0, transition: "transform 120ms ease", transform: collapsed ? "none" : "rotate(180deg)" }}
-          >
-            expand_more
-          </span>
-        </button>
+          </button>
+          <div className="chat-progress-actions">
+            {onRefresh && (
+              <button
+                type="button"
+                className="chat-progress-action"
+                data-testid="chat-progress-card-refresh"
+                data-state={refreshState}
+                aria-label={refreshLabel}
+                aria-busy={refreshPending || undefined}
+                title={refreshLabel}
+                aria-disabled={refreshPending || undefined}
+                onClick={() => { if (!refreshPending) onRefresh(); }}
+              >
+                <span
+                  className={refreshPending ? "material-symbols-rounded chat-progress-spinner" : "material-symbols-rounded"}
+                  aria-hidden="true"
+                  style={{ fontSize: 17 }}
+                >
+                  refresh
+                </span>
+              </button>
+            )}
+            {onClear && (
+              <button
+                type="button"
+                className="chat-progress-action chat-progress-danger"
+                data-testid="chat-progress-card-clear"
+                aria-label={t("chat.progressCard.clear")}
+                aria-busy={clearPending || undefined}
+                title={t("chat.progressCard.clear")}
+                aria-disabled={clearPending || undefined}
+                onClick={clear}
+              >
+                <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 17 }}>delete</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="chat-progress-action"
+              data-testid="chat-progress-card-dismiss"
+              aria-label={t("chat.progressCard.dismiss")}
+              title={t("chat.progressCard.dismissHint")}
+              onClick={putAway}
+            >
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>close</span>
+            </button>
+          </div>
+        </div>
+        {/* Always in the tree, so a screen reader hears the notice when it appears. */}
+        <div
+          role="status"
+          data-testid="chat-progress-card-notice"
+          style={notice ? { padding: "0 12px 6px 35px", color: "#fca5a5", fontSize: 11.5, lineHeight: 1.4 } : undefined}
+        >
+          {notice}
+        </div>
         {!collapsed && (
           <div
             id={bodyId}
@@ -289,6 +432,31 @@ export function ChatProgressCard({ card }: { card: ProgressCard }) {
   );
 }
 
+/** A click made with Enter or Space (no pointer press), where moving the focus is expected. */
+function viaKeyboard(event: MouseEvent): boolean {
+  return event.detail === 0;
+}
+
+const TEXT_ENTRY = "textarea, [contenteditable='true']";
+const FOCUSABLE = "textarea, input:not([type=hidden]):not([type=file]), button, select, [contenteditable='true'], [tabindex]:not([tabindex='-1'])";
+
+/**
+ * Where the focus goes when the card is taken away from under it: the first
+ * text box after the card (the composer), else the first control there.
+ */
+function focusTargetAfter(section: HTMLElement | null): HTMLElement | null {
+  const usable = (el: HTMLElement) =>
+    !el.matches(":disabled") && !el.closest("[hidden], [aria-hidden='true']") && getComputedStyle(el).display !== "none" && getComputedStyle(el).visibility !== "hidden";
+  for (const selector of [TEXT_ENTRY, FOCUSABLE]) {
+    for (let sibling = section?.nextElementSibling ?? null; sibling; sibling = sibling.nextElementSibling) {
+      const found = [sibling, ...Array.from(sibling.querySelectorAll(selector))]
+        .find((el): el is HTMLElement => el instanceof HTMLElement && el.matches(selector) && usable(el));
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function StepIcon({ status }: { status: ProgressStepStatus }) {
   const box: CSSProperties = { width: 18, height: 19, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" };
   if (status === "in_progress") {
@@ -327,14 +495,6 @@ function firstLine(blocks: ProgressBlock[]): string | null {
     }
   }
   return null;
-}
-
-function formatLocalTime(ms: number, locale: string): string | undefined {
-  try {
-    return new Date(ms).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
-  } catch {
-    return undefined;
-  }
 }
 
 // ── The note ────────────────────────────────────────────────────────────────

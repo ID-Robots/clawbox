@@ -96,7 +96,7 @@ export const AMBIENT_ANIMATIONS: ReadonlySet<string> = new Set([
  * are one recalc per step (15 a second). So the animations are looked up once
  * per commit — a render is what adds or drops one, or swaps the body's — and
  * picked by `animationName`, which reads without a flush. (The same trap the
- * team tree's stepped connectors hit, CodingTeamTree.tsx.)
+ * agent chart's stepped connectors hit, src/lib/coding-agent-flow.ts.)
  *
  * `activeRef` is the commit's own answer. A commit that ends the rest runs its
  * layout effects at once but this effect's cleanup only later, and a step in
@@ -175,6 +175,14 @@ const CRAB_BODY_PX = 150
  */
 const CRAB_ART_PX = 78
 const CRAB_ART_BOTTOM_PX = 42
+/**
+ * The still crab with its eyes shut, worn by the fail-open body while it
+ * sleeps — the still above has them open, and a sleeping crab must not.
+ * Cut from the sheet's sleep row by scripts/generate-crab-still.mjs at the
+ * same scale and foot line as `/clawbox-crab.png`, so swapping the two moves
+ * nothing but the eyes.
+ */
+const CRAB_SLEEP_SRC = '/clawbox-crab-sleep.png'
 
 /**
  * Clearance between the top of the pet's VISIBLE ART and its bubble.
@@ -2179,7 +2187,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
               />
             </>
           ) : (
-            <img src="/clawbox-crab.png" alt="" draggable={false} style={{
+            // Thinking outranks sleep, as it does for `bodyAnim` and the pet.
+            <img src={state === 'sleep' && !thinking ? CRAB_SLEEP_SRC : '/clawbox-crab.png'} alt="" draggable={false} style={{
               position: 'absolute', bottom: CRAB_ART_BOTTOM_PX, left: (CRAB_BODY_PX - CRAB_ART_PX) / 2,
               width: CRAB_ART_PX, height: CRAB_ART_PX, objectFit: 'contain',
             }} />

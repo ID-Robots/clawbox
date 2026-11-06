@@ -21,7 +21,7 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { runChild } from "@/lib/child-run";
-import { EXTRACTABLE_EXTENSIONS } from "@/lib/memory-shard-state";
+import { EXTRACTABLE_EXTENSIONS, INDEXABLE_EXTENSIONS } from "@/lib/memory-shard-state";
 
 /** Where derived Markdown lives. One folder per source. */
 export const EXTRACT_ROOT = path.join(DATA_DIR, "memory-extracted");
@@ -136,7 +136,19 @@ export function newWalkBudget(): WalkBudget {
   return { left: MAX_ENTRIES, truncated: false, unreadable: 0, rootUnreadable: false };
 }
 
-export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
+/**
+ * What a caller may leave out of a walk besides dot-entries. `skipDir` is
+ * asked with the folder's full path and its name before the walk goes in, so
+ * a caller can keep build output, caches or its own output folder out of the
+ * documents it reads; it may answer later (a promise), to look inside the
+ * folder first. The folder the walk starts at is never asked. Memory Shard
+ * passes none.
+ */
+export interface WalkOptions {
+  skipDir?: (full: string, name: string) => boolean | Promise<boolean>;
+}
+
+export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0, options: WalkOptions = {}): AsyncGenerator<string> {
   if (depth > MAX_DEPTH) return;
   // opendir, not readdir: readdir hands back the WHOLE listing as one array
   // before a single entry can be charged, so a directory of a million files
@@ -164,7 +176,10 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): As
       const full = path.join(dir, entry.name);
       // isDirectory() is false for a symlink, which is what keeps a link loop out
       // of the walk — the same reason the folder picker reads it this way.
-      if (entry.isDirectory()) yield* walkFiles(full, budget, depth + 1);
+      if (entry.isDirectory()) {
+        if (options.skipDir && (await options.skipDir(full, entry.name))) continue;
+        yield* walkFiles(full, budget, depth + 1, options);
+      }
       else if (entry.isFile()) yield full;
     }
   } catch {
@@ -176,8 +191,54 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): As
   }
 }
 
-/** Extract one document to Markdown. Returns false when it could not be read. */
-async function extractOne(file: string, out: string): Promise<boolean> {
+/** What a folder would give the memory index, counted without reading a file. */
+export interface SourceFileCount {
+  /** Files a pass would index: the markdown, plus the documents it converts (up to its cap). */
+  files: number;
+  markdown: number;
+  /** PDFs and office documents, converted to text before they are indexed. */
+  documents: number;
+  /** Documents past the per-folder conversion cap, which a pass leaves out. */
+  documentsOverCap: number;
+  /** False when part of the folder could not be read or the walk ran out of budget: the count is a floor. */
+  complete: boolean;
+}
+
+/**
+ * Count what adding `dir` as a Memory Shard folder would read, walking it the
+ * way a pass does — dot-entries and symlinks skipped, {@link MAX_DEPTH} levels,
+ * the same entry budget — and opening nothing. What the folder picker's
+ * "adding this folder reads N files" needs, and cheap enough to answer inside
+ * the request that adds it.
+ */
+export async function countSourceFiles(dir: string): Promise<SourceFileCount> {
+  const budget = newWalkBudget();
+  let markdown = 0;
+  let documents = 0;
+  const indexable = INDEXABLE_EXTENSIONS as readonly string[];
+  const extractable = EXTRACTABLE_EXTENSIONS as readonly string[];
+  for await (const file of walkFiles(path.resolve(dir), budget)) {
+    const ext = path.extname(file).toLowerCase();
+    if (indexable.includes(ext)) markdown += 1;
+    else if (extractable.includes(ext)) documents += 1;
+  }
+  const converted = Math.min(documents, MAX_FILES);
+  return {
+    files: markdown + converted,
+    markdown,
+    documents,
+    documentsOverCap: documents - converted,
+    complete: !budget.rootUnreadable && budget.unreadable === 0 && !budget.truncated,
+  };
+}
+
+/**
+ * Extract one document to text at `out`. Returns false when it could not be
+ * read. `.txt`/`.md` are copied, `.pdf` goes through pdftotext, everything
+ * else through LibreOffice. Exported for Prime Radiant's ingest, which uses
+ * the same extractors rather than a second set.
+ */
+export async function extractOne(file: string, out: string): Promise<boolean> {
   const ext = path.extname(file).toLowerCase();
 
   if (ext === ".txt" || ext === ".md") {

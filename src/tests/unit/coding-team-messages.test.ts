@@ -146,13 +146,13 @@ describe("how a message is worded to its reader", () => {
     expect(runMessageTurn("use port 8080")).toBe(
       "[ClawBox: a message from the person who started this run. It is about the task you are already on — take it into account and carry on; do not start over.]\n\nuse port 8080",
     );
-    expect(runMessagesNote([{ at: 1, text: "use port 8080", deliveredAt: null }])).toMatch(/^\[ClawBox: a message from the person who started this run, sent while it was working\./);
+    expect(runMessagesNote([{ id: "m-00000001", at: 1, text: "use port 8080", deliveredAt: null }])).toMatch(/^\[ClawBox: a message from the person who started this run, sent while it was working\./);
   });
 
   it("names both senders when a teammate's message rides out with the owner's at a boundary", () => {
     const note = runMessagesNote([
-      { at: 1, text: "use port 8080", deliveredAt: null },
-      { at: 2, text: `${teammatePrefix("worker", B)} done with the cart`, deliveredAt: null },
+      { id: "m-00000001", at: 1, text: "use port 8080", deliveredAt: null },
+      { id: "m-00000002", at: 2, text: `${teammatePrefix("worker", B)} done with the cart`, deliveredAt: null },
     ]);
     expect(note).toMatch(/2 messages sent while this run was working — from the person who started it, or, where a message starts \[from <role> <run>\]/);
     expect(note).toMatch(/do not answer a teammate just to acknowledge it/);

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { translations } from "@/lib/translations";
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
@@ -35,8 +36,8 @@ const DE = translations.de;
 const CLAWAI_CATALOG = {
   provider: "clawai",
   models: [
-    { id: "deepseek-v4-flash", label: "Free/Pro Tier", contextWindow: 1_000_000, input: "text", hint: "Default. Faster." },
-    { id: "deepseek-v4-pro", label: "Max Tier", contextWindow: 1_000_000, input: "text", hint: "1.6T frontier model. Max plan only." },
+    { id: "deepseek-v4-flash", label: "Free/Pro Tier", contextWindow: 1_000_000, input: "text", hint: "DeepSeek V4 Flash. Default." },
+    { id: "deepseek-v4-pro", label: "Max Tier", contextWindow: 1_000_000, input: "text", hint: "DeepSeek V4 Flash. Max plan only." },
   ],
   defaultModelId: "deepseek-v4-flash",
   allowCustom: false,
@@ -99,6 +100,10 @@ function installFetch(status: unknown, initialModel = ON_PRO) {
     vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       calls.push({ url, init });
+      // The owner's desktop: the automatic Flash switch is the owner's alone.
+      if (url.includes("/setup-api/users/me")) {
+        return { ok: true, json: async () => ({ username: "clawbox", isOwner: true, multiUser: false, openclawShared: false }) };
+      }
       if (url.includes("/setup-api/harness/active")) {
         return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
       }
@@ -150,6 +155,7 @@ class RefusedSocket {
 
 beforeEach(() => {
   resetHarnessCache();
+  _resetSessionUserForTest();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal("WebSocket", InertSocket);
@@ -171,7 +177,7 @@ describe("the chat composer's ClawBox AI model chip on a German desktop", () => 
     // everything this test already guarded — no picker, no tier vocabulary, no
     // catalogue fetch, one model write — still holds.
     await screen.findByRole("button", { name: /ClawBox/ });
-    expect(screen.queryByText("Flash 4.1")).toBeNull();
+    expect(screen.queryByText("DeepSeek V4 Flash")).toBeNull();
     expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(calls.filter((call) => call.url.includes("/setup-api/ai-models/catalog"))).toHaveLength(0);
@@ -222,7 +228,7 @@ describe("the automatic switch to Flash on a German desktop", () => {
     await waitFor(() => expect(modelWrites(calls)).toBe(1));
     // The write above is the synchronisation point the model name used to be.
     await screen.findByRole("button", { name: /ClawBox/ });
-    expect(screen.queryByText("Flash 4.1")).toBeNull();
+    expect(screen.queryByText("DeepSeek V4 Flash")).toBeNull();
     const write = calls.find((call) => call.init?.method === "POST" && call.url.includes("/setup-api/chat/model"));
     expect(JSON.parse(String(write?.init?.body))).toEqual({ model: ON_FLASH, automatic: true });
     expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();

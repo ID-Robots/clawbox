@@ -7,7 +7,10 @@
  * answer is the owner's OWN Anthropic access — either the native `claude`
  * login in their home, or an API key they saved on the box — which buys them
  * Claude's own models for a run when the ClawBox AI plan's DeepSeek tier is
- * not what the task needs.
+ * not what the task needs. The third is the owner's OWN OpenAI access — a
+ * ChatGPT sign-in or an API key — and it is the one provider that does not
+ * run on Claude Code at all: an `openai` run is the Codex CLI (`codex exec`),
+ * see src/lib/coding-codex.ts and src/lib/coding-openai.ts.
  *
  * PURE ON PURPOSE. No `fs`, no `child_process`, no config store: the MCP
  * server imports this to validate its own arguments before it ever reaches
@@ -26,7 +29,7 @@
  */
 
 /** The providers a run may be started against, default first. */
-export const CODING_PROVIDERS = ["clawbox-ai", "anthropic"] as const;
+export const CODING_PROVIDERS = ["clawbox-ai", "anthropic", "openai"] as const;
 
 export type CodingProvider = (typeof CODING_PROVIDERS)[number];
 
@@ -39,6 +42,14 @@ export const DEFAULT_CODING_PROVIDER: CodingProvider = "clawbox-ai";
 
 /** The owner's default, in data/config.json. */
 export const CODING_AGENT_PROVIDER_CONFIG_KEY = "coding_agent_provider";
+/**
+ * The providers the owner CONNECTED to the coding agent (Settings → Coding
+ * agent → Connected providers, 2026-10-28): a team may run on several accounts
+ * at once, one per role. A record from before the list reads as the default
+ * provider alone (`CODING_AGENT_PROVIDER_CONFIG_KEY`), which is what every box
+ * ran on until then.
+ */
+export const CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY = "coding_agent_providers";
 
 /**
  * The owner's Anthropic API key, beside `clawai_token` in the same 0600
@@ -55,7 +66,10 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * an unknown model id is a failed run several minutes in, and the picker's
  * job is to make that impossible from here.
  *
- * Default first. `claude-opus-5` stays on the list behind the 5.5 default
+ * Default first. `claude-fable-5-1` is offered beside it, never instead of it:
+ * a run nobody named a model for still lands on Opus 5.5.
+ *
+ * `claude-opus-5` stays on the list behind the 5.5 default
  * rather than retiring with it, because this list is the fence for what a
  * caller ASKS FOR: the MCP tool's `model` enum, the run route, and a
  * follow-up run that re-states the model of the run it continues all go
@@ -68,12 +82,79 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * (`normalizeRequestedModel`). So dropping an id here does not stop one
  * already on a run record — it only stops the next caller naming it.
  */
-export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"] as const;
+export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"] as const;
 
 export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 
 /** The model an `anthropic` run gets when the caller named none. */
 export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
+
+/**
+ * The models offered for an `openai` run — the Codex CLI's own picker list.
+ *
+ * Read off the CLI rather than chosen here: `codex debug models` (codex-cli
+ * 0.154.0) marks exactly these `visibility: list`, highest priority first. The
+ * hidden ones beside them are a security research tier, retired ids the CLI
+ * itself migrates away from (gpt-5.4, gpt-5.4-mini) and its own approval
+ * reviewer — none of them a model a coding run should be started on.
+ *
+ * The same fence as ANTHROPIC_MODELS: what a caller may ASK for, never what a
+ * stored record may carry.
+ */
+export const OPENAI_MODELS = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.2"] as const;
+
+export type OpenAIModel = (typeof OPENAI_MODELS)[number];
+
+/**
+ * The model an `openai` run gets when the caller named none: the CLI's own
+ * default, which is what `codex exec` reports in its header with nothing
+ * configured (`model: gpt-6-astra`). Named explicitly rather than left to the
+ * CLI so the record says which model ran and a resume re-enters on it.
+ */
+export const DEFAULT_OPENAI_MODEL: OpenAIModel = "gpt-6-astra";
+
+/**
+ * The owner's OpenAI API key, in the device secret store beside the Anthropic
+ * account pool's credentials (src/lib/project-secrets.ts, device scope) —
+ * never data/config.json, never a route's answer, never a log line. A run gets
+ * it as `CODEX_API_KEY`, the variable `codex exec` authenticates with.
+ */
+export const OPENAI_SECRET_SCOPE = "@openai-coding";
+export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
+
+/**
+ * The CHEAPER model of each provider: what a coding team's role runs on when
+ * the owner stored the `economy` tier for it (src/lib/coding-role-models.ts;
+ * a role with nothing stored runs on `ROLE_DEFAULT_MODELS` there instead).
+ *
+ * On `clawbox-ai` it is the plan's flash tier, which EVERY plan may use (the
+ * wrapper's own fallback and its small model — see scripts/claude-ds), and
+ * every team role's default there too. It is the one model a `clawbox-ai` run's record may carry
+ * (`isRecordableModel`); a CALLER still cannot name one for that provider.
+ *
+ * On `openai` it is the one the CLI's own catalogue describes as its fast and
+ * affordable coding model, gpt-5.6-luna.
+ */
+export const ECONOMY_MODELS: Readonly<Record<CodingProvider, string>> = {
+  "clawbox-ai": "deepseek-v4-flash",
+  anthropic: "claude-sonnet-5",
+  openai: "gpt-5.6-luna",
+};
+
+/** The cheaper model of this provider. */
+export function economyModelForProvider(provider: CodingProvider): string {
+  return ECONOMY_MODELS[provider];
+}
+
+/**
+ * May a run of this provider carry this model on its record? Anything the
+ * provider lets a caller name, and its economy model — which, on a provider
+ * whose plan picks the model, only the box itself ever sets.
+ */
+export function isRecordableModel(provider: CodingProvider, model: unknown): model is string {
+  if (typeof model !== "string" || !model) return false;
+  return modelsForProvider(provider).includes(model) || model === ECONOMY_MODELS[provider];
+}
 
 /**
  * The catalogue key that names a provider in the owner's language.
@@ -89,6 +170,7 @@ export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
 export const CODING_PROVIDER_NAME_KEY: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "codingAgent.providerName.clawboxAi",
   anthropic: "codingAgent.providerName.anthropic",
+  openai: "codingAgent.providerName.openai",
 };
 
 export function isCodingProvider(value: unknown): value is CodingProvider {
@@ -100,6 +182,13 @@ export function codingProviderFrom(raw: unknown): CodingProvider {
   return isCodingProvider(raw) ? raw : DEFAULT_CODING_PROVIDER;
 }
 
+/** The connected providers off the record, in their stored order, unknown ids and repeats dropped; no usable list → the default provider alone. */
+export function connectedProvidersFrom(raw: unknown, fallback: CodingProvider): CodingProvider[] {
+  const out: CodingProvider[] = [];
+  if (Array.isArray(raw)) for (const id of raw) if (isCodingProvider(id) && !out.includes(id)) out.push(id);
+  return out.length > 0 ? out : [fallback];
+}
+
 /**
  * The models a caller may name for this provider.
  *
@@ -109,12 +198,53 @@ export function codingProviderFrom(raw: unknown): CodingProvider {
  * rather than pretending to honour it.
  */
 export function modelsForProvider(provider: CodingProvider): readonly string[] {
-  return provider === "anthropic" ? ANTHROPIC_MODELS : [];
+  if (provider === "anthropic") return ANTHROPIC_MODELS;
+  if (provider === "openai") return OPENAI_MODELS;
+  return [];
 }
 
 /** The model an unnamed run gets, or null where the plan decides. */
 export function defaultModelForProvider(provider: CodingProvider): string | null {
-  return provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : null;
+  if (provider === "anthropic") return DEFAULT_ANTHROPIC_MODEL;
+  if (provider === "openai") return DEFAULT_OPENAI_MODEL;
+  return null;
+}
+
+/** Does this provider's run go through the Codex CLI rather than Claude Code? */
+export function runsOnCodex(provider: CodingProvider): boolean {
+  return provider === "openai";
+}
+
+/**
+ * The providers the settings panel OFFERS — its account rows, its per-role
+ * selects and the OpenAI card, which all read `status.providers` — as against
+ * CODING_PROVIDERS, what the box can run at all.
+ *
+ * Every provider but `openai` is always offered. `openai` runs on the Codex
+ * CLI (install.sh's `codex_cli` step, `isCodexInstalled` in coding-openai.ts),
+ * and on a box without it the row and the card could only ever say "install
+ * the CLI": noise on every box whose owner never asked for OpenAI (2026-10-30).
+ * So it is offered when the CLI is there, OR when the owner already has it —
+ * a saved credential, a place on the connected list, or the default — so an
+ * account that was set up and then lost its CLI stays visible, with the
+ * readiness check's reason beside it, rather than vanishing.
+ *
+ * Only what the panel shows. The run route and the MCP tool still accept the
+ * id (CODING_PROVIDERS) and refuse an `openai` run for the missing CLI in words.
+ */
+export function offeredProviders(state: {
+  codexInstalled: boolean;
+  openaiConnected: boolean;
+  connected: readonly CodingProvider[];
+  defaultProvider: CodingProvider;
+}): CodingProvider[] {
+  return CODING_PROVIDERS.filter((id) =>
+    !runsOnCodex(id)
+    || state.codexInstalled
+    || state.openaiConnected
+    || state.connected.includes(id)
+    || state.defaultProvider === id,
+  );
 }
 
 /**
@@ -156,7 +286,7 @@ export function resolveRunProvider(
     // selector exists to make visible.
     return {
       ok: false,
-      error: "ClawBox AI chooses the model from the box's plan, so a model cannot be named for it. Use provider \"anthropic\" to choose a model.",
+      error: "ClawBox AI chooses the model from the box's plan, so a model cannot be named for it. Use provider \"anthropic\" or \"openai\" to choose a model.",
     };
   }
   if (!allowed.includes(model)) {

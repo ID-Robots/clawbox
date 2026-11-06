@@ -4,5 +4,6 @@
   "description": "A vibrant orange crab with oversized claws, expressive eyes, a golden cube emblem, and nine animated states.",
   "version": "2.1.0",
   "spriteVersionNumber": 1,
-  "spritesheetPath": "spritesheet.webp"
+  "spritesheetPath": "spritesheet.webp",
+  "sleepFrames": [0, 1, 2]
 }

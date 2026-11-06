@@ -36,6 +36,10 @@ vi.mock("@/lib/openclaw-session-store", () => ({
   readSessionEntries: vi.fn(() => []),
 }));
 
+// The gateway applies a switch live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class: the route narrows on `instanceof GatewayNotReadyError` to
   // keep "the gateway has not finished binding" out of a sentence that says the
@@ -53,10 +57,18 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(async () => {}),
   runOpenclawConfigSet: vi.fn(async () => {}),
   runOpenclawConfigSetBatch: vi.fn(async () => {}),
+  runOpenclawConfigUnset: vi.fn(async () => {}),
+}));
+// Tool Search follows the on-device primary only on a 2026.10+ core
+// (src/lib/local-tool-search.ts); an unknown core writes nothing.
+const coreAtLeastMock = vi.fn(async () => false);
+vi.mock("@/lib/openclaw-core-generation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-core-generation")>()),
+  installedOpenclawCoreAtLeast: (...args: unknown[]) => coreAtLeastMock(...(args as [])),
 }));
 
 import { get, setMany } from "@/lib/config-store";
-import { GatewayNotReadyError, restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { readConfig, restartGateway, runOpenclawConfigSetBatch, runOpenclawConfigUnset } from "@/lib/openclaw-config";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
@@ -114,36 +126,62 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
     body: JSON.stringify({ enabled: false }),
   }));
 
-  it("restores the saved Anthropic primary in ONE batch that switches its plugin on first, then restarts", async () => {
+  it("restores the saved Anthropic primary in ONE batch that switches its plugin on first, and applies it live", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
     const response = await turnOff();
     const body = await response.json();
 
     expect(body.error).toBeUndefined();
     expect(response.status).toBe(200);
     expect(body.enabled).toBe(false);
+    expect(body.warning).toBeUndefined();
     expect(runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
     expect(vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0]).toEqual([
       ENABLE_OP,
       ["agents.defaults.model.primary", JSON.stringify("anthropic/claude-sonnet-5"), "--json"],
     ]);
-    expect(orderOf(vi.mocked(runOpenclawConfigSetBatch))).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+    // TASK-1535: the primary, the fallbacks and the plugin switch all
+    // hot-apply. The toggle waits for the gateway to take them, after the
+    // batch, and never restarts it — a restart here was 50 s of dead chat that
+    // ran past what the browser would wait for.
+    expect(orderOf(vi.mocked(runOpenclawConfigSetBatch))).toBeLessThan(orderOf(vi.mocked(hot.settleConfigWrite)));
+    expect(vi.mocked(hot.settleConfigWrite)).toHaveBeenCalledWith(expect.objectContaining({
+      baseline: { hash: "baseline-hash" },
+      label: "local-only",
+    }));
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
   });
 
-  it("does not say the restart failed over a gateway that is still coming back", async () => {
-    // TASK-608. `warning` is rendered by LocalAiPanel in its amber "the change
-    // landed" notice, so the sentence has to be true of a change that landed.
-    // The raw message here was `Gateway restart failed: gateway did not come
-    // back` — a failure claim over a `systemctl restart` that returned 0.
-    vi.mocked(restartGateway).mockRejectedValue(new GatewayNotReadyError());
+  it("restarts — answered early — only when the gateway could not take the switch live", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("restart-required");
 
     const body = await (await turnOff()).json();
 
     expect(body.enabled).toBe(false);
-    expect(body.warning).toMatch(/has not finished restarting/);
-    expect(body.warning).not.toMatch(/restart failed/i);
+    expect(hot.restartGatewayAnsweringEarly).toHaveBeenCalledTimes(1);
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
+    // `warning` is rendered by LocalAiPanel in its amber "the change landed"
+    // notice: true of a change that landed, and not a failure claim.
+    expect(body.warning).toMatch(/restarting/);
+    expect(body.warning).not.toMatch(/restart failed|did not come back/i);
+  });
+
+  it("adds no restart of its own over a gateway already restarting by itself", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("gateway-restarting");
+
+    const body = await (await turnOff()).json();
+
+    expect(body.enabled).toBe(false);
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
+    expect(body.warning).toMatch(/restarting/);
   });
 
   it("still says so when the restart was refused, without leaking the CLI error", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("restart-required");
     vi.mocked(restartGateway).mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
 
     const body = await (await turnOff()).json();
@@ -335,5 +373,110 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
       expect(body.code).toBeUndefined();
       expect(body.error).toBe(UNKNOWN_MODEL);
     });
+  });
+});
+
+describe("POST /setup-api/local-ai/exclusive — OpenClaw's Tool Search follows the local primary", () => {
+  const TOOL_SEARCH_OFF = ["tools.toolSearch", JSON.stringify({ enabled: false }), "--json"];
+  let POST: (request: Request) => Promise<Response>;
+  let store: Record<string, unknown>;
+  const toggle = (enabled: boolean) => POST(new Request("http://localhost/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }));
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    coreAtLeastMock.mockReset().mockResolvedValue(true);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+    vi.mocked(readConfig).mockReset().mockResolvedValue({ agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } } } as never);
+    store = { local_ai_model: "llamacpp/gemma4-e2b-it-q4_0" };
+    vi.mocked(get).mockImplementation(async (key: string) => store[key]);
+    vi.mocked(restartGateway).mockResolvedValue(undefined);
+    POST = (await import("@/app/setup-api/local-ai/exclusive/route")).POST;
+  });
+
+  it("turns Tool Search off in the batch that makes the local model the primary", async () => {
+    const response = await toggle(true);
+    expect(response.status).toBe(200);
+    const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0];
+    expect(batch).toContainEqual(["agents.defaults.model.primary", JSON.stringify("llamacpp/gemma4-e2b-it-q4_0"), "--json"]);
+    expect(batch).toContainEqual(TOOL_SEARCH_OFF);
+  });
+
+  it("gives the restored cloud primary OpenClaw's default back", async () => {
+    store = { ...store, local_only_mode: true, local_only_saved_primary: "deepseek/deepseek-v4-flash" };
+    vi.mocked(readConfig).mockResolvedValue({
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      tools: { toolSearch: { enabled: false } },
+    } as never);
+
+    const body = await (await toggle(false)).json();
+
+    expect(body.enabled).toBe(false);
+    expect(runOpenclawConfigUnset).toHaveBeenCalledWith("tools.toolSearch");
+    expect(vi.mocked(runOpenclawConfigUnset).mock.invocationCallOrder[0])
+      .toBeGreaterThan(vi.mocked(runOpenclawConfigSetBatch).mock.invocationCallOrder[0]);
+  });
+
+  it("leaves it off when nothing could be restored and the box stays on the local model", async () => {
+    store = { ...store, local_only_mode: true };
+    vi.mocked(readConfig).mockResolvedValue({ tools: { toolSearch: { enabled: false } } } as never);
+    await toggle(false);
+    expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+  });
+
+  it("never touches an owner's own setting", async () => {
+    vi.mocked(readConfig).mockResolvedValue({ tools: { toolSearch: false } } as never);
+    await toggle(true);
+    expect(vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0]).not.toContainEqual(TOOL_SEARCH_OFF);
+  });
+});
+
+describe("POST /setup-api/local-ai/exclusive — no cloud summary in Local-only (TASK-2127)", () => {
+  const COMPACTION = "agents.defaults.compaction.model";
+  let POST: (request: Request) => Promise<Response>;
+  let store: Record<string, unknown>;
+  const toggle = (enabled: boolean) => POST(new Request("http://localhost/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }));
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    coreAtLeastMock.mockReset().mockResolvedValue(true);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+    store = { local_ai_model: "llamacpp/gemma4-e2b-it-q4_0" };
+    vi.mocked(get).mockImplementation(async (key: string) => store[key]);
+    vi.mocked(restartGateway).mockResolvedValue(undefined);
+    POST = (await import("@/app/setup-api/local-ai/exclusive/route")).POST;
+  });
+
+  it("takes ClawBox's cloud compaction model out and never writes one", async () => {
+    store = { ...store, local_compaction_model: "deepseek/deepseek-v4-flash" };
+    vi.mocked(readConfig).mockResolvedValue({
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0", fallbacks: ["deepseek/deepseek-v4-flash"] }, compaction: { model: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const response = await toggle(true);
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigUnset).toHaveBeenCalledWith(COMPACTION);
+    const written = vi.mocked(runOpenclawConfigSetBatch).mock.calls.flatMap((call) => call[0] as string[][]);
+    expect(written.some((op) => op[0] === COMPACTION)).toBe(false);
+  });
+
+  it("leaves an owner's own compaction model alone", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" }, compaction: { model: "anthropic/claude-haiku-4-5" } } },
+    } as never);
+    await toggle(true);
+    expect(runOpenclawConfigUnset).not.toHaveBeenCalledWith(COMPACTION);
   });
 });

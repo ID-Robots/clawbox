@@ -61,17 +61,25 @@ vi.mock("@/lib/voice-local-wiring", () => ({
 
 const autoReplyMock = vi.fn();
 const setAutoReplyMock = vi.fn();
+const autoPlayAllMock = vi.fn();
+const setAutoPlayAllMock = vi.fn();
+const shortSpokenMock = vi.fn();
+const setShortSpokenMock = vi.fn();
 vi.mock("@/lib/voice-reply", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/voice-reply")>();
   return {
     ...actual,
     getVoiceAutoReply: (...a: unknown[]) => autoReplyMock(...a),
     setVoiceAutoReply: (...a: unknown[]) => setAutoReplyMock(...a),
+    getVoiceAutoPlayAll: (...a: unknown[]) => autoPlayAllMock(...a),
+    setVoiceAutoPlayAll: (...a: unknown[]) => setAutoPlayAllMock(...a),
+    getVoiceShortSpoken: (...a: unknown[]) => shortSpokenMock(...a),
+    setVoiceShortSpoken: (...a: unknown[]) => setShortSpokenMock(...a),
   };
 });
 
 const ownerMock = vi.fn();
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: (...a: unknown[]) => ownerMock(...a) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: (...a: unknown[]) => ownerMock(...a) }));
 
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
@@ -107,10 +115,23 @@ async function route() {
   return await import("@/app/setup-api/tts/route");
 }
 
-function post(body: unknown) {
+// A ClawBox AI plan change still being followed (src/lib/clawai-plan-follow.ts).
+const planFollow = vi.hoisted(() => ({ pending: false, onRecord: vi.fn(async () => {}) }));
+// Who a request's cookie speaks for: nobody (curl, the agent's bearer) unless a test says.
+const identity = vi.hoisted(() => ({ current: null as { username: string; isOwner: boolean } | null }));
+vi.mock("@/lib/route-auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/route-auth")>()),
+  sessionIdentity: vi.fn(async () => identity.current),
+}));
+vi.mock("@/lib/clawai-plan-follow", () => ({
+  clawaiPlanFollowPending: () => planFollow.pending,
+  followClawaiPlanOnRecord: planFollow.onRecord,
+}));
+
+function post(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://box/setup-api/tts", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -130,7 +151,12 @@ beforeEach(() => {
   wireMock.mockReset().mockResolvedValue({ ok: true, provider: {} });
   autoReplyMock.mockReset().mockResolvedValue(false);
   setAutoReplyMock.mockReset().mockResolvedValue(undefined);
+  autoPlayAllMock.mockReset().mockResolvedValue(false);
+  setAutoPlayAllMock.mockReset().mockResolvedValue(undefined);
+  shortSpokenMock.mockReset().mockResolvedValue(false);
+  setShortSpokenMock.mockReset().mockResolvedValue(undefined);
   ownerMock.mockReset().mockResolvedValue(true);
+  planFollow.onRecord.mockClear();
 });
 
 describe("spoken replies", () => {
@@ -181,6 +207,198 @@ describe("spoken replies", () => {
     const res = await POST(post({ action: "autoReply", enabled: false }));
     expect(res.status).toBe(500);
     expect(setAutoReplyMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * "Auto-play every spoken reply": the switch under spoken replies that has the
+ * desktop chat play a TYPED question's reply by itself too. The chat's alone —
+ * nothing reaches the gateway — and the owner's alone, behind the same gate
+ * as the switch it sits under.
+ */
+describe("auto-play every spoken reply", () => {
+  it("reports autoPlayAll:false for a box that never stored it, through the real reader", async () => {
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    autoPlayAllMock.mockImplementation(real.getVoiceAutoPlayAll);
+    preferenceMock.mockResolvedValue(undefined);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.autoPlayAll).toBe(false);
+    expect(preferenceMock).toHaveBeenCalledWith(real.VOICE_AUTO_PLAY_ALL_KEY);
+  });
+
+  it("reports the stored position beside the spoken-replies switch", async () => {
+    autoReplyMock.mockResolvedValue(true);
+    autoPlayAllMock.mockResolvedValue(true);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body).toMatchObject({ autoReply: true, autoPlayAll: true });
+  });
+
+  it("stores the owner's answer and answers the new status, writing nothing to the gateway", async () => {
+    const { POST } = await route();
+    autoPlayAllMock.mockResolvedValue(true);
+    let res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(200);
+    expect(setAutoPlayAllMock).toHaveBeenCalledWith(true);
+    expect((await res.json()).autoPlayAll).toBe(true);
+
+    autoPlayAllMock.mockResolvedValue(false);
+    res = await POST(post({ action: "autoPlayAll", enabled: false }));
+    expect(res.status).toBe(200);
+    expect(setAutoPlayAllMock).toHaveBeenLastCalledWith(false);
+    expect((await res.json()).autoPlayAll).toBe(false);
+    // A channel's typed question still gets a typed answer: `tts.auto` and the
+    // spoken-replies switch are not this action's to touch.
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body that does not say on or off", async () => {
+    const { POST } = await route();
+    for (const enabled of ["true", 1, null, undefined]) {
+      const res = await POST(post({ action: "autoPlayAll", enabled }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_request");
+    }
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the switch to the MCP bearer", async () => {
+    ownerMock.mockResolvedValue(false);
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("owner_only");
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["autoReply", "autoPlayAll", "shortSpoken"] as const)("refuses %s from another site's page, even with the owner's cookie", async (action) => {
+    const { POST } = await route();
+    const res = await POST(post({ action, enabled: true }, { host: "box", origin: "http://evil.example" }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("cross_origin");
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+    expect(setShortSpokenMock).not.toHaveBeenCalled();
+    expect(configSetMock).not.toHaveBeenCalled();
+  });
+
+  it("takes the switch from the box's own page", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoPlayAll", enabled: true }, { host: "box", origin: "http://box" }));
+    expect(res.status).toBe(200);
+    expect(setAutoPlayAllMock).toHaveBeenCalledWith(true);
+  });
+
+  it("answers a store that will not take the write with the route's own refusal", async () => {
+    setAutoPlayAllMock.mockRejectedValue(new Error("EROFS"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("cannot_change");
+  });
+});
+
+/**
+ * "Short spoken answers": the third switch, which has the desktop chat speak
+ * only a reply's short answer while the written reply stays whole. The chat's
+ * alone like auto-play — nothing reaches the gateway — and the owner's alone,
+ * behind the same gate.
+ */
+describe("short spoken answers", () => {
+  it("reports shortSpoken:false for a box that never stored it, through the real reader", async () => {
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    shortSpokenMock.mockImplementation(real.getVoiceShortSpoken);
+    preferenceMock.mockResolvedValue(undefined);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.shortSpoken).toBe(false);
+    expect(preferenceMock).toHaveBeenCalledWith(real.VOICE_SHORT_SPOKEN_KEY);
+    expect(real.VOICE_SHORT_SPOKEN_KEY).toBe("voice_short_spoken");
+  });
+
+  it("reads only a stored true as on", async () => {
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    shortSpokenMock.mockImplementation(real.getVoiceShortSpoken);
+    const { GET } = await route();
+    for (const stored of [false, "true", 1, null]) {
+      preferenceMock.mockResolvedValue(stored);
+      expect((await (await GET()).json()).shortSpoken).toBe(false);
+    }
+    preferenceMock.mockResolvedValue(true);
+    expect((await (await GET()).json()).shortSpoken).toBe(true);
+  });
+
+  it("reports the stored position beside the other two switches", async () => {
+    autoReplyMock.mockResolvedValue(true);
+    autoPlayAllMock.mockResolvedValue(false);
+    shortSpokenMock.mockResolvedValue(true);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body).toMatchObject({ autoReply: true, autoPlayAll: false, shortSpoken: true });
+  });
+
+  it("stores the owner's answer and a later GET reflects it, writing nothing to the gateway", async () => {
+    // A store of its own behind the mocked pair, so the GET after the POST
+    // reads what the POST wrote rather than what the test says it wrote.
+    let stored = false;
+    setShortSpokenMock.mockImplementation(async (enabled: boolean) => {
+      stored = enabled;
+    });
+    shortSpokenMock.mockImplementation(async () => stored);
+    const { GET, POST } = await route();
+
+    let res = await POST(post({ action: "shortSpoken", enabled: true }));
+    expect(res.status).toBe(200);
+    expect(setShortSpokenMock).toHaveBeenCalledWith(true);
+    expect((await res.json()).shortSpoken).toBe(true);
+    expect((await (await GET()).json()).shortSpoken).toBe(true);
+
+    res = await POST(post({ action: "shortSpoken", enabled: false }));
+    expect(res.status).toBe(200);
+    expect(setShortSpokenMock).toHaveBeenLastCalledWith(false);
+    expect((await res.json()).shortSpoken).toBe(false);
+    expect((await (await GET()).json()).shortSpoken).toBe(false);
+    // A channel's spoken reply is the gateway's: `tts.auto` and the other two
+    // switches are not this action's to touch.
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body that does not say on or off", async () => {
+    const { POST } = await route();
+    for (const enabled of ["true", 1, null, undefined]) {
+      const res = await POST(post({ action: "shortSpoken", enabled }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_request");
+    }
+    expect(setShortSpokenMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the switch to the MCP bearer", async () => {
+    ownerMock.mockResolvedValue(false);
+    const { POST } = await route();
+    const res = await POST(post({ action: "shortSpoken", enabled: true }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("owner_only");
+    expect(setShortSpokenMock).not.toHaveBeenCalled();
+  });
+
+  it("takes the switch from the box's own page", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "shortSpoken", enabled: true }, { host: "box", origin: "http://box" }));
+    expect(res.status).toBe(200);
+    expect(setShortSpokenMock).toHaveBeenCalledWith(true);
+  });
+
+  it("answers a store that will not take the write with the route's own refusal", async () => {
+    setShortSpokenMock.mockRejectedValue(new Error("EROFS"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "shortSpoken", enabled: true }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("cannot_change");
   });
 });
 
@@ -571,3 +789,101 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect((await (await GET()).json()).cloudModel).toBe("tts-1-hd");
   });
 });
+
+describe("a ClawBox AI plan that moved while the box runs", () => {
+  it("says the box is still following it, so the panel says so and looks again", async () => {
+    planFollow.pending = true;
+    try {
+      const { GET } = await route();
+      const body = await (await GET()).json();
+      expect(body.cloudPending).toBe(true);
+      // The fact the panel shows beside it is still the box's own reading.
+      expect(body.engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(false);
+    } finally {
+      planFollow.pending = false;
+    }
+  });
+
+  it("says nothing when no change is being followed", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).cloudPending).toBeUndefined();
+  });
+
+  it("reads the cloud voice as available the moment the gateway's boot script has armed it — no restart of the web server", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(false);
+    readConfigMock.mockResolvedValue(config({
+      tts: {
+        provider: LOCAL,
+        providers: {
+          [LOCAL]: { command: "/opt/clawbox-tts.sh" },
+          openai: { apiKey: "claw_84d065b", baseUrl: "https://proxy.example/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+        },
+      },
+    }));
+    expect((await (await GET()).json()).engines.find((e: { id: string }) => e.id === "cloud").configured).toBe(true);
+  });
+
+  /** What the boot script wrote while the plan was Max, at the proxy every box shares. */
+  const armedAtOurProxy = () => config({
+    tts: {
+      provider: "openai",
+      providers: {
+        [LOCAL]: { command: "/opt/clawbox-tts.sh" },
+        openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+      },
+    },
+    models: { providers: { openai: { apiKey: "claw_84d065b" }, deepseek: { apiKey: "claw_84d065b" } } },
+  });
+  const planOnRecord = (plan: string | undefined) =>
+    preferenceMock.mockImplementation(async (key: string) => (key === "clawai_plan_tier" ? plan : undefined));
+  const cloud = (body: { engines: { id: string; configured: boolean }[] }) => body.engines.find((e) => e.id === "cloud");
+
+  it("takes the cloud voice away the moment a plan without it is on record — before the gateway restarts, and never as 'setting up'", async () => {
+    readConfigMock.mockResolvedValue(armedAtOurProxy());
+    const { GET } = await route();
+    // Not on record yet: not knowing is not a downgrade.
+    expect(cloud(await (await GET()).json())?.configured).toBe(true);
+    planOnRecord("free");
+    const body = await (await GET()).json();
+    expect(cloud(body)?.configured).toBe(false);
+    expect(body.cloudPending).toBeUndefined();
+    // And the gateway's own file is brought round to it.
+    expect(planFollow.onRecord).toHaveBeenCalled();
+  });
+
+  it("keeps it on a Max plan, and hands it back when the plan on record is Max again", async () => {
+    readConfigMock.mockResolvedValue(armedAtOurProxy());
+    planOnRecord("flash");
+    const { GET } = await route();
+    expect(cloud(await (await GET()).json())?.configured).toBe(false);
+    planOnRecord("pro");
+    expect(cloud(await (await GET()).json())?.configured).toBe(true);
+  });
+
+  it("brings the gateway round for the owner's read, never for another user's", async () => {
+    const { GET } = await route();
+    const read = new Request("http://box/setup-api/tts");
+    try {
+      identity.current = { username: "alice", isOwner: false };
+      await GET(read);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(planFollow.onRecord).not.toHaveBeenCalled();
+      identity.current = { username: "clawbox", isOwner: true };
+      await GET(read);
+      await vi.waitFor(() => expect(planFollow.onRecord).toHaveBeenCalledTimes(1));
+    } finally {
+      identity.current = null;
+    }
+  });
+
+  it("never hides an owner's own cloud voice, whatever the ClawBox AI plan", async () => {
+    readConfigMock.mockResolvedValue(config({
+      tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "sk-owners-own" } } },
+    }));
+    planOnRecord("free");
+    const { GET } = await route();
+    expect(cloud(await (await GET()).json())?.configured).toBe(true);
+  });
+});
+

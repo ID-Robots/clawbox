@@ -5,14 +5,16 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import path from "@/lib/runtime-path";
 import { promisify } from "util";
-import { describePortOwner, findPlaywrightChromium, probeCdp } from "@/lib/cdp-probe";
+import { describePortOwner, findPlaywrightChromium, portOwnerPid, probeCdp } from "@/lib/cdp-probe";
 import net from "net";
 import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { activeRunDirectory, activeRunId, getRun, getRealBrowser } from "@/lib/coding-agent";
 import type { BrowserKind } from "@/lib/browser-sessions";
-import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
+import { closeSession, dropSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
 import { getBrowserStartUrl, writeBrowserLaunchEnv } from "@/lib/browser-setup";
+import { cdpEndpoint, readDesktopBrowserConfig, type DesktopBrowserConfig } from "@/lib/desktop-browser-config";
+import { findBrowserOnPortPids, findClawboxBrowserPids } from "@/lib/process-match";
 import { isInside } from "@/lib/file-guard";
 import { isPrivateIp, lookupWithTimeout } from "@/lib/private-address";
 import { chromiumSandboxArgs } from "@/lib/chromium-sandbox";
@@ -21,8 +23,8 @@ import { logSafe } from "@/lib/log-safe";
 import { describeImage } from "@/lib/vision-describe";
 
 const exec = promisify(execFile);
-const CDP_PORT = 18800;
-const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
+// The desktop browser's CDP port is the owner's to choose
+// (src/lib/desktop-browser-config.ts) and is read for every attach.
 // Every screenshot is bounded: Playwright's default is 30 s, and a renderer
 // wedged on a heavy page (a WebGL scene mid-compile) would otherwise hold the
 // whole request — and the coding run waiting on it — for that long on each
@@ -85,6 +87,20 @@ function liveBrowserRun(id: string) {
   return run?.status === "running" ? run : null;
 }
 
+/**
+ * The loopback names a run's preview can be served on — the URL parser has
+ * already folded 127.1, 0x7f.0.0.1 and the long forms of ::1 into these.
+ * Other 127/8 addresses fall to the private-address check like the LAN does.
+ */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * A run asking for a loopback port it does not serve is told so in words of
+ * its own: "internal address" sent runs off to find a public URL, when the
+ * fix is to serve the project from the run itself (scripts/clawbox-preview.mjs).
+ */
+const UNOWNED_LOOPBACK = "Blocked loopback address (not served by this run)";
+
 async function resolveNavUrl(url: string, runId?: string | null): Promise<NavDecision> {
   let parsed: URL;
   try {
@@ -98,7 +114,14 @@ async function resolveNavUrl(url: string, runId?: string | null): Promise<NavDec
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, error: `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)` };
   }
-  if (runId && await ownsLocalPreview(parsed, liveBrowserRun(runId))) return { ok: true, url };
+  // The one loopback exception to SEC-4: the live run's own server, its
+  // listeners proven to be the run's on every navigation and asset origin
+  // (src/lib/coding-local-preview.ts). LAN, link-local and *.localhost never are.
+  if (runId && LOOPBACK_HOSTS.has(parsed.hostname)) {
+    return await ownsLocalPreview(parsed, liveBrowserRun(runId))
+      ? { ok: true, url }
+      : { ok: false, error: UNOWNED_LOOPBACK };
+  }
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost")) return { ok: false, error: "Blocked internal host" };
   if (net.isIP(host)) {
@@ -221,6 +244,11 @@ setInterval(() => {
 // take that session's page down with it.
 let desktopBrowser: import("playwright").Browser | null = null;
 let desktopBrowserPromise: Promise<import("playwright").Browser> | null = null;
+// The endpoint that handle is attached to. The owner can point the desktop
+// browser at another port while the server runs; a handle on the old one is
+// then set aside (never closed — it is somebody's window) and the next
+// session attaches to the configured one.
+let desktopEndpoint: string | null = null;
 // The Chromium WE launched — for a foreign CDP port, a desktop launch that
 // failed, or an owner who switched the screen off. The desktop's is only
 // attached to and must never be closed from here. Ours is headless and
@@ -239,14 +267,38 @@ function closeOwnedBrowserIfIdle(): void {
   console.log("[Browser] Closed the headless Chromium of our own: no session left");
 }
 
+/** How to attach to the desktop browser: its endpoint, and the Origin to send (none for an owner-started browser). */
+interface DesktopAttach {
+  endpoint: string;
+  origin: string | undefined;
+}
+
 /**
  * Ready means OURS: /json/version answering is not enough, because another
  * program's Chromium on this port answers it too and then rejects our
  * Origin on the upgrade (seen live: the OpenClaw gateway's own browser sat
  * on 18800 for hours while this said "ready"). See src/lib/cdp-probe.ts.
+ *
+ * One rejection is still the desktop browser: the owner's own, on the
+ * configured profile and port, started by the owner rather than by
+ * scripts/launch-browser.sh — so without our --remote-allow-origins. Chromium
+ * checks the Origin only when one is sent, so that browser is attached to
+ * without one. It is recognised by its process (configured profile AND
+ * configured port in its argv), never by the answer on the port.
  */
-async function isDesktopBrowserReady(): Promise<boolean> {
-  return (await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT)) === "ours";
+async function desktopCdpState(config: DesktopBrowserConfig): Promise<{ state: "ours" | "foreign" | "down"; attach: DesktopAttach }> {
+  const endpoint = cdpEndpoint(config);
+  const state = await probeCdp(endpoint, endpoint);
+  if (state === "foreign") {
+    // The configured browser must be the one LISTENING, not merely one that
+    // was given the port: started on a port another browser already held, it
+    // runs on without CDP, and the answer would be that other browser's.
+    const [pids, listener] = await Promise.all([findBrowserOnPortPids(config), portOwnerPid(config.cdpPort)]);
+    if (listener !== null && pids.includes(listener)) {
+      return { state: "ours", attach: { endpoint, origin: undefined } };
+    }
+  }
+  return { state, attach: { endpoint, origin: endpoint } };
 }
 
 /**
@@ -257,16 +309,27 @@ async function isDesktopBrowserReady(): Promise<boolean> {
  * fail; "unavailable" — the launch produced nothing. The last two are not
  * errors here: the caller answers them with the headless browser and says so.
  */
-async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign" | "unavailable"> {
-  const state = await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT);
-  if (state === "ours") return "desktop";
-  if (state === "foreign") {
+async function ensureDesktopBrowserRunning(
+  config: DesktopBrowserConfig,
+): Promise<{ where: "desktop"; attach: DesktopAttach } | { where: "foreign" | "unavailable" }> {
+  const cdpPort = config.cdpPort;
+  const first = await desktopCdpState(config);
+  if (first.state === "ours") return { where: "desktop", attach: first.attach };
+  if (first.state === "foreign") {
     // Naming the squatter is ss plus two ps calls — a note for the log, not a
     // step the launch waits on. It never rejects, so nothing is left dangling.
-    void describePortOwner(CDP_PORT).then((owner) => {
-      console.warn(`[Browser] CDP port ${CDP_PORT} is held by another program's Chromium${owner}; using a headless Chromium of our own instead`);
+    void describePortOwner(cdpPort).then((owner) => {
+      console.warn(`[Browser] CDP port ${cdpPort} is held by another program's Chromium${owner}; using a headless Chromium of our own instead`);
     });
-    return "foreign";
+    return { where: "foreign" };
+  }
+
+  // The owner's own browser, open on its profile but not answering on the
+  // port: starting the unit would only hand the start page to it as a stray
+  // tab (a second browser cannot share the profile). Verify headless instead.
+  if (!config.ownProfile && (await findClawboxBrowserPids(config)).length > 0) {
+    console.warn(`[Browser] The owner's browser is open on ${config.profileDir} without CDP on port ${cdpPort}; using a headless Chromium of our own instead`);
+    return { where: "unavailable" };
   }
 
   // systemd starts Chromium, not this server, so the start page has to be on
@@ -290,11 +353,12 @@ async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign" | "u
   // it's not up in 6 s it's wedged.
   for (let i = 0; i < 6; i++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (await isDesktopBrowserReady()) return "desktop";
+    const next = await desktopCdpState(config);
+    if (next.state === "ours") return { where: "desktop", attach: next.attach };
   }
 
-  console.warn(`[Browser] Desktop Chromium did not come up on CDP port ${CDP_PORT}; using a headless Chromium of our own instead`);
-  return "unavailable";
+  console.warn(`[Browser] Desktop Chromium did not come up on CDP port ${cdpPort}; using a headless Chromium of our own instead`);
+  return { where: "unavailable" };
 }
 
 async function getPlaywright() {
@@ -306,24 +370,27 @@ async function getPlaywright() {
 }
 
 /** Attach to the desktop Chromium over CDP, once, and keep the handle. */
-async function getDesktopBrowser(): Promise<import("playwright").Browser> {
+async function getDesktopBrowser(attach: DesktopAttach): Promise<import("playwright").Browser> {
   if (desktopBrowser?.isConnected()) return desktopBrowser;
   if (desktopBrowserPromise) return desktopBrowserPromise;
 
+  const { endpoint, origin } = attach;
   desktopBrowserPromise = (async () => {
     const pw = await getPlaywright();
     try {
       // 30 s matches Playwright's own default — previously 10 s to fail fast
       // against the Bun-WS hang, which is no longer relevant now that we
       // run under Node.
-      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, {
+      const browser = await pw.chromium.connectOverCDP(endpoint, {
         timeout: 30_000,
         // Chromium gates the CDP WebSocket upgrade on Origin against
         // --remote-allow-origins (pinned to this exact value in
         // scripts/launch-browser.sh). Send a matching Origin so our automation
         // connects while a rebound web page's own origin is rejected — closing
         // the CDP DNS-rebinding takeover. Keep this byte-identical to the flag.
-        headers: { Origin: CDP_ENDPOINT },
+        // None for the owner's own browser (desktopCdpState): it was started
+        // without that flag, so it refuses every Origin, a rebound page's too.
+        ...(origin ? { headers: { Origin: origin } } : {}),
       });
       browser.on("disconnected", () => {
         if (desktopBrowser === browser) desktopBrowser = null;
@@ -333,11 +400,12 @@ async function getDesktopBrowser(): Promise<import("playwright").Browser> {
         console.log("[Browser] Shared CDP connection disconnected; will reconnect on next launch");
       });
       desktopBrowser = browser;
+      desktopEndpoint = endpoint;
       return browser;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[Browser] connectOverCDP(${CDP_ENDPOINT}) failed:`, msg);
-      throw new Error(`Failed to attach to desktop Chromium via CDP at ${CDP_ENDPOINT}: ${msg}`);
+      console.error(`[Browser] connectOverCDP(${endpoint}) failed:`, msg);
+      throw new Error(`Failed to attach to desktop Chromium via CDP at ${endpoint}: ${msg}`);
     } finally {
       desktopBrowserPromise = null;
     }
@@ -358,6 +426,39 @@ class BrowserUnavailableError extends Error {
     super(message);
     this.name = "BrowserUnavailableError";
   }
+}
+
+/** The session's own tab is gone: answered 410, the session already dropped. */
+class BrowserTabClosedError extends Error {
+  constructor() {
+    super("Browser tab was closed");
+    this.name = "BrowserTabClosedError";
+  }
+}
+
+/**
+ * Put the session's OWN tab in front before it is captured.
+ *
+ * The desktop browser is the owner's too, and its foremost tab can be anything
+ * they are reading. A capture is only ever taken of the page the session
+ * opened — and a tab the owner (or the page itself) closed is not quietly
+ * replaced by whatever is in front now: the session is dropped and the caller
+ * is told, so it opens a new tab instead of reporting a page it never opened.
+ * A closed page is told the same way in the headless browser, whose pages
+ * close with it when it exits: a dead session that answered 200 with no
+ * picture would be kept, and every later capture would come back empty. Only
+ * the desktop has anybody else's tabs to raise the page above.
+ */
+async function frontSessionTab(
+  page: import("playwright").Page,
+  sessionId: string,
+  kind: BrowserKind,
+): Promise<void> {
+  if (page.isClosed()) {
+    dropSession(sessionId);
+    throw new BrowserTabClosedError();
+  }
+  if (kind === "desktop") await page.bringToFront().catch(() => {});
 }
 
 
@@ -418,15 +519,19 @@ async function getOwnBrowser(): Promise<import("playwright").Browser> {
  */
 async function acquireBrowser(): Promise<{ browser: import("playwright").Browser; kind: BrowserKind }> {
   if (await getRealBrowser()) {
+    const config = await readDesktopBrowserConfig();
+    // A handle on a port the owner has since moved away from is set aside,
+    // not closed: it is attached to somebody's window.
+    if (desktopBrowser && desktopEndpoint !== cdpEndpoint(config)) desktopBrowser = null;
     // A handle we already hold is proof the window is up: skip the probe (two
     // round trips, one of them a WebSocket upgrade) on every session but the
     // first.
-    const where = desktopBrowser?.isConnected() || desktopBrowserPromise
-      ? "desktop"
-      : await ensureDesktopBrowserRunning();
-    if (where === "desktop") {
+    const held = desktopBrowser?.isConnected() || desktopBrowserPromise;
+    const found = held ? null : await ensureDesktopBrowserRunning(config);
+    if (held || found?.where === "desktop") {
       try {
-        return { browser: await getDesktopBrowser(), kind: "desktop" };
+        const attach = found?.where === "desktop" ? found.attach : { endpoint: cdpEndpoint(config), origin: cdpEndpoint(config) };
+        return { browser: await getDesktopBrowser(attach), kind: "desktop" };
       } catch (err) {
         console.warn("[Browser] the desktop Chromium could not be driven; using a headless Chromium of our own instead:", err instanceof Error ? err.message : err);
       }
@@ -496,9 +601,18 @@ export async function POST(req: Request) {
       // A run gets a page of its OWN. Borrowing `pages().at(-1)` meant a
       // delegated run drove whatever the owner was reading and the idle sweep
       // then closed that tab; with a page per run, closeSessionsForRun ends
-      // exactly what the run opened and never the owner's.
+      // exactly what the run opened and never the owner's. That page — the
+      // one newPage() hands back here — is the ONLY page this session ever
+      // captures: a run's page is never picked from `pages()`, whose last
+      // entry on the desktop is whatever tab happens to be in front.
       const runId = requestedRunId ?? activeRunId();
-      const page = runId ? await context.newPage() : (context.pages().at(-1) ?? await context.newPage());
+      // The same goes for every session on the DESKTOP browser, run or not:
+      // it is the owner's browser too, so the last page in it may be the tab
+      // they are reading. The assistant opens a tab of its own and closes only
+      // that. Our own headless browser has no owner to step on, and reusing
+      // its one page keeps it from collecting blank tabs.
+      const ownPage = Boolean(runId) || kind === "desktop";
+      const page = ownPage ? await context.newPage() : (context.pages().at(-1) ?? await context.newPage());
       await installNavGuard(page as unknown as GuardablePage, runId);
       installDownloadCapture(page as unknown as DownloadablePage, runId);
       await page.bringToFront().catch(() => {});
@@ -509,14 +623,17 @@ export async function POST(req: Request) {
         if (!nav.ok) {
           // A page opened for this run and never registered is a tab nothing
           // would ever close — the sweep only knows sessions.
-          if (runId) await page.close().catch(() => {});
+          if (ownPage) await page.close().catch(() => {});
           return NextResponse.json({ error: nav.error }, { status: 400 });
         }
         await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
-      const id = openSession(page, runId, kind);
+      // `requestedRunId`, not `runId`: a launch tagged with the active run
+      // because it named none is not the run's own — see BrowserSession.
+      const id = openSession(page, runId, kind, requestedRunId ?? null);
 
+      await frontSessionTab(page, id, kind);
       const screenshot = await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
 
       return NextResponse.json({
@@ -537,13 +654,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No active browser session" }, { status: 400 });
     }
 
-    if (requestedRunId !== undefined && session.runId !== requestedRunId) {
+    // Against the id the session was LAUNCHED with, not the run it was tagged
+    // with: a page the assistant or the owner opened while this run was live
+    // is not the run's to drive or capture.
+    if (requestedRunId !== undefined && session.codingRunId !== requestedRunId) {
       return NextResponse.json({ error: "Browser session belongs to another run" }, { status: 403 });
     }
     touchSession(sessionId as string);
     const { page } = session;
+    // Every capture below is of this session's own tab, raised first.
+    const front = () => frontSessionTab(page, sessionId as string, session.browser);
 
     const respond = async (skipScreenshot = false) => {
+      if (!skipScreenshot) await front();
       const screenshot = skipScreenshot ? null : await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       return {
         url: page.url(),
@@ -570,6 +693,7 @@ export async function POST(req: Request) {
       // trip scales with upload size (measured on this box: a full PNG frame
       // ~10-30 s, the same frame as a small JPEG ~3 s), while the PNG in
       // `reply` stays what the caller archives into the evidence folder.
+      await front();
       const jpeg = await page.screenshot({ type: "jpeg", quality: 60, timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       const described = jpeg
         ? await describeImage(jpeg.toString("base64"), undefined, "image/jpeg")
@@ -712,6 +836,10 @@ export async function POST(req: Request) {
     // can fix, and the code is the one every other surface already words.
     if (err instanceof BrowserUnavailableError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
+    }
+    // Gone, not failed: the caller's next step is a new tab, not a retry.
+    if (err instanceof BrowserTabClosedError) {
+      return NextResponse.json({ error: err.message }, { status: 410 });
     }
     const message = err instanceof Error ? err.message : "Internal error";
     return NextResponse.json({ error: message }, { status: 500 });

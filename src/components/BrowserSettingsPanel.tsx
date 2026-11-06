@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { browserErrorText, saveBrowserSetup, type BrowserAction } from "@/lib/browser-actions";
 import StatusMessage from "./StatusMessage";
+import VncResolutionSetting from "./VncResolutionSetting";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 
 /**
@@ -46,7 +47,25 @@ export interface BrowserStatus {
      * used to render this as "Chromium is running on the desktop" (TASK-515).
      */
     agentBrowsing?: boolean;
+    /** A browser that is not the assistant's — a person's — holds the CDP port. */
+    portTaken?: boolean;
+    /**
+     * The browser is the owner's own and they started it, not ClawBox: Close
+     * would leave it open, so the app offers Open (which brings it forward).
+     */
+    external?: boolean;
+    /** Open on the owner's profile, but never started with the CDP port: not "starting". */
+    noRemoteDebugging?: boolean;
+    /**
+     * The box's one browser, shared with the assistant and kept running
+     * (src/lib/shared-browser.ts): there is no Close, only Open.
+     */
+    shared?: boolean;
   };
+  /** False only where the owner chose a separate, hidden assistant browser. */
+  sharedWithAssistant?: boolean;
+  /** Where the assistant's old, separate profile is kept, when its sign-ins did not come along. */
+  legacyAgentProfile?: string | null;
   enabled: boolean;
   /**
    * True when this edition has no integration switch because the link is
@@ -57,6 +76,10 @@ export interface BrowserStatus {
    */
   alwaysOn?: boolean;
   cdpPort?: number;
+  /** The configured profile directory (src/lib/desktop-browser-config.ts). */
+  profileDir?: string;
+  /** False when that profile is the owner's own rather than ClawBox's. */
+  ownProfile?: boolean;
   /** False only while the owner still has the setup wizard in front of them. */
   setupComplete?: boolean;
   /** Whether opening this app opens Chromium. */
@@ -154,6 +177,8 @@ export default function BrowserSettingsPanel({
   const alwaysOn = status?.alwaysOn ?? false;
   const isEnabled = status?.enabled ?? false;
   const running = status?.browser?.running ?? false;
+  const shared = status?.sharedWithAssistant ?? false;
+  const closable = running && !status?.browser?.external && !status?.browser?.shared;
   const busyAnywhere = busy !== null || actionLoading !== null;
 
   return (
@@ -213,7 +238,7 @@ export default function BrowserSettingsPanel({
                   {alwaysOn ? "browser_open · browser_navigate · browser_screenshot" : "tools profile: full"}
                 </span>
                 <span className="font-mono text-[11px] text-[var(--text-muted)]">CDP :{status?.cdpPort ?? 18800}</span>
-                <span className="font-mono text-[11px] text-[var(--text-muted)]">~/.config/clawbox-browser/</span>
+                <span className="font-mono text-[11px] text-[var(--text-muted)] break-all">{status?.profileDir ? `${status.profileDir}/` : "~/.config/clawbox-browser/"}</span>
               </div>
             )}
           </div>
@@ -243,36 +268,51 @@ export default function BrowserSettingsPanel({
                 ? t("browser.settings.runningPid", { pid: status?.browser?.pid ?? "?" })
                 : t("browser.settings.notRunning")}
             </p>
+            {shared && (
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="browser-settings-shared">
+                {t("browser.settings.sharedHint")}
+              </p>
+            )}
+            {shared && status?.legacyAgentProfile && (
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)] break-all" data-testid="browser-settings-legacy-profile">
+                {t("browser.settings.legacyProfileNote", { path: status.legacyAgentProfile })}
+              </p>
+            )}
           </div>
+          {/* A browser the owner started themselves is not ClawBox's to close
+              (the route refuses): Open brings it forward instead. */}
           <button
             type="button"
-            onClick={() => onAction(running ? "close-browser" : "open-browser")}
+            onClick={() => onAction(closable ? "close-browser" : "open-browser")}
             disabled={busyAnywhere || !isEnabled || !chromium?.installed}
             data-testid="browser-settings-power"
-            className={running ? BTN_DANGER : BTN_PRIMARY}
+            className={closable ? BTN_DANGER : BTN_PRIMARY}
           >
             {actionLoading === "open-browser"
               ? t("browser.opening")
               : actionLoading === "close-browser"
                 ? t("browser.closing")
-                : running ? t("browser.closeBrowser") : t("browser.openBrowser")}
+                : closable ? t("browser.closeBrowser") : t("browser.openBrowser")}
           </button>
         </div>
 
-        <div className="mt-4 flex items-start justify-between gap-4 border-t border-[var(--border-subtle)] pt-4">
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-[var(--text-secondary)]">{t("browser.settings.autoOpenLabel")}</p>
-            <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]">{t("browser.settings.autoOpenHint")}</p>
+        {/* Nothing to open by itself where the browser never closes. */}
+        {!shared && (
+          <div className="mt-4 flex items-start justify-between gap-4 border-t border-[var(--border-subtle)] pt-4">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-[var(--text-secondary)]">{t("browser.settings.autoOpenLabel")}</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]">{t("browser.settings.autoOpenHint")}</p>
+            </div>
+            <Switch
+              checked={status?.autoOpen !== false}
+              busy={busy === "autoOpen"}
+              disabled={busyAnywhere || !status}
+              label={t("browser.settings.autoOpenLabel")}
+              onChange={(next) => void save({ autoOpen: next }, "autoOpen")}
+              testId="browser-settings-auto-open"
+            />
           </div>
-          <Switch
-            checked={status?.autoOpen !== false}
-            busy={busy === "autoOpen"}
-            disabled={busyAnywhere || !status}
-            label={t("browser.settings.autoOpenLabel")}
-            onChange={(next) => void save({ autoOpen: next }, "autoOpen")}
-            testId="browser-settings-auto-open"
-          />
-        </div>
+        )}
 
         {/* ── Where a freshly started Chromium lands. ── */}
         <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
@@ -318,6 +358,11 @@ export default function BrowserSettingsPanel({
           <button type="button" onClick={onOpenVnc} className={BTN_SECONDARY} data-testid="browser-settings-open-vnc">
             {t("browser.openInVNC")}
           </button>
+        </div>
+
+        {/* ── How big that screen is (virtual display only). ── */}
+        <div className="mt-4 border-t border-[var(--border-subtle)] pt-4" data-testid="browser-settings-vnc-resolution">
+          <VncResolutionSetting />
         </div>
       </div>
 

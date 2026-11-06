@@ -23,11 +23,29 @@ export interface InstallProgress {
   completed?: number;
   /** Bytes in total, when the route can say. */
   total?: number;
+  /**
+   * The work is waiting its turn behind another (true), or has just started
+   * after waiting (false). Absent from every line that says neither.
+   */
+  queued?: boolean;
+  /** While queued: what it waits for — that task's kind and short name. */
+  behind?: { kind: string; label: string };
 }
 
 export interface InstallOutcome {
   ok: boolean;
   error?: string;
+  /**
+   * The owner stopped it (a background task's Cancel): not a success, and not
+   * a failure to paint red either.
+   */
+  cancelled?: boolean;
+  /**
+   * The stream ended with no verdict at all: the server went away mid-way.
+   * For a background task that is not the work's ending (see
+   * `readTaskStream`), only this stream's.
+   */
+  lost?: boolean;
 }
 
 /** `completed`/`total` as a whole percentage, or null when there is no bar to draw. */
@@ -43,12 +61,22 @@ function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function readBehind(value: unknown): { kind: string; label: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { kind, label } = value as { kind?: unknown; label?: unknown };
+  return typeof kind === "string" && typeof label === "string" ? { kind, label } : undefined;
+}
+
 /**
  * Consume one line. Answers the outcome when the line was the closing one,
  * `null` while the stream goes on — including for a line that is not JSON,
  * which is a torn write rather than a failure.
  */
-function consume(line: string, onProgress: (p: InstallProgress) => void): InstallOutcome | null {
+function consume(
+  line: string,
+  onProgress: (p: InstallProgress) => void,
+  onTask?: (taskId: string) => void,
+): InstallOutcome | null {
   if (!line) return null;
   let payload: Record<string, unknown>;
   try {
@@ -57,13 +85,25 @@ function consume(line: string, onProgress: (p: InstallProgress) => void): Instal
     return null;
   }
   if (payload === null || typeof payload !== "object") return null;
+  // A route whose work is a background task names it on the first line, so the
+  // reader can follow the same work again once this stream is gone.
+  if (typeof payload.taskId === "string" && payload.taskId) onTask?.(payload.taskId);
 
   const status = typeof payload.status === "string" ? payload.status : undefined;
   const completed = readNumber(payload.completed);
   const total = readNumber(payload.total);
-  if (status !== undefined || completed !== undefined || total !== undefined) {
-    onProgress({ status, completed, total });
+  const queued = typeof payload.queued === "boolean" ? payload.queued : undefined;
+  const behind = readBehind(payload.behind);
+  if (status !== undefined || completed !== undefined || total !== undefined || queued !== undefined) {
+    onProgress({
+      status,
+      completed,
+      total,
+      ...(queued !== undefined ? { queued } : {}),
+      ...(behind ? { behind } : {}),
+    });
   }
+  if (payload.cancelled === true) return { ok: false, cancelled: true, error: typeof payload.error === "string" ? payload.error : undefined };
   if (typeof payload.error === "string") return { ok: false, error: payload.error };
   if (payload.success === true) return { ok: true };
   return null;
@@ -79,6 +119,7 @@ function consume(line: string, onProgress: (p: InstallProgress) => void): Instal
 export async function readInstallStream(
   res: Response,
   onProgress: (progress: InstallProgress) => void,
+  onTask?: (taskId: string) => void,
 ): Promise<InstallOutcome> {
   const reader = res.body?.getReader();
   if (!reader) return { ok: false };
@@ -92,12 +133,12 @@ export async function readInstallStream(
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
       newline = buffer.indexOf("\n");
-      const outcome = consume(line, onProgress);
+      const outcome = consume(line, onProgress, onTask);
       if (outcome) return outcome;
     }
     if (done) break;
   }
   // The closing line may arrive without its newline; it still decides the
   // outcome — dropping it turned a finished multi-minute install into an error.
-  return consume(buffer.trim(), onProgress) ?? { ok: false };
+  return consume(buffer.trim(), onProgress, onTask) ?? { ok: false, lost: true };
 }

@@ -202,6 +202,26 @@ export async function newestCommitSince(directory: string, sinceMs: number): Pro
   return sha;
 }
 
+/**
+ * The folder's HEAD in the spelling `newestCommitSince` answers in, or null
+ * when there is no commit to name (no repository, no commit yet, git not
+ * there). Recorded on the run at its spawn — `CodingRun.headAtStart` — so a
+ * commit made seconds BEFORE the run (a worktree's fork, a team's merge) is
+ * never taken for its own under that helper's minute of slack. Never throws.
+ */
+export async function headCommitShort(directory: string): Promise<string | null> {
+  try {
+    const r = await git(path.resolve(directory), ["log", "-1", "--format=%h"]);
+    if (r.code !== 0 || !r.stdout) return null;
+    const sha = r.stdout.trim().split(/\s+/)[0];
+    return sha || null;
+  } catch {
+    // A spawn that throws (no git, a folder spawn cannot enter) is "nothing to
+    // name" here, never a reason to refuse the run that asked.
+    return null;
+  }
+}
+
 /** The commit message: what the run was, and what it said it did. */
 export function buildCommitMessage(input: { runId: string; task: string; summary: string | null }): string {
   const subject = `Coding agent: ${firstLine(input.task, 68)}`;

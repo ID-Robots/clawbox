@@ -203,7 +203,7 @@ function held(config: Record<string, unknown>, key: string): unknown {
  * to the agent. The failing PATH is already in the line; the class or errno is
  * everything an operator needs to tell "no permission" from "corrupt".
  */
-function readFailureKind(err: unknown): string {
+export function readFailureKind(err: unknown): string {
   if (err instanceof SyntaxError) return "invalid JSON";
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   if (typeof code === "string" && code.length > 0) return code;

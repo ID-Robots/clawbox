@@ -4,6 +4,15 @@ import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { signSessionCookie } from "../../helpers/session";
 
+// The ritual's retirement works on the OpenClaw workspace under $HOME — on a
+// developer's machine, a real one. What it does is language-persona.test.ts's
+// business; here it is only whether, and when, the route asks for it.
+const persona = vi.hoisted(() => ({
+  retireOnboardingRitual: vi.fn(async () => false),
+  applyDeferredLanguagePersona: vi.fn(async () => false),
+}));
+vi.mock("@/lib/language-persona", () => persona);
+
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-setup-complete-tests-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "data");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
@@ -51,6 +60,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await fs.rm(CONFIG_PATH, { force: true });
+  persona.retireOnboardingRitual.mockClear();
+  persona.applyDeferredLanguagePersona.mockClear();
 });
 
 afterAll(async () => {
@@ -72,6 +83,36 @@ describe("POST /setup-api/setup/complete", () => {
 
     const config = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
     expect(config.setup_complete).toBe(true);
+  });
+
+  // TASK-1528: a set-up box answers its first chat message normally. The
+  // ritual the gateway armed at first boot is retired the moment the flag is
+  // on disk — retirement reads that flag — and the language the wizard's picker
+  // deferred for the ritual is paid back right after it.
+  it("retires the first-conversation ritual once the flag is written, then pays back the language", async () => {
+    let flagAtRetirement: unknown;
+    persona.retireOnboardingRitual.mockImplementationOnce(async () => {
+      flagAtRetirement = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8")).setup_complete;
+      return true;
+    });
+
+    const res = await completePost(ownerPost());
+
+    expect(res.status).toBe(200);
+    expect(flagAtRetirement).toBe(true);
+    expect(persona.retireOnboardingRitual).toHaveBeenCalledTimes(1);
+    expect(persona.applyDeferredLanguagePersona).toHaveBeenCalledTimes(1);
+    expect(persona.retireOnboardingRitual.mock.invocationCallOrder[0]).toBeLessThan(
+      persona.applyDeferredLanguagePersona.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not retire anything for a caller it refuses", async () => {
+    const res = await completePost(anonymousPost());
+
+    expect(res.status).toBe(401);
+    expect(persona.retireOnboardingRitual).not.toHaveBeenCalled();
+    expect(persona.applyDeferredLanguagePersona).not.toHaveBeenCalled();
   });
 
   it("clears stored setup progress once setup is complete", async () => {

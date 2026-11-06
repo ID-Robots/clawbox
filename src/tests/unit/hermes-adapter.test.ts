@@ -332,7 +332,12 @@ describe("HermesAdapter", () => {
     });
     const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
     await adapter.resetSession();
-    expect(seen).toEqual([{ url: "/setup-api/chat/history?sessionKey=desktop", method: "DELETE" }]);
+    // The box is told to stop anything still answering the conversation first,
+    // so no answer lands in the transcript after it was cleared (TASK-2117).
+    expect(seen).toEqual([
+      { url: "/setup-api/hermes/chat?sessionKey=desktop", method: "DELETE" },
+      { url: "/setup-api/chat/history?sessionKey=desktop", method: "DELETE" },
+    ]);
   });
 
   it("still forgets the session when the transcript cannot be cleared", async () => {
@@ -368,10 +373,32 @@ describe("HermesAdapter", () => {
     ]);
   });
 
+  it("sends a document as documentPaths, never as an image", async () => {
+    // The route names it in the prompt for the agent's file tools; `--image`
+    // would hand a text file to the vision path.
+    const { adapter, calls } = makeAdapter(ok({ text: "otter", sessionId: "s1" }));
+    await adapter.sendTurn({
+      text: "what is in this file?",
+      attachments: [
+        { name: "a.png", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/a.png", type: "image/png" },
+        { name: "notes.txt", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/notes.txt", type: "text/plain" },
+        { name: "data", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/data", type: "" },
+      ],
+      idempotencyKey: "k",
+    });
+    expect(calls[0].body.imagePaths).toEqual(["/home/clawbox/clawbox/data/chat-media/chat-attachments/a.png"]);
+    expect(calls[0].body.documentPaths).toEqual([
+      "/home/clawbox/clawbox/data/chat-media/chat-attachments/notes.txt",
+      "/home/clawbox/clawbox/data/chat-media/chat-attachments/data",
+    ]);
+    expect(calls[0].body.message).toBe("what is in this file?");
+  });
+
   it("sends no imagePaths field at all on an ordinary turn", async () => {
     const { adapter, calls } = makeAdapter(ok({ text: "hi", sessionId: "s1" }));
     await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "k" });
     expect(calls[0].body).not.toHaveProperty("imagePaths");
+    expect(calls[0].body).not.toHaveProperty("documentPaths");
     expect(calls[0].body).not.toHaveProperty("displayText");
   });
 
@@ -472,7 +499,12 @@ describe("HermesAdapter", () => {
       await adapter.sendTurn({ text: "two", attachments: [], idempotencyKey: "b" });
       seen.length = 0;
       await adapter.deleteSession("desktop-0123456789ab", { running: false });
-      expect(seen).toEqual([{ url: "/setup-api/chat/history?sessionKey=desktop-0123456789ab", method: "DELETE" }]);
+      // Its own turn stopped on the box first — one this page may not even be
+      // following (TASK-2117) — and then its transcript. Nothing of main's.
+      expect(seen).toEqual([
+        { url: "/setup-api/hermes/chat?sessionKey=desktop-0123456789ab", method: "DELETE" },
+        { url: "/setup-api/chat/history?sessionKey=desktop-0123456789ab", method: "DELETE" },
+      ]);
       // Main still remembers its thread.
       context.sessionKey = "desktop";
       expect(adapter.threadedSessionId).toBe("s1");

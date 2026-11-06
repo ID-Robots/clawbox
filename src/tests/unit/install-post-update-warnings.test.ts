@@ -61,7 +61,7 @@ function runPostUpdate(failing: string[]): { out: string; rc: string } {
     ...[...called].map((fn) => (failing.includes(fn) ? `${fn}() { return 1; }` : `${fn}() { :; }`)),
     // The helpers post_update calls that are not step_-prefixed, so the sweep
     // above does not find them.
-    ...["pause_engine_unit", "resume_paused_engines"].map((fn) => `${fn}() { :; }`),
+    ...["pause_engine_unit", "resume_paused_engines", "relay_update_restart_warnings", "report_update_ap_restart"].map((fn) => `${fn}() { :; }`),
     failing.includes("ensure_local_embeddings")
       ? "ensure_local_embeddings() { return 1; }"
       : "ensure_local_embeddings() { :; }",

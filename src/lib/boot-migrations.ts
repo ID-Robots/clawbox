@@ -171,6 +171,46 @@ export function dropRemovedConsentMigration(deps: {
 }
 
 /**
+ * The config keys the removed Projects app kept (TASK-1556): the Files app's
+ * pinned folders, the GitHub backup record of each one, and when the owner
+ * last answered "Not now" to the backup suggestion.
+ *
+ * Only these KEYS go. The folders a pin named, their local git history and any
+ * copy already on GitHub belong to the owner, and nothing here touches them —
+ * a pin was a bookmark, and the backup records hold no credential (the GitHub
+ * sign-in is the Coding Agent's, and stays).
+ */
+export const REMOVED_PROJECTS_KEYS = [
+  "files_project_folders",
+  "files_project_backups",
+  "files_backup_suggestion_dismissed_at",
+] as const;
+
+/**
+ * Take the removed Projects app's config keys off a box that updated past it.
+ *
+ * Read before it writes, so a box that never pinned a folder (most of them)
+ * costs three reads and no write, and says nothing in the boot log. A store
+ * that will not read or write rejects, which is this register's "ask me again
+ * at the next boot"; the run is idempotent, so the retry costs nothing.
+ */
+export function dropRemovedProjectsMigration(deps: BootMigrationDeps): BootMigration {
+  return {
+    id: "drop-removed-projects",
+    label: "removed the stored pinned folders and backup records of the Projects app this build no longer has",
+    run: async () => {
+      let changed = false;
+      for (const key of REMOVED_PROJECTS_KEYS) {
+        if ((await deps.get(key)) === undefined) continue;
+        await deps.set(key, undefined);
+        changed = true;
+      }
+      return changed;
+    },
+  };
+}
+
+/**
  * Bring the data of every webapp built before v4.0 back within its reach
  * (TASK-1150; src/lib/webapp-legacy-storage-migration.ts).
  *

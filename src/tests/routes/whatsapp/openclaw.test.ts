@@ -300,7 +300,7 @@ describe("/setup-api/whatsapp/pair — OpenClaw", () => {
 describe("POST /setup-api/whatsapp/unpair — OpenClaw", () => {
   it("logs the session out and turns the channel off together", async () => {
     const { POST } = await import("@/app/setup-api/whatsapp/unpair/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/setup-api/whatsapp/unpair", { method: "POST" }));
     const body = await res.json();
 
     expect(body.success).toBe(true);
@@ -330,6 +330,6 @@ describe("POST /setup-api/whatsapp/unpair — OpenClaw", () => {
 
   async function POST_unpair() {
     const { POST } = await import("@/app/setup-api/whatsapp/unpair/route");
-    return POST();
+    return POST(new Request("http://localhost/setup-api/whatsapp/unpair", { method: "POST" }));
   }
 });

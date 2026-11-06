@@ -30,26 +30,16 @@ ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 CONFIG_FILE="$ROOT/data/config.json"
 CONNECT_LOCK="$ROOT/data/wifi-connecting.lock"
 HOTSPOT_ENV="$ROOT/data/hotspot.env"
-# The script this one EXECUTES is the root-owned copy under
-# /usr/local/libexec/clawbox — never derived from $ROOT. This runs as root on a
-# timer (clawbox-ap-watchdog.service has no User=), while $ROOT/scripts is
-# clawbox-owned and clawbox-writable, so "$ROOT/scripts/start-ap.sh" was root
-# executing whatever clawbox had put there. The override exists for the tests
-# that stand a witness in for start-ap.sh (the shape nm-dispatcher-failover.sh
-# uses for CLAWBOX_ONLINE_WAITER); it is only safe because the unit loads its
-# environment from the root-owned /etc/clawbox/network.env, not data/ — a
-# CLAWBOX_START_AP line in a clawbox-writable EnvironmentFile would be the same
-# hole by another name. Security scan #21.
-START_AP="${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}"
+# Startup is requested from systemd; this watchdog never executes AP code.
 # A connect (with retries) + AP restore can legitimately take a couple of
 # minutes; ignore a lock older than this so a web-server crash mid-handoff can't
 # wedge the watchdog off forever.
 LOCK_MAX_AGE="${WIFI_CONNECT_LOCK_MAX_AGE:-180}"
 
-# Post-setup the hotspot is owned by the normal flow (saved WiFi / desktop) —
-# don't fight it.
+# Read here; acted on below, once a deferred failover has had its look.
+setup_complete=false
 if [ -f "$CONFIG_FILE" ] && grep -E -q '"setup_complete":[[:space:]]*true' "$CONFIG_FILE" 2>/dev/null; then
-  exit 0
+  setup_complete=true
 fi
 
 # The owner switched the hotspot off. Do not bring it back.
@@ -93,6 +83,50 @@ read_env_value() {
 }
 
 hotspot_disabled="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_DISABLED)"
+
+# A failover worker that had to leave a WiFi activation in flight left this
+# marker (wifi-failover.sh): NetworkManager dispatches nothing if that
+# activation then fails, so nothing else would run the worker again. Once the
+# radio has settled — never while still in flight or unreadable, never during
+# a deliberate client-connect — start the supervised worker: it re-decides
+# everything under the radio lock and ends or renews the marker, capped per
+# episode. Pre-setup as after, and nothing else in that tick: restoring the AP
+# is then the worker's call. Never pre-setup with the hotspot switched off:
+# the worker's recovery restarts clawbox-ap.service, and start-ap.sh honours
+# that switch only after setup — the marker is left to age out. Otherwise the
+# rules below apply unchanged. An episode nobody finished (a worker that never
+# got the radio lock) is dropped after FAILOVER_PENDING_MAX_AGE. The name is
+# wifi-radio.sh's, checked alike.
+RADIO_DIR="${CLAWBOX_RADIO_RUN_DIR:-/run/clawbox-radio}"
+FAILOVER_PENDING="$RADIO_DIR/$IFACE.failover-pending"
+FAILOVER_PENDING_MAX_AGE=900
+if { [ "$setup_complete" = true ] || [ "$hotspot_disabled" != "1" ]; } &&
+   [[ "$IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] && [ ! -L "$RADIO_DIR" ] &&
+   [ -f "$FAILOVER_PENDING" ] && [ ! -L "$FAILOVER_PENDING" ]; then
+  now="$(date +%s)"
+  age=$(( now - $(stat -c %Y "$FAILOVER_PENDING" 2>/dev/null || echo 0) ))
+  lock_age=$(( now - $(stat -c %Y "$CONNECT_LOCK" 2>/dev/null || echo 0) ))
+  if [ "$age" -lt 0 ] || [ "$age" -ge "$FAILOVER_PENDING_MAX_AGE" ]; then
+    rm -f -- "$FAILOVER_PENDING"
+  elif ! { [ -f "$CONNECT_LOCK" ] && [ "$lock_age" -ge 0 ] && [ "$lock_age" -lt "$LOCK_MAX_AGE" ]; }; then
+    radio="$(nmcli -g GENERAL.STATE device show "$IFACE" 2>/dev/null)" || radio=""
+    case "${radio%% *}" in
+      ""|40|50|60|70|80|90|110) ;;
+      *)
+        echo "[AP-watchdog] $IFACE settled (${radio%% *}) after a deferred failover — re-running it"
+        systemctl --no-block start clawbox-wifi-failover.service ||
+          echo "[AP-watchdog] could not start the deferred failover re-check" >&2
+        exit 0 ;;
+    esac
+  fi
+fi
+
+# Post-setup the hotspot is owned by the normal flow (saved WiFi / desktop) —
+# don't fight it.
+if [ "$setup_complete" = true ]; then
+  exit 0
+fi
+
 if [ "$hotspot_disabled" = "1" ]; then
   exit 0
 fi
@@ -121,20 +155,6 @@ case "$STATE" in
 esac
 
 echo "[AP-watchdog] $IFACE is '${STATE:-unknown}' (not connected) and setup is incomplete — restoring hotspot"
-# No fallback to the tree copy: a missing libexec copy means install.sh has not
-# run install_root_libexec yet (or it failed), and the answer to that is the
-# next root step, not root running a clawbox-writable file. Exit 0 so the timer
-# does not paint a failed unit every twenty seconds while it waits. There is
-# one known window where this branch runs on purpose: the FIRST in-app update
-# carrying this script, between the updater's `git reset --hard` (which puts
-# this file in the tree) and post_update's first install_root_libexec (which
-# puts the copy in libexec) — for the length of that build the old unit runs
-# this new script and it stands down. A hotspot that drops in those minutes on
-# a pre-setup box is not re-raised until the copy lands; that is the intended
-# cost of having no tree fallback, since the fallback IS the hole.
-if [ ! -x "$START_AP" ]; then
-  echo "[AP-watchdog] $START_AP is missing or not executable — hotspot NOT restored; run 'sudo bash /home/clawbox/clawbox/install.sh --step systemd_services'" >&2
-  exit 0
-fi
-# SKIP_PRESCAN: we only need the hotspot back, not a fresh network scan.
-SKIP_PRESCAN=1 bash "$START_AP"
+# A service owns every AP startup, including timeout/SIGKILL recovery.
+# Do not cancel an AP start already in progress when the timer fires again.
+systemctl --job-mode=fail --no-block restart clawbox-ap.service

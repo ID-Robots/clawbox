@@ -61,7 +61,9 @@ export default function BrowserSetupWizard({
     setBusy(key);
     setError(null);
     const result = await runBrowserAction(action);
-    setBusy(null);
+    // Only this action's own busy mark: a slow link request can return while
+    // the owner is already in the middle of the next step (see `waiting`).
+    setBusy((current) => (current === key ? null : current));
     if (!result.ok) {
       setError(browserErrorText(t, result));
       return false;
@@ -69,6 +71,15 @@ export default function BrowserSetupWizard({
     onChanged();
     return true;
   };
+
+  // Turning the link on restarts the gateway, and the request that asked for
+  // it stays open for most of a minute after the device already reports the
+  // link as on. The step shows its green tick by then, so its Next must not
+  // sit disabled behind a request whose answer is already known — the same
+  // rule the window applies to its own buttons (BrowserApp's actionLoading).
+  // Derived, not stored: what the buttons read is "busy, unless it is the
+  // link request and the link is on".
+  const waiting = busy === "enable" && enabled ? null : busy;
 
   /**
    * Mark setup finished. Both ways out of the last step end here — opening the
@@ -86,6 +97,27 @@ export default function BrowserSetupWizard({
       return;
     }
     onDone(opened);
+  };
+
+  /**
+   * Walk in, and say so on the device first.
+   *
+   * With no stored answer the device reports setup as finished the moment the
+   * browser WORKS — Chromium there and the link on (getBrowserSetupComplete).
+   * That is right for a box that was set up before the wizard existed, and it
+   * is exactly what step 2 makes true: enabling the link flipped the window to
+   * its home face on the next poll and step 3 never appeared. Storing "not
+   * finished" as the owner walks in makes the explicit flag the answer until
+   * one of the two ways out of step 3 stores "finished".
+   *
+   * A failed write does not keep anyone at the door: the steps work the same,
+   * the window only risks the early flip this is here to stop.
+   */
+  const start = async () => {
+    setBusy("start");
+    await saveBrowserSetup({ setupComplete: false });
+    setBusy(null);
+    setStep("chromium");
   };
 
   /** Opening it IS finishing: the home face behind this wizard is the screen
@@ -129,7 +161,8 @@ export default function BrowserSetupWizard({
             <div className="mt-7 flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setStep("chromium")}
+                onClick={() => void start()}
+                disabled={waiting !== null}
                 data-testid="browser-wizard-start"
                 className={BTN_PRIMARY}
               >
@@ -142,7 +175,7 @@ export default function BrowserSetupWizard({
               <button
                 type="button"
                 onClick={() => void finish(false)}
-                disabled={busy === "finish"}
+                disabled={waiting === "finish"}
                 data-testid="browser-wizard-skip"
                 className={BTN_SECONDARY}
               >
@@ -176,13 +209,13 @@ export default function BrowserSetupWizard({
               <button
                 type="button"
                 onClick={() => void act("install-chromium", "install")}
-                disabled={busy !== null}
+                disabled={waiting !== null}
                 data-testid="browser-wizard-install"
                 className={`${BTN_PRIMARY} mt-3`}
               >
-                {busy === "install" ? t("browser.installing") : t("browser.installChromium")}
+                {waiting === "install" ? t("browser.installing") : t("browser.installChromium")}
               </button>
-              {busy === "install" && (
+              {waiting === "install" && (
                 <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]">{t("browser.setup.installSlow")}</p>
               )}
             </>
@@ -194,7 +227,7 @@ export default function BrowserSetupWizard({
               onClick={() => setStep(alwaysOn ? "open" : "link")}
               // Nothing downstream has meaning without a browser to link or
               // open, so this is the one step that is a gate.
-              disabled={!installed || busy !== null}
+              disabled={!installed || waiting !== null}
               data-testid="browser-wizard-next"
               className={BTN_PRIMARY}
             >
@@ -221,22 +254,22 @@ export default function BrowserSetupWizard({
             <button
               type="button"
               onClick={() => void act("enable", "enable")}
-              disabled={busy !== null}
+              disabled={waiting !== null}
               data-testid="browser-wizard-link"
               className={`${BTN_PRIMARY} mt-3`}
             >
-              {busy === "enable" ? t("browser.enabling") : t("browser.enable")}
+              {waiting === "enable" ? t("browser.enabling") : t("browser.enable")}
             </button>
           )}
 
           <div className="mt-5 flex items-center gap-2">
-            <button type="button" onClick={() => setStep("chromium")} disabled={busy !== null} className={BTN_SECONDARY}>
+            <button type="button" onClick={() => setStep("chromium")} disabled={waiting !== null} className={BTN_SECONDARY}>
               {t("browser.back")}
             </button>
             <button
               type="button"
               onClick={() => setStep("open")}
-              disabled={busy !== null}
+              disabled={waiting !== null}
               data-testid="browser-wizard-next-open"
               className={BTN_PRIMARY}
             >
@@ -261,23 +294,23 @@ export default function BrowserSetupWizard({
             <button
               type="button"
               onClick={() => void (running ? finish(true) : openAndFinish())}
-              disabled={busy !== null}
+              disabled={waiting !== null}
               data-testid="browser-wizard-open"
               className={BTN_PRIMARY}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">open_in_new</span>
-              {busy === "open"
+              {waiting === "open"
                 ? t("browser.opening")
                 : running ? t("browser.setup.finish") : t("browser.openBrowser")}
             </button>
             <button
               type="button"
               onClick={() => void finish(running)}
-              disabled={busy !== null}
+              disabled={waiting !== null}
               data-testid="browser-wizard-finish"
               className={BTN_SECONDARY}
             >
-              {busy === "finish" ? t("browser.setup.finishing") : t("browser.setup.skipAndFinish")}
+              {waiting === "finish" ? t("browser.setup.finishing") : t("browser.setup.skipAndFinish")}
             </button>
           </div>
         </>

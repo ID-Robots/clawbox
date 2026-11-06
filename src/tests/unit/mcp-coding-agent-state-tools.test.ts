@@ -106,10 +106,11 @@ describe("registration", () => {
     expect(h.get("coding_agent_resume").opts.readOnly).toBe(false);
   });
 
-  it("offers no tool for an owner's switch or the owner's bring-home", () => {
-    // enable, the pipeline
-    // default and merge are owner-session routes: a tool for any of them could
-    // only be refused, and would make the owner's answer temporary if it were not.
+  it("offers no tool for an owner's switch, nor any merge into the owner's project", () => {
+    // enable is an owner-session route: a tool for it could only be refused,
+    // and would make the owner's answer temporary if it were not. A merge of
+    // a run's branch into the project folder is not a route at all any more (the settle does its own,
+    // conservatively), and no tool may grow one.
     const names = harness().names();
     for (const word of ["enable", "merge", "promote", "permission", "toggle"]) {
       expect(names.some((n) => n.includes(word))).toBe(false);
@@ -129,7 +130,6 @@ describe("coding_run_list", () => {
           deliverable: { kind: "paths", paths: ["index.html"] },
           deliverableCheck: { ok: false, missing: "index.html was not created", checkedAt: 1 },
           attempts: [{ startedAt: 1, endedAt: 2, reason: "missing" }, { startedAt: 3, endedAt: null, reason: null }],
-          completionAttempts: 3,
           messages: [{ at: 1, text: "use blue", deliveredAt: null }],
         },
         { ...RUN, id: "run-live0001", status: "running", completedAt: null, unit: "clawbox-run-run-live0001.scope" },
@@ -147,7 +147,7 @@ describe("coding_run_list", () => {
       project: "site",
       branch: "clawbox/run-k3x9q2ab",
       copy: "kept, not merged home yet",
-      attempts: "2 of 3",
+      attempts: 2,
       deliverable: { kind: "files", files: ["index.html"], met: false, missing: "index.html was not created" },
       messages_waiting: 1,
     });
@@ -157,6 +157,21 @@ describe("coding_run_list", () => {
     expect(runs[1]).toMatchObject({ run_id: "run-live0001", detached: true, copy: "in use" });
     expect(runs[2]).toMatchObject({ run_id: "run-done0001", left_running: true });
     expect(String(runs[2].copy)).toMatch(/files removed; the work is kept on branch/);
+  });
+
+  it("names the account and the model each run is on", async () => {
+    apiGet.mockResolvedValue({
+      runs: [
+        { ...RUN, id: "run-openai01", provider: "openai", requestedModel: "gpt-5.6-luna", model: "gpt-5.6-luna" },
+        { ...RUN, id: "run-claude01", provider: "anthropic", requestedModel: "claude-opus-5-5", model: null },
+      ],
+    });
+    const out = await harness().call("coding_run_list", { status: "all", limit: 10 });
+    if (out.isError) throw new Error("expected a list");
+    const { runs } = JSON.parse(out.text) as { runs: Record<string, unknown>[] };
+    expect(runs[0]).toMatchObject({ run_id: "run-openai01", provider: "openai", model: "gpt-5.6-luna" });
+    // A run that has not reported its model yet says the one it was started on.
+    expect(runs[1]).toMatchObject({ run_id: "run-claude01", provider: "anthropic", model: "claude-opus-5-5" });
   });
 
   it("does not mark a run resumable while the allowance that paused it is still spent", async () => {
@@ -465,6 +480,29 @@ describe("coding_project_status", () => {
     expect(projects[1]).toMatchObject({ project: "notes", name: "Notes", kind: "code project", run_it_with: { project_id: "notes" }, runs_working: 0 });
   });
 
+  it("counts a run in a sibling worktree or a copy as its project's: neither is a row of its own", async () => {
+    const site = PROJECTS.projects[0];
+    apiGet.mockResolvedValue({
+      ...PROJECTS,
+      projects: [
+        { ...site, worktrees: ["/home/clawbox/projects/site-ref-task-7"], copies: [{ folder: "site-copy-1", directory: "/home/clawbox/projects/site-copy-1" }] },
+        PROJECTS.projects[1],
+      ],
+    });
+    apiTry.mockResolvedValue({
+      runs: [
+        { ...RUN, id: "run-sibling1", status: "running", leftover: false, worktree: null, directory: "/home/clawbox/projects/site-ref-task-7" },
+        { ...RUN, id: "run-incopy01", status: "running", leftover: false, worktree: null, directory: "/home/clawbox/projects/site-copy-1" },
+      ],
+    });
+    const out = await harness().call("coding_project_status", {});
+    if (out.isError) throw new Error("expected the table");
+    const { projects } = JSON.parse(out.text) as { projects: Record<string, unknown>[] };
+    expect(projects).toHaveLength(2);
+    expect(projects[0]).toMatchObject({ project: "site", runs_working: 2, run_copies: 1 });
+    expect(projects[1]).toMatchObject({ project: "notes", runs_working: 0 });
+  });
+
   it("keeps the table when the run list cannot be read", async () => {
     apiGet.mockResolvedValue(PROJECTS);
     apiTry.mockResolvedValue(null);
@@ -475,20 +513,14 @@ describe("coding_project_status", () => {
     expect(parsed.note).toMatch(/could not be read/);
   });
 
-  it("adds a named project's runs and pipeline default", async () => {
+  it("adds a named project's runs", async () => {
     apiGet.mockResolvedValue(PROJECTS);
-    apiTry.mockImplementation(async (path: string) => {
-      if (path === "/setup-api/coding-agent/runs") return { runs: [RUN] };
-      if (path === "/setup-api/coding-agent/pipeline") return { scope: "site", enabled: true };
-      return null;
-    });
+    apiTry.mockImplementation(async (path: string) => (path === "/setup-api/coding-agent/runs" ? { runs: [RUN] } : null));
     const on = await harness().call("coding_project_status", { project: "site" });
     if (on.isError) throw new Error("expected the project");
     const detail = JSON.parse(on.text) as Record<string, unknown>;
-    expect(detail).toMatchObject({ project: "site", delivery_pipeline_by_default: true });
+    expect(detail).toMatchObject({ project: "site" });
     expect((detail.runs as { run_id: string }[]).map((r) => r.run_id)).toEqual([RUN.id]);
-    expect(apiTry).toHaveBeenCalledWith("/setup-api/coding-agent/pipeline", expect.objectContaining({ query: { directory: "/home/clawbox/projects/site" } }));
-
   });
 
   it("says how many of a named project's runs it left out, by count or by size", async () => {
@@ -543,5 +575,30 @@ describe("coding_project_status", () => {
     if (!out.isError) throw new Error("expected NOT_FOUND");
     expect(out.error.code).toBe("NOT_FOUND");
     expect(out.error.next).toMatch(/site, notes/);
+  });
+});
+
+describe("coding_run_list and the queue", () => {
+  it("gives a queued run its place in line, and no elapsed time", async () => {
+    apiGet.mockResolvedValue({ runs: [{ ...RUN, id: "run-queued01", status: "queued", completedAt: null, queued: { at: 1, position: 1 } }] });
+    const out = await harness().call("coding_run_list", { status: "queued" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const { runs, notes } = JSON.parse(out.text) as { runs: Record<string, unknown>[]; notes: string };
+    expect(runs[0]).toMatchObject({ run_id: "run-queued01", status: "queued", queue_position: 1, elapsed: "not started" });
+    expect(notes).toMatch(/queue_position/);
+  });
+});
+
+describe("coding_run_list and a failed CI", () => {
+  it("marks a run whose pull request's CI failed, and whether a Fix CI may be offered", async () => {
+    const ci = { prNumber: 7, checks: ["test"], tests: ["a", "b"], files: [], unread: [], attempt: 0, fixRunId: null };
+    apiGet.mockResolvedValue({ runs: [{ ...RUN, id: "run-cifail01", ci }, { ...RUN, id: "run-cifail02", ci: { ...ci, fixRunId: "run-fixfix01" } }] });
+    const out = await harness().call("coding_run_list", {});
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    const { runs } = JSON.parse(out.text) as { runs: Record<string, unknown>[] };
+    expect(runs[0]).toMatchObject({ ci_failed: "PR #7: 1 check(s), 2 failing test(s)", can_fix_ci: true });
+    expect(runs[1]).toMatchObject({ ci_failed: "PR #7: 1 check(s), 2 failing test(s)" });
+    expect(runs[1]).not.toHaveProperty("can_fix_ci");
   });
 });

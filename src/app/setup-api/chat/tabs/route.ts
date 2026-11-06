@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { personSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { syncChatTabs } from "@/lib/chat-tab-store";
 import { isChatTabKey, MAX_CLOSED, MAX_TABS, parseActivity, parseTabList } from "@/lib/chat-tabs";
@@ -29,13 +29,18 @@ export const dynamic = "force-dynamic";
 // that one, so a conversation started on the desktop is the one the phone
 // lands in. `activity: { key }` on a POST is how a device reports a turn.
 //
+// ONE LIST PER PERSON. Every signed-in ClawBox user has their own chat
+// (src/lib/chat-scope.ts), so the strip a request reads and writes is the
+// caller's: the owner's, or that user's own — never another person's, and a
+// key outside the caller's space is dropped before it reaches the file.
+//
 // Session-gated by middleware like the rest of /setup-api/chat, and checked
-// again here. A WRITE also has to come from the owner's own browser: the MCP
+// again here. A WRITE also has to come from a person's own browser: the MCP
 // bearer the agent holds opens /setup-api, and a prompt-injected agent that
-// could add tabs to the owner's strip could put words in it the owner never
-// said, or close a conversation out of sight — and, like every owner write, it
-// has to come from this box's own page (`isSameOriginRequest`). Reading needs
-// no more than the session: the agent already reads these conversations whole.
+// could add tabs to a strip could put words in it nobody said, or close a
+// conversation out of sight — and, like every person's write, it has to come
+// from this box's own page (`isSameOriginRequest`). Reading needs no more than
+// the session; the agent's bearer reads the owner's list, as it always did.
 
 /** A request larger than this is not a strip anyone has. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -44,7 +49,7 @@ export async function GET(req: NextRequest) {
   const denied = await requireSession(req);
   if (denied) return denied;
   try {
-    return NextResponse.json(await syncChatTabs());
+    return NextResponse.json(await syncChatTabs({}, await personSession(req)));
   } catch (err) {
     console.warn("[chat-tabs] could not read the tab list:", err);
     return NextResponse.json({ error: "Could not read the chat tabs" }, { status: 500 });
@@ -54,9 +59,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const denied = await requireSession(req);
   if (denied) return denied;
-  if (!(await hasOwnerSession(req)) || !isSameOriginRequest(req)) {
+  const person = await personSession(req);
+  if (!person || !isSameOriginRequest(req)) {
     return NextResponse.json(
-      { error: "Chat tabs can only be changed from the owner's own session", code: "owner_only" },
+      { error: "Chat tabs can only be changed from a signed-in person's own session", code: "owner_only" },
       { status: 403 },
     );
   }
@@ -93,7 +99,7 @@ export async function POST(req: NextRequest) {
       upsert: parseTabList(upsert).slice(0, MAX_TABS),
       close: (close ?? []).filter(isChatTabKey).slice(0, MAX_CLOSED),
       ...(activity ? { activity } : {}),
-    });
+    }, person);
     return NextResponse.json(synced);
   } catch (err) {
     console.warn("[chat-tabs] could not save the tab list:", err);

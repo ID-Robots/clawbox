@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { listGitHubRepos } from "@/lib/project-import";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
  * account is theirs, not the agent's — the agent has no business browsing it.
  */
 export async function GET(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json({ error: "Browsing GitHub needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
   const out = await listGitHubRepos();

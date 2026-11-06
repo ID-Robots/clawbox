@@ -1,3 +1,5 @@
+import { CHANNEL_SETUP_GROUP, CHANNEL_SETUP_KIND } from "@/lib/background-task-kinds";
+import { routeAsSettingsJob } from "@/lib/settings-jobs";
 import { NextResponse } from "next/server";
 import { set } from "@/lib/config-store";
 import { getActiveHarnessSource } from "@/lib/harness";
@@ -59,7 +61,32 @@ function notServingYet(reset: boolean, pending = false): NextResponse {
   );
 }
 
+/**
+ * POST { botToken } — save the bot and bring the gateway onto it. With
+ * `background: true` (Settings, TASK-2148) the same save runs as a job of the
+ * box (src/lib/settings-jobs.ts): answered 202 at once, shown on the desktop's
+ * corner card, followed by Settings, and ending with this route's own answer.
+ */
 export async function POST(request: Request) {
+  const job = await routeAsSettingsJob(request, {
+    path: "/setup-api/telegram/configure",
+  kind: CHANNEL_SETUP_KIND,
+  group: CHANNEL_SETUP_GROUP,
+  busyCode: "channel_change_running",
+    describe: () => ({
+      subject: "telegram",
+      action: "configure",
+      label: "Telegram",
+      title: "Setting up Telegram",
+      status: "Saving the Telegram bot and restarting the assistant…",
+      done: "Telegram is set up.",
+    }),
+    handler: configureTelegram,
+  });
+  return job ?? configureTelegram(request);
+}
+
+async function configureTelegram(request: Request): Promise<Response> {
   try {
     let body: { botToken?: string };
     try {

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 
+// The busy gate (GitHub #1269) asks the coding agent and the gateway: idle here
+// unless a test says otherwise.
+vi.mock("@/lib/update-busy", () => ({
+  activeAgentWork: vi.fn(async () => ({ coding: 0, agents: 0, total: 0 })),
+}));
+
 vi.mock("@/lib/updater", () => ({
   startUpdate: vi.fn(),
   isUpdateCompleted: vi.fn(),
@@ -13,11 +19,13 @@ vi.mock("@/lib/update-whats-new-server", () => ({
 }));
 
 import { startUpdate, isUpdateCompleted } from "@/lib/updater";
+import { activeAgentWork } from "@/lib/update-busy";
 import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 
 const mockStartUpdate = vi.mocked(startUpdate);
 const mockIsUpdateCompleted = vi.mocked(isUpdateCompleted);
 const mockPrefetch = vi.mocked(prefetchUpdateWhatsNew);
+const mockActiveAgentWork = vi.mocked(activeAgentWork);
 
 describe("POST /setup-api/update/run", () => {
   let updateRunPost: (req: Request) => Promise<Response>;
@@ -77,6 +85,39 @@ describe("POST /setup-api/update/run", () => {
     expect(mockStartUpdate).not.toHaveBeenCalled();
   });
 
+  describe("busy gate (GitHub #1269)", () => {
+    it("refuses with 409 and the counts while agent work runs, starting nothing", async () => {
+      mockActiveAgentWork.mockResolvedValueOnce({ coding: 1, agents: 2, total: 3 });
+      const res = await updateRunPost(jsonRequest({ force: true }));
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body).toMatchObject({ started: false, busy: true, work: { coding: 1, agents: 2, total: 3 } });
+      expect(mockStartUpdate).not.toHaveBeenCalled();
+    });
+
+    it("starts anyway with ignoreBusy, without asking", async () => {
+      mockActiveAgentWork.mockResolvedValue({ coding: 1, agents: 0, total: 1 });
+      const res = await updateRunPost(jsonRequest({ force: true, ignoreBusy: true }));
+      expect(res.status).toBe(200);
+      expect(mockStartUpdate).toHaveBeenCalled();
+      expect(mockActiveAgentWork).not.toHaveBeenCalled();
+    });
+
+    it("only a literal true is the override", async () => {
+      mockActiveAgentWork.mockResolvedValueOnce({ coding: 0, agents: 1, total: 1 });
+      const res = await updateRunPost(jsonRequest({ force: true, ignoreBusy: "yes" }));
+      expect(res.status).toBe(409);
+      expect(mockStartUpdate).not.toHaveBeenCalled();
+    });
+
+    it("an already-completed update is answered before the gate asks", async () => {
+      mockIsUpdateCompleted.mockResolvedValue(true);
+      const res = await updateRunPost(emptyRequest());
+      expect((await res.json()).already_completed).toBe(true);
+      expect(mockActiveAgentWork).not.toHaveBeenCalled();
+    });
+  });
+
   it("forces update even when completed", async () => {
     mockIsUpdateCompleted.mockResolvedValue(true);
 
@@ -86,6 +127,17 @@ describe("POST /setup-api/update/run", () => {
     expect(res.status).toBe(200);
     expect(body.started).toBe(true);
     expect(mockStartUpdate).toHaveBeenCalled();
+  });
+
+  it("passes the owner's explicit downgrade override, and nothing short of a literal true", async () => {
+    // "Back up and update anyway" (src/lib/harness-downgrade.ts): without it the
+    // updater refuses a run that would install an older harness.
+    await updateRunPost(jsonRequest({ force: true }));
+    expect(mockStartUpdate).toHaveBeenLastCalledWith({ allowHarnessDowngrade: false });
+    await updateRunPost(jsonRequest({ force: true, allowHarnessDowngrade: "true" }));
+    expect(mockStartUpdate).toHaveBeenLastCalledWith({ allowHarnessDowngrade: false });
+    await updateRunPost(jsonRequest({ force: true, allowHarnessDowngrade: true }));
+    expect(mockStartUpdate).toHaveBeenLastCalledWith({ allowHarnessDowngrade: true });
   });
 
   it("handles invalid JSON body gracefully", async () => {

@@ -46,6 +46,8 @@
 // inbound hook claims, so it would take the owner's approval reply away from
 // the mail queue and spend its attempt budget on the way.
 
+import { retryWhileAgentStarting } from "@/lib/chat-gateway-starting";
+
 /** The kinds `approval.resolve` accepts. Anything else is not acted on. */
 export const APPROVAL_KINDS = ["exec", "plugin", "system-agent"] as const;
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
@@ -339,14 +341,24 @@ export function approvalsAfterReplay(
  *
  * Never throws: a gateway without the RPC, or a socket that has gone, leaves
  * the chat exactly as it was.
+ *
+ * Asked on every hello, which right after a restart can come before the agent
+ * has finished starting: that refusal is waited out (bounded, see
+ * `retryWhileAgentStarting`) rather than taken as the fallback's cue. `signal`
+ * is the connection's own — a newer socket subscribes for itself, so a wait it
+ * calls off ends here with nothing applied.
  */
 export async function subscribeSessionApprovals(
   request: (method: string, params: unknown) => Promise<unknown>,
   key: string,
   applyReplay: (replay: ApprovalReplay, forKey: string) => void,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<void> {
   try {
-    const payload = await request("sessions.messages.subscribe", sessionApprovalSubscribeParams(key))
+    const payload = await retryWhileAgentStarting(
+      () => request("sessions.messages.subscribe", sessionApprovalSubscribeParams(key)),
+      { signal: opts.signal },
+    )
     // The key travels WITH the answer. This call is not cancelled when the
     // owner switches conversation, so a slow subscribe for the tab they left
     // can resolve after the next one and put its cards under the tab they are
@@ -354,6 +366,8 @@ export async function subscribeSessionApprovals(
     applyReplay(readApprovalReplay((payload as { approvalReplay?: unknown } | null)?.approvalReplay), key)
     return
   } catch {
+    // Called off by the connection that asked: the next one subscribes itself.
+    if (opts.signal?.aborted) return
     // THE OPT-IN IS NOT A SOFT ONE, and this is the whole reason for the second
     // call below. The core refuses the ENTIRE `sessions.messages.subscribe` —
     // and rolls the message subscription back — when the client may not review
@@ -376,7 +390,7 @@ export async function subscribeSessionApprovals(
     // ones, which are the record of what happened.
     applyReplay({ cards: [], truncated: false }, key)
   }
-  await subscribeSessionMessages(request, key)
+  await subscribeSessionMessages(request, key, opts)
 }
 
 /**
@@ -388,14 +402,16 @@ export async function subscribeSessionApprovals(
  * file or picture — stripped from the live `final` — reaches the chat without a
  * reload (lib/chat-transcript-reconcile.ts).
  *
- * Never throws, and says whether the gateway took it.
+ * Never throws, and says whether the gateway took it. Waits out an agent that
+ * is still starting, as the approvals subscribe above does.
  */
 export async function subscribeSessionMessages(
   request: (method: string, params: unknown) => Promise<unknown>,
   key: string,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<boolean> {
   try {
-    await request("sessions.messages.subscribe", { key })
+    await retryWhileAgentStarting(() => request("sessions.messages.subscribe", { key }), { signal: opts.signal })
     return true
   } catch {
     // A gateway that refuses the plain frame too. The chat still sends and

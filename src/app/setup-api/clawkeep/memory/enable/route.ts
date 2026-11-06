@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { readMemorySchedule } from "@/lib/clawkeep-memory";
+import { memoryShardWriter, scheduledFullPassRefusal } from "@/lib/memory-shard-writer";
 import { bodyWouldEnable } from "@/lib/paid-plan-gate";
 import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
 import {
@@ -15,10 +16,14 @@ export const dynamic = "force-dynamic";
 /**
  * The owner's switch for Memory Shard, and the wizard's completion flag.
  *
- * OWNER ONLY. Middleware admits the MCP bearer on every /setup-api route and
- * the agent holds it, so a route that trusted middleware here would let the
- * assistant switch on the indexing of the owner's own documents. Same helper
- * and same rule as coding-agent/enable.
+ * A signed-in person or the box's assistant (`memoryShardWriter`): the owner
+ * asked for the assistant to be able to do whatever the Memory Shard app does,
+ * and switching it on or off is one click there. Anything else is refused 403
+ * `owner_only`. The switch costs nothing by itself — the passes it allows are
+ * gated on their own — so it needs no `confirm`, with one exception: switching
+ * it ON re-arms the saved schedule, and over an index with nothing in it yet
+ * that schedule's next pass is a full build, which from the assistant waits
+ * for `confirm: true` (409 `confirm_required`).
  *
  * POST { enabled?: boolean, setupComplete?: boolean } → the new state.
  *
@@ -27,12 +32,8 @@ export const dynamic = "force-dynamic";
  * @/lib/paid-plan-gate for why the other writes stay open.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
-    return NextResponse.json(
-      { error: "Changing the memory index switch needs a signed-in browser session.", kind: "owner_only" },
-      { status: 403 },
-    );
-  }
+  const writer = await memoryShardWriter(request, "Changing the memory index switch");
+  if (!writer.ok) return writer.response;
 
   let body: { enabled?: unknown; setupComplete?: unknown };
   try {
@@ -61,16 +62,30 @@ export async function POST(request: Request) {
     const gate = await readPlanGate();
     if (!gate.satisfied) return refusePaidPlan("memory_shard", gate);
   }
+  if (writer.by === "assistant" && body.enabled === true && (await readMemorySchedule()).enabled) {
+    const refused = await scheduledFullPassRefusal(writer.by, body);
+    if (refused) return refused;
+  }
 
   if (hasEnabled) {
     await setMemoryShardEnabled(body.enabled as boolean);
-    console.error(`[memory-shard] switched ${body.enabled ? "on" : "off"} by the owner`);
+    console.error(`[memory-shard] switched ${body.enabled ? "on" : "off"} by the ${writer.by}`);
     // The switch means nothing until the timer follows it. Off disarms the
     // armed slot here and now — a switch that only took effect at the next
     // reboot would let the box spend tonight embedding after the owner
     // switched it off — and on re-arms the schedule they already saved,
     // which is what the wizard relies on when it enables after its PUT.
     await refreshMemoryScheduler();
+    // The Prime Radiant vault is one of its sources and is not indexed while
+    // it is off: catch up on whatever was committed meanwhile. Unchanged pages
+    // cost a blob comparison; no vault, nothing to do. Never awaited.
+    if (body.enabled === true) {
+      void import("@/lib/prime-radiant/shard-index")
+        .then((m) => m.reindexPrimeRadiantVault())
+        .catch((err) => {
+          console.warn(`[memory-shard] vault index catch-up did not finish: ${err instanceof Error ? err.message : String(err)}`);
+        });
+    }
   }
   if (hasSetup) {
     await setMemoryShardSetupComplete(body.setupComplete as boolean);

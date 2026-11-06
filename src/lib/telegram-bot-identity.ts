@@ -5,7 +5,8 @@
 // to write beside the real thing — never the authority:
 //
 //   * OpenClaw — `setTelegramToken()` writes `channels.telegram.botToken` into
-//     ~/.openclaw/openclaw.json, and the gateway long-polls from there.
+//     ~/.openclaw/openclaw.json, and the gateway long-polls from there; a
+//     multi-account channel keeps one per `channels.telegram.accounts.<id>`.
 //   * Hermes — `hermes config set TELEGRAM_BOT_TOKEN` writes ~/.hermes/.env (the
 //     path `hermes config env-path` prints), and the gateway resolves it through
 //     its own env bridge: .env first, then ~/.hermes/config.yaml's top-level
@@ -37,23 +38,16 @@ import {
   type Harness,
 } from "@/lib/harness";
 import { readHermesTelegramToken } from "@/lib/hermes-telegram";
-import { readConfigStrict, type OpenClawConfig } from "@/lib/openclaw-config";
+import { readConfigStrict } from "@/lib/openclaw-config";
+import {
+  defaultTelegramAccount,
+  holdsTelegramCredentialReference,
+  telegramBotId,
+  telegramCredentialBlocks,
+} from "@/lib/openclaw-telegram-account";
 
-/**
- * Telegram tokens are `<bot id>:<secret>`. The id is the BOT; the secret is one
- * credential for it, and /revoke issues another. Two tokens that differ only in
- * the secret address the same `getUpdates` stream, so identity comparisons have
- * to be made on the id — comparing whole tokens reports a rotated credential as
- * a different bot and lets two pollers collide.
- */
-const BOT_TOKEN_RE = /^(\d{1,20}):[A-Za-z0-9_-]{1,200}$/;
-
-/** The bot id inside a token, or null when the value is not one. */
-export function telegramBotId(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  const matched = BOT_TOKEN_RE.exec(raw.trim());
-  return matched ? matched[1] : null;
-}
+// The token shape lives beside the account rule that has to agree with it.
+export { telegramBotId };
 
 /**
  * A stored value, accepted only if it could address a bot.
@@ -81,6 +75,12 @@ function botTokenOrNull(raw: unknown): string | null {
 interface StoredBot {
   token: string | null;
   known: boolean;
+  /**
+   * OpenClaw only: the channel account the answer is about, as OpenClaw's
+   * pairing store keys it — so a caller asking who may talk to this bot asks
+   * the same account the token came from.
+   */
+  account?: string;
 }
 
 export type ActiveTelegramBot = StoredBot;
@@ -98,20 +98,18 @@ async function clawboxMirror(snapshot?: Record<string, unknown>): Promise<string
   return botTokenOrNull(snapshot ? snapshot.telegram_bot_token : await configGet("telegram_bot_token"));
 }
 
-type OpenClawChannel = NonNullable<OpenClawConfig["channels"]>[string];
-
 /**
- * OpenClaw's own credential, out of the channel block its gateway polls from.
+ * OpenClaw's Telegram channel block, the one its gateway polls from — or null
+ * when openclaw.json exists and could not be read.
  *
  * `readConfigStrict` and not `readConfig`: the plain reader answers `{}` to a
  * missing file and to an EACCES alike, which is the fail-open that put this
  * whole class of bug in the tree. Strict lets only ENOENT mean "nothing is
  * configured" and raises everything else, so `known` can be honest.
  */
-async function openclawStoredBot(): Promise<StoredBot> {
-  let channel: OpenClawChannel | undefined;
+async function readOpenclawTelegramChannel(): Promise<{ channel: unknown } | null> {
   try {
-    channel = (await readConfigStrict()).channels?.telegram;
+    return { channel: (await readConfigStrict()).channels?.telegram };
   } catch (err) {
     // The MESSAGE, not the error. `OpenclawConfigUnreadableError` carries the
     // original on `cause`, and V8's JSON parse errors quote a window of the
@@ -122,20 +120,51 @@ async function openclawStoredBot(): Promise<StoredBot> {
       "[telegram] openclaw.json could not be read; the bot it holds is unknown:",
       err instanceof Error ? err.message : err,
     );
-    return { token: null, known: false };
+    return null;
   }
-  const token = botTokenOrNull(channel?.botToken);
+}
+
+/**
+ * The bot one credential block holds.
+ *
+ * A block can carry its credential as a REFERENCE instead of a literal — a
+ * SecretRef in `botToken` (`{source:"env", provider, id}`, the shape OpenClaw's
+ * schema gives the key and Discord's setter writes, see envSecretRef in
+ * openclaw-config.ts), a `${VAR}` substitution, or the same shape under
+ * `token`. Resolving it would mean reading the gateway's process environment,
+ * which this module cannot do; but "there is a bot here and we cannot name it"
+ * is exactly what the third state is for, and it is the opposite of the
+ * confident "no bot" that let the guard wave the harness's own bot through.
+ */
+function blockBot(block: Record<string, unknown>): StoredBot {
+  const token = botTokenOrNull(block.botToken);
   if (token !== null) return { token, known: true };
-  // A channel can carry its credential as an env REFERENCE instead of a literal
-  // — `token: {source:"env", provider, id}`, the form Discord uses (see
-  // envSecretRef in openclaw-config.ts) — and Telegram accepts the same shape
-  // from `openclaw config set` or the control UI. Resolving it would mean
-  // reading the gateway's process environment, which this module cannot do; but
-  // "there is a bot here and we cannot name it" is exactly what the third state
-  // is for, and it is the opposite of the confident "no bot" that let the guard
-  // wave the harness's own bot through.
-  if (channel?.token !== undefined) return { token: null, known: false };
-  return { token: null, known: true };
+  return { token: null, known: !holdsTelegramCredentialReference(block) };
+}
+
+/**
+ * OpenClaw's own credential — the default account's. A multi-account channel
+ * keeps its bots under `channels.telegram.accounts.<id>` and none at the root,
+ * so the root alone answered "no bot" for a bot that works; which account is
+ * the box's is openclaw-telegram-account.ts's rule, shared with the allowlist
+ * reader so the token and the approved senders come from the same account.
+ */
+async function openclawStoredBot(): Promise<StoredBot> {
+  const read = await readOpenclawTelegramChannel();
+  if (read === null) return { token: null, known: false };
+  const account = defaultTelegramAccount(read.channel);
+  return { ...blockBot(account.block), account: account.id };
+}
+
+/** Every bot OpenClaw's channel holds, across the root and every account. */
+async function openclawStoredBots(): Promise<{ tokens: string[]; known: boolean }> {
+  const read = await readOpenclawTelegramChannel();
+  if (read === null) return { tokens: [], known: false };
+  const bots = telegramCredentialBlocks(read.channel).map(blockBot);
+  return {
+    tokens: bots.flatMap((bot) => (bot.token === null ? [] : [bot.token])),
+    known: bots.every((bot) => bot.known),
+  };
 }
 
 /** Hermes' own credential, out of the env file the harness itself names. */
@@ -215,7 +244,7 @@ export async function readActiveTelegramBot(
   // legacy box to protect on that SKU, which is where the fallback earns its
   // place: an OpenClaw box configured before the channel block existed.
   if ((source ? source.edition : getEdition()) === "dual") return stored;
-  return { token: await clawboxMirror(clawboxConfig), known: stored.known };
+  return { ...stored, token: await clawboxMirror(clawboxConfig) };
 }
 
 /** Every bot this box could be long-polling, by bot id. */
@@ -269,14 +298,17 @@ export interface TelegramBotsInUse {
  * save on a fault that cannot change the answer.
  */
 export async function readTelegramBotsInUse(): Promise<TelegramBotsInUse> {
+  // OpenClaw's EVERY account, not just the default one: a second account's bot
+  // is polled by the same gateway, and refusing the default bot while waving
+  // that one through is the same collision one account over.
   const [openclaw, hermes, mirror] = await Promise.all([
-    openclawStoredBot(),
+    openclawStoredBots(),
     hermesStoredBot(),
     clawboxMirror(),
   ]);
-  const stores: Record<Harness, StoredBot> = { openclaw, hermes };
+  const stores: Record<Harness, { known: boolean }> = { openclaw, hermes };
   const ids = new Set<string>();
-  for (const token of [openclaw.token, hermes.token, mirror]) {
+  for (const token of [...openclaw.tokens, hermes.token, mirror]) {
     const id = telegramBotId(token);
     if (id !== null) ids.add(id);
   }

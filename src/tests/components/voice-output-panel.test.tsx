@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render as renderBare, screen, waitFor } from "
 import { I18nProvider } from "@/lib/i18n";
 import VoiceOutputPanel, { isVoiceStatus } from "@/components/VoiceOutputPanel";
 import { sampleSentence } from "@/lib/voice-catalog";
+import { desktopTranslations } from "@/lib/desktop-translations";
+import { translations } from "@/lib/translations";
 
 /**
  * Settings → Voice, the compact version: where speech comes from, the
@@ -418,6 +420,264 @@ describe("status validation", () => {
     }
   });
 
+  /**
+   * "Auto-play every spoken reply", under the switch it depends on: off by
+   * default, and with spoken replies off there is no clip to play, so it is
+   * greyed out and says why instead of offering a flip that does nothing.
+   */
+  it("offers auto-play off by default, greyed out and saying why while spoken replies are off", async () => {
+    mockFetch(status());
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toBeDisabled();
+    expect(screen.getByTestId("voice-auto-play-all-hint")).toHaveTextContent(/Spoken replies above/);
+    expect(toggle).toHaveAccessibleDescription(/Spoken replies above/);
+    fireEvent.click(toggle);
+    expect(posts).toEqual([]);
+  });
+
+  it("keeps auto-play's position while spoken replies are off, so turning them back on brings it back", async () => {
+    mockFetch(status({ autoReply: false, autoPlayAll: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toBeDisabled();
+  });
+
+  it("posts the auto-play flip once spoken replies are on, adopts the box's answer and tells the chat", async () => {
+    mockFetch(status({ autoReply: true }), { answer: { ...status(), autoReply: true, autoPlayAll: true } });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      const toggle = await screen.findByTestId("voice-auto-play-all");
+      expect(toggle).not.toBeDisabled();
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByTestId("voice-auto-play-all-hint")).toHaveTextContent(/question you typed/);
+      fireEvent.click(toggle);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "autoPlayAll", enabled: true } }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      // The open chat learns it with no reload: the same event `autoReply`
+      // rides on, carrying both switches.
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toMatchObject({ autoReply: true, autoPlayAll: true });
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
+  it("follows auto-play when it is moved somewhere else, and only when an event names it", async () => {
+    mockFetch(status({ autoReply: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoPlayAll: true } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // A writer that names only spoken replies leaves auto-play where it was.
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoReply: true } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("voice-auto-reply")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("never lets a read that was out when a switch moved put the old position back", async () => {
+    // What the box answers at the moment it is ASKED: the held read below
+    // carries the state from before the change that lands while it waits.
+    let server = status({ autoReply: true, autoPlayAll: false });
+    let holdNextRead = false;
+    let releaseRead: () => void = () => {};
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      if (input.toString() !== "/setup-api/tts") return json({});
+      const answer = server;
+      if (holdNextRead) {
+        holdNextRead = false;
+        await new Promise<void>((resolve) => { releaseRead = resolve; });
+      }
+      return json(answer);
+    }));
+    const { rerender } = render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    // The tab is shown again, and its fresh read is still out when auto-play
+    // is turned on elsewhere — the box has taken it, and the event says so.
+    holdNextRead = true;
+    rerender(<I18nProvider><VoiceOutputPanel active={false} /></I18nProvider>);
+    rerender(<I18nProvider><VoiceOutputPanel active /></I18nProvider>);
+    server = status({ autoReply: true, autoPlayAll: true });
+    act(() => {
+      window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoReply: true, autoPlayAll: true } }));
+    });
+    expect(screen.getByTestId("voice-auto-play-all")).toHaveAttribute("aria-checked", "true");
+
+    // The held read answers "off". It is older than the event and loses: the
+    // panel asks the box again and keeps "on".
+    await act(async () => {
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(screen.getByTestId("voice-auto-play-all")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("refuses a status whose auto-play switch is not a boolean", () => {
+    expect(isVoiceStatus(status({ autoPlayAll: true }))).toBe(true);
+    expect(isVoiceStatus(status())).toBe(true);
+    expect(isVoiceStatus(status({ autoPlayAll: "yes" }))).toBe(false);
+  });
+
+});
+
+/**
+ * "Short spoken answers", the third switch on spoken replies: off by default
+ * (off is exactly what the voice did before it existed — the whole reply is
+ * spoken), owner-written through the same route, and greyed out under the
+ * same rule as auto-play, because with spoken replies off there is nothing
+ * spoken to shorten.
+ */
+describe("short spoken answers", () => {
+  it("offers it off by default, greyed out and saying why while spoken replies are off", async () => {
+    // A status from a server that predates the field carries no `shortSpoken`
+    // at all, and reads as off — never as on.
+    mockFetch(status());
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("role", "switch");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toBeDisabled();
+    expect(screen.getByTestId("voice-short-spoken-hint")).toHaveTextContent(/Spoken replies above/);
+    expect(toggle).toHaveAccessibleDescription(/Spoken replies above/);
+    expect(await screen.findByText("Short spoken answers")).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(posts).toEqual([]);
+  });
+
+  it("sits in the spoken-replies card, under auto-play", async () => {
+    mockFetch(status({ autoReply: true }));
+    render(<VoiceOutputPanel active />);
+    const row = await screen.findByTestId("voice-short-spoken-row");
+    const autoPlayRow = screen.getByTestId("voice-auto-play-all-row");
+    expect(row.parentElement).toBe(autoPlayRow.parentElement);
+    expect(row.parentElement).toContainElement(screen.getByTestId("voice-auto-reply"));
+    expect(autoPlayRow.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps its position while spoken replies are off, so turning them back on brings it back", async () => {
+    mockFetch(status({ autoReply: false, shortSpoken: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toBeDisabled();
+  });
+
+  it("posts the flip once spoken replies are on, adopts the box's answer and tells the chat", async () => {
+    mockFetch(status({ autoReply: true }), { answer: { ...status(), autoReply: true, shortSpoken: true } });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      const toggle = await screen.findByTestId("voice-short-spoken");
+      expect(toggle).not.toBeDisabled();
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByTestId("voice-short-spoken-hint")).toHaveTextContent(/main answer/);
+      fireEvent.click(toggle);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "shortSpoken", enabled: true } }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      // The open chat learns it with no reload, on the event the other two
+      // switches ride on — all three named, so none is left to a stale read.
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toMatchObject({ autoReply: true, autoPlayAll: false, shortSpoken: true });
+      expect((heard[0] as { engines?: unknown }).engines).toEqual(status().engines);
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
+  it("posts the flip back off, and leaves auto-play where it was", async () => {
+    mockFetch(status({ autoReply: true, autoPlayAll: true, shortSpoken: true }), {
+      answer: { ...status(), autoReply: true, autoPlayAll: true, shortSpoken: false },
+    });
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "shortSpoken", enabled: false } }));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+    expect(screen.getByTestId("voice-auto-play-all")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("shows the box's refusal and keeps the switch where the box left it", async () => {
+    // Owner-only on the route: without an owner session the box answers 403,
+    // and the switch must not pretend the write landed.
+    mockFetch(status({ autoReply: true }), { refuse: { status: 403, body: { error: "Only the owner can change this." } } });
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    fireEvent.click(toggle);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Only the owner can change this.");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("follows the switch when it is moved somewhere else, and only when an event names it", async () => {
+    mockFetch(status({ autoReply: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { shortSpoken: true } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // A writer from before the switch existed names only the other two, and
+    // must not move it.
+    act(() => {
+      window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoReply: true, autoPlayAll: true } }));
+    });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // Nor does a value that is not a boolean.
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { shortSpoken: "no" } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("names it on the event the ffmpeg repair sends, too", async () => {
+    mockFetch(status({ channels: { supportedOnEdition: true, voiceNoteReady: false }, autoReply: true, shortSpoken: true }), {
+      install: '{"success":true}\n',
+      after: status({ channels: { supportedOnEdition: true, voiceNoteReady: true }, autoReply: true, shortSpoken: true }),
+    });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      fireEvent.click(await screen.findByTestId("voice-channel-voice-notes-fix"));
+      await waitFor(() => expect(heard).toHaveLength(1));
+      expect(heard[0]).toMatchObject({ autoReply: true, shortSpoken: true });
+      expect(screen.getByTestId("voice-short-spoken")).toHaveAttribute("aria-checked", "true");
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
+  it("refuses a status whose short-answers switch is not a boolean", () => {
+    expect(isVoiceStatus(status({ shortSpoken: true }))).toBe(true);
+    expect(isVoiceStatus(status({ shortSpoken: false }))).toBe(true);
+    expect(isVoiceStatus(status({ shortSpoken: null }))).toBe(true);
+    expect(isVoiceStatus(status({ shortSpoken: "yes" }))).toBe(false);
+    expect(isVoiceStatus(status({ shortSpoken: 1 }))).toBe(false);
+  });
+
+  it("is said in every locale the other voice switches are, never in English by default", () => {
+    for (const locale of Object.keys(desktopTranslations) as (keyof typeof desktopTranslations)[]) {
+      for (const key of ["settings.voice.shortSpoken", "settings.voice.shortSpokenHint"]) {
+        const value = desktopTranslations[locale][key];
+        expect(value, `${locale}["${key}"]`).toEqual(expect.any(String));
+        expect(value.trim().length, `${locale}["${key}"]`).toBeGreaterThan(0);
+        expect(translations[locale][key], `merged ${locale}["${key}"]`).toBe(value);
+        if (locale !== "en") expect(value, `${locale}["${key}"] is still English`).not.toBe(desktopTranslations.en[key]);
+      }
+      // Beside the auto-play strings it mirrors, in the same table.
+      expect(desktopTranslations[locale]["settings.voice.autoPlayAllNeedsSpokenReplies"], locale).toEqual(expect.any(String));
+    }
+  });
 });
 
 /**
@@ -478,6 +738,46 @@ describe("channel voice notes", () => {
     await waitFor(() => expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull());
   });
 
+  it("follows a repair already running again when the tab reopens, instead of offering it as idle", async () => {
+    // The install is a background task of the box: closing Settings left it
+    // running, and pressing the button again would only have followed it.
+    let ended = false;
+    let finish!: () => void;
+    const follow = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"taskId":"k1","kind":"voice-kokoro-install","status":"Installing…"}\n'));
+        finish = () => {
+          ended = true;
+          controller.enqueue(new TextEncoder().encode('{"success":true,"taskId":"k1"}\n'));
+          controller.close();
+        };
+      },
+    });
+    const running = {
+      id: "k1", kind: "voice-kokoro-install", group: "g", title: "Installing the voice", meta: null, state: "running",
+      steps: [{ id: "install", label: "Install Kokoro and register the voice", state: "running", weight: 1 }],
+      status: "  Installing Kokoro TTS...", completed: null, total: null, startedAt: 1, updatedAt: 2, stepStartedAt: 1,
+      finishedAt: null, error: null, result: null, log: [], logCount: 0, runner: "r", dismissed: false,
+      cancellable: false, cancelRequested: false, unit: null, adoptedAt: null, label: "Kokoro", lanes: [], needs: null, queuedAt: null, queuedBehind: null, percent: null, etaSeconds: null,
+    };
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === "/setup-api/background-jobs/tasks") return json({ tasks: [running] });
+      if (url === "/setup-api/background-jobs/tasks/follow?id=k1") return new Response(follow, { status: 200 });
+      if (url === "/setup-api/background-jobs/tasks?id=k1") return json({ task: running });
+      if (init?.method === "POST") throw new Error(`no POST expected: ${url}`);
+      return json(status({ ...channels(ended), autoReply: true }));
+    }));
+    render(<VoiceOutputPanel active />);
+
+    const button = await screen.findByTestId("voice-channel-voice-notes-fix");
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(await screen.findByTestId("voice-channel-voice-notes-task")).toHaveTextContent("Installing Kokoro TTS...");
+    finish();
+    await waitFor(() => expect(screen.queryByTestId("voice-channel-voice-notes")).toBeNull());
+  });
+
   it("says the repair did not finish, rather than clearing the warning it did not fix", async () => {
     mockFetch(status({ ...channels(false), autoReply: true }), {
       install: '{"error":"The voice install did not finish."}\n',
@@ -505,5 +805,75 @@ describe("waking the voice on the box", () => {
     fireEvent.change(await screen.findByTestId("voice-source"), { target: { value: "cloud" } });
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "auto" } }));
     expect(posts.filter((p) => p.url === "/setup-api/tts/warm")).toEqual([]);
+  });
+});
+
+describe("the cloud voice follows the ClawBox AI plan", () => {
+  // A Free box: our token in the slot, no endpoint behind it — what the panel
+  // showed as "ClawBox cloud — not available" after an upgrade to Max, until
+  // the box restarted.
+  const unarmed = () => {
+    const s = status({ activeProviderId: "tts-local-cli", activeEngine: "local", preferredEngine: "local" });
+    s.engines[1] = engine({
+      id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: false,
+      detail: "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one.",
+    });
+    return s;
+  };
+  const cloudOption = () =>
+    screen.getByTestId("voice-source").querySelector('option[value="cloud"]') as HTMLOptionElement;
+
+  let server: unknown;
+  const stubBox = () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const body = input.toString() === "/setup-api/tts" ? server : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+  };
+
+  it("reads the box again when the plan changes, and offers the cloud voice the new plan brings", async () => {
+    server = unarmed();
+    stubBox();
+    render(<VoiceOutputPanel active />);
+    await waitFor(() => expect(cloudOption()).toHaveTextContent("ClawBox cloud — not available"));
+    expect(cloudOption()).toBeDisabled();
+
+    server = status();
+    act(() => { window.dispatchEvent(new Event("clawbox:clawai-plan-changed")); });
+    await waitFor(() => expect(cloudOption()).not.toBeDisabled());
+    expect(cloudOption()).toHaveTextContent(/^ClawBox cloud$/);
+  });
+
+  it("says the box is setting the voice up while it follows the plan, and looks again until it has", async () => {
+    server = unarmed();
+    stubBox();
+    render(<VoiceOutputPanel active />);
+    await waitFor(() => expect(cloudOption()).toHaveTextContent("ClawBox cloud — not available"));
+
+    vi.useFakeTimers();
+    try {
+      // The poll recorded Max; the box is restarting its gateway to arm the voice.
+      server = { ...unarmed(), cloudPending: true };
+      await act(async () => {
+        window.dispatchEvent(new Event("clawbox:clawai-plan-changed"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(cloudOption()).toHaveTextContent("ClawBox cloud — setting up for your plan…");
+      expect(cloudOption()).toBeDisabled();
+
+      // Armed: the next look finds the voice, with no event and no reopen.
+      server = status();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(cloudOption()).not.toBeDisabled();
+      expect(cloudOption()).toHaveTextContent(/^ClawBox cloud$/);
+
+      // And it stops looking once nothing is pending.
+      const calls = vi.mocked(fetch).mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(vi.mocked(fetch).mock.calls.length).toBe(calls);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });

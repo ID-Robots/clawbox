@@ -1,0 +1,18 @@
+{
+  "name": "kanban-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-user kanban board: JSON API + small browser UI",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}

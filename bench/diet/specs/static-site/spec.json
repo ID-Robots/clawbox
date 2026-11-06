@@ -1,0 +1,12 @@
+{
+  "id": "static-site",
+  "tier": "short",
+  "project": "acme-site",
+  "task": "This folder is a static website (index.html, about.html, style.css). Add a new page pricing.html with three pricing cards (Basic, Pro, Team) in the site's existing style, add it to the navigation on every page, and fix the layout so the nav and the cards stack vertically and stay readable on screens narrower than 600px. Keep it plain HTML/CSS, no frameworks. Commit nothing yourself.",
+  "source": { "kind": "seed" },
+  "accept": [
+    { "name": "hidden: pages, nav, media query, markup", "cmd": "python3 -I __acceptance__/check_site.py \"$PROJECT\"", "timeoutSec": 30 }
+  ],
+  "probe": { "start": "python3 -m http.server \"$PORT\" --bind 127.0.0.1", "url": "http://127.0.0.1:{port}/pricing.html", "expectStatus": 200, "expectBodyIncludes": "Team" },
+  "rubric": "The pricing page should reuse the existing .cards/.card styles and the same head/nav structure as the other pages rather than inventing a parallel design; each card should have a price and a short feature list. The narrow-screen fix should make .cards and nav stack (flex-direction: column or equivalent) and drop the fixed 260px min-width that causes horizontal overflow; a <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> on every page is needed for the media query to work on real phones and is a strong plus. Check nav ordering is identical on all pages, no inline styles or duplicated CSS, and no frameworks or external assets."
+}

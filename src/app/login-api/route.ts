@@ -8,7 +8,8 @@ import {
   getSystemUsername,
 } from "@/lib/auth";
 import { hasOwnerPassword } from "@/lib/system-password";
-import { findUser, verifyUserPassword } from "@/lib/clawbox-users";
+import { checkUserPassword, findUser } from "@/lib/clawbox-users";
+import { isTunnelRequest } from "@/lib/host-allowlist";
 import {
   checkLockout,
   recordFailure,
@@ -166,7 +167,7 @@ export async function POST(request: Request) {
 
   // No name, or the owner's name, is the owner — the single-user login every
   // box had before multi-user, unchanged. A name that is not the owner's must
-  // be a user Settings → Users created; anything else is refused exactly like
+  // be a user Settings → System → Users created; anything else is refused exactly like
   // a wrong password, so the answer never says which names exist.
   const requested = typeof body.username === "string" ? body.username.trim() : "";
   const target = await resolveLoginTarget(requested);
@@ -179,11 +180,23 @@ export async function POST(request: Request) {
     }
   }
 
+  const verdict = target.kind === "user" ? await checkUserPassword(target.username, password) : null;
+  // The box could not check a second user's password at all — its root-owned
+  // helper is missing or not granted (an x64 PC before its one-time repair).
+  // No password was tried, so nothing is charged, and on the LAN, where the
+  // picker already lists every name, the person is told why instead of
+  // "incorrect". Over the tunnel it stays "incorrect", like an unknown name, so
+  // the internet still cannot tell which names exist.
+  if (verdict === "unavailable" && !isTunnelRequest(request.headers)) {
+    await padResponseTime(startedAt);
+    return NextResponse.json(
+      { error: "This box cannot check other users' passwords yet. Ask the owner to open Settings → System → Users, which shows the one-time repair.", code: "signin_unavailable" },
+      { status: 503 },
+    );
+  }
   const valid = target.kind === "owner"
     ? await verifyPassword(password)
-    : target.kind === "user"
-      ? await verifyUserPassword(target.username, password)
-      : false;
+    : verdict === "ok";
   if (!valid || target.kind === "unknown") {
     // Record against every bucket, then report the longest lock in force so the
     // client's Retry-After is honest about when it can actually try again.

@@ -1,0 +1,7 @@
+{
+  "id": "clawbox-local-lean",
+  "name": "ClawBox local lean mode",
+  "description": "Gives turns on the on-device llama.cpp model a short system prompt and a small tool set.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

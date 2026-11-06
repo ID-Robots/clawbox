@@ -41,25 +41,28 @@ The user never talks to the gateway directly — everything enters through port 
 
 ## Services
 
-Everything runs under systemd. The two you will interact with most are **clawbox-setup** (the web OS) and your edition's AI unit — `clawbox-gateway` on OpenClaw/dual, `clawbox-hermes-dashboard` on Hermes/dual.
+Everything runs under systemd. The two you will interact with most are **clawbox-setup** (the web OS) and your edition's AI unit — `clawbox-gateway` on OpenClaw/dual, `clawbox-hermes-dashboard` on Hermes/dual (plus Hermes' messaging gateway once a channel is set up).
 
 | Service | What it runs | Port | Restart policy |
 |---|---|---|---|
 | `clawbox-setup` | Node.js `production-server.js` → Next.js standalone build (desktop UI, wizard, `/setup-api/*`) | 80 (+443 if certs present) | always (3 s) |
 | `clawbox-gateway` — **OpenClaw / dual only** | `openclaw gateway --bind lan` — preceded by `gateway-pre-start.sh` config self-heals | 18789 (private LAN only, token-gated) | always (5 s) |
+| `hermes-gateway` — **Hermes / dual only** | Hermes' messaging gateway: receives Telegram and the other channels and runs scheduled tasks. Installed once a channel is set up, usually as the `clawbox` user's service (`~/.config/systemd/user`), by Hermes' own `hermes gateway install`; manage it with `hermes gateway status\|restart` | — | managed by Hermes |
 | `clawbox-hermes-dashboard` — **Hermes / dual only** | The Hermes dashboard | 9119 on `127.0.0.2` (loopback) | always |
 | `clawbox-hermes-dashboard-proxy` — **Hermes / dual only** | Session-gated auth proxy in front of the dashboard | 8090 (private LAN only) | always |
 | `clawbox-ap` | Wi-Fi hotspot **ClawBox-Setup** for first-boot setup (oneshot) | — | oneshot |
-| `clawbox-ap-watchdog.timer` | Re-raises the hotspot until setup completes (every 20 s) | — | timer |
 | `clawbox-vnc` / `clawbox-websockify` | Xvfb virtual display `:99` + x11vnc + noVNC proxy | 5900 / 6080 | on-failure |
-| `clawbox-browser` | Desktop Chromium with CDP for AI browsing (started on demand) | 18800 (CDP) | no |
+| `clawbox-browser` | The box's one Chromium, shared by the owner (remote desktop) and the assistant (CDP); kept running by `clawbox-setup` | 18800 (CDP) | no |
 | `clawbox-heartbeat.timer` + `clawbox-heartbeat.service` | Every 5 min the timer runs the oneshot, which curls `/setup-api/portal/heartbeat-tick` on loopback. The web app then POSTs to the portal — but only when a ClawBox AI token *and* a tunnel URL both exist ([details](/technical/networking#portal-heartbeat)) | — | timer + oneshot |
-| `clawbox-tunnel` | Optional Cloudflare Quick Tunnel → port 80 | — | always |
+| `clawbox-tunnel` | Optional Cloudflare tunnel → port 80: the box's **named** tunnel (`<name>.clawbox.tech`) when the portal issued one, else a quick tunnel; `data/cloudflared/tunnel.mode` says which | — | always |
+| `clawbox-embed` | The memory-search embedder (Qwen3-Embedding-0.6B on llama.cpp) when Memory Shard indexes on the box; woken on demand, stopped after 10 minutes idle | 8081 (loopback) | no |
+| `clawbox-wifi-failover` / `clawbox-ap-watchdog.timer` | Supervised Wi-Fi failover to the hotspot, and the watchdog that re-raises the hotspot until setup completes (every 20 s) | — | oneshot / timer |
+| `clawbox-build-heal` | At every boot, heals a web build an interrupted update left behind | — | oneshot |
 | `clawbox-performance` | Applies the persisted Jetson power profile at boot (see [Power profile and memory guards](#power-profile-and-memory-guards)) | — | oneshot |
 | `clawbox-root-update@<step>` | Privileged installer steps, templated (`install.sh --step <step>`) | — | oneshot |
 | `ollama` | Local model runtime (system package) | 11434 | managed by Ollama |
 
-Two more servers run as **children of the web app** (no systemd unit): the terminal PTY WebSocket server (port 3006) and the optional llama.cpp server (port 8080), both supervised by `src/instrumentation-node.ts`. Reached directly, that PTY has no authentication of its own — which is why 3006 is firewalled off the LAN and the terminal is only ever served through the session-gated `/terminal-ws` proxy on port 80.
+Two more servers run as **children of the web app** (no systemd unit): the terminal PTY WebSocket server (port 3006) and the on-device model's llama.cpp server (port 8080), both supervised by `src/instrumentation-node.ts`. Reached directly, that PTY has no authentication of its own — which is why 3006 is firewalled off the LAN and the terminal is only ever served through the session-gated `/terminal-ws` proxy on port 80.
 
 ### What is actually reachable from your network
 
@@ -75,7 +78,7 @@ The GNOME desktop is **shipped and on by default**. Turning it off is a setting,
 
 **Settings → System → Desktop environment** posts to `/setup-api/system/desktop`, which runs the root-owned `clawbox-desktop-mode.sh`. Off sets the boot target to `multi-user.target` and disables the display manager; on sets it back to `graphical.target`. **The change applies at the next reboot**, and the UI says so: tearing the graphical session down under a logged-in user would kill their Remote Desktop view and any Chromium the agent is driving. Running headless gives back roughly 700 MB.
 
-The automation browser is unaffected either way — `clawbox-browser.service` has no `[Install]` section, so it is only ever started on demand, never at boot.
+The browser is unaffected either way. `clawbox-browser.service` has no `[Install]` section: the web server (`clawbox-setup`) starts it after boot and keeps it running, because it is the one browser the owner and the assistant share (see [The desktop browser](/technical/filesystem#the-desktop-browser)).
 
 ### Power profile and memory guards
 
@@ -108,7 +111,7 @@ Three cgroup v2 memory guards ship as `50-clawbox-memory.conf` drop-ins, written
     `clawbox-ap` raises the **ClawBox-Setup** hotspot at `10.42.0.1` (falls back to `10.43.0.1` on subnet collision). dnsmasq forwards DNS **upstream** (8.8.8.8 / 8.8.4.4 / 1.1.1.1) and only maps `clawbox.local` to the AP — there is no DNS hijack, and the legacy port-80 DNAT rule is deleted on every AP start. `src/middleware.ts` answers OS captive-portal probe *paths* that reach the box, but nothing forces them there, so the owner browses to `http://10.42.0.1`.
   </Step>
   <Step title="Setup wizard">
-    Wi-Fi → update → password → AI provider → Telegram (optional, skippable). The update step is unconditional, not optional. State persists in `data/config.json` (`setup_complete`, `password_configured`).
+    Wi-Fi → (on a box shipped with `CLAWBOX_EDITION=unselected` only: **Choose your assistant**, which locks the edition and removes the other harness) → update → password (skipped when one is already set) → AI provider → Telegram (optional, skippable). The update step is unconditional, not optional. State persists in `data/config.json` (`setup_complete`, `password_configured`). Only the owner can complete setup: `setup/complete` refuses every other signed-in user and the agent's own bearer.
   </Step>
   <Step title="Steady state — home network">
     The box joins your Wi-Fi/Ethernet, announces `clawbox.local` over mDNS (avahi), and serves the desktop at its LAN IP. The AP watchdog stands down once setup is complete.
@@ -132,20 +135,24 @@ Three cgroup v2 memory guards ship as `50-clawbox-memory.conf` drop-ins, written
 
 **Hermes / dual editions**
 
-- **Hermes** is installed at `~/.local/bin/hermes` (a shim into `~/.hermes/hermes-agent/venv`), with its configuration and pooled-auth credential store under `~/.hermes`.
+- **Hermes** is installed at `~/.local/bin/hermes` (a shim into the agent at `~/.hermes/hermes-agent`, whose Python environment lives under `~/.hermes/installs/`), with its configuration and pooled-auth credential store under `~/.hermes`.
 - **Config** lives in `~/.hermes/config.yaml`. Every writer does a full read-modify-write, so hand-added comments and formatting in that file are not preserved — treat it as generated state.
 - **MCP**: `scripts/register-mcp.sh` writes `mcp_servers.clawbox` into `~/.hermes/config.yaml` at every web-server boot and at install time.
 - **Dashboard**: reachable through the ClawBox desktop (Hermes app) via the session-gated proxy on port `8090`; there is no Control UI and `/chat` 404s.
+
+**On every edition — the protected paths**
+
+**Settings → Harness → Protect ClawBox files from the agent** (on by default) stops the assistant's own file and shell tools from deleting, overwriting, truncating or moving ClawBox's own files and the local AI models. The one list of those paths and commands is `config/protected-paths.json`, read by a `before_tool_call` hook on OpenClaw (`scripts/openclaw-plugins/clawbox-path-guard`) and turned into `approvals.deny` in `~/.hermes/config.yaml` on Hermes. On OpenClaw, changing the switch restarts the assistant.
 
 ## Stack
 
 | Layer | Technology |
 |---|---|
 | Hardware | NVIDIA Jetson (Orin) — Ubuntu 22.04 aarch64 |
-| Runtime | Node.js 24 (production), Bun (builds/package management) |
+| Runtime | Node.js 24.22.1+ (production; the October 2026 security release the pinned OpenClaw requires), Bun (builds/package management) |
 | Web | Next.js 16 App Router (`output: standalone`), React 19, Tailwind CSS v4 |
-| AI harness | OpenClaw (pinned, + `@openclaw/codex`) on OpenClaw/dual · Hermes CLI + dashboard on Hermes/dual |
-| Local AI | Ollama (port 11434), llama.cpp (optional, port 8080) |
+| AI harness | OpenClaw 2026.10.9 (pinned, + `@openclaw/codex`) on OpenClaw/dual · Hermes Agent v0.22.5 (CLI, gateway + dashboard) on Hermes/dual |
+| Local AI | llama.cpp at a pinned build (on-device model on port 8080, memory embedder on 8081), Ollama (port 11434, optional) |
 | System | systemd, NetworkManager, avahi (mDNS), dnsmasq (hotspot DHCP + upstream DNS forwarding), polkit |
 
 <Columns cols={2}>

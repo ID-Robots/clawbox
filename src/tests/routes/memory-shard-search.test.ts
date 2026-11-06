@@ -4,11 +4,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  * GET /setup-api/clawkeep/memory/search — the read half of Memory Shard on the
  * edition where ClawBox owns the index.
  *
- * The one thing worth pinning above all others is the exception this route
- * makes. Every other route under `clawkeep/memory` is a WRITE that changes what
- * the box does — which folders are read, whether indexing runs — and every one
- * of them refuses the MCP bearer, because the agent must not be able to widen
- * its owner's decisions. This one is deliberately reachable by the agent: the
+ * The one thing worth pinning above all others is that this route needs no
+ * second credential check at all. Every other route under `clawkeep/memory` is
+ * a WRITE that changes what the box does — which folders are read, whether
+ * indexing runs — and each asks again WHO is writing (a signed-in person or the
+ * assistant's own bearer, `memoryShardWriter`), holding the expensive ones to
+ * the owner's confirm. This one is a read the agent is meant to make: the
  * whole feature is that it can search the owner's documents mid-conversation.
  * A future tidy-up that "fixes the missing owner check" would take the feature
  * out while leaving every panel looking exactly the same, so the decision is
@@ -37,6 +38,9 @@ vi.mock("@/lib/memory-index-local", () => ({
   searchLocalMemory: search,
   MEMORY_SEARCH_DEADLINE_MS,
 }));
+// The Prime Radiant vault, a built-in source. Empty unless a test says otherwise.
+const vaultSearch = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown[]>>(async () => []));
+vi.mock("@/lib/prime-radiant/shard-index", () => ({ searchPrimeRadiant: vaultSearch }));
 
 import { NextRequest } from "next/server";
 import { GET } from "@/app/setup-api/clawkeep/memory/search/route";
@@ -52,6 +56,7 @@ beforeEach(() => {
   absent.value = true;
   enabled.value = true;
   search.mockClear();
+  vaultSearch.mockReset().mockResolvedValue([]);
 });
 
 describe("who may search", () => {
@@ -144,5 +149,35 @@ describe("what it accepts and answers", () => {
     const body = await res.json();
     expect(body.code).toBe("search_failed");
     expect(JSON.stringify(body)).not.toContain("127.0.0.1");
+  });
+});
+
+describe("the Prime Radiant vault as a built-in source", () => {
+  const vaultHit = {
+    source: "prime-radiant", path: "entities/acme-widgets.md", id: "acme-sales/acme-widgets/colour", kind: "claim",
+    type: "entity", title: "Acme Widgets Ltd", snippet: "Acme Widgets Ltd: blue widgets.", score: 0.95, similarity: 0.85, verified: true,
+  };
+
+  it("merges vault hits with the owner's documents, by score, and keeps their path, id and type", async () => {
+    vaultSearch.mockResolvedValue([vaultHit]);
+    const body = await (await call("?q=widgets&limit=2")).json();
+    expect(body.results).toEqual([
+      vaultHit,
+      { path: "Documents/lease.md", snippet: "The deposit is two months' rent.", score: 0.82 },
+    ]);
+    expect(vaultSearch).toHaveBeenCalledWith("widgets", 2, expect.any(AbortSignal));
+  });
+
+  it("still answers the owner's documents when the vault index cannot", async () => {
+    vaultSearch.mockRejectedValue(new Error("The embedding model did not answer: HTTP 502"));
+    const res = await call("?q=deposit");
+    expect(res.status).toBe(200);
+    expect((await res.json()).results).toHaveLength(1);
+  });
+
+  it("is not asked while Memory Shard is switched off", async () => {
+    enabled.value = false;
+    expect((await call("?q=deposit")).status).toBe(409);
+    expect(vaultSearch).not.toHaveBeenCalled();
   });
 });

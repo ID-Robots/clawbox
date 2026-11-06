@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import { saveEnv } from "@/tests/helpers/env";
+import { describeChatSwap } from "@/lib/anthropic-chat-swap";
 
 const gateway = vi.hoisted(() => ({ reportChatFailure: vi.fn(), startGatewaySwap: vi.fn() }));
 vi.mock("@/lib/anthropic-gateway", () => gateway);
@@ -69,6 +70,21 @@ describe("reporting a failed chat turn", () => {
     // The swap and the gateway's half are listening in this process.
     expect(swap.startAnthropicSwap).toHaveBeenCalled();
     expect(gateway.startGatewaySwap).toHaveBeenCalled();
+  });
+
+  it("relays an answer that names no account as it is — the chat then adds no line", async () => {
+    // What the swap answers when the gateway could not follow the active
+    // account (the Terminal's `claude` sign-in, which it cannot carry).
+    gateway.reportChatFailure.mockResolvedValue({
+      handled: true, kind: "auth", limitKind: null, activeId: null, activeLabel: null,
+      allLimited: false, nextResetAt: null, retry: "none",
+    });
+    const answer = await (await POST(req({ ...BODY, reason: "auth" }))).json();
+    expect(answer).toEqual({
+      handled: true, pending: false, kind: "auth", limitKind: null, activeLabel: null,
+      allLimited: false, nextResetAt: null, retry: "none",
+    });
+    expect(describeChatSwap(answer, { t: (key) => `T:${key}`, locale: "en" })).toBeNull();
   });
 
   it("answers `handled: false` for a failure that is not an Anthropic account's", async () => {

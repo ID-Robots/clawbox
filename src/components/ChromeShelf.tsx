@@ -1,13 +1,18 @@
 "use client";
 
-import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
+import { ReactNode, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { mainInsets } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
+import { formatBytesApart } from "@/lib/format-bytes";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import { useDesktopClock } from "@/lib/use-desktop-clock";
+import { desktopOverlayMounted, quickCaptureRequest, requestCapture, subscribeOverlays } from "@/lib/screenshot/session";
+import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
+import { useCanRequestFullscreen, useIsFullscreen } from "@/lib/use-is-fullscreen";
+import BatteryIndicator from "./BatteryIndicator";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -63,6 +68,29 @@ const AT_RISK_TITLE_KEY: Record<AtRiskReason, string> = {
   never: "shelf.clawkeepNeverBackedUp",
 };
 
+/** A backup the daemon would not upload — see `useClawkeepShieldStatus`. */
+interface ShieldRefusal {
+  kind: "quota_full" | "usage_unverified";
+  neededBytes: number;
+  freeBytes: number;
+}
+
+/**
+ * What the shield says for a backup that was REFUSED rather than one that
+ * broke. "Last backup failed — open to see why" is true of it and useless: the
+ * owner of a full account is told nothing they can act on until they open the
+ * window. The sizes are the ones the ClawKeep card prints, in the same units.
+ */
+function refusalTitle(
+  refusal: ShieldRefusal,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  if (refusal.kind === "usage_unverified") return t("shelf.clawkeepUsageUnverified");
+  // Apart, as on the card: never "needs 1.2 GB but only 1.2 GB is free".
+  const [needed, free] = formatBytesApart(refusal.neededBytes, refusal.freeBytes);
+  return t("shelf.clawkeepNoRoom", { needed, free });
+}
+
 interface ShelfApp {
   id: string;
   name: string;
@@ -97,6 +125,9 @@ interface ChromeShelfProps {
     unconfigured?: boolean;
     busy: boolean;
     restoring: boolean;
+    /** Why the last backup was refused, when it was. Said only beside an
+     *  `error` verdict — it is that verdict's reason, not one of its own. */
+    refusal?: ShieldRefusal | null;
   };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
@@ -125,6 +156,36 @@ function ShelfClock({ className }: { className: string }) {
   return <span className={className}>{time}</span>;
 }
 
+/**
+ * The Screenshot app's button in the tray (TASK-1491): one click starts a
+ * region selection, as Shift+Print Screen does, through the request the app's
+ * own capture buttons send — the window need not be open, it opens itself on
+ * the result. Its name gives the region keys, the ones it stands for. Drawn
+ * only while the desktop's capture overlay is mounted (the owner's desktop,
+ * like the app), since nothing else would answer the click.
+ */
+function ShelfScreenshotButton({ iconSize }: { iconSize: number }) {
+  const { t } = useT();
+  const available = useSyncExternalStore(subscribeOverlays, desktopOverlayMounted, () => false);
+  if (!available) return null;
+  const [key, fallback] = captureShortcutKeys("region");
+  const label = t("screenshot.trayTooltip", { key, fallback });
+  return (
+    <button
+      type="button"
+      onClick={() => requestCapture(quickCaptureRequest("region"))}
+      className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+      title={label}
+      aria-label={label}
+      data-testid="shelf-screenshot-button"
+    >
+      <span className="material-symbols-rounded text-white/60" style={{ fontSize: iconSize }} aria-hidden="true">
+        screenshot_monitor
+      </span>
+    </button>
+  );
+}
+
 export default function ChromeShelf({
   apps,
   onAppClick,
@@ -147,7 +208,8 @@ export default function ChromeShelf({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
   const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
   const openedAt = useRef(0);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const isFullscreen = useIsFullscreen();
+  const canFullscreen = useCanRequestFullscreen();
   const [isMobile, setIsMobile] = useState(false);
   // Phone portrait: hide the ClawKeep shield and the clock to fit the bar.
   // The chat crab STAYS — a phone lands in the chat and this is its way back
@@ -165,20 +227,15 @@ export default function ChromeShelf({
     };
     checkLayout();
     window.addEventListener("resize", checkLayout);
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onFsChange);
     return () => {
       window.removeEventListener("resize", checkLayout);
-      document.removeEventListener("fullscreenchange", onFsChange);
     };
   }, []);
 
-  const toggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      document.documentElement.requestFullscreen().catch(() => {});
-    }
+  const enterFullscreen = useCallback(() => {
+    // Optional all the way: the button is not drawn where the API is missing,
+    // and a call that answers no promise must not throw either.
+    document.documentElement.requestFullscreen?.()?.catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -220,11 +277,27 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && !pinnedApps.some(p => p.id === a.id))
     : apps.filter(a => a.isPinned === false);
+  // Offered only while there is a fullscreen to ENTER, in a browser that can
+  // be asked for one (an iPhone's Safari cannot). Once the page fills the
+  // screen — its own request, F11, or a kiosk's window — the button is gone
+  // rather than turned into "Exit": leaving is the browser's own gesture (Esc
+  // or F11 with a keyboard, the system's back or swipe on a touch screen).
+  const renderFullscreenButton = (iconSize: number) => canFullscreen && !isFullscreen && (
+    <button
+      onClick={enterFullscreen}
+      className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+      title={t("shelf.fullscreen")}
+      aria-label={t("shelf.fullscreen")}
+      data-testid="shelf-fullscreen-button"
+    >
+      <span className="material-symbols-rounded text-white/60" style={{ fontSize: iconSize }}>fullscreen</span>
+    </button>
+  );
   // Priority: restoring (orange) > backup running (green) > lapsed (amber)
   // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
-  const renderUserBadge = (size: number) => sessionUser && (
+  const renderUserBadge =(size: number) => sessionUser && (
     <button
       onClick={onPowerClick}
       className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -253,8 +326,11 @@ export default function ChromeShelf({
   // been set up. It gets its own invitation and a calm colour instead of the
   // red alert a genuinely missed backup earns.
   const needsSetup = clawAiAuthenticated && !atRisk && !!clawkeepStatus.unconfigured;
+  const refusal = atRisk && protection!.reason === "error" ? clawkeepStatus.refusal ?? null : null;
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
+    : refusal
+    ? refusalTitle(refusal, t)
     : atRisk
     ? t(AT_RISK_TITLE_KEY[protection!.reason as AtRiskReason])
     : needsSetup
@@ -473,6 +549,10 @@ export default function ChromeShelf({
                 </button>
               )}
               {!isPortraitPhone && renderShieldButton()}
+              {!isPortraitPhone && <ShelfScreenshotButton iconSize={22} />}
+              {/* The laptop's battery, left of the clock as on the desktop
+                  bar; renders nothing on a box without one. */}
+              {!isPortraitPhone && <BatteryIndicator />}
               {!isPortraitPhone && (
                 <button
                   onClick={onTrayClick}
@@ -484,15 +564,7 @@ export default function ChromeShelf({
                   <ShelfClock className="text-xs text-white/80 font-medium tabular-nums" />
                 </button>
               )}
-              <button
-                onClick={toggleFullscreen}
-                className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                title={isFullscreen ? t("shelf.exitFullscreen") : t("shelf.fullscreen")}
-              >
-                <span className="material-symbols-rounded text-white/60" style={{ fontSize: 20 }}>
-                  {isFullscreen ? "fullscreen_exit" : "fullscreen"}
-                </span>
-              </button>
+              {renderFullscreenButton(20)}
               {renderUserBadge(22)}
               <button
                 onClick={onPowerClick}
@@ -557,6 +629,9 @@ export default function ChromeShelf({
             </button>
           )}
           {renderShieldButton()}
+          <ShelfScreenshotButton iconSize={18} />
+          {/* The battery on an x64 laptop; nothing anywhere else. */}
+          <BatteryIndicator />
           <button
             onClick={onTrayClick}
             className="hidden sm:flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -566,15 +641,7 @@ export default function ChromeShelf({
           >
             <ShelfClock className="text-sm text-white/80 font-medium" />
           </button>
-          <button
-            onClick={toggleFullscreen}
-            className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={isFullscreen ? t("shelf.exitFullscreen") : t("shelf.fullscreen")}
-          >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>
-              {isFullscreen ? "fullscreen_exit" : "fullscreen"}
-            </span>
-          </button>
+          {renderFullscreenButton(18)}
           {renderUserBadge(22)}
           <button
             onClick={onPowerClick}
