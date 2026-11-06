@@ -146,8 +146,8 @@ describe("the vocabulary", () => {
     // What `codex exec` reports as its model with nothing configured.
     expect(DEFAULT_OPENAI_MODEL).toBe("gpt-6-astra");
     expect(defaultModelForProvider("openai")).toBe("gpt-6-astra");
-    // The cheaper model a team's planner and reviewers run on — one the
-    // provider offers, so a role's record can carry it.
+    // The cheaper model a team role runs on when the owner stored `economy`
+    // for it — one the provider offers, so a role's record can carry it.
     expect(ECONOMY_MODELS.openai).toBe("gpt-5.6-luna");
     expect(isRecordableModel("openai", ECONOMY_MODELS.openai)).toBe(true);
     expect(isRecordableModel("openai", "claude-opus-5-5")).toBe(false);

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # timeout: 300
 # parallel: probes
-# covers: src/lib/coding-role-models.ts
+# covers: src/lib/coding-role-models.ts src/lib/coding-provider.ts
 #
 # A coding team's role with nothing stored for it starts on its own default
 # model (TASK-2217): the planner on the provider's best model, a worker and a

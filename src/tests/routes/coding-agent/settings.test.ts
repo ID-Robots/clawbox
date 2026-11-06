@@ -74,7 +74,7 @@ const STATUS = {
   },
   roleModelMap: {
     planner: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 },
-    worker: { provider: "clawbox-ai", model: null, effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: null },
+    worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 },
     reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 },
   },
   connectedProviders: ["clawbox-ai", "anthropic"],

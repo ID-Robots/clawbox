@@ -55,12 +55,12 @@ const SETTINGS = {
   effortLevels: ["low", "xhigh", "max", "ultracode"],
   roleModels: {
     planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "auto" },
-    worker: { provider: "auto", model: "auto", effort: "auto" },
+    worker: { provider: "auto", model: "standard", effort: "auto" },
     reviewer: { provider: "auto", model: "auto", effort: "auto" },
   },
   roleModelMap: {
     planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 10 },
-    worker: { provider: "clawbox-ai", model: null, effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: null },
+    worker: { provider: "clawbox-ai", model: null, effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: null },
     reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: false, problems: ["ClawBox AI is not connected."], relativeCost: 1 },
   },
   roleModelTiers: ["standard", "economy"],
@@ -160,7 +160,7 @@ describe("coding_settings_get", () => {
     const text = (out as { text: string }).text;
     expect(text).toContain("effort: xhigh — choices: low, xhigh, max, ultracode");
     expect(text).toContain("planner: provider anthropic, model claude-sonnet-5, effort auto → runs on anthropic claude-sonnet-5 at xhigh");
-    expect(text).toContain("worker: provider auto, model auto, effort auto → runs on clawbox-ai at xhigh");
+    expect(text).toContain("worker: provider auto, model standard, effort auto → runs on clawbox-ai at xhigh");
     expect(text).toContain("reviewer: provider auto, model auto, effort auto → runs on clawbox-ai deepseek-v4-flash at xhigh (NOT READY: ClawBox AI is not connected.)");
     expect(text).toContain("review_pass: off · auto_pr: on · auto_merge: off · pr_body_includes_task: summary (summary, full-redacted, none)");
     expect(text).toContain("max_parallel_runs: 2 (1–4 on this box)");
