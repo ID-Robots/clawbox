@@ -773,6 +773,20 @@ describe("Update goes straight to /updating", () => {
     expect(document.querySelector('[data-testid="update-handover"]')).not.toBeNull();
   });
 
+  it("counts one agent run as one: \"1 agent run is active\", never \"1 agent runs are active\"", async () => {
+    stubBox(
+      () => ({ body: IDLE, locked: false }),
+      async () => respond({ started: false, busy: true, work: { coding: 1, agents: 0, total: 1 } }, {}, 409),
+    );
+    const app = render(<SystemUpdateApp />);
+    await advance();
+    fireEvent.click(app.getByRole("button", { name: "Update everything" }));
+    await advance();
+    const dialog = app.getByRole("dialog");
+    expect(dialog).toHaveTextContent("1 agent run is active. The update stops it mid-task. Wait until it finishes, or update anyway.");
+    expect(dialog).not.toHaveTextContent("runs are active");
+  });
+
   it("leaves anyway when the click's request never answers: /updating follows what the box has", async () => {
     const { click } = await openWindow(() => new Promise<Response>(() => {}));
     click();

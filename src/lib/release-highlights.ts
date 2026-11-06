@@ -32,8 +32,9 @@ export interface ReleaseHighlight {
 
 /**
  * A panel shows a handful and links to the rest: the update screen's step list
- * stays the thing to read. The 4.3 notes list six, the 4.2 notes seven, the
- * 4.1 notes four, the 4.0 notes eight.
+ * stays the thing to read. The 4.3 notes list eleven (the first seven are the
+ * headline features), the 4.2 notes seven, the 4.1 notes four, the 4.0 notes
+ * eight.
  */
 export const MAX_HIGHLIGHTS = 7;
 /** Longer than any title the notes have used, short enough for one line or two. */

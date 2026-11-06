@@ -89,7 +89,7 @@ for (const size of [
 
     const dots = dialog.getByTestId("whats-new-dot");
     const total = await dots.count();
-    expect(total).toBe(7);
+    expect(total).toBe(11);
     for (let i = 0; i < total; i++) {
       const slide = dialog.getByTestId("whats-new-slide");
       await expect(slide).toHaveAttribute("data-slide", String(i));
@@ -192,8 +192,14 @@ const RUN_STEPS = [
   "Updating ClawBox and restarting", "Applying system fixups", "Verifying gateway health",
 ].map((label, index) => ({ id: `step_${index}`, label, status: index < 2 ? "completed" : index === 2 ? "running" : "pending" }));
 
-const SHOWCASE_CHIPS = ["Screenshots", "One browser for you", "Share an app with a public link", "xAI Grok", "Hold to talk", "The Coding Agent", "Prime Radiant"];
-const FULL_IMAGES = ["screenshot", "agent-browser", "public-link", "model-picker", "hold-to-talk", "agent-chart", "prime-radiant"]
+const SHOWCASE_CHIPS = [
+  "Screenshots", "One browser for you", "Share an app with a public link", "xAI Grok", "Hold to talk", "The Coding Agent", "Prime Radiant",
+  "Runs report back", "Updates ask first", "Installs wait in line", "Job alerts",
+];
+const FULL_IMAGES = [
+  "screenshot", "agent-browser", "public-link", "model-picker", "hold-to-talk", "agent-chart", "prime-radiant",
+  "run-reports", "update-asks", "install-queue", "job-alerts",
+]
   .map((name) => `/whats-new/4.3/${name}-full.webp`);
 
 /** A box running an update to 4.3.0, as every route the update screens ask answers it. */
@@ -243,7 +249,7 @@ test.describe("the update screen's What's new showcase", () => {
     const region = page.getByRole("region", { name: "What's new in ClawBox 4.3.0" });
     await expect(region).toHaveAttribute("data-variant", "grid");
     await expect(showcase).toHaveAttribute("data-index", "0");
-    await expect(showcase.getByTestId("whats-new-showcase-count")).toHaveText("01 / 07 · New in 4.3");
+    await expect(showcase.getByTestId("whats-new-showcase-count")).toHaveText(`01 / ${SHOWCASE_CHIPS.length} · New in 4.3`);
     await expect(showcase.getByRole("heading", { name: "Screenshots, built in" })).toBeAttached();
     await expectStageImage(page, FULL_IMAGES[0]);
     await expect(showcase.getByRole("tab")).toHaveText(SHOWCASE_CHIPS);
@@ -256,12 +262,18 @@ test.describe("the update screen's What's new showcase", () => {
     await expectStageImage(page, FULL_IMAGES[6]);
     await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText("Prime Radiant, a living wiki");
 
+    const last = SHOWCASE_CHIPS.length - 1;
+    await showcase.getByRole("tab", { name: "Job alerts" }).click();
+    await expect(showcase).toHaveAttribute("data-index", String(last));
+    await expectStageImage(page, FULL_IMAGES[last]);
+    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText("Alerts for scheduled jobs");
+
     // The keyboard: → from the last wraps to the first, ← goes back.
     await page.keyboard.press("ArrowRight");
     await expect(showcase).toHaveAttribute("data-index", "0");
     await expect(showcase.getByRole("tab", { name: "Screenshots" })).toBeFocused();
     await page.keyboard.press("ArrowLeft");
-    await expect(showcase).toHaveAttribute("data-index", "6");
+    await expect(showcase).toHaveAttribute("data-index", String(last));
 
     // Held while the pointer or the focus is in it; on again once both have left.
     await expect(showcase).toHaveAttribute("data-paused", "true");
@@ -286,6 +298,21 @@ test.describe("the update screen's What's new showcase", () => {
     await expect(stage.locator(".wns-copy")).toHaveText("✓ Copied", { timeout: 6_000 });
     // It all sits inside the window: nothing pushes the page sideways.
     expect(await page.evaluate(() => document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth)).toBeLessThanOrEqual(1);
+  });
+
+  test("plays the later features' demos over their screenshots: the update's question, then the job's notice", async ({ page }) => {
+    const showcase = await openUpdateWindow(page);
+    const stage = showcase.getByTestId("whats-new-showcase-stage");
+    await showcase.getByRole("tab", { name: "Updates ask first" }).click();
+    await expect(stage).toHaveAttribute("data-feature", "busy");
+    expect(await stage.locator(".wns-cam").evaluate((el) => getComputedStyle(el).animationName)).toBe("wns-bscam");
+    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1", { timeout: 7_000 });
+    await expect(stage.locator(".wns-toast")).toContainText("Cancel waits for the run");
+    await showcase.getByRole("tab", { name: "Job alerts" }).click();
+    await expect(stage).toHaveAttribute("data-feature", "alert");
+    await expectStageImage(page, FULL_IMAGES[SHOWCASE_CHIPS.length - 1]);
+    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1", { timeout: 7_000 });
+    await expect(stage.locator(".wns-toast")).toContainText("Scheduled job “Weekly report” failed 2 times in a row.");
   });
 
   // A computer window too small for the two columns (TASK-2146): they ran past
@@ -335,6 +362,11 @@ test.describe("the update screen's What's new showcase", () => {
     await expect(stage.locator(".wns-flash")).toHaveCSS("opacity", "0");
     await showcase.getByRole("tab", { name: "Hold to talk" }).click();
     await expect(stage).toContainText("Recording 0:04");
+    await showcase.getByRole("tab", { name: "Runs report back" }).click();
+    await expect(stage).toContainText("Run finished");
+    await showcase.getByRole("tab", { name: "Installs wait in line" }).click();
+    await expect(stage.locator(".wns-pct")).toHaveText("86%");
+    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1");
   });
 
   // TASK-2146: the run used to be drawn in Settings' 672 px pane first, the

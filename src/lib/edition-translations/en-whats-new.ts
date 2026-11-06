@@ -37,6 +37,18 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.primeRadiantTitle": "Prime Radiant, a living wiki",
   "whatsNew.primeRadiantBody":
     "A new app that keeps a wiki for you. Point it at your documents and it writes a page for each one, listing the facts it found with where each came from and how sure it is. Every night it tidies the wiki, looks for facts that contradict each other, and asks you about anything it cannot settle alone.",
+  "whatsNew.runReportsTitle": "Coding runs report back in the chat",
+  "whatsNew.runReportsBody":
+    "When the assistant starts a coding run for you, the chat hears how it ended and the assistant tells you without being asked, including a deliverable that is missing or work still running. While it works, a run can send the assistant a question, a blocker or a milestone.",
+  "whatsNew.updateAsksTitle": "Updates that ask before they stop your agents",
+  "whatsNew.updateAsksBody":
+    "While coding runs or assistant tasks are working, Update asks first: Cancel waits for them, Update anyway goes ahead. The box reboots only when the update needs a boot, and the update screen shows what is new while you wait.",
+  "whatsNew.installQueueTitle": "Local AI installs wait in line",
+  "whatsNew.installQueueBody":
+    "Start a Local AI install while another one runs and it waits its turn instead of being refused. Its card says what it is waiting for, it starts by itself, and you can cancel it.",
+  "whatsNew.jobAlertsTitle": "Alerts for scheduled jobs",
+  "whatsNew.jobAlertsBody":
+    "When one of the assistant's scheduled jobs fails, keeps being skipped or does not run when it is due, the desktop tells you, and Telegram too when a bot is connected. Settings → Harness lists the jobs in trouble.",
 
   // The card's slides: one highlight each, under a screenshot of it, so each
   // gets a one- or two-line summary. The bodies above stay whole for the
@@ -53,6 +65,11 @@ export const whatsNewEn: Record<string, string> = {
     "Watch the Coding Agent's runs at work on a live chart, and message a run while it works.",
   "whatsNew.primeRadiantSummary":
     "A new app that turns your documents into a wiki of facts, each with its source, and tidies it every night.",
+  "whatsNew.runReportsSummary":
+    "The chat that asked for a coding run hears how it ended, and a run can send the assistant a question or a milestone.",
+  "whatsNew.updateAsksSummary": "Update asks first while agents are working, and the box reboots only when the update needs it.",
+  "whatsNew.installQueueSummary": "A second Local AI install waits its turn instead of being refused, and starts by itself.",
+  "whatsNew.jobAlertsSummary": "The box tells you when a scheduled job fails, keeps being skipped or does not run when it is due.",
   // The carousel's controls. {current} and {total} are slide numbers.
   "whatsNew.slideLabel": "{current} of {total}",
   "whatsNew.goToSlide": "Show highlight {number}",

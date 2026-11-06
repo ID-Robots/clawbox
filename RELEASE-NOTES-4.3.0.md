@@ -1,14 +1,16 @@
 # ClawBox 4.3.0
 
-Previous release: v4.2.0, 5 October 2026. 424 commits.
+Previous release: v4.2.0, 5 October 2026. 943 commits.
 
 4.3 adds a Screenshot app and gives you and your assistant one shared browser.
 An app the Coding Agent built can now be shared through a public link. xAI Grok
 joins the AI providers, most model changes no longer restart the assistant, you
 can hold to talk, and the Coding Agent shows its agents at work on a live
 chart. Prime Radiant, a new app, writes a wiki from your own documents and
-checks it every night. Wi-Fi, updates, backups, first setup and switching
-between Anthropic accounts get a long list of fixes.
+checks it every night. Coding runs report back in the chat that asked for them,
+an update asks before it stops your agents, Local AI installs wait in line, and
+the box tells you when a scheduled job fails. Wi-Fi, updates, backups, first
+setup and switching between Anthropic accounts get a long list of fixes.
 
 ## Highlights
 
@@ -40,6 +42,22 @@ between Anthropic accounts get a long list of fixes.
   found with where each came from and how sure it is. Every night it tidies the
   wiki, looks for facts that contradict each other, and asks you about anything
   it cannot settle alone.
+- **Coding runs report back in the chat.** When the assistant starts a coding
+  run for you, the chat hears how it ended and the assistant tells you without
+  being asked, including a deliverable that is missing or work still running.
+  While it works, a run can send the assistant a question, a blocker or a
+  milestone.
+- **Updates that ask before they stop your agents.** While coding runs or
+  assistant tasks are working, Update asks first: Cancel waits for them,
+  Update anyway goes ahead. The box reboots only when the update needs a
+  boot, and the update screen shows what is new while you wait.
+- **Local AI installs wait in line.** Start a Local AI install while another
+  one runs and it waits its turn instead of being refused. Its card says what
+  it is waiting for, it starts by itself, and you can cancel it.
+- **Alerts for scheduled jobs.** When one of the assistant's scheduled jobs
+  fails, keeps being skipped or does not run when it is due, the desktop tells
+  you, and Telegram too when a bot is connected. Settings → Harness lists the
+  jobs in trouble.
 
 ## New features
 
@@ -185,10 +203,11 @@ between Anthropic accounts get a long list of fixes.
 - **Run notes.** Each project keeps notes of what earlier runs learned, such as
   the commands that work. Every run reads them, and you can view, edit and
   clear them on the project page.
-- **Cheaper team roles.** A team's planner, lead and reviewers use the
-  provider's cheaper model by default, while workers use yours; **Models per
-  team role** in the Coding Agent's settings changes that. The team card shows
-  the tokens each role used.
+- **Models per team role.** Each role of a team, the planner (who also leads
+  the team), the workers and the reviewers, can run on an account, model and
+  effort of its own, set in **Models per team role** in the Coding Agent's
+  settings; on **Default model** the box picks one for the role. The team card
+  shows the tokens each role used.
 - **A fair share of the processor.** Coding runs work at a lower priority than
   the rest of the box and share a processor budget, smaller on battery, so the
   desktop stays responsive while they run.
@@ -210,6 +229,52 @@ between Anthropic accounts get a long list of fixes.
   it again. A Coding Agent project with a `clawbox.json` gets **Publish to
   ClawBox Store**; until publishing is open to your account, the dialog says it
   is coming soon.
+- **Runs report back in the chat.** When the assistant starts a coding run from
+  a chat, on OpenClaw or Hermes, that chat hears when the run ends, and the
+  assistant tells you how it went in a few lines without being asked. A run
+  you stopped, and one that waited in line but could not start, are told too,
+  each ending once. When a run's deliverable is missing, or something it
+  started is still running, the assistant says so instead of calling the run
+  done.
+- **A run can reach you while it works.** A coding run can send the assistant
+  that started it a question only you can answer, a blocker, or a milestone of
+  a long job, and carry on working.
+
+### Updates
+
+- **Updates ask before they stop your agents.** An update stops the assistant
+  and restarts the box's web server, which used to cut off agent work in
+  progress. Now, while coding runs or assistant tasks are working, **Update**
+  first says **Agents are working right now**, how many are active and that
+  the update stops them mid-task, with **Cancel** to wait and **Update anyway**
+  to go ahead.
+- **What's new, while you wait.** The update screen shows the release it
+  installs one highlight at a time: the title types in beside a screenshot of
+  the feature, with a live demo over it. Pick one with its chip, the arrow
+  keys or, on a phone, a swipe; it goes on drawing while the box restarts.
+- **Update** goes straight to the full-screen update screen, after a short
+  ClawBox loader, instead of drawing the steps inside the Settings window
+  first. In a window too small for the steps and the showcase side by side,
+  it shows the steps alone.
+
+### Local AI
+
+- **Installs wait in line.** An install in **Settings → Local AI** that cannot
+  run beside another one waits its turn instead of being refused. Its card
+  says **Queued — starts after** the install it waits for, with **Cancel**, and
+  it starts by itself when that one ends, after a restart too.
+
+### Scheduled job alerts
+
+- The box tells you when one of the assistant's scheduled jobs fails, keeps
+  being skipped, does not run when it is due, or was switched off after it
+  failed: on the desktop, and on Telegram when a bot is connected. You hear
+  once per problem and once more when the job runs normally again, and several
+  jobs at once come as one message. The message never quotes the job's error.
+- **Settings → Harness → Scheduled job alerts** lists the jobs in trouble,
+  since when, and the scheduler's last error. **Alert me about scheduled jobs**
+  is on by default. The desktop notice's **Open Settings → Harness** goes
+  straight to that card.
 
 ## Improvements
 
@@ -244,6 +309,9 @@ between Anthropic accounts get a long list of fixes.
   credentials before the assistant sees it.
 - Spoken replies are sent compressed: a 15-second reply is about 90 KB instead
   of more than 700 KB.
+- The assistant can search and read ClawBox's own user guide and support pages,
+  as they are for the installed version, with no internet needed. When
+  something on the box fails, it looks the symptom up there first.
 
 ### Chat
 
@@ -257,6 +325,15 @@ between Anthropic accounts get a long list of fixes.
 - A coding run card you hide with × stays hidden, in every window and after a
   reload. **Show finished coding runs again** brings back only the cards that
   left on their own.
+- A long conversation on Local AI no longer takes minutes to be shortened by
+  the box's small model, on OpenClaw or Hermes. The chat offers **Start a new
+  chat with Local AI**, which answers in seconds, or **Shorten this
+  conversation first**, and a shortening that leaves the chat no smaller is
+  not reported as done.
+- On OpenClaw, the chat's **Task progress** card has three buttons: × hides it
+  in that chat until the assistant updates it, the bin clears it, and refresh
+  asks the assistant to bring it up to date. On a narrow phone its time stays
+  whole and the summary is cut first.
 
 ### Coding Agent
 
@@ -272,6 +349,20 @@ between Anthropic accounts get a long list of fixes.
   test server: the box starts the app from its project folder, and says what
   went wrong when it cannot.
 - A working run no longer shows "0 turns".
+- A run no longer ends while something it started, such as a background job,
+  is still running: it keeps working until that is done. If it has to stop
+  anyway, its page says **Something this run started is still running.**, and
+  that line counts only what the run itself started.
+- Work a run wrote only through its shell, such as a generated file, is
+  committed on the run's branch when the run made no commit of its own.
+- The assistant can start a run from a branch you name, and hand it your own
+  files, such as a PDF in Documents, which were refused before.
+- A team role left on its default runs on the provider's best model for
+  planning and its middle model for coding and review; the planner used to get
+  the cheaper model. On Anthropic, Claude Fable 5.1 plans and Claude Opus 5.5
+  writes and reviews; on OpenAI, GPT-6 Astra plans and GPT-5.6 Sol writes and
+  reviews; on ClawBox AI, all three use DeepSeek V4 Flash. The role's **Now:**
+  line in **Models per team role** names the model it runs on.
 
 ### Backups
 
@@ -307,6 +398,25 @@ between Anthropic accounts get a long list of fixes.
 - The crab's eyes stay closed while it sleeps.
 - On Hermes, the Skills app no longer lists bundled skills that cannot run on
   this device.
+- The notices in the top-right corner stay there, under the kiosk bar, and
+  take turns with the chat instead of jumping when you open, dock or move it.
+  Small pop-up messages join them, instead of sitting in the bottom-right
+  corner over the chat's message box.
+- A notice with a button says under its message where the button leads, such
+  as **Open Settings → Harness**.
+
+### Settings
+
+- **Users** has moved into **Settings → System**, as a tab beside the
+  device's figures, and only the owner sees it. A sign-in page that needs the
+  owner's one-time repair now points to **Settings → System → Users**.
+- Signing out of a provider shows what is happening: the button reads
+  **Signing out…** and the row dims until the box has its new list, so a
+  sign-out that restarts the assistant no longer looks like a lost click.
+- Connecting or signing out of an AI provider, and setting up Telegram,
+  Discord, Email or WhatsApp, run as jobs of the box with a card in the corner.
+  Close or reopen Settings half-way and the change is still shown running, and
+  a failure says what went wrong instead of showing a bare code.
 
 ## Fixes
 
@@ -337,7 +447,37 @@ between Anthropic accounts get a long list of fixes.
 - The first start after an update no longer drops the remote desktop once.
 - A Jetson box no longer comes back from an update unable to boot because the
   firmware moved its SSD down the boot order: the SSD is kept first at every
-  start and shutdown, and network boot is switched off.
+  start and shutdown, and the network boot entries stay switched on but last.
+  A device the firmware adds again, the SSD included, now goes to the top of
+  the order, so a start that missed the SSD once no longer leaves the box at
+  the UEFI Shell prompt on every start after it.
+- An update reboots the box only when something needs a boot, such as a new
+  kernel, and otherwise restarts the ClawBox services. Any ClawBox service
+  that should run and is not running afterwards is started, and the update's
+  warning names each one that did not come back, telling one that came up late
+  from one that crashed.
+- On ClawBox installed on your own x64 machine too, an update that leaves
+  OpenClaw as it is no longer stops the assistant.
+- On OpenClaw, an update checks that the chat can open its conversations, not
+  only that the assistant runs. When it still cannot after one restart of the
+  assistant, the update fails and says to restart the device, instead of
+  finishing green over a silent chat; a chat that is only slow to answer is a
+  warning.
+- An update no longer stops the assistant while it is still starting, which
+  made the stop wait out its five and a half minute limit; it lets the start
+  finish first, for up to three minutes.
+- An update no longer fails at **Applying system fixups** when another job
+  restarts the assistant while the update stops it.
+- On a box without a clock battery, an update no longer fails a healthy box
+  when the clock jumps forward to the network time after a cold start.
+- The update screen no longer lists the **Installing Chromium** and
+  **Installing VNC (Remote Desktop)** steps, which still run, and its step
+  count leaves them out.
+- On a wide screen the update screen fills the window, with **Don't power
+  off** at its foot, instead of stopping short above an empty band.
+- Checking for updates no longer waits on a download of every branch and tag
+  from GitHub, so the setup wizard's update step no longer stalls on
+  "Checking for updates…" when GitHub is slow.
 - On OpenClaw, an update that lacks the disk space to move the assistant's data
   to the new format stops before it changes OpenClaw, and says how much space
   it needs and how much is free. When an agent's data is left unfinished, the
@@ -366,6 +506,14 @@ between Anthropic accounts get a long list of fixes.
   the five-hour allowance **Short-term limit (5 hours)**.
 - The Telegram card no longer says the channel is active when the bot is not
   receiving messages, for example after its token was rejected.
+- On Hermes, a chat or a Hermes dashboard tab whose ClawBox sign-in has
+  expired goes to the sign-in page, as on OpenClaw, instead of staying on a
+  chat that no longer answers.
+- On Hermes, ClawBox AI cannot be signed out while it is the default
+  provider: its button says to make another provider the default first. A
+  sign-out that Hermes still lists as signed in now fails instead of
+  reporting success, and the helpers that still pointed at ClawBox AI go back
+  to Hermes' own.
 
 ### Switching between Anthropic accounts
 
@@ -396,6 +544,20 @@ between Anthropic accounts get a long list of fixes.
 - On OpenClaw, a chat whose account reached its usage limit moves to another
   account on its next message, instead of answering with the limit message.
   The account joins in again once its limit resets.
+- Claude's usage limits are read per model: a weekly limit on one model holds
+  back only the runs on that model, while the chat and other models carry on.
+  The **Anthropic accounts** card shows every model's week, and Anthropic's
+  "continuing automatically" notes count as progress, not as a reason to
+  switch accounts.
+- A run held up by two spent weeks of the same model waits for the later of
+  the two resets, instead of starting again while the other week still
+  refuses it.
+- When Anthropic refuses an account's sign-in in the middle of a coding run,
+  the run moves to the next usable account instead of going round the
+  refused one until its tries run out, and a resumed run never goes back to
+  an account it gave up on.
+- When the assistant checks your Claude accounts, its answer leads with the
+  verdict and the advice, before the list of accounts.
 
 ### Chat and voice
 
@@ -413,6 +575,49 @@ between Anthropic accounts get a long list of fixes.
   than one agent too; the list used to stay empty.
 - On OpenClaw, a user other than the owner can start a new chat again; it used
   to fail with "Could not start a new chat".
+- On Hermes, the first message in a chat already under way no longer fails
+  with a permission error, or asks about adding a picture, after the assistant
+  restarted or the provider or model was switched. The chat reopens the
+  conversation and sends the message; when it cannot, it asks you to send it
+  again in a moment.
+- On OpenClaw, **Turn off Local AI** while Local AI answers the chat moves the
+  chat straight back to your cloud model, instead of loading the local model
+  again on the next message.
+
+### Coding Agent
+
+- A ClawBox AI coding run on a model with a one-million-token window compacts
+  its conversation well before the provider's limit, instead of growing until
+  the provider refused the next request and the run failed. A run that reaches
+  the limit anyway is compacted and carried on in the same session, up to
+  twice, and its timeline says so; one that cannot be carried on says how far
+  over the limit it was, in the provider's own words.
+
+### Prime Radiant
+
+- **Undo** never undoes a verification, whole or one page of it, which used to
+  bring the wrong answer back and leave the right one retired. **History**
+  marks those changes **Can't be undone**, and says why.
+- When a document behind a page you verified changes, the night is held and
+  **Review** asks you about it, showing what the new version adds and drops,
+  instead of the change being skipped without a word. An import you start
+  yourself leaves that page as you verified it, lists it under **Left out** on
+  the job's row, and asks in **Review** too.
+- Stopping an import shows **Stopped**, and the files it did not reach wait
+  for the next run instead of failing; **Try these again** imports them. Files
+  dropped on **Add** show **Dropped files** as their source.
+- A fact worded with its document as the subject is checked against the
+  others like any fact, so a contradiction can no longer hide that way.
+- **Review** shows a disputed fact in its own words, and its kinds of
+  evidence, verdicts and notes read in your language instead of raw words.
+- An import's total matches what its preview promised, and its count of pages
+  written moves while it writes.
+- The nightly card no longer says the nightly pass has started once it has
+  ended, and a night whose question check gets no verdict keeps the last
+  score.
+- On a phone, nothing in Prime Radiant runs off the edge of the screen.
+  Changing the language no longer stalls **Pages** for about ten seconds, and
+  the usage totals in its settings show at once.
 
 ### Factory reset
 
@@ -434,6 +639,17 @@ between Anthropic accounts get a long list of fixes.
   own dependency folder, so it runs on other machines too.
 - The box's web server and the libraries it uses are updated with their
   security fixes.
+- Every "… ago" on the desktop is counted on the box's clock, not your
+  browser's, so a computer whose clock runs a little behind no longer shows a
+  finished backup as "in the future".
+- Every box is moved onto the llama.cpp build ClawBox pins, at install and on
+  every update, and says so when it cannot be rebuilt. A box on an old build
+  had memory search fall back to the cloud without a word; **Settings → Local
+  AI** now says why the **Memory search** model stopped.
+- On Hermes, the assistant's first ClawBox tool call after more than ten quiet
+  minutes no longer fails.
+- The desktop no longer stays dimmed under **Drop files to upload** after files
+  are dropped on an app's own drop zone.
 
 ### Fixes since the release candidate
 
@@ -517,3 +733,7 @@ between Anthropic accounts get a long list of fixes.
 - The Projects app has been removed, together with its pinned folders and the
   GitHub backup in Files. Your folders stay where they are and still open in
   Files; copies already on GitHub stay there, and their daily backup stops.
+- Prime Radiant no longer asks Claude Opus for a nightly second opinion, and
+  its settings no longer have the **Second opinion** section that came with
+  the 4.3 beta builds. The nightly pass does not use an Anthropic API key or
+  Claude Code any more; questions it raised before stay in **Review**.
