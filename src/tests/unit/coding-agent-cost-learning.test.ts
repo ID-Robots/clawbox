@@ -156,8 +156,8 @@ afterEach(async () => {
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-describe("a team's roles: the cheaper model where nobody writes code", () => {
-  it("starts a planner on the plan's flash tier at no more than xhigh, and a worker on the owner's own", async () => {
+describe("a team's roles: each role's default model", () => {
+  it("starts every ClawBox AI role on the plan's flash tier, a planner at no more than xhigh, a worker at the owner's effort", async () => {
     makePlainProject("plain");
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
     // A reader's steps are capped at 100 (ROLE_DEFAULTS.turnsCap), under the owner's 200.
@@ -169,10 +169,10 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
     expect(lib.getRun(planner.id)).toMatchObject({ requestedModel: "deepseek-v4-flash", effort: "xhigh" });
 
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
-    // The owner's own: the plan picks the model, and the effort is the box's default.
-    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "xhigh", maxTurns: 2000 });
+    // The flash tier too — never the pro tier — at the owner's effort, the box's default.
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "xhigh", maxTurns: 2000 });
     await finished(worker.id);
-    expect(handed(worker.id, "model")).toBe("");
+    expect(handed(worker.id, "model")).toBe("deepseek-v4-flash");
 
     // A lead and a reviewer are read-only runs on the same cheaper tier.
     const reviewer = await lib.startRun({ task: "review t1", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "reviewer", taskId: "t1" } });
@@ -268,7 +268,7 @@ describe("a team's roles on their own providers", () => {
     await finished(planner.id);
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     // The team's own provider: nothing moved the workers.
-    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "xhigh", modelRole: "worker" });
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "xhigh", modelRole: "worker" });
     await finished(worker.id);
 
     // What each harness was actually handed: its own provider and model, and
@@ -277,7 +277,7 @@ describe("a team's roles on their own providers", () => {
     expect(handed(planner.id, "model")).toBe("claude-fable-5-1");
     expect(handed(planner.id, "cred")).toContain(ANTHROPIC_KEY);
     expect(handed(worker.id, "provider")).toBe("clawbox-ai");
-    expect(handed(worker.id, "model")).toBe("");
+    expect(handed(worker.id, "model")).toBe("deepseek-v4-flash");
     expect(handed(worker.id, "cred")).toBe("");
     for (const id of [planner.id, worker.id]) {
       const env = handed(id, "env");
@@ -295,7 +295,7 @@ describe("a team's roles on their own providers", () => {
   it("keeps the role on the record, reads one from before the field as none, and a `bulk` from before 2026-10-30 as a worker's", async () => {
     makePlainProject("plain");
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
-    expect(worker).toMatchObject({ requestedModel: null, modelRole: "worker" });
+    expect(worker).toMatchObject({ requestedModel: "deepseek-v4-flash", modelRole: "worker" });
     await finished(worker.id);
     const lead = await lib.startRun({ task: "decide", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "lead", taskId: "t1" } });
     expect(lead.modelRole).toBe("planner");
@@ -384,7 +384,7 @@ describe("a team's roles on their own providers", () => {
     // A box that never chose: the defaults on the team's own provider.
     const defaults = (await lib.getCodingAgentStatus()).roleModelMap;
     expect(defaults.planner).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 });
-    expect(defaults.worker).toEqual({ provider: "clawbox-ai", model: null, effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: null });
+    expect(defaults.worker).toEqual(defaults.planner);
     expect(defaults.reviewer).toEqual(defaults.planner);
     expect(Object.keys(defaults)).toEqual(["planner", "worker", "reviewer"]);
 
@@ -399,7 +399,7 @@ describe("a team's roles on their own providers", () => {
     expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 40 });
     expect(map.planner.problems.join(" ")).toMatch(/Anthropic account is not connected/);
     expect(map.reviewer).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 1 });
-    expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: null, auto: true });
+    expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", auto: true });
 
     // And it is what the runs get.
     const reviewer = await lib.startRun({ task: "review t2", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "reviewer", taskId: "t2" } });

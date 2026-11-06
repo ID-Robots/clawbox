@@ -1089,8 +1089,6 @@ export const zh: Record<string, string> = {
   "codingAgent.roleModels.reviewer": "审核者",
   "codingAgent.roleModelFor": "{role} 的模型",
   "codingAgent.roleEffortFor": "{role} 的思考强度",
-  "codingAgent.roleModel.autoEconomy": "默认（更便宜的模型）",
-  "codingAgent.roleModel.autoStandard": "默认（你的模型）",
   "codingAgent.roleModel.economy": "更便宜的模型",
   "codingAgent.roleModel.standard": "你的模型",
   "codingAgent.roleEffort.autoCapped": "默认（最高 {level}）",

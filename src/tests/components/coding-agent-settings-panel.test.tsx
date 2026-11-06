@@ -1032,8 +1032,10 @@ describe("a team's model and effort per role", () => {
     expect(texts(planner)).toEqual([t("codingAgent.roleProvider.auto"), "ClawBox AI", "Anthropic", "OpenAI (ChatGPT)"]);
     // On the team's own account the model select keeps the two older choices.
     expect(model("planner").value).toBe("auto");
-    expect(texts(model("planner"))).toEqual(["Default (cheaper model)", "Your model", "Cheaper model"]);
-    expect(texts(model("worker"))[0]).toBe("Default (your model)");
+    // "Default" names no tier: which model it is depends on the role and the
+    // account, and the row's "Now:" line says it.
+    expect(texts(model("planner"))).toEqual(["Default model", "Your model", "Cheaper model"]);
+    expect(texts(model("worker"))[0]).toBe("Default model");
     expect(texts(effort("reviewer"))[0]).toBe("Default (at most Very high)");
     expect(texts(effort("worker"))[0]).toBe("Default (your effort)");
     expect(screen.getByLabelText("Model for Reviewers")).toBe(model("reviewer"));
@@ -1126,7 +1128,7 @@ describe("a team's model and effort per role", () => {
         },
         roleModelMap: {
           planner: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 },
-          worker: { provider: "clawbox-ai", model: null, effort: "max", auto: true, ready: true, problems: [], relativeCost: null },
+          worker: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "max", auto: true, ready: true, problems: [], relativeCost: 1 },
           reviewer: { provider: "anthropic", model: "claude-sonnet-5", effort: "xhigh", auto: false, ready: false, problems: [MISSING], relativeCost: 10 },
         },
       },
@@ -1171,15 +1173,16 @@ describe("a team's model and effort per role", () => {
   it("says what each role starts on right now, and nothing about what a token of it costs", async () => {
     stubFetch({ enabled: true, readiness: READY }, {
       roleModelMap: {
-        planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 10 },
-        worker: { provider: "clawbox-ai", model: null, effort: "max", auto: true, ready: true, problems: [], relativeCost: null },
-        reviewer: { provider: "anthropic", model: "claude-sonnet-5", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 10 },
+        planner: { provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 40 },
+        worker: { provider: "clawbox-ai", model: null, effort: "max", auto: false, ready: true, problems: [], relativeCost: null },
+        reviewer: { provider: "anthropic", model: "claude-opus-5-5", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 20 },
       },
     });
     render(<CodingAgentSettingsPanel />);
     const planner = await screen.findByTestId("coding-agent-role-planner-about");
     // Only what it starts on: the role's job moved up onto the label (SCA C3).
-    expect(planner.textContent).toBe(t("codingAgent.roleModelNow", { model: "Sonnet 5", provider: "Anthropic" }));
+    expect(planner.textContent).toBe(t("codingAgent.roleModelNow", { model: "Fable 5.1", provider: "Anthropic" }));
+    expect(screen.getByTestId("coding-agent-role-reviewer-about").textContent).toBe(t("codingAgent.roleModelNow", { model: "Opus 5.5", provider: "Anthropic" }));
     expect(screen.getByTestId("coding-agent-role-planner-label")).toHaveTextContent(t("codingAgent.roleModelsRoleJob.planner"));
     // Where the plan picks the model, the account is still said.
     expect(screen.getByTestId("coding-agent-role-worker-about").textContent).toBe(
@@ -1225,7 +1228,7 @@ describe("a team's model and effort per role", () => {
     expect(model("worker").selectedOptions[0].text).toBe(t("codingAgent.roleModel.autoForProvider"));
     // Only on the row that stores it.
     expect(values(model("reviewer"))).not.toContain("economy".repeat(0) + "claude-sonnet-5");
-    expect(texts(model("reviewer"))).toEqual(["Default (cheaper model)", "Your model", "Cheaper model"]);
+    expect(texts(model("reviewer"))).toEqual(["Default model", "Your model", "Cheaper model"]);
   });
 
   it("is not drawn for a server that does not answer with the setting", async () => {

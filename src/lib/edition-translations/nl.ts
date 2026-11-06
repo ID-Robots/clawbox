@@ -1079,8 +1079,6 @@ export const nl: Record<string, string> = {
   "codingAgent.roleModels.reviewer": "Beoordelaars",
   "codingAgent.roleModelFor": "Model voor {role}",
   "codingAgent.roleEffortFor": "Inspanning voor {role}",
-  "codingAgent.roleModel.autoEconomy": "Standaard (goedkoper model)",
-  "codingAgent.roleModel.autoStandard": "Standaard (jouw model)",
   "codingAgent.roleModel.economy": "Goedkoper model",
   "codingAgent.roleModel.standard": "Jouw model",
   "codingAgent.roleEffort.autoCapped": "Standaard (hoogstens {level})",

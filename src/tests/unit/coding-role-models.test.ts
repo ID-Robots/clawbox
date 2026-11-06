@@ -1,8 +1,8 @@
 /**
  * Which account, which model, and how hard it thinks, for each role of a
- * coding team (src/lib/coding-role-models.ts): a planner and a reviewer
- * default to the provider's cheaper model at no more than `xhigh`, a worker
- * keeps the owner's model and effort, and
+ * coding team (src/lib/coding-role-models.ts): a planner defaults to the
+ * provider's best model, a worker and a reviewer to its middle one, a planner
+ * and a reviewer at no more than `xhigh`, a worker at the owner's effort, and
  * the owner may override the provider, the model and the effort per role — a
  * box that never chose stores nothing and runs on the defaults, and a box that
  * stored the older tier-only shape runs exactly as it did.
@@ -17,6 +17,7 @@ import {
   relativeModelCost,
   resolveRoleRun,
   ROLE_AUTO,
+  ROLE_DEFAULT_MODELS,
   ROLE_DEFAULTS,
   ROLE_EFFORT_LEVELS,
   roleMaxTurns,
@@ -87,7 +88,7 @@ describe("the models a role may name", () => {
   });
 
   it("puts an OpenAI role's economy tier on the cheapest OpenAI model it offers", () => {
-    const run = resolveRoleRun("planner", "openai", "gpt-6-astra", "max", {});
+    const run = resolveRoleRun("planner", "openai", "gpt-6-astra", "max", { planner: { model: "economy" } });
     expect(run.provider).toBe("openai");
     expect(run.model).toBe("gpt-5.6-luna");
     expect(run.tier).toBe("economy");
@@ -151,11 +152,57 @@ describe("relative cost", () => {
 });
 
 describe("the defaults — a box that never chose", () => {
-  it("runs a planner and a reviewer on the cheaper model at no more than xhigh", () => {
-    for (const role of ["planner", "reviewer"] as const) {
-      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", {})).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "xhigh", auto: true });
-      expect(resolveRoleRun(role, "clawbox-ai", null, "ultracode", {})).toEqual({ provider: "clawbox-ai", tier: "economy", model: "deepseek-v4-flash", effort: "xhigh", auto: true });
+  // Every provider × every role, with nothing stored: the planner on the
+  // provider's best model, a worker and a reviewer on its middle one; ClawBox
+  // AI on its flash tier throughout, never the pro tier.
+  const EXPECTED = {
+    anthropic: { planner: "claude-fable-5-1", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+    openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
+    "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
+  } as const;
+  const OWNER_MODEL = { anthropic: DEFAULT_ANTHROPIC_MODEL, openai: "gpt-6-astra", "clawbox-ai": null } as const;
+
+  for (const provider of CODING_PROVIDERS) {
+    for (const role of MODEL_ROLES) {
+      it(`runs a ${role} on ${provider} on ${EXPECTED[provider][role]}`, () => {
+        const run = resolveRoleRun(role, provider, OWNER_MODEL[provider], "ultracode", {});
+        expect(run).toEqual({
+          provider,
+          tier: "default",
+          model: EXPECTED[provider][role],
+          effort: role === "worker" ? "ultracode" : "xhigh",
+          auto: true,
+        });
+        expect(ROLE_DEFAULT_MODELS[provider][role]).toBe(EXPECTED[provider][role]);
+        // A model the role may name and its run's record may carry — never a
+        // typo that fails a planner minutes in.
+        expect(isRoleModelId(provider, run.model), `${provider} ${role}`).toBe(true);
+        expect(isRecordableModel(provider, run.model)).toBe(true);
+      });
     }
+  }
+
+  it("gives planning the provider's most capable model, never less than the others", () => {
+    for (const provider of CODING_PROVIDERS) {
+      const cost = (role: (typeof MODEL_ROLES)[number]) => relativeModelCost(provider, ROLE_DEFAULT_MODELS[provider][role])!;
+      expect(cost("planner")).toBe(Math.max(...roleModelOptions(provider).map((m) => relativeModelCost(provider, m)!)));
+      expect(cost("planner")).toBeGreaterThanOrEqual(cost("worker"));
+      expect(cost("planner")).toBeGreaterThanOrEqual(cost("reviewer"));
+    }
+  });
+
+  it("is not the economy tier anywhere a cheaper model exists (the OpenAI planner on luna was the bug)", () => {
+    expect(resolveRoleRun("planner", "openai", "gpt-6-astra", "max", {}).model).not.toBe(ECONOMY_MODELS.openai);
+    expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "max", {}).model).not.toBe(ECONOMY_MODELS.anthropic);
+  });
+
+  it("is the role's default whatever model the team's runs would carry", () => {
+    expect(resolveRoleRun("worker", "anthropic", "claude-opus-5", "high", {}).model).toBe("claude-opus-5-5");
+    expect(resolveRoleRun("planner", "openai", "gpt-5.2", "high", {}).model).toBe("gpt-6-astra");
+  });
+
+  it("stays the default when only the effort is stored", () => {
+    expect(resolveRoleRun("planner", "openai", "gpt-6-astra", "max", { planner: { effort: "medium" } })).toEqual({ provider: "openai", tier: "default", model: "gpt-6-astra", effort: "medium", auto: true });
   });
 
   it("never raises a role ABOVE the owner's own effort", () => {
@@ -163,17 +210,10 @@ describe("the defaults — a box that never chose", () => {
     expect(resolveRoleRun("reviewer", "anthropic", DEFAULT_ANTHROPIC_MODEL, "high", {}).effort).toBe("high");
   });
 
-  it("leaves a worker on the owner's provider, model and effort", () => {
-    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", {})).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "ultracode", auto: true });
-    expect(resolveRoleRun("worker", "clawbox-ai", null, "max", {})).toEqual({ provider: "clawbox-ai", tier: "standard", model: null, effort: "max", auto: true });
-    // The model the team's runs carry anyway, even one the start named.
-    expect(resolveRoleRun("worker", "anthropic", "claude-opus-5", "high", {}).model).toBe("claude-opus-5");
-  });
-
-  it("says so in the table the panel draws from", () => {
-    expect(ROLE_DEFAULTS.planner).toEqual({ model: "economy", effortCap: "xhigh", turnsCap: 100 });
-    expect(ROLE_DEFAULTS.reviewer).toEqual({ model: "economy", effortCap: "xhigh", turnsCap: 100 });
-    expect(ROLE_DEFAULTS.worker).toEqual({ model: "standard", effortCap: null, turnsCap: null });
+  it("keeps the caps in the table the panel draws from", () => {
+    expect(ROLE_DEFAULTS.planner).toEqual({ effortCap: "xhigh", turnsCap: 100 });
+    expect(ROLE_DEFAULTS.reviewer).toEqual({ effortCap: "xhigh", turnsCap: 100 });
+    expect(ROLE_DEFAULTS.worker).toEqual({ effortCap: null, turnsCap: null });
   });
 });
 
@@ -225,9 +265,23 @@ describe("old settings — the tier-only shape a box may already hold", () => {
     const stored = roleModelsFrom(OLD);
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "xhigh", auto: false });
     expect(resolveRoleRun("planner", "clawbox-ai", null, "ultracode", stored)).toEqual({ provider: "clawbox-ai", tier: "standard", model: null, effort: "xhigh", auto: false });
-    // The one change since: a stored `max` for a reader is held at the cap.
-    expect(resolveRoleRun("reviewer", "clawbox-ai", null, "low", stored)).toEqual({ provider: "clawbox-ai", tier: "economy", model: "deepseek-v4-flash", effort: "xhigh", auto: true });
+    // A stored `max` for a reader is held at the cap; with no model stored the
+    // reviewer is on its role's default.
+    expect(resolveRoleRun("reviewer", "clawbox-ai", null, "low", stored)).toEqual({ provider: "clawbox-ai", tier: "default", model: "deepseek-v4-flash", effort: "xhigh", auto: true });
+    expect(resolveRoleRun("reviewer", "openai", "gpt-6-astra", "low", stored)).toEqual({ provider: "openai", tier: "default", model: "gpt-5.6-sol", effort: "xhigh", auto: true });
     expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "low", auto: false });
+  });
+
+  it("keeps a stored tier on every provider: economy the cheaper model, standard the team's own", () => {
+    for (const provider of CODING_PROVIDERS) {
+      for (const role of MODEL_ROLES) {
+        expect(resolveRoleRun(role, provider, null, "high", { [role]: { model: "economy" } })).toMatchObject({ provider, model: ECONOMY_MODELS[provider], tier: "economy", auto: false });
+      }
+    }
+    expect(resolveRoleRun("planner", "openai", "gpt-6-astra", "high", { planner: { model: "economy" } }).model).toBe("gpt-5.6-luna");
+    // `standard` is the model the team's runs carry, even one the start named.
+    expect(resolveRoleRun("worker", "anthropic", "claude-opus-5", "high", { worker: { model: "standard" } })).toMatchObject({ model: "claude-opus-5", tier: "standard" });
+    expect(resolveRoleRun("planner", "clawbox-ai", null, "high", { planner: { model: "standard" } })).toMatchObject({ model: null, tier: "standard" });
   });
 });
 
@@ -241,13 +295,13 @@ describe("a provider and a model per role — mixed providers", () => {
 
   it("puts each role on its own provider and model", () => {
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "chosen", model: "claude-fable-5-1", effort: "xhigh", auto: false });
-    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "ultracode", auto: true });
+    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "default", model: "claude-opus-5-5", effort: "ultracode", auto: true });
     expect(resolveRoleRun("reviewer", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "clawbox-ai", tier: "chosen", model: "deepseek-v4-flash", effort: "xhigh", auto: false });
   });
 
   it("does the same on a team whose own provider is the other one", () => {
     expect(resolveRoleRun("planner", "clawbox-ai", null, "max", MIXED)).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", tier: "chosen" });
-    expect(resolveRoleRun("worker", "clawbox-ai", null, "max", MIXED)).toMatchObject({ provider: "clawbox-ai", model: null, tier: "standard" });
+    expect(resolveRoleRun("worker", "clawbox-ai", null, "max", MIXED)).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", tier: "default" });
   });
 
   it("reads a provider without a model as that provider's default model", () => {

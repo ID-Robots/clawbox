@@ -123,15 +123,13 @@ export const OPENAI_SECRET_SCOPE = "@openai-coding";
 export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
 
 /**
- * The CHEAPER model of each provider: what a coding team's planner and
- * reviewers run on unless the owner says otherwise (src/lib/coding-role-models.ts).
- * Reading a folder and answering a plan, or reading a diff and answering a
- * verdict, is not where the most capable model earns its price.
+ * The CHEAPER model of each provider: what a coding team's role runs on when
+ * the owner stored the `economy` tier for it (src/lib/coding-role-models.ts;
+ * a role with nothing stored runs on `ROLE_DEFAULT_MODELS` there instead).
  *
  * On `clawbox-ai` it is the plan's flash tier, which EVERY plan may use (the
- * wrapper's own fallback and its small model — see scripts/claude-ds), so a
- * box on the Max plan pays for its pro model only where a worker writes code.
- * It is the one model a `clawbox-ai` run's record may carry
+ * wrapper's own fallback and its small model — see scripts/claude-ds), and
+ * every team role's default there too. It is the one model a `clawbox-ai` run's record may carry
  * (`isRecordableModel`); a CALLER still cannot name one for that provider.
  *
  * On `openai` it is the one the CLI's own catalogue describes as its fast and
