@@ -1,9 +1,14 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { PATCH_MARKER, VERIFIED_VERSIONS, patchOpenClawRoot, patchTransportSource } from "../../../scripts/openclaw-reasoning-stream-patch.mjs";
+
+// The CLI and installer cases start real node and bash processes, which a
+// loaded CI runner can keep past vitest's 5 s default; see
+// test-timeout-hygiene.test.ts for why the ceiling is declared per file.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
  * TASK-2228: on OpenClaw 2026.10.9 a reasoning model's answer reached the chat
