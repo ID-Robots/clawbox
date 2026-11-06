@@ -4626,7 +4626,7 @@ const table: Record<string, string> = {
   "update.showcase.linkPasswordOn": "Вкл.",
   "update.showcase.linkTitle": "Публичен линк за {app}",
   "update.showcase.newIn": "Ново в {release}",
-  "update.showcase.queueStarts": "Започва само",
+  "update.showcase.queueStarts": "Започва сама",
   "update.showcase.queueStartsText": "когато свърши инсталацията преди нея",
   "update.showcase.reportsDone": "Изпълнението завърши",
   "update.showcase.reportsDoneText": "Чатът научава, а асистентът ви казва.",

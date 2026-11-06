@@ -1658,7 +1658,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.showcase.reportsDoneText": "Чатът научава, а асистентът ви казва.",
     "update.showcase.busyWait": "Отказ ги изчаква",
     "update.showcase.busyWaitText": "Нищо не се спира по средата.",
-    "update.showcase.queueStarts": "Започва само",
+    "update.showcase.queueStarts": "Започва сама",
     "update.showcase.queueStartsText": "когато свърши инсталацията преди нея",
     "ai.clawaiDeviceIntro": "Отворете портала на ClawBox и въведете показания по-долу код на устройството. Устройството завършва свързването, щом потвърдите в портала.",
     "ai.clawaiGetCode": "Вземи код на устройството",
