@@ -264,13 +264,13 @@ describe("install.sh's openclaw_patch step runs it", () => {
     ].join("\n");
     return execFileSync("bash", ["-c", script], {
       encoding: "utf8",
-      env: { ...process.env, PROJECT_DIR: project, GATEWAY_DIST: "/home/u/.npm-global/lib/node_modules/openclaw/dist" },
+      env: { ...process.env, PROJECT_DIR: project, GATEWAY_DIST: "/opt/npm-global/lib/node_modules/openclaw/dist" },
     }).replaceAll(project, "<project>");
   }
 
   it("on OpenClaw 2, before the step's own early return, against the core's package root", () => {
     const out = runStep();
-    expect(out).toContain("as_clawbox node <project>/scripts/openclaw-reasoning-stream-patch.mjs /home/u/.npm-global/lib/node_modules/openclaw\n");
+    expect(out).toContain("as_clawbox node <project>/scripts/openclaw-reasoning-stream-patch.mjs /opt/npm-global/lib/node_modules/openclaw\n");
     expect(out).toContain("not needed on OpenClaw 2");
     expect(out.trim().endsWith("rc=0")).toBe(true);
   });
