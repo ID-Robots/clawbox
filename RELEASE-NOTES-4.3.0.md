@@ -1,6 +1,6 @@
 # ClawBox 4.3.0
 
-Previous release: v4.2.0, 5 October 2026. 941 commits.
+Previous release: v4.2.0, 5 October 2026. 943 commits.
 
 4.3 adds a Screenshot app and gives you and your assistant one shared browser.
 An app the Coding Agent built can now be shared through a public link. xAI Grok
@@ -203,10 +203,11 @@ setup and switching between Anthropic accounts get a long list of fixes.
 - **Run notes.** Each project keeps notes of what earlier runs learned, such as
   the commands that work. Every run reads them, and you can view, edit and
   clear them on the project page.
-- **Cheaper team roles.** A team's planner, lead and reviewers use the
-  provider's cheaper model by default, while workers use yours; **Models per
-  team role** in the Coding Agent's settings changes that. The team card shows
-  the tokens each role used.
+- **Models per team role.** Each role of a team, the planner (who also leads
+  the team), the workers and the reviewers, can run on an account, model and
+  effort of its own, set in **Models per team role** in the Coding Agent's
+  settings; on **Default model** the box picks one for the role. The team card
+  shows the tokens each role used.
 - **A fair share of the processor.** Coding runs work at a lower priority than
   the rest of the box and share a processor budget, smaller on battery, so the
   desktop stays responsive while they run.
@@ -356,6 +357,12 @@ setup and switching between Anthropic accounts get a long list of fixes.
   committed on the run's branch when the run made no commit of its own.
 - The assistant can start a run from a branch you name, and hand it your own
   files, such as a PDF in Documents, which were refused before.
+- A team role left on its default runs on the provider's best model for
+  planning and its middle model for coding and review; the planner used to get
+  the cheaper model. On Anthropic, Claude Fable 5.1 plans and Claude Opus 5.5
+  writes and reviews; on OpenAI, GPT-6 Astra plans and GPT-5.6 Sol writes and
+  reviews; on ClawBox AI, all three use DeepSeek V4 Flash. The role's **Now:**
+  line in **Models per team role** names the model it runs on.
 
 ### Backups
 
