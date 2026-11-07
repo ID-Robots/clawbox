@@ -4732,9 +4732,10 @@ export function getSkillsDir(): string {
  * Named only when the config actually holds more than one agent, which is the
  * only condition the CLI refuses: a stock appliance has one and keeps the
  * inference that has always worked there, so this can never make a working box
- * worse. `main` is ClawBox's own agent — the same id `clawkeep-memory.ts`
- * names for `openclaw memory` — and with several agents and no `main` the
- * first entry is a better guess than a certain refusal.
+ * worse. `main` is ClawBox's own agent, and with several agents and no `main`
+ * the first entry is a better guess than a certain refusal. (`openclaw memory`
+ * names the agent the config designates as the default instead; see
+ * `@/lib/openclaw-default-agent`.)
  *
  * Lenient by construction: {@link readConfig} answers `{}` for a config it
  * cannot read, which lands on the empty argument list and today's behaviour.
