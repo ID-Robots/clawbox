@@ -66,10 +66,12 @@ export const CODEX_APP_SERVER_IDLE_MS = 30 * 60_000;
  * Quiet, as a share of one core: what an app-server tree may use between two
  * looks and still count as idle. Not zero, because an idle one is not still:
  * on a Jetson Orin Nano with @openai/codex 0.160.0, four app-servers nobody
- * had used for half an hour each gained ~10 clock ticks (0.1 s) every five to
- * six minutes, about 0.03 % of a core. A turn costs far more than this.
+ * used for 35 minutes each gained 3-4 clock ticks a minute, about 0.06 % of a
+ * core. 0.5 % (150 ticks in five minutes) leaves room for an idle one that
+ * wakes more often. What decides that nobody is using it is the gateway's
+ * answer below; this only keeps a box from churning app-servers it is using.
  */
-export const QUIET_CPU_SHARE = 0.002;
+export const QUIET_CPU_SHARE = 0.005;
 
 /** Linux's USER_HZ, the unit of utime/stime in /proc/<pid>/stat. */
 const USER_HZ = 100;

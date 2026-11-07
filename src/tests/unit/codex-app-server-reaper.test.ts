@@ -176,10 +176,10 @@ describe("createCodexAppServerReaper", () => {
   });
 
   it("counts the little CPU an idle app-server still uses as quiet", async () => {
-    // Measured on a Jetson: ~10 ticks per idle app-server every five to six minutes.
+    // Measured on a Jetson: 3-4 ticks a minute per idle app-server, ~18 per look.
     const box = fakeBox([gateway(), ...appServer(2000)]);
     for (let look = 0; look <= 6; look += 1) {
-      box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 5 + 5 * look })]);
+      box.setProcs([gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS]), proc(2001, 2000, [NATIVE, ...APP_SERVER_ARGS], { cpuTicks: 5 + 18 * look })]);
       const stopped = await box.reaper.sweep();
       if (look < 6) expect(stopped).toEqual([]);
       else expect(stopped.map((s) => s.pid)).toEqual([2000]);
@@ -191,7 +191,7 @@ describe("createCodexAppServerReaper", () => {
     const box = fakeBox([gateway(), ...appServer(2000)]);
     await box.reaper.sweep();
     box.advance(CODEX_APP_SERVER_IDLE_MS - MIN);
-    box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 500 })]); // a turn
+    box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 2_000 })]); // a turn: 40 s of CPU
     await box.reaper.sweep();
     box.advance(2 * MIN);
     expect(await box.reaper.sweep()).toEqual([]);
