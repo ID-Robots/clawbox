@@ -8346,14 +8346,15 @@ fi
 CLAWBOX_HOOK_PLUGIN_ID="clawbox-email-directives"
 CLAWBOX_HOOK_PLUGIN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_HOOK_PLUGIN_ID"
 CLAWBOX_HOOK_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_HOOK_PLUGIN_ID"
-CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs email-approvals.mjs"
+CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs email-approvals.mjs update-commands.mjs"
 install_clawbox_hook_plugin "$CLAWBOX_HOOK_PLUGIN_ID" "$CLAWBOX_HOOK_PLUGIN_DST" \
-  "EMAIL: directives will reach channels and approving a queued email from Telegram will not work" \
+  "EMAIL: directives will reach channels, and approving a queued email or using /update and the update notice's button from Telegram will not work" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/openclaw.plugin.json" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/package.json" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/index.mjs" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/email-directives.mjs" \
-  "$CLAWBOX_HOOK_PLUGIN_SRC/email-approvals.mjs"
+  "$CLAWBOX_HOOK_PLUGIN_SRC/email-approvals.mjs" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/update-commands.mjs"
 
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
 

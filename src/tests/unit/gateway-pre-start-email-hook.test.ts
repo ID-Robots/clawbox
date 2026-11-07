@@ -197,6 +197,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       "index.mjs",
       "openclaw.plugin.json",
       "package.json",
+      "update-commands.mjs",
     ]);
     expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ enabled: true });
     expect(r.stdout).toContain("reply_payload_sending and before_dispatch registered");
@@ -367,7 +368,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     rmSync(path.join(openclawHome, "extensions"), { recursive: true, force: true });
     writeFileSync(path.join(dir, "calls.log"), "");
     const r = run();
-    expect(installed()).toHaveLength(5);
+    expect(installed()).toHaveLength(6);
     expect(calls()).not.toContain("plugins inspect");
     expect(r.stdout).toContain("unchanged since it was last verified");
   });
@@ -628,12 +629,12 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // where it was. Removing it there would turn "the box keeps stripping with
     // what it already had" into "no plugin, and a config that names one".
     run();
-    expect(installed()).toHaveLength(5);
+    expect(installed()).toHaveLength(6);
     const bare = mkdtempSync(path.join(tmpdir(), "oc-unreadable-src-"));
     try {
       const src = path.join(bare, "scripts", "openclaw-plugins", PLUGIN_ID);
       mkdirSync(src, { recursive: true });
-      for (const f of ["openclaw.plugin.json", "package.json", "index.mjs", "email-directives.mjs", "email-approvals.mjs"]) {
+      for (const f of ["openclaw.plugin.json", "package.json", "index.mjs", "email-directives.mjs", "email-approvals.mjs", "update-commands.mjs"]) {
         writeFileSync(path.join(src, f), "x");
         chmodSync(path.join(src, f), 0o000);
       }
@@ -641,7 +642,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       expect(r.status).toBe(0);
       expect(r.stderr).toMatch(/WARNING: could not read .* plugin sources/);
       expect(r.stderr).toContain("leaving whatever is already installed in place");
-      expect(installed()).toHaveLength(5);
+      expect(installed()).toHaveLength(6);
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }

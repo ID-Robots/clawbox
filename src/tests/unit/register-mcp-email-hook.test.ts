@@ -170,7 +170,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
   it("installs the shipped plugin and enables it by name", () => {
     const r = run();
     expect(r.status).toBe(0);
-    expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml"]);
+    expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml", "update_commands.py"]);
     expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
   });
 
@@ -330,14 +330,14 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // "the box keeps stripping with what it already had" into "no plugin, and a
     // config that names one".
     run();
-    expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml"]);
+    expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml", "update_commands.py"]);
     const bare = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-unreadable-src-"));
     try {
       fs.mkdirSync(path.join(bare, "mcp"), { recursive: true });
       fs.writeFileSync(path.join(bare, "mcp", "clawbox-mcp.ts"), "// stand-in\n");
       const src = path.join(bare, "scripts", "hermes-plugins", PLUGIN);
       fs.mkdirSync(src, { recursive: true });
-      for (const f of ["__init__.py", "plugin.yaml", "email_directives.py", "approvals.py"]) {
+      for (const f of ["__init__.py", "plugin.yaml", "email_directives.py", "approvals.py", "update_commands.py"]) {
         fs.writeFileSync(path.join(src, f), "x");
         fs.chmodSync(path.join(src, f), 0o000);
       }
@@ -345,7 +345,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
       expect(r.status).toBe(0);
       expect(r.stdout).toMatch(/WARNING: could not read/);
       expect(r.stdout).toContain("leaving whatever is already installed in place");
-      expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml"]);
+      expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml", "update_commands.py"]);
     } finally {
       fs.rmSync(bare, { recursive: true, force: true });
     }

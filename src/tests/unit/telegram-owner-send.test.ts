@@ -136,3 +136,69 @@ describe("never throws", () => {
     expect(JSON.parse(String(calls[0].init.body)).chat_id).toBe("-100200");
   });
 });
+
+describe("a message with buttons (TASK-2260, the weekly update notice)", () => {
+  const BUTTON = [{ text: "Update", callback_data: "clawbox-update" }];
+  const savedRoot = process.env.CLAWBOX_TELEGRAM_API_ROOT;
+  afterEach(() => {
+    if (savedRoot === undefined) delete process.env.CLAWBOX_TELEGRAM_API_ROOT;
+    else process.env.CLAWBOX_TELEGRAM_API_ROOT = savedRoot;
+  });
+
+  it("carries one row of callback buttons, and nothing else changes", async () => {
+    const calls = stubTelegram();
+    expect(await send.sendOwnerTelegramButtons("6001", "ClawBox 4.3.1 is available", BUTTON, { harness: "openclaw" })).toBe(true);
+    expect(calls[0].url).toBe(`https://api.telegram.org/bot${TOKEN}/sendMessage`);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      chat_id: "6001",
+      text: "ClawBox 4.3.1 is available",
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: [[{ text: "Update", callback_data: "clawbox-update" }]] },
+    });
+  });
+
+  it("takes the Bot API on Hermes too — with HERMES' token — because `hermes send` carries no buttons", async () => {
+    const calls = stubTelegram();
+    expect(await send.sendOwnerTelegramButtons("6001", "hi", BUTTON, { harness: "hermes" })).toBe(true);
+    expect(identity.readActiveTelegramBot).toHaveBeenCalledWith("hermes");
+    expect(hermes.notifyHermesTelegramUser).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("follows the active harness when none is named", async () => {
+    vi.mocked(harness.getActiveHarness).mockResolvedValue("hermes");
+    stubTelegram();
+    await send.sendOwnerTelegramButtons("6001", "hi", BUTTON);
+    expect(identity.readActiveTelegramBot).toHaveBeenCalledWith("hermes");
+  });
+
+  it("answers false — never throws — with no token, a bad chat id or a refusal", async () => {
+    stubTelegram(false);
+    expect(await send.sendOwnerTelegramButtons("6001", "hi", BUTTON)).toBe(false);
+    expect(await send.sendOwnerTelegramButtons("not-a-chat", "hi", BUTTON)).toBe(false);
+    vi.mocked(identity.readActiveTelegramBot).mockResolvedValue({ token: null, known: true });
+    expect(await send.sendOwnerTelegramButtons("6001", "hi", BUTTON)).toBe(false);
+    vi.mocked(identity.readActiveTelegramBot).mockRejectedValue(new Error("EACCES"));
+    expect(await send.sendOwnerTelegramButtons("6001", "hi", BUTTON)).toBe(false);
+  });
+
+  it("honours a LOOPBACK Bot API root for a lab board, and nothing else", () => {
+    delete process.env.CLAWBOX_TELEGRAM_API_ROOT;
+    expect(send.telegramApiRoot()).toBe("https://api.telegram.org");
+    process.env.CLAWBOX_TELEGRAM_API_ROOT = "http://127.0.0.1:8099";
+    expect(send.telegramApiRoot()).toBe("http://127.0.0.1:8099");
+    process.env.CLAWBOX_TELEGRAM_API_ROOT = "http://localhost:8099";
+    expect(send.telegramApiRoot()).toBe("http://localhost:8099");
+    for (const elsewhere of ["http://example.com:80", "https://127.0.0.1:8099", "http://127.0.0.1:8099/x", "http://127.0.0.1@evil:80", "http://127.0.0.1:99999"]) {
+      process.env.CLAWBOX_TELEGRAM_API_ROOT = elsewhere;
+      expect(send.telegramApiRoot(), elsewhere).toBe("https://api.telegram.org");
+    }
+  });
+
+  it("sends to the loopback root when one is set", async () => {
+    process.env.CLAWBOX_TELEGRAM_API_ROOT = "http://127.0.0.1:8099";
+    const calls = stubTelegram();
+    await send.sendOwnerTelegramText("6001", "hi", { harness: "openclaw" });
+    expect(calls[0].url).toBe(`http://127.0.0.1:8099/bot${TOKEN}/sendMessage`);
+  });
+});
