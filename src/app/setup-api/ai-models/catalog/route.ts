@@ -336,9 +336,11 @@ function clearFailedRefresh(provider: string): void {
 // spawn for clawai also dodges the 3-min CLI execution time on Jetson.
 export const CLAWAI_STATIC_MODELS: CatalogModel[] = [
   // 1M matches what the provider definition writes to openclaw.json and what a
-  // real device reports back from `openclaw models list`. `text+image` too:
-  // the one model looks at pictures itself (measured 2026-11-07 against the
-  // live proxy and on a lab box's own chat; see CLAWBOX_AI_INPUT_MODALITIES).
+  // real device reports back from `openclaw models list`. `text+image`: the
+  // one model looks at pictures itself (measured 2026-11-07 against the live
+  // proxy and on a lab box's own chat). That is re-checked at every start; a
+  // box whose check finds Flash blind declares it text-only in openclaw.json
+  // and sends pictures to the vision fallback (src/lib/clawbox-ai-vision.ts).
   {
     id: CLAWBOX_AI_FLASH_MODEL_ID,
     label: CLAWBOX_AI_CHAT_MODEL_LABEL,

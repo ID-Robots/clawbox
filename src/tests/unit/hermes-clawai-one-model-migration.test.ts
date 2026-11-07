@@ -17,9 +17,22 @@ const cliMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));
+const storeMock = vi.hoisted(() => ({ values: {} as Record<string, unknown> }));
+vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(async (key: string) => storeMock.values[key]),
+  set: vi.fn(async (key: string, value: unknown) => { storeMock.values[key] = value; }),
+  getKnown: vi.fn(async (key: string) => ({ value: storeMock.values[key], known: true })),
+  setMany: vi.fn(async (entries: Record<string, unknown>) => { Object.assign(storeMock.values, entries); }),
+}));
+const probeMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: probeMock,
+}));
 
 const RETIRED_CHAT = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
-const [VISION_EXP, LEGACY_VISION] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+const [VISION_EXP] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+const FALLBACK = "gpt-5.6-luna";
 
 let home: string;
 let savedHome: string | undefined;
@@ -39,6 +52,8 @@ beforeEach(async () => {
   savedHome = process.env.HERMES_HOME;
   process.env.HERMES_HOME = home;
   cliMock.mockReset();
+  probeMock.mockReset();
+  storeMock.values = {};
   // No `providers.clawai` block: the catalogue repair has nothing to do.
   cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "Config key not set" });
   vi.resetModules();
@@ -53,7 +68,7 @@ afterEach(() => {
 });
 
 describe("migrateRetiredClawaiModelsInHermes", () => {
-  it("moves model.default and the auxiliary slots ClawBox wrote, keeping the file's comments", async () => {
+  it("moves model.default and the auxiliary chat slots ClawBox wrote, keeping the file's comments", async () => {
     writeConfig([
       "# ── Model ──",
       "model:",
@@ -79,15 +94,9 @@ describe("migrateRetiredClawaiModelsInHermes", () => {
     const text = readConfig();
     expect(text).toContain("# ── Model ──");
     expect(text).not.toContain(RETIRED_CHAT);
-    expect(text).not.toContain(VISION_EXP);
-    expect(text.match(/deepseek-v4-flash/g)).toHaveLength(4);
-  });
-
-  it("moves the older vision id too", async () => {
-    writeConfig(["auxiliary:", "  vision:", "    provider: clawai", `    model: ${LEGACY_VISION}`, ""].join("\n"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    expect(await mod.migrateRetiredClawaiModelsInHermes()).toBe(true);
-    expect(readConfig()).toContain("model: deepseek-v4-flash");
+    expect(text.match(/deepseek-v4-flash(?![-\w])/g)).toHaveLength(3);
+    // The picture slot is the vision check's, not this migration's.
+    expect(text).toContain(`model: ${VISION_EXP}`);
   });
 
   it("leaves the owner's own values alone", async () => {
@@ -98,7 +107,7 @@ describe("migrateRetiredClawaiModelsInHermes", () => {
       "auxiliary:",
       "  vision:",
       "    provider: openai",
-      `    model: ${LEGACY_VISION}`,
+      `    model: ${FALLBACK}`,
       "  title_generation:",
       "    provider: clawai",
       "    model: deepseek-v4-flash",
@@ -133,5 +142,72 @@ describe("migrateRetiredClawaiModelsInHermes", () => {
     await mod.migrateRetiredClawaiModelsInHermes();
 
     expect(block.models).toEqual(["deepseek-v4-flash"]);
+  });
+});
+
+describe("refreshClawaiVisionOnHermes", () => {
+  const SEES = { verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null };
+  const FALLS_BACK = { verdict: "fallback", model: FALLBACK, flash: "blind", fallback: "sees" };
+  const NOBODY = { verdict: "none", model: null, flash: "blind", fallback: "blind" };
+
+  /** Hermes' `config get auxiliary.vision --json`, answered from the file the test wrote. */
+  function visionBlockFromFile() {
+    cliMock.mockImplementation(async (args: string[]) => {
+      if (args[1] === "get" && args[2] === "auxiliary.vision") {
+        const text = readConfig();
+        const provider = /vision:\n\s+provider: (\S+)/.exec(text)?.[1];
+        const model = /vision:\n\s+provider: \S+\n\s+model: (\S+)/.exec(text)?.[1];
+        return provider ? { code: 0, stdout: JSON.stringify({ provider, model: model ?? "" }), stderr: "" }
+          : { code: 1, stdout: "", stderr: "Config key not set" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+  }
+
+  beforeEach(() => {
+    storeMock.values.clawai_token = "claw_token_abc";
+    visionBlockFromFile();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("moves the separate vision model's id to Flash while Flash sees, and records the verdict", async () => {
+    writeConfig(["auxiliary:", "  vision:", "    provider: clawai", `    model: ${VISION_EXP}`, ""].join("\n"));
+    probeMock.mockResolvedValue(SEES);
+    await mod.refreshClawaiVisionOnHermes();
+    expect(readConfig()).toContain("model: deepseek-v4-flash");
+    expect(storeMock.values.clawai_vision).toMatchObject({ verdict: "flash", model: "deepseek-v4-flash" });
+  });
+
+  it("moves pictures to the fallback when upstream took vision away from Flash", async () => {
+    writeConfig(["auxiliary:", "  vision:", "    provider: clawai", "    model: deepseek-v4-flash", ""].join("\n"));
+    probeMock.mockResolvedValue(FALLS_BACK);
+    await mod.refreshClawaiVisionOnHermes();
+    expect(readConfig()).toContain(`model: ${FALLBACK}`);
+  });
+
+  it("clears OUR slot when nothing can see, so the chat refuses a picture in words", async () => {
+    writeConfig(["model:", "  provider: clawai", "auxiliary:", "  vision:", "    provider: clawai", "    model: deepseek-v4-flash", ""].join("\n"));
+    probeMock.mockResolvedValue(NOBODY);
+    await mod.refreshClawaiVisionOnHermes();
+    expect(readConfig()).not.toContain("deepseek-v4-flash");
+    expect(storeMock.values.clawai_vision).toMatchObject({ verdict: "none", model: null });
+  });
+
+  it("never touches, or even asks about, an owner's own vision model", async () => {
+    const owner = ["auxiliary:", "  vision:", "    provider: openai", `    model: ${FALLBACK}`, ""].join("\n");
+    writeConfig(owner);
+    await mod.refreshClawaiVisionOnHermes();
+    expect(probeMock).not.toHaveBeenCalled();
+    expect(readConfig()).toBe(owner);
+  });
+
+  it("does nothing on a box with no ClawBox AI token or no Hermes", async () => {
+    delete storeMock.values.clawai_token;
+    writeConfig("model:\n  provider: clawai\n");
+    await mod.refreshClawaiVisionOnHermes();
+    storeMock.values.clawai_token = "claw_token_abc";
+    fs.rmSync(path.join(home, "config.yaml"));
+    await mod.refreshClawaiVisionOnHermes();
+    expect(probeMock).not.toHaveBeenCalled();
   });
 });

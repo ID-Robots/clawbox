@@ -85,8 +85,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
     const [m] = migrate([{ id, name: "ClawBox AI" }]);
     expect(m.contextWindow).toBe(1_000_000);
     expect(m.maxTokens).toBe(393_216);
-    // The one ClawBox AI model looks at pictures too (TASK-2261).
-    expect(m.input).toEqual(["text", "image"]);
+    // Text only: whether Flash also takes pictures is the vision check's to
+    // say (TASK-2261), never this backfill's.
+    expect(m.input).toEqual(["text"]);
   });
 
   it.each(V4_IDS)("replaces the old explicit 128K on %s", (id) => {
@@ -149,7 +150,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
 
   it("replaces an input that is present but not a usable list", () => {
     const [m] = migrate([{ id: "deepseek-v4-flash", input: [] }]);
-    expect(m.input).toEqual(["text", "image"]);
+    expect(m.input).toEqual(["text"]);
   });
 
   // Long sessions on the 1M window were never compacted early: OpenClaw

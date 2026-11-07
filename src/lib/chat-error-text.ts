@@ -423,6 +423,26 @@ const RATE_LIMIT = "That message did not go through — the AI provider is rate-
 const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
 
 /**
+ * A turn refused because nothing could look at the picture on it (TASK-2261).
+ *
+ * ClawBox AI's model can lose its vision upstream between two checks of it
+ * (src/lib/clawbox-ai-vision.ts), and an owner's own model may never have had
+ * one. Either way the provider's answer is an operator line — DeepSeek's
+ * "unknown variant `image_url`", OpenClaw's "Model does not support images" or
+ * "No image model configured" — and none of them tells the customer what to do.
+ */
+const PICTURE_REFUSED = "That message did not go through — the model this chat runs on cannot look at pictures right now. Send it again without the picture, or try again later.";
+
+/** The provider or the gateway refused the turn because of the picture on it. */
+export function isPictureRefused(evidence: string): boolean {
+  return /unknown variant [`'"]?image_url/i.test(evidence)
+    || /model does not support images?/i.test(evidence)
+    || /no image model configured/i.test(evidence)
+    || /\b(images?|image input|vision)\b(?! ?generat)[^.\n]{0,40}\bnot supported\b/i.test(evidence)
+    || /\bdoes not support (images?|image input|vision)\b/i.test(evidence);
+}
+
+/**
  * There is no sign-in to refuse (see `missingCredential`). Its own sentence,
  * not `CREDENTIAL_REJECTED`: the gateway tags this failure `reason=auth` too,
  * but "not accepting this box's sign-in any more" is false here — nobody was
@@ -758,6 +778,9 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   if (isCredentialRejected(evidence) || context?.reason === "auth" || context?.reason === "auth_permanent") {
     return CREDENTIAL_REJECTED;
   }
+  // Before the sanitizer: "Model does not support images" carries no path or
+  // handle, so it would otherwise be relayed verbatim.
+  if (isPictureRefused(evidence)) return PICTURE_REFUSED;
   // The gateway's reason and the provider's words beat the gateway's sentence:
   // for a reason it has no copy for, that sentence is the generic one, and
   // for one it has, ours says the same thing in the customer's terms.

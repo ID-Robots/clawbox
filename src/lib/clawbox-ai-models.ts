@@ -16,9 +16,11 @@
  * upstream model, DeepSeek V4.1 Flash, on every plan — measured 2026-11-07: a
  * turn sent as the Flash id, the former Max-plan id and the former vision id
  * all report `model: "deepseek-flash"`. So the box offers exactly one:
- * `deepseek-v4-flash`, for chat AND for looking at pictures. The ids the box
- * used to write live only in src/lib/clawbox-ai-retired-models.ts, which is
- * what every migration recognises them by.
+ * `deepseek-v4-flash`, for chat, and for looking at pictures while the vision
+ * check says it can (src/lib/clawbox-ai-vision.ts; a describe-only fallback
+ * steps in when upstream takes vision away). The ids the box used to write
+ * live only in src/lib/clawbox-ai-retired-models.ts, which is what every
+ * migration recognises them by.
  */
 export const CLAWBOX_AI_PROVIDER = "deepseek" as const;
 
@@ -66,7 +68,7 @@ export const CLAWBOX_AI_CHAT_MODEL = `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_FLASH_
 export const CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = [CLAWBOX_AI_FLASH_MODEL_ID];
 
 /**
- * What the one model takes in: text AND pictures.
+ * What the one model takes in while it can see: text AND pictures.
  *
  * Measured 2026-11-07 against the live proxy on a lab box with the
  * `deepseek-v4-flash` id: a picture with text, a photo, a UI screenshot, two
@@ -77,8 +79,15 @@ export const CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = [CLAWBOX_AI_FLASH_MO
  * what `agents.defaults.imageModel` needs, because OpenClaw's
  * `resolveImageRuntime` refuses an image model whose catalog entry does not
  * advertise `image` ("Model does not support images").
+ *
+ * NOT ASSUMED. Upstream can take vision away from Flash, so the box asks before
+ * it declares it (src/lib/clawbox-ai-vision.ts); a Flash that cannot see gets
+ * {@link CLAWBOX_AI_TEXT_ONLY_MODALITIES} and pictures go to the fallback.
  */
 export const CLAWBOX_AI_INPUT_MODALITIES = ["text", "image"] as const;
+
+/** The Flash row while the vision check says it cannot see. */
+export const CLAWBOX_AI_TEXT_ONLY_MODALITIES = ["text"] as const;
 
 // Device-tier badge label rendered in the chat header / Settings. Mirrors
 // the subscription plan names ("Pro plan" / "Max plan") so users don't see
@@ -519,14 +528,39 @@ export function clawboxAiNonChatModelReason(ref: string): string {
  * ------------------------------------------------------------------------ */
 
 /*
- * There is no separate vision model any more (TASK-2261). The one chat model
- * takes pictures itself ({@link CLAWBOX_AI_INPUT_MODALITIES}), so every surface
- * that has to look at an image names {@link CLAWBOX_AI_FLASH_MODEL_ID}:
- * OpenClaw's `agents.defaults.imageModel` (for a turn whose chat model is
- * another provider's), Hermes' `auxiliary.vision`, and the box's own describe
- * route (src/lib/vision-describe.ts). The ids that slot used to hold are
- * recognised, and moved, by src/lib/clawbox-ai-retired-models.ts.
+ * One model looks at pictures too (TASK-2261): while the vision check says
+ * Flash can see (src/lib/clawbox-ai-vision.ts), every surface that has to look
+ * at an image names {@link CLAWBOX_AI_FLASH_MODEL_ID} — OpenClaw's
+ * `agents.defaults.imageModel` (for a turn whose chat model is another
+ * provider's), Hermes' `auxiliary.vision`, and the box's own describe route
+ * (src/lib/vision-describe.ts).
+ *
+ * THE FALLBACK. Upstream can take vision away from Flash. When the check says
+ * Flash does not see, pictures go to {@link CLAWBOX_AI_VISION_FALLBACK_MODEL_ID}
+ * instead — a model that only ever LOOKS at a picture, never one offered to chat
+ * with — and when that is not served either, the box says plainly that it
+ * cannot look at pictures right now rather than accepting one it cannot read.
  */
+
+/**
+ * The model pictures go to while Flash cannot see. OpenAI's `gpt-5.6-luna`,
+ * served by the ClawBox AI proxy (measured 2026-11-07: a picture is described,
+ * without tools; with function tools it answers 400, which is why it is a
+ * describe-only slot and never a chat model). Env-overridable like the chat id.
+ */
+export const CLAWBOX_AI_VISION_FALLBACK_MODEL_ID =
+  process.env.CLAWBOX_AI_VISION_FALLBACK_MODEL_ID?.trim() || "gpt-5.6-luna";
+
+/** `name` on the fallback's model row. Required by OpenClaw's schema. */
+export const CLAWBOX_AI_VISION_FALLBACK_LABEL = "ClawBox AI Vision";
+
+/**
+ * Completion-token ceiling the upstream enforces for the fallback, measured
+ * against the live proxy on 2026-08-21: `max_tokens: 128000` is accepted,
+ * `200000` comes back 400 — and 200,000 is the generic default an entry falls
+ * through to when it omits the field.
+ */
+export const CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS = 128_000;
 
 const DEFAULT_CLAWBOX_AI_PROXY_URL = "https://clawbox.com/api/ai";
 

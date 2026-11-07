@@ -3,14 +3,19 @@
  * moves a slot off them (TASK-2261).
  *
  * ClawBox AI is ONE model now: `deepseek-v4-flash` (DeepSeek V4.1 Flash), for
- * chat and for looking at pictures — see src/lib/clawbox-ai-models.ts. Boxes in
+ * chat and — while the vision check says it can see — for looking at pictures;
+ * see src/lib/clawbox-ai-models.ts and src/lib/clawbox-ai-vision.ts. Boxes in
  * the field still name the ids it replaced:
  *
  *   - `deepseek-v4-pro`, the Max plan's chat id. The proxy answered it with the
  *     same Flash model; it was a plan gate, never a bigger model.
- *   - `deepseek-v4-flash-vision-exp` and, before it, `gpt-5.6-luna`: the
- *     separate vision model `agents.defaults.imageModel` (OpenClaw) and
- *     `auxiliary.vision` (Hermes) were pointed at.
+ *   - `deepseek-v4-flash-vision-exp`, the separate vision model
+ *     `agents.defaults.imageModel` (OpenClaw) and `auxiliary.vision` (Hermes)
+ *     were pointed at — the same Flash upstream under another id.
+ *
+ * The picture slots themselves are decided by the vision check, not here: it
+ * knows whether Flash can see, and moves a slot naming any id ClawBox wrote
+ * there (these, Flash, or the fallback) onto the one that answers.
  *
  * This module is the only place outside the boot script's mirror
  * (scripts/gateway-pre-start.sh) that spells them, so a grep for a retired id
@@ -18,21 +23,16 @@
  *
  * WHICH SLOTS ARE OURS. A value is moved only when it names one of these ids
  * under ClawBox AI's own provider — `deepseek/…` or `clawai/…` on OpenClaw, a
- * bare id under `provider: clawai` on Hermes. `gpt-5.6-luna` is also a real
- * OpenAI model: `openai/gpt-5.6-luna`, or a Hermes slot whose provider is not
- * `clawai`, is the owner's configuration and is never touched. Anything else
- * an owner wrote into a slot stays as it is.
+ * bare id under `provider: clawai` on Hermes. Anything else an owner wrote into
+ * a slot stays as it is.
  */
 import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 
 /** The chat ids ClawBox AI used to offer beside Flash. */
 export const RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = ["deepseek-v4-pro"];
 
-/** The separate vision ids `imageModel` / `auxiliary.vision` used to name. */
-export const RETIRED_CLAWBOX_AI_VISION_MODEL_IDS: readonly string[] = [
-  "deepseek-v4-flash-vision-exp",
-  "gpt-5.6-luna",
-];
+/** The separate vision id `imageModel` / `auxiliary.vision` used to name. */
+export const RETIRED_CLAWBOX_AI_VISION_MODEL_IDS: readonly string[] = ["deepseek-v4-flash-vision-exp"];
 
 /** The Hermes provider slug ClawBox AI is registered under. */
 const HERMES_CLAWAI_PROVIDER = "clawai";
@@ -130,9 +130,10 @@ export interface OpenclawAgentsMigration {
 
 /**
  * Move every slot under openclaw.json's `agents` that names a retired ClawBox
- * AI id to Flash: the primary and its fallbacks, `imageModel`, per-agent
- * models in `agents.list`, `compaction.model`, `modelPolicy.allow`, and a key
- * of the `agents.defaults.models` map. ANY string in the block that is exactly
+ * AI id to Flash: the primary and its fallbacks, per-agent models in
+ * `agents.list`, `compaction.model`, `modelPolicy.allow`, and a key of the
+ * `agents.defaults.models` map. NOT `agents.defaults.imageModel`, which the
+ * vision check owns. ANY string in the block that is exactly
  * a retired ref is ours (it names ClawBox AI's provider and an id only ClawBox
  * ever wrote), so the walk does not need to know OpenClaw's whole schema.
  *
@@ -147,6 +148,10 @@ export function migrateRetiredClawboxAiOpenclawAgents(
   const changed = new Set<string>();
 
   const walk = (value: unknown, path: string[]): unknown => {
+    // The picture slot is the vision check's (src/lib/clawbox-ai-vision.ts):
+    // whether its retired id becomes Flash or the fallback depends on whether
+    // Flash can see, which this walk does not know.
+    if (path.length === 2 && path[0] === "defaults" && path[1] === "imageModel") return value;
     const note = () => changed.add(writablePath(path));
     if (typeof value === "string") {
       if (!isRetiredClawboxAiModel(value, refOptions)) return value;
@@ -204,31 +209,28 @@ function writablePath(path: string[]): string {
  * Hermes: `model.default` and the auxiliary slots
  * ------------------------------------------------------------------------ */
 
-/** The Hermes config slots ClawBox AI writes a model into, as `[provider key, model key]`. */
+/**
+ * The Hermes config slots ClawBox AI writes a CHAT model into, as
+ * `[provider key, model key]`. `auxiliary.vision` is not one of them: the
+ * vision check decides what looks at a picture (src/lib/clawbox-ai-vision.ts).
+ */
 export const HERMES_CLAWAI_MODEL_SLOTS = [
   ["model.provider", "model.default"],
-  ["auxiliary.vision.provider", "auxiliary.vision.model"],
   ["auxiliary.title_generation.provider", "auxiliary.title_generation.model"],
   ["auxiliary.compression.provider", "auxiliary.compression.model"],
 ] as const;
 
 /**
- * What a Hermes slot should hold instead, or null to leave it.
- *
- * Moved only when the slot's provider is `clawai` and its model a retired id
- * (bare, the way Hermes stores it). The vision slot takes either kind — a
- * former chat id there is ours just as much — and every other slot only a
- * former chat id: a vision id in a chat slot is nothing ClawBox ever wrote.
+ * What a Hermes chat slot should hold instead, or null to leave it: Flash, when
+ * the slot's provider is `clawai` and its model the retired Max-plan id (bare,
+ * the way Hermes stores it).
  */
 export function hermesSlotFlashTarget(
-  modelKey: string,
   provider: string | null | undefined,
   model: string | null | undefined,
 ): string | null {
   if ((provider ?? "").trim().toLowerCase() !== HERMES_CLAWAI_PROVIDER) return null;
-  const kind = retiredKind(model, { bare: true });
-  if (kind === null) return null;
-  if (kind === "vision" && modelKey !== "auxiliary.vision.model") return null;
+  if (!isRetiredClawboxAiChatModel(model, { bare: true })) return null;
   return flashRefFor(model as string);
 }
 

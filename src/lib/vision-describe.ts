@@ -5,14 +5,17 @@
  * model as "[Unsupported Image]" (measured on this box, 2026-08-27), whatever
  * the model could do with it. So instead of handing an agent pixels it cannot
  * read, the browser route hands it this module's written description of them —
- * asked of ClawBox AI's one model, `deepseek-v4-flash`, which takes pictures
- * itself (TASK-2261; there is no separate vision model any more).
+ * asked of the model the vision check names (src/lib/clawbox-ai-vision.ts):
+ * ClawBox AI's one model, `deepseek-v4-flash`, while it can see (TASK-2261),
+ * the vision fallback while it cannot, and nobody — said in words — when
+ * neither can.
  *
  * Failure is an answer, never an exception: an offline box or an unlinked
  * account returns { text: null, error } and the caller degrades to titles.
  */
 import { get as configGet } from "@/lib/config-store";
-import { CLAWBOX_AI_FLASH_MODEL_ID, clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
+import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
+import { clawboxAiVisionModelFor, probeClawboxAiVision, readClawboxAiVision } from "@/lib/clawbox-ai-vision";
 
 /**
  * The whole call's wall-clock budget, retry included. 60 s, not 30: the
@@ -67,6 +70,27 @@ const DEFAULT_PROMPT =
  * extension map from this and the artifacts store's inline-image table, so
  * "can be described" and "is served as an image" cannot drift apart.
  */
+/** Re-ask which model may look at a picture at most this often. */
+const RESOLVE_TTL_MS = 10 * 60_000;
+let cachedModel: { id: string | null; at: number } | null = null;
+
+/** What the describe route says when no ClawBox AI model can look at a picture. */
+export const NO_VISION_MODEL_ERROR = "ClawBox AI cannot look at pictures right now";
+
+async function visionModelId(token: string): Promise<string | null> {
+  if (cachedModel && Date.now() - cachedModel.at < RESOLVE_TTL_MS) return cachedModel.id;
+  const probe = await probeClawboxAiVision({ token });
+  const previous = cachedModel?.id ?? (await readClawboxAiVision())?.model ?? null;
+  const id = clawboxAiVisionModelFor(probe, previous);
+  cachedModel = { id, at: Date.now() };
+  return id;
+}
+
+/** Forget the cached answer (tests, and a link that just re-checked). */
+export function _resetVisionModelCacheForTests(): void {
+  cachedModel = null;
+}
+
 export const VISION_IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp"] as const;
 export type VisionImageMime = (typeof VISION_IMAGE_MIMES)[number];
 
@@ -173,7 +197,8 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
     return { text: null, error: "ClawBox AI is not connected on this device" };
   }
   const deadline = Date.now() + DESCRIBE_TIMEOUT_MS;
-  const model = CLAWBOX_AI_FLASH_MODEL_ID;
+  const model = await visionModelId(token.trim());
+  if (!model) return { text: null, error: NO_VISION_MODEL_ERROR };
   const attempts: VisionAttempt[] = [];
   const first = await ask(token.trim(), model, prompt, imageBase64, mime, Math.max(1, deadline - Date.now()), attempts);
   if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {

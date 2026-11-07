@@ -17,6 +17,12 @@ const rpcMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
 const optionsMock = vi.hoisted(() => vi.fn());
 
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => store[key] ?? null),
   // The tri-state reader the explicit-pick marker uses (TASK-713), over the

@@ -67,6 +67,12 @@ import {
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
 import { migrateRetiredClawboxAiOpenclawAgents } from "@/lib/clawbox-ai-retired-models";
+import {
+  clawboxAiVisionModelFor,
+  isClawboxAiVisionSlotOurs,
+  probeClawboxAiVision,
+  recordClawboxAiVision,
+} from "@/lib/clawbox-ai-vision";
 import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
   getDefaultLlamaCppModel,
@@ -88,6 +94,10 @@ import {
   CLAWBOX_AI_CHAT_MODEL,
   CLAWBOX_AI_DEFAULT_TIER,
   CLAWBOX_AI_INPUT_MODALITIES,
+  CLAWBOX_AI_TEXT_ONLY_MODALITIES,
+  CLAWBOX_AI_VISION_FALLBACK_LABEL,
+  CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS,
+  CLAWBOX_AI_VISION_FALLBACK_MODEL_ID,
   CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_PROVIDER,
   CLAWBOX_AI_LEGACY_IMAGE_PROVIDER,
@@ -1101,7 +1111,11 @@ const CLAWBOX_AI_CONTEXT_TOKENS = 131_072;
 // reason.
 const CLAWBOX_AI_MAX_TOKENS = 393_216;
 
-function buildClawboxAiProviderDefinition(apiKey: string, capContext = true) {
+function buildClawboxAiProviderDefinition(
+  apiKey: string,
+  capContext = true,
+  visionModel: string | null = CLAWBOX_AI_FLASH_MODEL_ID,
+) {
   const contextCap = capContext ? { contextTokens: CLAWBOX_AI_CONTEXT_TOKENS } : {};
   // Emit the proxy URL, our auth, the one model's identity/branding/reasoning,
   // and the context/output/modality limits above.
@@ -1126,18 +1140,21 @@ function buildClawboxAiProviderDefinition(apiKey: string, capContext = true) {
     // providers in openclaw.json override the plugin's modelCatalog entirely;
     // the compat must live on the configured entry.
     //
-    // ONE ROW (TASK-2261). The former Max-plan id and the separate vision row
-    // are gone: this write replaces the whole provider, so a re-link drops
+    // ONE CHAT ROW (TASK-2261). The former Max-plan id and the separate vision
+    // row are gone: this write replaces the whole provider, so a re-link drops
     // them, and the boot script drops them from a box that is never re-linked.
-    // `input` carries `image` — the one model looks at pictures itself, which
+    // `input` carries `image` while the vision check says Flash sees — which
     // lets an attached picture reach the chat model directly and gives
-    // `agents.defaults.imageModel` (below) a row OpenClaw will resolve.
+    // `agents.defaults.imageModel` (below) a row OpenClaw will resolve — and
+    // `text` alone when it does not, so OpenClaw never hands it a picture.
     models: [
       {
         id: CLAWBOX_AI_FLASH_MODEL_ID,
         name: "ClawBox AI Flash",
         reasoning: true,
-        input: [...CLAWBOX_AI_INPUT_MODALITIES],
+        input: visionModel === CLAWBOX_AI_FLASH_MODEL_ID
+          ? [...CLAWBOX_AI_INPUT_MODALITIES]
+          : [...CLAWBOX_AI_TEXT_ONLY_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
         ...contextCap,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
@@ -1147,6 +1164,19 @@ function buildClawboxAiProviderDefinition(apiKey: string, capContext = true) {
           supportedReasoningEfforts: ["off", "high", "xhigh"],
         },
       },
+      // The vision fallback, only while Flash cannot see: a picture-only row
+      // `agents.defaults.imageModel` resolves to. Never a chat model — no
+      // `reasoning`/`compat`, and the device picker reads CLAWAI_STATIC_MODELS,
+      // not this array.
+      ...(visionModel === CLAWBOX_AI_VISION_FALLBACK_MODEL_ID
+        ? [{
+            id: CLAWBOX_AI_VISION_FALLBACK_MODEL_ID,
+            name: CLAWBOX_AI_VISION_FALLBACK_LABEL,
+            input: [...CLAWBOX_AI_INPUT_MODALITIES],
+            maxTokens: CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          }]
+        : []),
     ],
   });
 }
@@ -1807,25 +1837,38 @@ async function configureClawboxAi(
 
   // EVERY SLOT UNDER `agents` THAT STILL NAMES A RETIRED CLAWBOX AI ID
   // (TASK-2261). The provider write below drops the former Max-plan row and
-  // the separate vision row, so a primary, a fallback, a per-agent model or the
-  // image slot left naming one would point at a model this box no longer
-  // defines. Moved here, on the link that drops them, and again by
+  // the separate vision row, so a primary, a fallback or a per-agent model
+  // left naming one would point at a model this box no longer defines. Moved
+  // here, on the link that drops them, and again by
   // scripts/gateway-pre-start.sh on every gateway start for a box that is never
   // re-linked. Only refs under ClawBox AI's own provider move; see
-  // src/lib/clawbox-ai-retired-models.ts.
-  const retired = migrateRetiredClawboxAiOpenclawAgents(snapshot?.agents, {
-    deepseekIsClawboxAi: deepseekProviderIsClawboxAi(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]),
-  });
+  // src/lib/clawbox-ai-retired-models.ts. The picture slot is the vision
+  // check's, below.
+  const deepseekIsClawboxAi = deepseekProviderIsClawboxAi(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]);
+  const retired = migrateRetiredClawboxAiOpenclawAgents(snapshot?.agents, { deepseekIsClawboxAi });
   // NARROWED, not cast (TASK-755). The slot can hold a bare string — the core
-  // coerces one — so its migrated value is re-read through the same coercion.
+  // coerces one — and the move below spreads an object, never a string.
   const currentImageModelSlot = snapshot?.agents?.defaults?.imageModel;
-  const migratedImageModelSlot = (retired.agents as { defaults?: { imageModel?: unknown } } | undefined)
-    ?.defaults?.imageModel;
-  // The paths written below as their own groups, not as part of this one:
-  // `imageModel` has a write of its own, and `agents.defaults.models` is a map
-  // the CLI will not shrink without `--replace`, which this group passes.
+  const currentImageModel = typeof currentImageModelSlot === "object" && currentImageModelSlot !== null
+    ? currentImageModelSlot
+    : undefined;
+  const currentImagePrimary = typeof currentImageModelSlot === "string"
+    ? currentImageModelSlot.trim()
+    : typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
+  const imageSlotIsOurs = isClawboxAiVisionSlotOurs(currentImagePrimary, { deepseekIsClawboxAi });
+
+  // CAN FLASH SEE? Asked, not assumed (src/lib/clawbox-ai-vision.ts): Flash,
+  // else the vision fallback, else no picture slot at all. A question that
+  // could not be answered keeps what the box has.
+  const vision = await probeClawboxAiVision({ token: clawboxAiToken, baseUrl: CLAWBOX_AI_PROXY_URL });
+  const visionModel = clawboxAiVisionModelFor(vision, imageSlotIsOurs ? currentImagePrimary : null);
+  await recordClawboxAiVision(vision, visionModel);
+  console.log(`[AI Config] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"})`);
+  const visionRef = visionModel ? `${CLAWBOX_AI_PROVIDER}/${visionModel}` : null;
+
+  // `agents.defaults.models` is a map the CLI will not shrink without
+  // `--replace`, which this group passes.
   const retiredOps: OpenclawConfigSetArgs[] = retired.changedPaths
-    .filter((path) => path !== "agents.defaults.imageModel")
     .flatMap((path): OpenclawConfigSetArgs[] => {
       const value = valueAtAgentsPath(retired.agents, path);
       if (value === undefined) return [];
@@ -1845,16 +1888,17 @@ async function configureClawboxAi(
     ],
     [
       `models.providers.${CLAWBOX_AI_PROVIDER}`,
-      buildClawboxAiProviderDefinition(clawboxAiToken, await installedOpenclawCoreAtLeast(2026, 10)),
+      buildClawboxAiProviderDefinition(clawboxAiToken, await installedOpenclawCoreAtLeast(2026, 10), visionModel),
       "--json",
     ],
     ...(extra?.requiredOps ?? []),
   ];
 
-  // Point image *understanding* at the one model the provider definition above
-  // just wrote, with `image` in its input. Without this a turn whose chat model
-  // cannot see (another provider's, a local one) accepts an attached picture
-  // and then cannot look at it: the `image` tool that would read the media path
+  // Point image *understanding* at the model the vision check chose, whose
+  // row the provider definition above just wrote with `image` in its input.
+  // Without this a turn whose chat model cannot see (another provider's, a
+  // local one, or Flash while it cannot) accepts an attached picture and then
+  // cannot look at it: the `image` tool that would read the media path
   // resolves its model through `agents.defaults.imageModel` — which ClawBox
   // provisioning never set, making `runWithImageModelFallback` throw "No image
   // model configured" (`dist/model-fallback-CvSRhgYr.js` on 2026.7.1).
@@ -1865,24 +1909,29 @@ async function configureClawboxAi(
   // for some other provider, and a slot the owner filled is their choice.
   // Non-fatal for the same reason too.
   const visionOps: OpenclawConfigSetArgs[] = [];
+  let visionUnset = false;
   if (!hasToolModelConfig(currentImageModelSlot)) {
-    visionOps.push([
-      "agents.defaults.imageModel",
-      JSON.stringify({ primary: CLAWBOX_AI_CHAT_MODEL }),
-      "--json",
-    ]);
-  } else if (retired.changedPaths.includes("agents.defaults.imageModel")) {
-    // The slot names the separate vision model ClawBox used to write (or the
-    // former Max-plan id) — ours to move to the one model. A value the owner
-    // set themselves never matches and is never touched, and the move keeps
-    // everything else in the slot: fallbacks the owner added ride along. A
-    // bare string is written back in the object shape this block writes
-    // everywhere else.
-    const moved = typeof migratedImageModelSlot === "string"
-      ? { primary: migratedImageModelSlot }
-      : migratedImageModelSlot;
-    console.log(`[AI Config] Moving agents.defaults.imageModel to ${CLAWBOX_AI_CHAT_MODEL}`);
-    visionOps.push(["agents.defaults.imageModel", JSON.stringify(moved), "--json"]);
+    if (visionRef) {
+      visionOps.push(["agents.defaults.imageModel", JSON.stringify({ primary: visionRef }), "--json"]);
+    }
+  } else if (imageSlotIsOurs && currentImagePrimary !== visionRef) {
+    // The slot names a model ClawBox wrote there — Flash, the fallback, or an
+    // id it used to write — so it is ours to move to the one that answers, and
+    // the move keeps everything else in the slot: fallbacks the owner added
+    // ride along. A bare string is written back in the object shape this block
+    // writes everywhere else. With no model that can see, OUR primary goes.
+    const rest = currentImageModel ? { ...currentImageModel } : {};
+    delete (rest as { primary?: unknown }).primary;
+    if (visionRef) {
+      console.log(`[AI Config] Moving agents.defaults.imageModel ${currentImagePrimary} -> ${visionRef}`);
+      visionOps.push(["agents.defaults.imageModel", JSON.stringify({ ...rest, primary: visionRef }), "--json"]);
+    } else if (Object.keys(rest).length > 0) {
+      console.log(`[AI Config] No ClawBox AI model can look at pictures: dropping ${currentImagePrimary} from agents.defaults.imageModel`);
+      visionOps.push(["agents.defaults.imageModel", JSON.stringify(rest), "--json"]);
+    } else {
+      console.log(`[AI Config] No ClawBox AI model can look at pictures: removing agents.defaults.imageModel`);
+      visionUnset = true;
+    }
   } else {
     console.log(
       "[AI Config] Left agents.defaults.imageModel alone: it already names a model that looks at pictures",
@@ -1943,7 +1992,7 @@ async function configureClawboxAi(
       ops: visionOps,
       onApplied: () =>
         console.log(
-          `[AI Config] Set ClawBox AI image understanding to ${CLAWBOX_AI_CHAT_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+          `[AI Config] Set ClawBox AI image understanding to ${visionRef} via proxy ${CLAWBOX_AI_PROXY_URL}`,
         ),
       onError: (err) =>
         console.warn(
@@ -2004,6 +2053,17 @@ async function configureClawboxAi(
         ),
       },
       () => runOpenclawConfigSet(op, { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
+    );
+  }
+  if (visionUnset) {
+    await configWriteBoundary(
+      {
+        onError: (err) => console.warn(
+          "[AI Config] Failed to remove agents.defaults.imageModel:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+      },
+      () => runOpenclawConfigUnset("agents.defaults.imageModel", { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
     );
   }
   for (const path of legacyImageCleanup.unsets) {

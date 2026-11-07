@@ -17,10 +17,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * two lines there is no model to route the picture to and it is degraded to a
  * description of itself.
  *
- * Since TASK-2261 the model that looks is the one ClawBox AI model itself,
- * `deepseek-v4-flash` — there is no separate vision model and no probe. The
- * slot is claimed when it is empty or names a model ClawBox put there, and an
- * owner's own vision model stays.
+ * Since TASK-2261 the model that looks is the one the vision check names:
+ * ClawBox AI's own `deepseek-v4-flash` while it sees, the fallback while it
+ * does not, and nothing — which the chat then says plainly — when neither
+ * does. The slot is claimed when it is empty or names a model ClawBox put
+ * there, and an owner's own vision model stays.
  */
 
 const cliMock = vi.hoisted(() => vi.fn());
@@ -56,14 +57,26 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   installHermesImagePlugin: vi.fn(),
 }));
 
+const probeMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: probeMock,
+}));
+
 import {
   CLAWAI_DEFAULT_MODEL,
   CLAWAI_PROVIDER,
   ClawaiApplyError,
   applyClawaiToHermes,
 } from "@/lib/hermes-clawai";
-import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_VISION_FALLBACK_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { RETIRED_CLAWBOX_AI_VISION_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+const FALLBACK = CLAWBOX_AI_VISION_FALLBACK_MODEL_ID;
+const SEES = { verdict: "flash", model: CLAWBOX_AI_FLASH_MODEL_ID, flash: "sees", fallback: null };
+const FALLS_BACK = { verdict: "fallback", model: FALLBACK, flash: "blind", fallback: "sees" };
+const NOBODY = { verdict: "none", model: null, flash: "blind", fallback: "blind" };
+const NO_ANSWER = { verdict: "unknown", model: null, flash: "unknown", fallback: "unknown" };
 
 /** Answer `config get auxiliary.vision --json` with `answer`; every other call succeeds quietly. */
 function visionSlot(answer: { code: number; stdout?: string; stderr?: string }) {
@@ -90,19 +103,42 @@ describe("pointing Hermes at ClawBox AI", () => {
   beforeEach(() => {
     cliMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    probeMock.mockReset();
+    probeMock.mockResolvedValue(SEES);
   });
 
-  it("names the one model, which can see, so an attached picture is looked at", async () => {
+  it("names Flash while the vision check says it sees", async () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(probeMock).toHaveBeenCalledWith(expect.objectContaining({ token: "claw_token_abc" }));
     expect(sets()).toContain(`auxiliary.vision.provider=${CLAWAI_PROVIDER}`);
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_FLASH_MODEL_ID}`);
   });
 
-  it("asks nothing of the proxy: there is no vision model to resolve any more", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
+  it("names the fallback while Flash cannot see", async () => {
+    probeMock.mockResolvedValue(FALLS_BACK);
     await applyClawaiToHermes("claw_token_abc", "flash");
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
+    expect(sets()).toContain(`auxiliary.vision.model=${FALLBACK}`);
+    // The chat model stays Flash: only the picture moves.
+    expect(sets()).toContain(`model.default=${CLAWBOX_AI_FLASH_MODEL_ID}`);
+  });
+
+  it("arms no picture route when neither can see, and clears ours", async () => {
+    probeMock.mockResolvedValue(NOBODY);
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets().some((kv) => kv.startsWith("auxiliary.vision."))).toBe(false);
+
+    cliMock.mockReset();
+    visionSlot({ code: 0, stdout: JSON.stringify({ provider: CLAWAI_PROVIDER, model: CLAWBOX_AI_FLASH_MODEL_ID }) });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    const unsets = cliMock.mock.calls.map((c) => c[0] as string[]).filter((a) => a[1] === "unset").map((a) => a[2]);
+    expect(unsets).toEqual(expect.arrayContaining(["auxiliary.vision.model", "auxiliary.vision.provider"]));
+  });
+
+  it("keeps the slot it has when the question cannot be answered", async () => {
+    probeMock.mockResolvedValue(NO_ANSWER);
+    visionSlot({ code: 0, stdout: JSON.stringify({ provider: CLAWAI_PROVIDER, model: FALLBACK }) });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain(`auxiliary.vision.model=${FALLBACK}`);
   });
 
   it("claims a slot Hermes ships empty, and one whose key is not set", async () => {
@@ -116,8 +152,8 @@ describe("pointing Hermes at ClawBox AI", () => {
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_FLASH_MODEL_ID}`);
   });
 
-  it("moves a slot naming either id the separate vision model had", async () => {
-    for (const id of RETIRED_CLAWBOX_AI_VISION_MODEL_IDS) {
+  it("moves a slot naming the separate vision model's id, or the fallback, to the model that sees", async () => {
+    for (const id of [...RETIRED_CLAWBOX_AI_VISION_MODEL_IDS, FALLBACK]) {
       cliMock.mockReset();
       visionSlot({ code: 0, stdout: JSON.stringify({ provider: CLAWAI_PROVIDER, model: id }) });
       await applyClawaiToHermes("claw_token_abc", "flash");
@@ -125,16 +161,18 @@ describe("pointing Hermes at ClawBox AI", () => {
     }
   });
 
-  it("leaves an owner's own vision model alone, the OpenAI model of the same name included", async () => {
+  it("leaves an owner's own vision model alone, and does not even ask", async () => {
     for (const owner of [
-      { provider: "openai", model: RETIRED_CLAWBOX_AI_VISION_MODEL_IDS[1] },
+      { provider: "openai", model: FALLBACK },
       { provider: "openrouter", model: "google/gemini-2.5-flash" },
       { provider: CLAWAI_PROVIDER, model: "some-model-the-owner-typed" },
     ]) {
       cliMock.mockReset();
+      probeMock.mockClear();
       visionSlot({ code: 0, stdout: JSON.stringify(owner) });
       await applyClawaiToHermes("claw_token_abc", "flash");
       expect(sets().some((kv) => kv.startsWith("auxiliary.vision."))).toBe(false);
+      expect(probeMock).not.toHaveBeenCalled();
     }
   });
 

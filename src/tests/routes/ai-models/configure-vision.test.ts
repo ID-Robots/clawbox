@@ -3,19 +3,24 @@ import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
-import { CLAWBOX_AI_CHAT_MODEL, CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
+import {
+  CLAWBOX_AI_CHAT_MODEL,
+  CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_VISION_FALLBACK_MODEL_ID,
+} from "@/lib/clawbox-ai-models";
 import {
   RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS,
   RETIRED_CLAWBOX_AI_VISION_MODEL_IDS,
 } from "@/lib/clawbox-ai-retired-models";
 
 // ClawBox AI's ONE model (TASK-2261) as POST /setup-api/ai-models/configure
-// writes it: `deepseek-v4-flash` for chat AND for looking at a picture. The
-// provider gets one row, with `image` in its input; `agents.defaults.imageModel`
-// points at it (TASK-417: with that slot empty, a turn whose chat model cannot
-// see throws "No image model configured"); and a re-link moves every slot that
-// still names a retired id — the former Max-plan chat id, the separate vision
-// model — onto Flash, while leaving the owner's own choices alone.
+// writes it: `deepseek-v4-flash` for chat, and for looking at a picture while
+// the vision check — the proxy SHOWN a picture — says Flash sees; the vision
+// fallback while it does not; nothing while neither does. The provider gets
+// one chat row; `agents.defaults.imageModel` points at the model that sees
+// (TASK-417: with that slot empty, a turn whose chat model cannot see throws
+// "No image model configured"); and a re-link moves every slot that still
+// names a retired id onto Flash, while leaving the owner's own choices alone.
 //
 // Mocks are the same set configure-images.test.ts uses — the route's
 // collaborators, with `runOpenclawConfigSet` as the boundary every
@@ -205,7 +210,31 @@ type ModelEntry = {
   [key: string]: unknown;
 };
 
-const [VISION_EXP, LEGACY_VISION] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+const [VISION_EXP] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+const FALLBACK = CLAWBOX_AI_VISION_FALLBACK_MODEL_ID;
+const FALLBACK_REF = `deepseek/${FALLBACK}`;
+
+/**
+ * What the proxy says when the vision check shows a model the probe picture:
+ * a string is the model's answer, a number the status it refuses with. Every
+ * other request is "network disabled".
+ */
+function proxySays(answers: Record<string, string | number>) {
+  const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+    if (String(input).endsWith("/chat/completions")) {
+      const answer = answers[JSON.parse(String(init?.body ?? "{}")).model];
+      if (typeof answer === "number") {
+        return new Response(JSON.stringify({ error: { message: "unknown variant `image_url`, expected `text`" } }), { status: answer });
+      }
+      if (typeof answer === "string") {
+        return new Response(JSON.stringify({ choices: [{ message: { content: answer } }] }), { status: 200 });
+      }
+    }
+    throw new Error("network disabled in tests");
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 const RETIRED_CHAT_REF = `deepseek/${RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0]}`;
 
 describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () => {
@@ -329,10 +358,55 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () =>
     expect(JSON.parse(call?.[1] ?? "null")).toEqual({ primary: CLAWBOX_AI_CHAT_MODEL });
   });
 
-  it("asks nothing of the proxy about a vision model", async () => {
+  it("asks the proxy whether Flash can see by SHOWING it a picture", async () => {
+    const fetchMock = proxySays({ [CLAWBOX_AI_FLASH_MODEL_ID]: "Red" });
     await connectClawai();
-    const asked = vi.mocked(fetch).mock.calls.map((c) => String(c[0]));
-    expect(asked.some((url) => url.includes("/chat/completions"))).toBe(false);
+    const probe = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/chat/completions"));
+    const body = JSON.parse(String(probe?.[1]?.body));
+    expect(body.model).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(body.messages[0].content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image_url" })]));
+    expect(deepseekModels()[0].input).toEqual(["text", "image"]);
+  });
+
+  it("keeps Flash text-only and sends pictures to the fallback when Flash cannot see", async () => {
+    proxySays({ [CLAWBOX_AI_FLASH_MODEL_ID]: 400, [FALLBACK]: "red" });
+    await connectClawai();
+
+    expect(deepseekModels()).toEqual([
+      expect.objectContaining({ id: CLAWBOX_AI_FLASH_MODEL_ID, input: ["text"] }),
+      expect.objectContaining({ id: FALLBACK, input: ["text", "image"], maxTokens: 128_000 }),
+    ]);
+    // Never a chat model: no reasoning controls on the fallback row.
+    expect(deepseekModels()[1].reasoning).toBeUndefined();
+    expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null")).toEqual({ primary: FALLBACK_REF });
+  });
+
+  it("arms no picture slot when neither can see, and removes ours", async () => {
+    proxySays({ [CLAWBOX_AI_FLASH_MODEL_ID]: 400, [FALLBACK]: 400 });
+    await connectClawai();
+    expect(deepseekModels()).toEqual([expect.objectContaining({ id: CLAWBOX_AI_FLASH_MODEL_ID, input: ["text"] })]);
+    expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+
+    const { runOpenclawConfigUnset } = await import("@/lib/openclaw-config");
+    vi.mocked(runOpenclawConfigUnset).mockClear();
+    mockReadConfig.mockResolvedValue({ agents: { defaults: { imageModel: { primary: CLAWBOX_AI_CHAT_MODEL } } } });
+    await connectClawai();
+    expect(vi.mocked(runOpenclawConfigUnset).mock.calls.map((c) => c[0])).toContain("agents.defaults.imageModel");
+
+    vi.mocked(runOpenclawConfigSet).mockClear();
+    vi.mocked(runOpenclawConfigSetBatch).mockClear();
+    mockReadConfig.mockResolvedValue({
+      agents: { defaults: { imageModel: { primary: CLAWBOX_AI_CHAT_MODEL, fallbacks: ["google/gemini-2.5-flash"] } } },
+    });
+    await connectClawai();
+    expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null")).toEqual({ fallbacks: ["google/gemini-2.5-flash"] });
+  });
+
+  it("keeps the fallback a box already uses when the question cannot be answered", async () => {
+    mockReadConfig.mockResolvedValue({ agents: { defaults: { imageModel: { primary: FALLBACK_REF } } } });
+    await connectClawai();
+    expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+    expect(deepseekModels().map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID, FALLBACK]);
   });
 
   it("does not touch imageGenerationModel", async () => {
@@ -350,7 +424,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () =>
     // configureClawboxAi also runs when ClawBox AI is merely being added as a
     // fallback for some other provider, so an occupied slot is a decision made
     // elsewhere.
-    for (const owner of [{ primary: "google/gemini-2.5-flash" }, { primary: `openai/${LEGACY_VISION}` }]) {
+    for (const owner of [{ primary: "google/gemini-2.5-flash" }, { primary: `openai/${FALLBACK}` }]) {
       vi.mocked(runOpenclawConfigSet).mockClear();
       vi.mocked(runOpenclawConfigSetBatch).mockClear();
       mockReadConfig.mockResolvedValue({ agents: { defaults: { imageModel: owner } } });
@@ -384,8 +458,9 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () =>
     expect(callFor("agents.defaults.imageModel")).toBeUndefined();
   });
 
-  it("moves either id the separate vision model had onto Flash, keeping the owner's fallbacks", async () => {
-    for (const id of [VISION_EXP, LEGACY_VISION]) {
+  it("moves the separate vision model's id, or the fallback, onto Flash when it sees, keeping the owner's fallbacks", async () => {
+    proxySays({ [CLAWBOX_AI_FLASH_MODEL_ID]: "Red" });
+    for (const id of [VISION_EXP, FALLBACK]) {
       vi.mocked(runOpenclawConfigSet).mockClear();
       vi.mocked(runOpenclawConfigSetBatch).mockClear();
       mockReadConfig.mockResolvedValue({
@@ -400,8 +475,9 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () =>
   });
 
   it("moves OUR old id even as a bare string, into the object shape", async () => {
+    proxySays({ [CLAWBOX_AI_FLASH_MODEL_ID]: "Red" });
     mockReadConfig.mockResolvedValue({
-      agents: { defaults: { imageModel: `deepseek/${LEGACY_VISION}` } },
+      agents: { defaults: { imageModel: `deepseek/${VISION_EXP}` } },
     });
 
     await connectClawai();

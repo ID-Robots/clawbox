@@ -425,6 +425,18 @@ export async function register() {
   } catch (err) {
     console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
   }
+  try {
+    // Can ClawBox AI's model still look at a picture? (TASK-2261) Upstream can
+    // take vision away from Flash, so a Hermes box asks at every start and
+    // moves `auxiliary.vision` to Flash, the fallback, or nothing. NOT awaited:
+    // it is a network round trip, and nothing on the box waits for it. The
+    // OpenClaw side is asked by scripts/gateway-pre-start.sh at gateway start.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { refreshClawaiVisionOnHermes } = require('./lib/hermes-clawai')
+    void refreshClawaiVisionOnHermes()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the ClawBox AI vision check:', err instanceof Error ? err.message : err)
+  }
   if (onDeviceAccount) {
     try {
       // The owner's project folder, real on disk from the first boot and from

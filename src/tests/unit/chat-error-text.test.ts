@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure } from "@/lib/chat-error-text";
+import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure, isPictureRefused } from "@/lib/chat-error-text";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { translations } from "@/lib/translations";
 
@@ -650,5 +650,32 @@ describe("describeChatFailure — a zero rate limit", () => {
     expect(isAccountQuotaFailure("No API key found for provider \"xai\". Auth store: /x. limit: 0", context)).toBe(false);
     expect(isAccountQuotaFailure("", undefined)).toBe(false);
     expect(isAccountQuotaFailure(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("a turn refused because of the picture on it (TASK-2261)", () => {
+  it.each([
+    "400 Failed to deserialize the JSON body into the target type: messages[0]: unknown variant `image_url`, expected `text`",
+    "Model does not support images",
+    "No image model configured",
+    "HTTP 400: image input is not supported for this model",
+    "This model does not support vision",
+  ])("says what to do instead of relaying %j", (raw) => {
+    expect(isPictureRefused(raw)).toBe(true);
+    const text = describeChatFailure(raw);
+    expect(text).toMatch(/cannot look at pictures right now/);
+    expect(text).toMatch(/without the picture/);
+    expect(text).not.toContain("image_url");
+  });
+
+  it("reads the provider's detail line too", () => {
+    expect(describeChatFailure("LLM request failed", { detail: "unknown variant `image_url`" } as never))
+      .toMatch(/cannot look at pictures right now/);
+  });
+
+  it("does not claim a picture where the failure has nothing to do with one", () => {
+    expect(isPictureRefused("Request exceeds the size limit")).toBe(false);
+    expect(isPictureRefused("image generation is not available on this plan")).toBe(false);
+    expect(isPictureRefused("image generation is not supported by this provider")).toBe(false);
   });
 });

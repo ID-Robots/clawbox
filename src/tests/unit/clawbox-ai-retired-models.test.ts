@@ -16,13 +16,16 @@ import {
 // half is pinned by gateway-pre-start-clawai-one-model.test.ts.
 
 const PRO_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
-const [VISION_EXP, LEGACY_VISION] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+const [VISION_EXP] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+/** The vision fallback: a LIVE id, never retired (src/lib/clawbox-ai-vision.ts). */
+const FALLBACK = "gpt-5.6-luna";
 const FLASH = "deepseek/deepseek-v4-flash";
 
 describe("recognising a retired ClawBox AI id", () => {
-  it("knows the former Max-plan id and both ids the vision model had", () => {
+  it("knows the former Max-plan id and the separate vision model's id — not the live fallback", () => {
     expect(PRO_ID).toBe("deepseek-v4-pro");
-    expect(RETIRED_CLAWBOX_AI_VISION_MODEL_IDS).toEqual(["deepseek-v4-flash-vision-exp", "gpt-5.6-luna"]);
+    expect(RETIRED_CLAWBOX_AI_VISION_MODEL_IDS).toEqual(["deepseek-v4-flash-vision-exp"]);
+    expect(isRetiredClawboxAiModel(`deepseek/${FALLBACK}`)).toBe(false);
   });
 
   it("reads refs under ClawBox AI's provider, in either spelling", () => {
@@ -30,7 +33,7 @@ describe("recognising a retired ClawBox AI id", () => {
     expect(isRetiredClawboxAiChatModel(`clawai/${PRO_ID}`)).toBe(true);
     expect(isRetiredClawboxAiChatModel(`ClawAI/${PRO_ID}`)).toBe(true);
     expect(isRetiredClawboxAiVisionModel(`deepseek/${VISION_EXP}`)).toBe(true);
-    expect(isRetiredClawboxAiVisionModel(`deepseek/${LEGACY_VISION}`)).toBe(true);
+    expect(isRetiredClawboxAiVisionModel(`clawai/${VISION_EXP}`)).toBe(true);
   });
 
   it("needs a bare id to be asked for one", () => {
@@ -40,7 +43,7 @@ describe("recognising a retired ClawBox AI id", () => {
   });
 
   it("never claims another provider's model of the same name", () => {
-    expect(isRetiredClawboxAiModel(`openai/${LEGACY_VISION}`)).toBe(false);
+    expect(isRetiredClawboxAiModel(`openai/${FALLBACK}`)).toBe(false);
     expect(isRetiredClawboxAiModel(`openrouter/deepseek/${PRO_ID}`)).toBe(false);
     expect(isRetiredClawboxAiModel(`deepseek/${PRO_ID}`, { deepseekIsClawboxAi: false })).toBe(false);
     expect(isRetiredClawboxAiModel(`clawai/${PRO_ID}`, { deepseekIsClawboxAi: false })).toBe(true);
@@ -61,16 +64,15 @@ describe("recognising a retired ClawBox AI id", () => {
   it("writes Flash back in the shape the ref came in", () => {
     expect(flashRefFor(`deepseek/${PRO_ID}`)).toBe(FLASH);
     expect(flashRefFor(`clawai/${VISION_EXP}`)).toBe("clawai/deepseek-v4-flash");
-    expect(flashRefFor(LEGACY_VISION)).toBe("deepseek-v4-flash");
+    expect(flashRefFor(VISION_EXP)).toBe("deepseek-v4-flash");
   });
 });
 
 describe("migrateRetiredClawboxAiOpenclawAgents", () => {
-  it("moves every slot that names a retired id and reports the paths to write", () => {
+  it("moves every chat slot that names a retired id and reports the paths to write", () => {
     const agents = {
       defaults: {
         model: { primary: `deepseek/${PRO_ID}`, fallbacks: [FLASH] },
-        imageModel: { primary: `deepseek/${VISION_EXP}`, fallbacks: ["google/gemini-2.5-flash"] },
         imageGenerationModel: { primary: "litellm/gpt-image-1-mini" },
         compaction: { model: `deepseek/${PRO_ID}` },
         modelPolicy: { allow: [`clawai/${PRO_ID}`, "clawai/deepseek-v4-flash"] },
@@ -84,7 +86,6 @@ describe("migrateRetiredClawboxAiOpenclawAgents", () => {
     expect(result.agents).toEqual({
       defaults: {
         model: { primary: FLASH, fallbacks: [FLASH] },
-        imageModel: { primary: FLASH, fallbacks: ["google/gemini-2.5-flash"] },
         imageGenerationModel: { primary: "litellm/gpt-image-1-mini" },
         compaction: { model: FLASH },
         modelPolicy: { allow: ["clawai/deepseek-v4-flash"] },
@@ -93,11 +94,15 @@ describe("migrateRetiredClawboxAiOpenclawAgents", () => {
     });
     expect(result.changedPaths).toEqual([
       "agents.defaults.compaction",
-      "agents.defaults.imageModel",
       "agents.defaults.model",
       "agents.defaults.modelPolicy",
       "agents.list",
     ]);
+  });
+
+  it("leaves the picture slot to the vision check", () => {
+    const agents = { defaults: { imageModel: { primary: `deepseek/${VISION_EXP}`, fallbacks: [`deepseek/${PRO_ID}`] } } };
+    expect(migrateRetiredClawboxAiOpenclawAgents(agents)).toEqual({ agents, changedPaths: [] });
   });
 
   it("drops a second Flash a move produced, whichever side it is on", () => {
@@ -119,7 +124,7 @@ describe("migrateRetiredClawboxAiOpenclawAgents", () => {
     const agents = {
       defaults: {
         model: { primary: "anthropic/claude-opus-5", fallbacks: [FLASH] },
-        imageModel: `openai/${LEGACY_VISION}`,
+        imageModel: `openai/${FALLBACK}`,
       },
     };
     expect(migrateRetiredClawboxAiOpenclawAgents(agents)).toEqual({ agents, changedPaths: [] });
@@ -133,24 +138,20 @@ describe("migrateRetiredClawboxAiOpenclawAgents", () => {
 });
 
 describe("hermesSlotFlashTarget", () => {
-  it("moves a retired id under provider clawai", () => {
-    expect(hermesSlotFlashTarget("model.default", "clawai", PRO_ID)).toBe("deepseek-v4-flash");
-    expect(hermesSlotFlashTarget("auxiliary.vision.model", "clawai", VISION_EXP)).toBe("deepseek-v4-flash");
-    expect(hermesSlotFlashTarget("auxiliary.vision.model", "clawai", LEGACY_VISION)).toBe("deepseek-v4-flash");
-    expect(hermesSlotFlashTarget("auxiliary.vision.model", "clawai", PRO_ID)).toBe("deepseek-v4-flash");
-    expect(hermesSlotFlashTarget("auxiliary.title_generation.model", " ClawAI ", PRO_ID)).toBe("deepseek-v4-flash");
+  it("moves the retired Max-plan id under provider clawai", () => {
+    expect(hermesSlotFlashTarget("clawai", PRO_ID)).toBe("deepseek-v4-flash");
+    expect(hermesSlotFlashTarget(" ClawAI ", PRO_ID)).toBe("deepseek-v4-flash");
   });
 
   it("leaves the owner's slot alone", () => {
-    expect(hermesSlotFlashTarget("auxiliary.vision.model", "openai", LEGACY_VISION)).toBeNull();
-    expect(hermesSlotFlashTarget("auxiliary.vision.model", "auto", VISION_EXP)).toBeNull();
-    expect(hermesSlotFlashTarget("model.default", "clawai", "deepseek-v4-flash")).toBeNull();
-    expect(hermesSlotFlashTarget("model.default", "openrouter", PRO_ID)).toBeNull();
+    expect(hermesSlotFlashTarget("clawai", "deepseek-v4-flash")).toBeNull();
+    expect(hermesSlotFlashTarget("openrouter", PRO_ID)).toBeNull();
+    expect(hermesSlotFlashTarget("auto", PRO_ID)).toBeNull();
   });
 
-  it("only moves a vision id in the vision slot", () => {
-    expect(hermesSlotFlashTarget("model.default", "clawai", VISION_EXP)).toBeNull();
-    expect(hermesSlotFlashTarget("auxiliary.compression.model", "clawai", LEGACY_VISION)).toBeNull();
+  it("never moves a vision id into a chat slot", () => {
+    expect(hermesSlotFlashTarget("clawai", VISION_EXP)).toBeNull();
+    expect(hermesSlotFlashTarget("clawai", FALLBACK)).toBeNull();
   });
 });
 

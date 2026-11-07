@@ -12,14 +12,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   configGet: vi.fn(async (): Promise<unknown> => "tok-1234567890"),
+  probe: vi.fn(),
 }));
 vi.mock("@/lib/config-store", () => ({ get: mocks.configGet }));
 vi.mock("@/lib/clawbox-ai-models", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/clawbox-ai-models")>()),
   clawboxAiProxyUrl: () => "http://proxy.test/v1",
 }));
+// Which model looks is the vision check's answer (src/lib/clawbox-ai-vision.ts),
+// which has its own suite; here it is stated, so the proxy calls counted below
+// are the description's alone.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: mocks.probe,
+  readClawboxAiVision: vi.fn(async () => null),
+}));
 
-import { DESCRIBE_TIMEOUT_MS, MIN_RETRY_MS, RETRY_DELAY_MS, describeImage } from "@/lib/vision-describe";
+import {
+  DESCRIBE_TIMEOUT_MS,
+  MIN_RETRY_MS,
+  NO_VISION_MODEL_ERROR,
+  RETRY_DELAY_MS,
+  _resetVisionModelCacheForTests,
+  describeImage,
+} from "@/lib/vision-describe";
+
+const SEES = { verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null };
 
 const fetchMock = vi.fn<(input: unknown, init?: RequestInit) => Promise<Response>>();
 
@@ -40,6 +58,9 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   mocks.configGet.mockResolvedValue("tok-1234567890");
+  mocks.probe.mockReset();
+  mocks.probe.mockResolvedValue(SEES);
+  _resetVisionModelCacheForTests();
 });
 
 afterEach(() => {
@@ -127,7 +148,30 @@ it("records requested and actual model plus usage separately for every attempt",
   const result = await pending;
   expect(result.vision?.attempts).toHaveLength(2);
   expect(result.vision?.attempts[0]).toMatchObject({ status: 503, usage: null, responseModel: null });
-  // ClawBox AI's one model looks at the picture: no separate vision model (TASK-2261).
+  // The model the vision check names looks at the picture (TASK-2261).
   expect(result.vision?.attempts[1]).toMatchObject({ requestedModel: "deepseek-v4-flash", responseModel: "deepseek-flash", usage: { total_tokens: 130 } });
   expect(JSON.stringify(result)).not.toContain("tok-1234567890");
+});
+
+describe("which model looks", () => {
+  it("asks the vision fallback while Flash cannot see", async () => {
+    mocks.probe.mockResolvedValue({ verdict: "fallback", model: "gpt-5.6-luna", flash: "blind", fallback: "sees" });
+    fetchMock.mockResolvedValueOnce(answer("a dashboard"));
+    const result = await describeImage("aGk=");
+    expect(result.text).toBe("a dashboard");
+    expect(result.vision?.attempts[0].requestedModel).toBe("gpt-5.6-luna");
+  });
+
+  it("says plainly that nothing can look, without asking the proxy, when neither can see", async () => {
+    mocks.probe.mockResolvedValue({ verdict: "none", model: null, flash: "blind", fallback: "blind" });
+    expect(await describeImage("aGk=")).toEqual({ text: null, error: NO_VISION_MODEL_ERROR });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("asks the check once per ten minutes, not once per picture", async () => {
+    fetchMock.mockImplementation(async () => answer("x"));
+    await describeImage("aGk=");
+    await describeImage("aGk=");
+    expect(mocks.probe).toHaveBeenCalledTimes(1);
+  });
 });

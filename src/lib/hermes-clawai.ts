@@ -37,6 +37,12 @@ import {
   hermesSlotFlashTarget,
   isRetiredClawboxAiModel,
 } from "@/lib/clawbox-ai-retired-models";
+import {
+  clawboxAiVisionModelFor,
+  isClawboxAiVisionSlotOurs,
+  probeClawboxAiVision,
+  recordClawboxAiVision,
+} from "@/lib/clawbox-ai-vision";
 import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
@@ -270,9 +276,32 @@ export async function applyClawaiToHermes(
   // its two neighbours.
   const providersBefore = await readUsableProviderIds();
 
-  // Whether the picture slot is ours to (re)write — see `hermesVisionSlotIsOurs`.
-  const claimVision = await hermesVisionSlotIsOurs();
-  console.log(`[Hermes ClawAI] Vision ${claimVision ? `set to ${CLAWAI_DEFAULT_MODEL}` : "left untouched (the owner's own, or unreadable)"}`);
+  // What looks at a picture: decided only for a slot that is ours to write
+  // (`readHermesVisionSlot`), by the vision check (src/lib/clawbox-ai-vision.ts)
+  // — Flash while it sees, the fallback while it does not, and nothing at all
+  // when neither does, which the chat then says plainly instead of accepting a
+  // picture nobody can read.
+  const visionSlot = await readHermesVisionSlot();
+  let visionSteps: string[][] = [];
+  if (visionSlot.state === "empty" || visionSlot.state === "ours") {
+    const vision = await probeClawboxAiVision({ token: trimmed, baseUrl: CLAWBOX_AI_PROXY_URL });
+    const visionModel = clawboxAiVisionModelFor(vision, visionSlot.state === "ours" ? visionSlot.model : null);
+    await recordClawboxAiVision(vision, visionModel);
+    if (visionModel) {
+      visionSteps = [
+        ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
+        ["config", "set", "auxiliary.vision.model", visionModel],
+      ];
+    } else if (visionSlot.state === "ours") {
+      visionSteps = [
+        ["config", "unset", "auxiliary.vision.model"],
+        ["config", "unset", "auxiliary.vision.provider"],
+      ];
+    }
+    console.log(`[Hermes ClawAI] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"})`);
+  } else {
+    console.log(`[Hermes ClawAI] Vision left untouched (${visionSlot.state === "owner" ? "the owner's own model" : "the config could not be read"})`);
+  }
 
   const steps: string[][] = [
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
@@ -337,13 +366,11 @@ export async function applyClawaiToHermes(
     // the OpenClaw side — one capability, two harnesses, no second provider to
     // credential.
     //
-    // The one model, which looks at pictures itself (TASK-2261) — written
-    // when the slot is empty or names a model ClawBox put there, and not at
-    // all when the owner pointed it elsewhere or the config would not answer.
-    ...(claimVision ? [
-      ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
-      ["config", "set", "auxiliary.vision.model", CLAWAI_DEFAULT_MODEL],
-    ] : []),
+    // The model the vision check chose (TASK-2261) — written when the slot is
+    // empty or names a model ClawBox put there, cleared when it is ours and no
+    // model can see, and not touched at all when the owner pointed it
+    // elsewhere or the config would not answer.
+    ...visionSteps,
     // ── Naming the session titler, for the same reason ──────────────────────
     //
     // `auxiliary.title_generation` ships as `provider: auto`, and auto is not a
@@ -646,40 +673,83 @@ const REPAIR_RETRY_MS = 60_000;
 const REPAIR_MAX_UNVERIFIED_WRITES = 3;
 
 /**
- * Is Hermes' `auxiliary.vision` slot ClawBox AI's to write?
+ * Hermes' `auxiliary.vision` slot, as the link and the start-up check see it.
  *
- * Yes when it is empty (a fresh box: `provider: auto, model: ''`), or when it
- * names a model ClawBox put there under `provider: clawai` — the one model, or
- * a retired vision/chat id (TASK-2261). Any other value is the owner's own
- * choice for looking at pictures and stays. A config that cannot be READ (as
- * opposed to one where the key is not set) is not an empty one: nothing is
- * written, exactly as before.
+ *   empty       not set, or Hermes' shipped `provider: auto, model: ''`
+ *   ours        `provider: clawai` and a model ClawBox wrote there (Flash, the
+ *               vision fallback, or an id it used to write)
+ *   owner       anything else — the owner's own choice for looking at the
+ *               pictures they send, never touched
+ *   unreadable  the config could not be READ (as opposed to the key not being
+ *               set): not an empty one, so nothing is written
  *
  * One `--json` read of the block. Its stdout can carry an `api_key`, so nothing
  * from it is logged.
  */
-async function hermesVisionSlotIsOurs(): Promise<boolean> {
+async function readHermesVisionSlot(): Promise<
+  | { state: "empty" | "owner" | "unreadable" }
+  | { state: "ours"; model: string }
+> {
   let read: HermesCliResult;
   try {
     read = await runHermesCli(["config", "get", "auxiliary.vision", "--json"], { timeoutMs: 15_000 });
   } catch {
-    return false;
+    return { state: "unreadable" };
   }
-  if (read.code !== 0) return /config key not set/i.test(`${read.stdout ?? ""}\n${read.stderr ?? ""}`);
+  if (read.code !== 0) {
+    return /config key not set/i.test(`${read.stdout ?? ""}\n${read.stderr ?? ""}`)
+      ? { state: "empty" }
+      : { state: "unreadable" };
+  }
   const raw = (read.stdout ?? "").trim();
-  if (!raw) return true;
+  if (!raw) return { state: "empty" };
   let block: unknown;
   try {
     block = JSON.parse(raw);
   } catch {
-    return false;
+    return { state: "unreadable" };
   }
-  if (!block || typeof block !== "object" || Array.isArray(block)) return block === null;
+  if (block === null) return { state: "empty" };
+  if (typeof block !== "object" || Array.isArray(block)) return { state: "owner" };
   const { provider, model } = block as { provider?: unknown; model?: unknown };
   const modelId = typeof model === "string" ? model.trim() : "";
-  if (!modelId) return true;
-  if (typeof provider !== "string" || provider.trim().toLowerCase() !== CLAWAI_PROVIDER) return false;
-  return modelId === CLAWAI_DEFAULT_MODEL || isRetiredClawboxAiModel(modelId, { bare: true });
+  if (!modelId) return { state: "empty" };
+  if (typeof provider !== "string" || provider.trim().toLowerCase() !== CLAWAI_PROVIDER) return { state: "owner" };
+  return isClawboxAiVisionSlotOurs(modelId, { bare: true }) ? { state: "ours", model: modelId } : { state: "owner" };
+}
+
+/**
+ * The vision check at box start, for a Hermes box (TASK-2261): ask whether
+ * Flash can see, record the answer, and move `auxiliary.vision` onto the model
+ * that can — or clear it when none can — when that slot is ours. Upstream can
+ * take vision away from Flash between two links; this is what catches it at
+ * the next start. Never throws: a box that cannot be asked keeps its slot.
+ */
+export async function refreshClawaiVisionOnHermes(): Promise<void> {
+  try {
+    const token = await getStoredClawaiToken();
+    if (!token) return;
+    try {
+      await fs.stat(hermesConfigPath());
+    } catch {
+      return;
+    }
+    const slot = await readHermesVisionSlot();
+    if (slot.state !== "empty" && slot.state !== "ours") return;
+    const vision = await probeClawboxAiVision({ token, baseUrl: CLAWBOX_AI_PROXY_URL });
+    const current = slot.state === "ours" ? slot.model : null;
+    const model = clawboxAiVisionModelFor(vision, current);
+    await recordClawboxAiVision(vision, model);
+    if (model && current !== model) {
+      await patchHermesConfig({ set: { "auxiliary.vision.provider": CLAWAI_PROVIDER, "auxiliary.vision.model": model } });
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: pictures go to ${model}`);
+    } else if (!model && slot.state === "ours") {
+      await patchHermesConfig({ unset: ["auxiliary.vision.model", "auxiliary.vision.provider"] });
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: no ClawBox AI model can look at pictures right now`);
+    }
+  } catch (err) {
+    console.warn("[hermes/clawai] vision check failed:", err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -687,11 +757,13 @@ async function hermesVisionSlotIsOurs(): Promise<boolean> {
  * boot that carries it (src/lib/boot-migrations.ts) — a box that is never
  * re-linked still names the retired ids its last link wrote.
  *
- * Moves `model.default` and the `auxiliary.{vision,title_generation,compression}`
- * models that name a retired ClawBox AI id under `provider: clawai` to Flash
+ * Moves `model.default` and the `auxiliary.{title_generation,compression}`
+ * models that name the retired Max-plan id under `provider: clawai` to Flash
  * (one comment-preserving patch of config.yaml), and the `providers.clawai.models`
  * list through the same repair the picker route runs. Anything else in those
- * slots is the owner's and stays (src/lib/clawbox-ai-retired-models.ts).
+ * slots is the owner's and stays (src/lib/clawbox-ai-retired-models.ts). The
+ * picture slot, `auxiliary.vision`, is the vision check's: it runs at every
+ * start (src/lib/clawbox-ai-vision.ts).
  *
  * Answers whether it changed anything. THROWS when the config cannot be read
  * or written, so the boot register leaves the migration unmarked and the next
@@ -715,7 +787,7 @@ export async function migrateRetiredClawaiModelsInHermes(): Promise<boolean> {
       throw new Error(`Hermes config could not be read at ${modelKey}`);
     }
     if (provider.state !== "value" || model.state !== "value") continue;
-    const target = hermesSlotFlashTarget(modelKey, provider.value, model.value);
+    const target = hermesSlotFlashTarget(provider.value, model.value);
     if (target) set[modelKey] = target;
   }
   const moved = Object.keys(set);

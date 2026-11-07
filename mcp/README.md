@@ -686,7 +686,7 @@ coding-agent run — see below) · `describe_image` (both editions)
 
 `describe_image` is not a browser tool but lives in the same family so a
 coding-agent run gets it: a written description of a local image file
-(.png/.jpg/.jpeg/.webp), through ClawBox AI's model, `deepseek-v4-flash` — how an image-blind
+(.png/.jpg/.jpeg/.webp), through ClawBox AI's model that can see (`deepseek-v4-flash`, or its vision fallback) — how an image-blind
 run looks at a frame it saved without driving the browser at it. The fence is
 the ROUTE's (`/setup-api/vision/describe`), not this tool's: a credential
 store answers like a missing file for every caller, and the MCP bearer may
