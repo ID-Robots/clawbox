@@ -61,8 +61,13 @@ const SAW_RED = /\b(red|crimson|scarlet|maroon)\b/i;
  */
 const REFUSED_STATUSES = new Set([400, 404, 415, 422]);
 const PROBE_TIMEOUT_MS = 15_000;
-/** The completion budget: room for a short thought and one word. */
-const PROBE_MAX_TOKENS = 64;
+/**
+ * The completion budget. Flash REASONS before it answers even this — measured
+ * 2026-11-07, 25-64 reasoning tokens on the probe, and a 64-token budget came
+ * back empty one time in four — so the budget is room for the thought and the
+ * word, not for the word alone.
+ */
+const PROBE_MAX_TOKENS = 1024;
 
 /** Config-store key holding the last verdict, for the describe route and the logs. */
 export const CLAWBOX_AI_VISION_STORE_KEY = "clawai_vision";
@@ -131,8 +136,8 @@ async function looks(
 }
 
 /**
- * Show Flash the probe picture, and the fallback too when Flash does not see.
- * Never throws.
+ * Show Flash the probe picture, and the fallback too when Flash positively
+ * does not see. Never throws.
  */
 export async function probeClawboxAiVision(
   { token, baseUrl, fetchImpl = fetch }: { token: string; baseUrl?: string | null; fetchImpl?: typeof fetch },
@@ -140,11 +145,14 @@ export async function probeClawboxAiVision(
   const url = await clawboxAiVisionProbeUrl(baseUrl);
   const flash = await looks(CLAWBOX_AI_FLASH_MODEL_ID, { token, baseUrl: url, fetchImpl });
   if (flash === "sees") return { verdict: "flash", model: CLAWBOX_AI_FLASH_MODEL_ID, flash, fallback: null };
+  // A Flash that could not be ASKED is not a Flash that cannot see: only a
+  // definite "blind" moves pictures to the fallback.
+  if (flash === "unknown") return { verdict: "unknown", model: null, flash, fallback: null };
   const fallback = await looks(CLAWBOX_AI_VISION_FALLBACK_MODEL_ID, { token, baseUrl: url, fetchImpl });
   if (fallback === "sees") {
     return { verdict: "fallback", model: CLAWBOX_AI_VISION_FALLBACK_MODEL_ID, flash, fallback };
   }
-  if (flash === "blind" && fallback === "blind") return { verdict: "none", model: null, flash, fallback };
+  if (fallback === "blind") return { verdict: "none", model: null, flash, fallback };
   return { verdict: "unknown", model: null, flash, fallback };
 }
 

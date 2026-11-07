@@ -2907,7 +2907,9 @@ def _clawai_vision_look(model, token, base):
 
     payload = json.dumps({
         "model": model,
-        "max_tokens": 64,
+        # Room for the thought AND the word: Flash reasons before it answers
+        # (25-64 tokens measured), and a 64-token budget came back empty.
+        "max_tokens": 1024,
         "messages": [{
             "role": "user",
             "content": [
@@ -2997,11 +2999,14 @@ if _deepseek_is_clawai and _flash_row is not None and isinstance(_one_model_toke
         _flash_look = _clawai_vision_look(CLAWBOX_AI_FLASH_ID, _one_model_token, _probe_base)
         if _flash_look == "sees":
             _vision_verdict = "flash"
+        elif _flash_look == "unknown":
+            # Not asked is not blind: only a definite "blind" moves pictures.
+            _vision_verdict = "unknown"
         else:
             _fallback_look = _clawai_vision_look(CLAWBOX_AI_VISION_FALLBACK_ID, _one_model_token, _probe_base)
             if _fallback_look == "sees":
                 _vision_verdict = "fallback"
-            elif _flash_look == "blind" and _fallback_look == "blind":
+            elif _fallback_look == "blind":
                 _vision_verdict = "none"
             else:
                 _vision_verdict = "unknown"

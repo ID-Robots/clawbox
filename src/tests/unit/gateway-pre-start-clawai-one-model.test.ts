@@ -383,6 +383,16 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision probe", () 
     expect(defaults(cfg).imageModel).toBeUndefined();
   });
 
+  it("does not move pictures off a Flash it could not ask", async () => {
+    answers = { "deepseek-v4-flash": { status: 503, body: {} }, [FALLBACK]: said("red") };
+    const { cfg, out } = await probe();
+    expect(out).toContain("vision check: unknown");
+    expect(asked.map((a) => a.model)).toEqual(["deepseek-v4-flash"]);
+    // An old vision id with no answer goes to Flash, the model measured to see.
+    expect(dsModels(cfg)).toEqual([FLASH_ROW_SEES]);
+    expect(defaults(cfg).imageModel).toEqual({ primary: FLASH });
+  });
+
   it("keeps the box as it is when the question fails", async () => {
     answers = {};
     const { out } = await probe();

@@ -79,6 +79,12 @@ describe("probeClawboxAiVision", () => {
     expect(seen).toHaveLength(2);
   });
 
+  it("does not move pictures off a Flash it could not ask, even when the fallback answers", async () => {
+    const { fetchImpl, seen } = proxy({ [FLASH]: 503, [FALLBACK]: "red" });
+    expect((await probeClawboxAiVision({ token: "t", fetchImpl })).verdict).toBe("unknown");
+    expect(seen.map((s) => s.model)).toEqual([FLASH]);
+  });
+
   it("is unknown — never none — when the question itself fails", async () => {
     for (const failure of ["throw", 500, 429, 401] as const) {
       const { fetchImpl } = proxy({ [FLASH]: failure, [FALLBACK]: failure });
