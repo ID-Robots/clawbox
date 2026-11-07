@@ -12,6 +12,9 @@ import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The background answer is waited for (WAIT below), so the ceiling sits above it.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+
 const sendOwnerTelegramText = vi.fn(async (..._a: unknown[]) => true);
 const sendOwnerTelegramButtons = vi.fn(async (..._a: unknown[]) => true);
 vi.mock("@/lib/telegram-owner-send", async (importOriginal) => ({
@@ -59,6 +62,9 @@ const fromOpenclaw = (extra: Record<string, unknown>) => ({ channel: "telegram",
 async function settle(): Promise<void> {
   for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5));
 }
+
+/** A CI runner loads the translation chunks far slower than a laptop. */
+const WAIT = { timeout: 10_000, interval: 20 };
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-update-chat-"));
@@ -119,8 +125,8 @@ describe("what it claims", () => {
   it("claims a stranger's /update and refuses it: no check, no question", async () => {
     const res = await post(fromOpenclaw({ senderId: "999", chatId: "999", text: "/update" }));
     expect(await res.json()).toEqual({ handled: true });
-    await settle();
-    expect(sendOwnerTelegramText).toHaveBeenCalledWith("999", "Only this ClawBox's owner can do that.", { harness: "openclaw" });
+    await vi.waitFor(() =>
+      expect(sendOwnerTelegramText).toHaveBeenCalledWith("999", "Only this ClawBox's owner can do that.", { harness: "openclaw" }), WAIT);
     expect(sendOwnerTelegramButtons).not.toHaveBeenCalled();
     expect(power.pendingPowerApproval()).toBeNull();
   });
@@ -128,7 +134,9 @@ describe("what it claims", () => {
   it("claims a stranger's tap and asks the owner nothing", async () => {
     const res = await post(fromOpenclaw({ senderId: "999", text: "callback_data: clawbox-update" }));
     expect(await res.json()).toEqual({ handled: true });
-    await settle();
+    // The refusal is the last thing the background work does; once it is out,
+    // nothing else is coming.
+    await vi.waitFor(() => expect(sendOwnerTelegramText).toHaveBeenCalledTimes(1), WAIT);
     expect(power.pendingPowerApproval()).toBeNull();
     expect(startUpdate).not.toHaveBeenCalled();
   });
@@ -142,8 +150,8 @@ describe("what it claims", () => {
     expect(sendOwnerTelegramButtons).not.toHaveBeenCalled();
     expect(power.pendingPowerApproval()).toBeNull();
     await post({ senderId: "7001", chatId: "7001", text: "/update", channel: "telegram", harness: "hermes" });
-    await settle();
-    expect(sendOwnerTelegramButtons).toHaveBeenCalledWith("7001", expect.stringContaining("4.3.1"), expect.any(Array), { harness: "hermes" });
+    await vi.waitFor(() =>
+      expect(sendOwnerTelegramButtons).toHaveBeenCalledWith("7001", expect.stringContaining("4.3.1"), expect.any(Array), { harness: "hermes" }), WAIT);
   });
 });
 
@@ -151,7 +159,7 @@ describe("the owner", () => {
   it("/update gets the notice with its button", async () => {
     const res = await post(fromOpenclaw({ senderId: "6001", chatId: "6001", text: "/update" }));
     expect(await res.json()).toEqual({ handled: true });
-    await settle();
+    await vi.waitFor(() => expect(sendOwnerTelegramButtons).toHaveBeenCalledTimes(1), WAIT);
     expect(sendOwnerTelegramButtons).toHaveBeenCalledWith(
       "6001",
       expect.stringContaining("ClawBox 4.3.1 is available"),
@@ -163,7 +171,7 @@ describe("the owner", () => {
   it("the tap raises the existing owner question — desktop prompt — and nothing runs until Confirm", async () => {
     const res = await post(fromOpenclaw({ senderId: "6001", chatId: "6001", text: "callback_data: clawbox-update" }));
     expect(await res.json()).toEqual({ handled: true });
-    await settle();
+    await vi.waitFor(() => expect(sendOwnerTelegramText).toHaveBeenCalledTimes(1), WAIT);
     const pending = power.pendingPowerApproval();
     expect(pending).toMatchObject({ action: "update", reason: "Update button in Telegram" });
     expect(startUpdate).not.toHaveBeenCalled();
@@ -180,7 +188,7 @@ describe("the owner", () => {
   it("an owner's /update in a group is claimed and redirected to the private chat", async () => {
     const res = await post(fromOpenclaw({ senderId: "6001", chatId: "-1001", isGroup: true, text: "/update@ClawBoxBot" }));
     expect(await res.json()).toEqual({ handled: true });
-    await settle();
+    await vi.waitFor(() => expect(sendOwnerTelegramText).toHaveBeenCalledTimes(1), WAIT);
     expect(sendOwnerTelegramButtons).not.toHaveBeenCalled();
     expect(sendOwnerTelegramText.mock.calls[0][1]).toContain("private chat");
   });
