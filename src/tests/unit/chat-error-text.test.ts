@@ -668,6 +668,12 @@ describe("a turn refused because of the picture on it (TASK-2261)", () => {
     expect(text).not.toContain("image_url");
   });
 
+  it("reads OpenClaw's markdown-escaped rendering of the same error", () => {
+    const stored = "LLM request rejected: Failed to deserialize the JSON body into the target type\\: messages\\[0\\]\\: unknown variant \\`image\\_url\\`, expected \\`text\\`";
+    expect(isPictureRefused(stored)).toBe(true);
+    expect(describeChatFailure(stored)).toMatch(/cannot look at pictures right now/);
+  });
+
   it("reads the provider's detail line too", () => {
     expect(describeChatFailure("LLM request failed", { detail: "unknown variant `image_url`" } as never))
       .toMatch(/cannot look at pictures right now/);

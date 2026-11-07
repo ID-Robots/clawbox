@@ -212,4 +212,16 @@ describe("a provider's refusal stored as the assistant's row (TASK-2261)", () =>
     expect(failure?.text).toMatch(/cannot look at pictures right now/);
     expect(JSON.stringify(page.messages)).not.toContain("image_url");
   });
+
+  it("reads the gateway's escaped copy the same way when the row carries no errorMessage", async () => {
+    const { projectGatewayHistory: project } = await import("@/lib/harness/openclaw-gateway-adapter");
+    const page = project([{
+      role: "assistant",
+      content: [{ type: "text", text: "LLM request rejected: messages\\[0\\]\\: unknown variant \\`image\\_url\\`, expected \\`text\\`" }],
+      stopReason: "error",
+      timestamp: 3,
+    }], null);
+    expect(page.messages).toEqual([expect.objectContaining({ role: "system" })]);
+    expect(page.messages[0].text).toMatch(/cannot look at pictures right now/);
+  });
 });

@@ -434,7 +434,11 @@ const CREDENTIAL_REJECTED = "That message did not go through — the AI provider
 const PICTURE_REFUSED = "That message did not go through — the model this chat runs on cannot look at pictures right now. Send it again without the picture, or try again later.";
 
 /** The provider or the gateway refused the turn because of the picture on it. */
-export function isPictureRefused(evidence: string): boolean {
+export function isPictureRefused(raw: string): boolean {
+  // OpenClaw's history renders the provider's words markdown-escaped (a
+  // backslash before every backtick, underscore and bracket); read them as
+  // the provider wrote them.
+  const evidence = raw.replace(/\\(.)/g, "$1");
   return /unknown variant [`'"]?image_url/i.test(evidence)
     || /model does not support images?/i.test(evidence)
     || /no image model configured/i.test(evidence)
