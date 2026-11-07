@@ -165,10 +165,12 @@ for i in $(seq 1 "$NOISE"); do echo "gyp info attempt $attempt line $i"; done
 if [ -n "\${npm_config_nodedir:-}" ]; then
   hdr="$npm_config_nodedir/include/node"
 else
-  devdir="\${npm_package_config_node_gyp_devdir:-$(npm_devdir_config)}"
+  # Set but empty still wins; relative is node-pty's directory's, where npm runs it.
+  devdir="\${npm_package_config_node_gyp_devdir-$(npm_devdir_config)}"
   [ "$devdir" != undefined ] || devdir=""
   case "$devdir" in "~"*) devdir="$HOME\${devdir#"~"}" ;; esac
   devdir="\${devdir:-\${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"
+  case "$devdir" in /*) ;; *) devdir="$PWD/node_modules/node-pty/$devdir" ;; esac
   hdr="$devdir/$FAKE_NODE_VERSION/include/node"
   if [ ! -f "$hdr/node_version.h" ]; then
     echo "gyp http GET https://nodejs.org/download/release/v$FAKE_NODE_VERSION/node-v$FAKE_NODE_VERSION-headers.tar.gz" >&2
@@ -232,7 +234,10 @@ function run(scenario: Scenario = {}): Run {
   const include = path.join(sys, "usr", "include");
   const ptyBuild = path.join(project, "node_modules", "node-pty", "build");
   const npmCalls = path.join(sandbox, "npm-calls.txt");
-  const devdirs = [path.join(home, ".cache"), path.join(sandbox, "devdirs"), path.join(home, "gyp-dev")];
+  const devdirs = [
+    path.join(home, ".cache"), path.join(sandbox, "devdirs"), path.join(home, "gyp-dev"),
+    path.join(project, "node_modules", "node-pty", "gyp-rel"),
+  ];
   const projectNpmrc = path.join(project, ".npmrc");
   for (const p of [include, ptyBuild, npmCalls, path.join(sandbox, "npm-attempts.txt"), projectNpmrc, ...devdirs]) {
     rmSync(p, { recursive: true, force: true });
@@ -438,10 +443,23 @@ describe("the headers node-gyp fetched are looked for where node-gyp keeps them"
       () => ({ loginEnv: { npm_config_devdir: dev("gyp"), npm_package_config_node_gyp_devdir: dev("pkg") } }),
       () => dev("pkg"),
     ],
+    [
+      "an empty npm_package_config_node_gyp_devdir, which clears npm_config_devdir",
+      () => ({ loginEnv: { npm_config_devdir: dev("gyp"), npm_package_config_node_gyp_devdir: "" } }),
+      () => path.join(home, ".cache", "node-gyp"),
+    ],
+    [
+      "a relative npm_config_devdir, node-pty's directory's",
+      () => ({ loginEnv: { npm_config_devdir: "gyp-rel" } }),
+      () => path.join(project, "node_modules", "node-pty", "gyp-rel"),
+    ],
   ])("a build that failed after the fetch worked (%s) retries, without the mismatched system headers", (_label, scenario, devdir) => {
     const r = run({ systemHeaders: "22.21.0", compiler: "broken", ...scenario() });
+    // Only where the headers went: one devdir, never npm_config_devdir's when overridden.
+    for (const other of [path.join(home, ".cache", "node-gyp"), dev("gyp")]) {
+      if (other !== devdir()) expect(fetched(other)).toBe(false);
+    }
     expect(fetched(devdir())).toBe(true);
-    expect(fetched(path.join(home, ".cache", "node-gyp"))).toBe(false);
     expect(r.nodedirs).toEqual(["<unset>", "<unset>"]);
     expect(r.stdout).not.toContain("could not fetch");
     expect(r.stdout).toContain("Initial node-pty rebuild failed (../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 1)); clearing stale build output and retrying once...");
