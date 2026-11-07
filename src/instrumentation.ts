@@ -839,7 +839,7 @@ export async function register() {
     // The codex app-servers the gateway keeps after an agent's turn, one per
     // agent and 130-260 MB each, are never closed by the pinned Codex plugin
     // (src/lib/codex-app-server-reaper.ts). Every CODEX_REAP_SWEEP_MS, one that
-    // has used no CPU for 30 min is stopped while the gateway reports no agent
+    // has been quiet for 30 min is stopped while the gateway reports no agent
     // work; the agent's next turn starts a fresh one. CLAWBOX_CODEX_REAP=0
     // turns it off. Starts nothing on a box with no gateway running.
     // eslint-disable-next-line @typescript-eslint/no-require-imports

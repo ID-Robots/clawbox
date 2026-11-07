@@ -25,7 +25,8 @@
  *    comes first);
  *  - nothing runs under it except its own native binary, so a command it is
  *    running, a background terminal or an MCP server keeps it alive;
- *  - the CPU time of the wrapper and binary together has not moved for
+ *  - the wrapper and binary together have stayed under
+ *    {@link QUIET_CPU_SHARE} of a core at every look for
  *    {@link CODEX_APP_SERVER_IDLE_MS}, the plugin's own idle window for a
  *    retained thread. The clock starts when this process first sees the
  *    app-server, so a web-server restart starts it over;
@@ -56,8 +57,20 @@ import { logSafe } from "@/lib/log-safe";
 /** How often the web server looks. */
 export const CODEX_REAP_SWEEP_MS = 5 * 60_000;
 
-/** How long an app-server's CPU time must stand still before it is stopped. */
+/** How long an app-server must stay quiet before it is stopped. */
 export const CODEX_APP_SERVER_IDLE_MS = 30 * 60_000;
+
+/**
+ * Quiet, as a share of one core: what an app-server tree may use between two
+ * looks and still count as idle. Not zero, because an idle one is not still:
+ * on a Jetson Orin Nano with @openai/codex 0.160.0, four app-servers nobody
+ * had used for half an hour each gained ~10 clock ticks (0.1 s) every five to
+ * six minutes, about 0.03 % of a core. A turn costs far more than this.
+ */
+export const QUIET_CPU_SHARE = 0.002;
+
+/** Linux's USER_HZ, the unit of utime/stime in /proc/<pid>/stat. */
+const USER_HZ = 100;
 
 /** How long a SIGTERM gets before SIGKILL. */
 export const STOP_GRACE_MS = 10_000;
@@ -173,7 +186,7 @@ export function gatewayAppServers(processes: readonly UnitProcess[]): AppServerT
 
 const identity = (p: UnitProcess) => `${p.pid}:${p.startTicks}`;
 
-/** What must stay the same for the tree to count as idle: who is in it and the CPU it has used. */
+/** Who is in the tree, the CPU it has used, and whether anything under it is work. */
 function treeState(tree: AppServerTree): { members: string; cpuTicks: number; busy: boolean } {
   return {
     members: [tree.root, ...tree.descendants].map(identity).join(","),
@@ -239,14 +252,34 @@ const realDeps: ReaperDeps = {
   log: (line) => console.log(line),
 };
 
+/** The ticks a quiet tree may gain in `elapsedMs`. Never under two, so a short re-look is not judged on one tick. */
+function quietBudget(elapsedMs: number): number {
+  return Math.max(2, (elapsedMs / 1000) * USER_HZ * QUIET_CPU_SHARE);
+}
+
+/** One app-server as last seen: who was in its tree, its CPU then, and since when it has been quiet. */
+interface Watched {
+  members: string;
+  cpuTicks: number;
+  lookedAt: number;
+  quietSince: number;
+}
+
+/** Still quiet since `before`: same members, no work under it, CPU within the budget for the time that passed. */
+function stayedQuiet(before: Watched, state: ReturnType<typeof treeState>, now: number): boolean {
+  if (state.busy || state.members !== before.members) return false;
+  const gained = state.cpuTicks - before.cpuTicks;
+  return gained >= 0 && gained <= quietBudget(now - before.lookedAt);
+}
+
 /**
- * A reaper with its own memory of what each app-server's CPU time was and
- * since when. `sweep` is one look; the web server calls it every
+ * A reaper with its own memory of each app-server's CPU time and since when
+ * it has been quiet. `sweep` is one look; the web server calls it every
  * {@link CODEX_REAP_SWEEP_MS}.
  */
 export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, idleMs = CODEX_APP_SERVER_IDLE_MS) {
   const deps: ReaperDeps = { ...realDeps, ...overrides };
-  const quiet = new Map<string, { members: string; cpuTicks: number; since: number }>();
+  const watched = new Map<string, Watched>();
   let sweeping = false;
   let lastRefusal = "";
 
@@ -290,14 +323,12 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
         const key = identity(tree.root);
         seen.add(key);
         const state = treeState(tree);
-        const before = quiet.get(key);
-        if (state.busy || !before || before.members !== state.members || before.cpuTicks !== state.cpuTicks) {
-          quiet.set(key, { members: state.members, cpuTicks: state.cpuTicks, since: now });
-          continue;
-        }
-        if (now - before.since >= idleMs) idle.push({ tree, idleFor: now - before.since });
+        const before = watched.get(key);
+        const quietSince = before && stayedQuiet(before, state, now) ? before.quietSince : now;
+        watched.set(key, { members: state.members, cpuTicks: state.cpuTicks, lookedAt: now, quietSince });
+        if (now - quietSince >= idleMs) idle.push({ tree, idleFor: now - quietSince });
       }
-      for (const key of [...quiet.keys()]) if (!seen.has(key)) quiet.delete(key);
+      for (const key of [...watched.keys()]) if (!seen.has(key)) watched.delete(key);
       if (!idle.length) return [];
 
       let active: number;
@@ -313,17 +344,16 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
       if (active > 0) return [];
 
       // Looked at again after the gateway answered: only a tree that is still
-      // exactly what was judged idle is stopped.
+      // what was judged idle, and has stayed quiet meanwhile, is stopped.
       const current = new Map(gatewayAppServers(await deps.listUnitProcesses()).map((tree) => [identity(tree.root), tree]));
+      const recheckedAt = deps.now();
       const stopped: StoppedAppServer[] = [];
       for (const { tree, idleFor } of idle) {
         const key = identity(tree.root);
         const latest = current.get(key);
-        const before = quiet.get(key);
-        if (!latest || !before) continue;
-        const state = treeState(latest);
-        if (state.busy || state.members !== before.members || state.cpuTicks !== before.cpuTicks) continue;
-        quiet.delete(key);
+        const before = watched.get(key);
+        if (!latest || !before || !stayedQuiet(before, treeState(latest), recheckedAt)) continue;
+        watched.delete(key);
         const result = await stop(latest, idleFor);
         if (result) stopped.push(result);
       }

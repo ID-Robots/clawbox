@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CODEX_APP_SERVER_IDLE_MS,
+  QUIET_CPU_SHARE,
   STOP_GRACE_MS,
   createCodexAppServerReaper,
   gatewayAppServers,
@@ -134,16 +135,43 @@ describe("createCodexAppServerReaper", () => {
     expect(box.logs[0]).toMatch(/stopped the idle codex app-server of agent agent-2000 \(pid 2000, idle 30 min, 166 MB\)/);
   });
 
+  it("counts the little CPU an idle app-server still uses as quiet", async () => {
+    // Measured on a Jetson: ~10 ticks per idle app-server every five to six minutes.
+    const box = fakeBox([gateway(), ...appServer(2000)]);
+    for (let look = 0; look <= 6; look += 1) {
+      box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 5 + 5 * look })]);
+      const stopped = await box.reaper.sweep();
+      if (look < 6) expect(stopped).toEqual([]);
+      else expect(stopped.map((s) => s.pid)).toEqual([2000]);
+      box.advance(5 * MIN);
+    }
+  });
+
   it("keeps an app-server that used CPU, and restarts its clock", async () => {
     const box = fakeBox([gateway(), ...appServer(2000)]);
     await box.reaper.sweep();
     box.advance(CODEX_APP_SERVER_IDLE_MS - MIN);
-    box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 9 })]);
+    box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 500 })]); // a turn
     await box.reaper.sweep();
     box.advance(2 * MIN);
     expect(await box.reaper.sweep()).toEqual([]);
     box.advance(CODEX_APP_SERVER_IDLE_MS);
     expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+  });
+
+  it("allows a quiet tree QUIET_CPU_SHARE of a core between looks, and not a tick more", async () => {
+    const budget = 5 * 60 * 100 * QUIET_CPU_SHARE; // ticks in five minutes
+    for (const [gained, quiet] of [[budget, true], [budget + 1, false]] as const) {
+      const box = fakeBox([gateway(), ...appServer(2000)]);
+      let cpu = 5;
+      for (let look = 0; look <= 6; look += 1) {
+        box.setProcs([gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS]), proc(2001, 2000, [NATIVE, ...APP_SERVER_ARGS], { cpuTicks: cpu })]);
+        const stopped = await box.reaper.sweep();
+        if (look === 6) expect(stopped.length).toBe(quiet ? 1 : 0);
+        cpu += gained;
+        box.advance(5 * MIN);
+      }
+    }
   });
 
   it("keeps an app-server with work under it: a command, a background terminal or an MCP server", async () => {
