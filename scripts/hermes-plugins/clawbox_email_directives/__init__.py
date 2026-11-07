@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import logging
 
-from .approvals import pre_gateway_dispatch
+from .approvals import pre_gateway_dispatch as approvals_pre_gateway_dispatch
 from .email_directives import strip_email_directives
+from .update_commands import pre_gateway_dispatch as update_pre_gateway_dispatch
+from .update_commands import register_telegram_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +115,30 @@ def transform_llm_output(response_text=None, platform=None, **kwargs):
         return None
 
 
+def pre_gateway_dispatch(event=None, **kwargs):
+    """The one inbound hook, two disjoint shapes.
+
+    /update (``update_commands.py``) first, then the owner's emailed-draft reply
+    (``approvals.py``). Neither shape can match what the other claims, so the
+    order only decides which regex runs first; ``None`` from both is ordinary
+    conversation, left to the agent.
+    """
+    claimed = update_pre_gateway_dispatch(event=event, **kwargs)
+    if claimed is not None:
+        return claimed
+    return approvals_pre_gateway_dispatch(event=event, **kwargs)
+
+
 def register(ctx) -> None:
     ctx.register_hook("transform_llm_output", transform_llm_output)
-    # The inbound half. See approvals.py: it claims ONLY a message that is
-    # exactly a verb and a code, so every other message reaches the agent
-    # untouched, and it fails open on anything unexpected.
+    # The inbound half. See approvals.py and update_commands.py: it claims ONLY
+    # a message that is exactly a verb and a code, or /update, so every other
+    # message reaches the agent untouched.
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
+    # The weekly update notice's button. Hermes drops callback data it has no
+    # handler for, so the tap needs a scoped handler of its own; a Hermes that
+    # cannot take one still answers /update.
+    register_telegram_handlers(ctx)
 
 
 __all__ = ["pre_gateway_dispatch", "register", "transform_llm_output"]

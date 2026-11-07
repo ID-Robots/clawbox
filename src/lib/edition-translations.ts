@@ -15,6 +15,7 @@ import { usersEn } from "./edition-translations/en-users";
 import { dbMaintenanceEn } from "./edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "./edition-translations/en-model-availability";
 import { jobAlertsEn } from "./edition-translations/en-job-alerts";
+import { updateNoticeEn } from "./edition-translations/en-update-notice";
 import { bg } from "./edition-translations/bg";
 import { de } from "./edition-translations/de";
 import { es } from "./edition-translations/es";
@@ -73,6 +74,7 @@ export const editionEn: Record<string, string> = {
   ...dbMaintenanceEn,
   ...modelAvailabilityEn,
   ...jobAlertsEn,
+  ...updateNoticeEn,
 };
 
 const overrides: Record<Exclude<Locale, "en">, Record<string, string>> = {

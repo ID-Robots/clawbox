@@ -787,6 +787,20 @@ export async function register() {
     console.error('[instrumentation] Could not arm the scheduled-job alerts:', err instanceof Error ? err.message : err)
   }
   try {
+    // The weekly update check (src/lib/update-notice.ts): Monday ~10:00 on the
+    // box's clock, the updater's own check, and ONE notice per new version —
+    // Telegram with an Update button, or the desktop when no bot is connected.
+    // A box that was off on Monday checks once at this start, a few minutes in.
+    // The owner's switch is in Settings → Update and is read when the slot fires.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const updateNoticeScheduler = require('./lib/update-notice-scheduler')
+    void updateNoticeScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Weekly update check scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the weekly update check scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
     // The app servers that were on the desktop before the reboot (see
     // restartServerAppsAtBoot). They used to be restarted by a
     // `clawbox-app-<id>.service` the OWNER hand-wrote, uncapped and outside
