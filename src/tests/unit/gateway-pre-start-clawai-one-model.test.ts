@@ -390,11 +390,14 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision probe", () 
     expect((await probe()).out).toContain("vision check: fallback");
   });
 
-  it("needs two blinds: a blind and an empty answer are no answer", async () => {
-    answers = { "deepseek-v4-flash": [refusesPictures, said("")], [FALLBACK]: said("Red") };
-    const { out } = await probe();
-    expect(out).toContain("vision check: unknown");
-    expect(asked.map((a) => a.model)).toEqual(["deepseek-v4-flash", "deepseek-v4-flash"]);
+  it("needs two blinds: a blind and an empty answer are no answer, in either order", async () => {
+    for (const turns of [[refusesPictures, said("")], [said(""), refusesPictures]]) {
+      asked = [];
+      answers = { "deepseek-v4-flash": turns, [FALLBACK]: said("Red") };
+      const { out } = await probe();
+      expect(out).toContain("vision check: unknown");
+      expect(asked.map((a) => a.model)).toEqual(["deepseek-v4-flash", "deepseek-v4-flash"]);
+    }
   });
 
   it("arms nothing when neither model can see", async () => {
