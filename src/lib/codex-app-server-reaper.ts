@@ -49,7 +49,7 @@
  */
 
 import fs from "fs/promises";
-import path from "./runtime-path";
+import path, { untraced } from "./runtime-path";
 import { gatewayCgroupDirs, isGatewayServerProcess } from "@/lib/gateway-start-guard";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { parseProcCmdline } from "@/lib/process-match";
@@ -224,12 +224,20 @@ export function parseProcStat(stat: string): { state: string; ppid: number; cpuT
   return { state: fields[0], ppid, cpuTicks, startTicks };
 }
 
+/**
+ * `/proc/<pid>/<name>`, built so `next build` does not read the template as a
+ * glob and trace whatever matches it (see runtime-path.ts).
+ */
+function procFile(pid: number, name: string): string {
+  return untraced(`/proc/${pid}/${name}`);
+}
+
 async function readUnitProcess(pid: number): Promise<UnitProcess | null> {
   try {
-    const stat = parseProcStat(await fs.readFile(`/proc/${pid}/stat`, "utf8"));
+    const stat = parseProcStat(await fs.readFile(procFile(pid, "stat"), "utf8"));
     if (!stat) return null;
-    const argv = parseProcCmdline(await fs.readFile(`/proc/${pid}/cmdline`, "utf8"));
-    const parentComm = await fs.readFile(`/proc/${stat.ppid}/comm`, "utf8").then((s) => s.trim(), () => null);
+    const argv = parseProcCmdline(await fs.readFile(procFile(pid, "cmdline"), "utf8"));
+    const parentComm = await fs.readFile(procFile(stat.ppid, "comm"), "utf8").then((s) => s.trim(), () => null);
     return { pid, ppid: stat.ppid, startTicks: stat.startTicks, cpuTicks: stat.cpuTicks, argv, parentComm };
   } catch {
     return null; // gone between the reads
@@ -252,7 +260,9 @@ const realDeps: ReaperDeps = {
   async listUnitProcesses() {
     const pids = new Set<number>();
     for (const dir of gatewayCgroupDirs()) {
-      const raw = await fs.readFile(`${dir}/cgroup.procs`, "utf8").catch(() => "");
+      // Untraced: to the build, `${dir}/cgroup.procs` is every cgroup.procs in
+      // the project, data/ included.
+      const raw = await fs.readFile(untraced(`${dir}/cgroup.procs`), "utf8").catch(() => "");
       for (const pid of raw.split(/\s+/)) if (/^\d+$/.test(pid)) pids.add(Number(pid));
     }
     const found = await Promise.all([...pids].map(readUnitProcess));
@@ -260,18 +270,18 @@ const realDeps: ReaperDeps = {
   },
   activeSessionCount: countActiveSessions,
   async isAlive(pid, startTicks) {
-    const stat = parseProcStat(await fs.readFile(`/proc/${pid}/stat`, "utf8").catch(() => ""));
+    const stat = parseProcStat(await fs.readFile(procFile(pid, "stat"), "utf8").catch(() => ""));
     return stat !== null && stat.state !== "Z" && stat.startTicks === startTicks;
   },
   signal(pid, signal) {
     process.kill(pid, signal);
   },
   async rssKb(pid) {
-    const status = await fs.readFile(`/proc/${pid}/status`, "utf8").catch(() => "");
+    const status = await fs.readFile(procFile(pid, "status"), "utf8").catch(() => "");
     return Number.parseInt(/^VmRSS:\s+(\d+)/m.exec(status)?.[1] ?? "0", 10);
   },
   async agentOf(pid) {
-    const environ = await fs.readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
+    const environ = await fs.readFile(procFile(pid, "environ"), "utf8").catch(() => "");
     const home = environ.split("\0").find((entry) => entry.startsWith("CODEX_HOME="));
     return /\/agents\/([^/]+)\/agent\/codex-home\/?$/.exec(home ?? "")?.[1] ?? null;
   },
