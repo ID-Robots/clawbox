@@ -164,6 +164,33 @@ function storedRunFailure(m: Record<string, unknown>, words: ChatFailureWords | 
 }
 
 /**
+ * An assistant row that is a provider's refusal rather than a reply
+ * (`stopReason: "error"`), as the chat's own failure note — tagged with its
+ * run, so the line the live error frame painted and this one are never shown
+ * side by side. Never the row's own text: that is the gateway's rendering of
+ * the provider's error, written for an operator.
+ */
+function recordedAssistantFailure(
+  m: Record<string, unknown>,
+  role: string,
+  words: ChatFailureWords | undefined,
+): HistoryMessage | null {
+  if (role !== "assistant" || m.stopReason !== "error") return null;
+  const raw = typeof m.errorMessage === "string" && m.errorMessage.trim() ? m.errorMessage : extractText(m);
+  const note = chatFailureNote(raw, undefined, words);
+  const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+  const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+  return {
+    role: "system",
+    text: note.text,
+    timestamp: (m.timestamp as number) || 0,
+    ...(runId ? { failedRun: runId } : {}),
+    ...(note.variant ? { variant: note.variant } : {}),
+    ...(note.actions ? { actions: note.actions } : {}),
+  };
+}
+
+/**
  * Turn a raw `chat.history` page into the transcript the chat renders.
  *
  * THE SHARPEST EDGE IN THIS PROGRAM. What looks like one function is about six
@@ -220,6 +247,16 @@ export function projectGatewayHistory(
       continue;
     }
     if (role !== "user" && role !== "assistant") continue;
+    // A reply that never came: the provider refused the turn. OpenClaw's
+    // history renders that row as its own copy of the provider's error
+    // ("LLM request rejected: … unknown variant `image_url` …", measured on a
+    // lab box, TASK-2261), which painted the raw error beside the chat's own
+    // failure line. It is the same failure, so it is the same line.
+    const recordedFailure = recordedAssistantFailure(m, role, options?.failureWords);
+    if (recordedFailure) {
+      chatMsgs.push(recordedFailure);
+      continue;
+    }
     const raw = extractText(m);
     if (isSentinel(raw)) continue;
     // OpenClaw routes background-job results back into the conversation as
