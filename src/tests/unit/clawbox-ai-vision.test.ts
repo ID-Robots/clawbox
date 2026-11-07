@@ -15,6 +15,7 @@ import {
   CLAWBOX_AI_VISION_PROBE_URL_KEY,
   CLAWBOX_AI_VISION_STORE_KEY,
   clawboxAiVisionModelFor,
+  clawboxAiVisionWasNone,
   isClawboxAiVisionSlotOurs,
   probeClawboxAiVision,
   readClawboxAiVision,
@@ -83,6 +84,23 @@ describe("probeClawboxAiVision", () => {
     expect((await probeClawboxAiVision({ token: "t", fetchImpl: once.fetchImpl })).verdict).toBe("flash");
   });
 
+  it("does not take a colour named in a refusal as a sighting", async () => {
+    for (const said of ["Not red — I cannot see images.", "I can't see the picture, but red is a guess.", "No image attached; red?"]) {
+      const { fetchImpl } = proxy({ [FLASH]: said, [FALLBACK]: "Red" });
+      expect((await probeClawboxAiVision({ token: "t", fetchImpl })).verdict, said).toBe("fallback");
+    }
+  });
+
+  it("needs two blinds: a blind and an empty answer are no answer", async () => {
+    for (const answers of [[400, ""], ["", 400]] as Reply[][]) {
+      const { fetchImpl, seen } = proxy({ [FLASH]: answers, [FALLBACK]: "red" });
+      const probe = await probeClawboxAiVision({ token: "t", fetchImpl });
+      expect(probe.verdict, JSON.stringify(answers)).toBe("unknown");
+      expect(probe.flash).toBe("unknown");
+      expect(seen.map((s) => s.model)).toEqual([FLASH, FLASH]);
+    }
+  });
+
   it("asks once more past an EMPTY answer, which is a spent budget, not blindness", async () => {
     const { fetchImpl, seen } = proxy({ [FLASH]: ["", "Red"] });
     expect((await probeClawboxAiVision({ token: "t", fetchImpl })).verdict).toBe("flash");
@@ -132,6 +150,13 @@ describe("clawboxAiVisionModelFor", () => {
     expect(clawboxAiVisionModelFor(probe("unknown"), `deepseek/${RETIRED_CLAWBOX_AI_VISION_MODEL_IDS[0]}`)).toBe(FLASH);
   });
 
+  it("keeps a box an earlier check left with no picture model without one", () => {
+    expect(clawboxAiVisionModelFor(probe("unknown"), null, { keptNone: true })).toBeNull();
+    // ...but a slot of ours, or a definite answer, still decides.
+    expect(clawboxAiVisionModelFor(probe("unknown"), `deepseek/${FALLBACK}`, { keptNone: true })).toBe(FALLBACK);
+    expect(clawboxAiVisionModelFor(probe("flash", "sees"), null, { keptNone: true })).toBe(FLASH);
+  });
+
   it("prefers the fallback when Flash itself refused the picture", () => {
     expect(clawboxAiVisionModelFor(probe("unknown", "blind"), `deepseek/${FLASH}`)).toBe(FALLBACK);
   });
@@ -162,5 +187,16 @@ describe("the recorded verdict", () => {
     expect(await readClawboxAiVision()).toMatchObject({ verdict: "fallback", model: FALLBACK });
     store.values[CLAWBOX_AI_VISION_STORE_KEY] = { verdict: "maybe" };
     expect(await readClawboxAiVision()).toBeNull();
+  });
+
+  it("says the box was left with no picture model only when the record names none", async () => {
+    expect(await clawboxAiVisionWasNone()).toBe(false);
+    await recordClawboxAiVision({ verdict: "none", model: null, flash: "blind", fallback: "blind" }, null);
+    expect(await clawboxAiVisionWasNone()).toBe(true);
+    // An unknown check that kept it so is recorded the same way.
+    await recordClawboxAiVision({ verdict: "unknown", model: null, flash: "unknown", fallback: null }, null);
+    expect(await clawboxAiVisionWasNone()).toBe(true);
+    await recordClawboxAiVision({ verdict: "flash", model: FLASH, flash: "sees", fallback: null }, FLASH);
+    expect(await clawboxAiVisionWasNone()).toBe(false);
   });
 });

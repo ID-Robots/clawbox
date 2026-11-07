@@ -683,5 +683,7 @@ describe("a turn refused because of the picture on it (TASK-2261)", () => {
     expect(isPictureRefused("Request exceeds the size limit")).toBe(false);
     expect(isPictureRefused("image generation is not available on this plan")).toBe(false);
     expect(isPictureRefused("image generation is not supported by this provider")).toBe(false);
+    expect(isPictureRefused("This model does not support image generation")).toBe(false);
+    expect(isPictureRefused("Provider does not support image generation.")).toBe(false);
   });
 });

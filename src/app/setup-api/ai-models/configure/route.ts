@@ -1258,6 +1258,9 @@ function clawboxProxyHosts(deepseekProvider: OpenAiProviderConfig | undefined): 
  * box about to be linked: the refs it holds can only be ours.
  */
 function deepseekProviderIsClawboxAi(deepseekProvider: OpenAiProviderConfig | undefined): boolean {
+  // No provider yet: the link this runs in writes it as the proxy, so a
+  // `deepseek/…` ref is ClawBox AI's from here on. (The boot script, which
+  // writes no provider, reads an absent one as not ours.)
   if (!deepseekProvider) return true;
   const apiKey = deepseekProvider.apiKey;
   if (typeof apiKey === "string" && apiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)) return true;
@@ -1859,9 +1862,19 @@ async function configureClawboxAi(
 
   // CAN FLASH SEE? Asked, not assumed (src/lib/clawbox-ai-vision.ts): Flash,
   // else the vision fallback, else no picture slot at all. A question that
-  // could not be answered keeps what the box has.
+  // could not be answered keeps what the box has — no picture model included,
+  // which ClawBox AI's rows say the way scripts/gateway-pre-start.sh reads
+  // them: Flash declared text-only, no fallback row, and no slot of ours.
   const vision = await probeClawboxAiVision({ token: clawboxAiToken, baseUrl: CLAWBOX_AI_PROXY_URL });
-  const visionModel = clawboxAiVisionModelFor(vision, imageSlotIsOurs ? currentImagePrimary : null);
+  const clawaiRows = deepseekIsClawboxAi ? snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]?.models : undefined;
+  const flashRowInput = Array.isArray(clawaiRows)
+    ? clawaiRows.find((row) => row?.id === CLAWBOX_AI_FLASH_MODEL_ID)?.input
+    : undefined;
+  const keptNone = !imageSlotIsOurs
+    && Array.isArray(flashRowInput)
+    && !flashRowInput.includes("image")
+    && !(clawaiRows ?? []).some((row) => row?.id === CLAWBOX_AI_VISION_FALLBACK_MODEL_ID);
+  const visionModel = clawboxAiVisionModelFor(vision, imageSlotIsOurs ? currentImagePrimary : null, { keptNone });
   await recordClawboxAiVision(vision, visionModel);
   console.log(`[AI Config] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"}; ${(vision.why ?? []).join("; ")})`);
   const visionRef = visionModel ? `${CLAWBOX_AI_PROVIDER}/${visionModel}` : null;
@@ -1976,9 +1989,10 @@ async function configureClawboxAi(
   }
 
   await applyConfigSetGroups([
-    // FIRST, so every write after it wins: a primary or fallbacks this same
-    // call is about to set (the caller's own ops, `setFallback`) must not be
-    // put back by a move computed from the config as it was before the call.
+    // FIRST among this call's writes, so every one after it wins: the move is
+    // computed from the config read above (writes the caller already staged
+    // included), and a primary or fallbacks this call's own ops set
+    // (`extra.requiredOps`, `setFallback`) must not be put back by it.
     {
       ops: retiredOps,
       onError: (err) =>

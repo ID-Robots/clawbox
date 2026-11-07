@@ -80,8 +80,12 @@ export const NO_VISION_MODEL_ERROR = "ClawBox AI cannot look at pictures right n
 async function visionModelId(token: string): Promise<string | null> {
   if (cachedModel && Date.now() - cachedModel.at < RESOLVE_TTL_MS) return cachedModel.id;
   const probe = await probeClawboxAiVision({ token });
-  const previous = cachedModel?.id ?? (await readClawboxAiVision())?.model ?? null;
-  const id = clawboxAiVisionModelFor(probe, previous);
+  // What pictures went to before — this process's last answer, else the
+  // box's recorded check — is what a check that could not be asked keeps.
+  const record = cachedModel ? null : await readClawboxAiVision();
+  const previous = cachedModel ? cachedModel.id : record?.model ?? null;
+  const keptNone = cachedModel ? cachedModel.id === null : record !== null && record.model === null;
+  const id = clawboxAiVisionModelFor(probe, previous, { keptNone });
   cachedModel = { id, at: Date.now() };
   return id;
 }

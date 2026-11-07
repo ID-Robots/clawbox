@@ -70,6 +70,7 @@ import {
   applyClawaiToHermes,
 } from "@/lib/hermes-clawai";
 import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_VISION_FALLBACK_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { get as configGet } from "@/lib/config-store";
 import { RETIRED_CLAWBOX_AI_VISION_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
 
 const FALLBACK = CLAWBOX_AI_VISION_FALLBACK_MODEL_ID;
@@ -139,6 +140,19 @@ describe("pointing Hermes at ClawBox AI", () => {
     visionSlot({ code: 0, stdout: JSON.stringify({ provider: CLAWAI_PROVIDER, model: FALLBACK }) });
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets()).toContain(`auxiliary.vision.model=${FALLBACK}`);
+  });
+
+  it("keeps a box the last check left with no picture route without one, when it cannot ask", async () => {
+    probeMock.mockResolvedValue(NO_ANSWER);
+    visionSlot({ code: 1, stderr: "config key not set" });
+    vi.mocked(configGet).mockImplementation(async (key: string) =>
+      key === "clawai_vision" ? { verdict: "none", model: null, checkedAt: 1 } : undefined);
+    try {
+      await applyClawaiToHermes("claw_token_abc", "flash");
+    } finally {
+      vi.mocked(configGet).mockImplementation(async () => undefined);
+    }
+    expect(sets().some((kv) => kv.startsWith("auxiliary.vision."))).toBe(false);
   });
 
   it("claims a slot Hermes ships empty, and one whose key is not set", async () => {

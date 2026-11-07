@@ -55,6 +55,8 @@ export const CLAWBOX_AI_VISION_PROBE_PNG =
 export const CLAWBOX_AI_VISION_PROBE_QUESTION = "What colour is this square? Answer with one word.";
 /** An answer naming the colour: the model saw the picture. */
 const SAW_RED = /\b(red|crimson|scarlet|maroon)\b/i;
+/** ...unless it says it could not look ("I cannot see images", "not red"): naming the colour is then no sighting. */
+const SAYS_CANNOT = /\b(not|no|cannot|unable|can[’']t|don[’']t|doesn[’']t)\b/i;
 /**
  * Statuses that ARE an answer about the picture: the request was understood
  * and refused (an image part the model cannot take, a model the proxy does not
@@ -133,7 +135,9 @@ async function askOnce(
   if (typeof text !== "string" || !text.trim()) return { look: "empty", why: "empty answer" };
   // A model's own words about a red square, clipped: nothing else is logged.
   const said = JSON.stringify(text.trim().slice(0, 24));
-  return SAW_RED.test(text) ? { look: "sees", why: `said ${said}` } : { look: "blind", why: `said ${said}` };
+  return SAW_RED.test(text) && !SAYS_CANNOT.test(text)
+    ? { look: "sees", why: `said ${said}` }
+    : { look: "blind", why: `said ${said}` };
 }
 
 async function looks(
@@ -145,7 +149,7 @@ async function looks(
   // thinking and say nothing, which is not blindness) and past a "blind" one:
   // a single refusal can be the proxy's moment, and moving every picture on
   // the box is not something one answer should decide. Two blinds in a row
-  // are an answer.
+  // are an answer; a blind and an empty one are not.
   let blind = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     const answer = await askOnce(model, options);
@@ -157,7 +161,7 @@ async function looks(
       blind = true;
     }
   }
-  return blind ? "blind" : "unknown";
+  return "unknown";
 }
 
 /**
@@ -223,15 +227,30 @@ function bareId(value: string): string {
  * `current` is what the slot holds now (one of ours, or nothing). A definite
  * verdict decides outright. An `unknown` one keeps the box as it is: a current
  * Flash or fallback stays — unless Flash itself just refused the picture, in
- * which case the fallback is the better guess — and an empty slot gets Flash,
- * the model measured to see.
+ * which case the fallback is the better guess. An empty slot an earlier check
+ * left empty (`keptNone`: no model could see) stays empty — a boot before the
+ * network is up must not hand pictures back to a model that refused them —
+ * and any other empty slot gets Flash, the model measured to see.
  */
-export function clawboxAiVisionModelFor(probe: ClawboxAiVisionProbe, current?: string | null): string | null {
+export function clawboxAiVisionModelFor(
+  probe: ClawboxAiVisionProbe,
+  current?: string | null,
+  { keptNone = false }: { keptNone?: boolean } = {},
+): string | null {
   if (probe.verdict !== "unknown") return probe.model;
   if (probe.flash === "blind") return CLAWBOX_AI_VISION_FALLBACK_MODEL_ID;
   const kept = current && current.trim() ? bareId(current) : "";
   if (kept === CLAWBOX_AI_FLASH_MODEL_ID || kept === CLAWBOX_AI_VISION_FALLBACK_MODEL_ID) return kept;
-  return CLAWBOX_AI_FLASH_MODEL_ID;
+  return keptNone ? null : CLAWBOX_AI_FLASH_MODEL_ID;
+}
+
+/**
+ * Did the last recorded check leave the box with no picture model? Its record
+ * says so by naming none — a "none" verdict, or an unknown one that kept it.
+ */
+export async function clawboxAiVisionWasNone(): Promise<boolean> {
+  const last = await readClawboxAiVision();
+  return last !== null && last.model === null;
 }
 
 export interface ClawboxAiVisionRecord {

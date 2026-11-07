@@ -170,6 +170,13 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI one-model migratio
 
     const onFlash = migrate(pairedBox(), "flash").cfg;
     expect(migrate(onFlash, "unknown").cfg).toEqual(onFlash);
+
+    // No picture model is a state too: a boot before the network is up must
+    // not hand pictures back to a Flash the last check found blind.
+    const onNothing = migrate(pairedBox(), "none").cfg;
+    const still = migrate(onNothing, "unknown");
+    expect(still.changed).toBe(false);
+    expect(still.cfg).toEqual(onNothing);
   });
 
   it("is idempotent — a second boot with the same answer changes nothing", () => {
@@ -302,7 +309,8 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI one-model migratio
 describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision probe", () => {
   type Answer = { status: number; body: unknown };
   let server: Server;
-  let answers: Record<string, Answer>;
+  /** One answer per model, or a list answered in turn (the last one repeats). */
+  let answers: Record<string, Answer | Answer[]>;
   let asked: { model: string; hasImage: boolean; auth: string }[];
 
   beforeEach(async () => {
@@ -313,8 +321,10 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision probe", () 
       req.on("end", () => {
         const body = JSON.parse(raw || "{}") as { model: string; messages: { content: { type: string }[] }[] };
         const hasImage = body.messages?.[0]?.content?.some?.((part) => part.type === "image_url") ?? false;
+        const turn = asked.filter((a) => a.model === body.model).length;
         asked.push({ model: body.model, hasImage, auth: String(req.headers.authorization ?? "") });
-        const answer = answers[body.model] ?? { status: 500, body: {} };
+        const given = answers[body.model];
+        const answer = (Array.isArray(given) ? given[Math.min(turn, given.length - 1)] : given) ?? { status: 500, body: {} };
         res.writeHead(answer.status, { "content-type": "application/json" });
         res.end(JSON.stringify(answer.body));
       });
@@ -373,6 +383,18 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision probe", () 
   it("falls back when Flash answers without having seen the picture", async () => {
     answers = { "deepseek-v4-flash": said("I cannot see any image."), [FALLBACK]: said("red") };
     expect((await probe()).out).toContain("vision check: fallback");
+  });
+
+  it("does not take a colour named in a refusal as a sighting", async () => {
+    answers = { "deepseek-v4-flash": said("Not red - I cannot see images."), [FALLBACK]: said("Red") };
+    expect((await probe()).out).toContain("vision check: fallback");
+  });
+
+  it("needs two blinds: a blind and an empty answer are no answer", async () => {
+    answers = { "deepseek-v4-flash": [refusesPictures, said("")], [FALLBACK]: said("Red") };
+    const { out } = await probe();
+    expect(out).toContain("vision check: unknown");
+    expect(asked.map((a) => a.model)).toEqual(["deepseek-v4-flash", "deepseek-v4-flash"]);
   });
 
   it("arms nothing when neither model can see", async () => {

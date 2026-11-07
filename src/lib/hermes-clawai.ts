@@ -38,6 +38,7 @@ import {
 } from "@/lib/clawbox-ai-retired-models";
 import {
   clawboxAiVisionModelFor,
+  clawboxAiVisionWasNone,
   isClawboxAiVisionSlotOurs,
   probeClawboxAiVision,
   recordClawboxAiVision,
@@ -284,7 +285,9 @@ export async function applyClawaiToHermes(
   let visionSteps: string[][] = [];
   if (visionSlot.state === "empty" || visionSlot.state === "ours") {
     const vision = await probeClawboxAiVision({ token: trimmed, baseUrl: CLAWBOX_AI_PROXY_URL });
-    const visionModel = clawboxAiVisionModelFor(vision, visionSlot.state === "ours" ? visionSlot.model : null);
+    const visionModel = clawboxAiVisionModelFor(vision, visionSlot.state === "ours" ? visionSlot.model : null, {
+      keptNone: visionSlot.state === "empty" && (await clawboxAiVisionWasNone()),
+    });
     await recordClawboxAiVision(vision, visionModel);
     if (visionModel) {
       visionSteps = [
@@ -737,7 +740,9 @@ export async function refreshClawaiVisionOnHermes(): Promise<void> {
     if (slot.state !== "empty" && slot.state !== "ours") return;
     const vision = await probeClawboxAiVision({ token, baseUrl: CLAWBOX_AI_PROXY_URL });
     const current = slot.state === "ours" ? slot.model : null;
-    const model = clawboxAiVisionModelFor(vision, current);
+    const model = clawboxAiVisionModelFor(vision, current, {
+      keptNone: slot.state === "empty" && (await clawboxAiVisionWasNone()),
+    });
     await recordClawboxAiVision(vision, model);
     const why = (vision.why ?? []).join("; ");
     if (model && current !== model) {

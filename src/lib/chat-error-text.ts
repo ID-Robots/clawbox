@@ -440,10 +440,10 @@ export function isPictureRefused(raw: string): boolean {
   // the provider wrote them.
   const evidence = raw.replace(/\\(.)/g, "$1");
   return /unknown variant [`'"]?image_url/i.test(evidence)
-    || /model does not support images?/i.test(evidence)
+    || /model does not support images?\b(?! ?generat)/i.test(evidence)
     || /no image model configured/i.test(evidence)
     || /\b(images?|image input|vision)\b(?! ?generat)[^.\n]{0,40}\bnot supported\b/i.test(evidence)
-    || /\bdoes not support (images?|image input|vision)\b/i.test(evidence);
+    || /\bdoes not support (images?|image input|vision)\b(?! ?generat)/i.test(evidence);
 }
 
 /**

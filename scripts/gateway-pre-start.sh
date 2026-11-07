@@ -2732,14 +2732,10 @@ if not is_strong_gateway_token(auth.get("token")):
 # maps OpenClaw xhigh → DeepSeek reasoning_effort: "max" correctly. New
 # configurations get the field from configure/route.ts; this branch handles
 # devices that were configured before that landed.
-ds_models = (
-    cfg.get("models", {}).get("providers", {}).get("deepseek", {}).get("models")
-    if isinstance(cfg.get("models"), dict) else None
-)
-deepseek_provider = (
-    cfg.get("models", {}).get("providers", {}).get("deepseek")
-    if isinstance(cfg.get("models"), dict) else None
-)
+# Each level checked: a null or non-object one must not raise here, under set -e.
+_ds_providers = cfg["models"].get("providers") if isinstance(cfg.get("models"), dict) else None
+deepseek_provider = _ds_providers.get("deepseek") if isinstance(_ds_providers, dict) else None
+ds_models = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
 # These two are LEGACY values on purpose: they are what a box paired before the
 # clawbox.com move still has written in its config, and matching them is the
 # whole point of the branch. Do not "update" them to the current domain — that
@@ -2936,7 +2932,11 @@ def _clawai_vision_ask(model, token, base):
     if not isinstance(text, str) or not text.strip():
         return "empty", "empty answer"
     said = "said " + json.dumps(text.strip()[:24])
-    return ("sees" if re.search(r"\b(red|crimson|scarlet|maroon)\b", text, re.I) else "blind"), said
+    # Naming the colour is a sighting unless it says it could not look ("not red").
+    sees = re.search(r"\b(red|crimson|scarlet|maroon)\b", text, re.I) and not re.search(
+        r"\b(not|no|cannot|unable|can[\u2019']t|don[\u2019']t|doesn[\u2019']t)\b", text, re.I
+    )
+    return ("sees" if sees else "blind"), said
 
 
 _clawai_vision_why = []
@@ -2946,7 +2946,8 @@ def _clawai_vision_look(model, token, base):
     # "sees" | "blind" | "unknown". Asked again past an EMPTY answer (a
     # reasoning model can spend its budget thinking and say nothing) and past a
     # "blind" one: a single refusal can be the proxy's moment, and moving every
-    # picture on the box is not something one answer should decide.
+    # picture on the box is not something one answer should decide: two blinds
+    # in a row are an answer, a blind and an empty one are not.
     blind = False
     for _attempt in range(2):
         look, why = _clawai_vision_ask(model, token, base)
@@ -2957,7 +2958,7 @@ def _clawai_vision_look(model, token, base):
             if blind:
                 return "blind"
             blind = True
-    return "blind" if blind else "unknown"
+    return "unknown"
 
 
 def _clawai_vision_probe_url():
@@ -3041,14 +3042,20 @@ if _deepseek_is_clawai and _flash_row is not None and isinstance(_one_model_toke
     elif _image_ours and _image_parsed[1] in (CLAWBOX_AI_FLASH_ID, CLAWBOX_AI_VISION_FALLBACK_ID):
         _vision_model = _image_parsed[1]
     elif _image_ours or not _has_image_model:
+        # A check that could not be asked keeps the box as it is: Flash
+        # declared text-only is the fallback while its row is there, and NO
+        # picture model while there is neither a row nor a slot of ours — what
+        # a "none" verdict left, kept through a boot before the network is up.
         _flash_input = _flash_row.get("input")
-        _vision_model = (
-            CLAWBOX_AI_VISION_FALLBACK_ID
-            if isinstance(_flash_input, list) and "image" not in _flash_input and any(
-                isinstance(row, dict) and row.get("id") == CLAWBOX_AI_VISION_FALLBACK_ID for row in _one_model_rows
-            )
-            else CLAWBOX_AI_FLASH_ID
-        )
+        _flash_text_only = isinstance(_flash_input, list) and "image" not in _flash_input
+        if _flash_text_only and any(
+            isinstance(row, dict) and row.get("id") == CLAWBOX_AI_VISION_FALLBACK_ID for row in _one_model_rows
+        ):
+            _vision_model = CLAWBOX_AI_VISION_FALLBACK_ID
+        elif _flash_text_only and not _image_ours:
+            _vision_model = None
+        else:
+            _vision_model = CLAWBOX_AI_FLASH_ID
     else:
         # The owner's own picture model; Flash keeps whatever it declared.
         _flash_input = _flash_row.get("input")

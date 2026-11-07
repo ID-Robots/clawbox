@@ -409,6 +409,20 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () =>
     expect(deepseekModels().map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID, FALLBACK]);
   });
 
+  it("keeps a box the last check left with no picture model without one when the question cannot be answered", async () => {
+    mockReadConfig.mockResolvedValue({
+      models: { providers: { deepseek: {
+        apiKey: CLAWAI_TOKEN,
+        baseUrl: "https://clawbox.com/api/ai",
+        models: [{ id: CLAWBOX_AI_FLASH_MODEL_ID, input: ["text"] }],
+      } } },
+      agents: { defaults: { model: { primary: CLAWBOX_AI_CHAT_MODEL } } },
+    });
+    await connectClawai();
+    expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+    expect(deepseekModels()).toEqual([expect.objectContaining({ id: CLAWBOX_AI_FLASH_MODEL_ID, input: ["text"] })]);
+  });
+
   it("does not touch imageGenerationModel", async () => {
     await connectClawai();
 
