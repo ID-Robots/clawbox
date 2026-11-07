@@ -88,7 +88,7 @@ export class GatewayStillStartingError extends Error {
 export type GatewayStartPhase = "started" | "starting" | "pre-start" | "idle";
 
 /** Where systemd keeps the gateway unit's processes, appliance and x64 bridge. */
-function gatewayCgroupDirs(): string[] {
+export function gatewayCgroupDirs(): string[] {
   const dirs = ["/sys/fs/cgroup/system.slice/clawbox-gateway.service"];
   const uid = process.getuid?.();
   if (typeof uid === "number") {
