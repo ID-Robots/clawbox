@@ -31,7 +31,7 @@ function makeAdapter(route: (url: string, init?: RequestInit) => { ok: boolean; 
 
 /** Thread the conversation to SESSION the way a reply does. */
 async function thread(adapter: HermesAdapter) {
-  await adapter.sendTurn({ text: "hi", attachments: [], idempotencyKey: "t1", model: "deepseek-v4-pro", provider: "clawai" });
+  await adapter.sendTurn({ text: "hi", attachments: [], idempotencyKey: "t1", model: "deepseek-v4-flash", provider: "clawai" });
 }
 
 describe("HermesAdapter on a long conversation", () => {

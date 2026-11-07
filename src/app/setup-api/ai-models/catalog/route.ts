@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { CLAWBOX_AI_CHAT_MODEL_LABEL, CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { coreRetiredModels } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
@@ -109,9 +110,9 @@ interface CatalogResponse {
    * For every CLI provider that is `openclaw models list --provider <p> --all
    * --json`, and for openrouter it is that catalogue's own /api/v1/models. For
    * `clawai` the enumeration IS a literal (`CLAWAI_STATIC_MODELS`), and it is
-   * stamped all the same, deliberately: Mike's gateway routes exactly the two
-   * device tiers, so those two rows are the routing table rather than a
-   * stand-in for one nobody asked. The rule this field carries is "not a
+   * stamped all the same, deliberately: the gateway routes exactly the one
+   * model, so that row is the routing table rather than a stand-in for one
+   * nobody asked. The rule this field carries is "not a
    * placeholder for an answer", not "a subprocess ran".
    *
    * Absent is not a synonym for "old": a payload persisted by a build before
@@ -330,30 +331,20 @@ function clearFailedRefresh(provider: string): void {
 }
 
 // ClawBox AI catalog is hardcoded — the gateway routes via DeepSeek
-// upstream but the only end-user-pickable variants are the two device
-// tiers (Flash + Pro ids), gated by subscription. Both ids are served by
-// DeepSeek V4 Flash, so the hints name that model and the Max row is only
-// a plan gate. Skipping the openclaw spawn for clawai also dodges the
-// 3-min CLI execution time on Jetson.
+// upstream, and there is exactly one model to pick: DeepSeek V4.1 Flash on
+// every plan, for chat and pictures alike (TASK-2261). Skipping the openclaw
+// spawn for clawai also dodges the 3-min CLI execution time on Jetson.
 export const CLAWAI_STATIC_MODELS: CatalogModel[] = [
-  // 1M/text matches what the provider definition writes to openclaw.json and
-  // what a real device reports back from `openclaw models list`. The previous
-  // 128K here was never the model's limit — it under-reported the window to
-  // every picker that reads this catalog. `text+image` was wrong too: V4 is
-  // text-in upstream, and offering image attachments only produced rejects.
+  // 1M matches what the provider definition writes to openclaw.json and what a
+  // real device reports back from `openclaw models list`. `text+image` too:
+  // the one model looks at pictures itself (measured 2026-11-07 against the
+  // live proxy and on a lab box's own chat; see CLAWBOX_AI_INPUT_MODALITIES).
   {
-    id: "deepseek-v4-flash",
-    label: "Free/Pro Tier",
+    id: CLAWBOX_AI_FLASH_MODEL_ID,
+    label: CLAWBOX_AI_CHAT_MODEL_LABEL,
     contextWindow: 1_000_000,
-    input: "text",
-    hint: "DeepSeek V4 Flash. Default.",
-  },
-  {
-    id: "deepseek-v4-pro",
-    label: "Max Tier",
-    contextWindow: 1_000_000,
-    input: "text",
-    hint: "DeepSeek V4 Flash. Max plan only.",
+    input: "text+image",
+    hint: "Every plan.",
   },
 ];
 

@@ -371,7 +371,7 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
         deepseek: { apiKey: "claw_box_token" },
         openai: { apiKey: "claw_box_token", models: [{ id: "gpt-image-1-mini", baseUrl: "https://clawbox.com/api/ai" }] },
       } },
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
     });
     const body = await (await GET()).json();
 

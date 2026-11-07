@@ -56,12 +56,7 @@ vi.mock("@/lib/harness/credentials", () => ({
   // proxy gave the token being replaced says nothing about the new one.
   forgetClawaiCredentialRefusal: vi.fn(),
 }));
-// The link path's neighbours, none of which this file is about. The vision
-// resolver is mocked because it performs network I/O against the proxy.
-vi.mock("@/lib/clawbox-ai-vision", () => ({
-  resolveVisionModelId: vi.fn(async () => ({ id: null, reason: "unset" })),
-  isClawboxAiVisionId: () => false,
-}));
+// The link path's neighbours, none of which this file is about.
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => false) }));
 vi.mock("@/lib/hermes-image-refresh", () => ({ refreshHermesImageTools: vi.fn() }));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));

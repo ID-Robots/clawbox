@@ -130,7 +130,7 @@ beforeEach(() => {
   fs.mkdirSync(path.join(root, "data"), { recursive: true });
   fs.writeFileSync(path.join(root, "mcp", "clawbox-mcp.ts"), "// stand-in\n");
   fs.mkdirSync(path.join(home, ".hermes"), { recursive: true });
-  fs.writeFileSync(path.join(home, ".hermes", "config.yaml"), "model:\n  default: deepseek-v4-pro\n");
+  fs.writeFileSync(path.join(home, ".hermes", "config.yaml"), "model:\n  default: deepseek-v4-flash\n");
   fs.writeFileSync(path.join(home, "edition.env"), "CLAWBOX_EDITION=hermes\n");
   fs.writeFileSync(path.join(home, "fake-bun"), "#!/bin/sh\nexit 0\n");
   fs.chmodSync(path.join(home, "fake-bun"), 0o755);

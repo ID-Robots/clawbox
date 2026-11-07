@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ANTHROPIC_MODELS, ECONOMY_MODELS, OPENAI_MODELS } from "@/lib/coding-provider";
 import { codingModelName, memberModelFields, modelsLabel, runModelId, runModelLabel, teamMemberModels, teamModelsLabel } from "@/lib/coding-model-names";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 describe("codingModelName", () => {
   it("names every OpenAI model a run can carry in the owner's style", () => {
@@ -22,7 +26,7 @@ describe("codingModelName", () => {
     expect(codingModelName("claude-opus-5-5")).toBe("Opus 5.5");
     expect(codingModelName("claude-sonnet-5")).toBe("Sonnet 5");
     expect(codingModelName("deepseek-v4-flash")).toBe("DeepSeek Flash");
-    expect(codingModelName("deepseek-v4-pro[1m]")).toBe("DeepSeek Flash");
+    expect(codingModelName(`${RETIRED_CHAT_ID}[1m]`)).toBe("DeepSeek Flash");
   });
 
   it("prettifies an unknown gpt id and an unknown claude-<family>-<major>-<minor> id", () => {
@@ -68,7 +72,7 @@ describe("modelsLabel / teamModelsLabel", () => {
     expect(modelsLabel([{ model: "claude-opus-5-5" }, { requestedModel: "gpt-5.6-sol" }])?.label).toBe("Opus 5.5 · GPT 5.6 Sol");
     expect(modelsLabel([{ model: "claude-opus-5-5" }, { model: "gpt-5.6-sol" }, { model: "deepseek-v4-flash" }, { model: "claude-sonnet-5" }])?.label).toBe("Opus 5.5 · GPT 5.6 Sol +2");
     // Two ids, one name: counted once.
-    expect(modelsLabel([{ model: "deepseek-v4-flash" }, { model: "deepseek-v4-pro" }])).toEqual({ label: "DeepSeek Flash", ids: ["deepseek-v4-flash", "deepseek-v4-pro"] });
+    expect(modelsLabel([{ model: "deepseek-v4-flash" }, { model: RETIRED_CHAT_ID }])).toEqual({ label: "DeepSeek Flash", ids: ["deepseek-v4-flash", RETIRED_CHAT_ID] });
     expect(modelsLabel([{}, null])).toBeNull();
   });
 

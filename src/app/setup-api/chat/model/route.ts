@@ -34,7 +34,7 @@ import {
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { DEFAULT_LLAMACPP_CONTEXT_WINDOW, getLlamaCppContextWindow } from "@/lib/llamacpp";
-import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_CHAT_MODEL } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { chatgptDefaultModelId } from "@/lib/chatgpt-surface";
@@ -218,8 +218,8 @@ const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthro
 // ClawBox AI chat uses the existing Flash alias. The former Pro alias also
 // serves DeepSeek V4 Flash, so remembered plan choices do not select another model.
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
-  clawai: CLAWBOX_AI_MODEL_BY_TIER.flash,
-  deepseek: CLAWBOX_AI_MODEL_BY_TIER.flash,
+  clawai: CLAWBOX_AI_CHAT_MODEL,
+  deepseek: CLAWBOX_AI_CHAT_MODEL,
   anthropic: `anthropic/${ANTHROPIC_DEFAULT_MODEL_ID}`,
   openai: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
   google: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
@@ -279,7 +279,7 @@ function normalizeProviderFromModel(model: string | null | undefined): string | 
 
 function canonicalChatModel(model: string): string {
   return normalizeProviderFromModel(model) === "clawai"
-    ? CLAWBOX_AI_MODEL_BY_TIER.flash
+    ? CLAWBOX_AI_CHAT_MODEL
     : model;
 }
 
@@ -1586,7 +1586,7 @@ async function postChatModel(request: Request) {
     // The equivalent Flash permission remains if primary validation later fails.
     // Whether it repaired anything no longer decides a re-read: every answer
     // below comes from a fresh read (see loadChatModelState).
-    if (targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash) await repairClawboxAiFlashModelPolicy();
+    if (targetModel === CLAWBOX_AI_CHAT_MODEL) await repairClawboxAiFlashModelPolicy();
 
     if (state.activeModel === targetModel) {
       // Naming the model the box already runs is still a choice, and the write

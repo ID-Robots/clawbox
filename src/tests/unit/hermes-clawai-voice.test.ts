@@ -70,16 +70,6 @@ vi.mock("@/lib/local-models", async (importOriginal) => ({
   probeLocalTtsEngine: probeEngineMock,
   localTtsCommandRunnable: runnableMock,
 }));
-// Every case here reaches `applyClawaiToHermes`, which resolves the vision
-// model before it ever gets to the voice — and that resolver PROBES the
-// ClawBox AI proxy. Unmocked, 24 unit tests each do network I/O whose failure
-// mode is a delay. Stubbed to "unset", the state that writes no vision keys
-// at all and leaves this suite about the voice.
-vi.mock("@/lib/clawbox-ai-vision", () => ({
-  resolveVisionModelId: vi.fn(async () => ({ id: null, reason: "unset" })),
-  isClawboxAiVisionId: () => false,
-}));
-
 import { applyClawaiToHermes, CLAWBOX_AI_PROXY_URL } from "@/lib/hermes-clawai";
 import {
   HERMES_LOCAL_TTS_PROVIDER,

@@ -33,7 +33,6 @@ const envMock = vi.hoisted(() => vi.fn());
 const installMock = vi.hoisted(() => vi.fn());
 const drawsMock = vi.hoisted(() => vi.fn());
 const refreshMock = vi.hoisted(() => vi.fn());
-const resolveVisionMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
@@ -58,18 +57,11 @@ vi.mock("@/lib/config-store", () => ({
   set: vi.fn(),
 }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: envMock }));
-// The vision probe reaches the proxy over the network and waits seconds for it.
-// Nothing in this file is about vision; stubbing it keeps the suite hermetic.
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: resolveVisionMock,
-}));
 vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: installMock,
 }));
 
-import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { HERMES_IMAGE_PLUGIN_NAME } from "@/lib/hermes-image-plugin";
 
@@ -201,15 +193,6 @@ beforeEach(() => {
   refreshMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
-  // The resolver's own shape (`id`, not `model`), so the vision write below it
-  // is issued with a real id rather than `undefined`: a stub whose field name
-  // is wrong makes every case in this file exercise a path the file is not
-  // about. Same value the vision suite stubs with.
-  resolveVisionMock.mockResolvedValue({
-    id: CLAWBOX_AI_VISION_MODEL_ID,
-    verified: true,
-    reason: "proxy-allows",
-  });
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 

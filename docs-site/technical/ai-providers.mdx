@@ -69,7 +69,7 @@ Some native OpenClaw provider plugins expect auth stores ClawBox doesn't populat
 ## ClawBox AI specifics
 
 - Pairing uses a device-code flow against the portal (`clawbox.com`) — the wizard shows a short code you confirm in your portal account; the resulting token is stored on-device.
-- Requests proxy through the portal's AI endpoint; both models advertise reasoning support including **X-High** effort (mapped upstream to DeepSeek's maximum reasoning mode).
+- Requests proxy through the portal's AI endpoint to one model, DeepSeek V4.1 Flash (`deepseek-v4-flash`), on every plan: it answers chat and looks at attached pictures, and advertises reasoning support including **X-High** effort (mapped upstream to DeepSeek's maximum reasoning mode).
 - Changing the linked portal account automatically unpairs ClawKeep (backups belong to the account).
 - Two tier values are kept side by side and answer different questions: the **device badge** (`clawai_tier`) is what this box should default to, and the **plan** (`clawai_plan_tier`) is what the account pays for. Only the second may be read before refusing an entitlement — a Max subscriber whose box is badged Flash is a state the product preserves on purpose.
 

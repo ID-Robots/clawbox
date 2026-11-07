@@ -40,6 +40,7 @@ import {
   LOBSTER_ORBITAL_WALLPAPER,
 } from "@/lib/builtin-wallpapers";
 import { PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
+import { migrateRetiredClawboxAiPick } from "@/lib/clawbox-ai-retired-models";
 
 /** Where the ids of the migrations this box has already run are kept. */
 export const BOOT_MIGRATIONS_KEY = "clawbox_boot_migrations";
@@ -375,4 +376,49 @@ export function hermesWallpaperDefaultMigration(deps: WallpaperDefaultMigrationD
     },
     deps,
   );
+}
+
+export interface ClawboxAiOneModelMigrationDeps {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown) => Promise<void>;
+  /** The config-store key of the owner's remembered model picks (`ai_model_explicit_picks`). */
+  picksKey: string;
+  /**
+   * The Hermes half (`migrateRetiredClawaiModelsInHermes`): answers whether it
+   * changed anything, and THROWS when the Hermes config could not be read or
+   * written, so this migration stays unmarked and the next boot tries again.
+   * Handed in because it reaches config.yaml and the Hermes CLI.
+   */
+  migrateHermes: () => Promise<boolean>;
+}
+
+/**
+ * ClawBox AI is ONE model (TASK-2261): `deepseek-v4-flash` for chat and for
+ * pictures, on every plan. A box that is never re-linked still names the ids
+ * it replaced — the former Max-plan chat id and the separate vision model — so
+ * this moves what the box's own store and Hermes' config.yaml hold:
+ *
+ *   - the owner's remembered ClawBox AI pick, when it names a retired id;
+ *   - Hermes' `model.default` and auxiliary vision/title/compression models
+ *     under `provider: clawai`, and its `providers.clawai.models` list.
+ *
+ * openclaw.json is not here: scripts/gateway-pre-start.sh moves its slots on
+ * every gateway start, which every update ends with. Values an owner chose
+ * themselves are left alone throughout (src/lib/clawbox-ai-retired-models.ts).
+ *
+ * Not gated on the edition: a box with no Hermes config has nothing for the
+ * Hermes half to read, and one that swapped away from Hermes still carries a
+ * config.yaml a later swap back would start from.
+ */
+export function clawboxAiOneModelMigration(deps: ClawboxAiOneModelMigrationDeps): BootMigration {
+  return {
+    id: "clawai-one-model-2026-11",
+    label: "moved retired ClawBox AI models to deepseek-v4-flash",
+    run: async () => {
+      const picks = migrateRetiredClawboxAiPick(await deps.get(deps.picksKey));
+      if (picks) await deps.set(deps.picksKey, picks);
+      const hermesMoved = await deps.migrateHermes();
+      return Boolean(picks) || hermesMoved;
+    },
+  };
 }

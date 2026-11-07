@@ -36,13 +36,13 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: vi.fn(async () => ({ id: "deepseek-v4-flash-vision-exp", verified: true, reason: "proxy-allows" })),
-}));
 
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
-import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a pick made before TASK-2261 may still name. */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 import { EXPLICIT_MODEL_PICKS_KEY } from "@/lib/explicit-model-pick";
 
 /** What `model.default` was set to, or undefined when it was never written. */
@@ -81,13 +81,13 @@ describe("recording a pick", () => {
     const { recordExplicitModelPick } = await import("@/lib/explicit-model-pick");
 
     await Promise.all([
-      recordExplicitModelPick(`deepseek/${CLAWBOX_AI_PRO_MODEL_ID}`),
+      recordExplicitModelPick(`deepseek/${CLAWBOX_AI_FLASH_MODEL_ID}`),
       recordExplicitModelPick("anthropic/claude-opus-5"),
       recordExplicitModelPick("openrouter/openai/gpt-5"),
     ]);
 
     expect(stored[EXPLICIT_MODEL_PICKS_KEY]).toEqual({
-      clawai: `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}`,
+      clawai: `deepseek/${CLAWBOX_AI_FLASH_MODEL_ID}`,
       anthropic: "anthropic/claude-opus-5",
       openrouter: "openrouter/openai/gpt-5",
     });
@@ -95,29 +95,31 @@ describe("recording a pick", () => {
 });
 
 describe("a Hermes re-pair and the owner's own model", () => {
-  it("writes the tier default when the owner has never picked one", async () => {
+  it("writes the one model when the owner has never picked one", async () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
   });
 
-  it("keeps the owner's Max model when the badge says Flash", async () => {
-    store({ [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_PRO_MODEL_ID } });
+  it("runs a remembered pick of the retired Max-plan id on Flash (TASK-2261)", async () => {
+    store({ [EXPLICIT_MODEL_PICKS_KEY]: { clawai: RETIRED_CHAT_ID } });
 
-    await applyClawaiToHermes("claw_token_abc", "flash");
+    const result = await applyClawaiToHermes("claw_token_abc", "pro");
 
-    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(result.explicitPickKept).toBe(false);
   });
 
   it("reads a pick the OpenClaw picker wrote fully qualified", async () => {
     // The marker is one store for both editions, and the two pickers spell the
     // same model differently — a box migrated between them must not lose the
     // choice to a slash.
-    store({ [EXPLICIT_MODEL_PICKS_KEY]: { clawai: `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}` } });
+    store({ [EXPLICIT_MODEL_PICKS_KEY]: { clawai: `deepseek/${CLAWBOX_AI_FLASH_MODEL_ID}` } });
 
-    await applyClawaiToHermes("claw_token_abc", "flash");
+    const result = await applyClawaiToHermes("claw_token_abc", "flash");
 
-    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(result.explicitPickKept).toBe(true);
   });
 
   it("is not moved by a pick the owner made for a DIFFERENT provider", async () => {
@@ -127,27 +129,27 @@ describe("a Hermes re-pair and the owner's own model", () => {
     store({
       [EXPLICIT_MODEL_PICKS_KEY]: {
         anthropic: "anthropic/claude-opus-5",
-        clawai: CLAWBOX_AI_PRO_MODEL_ID,
+        clawai: CLAWBOX_AI_FLASH_MODEL_ID,
       },
     });
 
-    await applyClawaiToHermes("claw_token_abc", "flash");
+    const result = await applyClawaiToHermes("claw_token_abc", "flash");
 
-    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(result.explicitPickKept).toBe(true);
   });
 
   it("drops the pick when the box is linked to a DIFFERENT ClawBox AI account", async () => {
-    // The choice belonged to the account that has just been replaced. Imposing
-    // it on the next one hands the new owner a model their plan may refuse —
-    // and every turn fails on a box they have only just paired.
+    // The choice belonged to the account that has just been replaced.
     store({
       clawai_token: "claw_token_ACCOUNT_A",
-      [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_PRO_MODEL_ID },
+      [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_FLASH_MODEL_ID },
     });
 
-    await applyClawaiToHermes("claw_token_ACCOUNT_B", "flash");
+    const result = await applyClawaiToHermes("claw_token_ACCOUNT_B", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(result.explicitPickKept).toBe(false);
     // Cleared in the SAME write that stores the replacement token, so a failed
     // clear cannot leave account A's pick beside account B's token.
     expect(setManyMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -159,12 +161,13 @@ describe("a Hermes re-pair and the owner's own model", () => {
   it("keeps the pick when the same account re-pairs", async () => {
     store({
       clawai_token: "claw_token_ACCOUNT_A",
-      [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_PRO_MODEL_ID },
+      [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_FLASH_MODEL_ID },
     });
 
-    await applyClawaiToHermes("claw_token_ACCOUNT_A", "flash");
+    const result = await applyClawaiToHermes("claw_token_ACCOUNT_A", "flash");
 
-    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(result.explicitPickKept).toBe(true);
   });
 
   it("refuses a stored slot that is not a provider name", async () => {
@@ -176,15 +179,16 @@ describe("a Hermes re-pair and the owner's own model", () => {
     // whatever the parser did. This is the shape a hand-edited
     // `data/config.json` actually produces.
     store({
-      [EXPLICIT_MODEL_PICKS_KEY]: JSON.parse(`{"__proto__": "${CLAWBOX_AI_PRO_MODEL_ID}"}`),
+      [EXPLICIT_MODEL_PICKS_KEY]: JSON.parse(`{"__proto__": "${CLAWBOX_AI_FLASH_MODEL_ID}"}`),
     });
 
-    await applyClawaiToHermes("claw_token_abc", "flash");
+    const result = await applyClawaiToHermes("claw_token_abc", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(result.explicitPickKept).toBe(false);
   });
 
-  it("lets the badge decide when the store could not be read at all", async () => {
+  it("writes the one model when the store could not be read at all", async () => {
     // Beta's answer, kept on purpose: a link that writes no model is a box with
     // no working chat, and bookkeeping we could not read is not worth holding a
     // pairing hostage to.
@@ -192,6 +196,6 @@ describe("a Hermes re-pair and the owner's own model", () => {
 
     await applyClawaiToHermes("claw_token_abc", "pro");
 
-    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
   });
 });

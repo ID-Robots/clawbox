@@ -19,7 +19,7 @@ import {
   CLAWAI_PROVIDER,
   ClawaiApplyError,
   applyClawaiToHermes,
-  clawaiModelForTier,
+  CLAWAI_DEFAULT_MODEL,
 } from "@/lib/hermes-clawai";
 import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
@@ -85,10 +85,10 @@ export async function GET() {
     // While ClawBox AI is the ACTIVE provider the harness's own `model.default`
     // is the answer — no derivation can beat what the box is configured with.
     // Otherwise it is what a link would write: the owner's pick if there is one,
-    // else the badge's default.
+    // else the one model every plan runs.
     model: (active && storedModel.trim())
       || clawboxAiModelIdOf(picks.clawai)
-      || clawaiModelForTier(tier),
+      || CLAWAI_DEFAULT_MODEL,
   });
 }
 

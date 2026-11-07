@@ -159,7 +159,7 @@ beforeEach(() => {
   fs.writeFileSync(path.join(home, "fake-bun"), "#!/bin/sh\nexit 0\n");
   fs.chmodSync(path.join(home, "fake-bun"), 0o755);
   writeHermesStub();
-  fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+  fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
 });
 
 afterEach(() => {

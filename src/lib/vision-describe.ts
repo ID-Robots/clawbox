@@ -1,19 +1,18 @@
 /**
  * Text eyes for agents that cannot see.
  *
- * The coding-agent runs execute on DeepSeek models whose vision the ClawBox AI
- * proxy does not serve yet — an image block in a tool result reaches them as
- * "[Unsupported Image]" (measured on this box, 2026-08-27). The box DOES have
- * a working vision model: whatever resolveVisionModelId() answers (today the
- * legacy gpt-5.6-luna, DeepSeek's own the day the proxy allows it). So instead
- * of handing an agent pixels it cannot read, the browser route hands it this
- * module's written description of the pixels.
+ * A coding-agent run's harness hands an image block in a tool result to its
+ * model as "[Unsupported Image]" (measured on this box, 2026-08-27), whatever
+ * the model could do with it. So instead of handing an agent pixels it cannot
+ * read, the browser route hands it this module's written description of them —
+ * asked of ClawBox AI's one model, `deepseek-v4-flash`, which takes pictures
+ * itself (TASK-2261; there is no separate vision model any more).
  *
  * Failure is an answer, never an exception: an offline box or an unlinked
  * account returns { text: null, error } and the caller degrades to titles.
  */
 import { get as configGet } from "@/lib/config-store";
-import { clawboxAiProxyUrl, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import { CLAWBOX_AI_FLASH_MODEL_ID, clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
 
 /**
  * The whole call's wall-clock budget, retry included. 60 s, not 30: the
@@ -27,11 +26,11 @@ import { clawboxAiProxyUrl, resolveVisionModelId } from "@/lib/clawbox-ai-vision
  * then asks the same question again.
  */
 export const DESCRIBE_TIMEOUT_MS = 60_000;
-// The completion budget must cover hidden REASONING as well as the answer:
-// gpt-5.6-luna is a reasoning model, and on a busy screenshot (a game board)
-// it spent an entire 500-token budget thinking and emitted zero content —
-// finish_reason "length", reasoning_tokens 500, content "" (measured on
-// run-0nxtbhb1, 2026-08-27). max_tokens is a ceiling, not a spend, so the
+// The completion budget must cover hidden REASONING as well as the answer: on
+// a busy screenshot (a game board) a reasoning vision model spent an entire
+// 500-token budget thinking and emitted zero content — finish_reason
+// "length", reasoning_tokens 500, content "" (measured on run-0nxtbhb1,
+// 2026-08-27). max_tokens is a ceiling, not a spend, so the
 // budget is simply set high enough for thought AND answer on the busiest
 // screens — a retry-with-more would re-upload and re-infer the whole image
 // (the expensive part) exactly on the screens that need the room.
@@ -56,10 +55,6 @@ export const MIN_RETRY_MS = 10_000;
 // (run-ssodhkys died to unrecognized_model minutes after run-5vt51ppv built
 // on the same model string).
 const PROXY_FLAP_RE = /failed to authenticate|attention required|cloudflare|unrecognized_model/i;
-
-/** Re-ask the proxy which vision model this box may use at most this often. */
-const RESOLVE_TTL_MS = 10 * 60_000;
-let cachedModel: { id: string; at: number } | null = null;
 
 const DEFAULT_PROMPT =
   "Describe this screenshot of a web page for a developer who cannot see it. "
@@ -97,13 +92,6 @@ export interface VisionDescription {
 /** One attempt's answer, plus whether asking again could change it. */
 interface Attempt extends VisionDescription {
   transient: boolean;
-}
-
-async function visionModelId(token: string): Promise<string> {
-  if (cachedModel && Date.now() - cachedModel.at < RESOLVE_TTL_MS) return cachedModel.id;
-  const resolved = await resolveVisionModelId({ token });
-  cachedModel = { id: resolved.id, at: Date.now() };
-  return resolved.id;
 }
 
 async function ask(
@@ -178,19 +166,14 @@ async function ask(
   }
 }
 
-/** Describe a PNG through the box's vision model. */
+/** Describe a PNG through ClawBox AI's model. */
 export async function describeImage(imageBase64: string, prompt: string = DEFAULT_PROMPT, mime: VisionImageMime = "image/png"): Promise<VisionDescription> {
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || !token.trim()) {
     return { text: null, error: "ClawBox AI is not connected on this device" };
   }
   const deadline = Date.now() + DESCRIBE_TIMEOUT_MS;
-  let model: string;
-  try {
-    model = await visionModelId(token.trim());
-  } catch {
-    return { text: null, error: "could not resolve a vision model" };
-  }
+  const model = CLAWBOX_AI_FLASH_MODEL_ID;
   const attempts: VisionAttempt[] = [];
   const first = await ask(token.trim(), model, prompt, imageBase64, mime, Math.max(1, deadline - Date.now()), attempts);
   if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {

@@ -13,7 +13,7 @@ describe("lastModelSegment", () => {
   });
 
   it("passes a bare id through unchanged", () => {
-    expect(lastModelSegment("deepseek-v4-pro")).toBe("deepseek-v4-pro");
+    expect(lastModelSegment("deepseek-v4-flash")).toBe("deepseek-v4-flash");
   });
 });
 
@@ -25,7 +25,7 @@ describe("shortModelPillLabel", () => {
   it("drops a leading vendor token the provider pill already shows", () => {
     expect(shortModelPillLabel("claude-fable-5", "Claude")).toBe("fable-5");
     expect(shortModelPillLabel("gemini-2.5-flash", "Gemini")).toBe("2.5-flash");
-    expect(shortModelPillLabel("deepseek-v4-pro", "DeepSeek")).toBe("v4-pro");
+    expect(shortModelPillLabel("deepseek-v4-flash", "DeepSeek")).toBe("v4-flash");
   });
 
   it("drops a trailing vendor token too (OpenAI Codex ids end with the vendor)", () => {
@@ -56,7 +56,7 @@ describe("shortModelPillLabel", () => {
     // OpenRouter's pill says "OpenRouter", so the vendor prefix here is the
     // only thing naming the vendor and must survive.
     expect(shortModelPillLabel("claude-haiku-4-5", "OpenRouter")).toBe("claude-haiku-4-5");
-    expect(shortModelPillLabel("deepseek-v4-pro", "ClawBox")).toBe("deepseek-v4-pro");
+    expect(shortModelPillLabel("deepseek-v4-flash", "ClawBox")).toBe("deepseek-v4-flash");
   });
 
   it("only strips whole tokens, never a prefix of one", () => {

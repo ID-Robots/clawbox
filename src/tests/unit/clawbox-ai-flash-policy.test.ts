@@ -4,11 +4,15 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const FLASH = "deepseek/deepseek-v4-flash";
-const PRO = "deepseek/deepseek-v4-pro";
+const PRO = `deepseek/${RETIRED_CHAT_ID}`;
 let root: string;
 let configPath: string;
 let repair: () => Promise<boolean>;
@@ -105,7 +109,7 @@ describe("Flash model-policy repair under the native cross-process lock", () => 
     }
   });
 
-  it.each([PRO, "clawai/deepseek-v4-pro"])("appends Flash for %s without changing any other config", async (allowedPro) => {
+  it.each([PRO, `clawai/${RETIRED_CHAT_ID}`])("appends Flash for %s without changing any other config", async (allowedPro) => {
     const config = configWithAllow([allowedPro, "anthropic/*"]);
     await fs.writeFile(configPath, JSON.stringify(config));
 
@@ -124,7 +128,7 @@ describe("Flash model-policy repair under the native cross-process lock", () => 
     ["absent list", undefined],
     ["empty list", []],
     ["wildcard only", ["deepseek/*"]],
-    ["foreign Pro id", ["openrouter/deepseek/deepseek-v4-pro"]],
+    ["foreign Pro id", [`openrouter/deepseek/${RETIRED_CHAT_ID}`]],
     ["already allowed Flash", [PRO, FLASH]],
   ])("leaves an %s unchanged", async (_label, allow) => {
     const raw = JSON.stringify(configWithAllow(allow));

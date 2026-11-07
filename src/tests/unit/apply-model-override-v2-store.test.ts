@@ -72,7 +72,7 @@ describe("applyModelOverrideToAllAgentSessions on an OpenClaw 2 (SQLite) agent s
     }));
 
     await applyModelOverrideToAllAgentSessions(
-      { provider: "deepseek", modelId: "deepseek-v4-pro" },
+      { provider: "deepseek", modelId: "deepseek-v4-flash" },
       { agentsDir: root, callGateway },
     );
 
@@ -93,7 +93,7 @@ describe("applyModelOverrideToAllAgentSessions on an OpenClaw 2 (SQLite) agent s
     }));
 
     const result = await applyModelOverrideToAllAgentSessions(
-      { provider: "deepseek", modelId: "deepseek-v4-pro", source: "user" },
+      { provider: "deepseek", modelId: "deepseek-v4-flash", source: "user" },
       { agentsDir: root, callGateway },
     );
 
@@ -105,7 +105,7 @@ describe("applyModelOverrideToAllAgentSessions on an OpenClaw 2 (SQLite) agent s
           { key: "agent:main:clawbox-abc", agentId: "main" },
           { key: "agent:main:main", agentId: "main" },
         ],
-        patch: { model: "deepseek/deepseek-v4-pro" },
+        patch: { model: "deepseek/deepseek-v4-flash" },
       },
       expect.anything(),
     );
@@ -124,7 +124,7 @@ describe("applyModelOverrideToAllAgentSessions on an OpenClaw 2 (SQLite) agent s
     }));
 
     const result = await applyModelOverrideToAllAgentSessions(
-      { provider: "deepseek", modelId: "deepseek-v4-pro" },
+      { provider: "deepseek", modelId: "deepseek-v4-flash" },
       { agentsDir: root, callGateway },
     );
 
@@ -144,13 +144,13 @@ describe("applyModelOverrideToAllAgentSessions on an OpenClaw 2 (SQLite) agent s
     }));
 
     const result = await applyModelOverrideToAllAgentSessions(
-      { provider: "deepseek", modelId: "deepseek-v4-pro" },
+      { provider: "deepseek", modelId: "deepseek-v4-flash" },
       { agentsDir: root, callGateway },
     );
 
     expect(result).toEqual({ filesUpdated: 2, sessionsUpdated: 3, sessionsSkipped: 0 });
     const legacy = JSON.parse(readFileSync(legacyPath, "utf8"));
-    expect(legacy["agent:legacy:main"].modelOverride).toBe("deepseek-v4-pro");
+    expect(legacy["agent:legacy:main"].modelOverride).toBe("deepseek-v4-flash");
     expect(legacy["agent:legacy:main"].providerOverride).toBe("deepseek");
     // Only the v2 agent's sessions went through the gateway.
     const targets = callGateway.mock.calls.flatMap(([, params]) => (params.targets as Array<{ agentId: string }>).map((t) => t.agentId));

@@ -84,7 +84,7 @@ export function isHermesReasoningLevel(value: unknown): value is HermesReasoning
  * the level through as `reasoning_effort`, and the upstream API is free to
  * reject a value it doesn't know.
  *
- * VERIFIED on-device against ClawBox AI (deepseek-v4-pro, the clawbox.com/api/ai
+ * VERIFIED on-device against ClawBox AI (DeepSeek V4 Flash, the clawbox.com/api/ai
  * proxy) by sending all eight: none/minimal/low/medium/high/xhigh/max all
  * answered normally; `ultra` failed with
  *   HTTP 400: Failed to deserialize the JSON body into the target type:

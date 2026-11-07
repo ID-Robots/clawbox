@@ -241,7 +241,7 @@ restore() {
         ok "the chat model is back on $BEFORE_MODEL"
       elif [ "$API_STATUS" = 200 ] && [[ $BEFORE_MODEL == deepseek/* && $back == deepseek/* ]]; then
         # chat/model writes every ClawBox AI pick as its one chat id
-        # (canonicalChatModel: the proxy serves Flash under the Pro id too).
+        # (canonicalChatModel: ClawBox AI has one model, TASK-2261).
         ok "the chat model is back on ClawBox AI ($back; it was $BEFORE_MODEL, which a pick writes as $back)"
       else
         not_ok "could not put the chat model back on $BEFORE_MODEL: $(api_error)"

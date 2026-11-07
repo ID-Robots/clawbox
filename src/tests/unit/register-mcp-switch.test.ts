@@ -78,7 +78,7 @@ function servers(): Record<string, unknown> | undefined {
 
 const REGISTERED_YAML = [
   "model:",
-  "  default: deepseek-v4-pro",
+  "  default: deepseek-v4-flash",
   "mcp_servers:",
   "  clawbox:",
   "    command: /old/bun",
@@ -120,14 +120,14 @@ d("register-mcp.sh — the MCP switch", () => {
     const r = run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(servers()).toEqual({ other: { url: "http://example.invalid" } });
-    expect(readConfig().model).toEqual({ default: "deepseek-v4-pro" });
+    expect(readConfig().model).toEqual({ default: "deepseek-v4-flash" });
     expect(r.stdout).toMatch(/switched off in Settings; removed mcp_servers\.clawbox/);
     expect(r.stdout).toMatch(/removed the ClawBox MCP server from the Hermes config/);
     expect(r.stdout).not.toMatch(/registered the ClawBox MCP server/);
   });
 
   it("writes no registration into a config that has none when the switch is off", () => {
-    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
     fs.writeFileSync(storePath, JSON.stringify({ clawbox_mcp_enabled: false }));
     const r = run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
@@ -139,7 +139,7 @@ d("register-mcp.sh — the MCP switch", () => {
     // The distractor skills and the clarify window are not the MCP server's,
     // and an owner who switched the tools off has not asked for the bundled
     // email skills back.
-    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
     fs.writeFileSync(storePath, JSON.stringify({ clawbox_mcp_enabled: false }));
     const r = run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
@@ -149,7 +149,7 @@ d("register-mcp.sh — the MCP switch", () => {
   });
 
   it("registers as it always did when the store has no such key", () => {
-    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
     fs.writeFileSync(storePath, JSON.stringify({ setup_complete: true }));
     const r = run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
@@ -161,7 +161,7 @@ d("register-mcp.sh — the MCP switch", () => {
 
   it("registers when the switch is explicitly on, when the store is missing, and for any value but the boolean false", () => {
     for (const store of [JSON.stringify({ clawbox_mcp_enabled: true }), null, JSON.stringify({ clawbox_mcp_enabled: "false" })]) {
-      fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+      fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
       fs.rmSync(storePath, { force: true });
       if (store !== null) fs.writeFileSync(storePath, store);
       const r = run();
@@ -173,7 +173,7 @@ d("register-mcp.sh — the MCP switch", () => {
   it("leaves the registration exactly as it is when the store exists and cannot be read", () => {
     for (const torn of ["{\"clawbox_mcp_enabled\": fal", "[false]"]) {
       // Unregistered stays unregistered: a corrupt store cannot undo an owner's off...
-      fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+      fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
       fs.writeFileSync(storePath, torn);
       let r = run();
       expect(r.status, r.stdout + r.stderr).toBe(0);

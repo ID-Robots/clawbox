@@ -46,10 +46,6 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: vi.fn(async () => ({ id: null, verified: false, reason: "probe-failed" })),
-}));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: true })) }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: vi.fn(async () => ({ status: "ok" })) }));

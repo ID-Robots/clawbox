@@ -12,12 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   configGet: vi.fn(async (): Promise<unknown> => "tok-1234567890"),
-  resolveVisionModelId: vi.fn(async () => ({ id: "vision-x" })),
 }));
 vi.mock("@/lib/config-store", () => ({ get: mocks.configGet }));
-vi.mock("@/lib/clawbox-ai-vision", () => ({
+vi.mock("@/lib/clawbox-ai-models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-models")>()),
   clawboxAiProxyUrl: () => "http://proxy.test/v1",
-  resolveVisionModelId: mocks.resolveVisionModelId,
 }));
 
 import { DESCRIBE_TIMEOUT_MS, MIN_RETRY_MS, RETRY_DELAY_MS, describeImage } from "@/lib/vision-describe";
@@ -118,9 +117,9 @@ describe("what is not", () => {
 });
 
 
-it("records requested and actual vision model plus usage separately for every attempt", async () => {
+it("records requested and actual model plus usage separately for every attempt", async () => {
   fetchMock.mockResolvedValueOnce(status(503)).mockResolvedValueOnce(new Response(JSON.stringify({
-    model: "deepseek-v4-flash-vision-exp", usage: { prompt_tokens: 123, completion_tokens: 7, total_tokens: 130 },
+    model: "deepseek-flash", usage: { prompt_tokens: 123, completion_tokens: 7, total_tokens: 130 },
     choices: [{ message: { content: "A dashboard" } }],
   })));
   const pending = describeImage("aGk=");
@@ -128,6 +127,7 @@ it("records requested and actual vision model plus usage separately for every at
   const result = await pending;
   expect(result.vision?.attempts).toHaveLength(2);
   expect(result.vision?.attempts[0]).toMatchObject({ status: 503, usage: null, responseModel: null });
-  expect(result.vision?.attempts[1]).toMatchObject({ requestedModel: "vision-x", responseModel: "deepseek-v4-flash-vision-exp", usage: { total_tokens: 130 } });
+  // ClawBox AI's one model looks at the picture: no separate vision model (TASK-2261).
+  expect(result.vision?.attempts[1]).toMatchObject({ requestedModel: "deepseek-v4-flash", responseModel: "deepseek-flash", usage: { total_tokens: 130 } });
   expect(JSON.stringify(result)).not.toContain("tok-1234567890");
 });

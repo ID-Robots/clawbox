@@ -121,7 +121,7 @@ function writeRecord(body: unknown) {
   fs.writeFileSync(statePath, typeof body === "string" ? body : JSON.stringify(body, null, 2) + "\n");
 }
 
-const BASE = "model:\n  default: deepseek-v4-pro\n";
+const BASE = "model:\n  default: deepseek-v4-flash\n";
 /** The config the previous build left behind: both opt-outs seeded. */
 const OPTED_OUT = `${BASE}auxiliary:\n  background_review:\n    enabled: false\ncurator:\n  enabled: false\n`;
 
@@ -176,7 +176,7 @@ d("register-mcp.sh — a fresh Hermes box", () => {
       + "curator:\n  enabled: false\n  interval_hours: 168\n",
     );
     run();
-    expect(at("model.default")).toBe("deepseek-v4-pro");
+    expect(at("model.default")).toBe("deepseek-v4-flash");
     expect(at("auxiliary.background_review.model")).toBe("keep-me");
     expect(at("curator.interval_hours")).toBe(168);
     expect(at(REVIEW_KEY)).toBe(true);

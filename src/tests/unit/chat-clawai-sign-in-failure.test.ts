@@ -66,7 +66,7 @@ describe("a ClawBox AI turn the box's sign-in cannot serve", () => {
     // The proxy's own refusal code names ClawBox AI even when no frame did.
     expect(clawaiSignInFailure(PROXY_403)).toBe("rejected");
     // The gateway's auth reason on a ClawBox AI model, with no words at all.
-    expect(clawaiSignInFailure("", { model: "deepseek/deepseek-v4-pro", reason: "auth" })).toBe("rejected");
+    expect(clawaiSignInFailure("", { model: "deepseek/deepseek-v4-flash", reason: "auth" })).toBe("rejected");
   });
 
   it("reads a 402 or a lapsed plan on a ClawBox AI turn as the subscription", () => {

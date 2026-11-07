@@ -2,10 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 // The ClawBox AI catalog is hardcoded rather than fetched, so nothing upstream
 // will ever correct it: whatever these entries say is what every model picker
-// on the device shows. They used to claim 128K — a number that was never V4's
-// limit — and text+image, which the text-only proxy rejects. This pins them to
-// the same values the provider definition writes into openclaw.json, so the
-// picker and the gateway can't drift apart again.
+// on the device shows. This pins it to what the provider definition writes into
+// openclaw.json — ONE model since TASK-2261, the 1M window, and pictures as
+// well as text — so the picker and the gateway can't drift apart again.
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
@@ -18,33 +17,39 @@ vi.mock("@/lib/openclaw-config", () => ({
 vi.mock("@/lib/config-store", () => ({ DATA_DIR: `/tmp/clawbox-catalog-clawai-test-${process.pid}` }));
 
 import { CLAWAI_STATIC_MODELS } from "@/app/setup-api/ai-models/catalog/route";
+import {
+  RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS,
+  RETIRED_CLAWBOX_AI_VISION_MODEL_IDS,
+} from "@/lib/clawbox-ai-retired-models";
 
 describe("ClawBox AI static catalog", () => {
-  it("offers exactly the two subscription tiers", () => {
-    expect(CLAWAI_STATIC_MODELS.map((m) => m.id)).toEqual([
-      "deepseek-v4-flash",
-      "deepseek-v4-pro",
-    ]);
+  it("offers exactly the one model, on every plan", () => {
+    expect(CLAWAI_STATIC_MODELS.map((m) => m.id)).toEqual(["deepseek-v4-flash"]);
   });
 
-  it("reports V4's real 1M context window on both tiers", () => {
+  it("offers none of the retired ids", () => {
+    const ids = CLAWAI_STATIC_MODELS.map((m) => m.id);
+    for (const retired of [...RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS, ...RETIRED_CLAWBOX_AI_VISION_MODEL_IDS]) {
+      expect(ids).not.toContain(retired);
+    }
+  });
+
+  it("reports V4's real 1M context window", () => {
     for (const model of CLAWAI_STATIC_MODELS) {
       expect(model.contextWindow).toBe(1_000_000);
     }
   });
 
-  it("declares text-only input, matching the proxy", () => {
+  it("declares pictures as well as text, matching the provider definition", () => {
     for (const model of CLAWAI_STATIC_MODELS) {
-      expect(model.input).toBe("text");
+      expect(model.input).toBe("text+image");
     }
   });
 
-  // The proxy answers deepseek-v4-pro with the same V4 Flash model as
-  // deepseek-v4-flash. The Max row is a plan gate, not a bigger model.
-  it("claims no bigger model than the V4 Flash that serves both tiers", () => {
+  it("names the model that serves it and claims no bigger one", () => {
     for (const model of CLAWAI_STATIC_MODELS) {
       expect(`${model.label} ${model.hint ?? ""}`, model.id).not.toMatch(/V4[ -]?Pro|1[.,]6\s?T|frontier/i);
+      expect(model.label).toBe("DeepSeek V4 Flash");
     }
-    expect(CLAWAI_STATIC_MODELS.find((m) => m.id === "deepseek-v4-pro")?.hint).toContain("DeepSeek V4 Flash");
   });
 });

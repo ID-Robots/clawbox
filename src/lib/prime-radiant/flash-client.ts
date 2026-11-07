@@ -34,7 +34,7 @@ import {
   type ClawaiAllowanceRefusal,
 } from "@/lib/clawai-allowance";
 import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
-import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-vision";
+import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
 import {
   clawaiCredentialGeneration,
   noteClawaiCredentialRefused,

@@ -686,7 +686,7 @@ coding-agent run — see below) · `describe_image` (both editions)
 
 `describe_image` is not a browser tool but lives in the same family so a
 coding-agent run gets it: a written description of a local image file
-(.png/.jpg/.jpeg/.webp), through the box's vision model — how an image-blind
+(.png/.jpg/.jpeg/.webp), through ClawBox AI's model, `deepseek-v4-flash` — how an image-blind
 run looks at a frame it saved without driving the browser at it. The fence is
 the ROUTE's (`/setup-api/vision/describe`), not this tool's: a credential
 store answers like a missing file for every caller, and the MCP bearer may
@@ -731,7 +731,7 @@ run's model cannot see images, so every screenshot is archived into the run's
 evidence folder (`data/coding-agent-artifacts/<runId>/`,
 `CLAWBOX_RUN_ARTIFACTS_DIR`) and replaced in the reply by the backend's written
 description of it (the browser route's `describe` action, produced by the
-box's vision model — `src/lib/vision-describe.ts`). `browser_view_local` opens
+box's ClawBox AI model — `src/lib/vision-describe.ts`). `browser_view_local` opens
 an HTML file from the run's working folder (`CLAWBOX_RUN_DIR`): the ONLY
 `file://` the browser route accepts, and only while that run is the active
 one, realpath-checked on both sides.

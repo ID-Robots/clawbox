@@ -485,7 +485,7 @@ export function registerBrowserTools(reg: Registrar): void {
   // the circuit breaker for a healthy box.
   reg.tool(
     "describe_image",
-    "Get a written description of a local image file (.png, .jpg, .jpeg, .webp) from the device's vision model, to check a picture or screenshot you saved.",
+    "Get a written description of a local image file (.png, .jpg, .jpeg, .webp) from the device's ClawBox AI model, to check a picture or screenshot you saved.",
     {
       path: zText(512, "Image file to describe. Relative paths resolve against the working folder."),
       prompt: zText(600, "What to look for, in one sentence. Omit for a general description.").optional(),

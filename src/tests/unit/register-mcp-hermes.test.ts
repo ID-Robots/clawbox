@@ -111,7 +111,7 @@ afterEach(() => {
 
 d("register-mcp.sh — registering on Hermes", () => {
   it("adds mcp_servers.clawbox to a config that has none", () => {
-    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
     const r = run();
     expect(r.status).toBe(0);
 
@@ -124,12 +124,12 @@ d("register-mcp.sh — registering on Hermes", () => {
   it("keeps every key the config already had", () => {
     fs.writeFileSync(
       configPath,
-      "model:\n  default: deepseek-v4-pro\nproviders:\n  clawai:\n    api_key: keep-me\nskills:\n  enabled: true\n",
+      "model:\n  default: deepseek-v4-flash\nproviders:\n  clawai:\n    api_key: keep-me\nskills:\n  enabled: true\n",
     );
     run();
 
     const cfg = readConfig();
-    expect(cfg.model).toEqual({ default: "deepseek-v4-pro" });
+    expect(cfg.model).toEqual({ default: "deepseek-v4-flash" });
     expect(cfg.providers).toEqual({ clawai: { api_key: "keep-me" } });
     // `skills` keeps what it had; the script only ADDS its disabled list
     // (asserted in its own describe block below).
@@ -344,7 +344,7 @@ d("register-mcp.sh — refuses rather than clobbers", () => {
     // reader had no arm for it at all, so a bare `python3` heredoc under
     // `set -euo pipefail` ended the run with a PermissionError traceback.
     // TASK-657.
-    const kept = "model:\n  default: deepseek-v4-pro\n";
+    const kept = "model:\n  default: deepseek-v4-flash\n";
     fs.writeFileSync(configPath, kept);
     fs.chmodSync(configPath, 0o000);
     const r = run();
@@ -473,7 +473,7 @@ d("register-mcp.sh — the clarify window this appliance ships with", () => {
   }
 
   it("seeds agent.clarify_timeout at 300 on a config that never set it", () => {
-    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
     const r = run();
     expect(r.status).toBe(0);
     // A NUMBER, not the string `hermes config set` would have stored: upstream

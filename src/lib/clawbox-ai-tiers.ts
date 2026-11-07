@@ -114,9 +114,8 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     pricePeriod: "/month",
     pricePeriodKey: "ai.planPeriodMonth",
     hasTrial: true,
-    // Max is served by the same DeepSeek V4 Flash as Free and Pro: the proxy
-    // answers its `deepseek-v4-pro` id with Flash, so the card says Flash. The
-    // key stays ai.planFeatureProModel; only its words changed.
+    // Max runs the same one model as Free and Pro (TASK-2261), so its card
+    // names it with the same key theirs do.
     features: [
       "Maximum usage",
       "DeepSeek V4 Flash",
@@ -127,7 +126,7 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     ],
     featureKeys: [
       "ai.planFeatureMaxUsage",
-      "ai.planFeatureProModel",
+      "ai.planFeatureFlashModel",
       "ai.planFeatureBackups50gb",
       "ai.planFeatureRemoteDesktop",
       "ai.planFeatureHighestPriority",
@@ -159,11 +158,11 @@ export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
 }
 
 /**
- * UI tier → *device* tier (which model id gets configured). Free and Pro are
- * configured with `deepseek-v4-flash`, Max with `deepseek-v4-pro`; the proxy
- * serves both ids with DeepSeek V4 Flash, so the id is a plan gate, not a
- * bigger model. `ClawboxAiTier` has no "free" member because the device has
- * nothing different to configure for it.
+ * UI tier → *device* tier, the plan badge stored as `clawai_tier`. Every plan
+ * is configured with the same one model (`deepseek-v4-flash`); the badge is
+ * still what the plan pickers, the voice gate and the harness swap read.
+ * `ClawboxAiTier` has no "free" member because the device has nothing
+ * different to configure for it.
  */
 export function uiTierToDeviceTier(tier: ClawaiTier): ClawboxAiTier {
   return tier === "pro" ? "pro" : "flash";

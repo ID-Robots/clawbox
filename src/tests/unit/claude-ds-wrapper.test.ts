@@ -17,9 +17,8 @@ import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/codin
  *  - The wrapper must not leak ANTHROPIC_BASE_URL into anything but its own
  *    child. OpenClaw drives `claude-cli` through the SAME binary, so a global
  *    export reroutes every OpenClaw Claude call to DeepSeek silently.
- *  - The model must follow the plan. ClawBox AI answers 403 for
- *    deepseek-v4-pro below the Max plan, so a hard-wired pro default would
- *    ship a harness that is broken for most owners.
+ *  - The model is ClawBox AI's one model, on every plan (TASK-2261), and an
+ *    explicit CLAUDE_DS_MODEL still wins over it.
  *  - An inherited Anthropic credential must lose. ANTHROPIC_API_KEY outranks
  *    ANTHROPIC_AUTH_TOKEN, so a stale key in the environment would send the
  *    run to Anthropic under a DeepSeek model name.
@@ -265,16 +264,9 @@ describe("effort", () => {
 });
 
 describe("which model the owner actually gets", () => {
-  it("gives a Max box the pro model", () => {
-    // "pro" is the DEVICE tier name for the Max plan — the only tier ClawBox AI
-    // lets reach deepseek-v4-pro.
-    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper();
-    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-pro[1m]");
-  });
-
-  it("gives every other plan flash, because the proxy 403s pro below Max", () => {
-    for (const tier of ["flash", "free", ""]) {
+  it("gives every plan the one ClawBox AI model, the Max plan included (TASK-2261)", () => {
+    // "pro" is the DEVICE tier name for the Max plan. It no longer picks a model.
+    for (const tier of ["pro", "flash", "free", ""]) {
       writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: tier });
       runWrapper();
       expect(capturedEnv().ANTHROPIC_MODEL, `tier=${tier || "<unset>"}`).toBe("deepseek-v4-flash");
@@ -308,17 +300,17 @@ describe("which model the owner actually gets", () => {
     expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
   });
 
-  it("lets an override win over the plan", () => {
-    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-pro" });
+  it("lets an override win over the default", () => {
+    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     const env = capturedEnv();
-    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-pro");
-    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("deepseek-v4-pro");
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("deepseek-v4-pro");
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-flash[1m]");
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("deepseek-v4-flash[1m]");
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("deepseek-v4-flash[1m]");
   });
 
   it("says on screen which model is about to answer", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    expect(runWrapper().stderr).toContain("deepseek-v4-pro[1m]");
+    expect(runWrapper().stderr).toContain("deepseek-v4-flash");
   });
 });
 
@@ -333,7 +325,7 @@ describe("which model the owner actually gets", () => {
 describe("the auto-compact window", () => {
   it("gives a 1M model a window of 84% of the 1,048,576 tokens the proxy really serves", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    const { status, stderr } = runWrapper();
+    const { status, stderr } = runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(status).toBe(0);
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(1_048_576 * 84 / 100)));
     expect(stderr).toContain("auto-compact window 880803 tokens");
@@ -352,13 +344,13 @@ describe("the auto-compact window", () => {
     expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000" });
+    runWrapper({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000", CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("880803");
   });
 
   it("takes an explicit window, or `off` for Claude Code's default", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "700000" });
+    runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "700000", CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("700000");
     runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "off" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
@@ -666,7 +658,7 @@ describe("the provider split", () => {
       ANTHROPIC_AUTH_TOKEN: "claw_test_token",
       ANTHROPIC_BASE_URL: "https://clawbox.com/api/ai/anthropic",
       CLAUDE_CODE_API_BASE_URL: "https://clawbox.com/api/ai/anthropic",
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro[1m]",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-flash[1m]",
       CLAUDE_CONFIG_DIR: path.join(home, ".claude-ds"),
     });
     expect(res.status).toBe(0);

@@ -3,20 +3,19 @@ import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
+import { CLAWBOX_AI_CHAT_MODEL, CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
 import {
-  CLAWBOX_AI_LEGACY_VISION_MODEL_ID,
-  CLAWBOX_AI_VISION_MODEL,
-  CLAWBOX_AI_VISION_MODEL_ID,
-  CLAWBOX_AI_VISION_MODEL_LABEL,
-  CLAWBOX_AI_VISION_MAX_TOKENS,
-} from "@/lib/clawbox-ai-models";
+  RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS,
+  RETIRED_CLAWBOX_AI_VISION_MODEL_IDS,
+} from "@/lib/clawbox-ai-retired-models";
 
-// The ClawBox AI vision half of POST /setup-api/ai-models/configure
-// (TASK-417). Without it a provisioned box accepts an image attachment and then
-// answers that it cannot see it: both chat tiers are text-only, so OpenClaw
-// hands the turn a media path, and the `image` tool that would read it resolves
-// its model from `agents.defaults.imageModel` — which provisioning never wrote,
-// so runWithImageModelFallback throws "No image model configured".
+// ClawBox AI's ONE model (TASK-2261) as POST /setup-api/ai-models/configure
+// writes it: `deepseek-v4-flash` for chat AND for looking at a picture. The
+// provider gets one row, with `image` in its input; `agents.defaults.imageModel`
+// points at it (TASK-417: with that slot empty, a turn whose chat model cannot
+// see throws "No image model configured"); and a re-link moves every slot that
+// still names a retired id — the former Max-plan chat id, the separate vision
+// model — onto Flash, while leaving the owner's own choices alone.
 //
 // Mocks are the same set configure-images.test.ts uses — the route's
 // collaborators, with `runOpenclawConfigSet` as the boundary every
@@ -76,16 +75,6 @@ vi.mock("@/lib/clawkeep", () => ({
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
   notifyProviderSetChanged: vi.fn(),
-}));
-
-// The vision id is RESOLVED against the proxy before the route writes it:
-// DeepSeek's model when served, the previous one until then. The resolver has
-// its own unit file; here it answers "preferred allowed" unless a test says
-// otherwise, so no route test touches the network.
-const resolveVisionMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: resolveVisionMock,
 }));
 
 const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() => ({
@@ -216,7 +205,10 @@ type ModelEntry = {
   [key: string]: unknown;
 };
 
-describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () => {
+const [VISION_EXP, LEGACY_VISION] = RETIRED_CLAWBOX_AI_VISION_MODEL_IDS;
+const RETIRED_CHAT_REF = `deepseek/${RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0]}`;
+
+describe("POST /setup-api/ai-models/configure — ClawBox AI's one model", () => {
   let configurePost: (req: Request) => Promise<Response>;
 
   function jsonRequest(body: unknown): Request {
@@ -247,15 +239,10 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     return provider?.models ?? [];
   }
 
-  function visionEntry(): ModelEntry | undefined {
-    return deepseekModels().find((m) => m.id === CLAWBOX_AI_VISION_MODEL_ID);
-  }
-
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
 
-    resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_VISION_MODEL_ID, verified: true, reason: "proxy-allows" });
     mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();
@@ -305,82 +292,73 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
-  it("registers a vision entry that advertises image input", async () => {
+  it("writes one model row, which takes pictures too", async () => {
     await connectClawai();
 
-    // `input: ["text", "image"]` is the load-bearing part: resolveImageRuntime
-    // refuses a media-understanding model whose catalog entry does not
-    // advertise image input.
-    expect(visionEntry()).toEqual({
-      id: CLAWBOX_AI_VISION_MODEL_ID,
-      name: CLAWBOX_AI_VISION_MODEL_LABEL,
-      input: ["text", "image"],
-      maxTokens: CLAWBOX_AI_VISION_MAX_TOKENS,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    });
+    // `input: ["text", "image"]` is load-bearing twice over: it lets an
+    // attached picture reach the chat model directly, and resolveImageRuntime
+    // refuses an image model whose catalog entry does not advertise it.
+    expect(deepseekModels()).toEqual([
+      expect.objectContaining({ id: CLAWBOX_AI_FLASH_MODEL_ID, input: ["text", "image"], reasoning: true }),
+    ]);
+  });
+
+  it("offers no retired id on the provider, the Max plan included", async () => {
+    await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN, clawaiTier: "pro" }));
+    const ids = deepseekModels().map((m) => m.id);
+    expect(ids).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
+    for (const retired of [...RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS, ...RETIRED_CLAWBOX_AI_VISION_MODEL_IDS]) {
+      expect(ids).not.toContain(retired);
+    }
   });
 
   it("registers it on the ClawBox AI proxy provider, not on openai", async () => {
     await connectClawai();
 
-    // The deepseek entry IS the proxy: it already carries
-    // api=openai-completions, the proxy baseUrl and the claw_ token. OpenClaw's
-    // `openai` provider defaults to openai-responses, which the proxy does not
-    // speak.
     const provider = JSON.parse(callFor("models.providers.deepseek")?.[1] ?? "null");
     expect(provider.baseUrl).toBe(PROXY_URL);
     expect(provider.api).toBe("openai-completions");
-
-    const openaiModels = JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "[]") as ModelEntry[];
-    expect(openaiModels.some((m) => m.id === CLAWBOX_AI_VISION_MODEL_ID)).toBe(false);
+    expect(callFor("models.providers.openai.models")).toBeUndefined();
   });
 
-  it("points agents.defaults.imageModel at it", async () => {
+  it("points agents.defaults.imageModel at the one model", async () => {
     await connectClawai();
 
     const call = callFor("agents.defaults.imageModel");
     expect(call?.[2]).toBe("--json");
-    expect(JSON.parse(call?.[1] ?? "null")).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+    expect(JSON.parse(call?.[1] ?? "null")).toEqual({ primary: CLAWBOX_AI_CHAT_MODEL });
   });
 
-  it("leaves the two chat tiers text-only and non-reasoning-free", async () => {
+  it("asks nothing of the proxy about a vision model", async () => {
     await connectClawai();
-
-    const chat = deepseekModels().filter((m) => m.id !== CLAWBOX_AI_VISION_MODEL_ID);
-    expect(chat).toHaveLength(2);
-    for (const entry of chat) {
-      expect(entry.input).toEqual(["text"]);
-      expect(entry.reasoning).toBe(true);
-    }
-    // The vision entry is a one-shot describe and never negotiates thinking.
-    expect(visionEntry()?.reasoning).toBeUndefined();
-    expect(visionEntry()?.compat).toBeUndefined();
+    const asked = vi.mocked(fetch).mock.calls.map((c) => String(c[0]));
+    expect(asked.some((url) => url.includes("/chat/completions"))).toBe(false);
   });
 
   it("does not touch imageGenerationModel", async () => {
     await connectClawai();
 
-    // Two independent config keys with no aliasing. imageGenerationModel says
-    // where pictures come from; imageModel says what looks at one.
+    // Two independent config keys with no aliasing. The image-generation slot
+    // says where pictures come from; imageModel says what looks at one.
     expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null"))
       .toEqual({ primary: "litellm/gpt-image-1-mini" });
     expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null"))
-      .toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+      .toEqual({ primary: CLAWBOX_AI_CHAT_MODEL });
   });
 
-  it("keeps a vision model the owner already chose", async () => {
+  it("keeps a vision model the owner already chose, the OpenAI model of the same name included", async () => {
     // configureClawboxAi also runs when ClawBox AI is merely being added as a
     // fallback for some other provider, so an occupied slot is a decision made
     // elsewhere.
-    mockReadConfig.mockResolvedValue({
-      agents: { defaults: { imageModel: { primary: "google/gemini-2.5-flash" } } },
-    });
+    for (const owner of [{ primary: "google/gemini-2.5-flash" }, { primary: `openai/${LEGACY_VISION}` }]) {
+      vi.mocked(runOpenclawConfigSet).mockClear();
+      vi.mocked(runOpenclawConfigSetBatch).mockClear();
+      mockReadConfig.mockResolvedValue({ agents: { defaults: { imageModel: owner } } });
 
-    await connectClawai();
+      await connectClawai();
 
-    expect(callFor("agents.defaults.imageModel")).toBeUndefined();
-    // The entry is still registered — availability is not the same as default.
-    expect(visionEntry()).toBeDefined();
+      expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+    }
   });
 
   it("treats a fallbacks-only imageModel as already configured", async () => {
@@ -397,9 +375,6 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
   });
 
   it("leaves a bare string the OWNER wrote alone (TASK-755)", async () => {
-    // The core coerces a string and resolves a model from it, so this is a
-    // configured slot; reading it as empty replaced the model the owner chose
-    // for looking at the pictures he sends.
     mockReadConfig.mockResolvedValue({
       agents: { defaults: { imageModel: "google/gemini-2.5-flash" } },
     });
@@ -409,20 +384,30 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     expect(callFor("agents.defaults.imageModel")).toBeUndefined();
   });
 
-  it("carries OUR own previous id to the resolved one even as a bare string", async () => {
-    // The other half, and the reason the string is COERCED rather than merely
-    // treated as occupied: this arm moves our own previous vision id to the
-    // resolved one in both directions, and a slot it cannot read keeps pointing
-    // at an id the provider block no longer defines. A string carries no
-    // fallbacks, so it is replaced rather than spread.
+  it("moves either id the separate vision model had onto Flash, keeping the owner's fallbacks", async () => {
+    for (const id of [VISION_EXP, LEGACY_VISION]) {
+      vi.mocked(runOpenclawConfigSet).mockClear();
+      vi.mocked(runOpenclawConfigSetBatch).mockClear();
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { imageModel: { primary: `deepseek/${id}`, fallbacks: ["google/gemini-2.5-flash"] } } },
+      });
+
+      await connectClawai();
+
+      expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null"))
+        .toEqual({ primary: CLAWBOX_AI_CHAT_MODEL, fallbacks: ["google/gemini-2.5-flash"] });
+    }
+  });
+
+  it("moves OUR old id even as a bare string, into the object shape", async () => {
     mockReadConfig.mockResolvedValue({
-      agents: { defaults: { imageModel: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` } },
+      agents: { defaults: { imageModel: `deepseek/${LEGACY_VISION}` } },
     });
 
     await connectClawai();
 
     expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null"))
-      .toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+      .toEqual({ primary: CLAWBOX_AI_CHAT_MODEL });
   });
 
   it("claims an imageModel that is empty in OpenClaw's sense", async () => {
@@ -433,12 +418,81 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     await connectClawai();
 
     expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null"))
-      .toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+      .toEqual({ primary: CLAWBOX_AI_CHAT_MODEL });
   });
 
-  it("still configures chat when the vision write fails", async () => {
+  it("moves fallbacks and per-agent models off the retired Max-plan id on a re-link", async () => {
+    // The provider write drops that row, so a slot left naming it would point
+    // at a model this box no longer defines.
+    mockReadConfig.mockResolvedValue({
+      models: { providers: { deepseek: { apiKey: CLAWAI_TOKEN, baseUrl: PROXY_URL, models: [] } } },
+      agents: {
+        defaults: {
+          model: { primary: "anthropic/claude-opus-5", fallbacks: [RETIRED_CHAT_REF] },
+          compaction: { model: RETIRED_CHAT_REF },
+        },
+        list: [{ id: "helper", model: RETIRED_CHAT_REF }, { id: "other", model: "anthropic/claude-opus-5" }],
+      },
+      // `agents.list` is OpenClaw's, not a key this repo's config type models.
+    } as never);
+
+    await connectClawai();
+
+    expect(JSON.parse(callFor("agents.defaults.model")?.[1] ?? "null"))
+      .toEqual({ primary: "anthropic/claude-opus-5", fallbacks: [CLAWBOX_AI_CHAT_MODEL] });
+    expect(JSON.parse(callFor("agents.defaults.compaction")?.[1] ?? "null")).toEqual({ model: CLAWBOX_AI_CHAT_MODEL });
+    expect(JSON.parse(callFor("agents.list")?.[1] ?? "null")).toEqual([
+      { id: "helper", model: CLAWBOX_AI_CHAT_MODEL },
+      { id: "other", model: "anthropic/claude-opus-5" },
+    ]);
+  });
+
+  it("lets this call's own primary win over the move", async () => {
+    // The move is computed from the config as it was BEFORE this save, so it
+    // is written first: the primary the save itself picks lands after it.
+    mockReadConfig.mockResolvedValue({
+      agents: { defaults: { model: { primary: RETIRED_CHAT_REF, fallbacks: [] } } },
+    });
+
+    await connectClawai();
+
+    // Every write that sets the primary, in order: the move's whole slot and
+    // the save's own `.primary`.
+    const primaries = configSetCalls().flatMap((args) => {
+      if (args[0] === "agents.defaults.model.primary") return [args[1]];
+      if (args[0] === "agents.defaults.model") return [JSON.parse(args[1]).primary];
+      return [];
+    });
+    expect(primaries.length).toBeGreaterThan(0);
+    expect(primaries[primaries.length - 1]).toBe(CLAWBOX_AI_CHAT_MODEL);
+  });
+
+  it("writes a retired key of the models map with --replace, which the CLI needs to drop it", async () => {
+    mockReadConfig.mockResolvedValue({
+      agents: { defaults: { models: { [RETIRED_CHAT_REF]: { alias: "max" } } } },
+    } as never);
+
+    await connectClawai();
+
+    const call = callFor("agents.defaults.models");
+    expect(JSON.parse(call?.[1] ?? "null")).toEqual({ [CLAWBOX_AI_CHAT_MODEL]: { alias: "max" } });
+    expect(call).toContain("--replace");
+  });
+
+  it("leaves `deepseek/…` alone on a box whose deepseek provider is a raw DeepSeek account", async () => {
+    mockReadConfig.mockResolvedValue({
+      models: { providers: { deepseek: { apiKey: "sk-raw", baseUrl: "https://api.deepseek.com", models: [] } } },
+      agents: { defaults: { model: { primary: "anthropic/claude-opus-5", fallbacks: [RETIRED_CHAT_REF] } } },
+    });
+
+    await connectClawai();
+
+    expect(callFor("agents.defaults.model")).toBeUndefined();
+  });
+
+  it("still configures chat when the image-understanding write fails", async () => {
     // Non-fatal by design: a chat provider that works is worth more than a
-    // vision model, so this must not fail the whole Connect ClawBox AI flow.
+    // picture slot, so this must not fail the whole Connect ClawBox AI flow.
     failConfigSetsMatching(
       mockRunOpenclawConfigSet,
       mockRunOpenclawConfigSetBatch,

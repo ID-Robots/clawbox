@@ -3,7 +3,7 @@
 // WHY IT EXISTS (TASK-713). The ClawBox AI tier badge is a device DEFAULT — the
 // portal's `deviceTier`, which a Max subscriber may deliberately leave on Flash
 // for one box — and every pair, re-pair, wizard finalise and plan press wrote
-// `CLAWBOX_AI_MODEL_BY_TIER[badge]` straight over the primary model. On a Max
+// the badge's own model straight over the primary model. On a Max
 // account whose box is stamped `flash`, an entitled Max primary was replaced by
 // Flash on the next re-pair, and the chat's own entitlement guard could not undo
 // it: that one only ever moves DOWN. The owner's ruling is that a default fills
@@ -58,6 +58,7 @@
 
 import { getKnown, setMany } from "@/lib/config-store";
 import { CLAWBOX_AI_CHAT_MODEL_IDS, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
+import { isRetiredClawboxAiChatModel } from "@/lib/clawbox-ai-retired-models";
 
 /**
  * Config-store key: `{ <canonical provider>: <model as the picker wrote it> }`.
@@ -70,8 +71,10 @@ import { CLAWBOX_AI_CHAT_MODEL_IDS, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai
  *
  * The provider keys are the canonical UI ids (`clawai`, `anthropic`, …), and the
  * values keep the spelling the surface that wrote them uses:
- * `deepseek/deepseek-v4-pro` from the OpenClaw picker, the bare
- * `deepseek-v4-pro` from Hermes, whose config takes ids unprefixed.
+ * `deepseek/deepseek-v4-flash` from the OpenClaw picker, the bare
+ * `deepseek-v4-flash` from Hermes, whose config takes ids unprefixed. A pick of
+ * a retired ClawBox AI id is moved to Flash by the one-model boot migration
+ * (src/lib/clawbox-ai-retired-models.ts).
  */
 export const EXPLICIT_MODEL_PICKS_KEY = "ai_model_explicit_picks";
 
@@ -109,9 +112,10 @@ function serialise(fn: () => Promise<void>): Promise<void> {
  * The ClawBox AI chat model this reference names, bare, or null.
  *
  * The id allowlist is what actually decides — `CLAWBOX_AI_CHAT_MODEL_IDS` is a
- * closed set of two. The provider half is checked only to reject a foreign
- * vendor that happens to serve a same-named id, which is not idle: OpenRouter
- * slugs carry their vendor INSIDE the id, and `deepseek/` is one of them.
+ * closed set (the one model, since TASK-2261). The provider half is checked
+ * only to reject a foreign vendor that happens to serve a same-named id, which
+ * is not idle: OpenRouter slugs carry their vendor INSIDE the id, and
+ * `deepseek/` is one of them.
  */
 export function clawboxAiModelIdOf(ref: unknown): string | null {
   if (typeof ref !== "string") return null;
@@ -269,7 +273,10 @@ export async function forgetClawboxAiPickIfMovedOff(model: string): Promise<void
       const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
       const picks = explicitPicksFrom(value);
       const picked = clawboxAiModelIdOf(picks.clawai);
-      if (!picked || picked === landed) return;
+      // A pick of a retired id (TASK-2261) is one the box has moved off too:
+      // the one-model switch is exactly such a move.
+      const retired = isRetiredClawboxAiChatModel(picks.clawai, { bare: true });
+      if (!retired && (!picked || picked === landed)) return;
       const next = picksWithoutProvider(picks, "clawai");
       if (next) await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: next });
     } catch (err) {
@@ -404,7 +411,7 @@ export function picksWithoutProvider(
  * CLAWBOX AI ONLY, deliberately, and the other four slots are a stated gap
  * rather than an oversight. Two things are true of `clawai` and of nothing
  * else in this map. Its slot is EXACT: `clawboxAiModelIdOf` decides membership
- * from a closed set of two ids and accepts every spelling the surfaces write
+ * from a closed set of ids and accepts every spelling the surfaces write
  * (`deepseek/…`, `clawai/…`, and Hermes' bare id), so no prefix has to be
  * guessed at — and guessing is not idle, because Hermes records a bare
  * `openai/gpt-5.4` for an OPENROUTER save, which `pickSlotFor` files under
@@ -416,9 +423,8 @@ export function picksWithoutProvider(
  * resurrect one account's model as another's default.
  *
  * VALIDATED AGAINST WHAT THE SURFACE STILL OFFERS. Not an entitlement check
- * and not claimed as one: both tiers are declared on EVERY box whatever the
- * plan (see `CLAWBOX_AI_CHAT_MODEL_IDS`), and the portal is what gates them.
- * What this rejects is an id that has left the list — a retired alias, a
+ * and not claimed as one: the same ids are declared on EVERY box whatever the
+ * plan (see `CLAWBOX_AI_CHAT_MODEL_IDS`). What this rejects is an id that has left the list — a retired alias, a
  * provider row rewritten by hand — so the row can never name a model the
  * surface has no entry for.
  */

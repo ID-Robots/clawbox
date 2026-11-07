@@ -35,7 +35,7 @@ export type ProgressLabelKey =
   | "plan"
   // The runner's OWN sentences (RUNNER_STEP below). They used to reach the
   // timeline as the English the runner wrote, so a German run page read
-  // "Started with deepseek-v4-pro[1m]" and "Thinking…" beside the translated
+  // "Started with deepseek-v4-flash[1m]" and "Thinking…" beside the translated
   // "Liest store.ts". A key each, so the surface can word them.
   | "started"
   | "startedWith"
@@ -228,7 +228,7 @@ function shorten(s: string, max: number): string {
  *
  * They lived as English literals at their thirty-odd call sites, and the run
  * page drew them verbatim: a German desktop read "Started with
- * deepseek-v4-pro[1m]", "Thinking…" and "Committed as 4f21a…" beside chips
+ * deepseek-v4-flash[1m]", "Thinking…" and "Committed as 4f21a…" beside chips
  * that were properly translated. A surface can only word a step in the
  * owner's language if it can tell WHICH step it is, and the only handle on a
  * line is its text — so a reworded sentence here would silently stop matching

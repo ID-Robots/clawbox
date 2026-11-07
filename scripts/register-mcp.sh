@@ -1247,7 +1247,7 @@ esac
 # 30-second poll — the same pair `speechEntitledTier()` reads for the panel and
 # `_clawai_speech_entitled` / `_clawai_speech_withdrawable` read on the OpenClaw
 # side. `"pro"` is the tier of the MAX plan; the two names are off by one on
-# purpose (CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts).
+# purpose (ClawboxAiTier and CLAWBOX_AI_TIER_LABEL in src/lib/clawbox-ai-models.ts).
 #
 # NOT KNOWING IS NOT AN ANSWER, in either direction, and that is the whole
 # false-success/false-failure guard here. A device store that is absent,

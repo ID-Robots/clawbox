@@ -71,10 +71,6 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: vi.fn(async () => ({ id: "vision", verified: true, reason: "proxy-allows" })),
-}));
 // `ready` is `enabled AND harness installed AND ClawBox AI connected`, and the
 // third of those is the config-store key this route writes. Modelling it off the
 // same store is what makes the ordering trap reproducible.
@@ -198,7 +194,7 @@ describe("POST /setup-api/hermes/clawai", () => {
     // token is captured here, ahead of that write, and passed in — the same
     // shape, and for the same reason, as `codingAgentReadyBefore` beside it.
     store.clawai_token = "claw_ACCOUNT_A0000000";
-    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-flash" };
 
     const response = await POST(post({ token: PASTED, tier: "flash" }));
 
@@ -218,7 +214,7 @@ describe("POST /setup-api/hermes/clawai", () => {
     // no account change, and wrote A's model as B's default for good. The two
     // writes are one write now (TASK-713).
     store.clawai_token = "claw_ACCOUNT_A0000000";
-    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-flash" };
     cliMock.mockImplementation(async (args: string[]) => (
       args[1] === "set" && args[2] === "model.default"
         ? { code: 1, stdout: "", stderr: "config store is locked by another writer" }
@@ -305,14 +301,14 @@ describe("POST /setup-api/hermes/clawai", () => {
 
   it("keeps the pick when the SAME account re-applies its tier", async () => {
     store.clawai_token = PASTED;
-    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-flash" };
 
     const response = await POST(post({ token: PASTED, tier: "flash" }));
 
     expect(response.status).toBe(200);
-    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({ clawai: "deepseek/deepseek-v4-pro" });
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({ clawai: "deepseek/deepseek-v4-flash" });
     const modelWrite = modelDefaultWrite();
-    expect(modelWrite).toBe("deepseek-v4-pro");
+    expect(modelWrite).toBe("deepseek-v4-flash");
   });
 
   it("still asks only ONCE when the link moves the providers too", async () => {
@@ -416,7 +412,7 @@ describe("GET /setup-api/hermes/clawai", () => {
     store.clawai_token = "claw_token_abc";
   });
 
-  it("names the tier's model when the owner has picked none", async () => {
+  it("names the one model when the owner has picked none", async () => {
     // Some other provider is active, so this is what a LINK would write.
     hermesConfig["model.provider"] = "anthropic";
     hermesConfig["model.default"] = "anthropic/claude-opus-5";
@@ -435,11 +431,11 @@ describe("GET /setup-api/hermes/clawai", () => {
     hermesConfig["model.provider"] = "anthropic";
     hermesConfig["model.default"] = "anthropic/claude-opus-5";
     store.clawai_tier = "flash";
-    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-flash" };
 
     const body = await (await GET()).json();
 
-    expect(body.model).toBe("deepseek-v4-pro");
+    expect(body.model).toBe("deepseek-v4-flash");
     // The badge itself is untouched — it is the PLAN, and it is still what the
     // plan card renders.
     expect(body.tier).toBe("flash");
@@ -450,13 +446,13 @@ describe("GET /setup-api/hermes/clawai", () => {
     // with `model.default` — an out-of-band `hermes config set`, a link that
     // half-landed — must not be painted as the model in use.
     hermesConfig["model.provider"] = "clawai";
-    hermesConfig["model.default"] = "deepseek-v4-flash";
+    hermesConfig["model.default"] = "a-hand-set-id";
     store.clawai_tier = "pro";
-    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-flash" };
 
     const body = await (await GET()).json();
 
-    expect(body.model).toBe("deepseek-v4-flash");
+    expect(body.model).toBe("a-hand-set-id");
     expect(body.active).toBe(true);
   });
 });
