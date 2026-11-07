@@ -187,6 +187,12 @@ py3("Hermes — pre_gateway_dispatch and the button's callback handler", () => {
     expect(calls[0].body).toEqual({ senderId: "7001", chatId: "7001", isGroup: false, text: "/update", channel: "telegram", harness: "hermes" });
   });
 
+  it("hands a stranger back to Hermes' own auth — not claimed, not a fail-closed drop", () => {
+    const { result, calls } = dispatch("/update", { answer: { handled: false, outcome: "not_owner" } });
+    expect(calls).toHaveLength(1);
+    expect(result).toBeNull();
+  });
+
   it("says when it came from a group", () => {
     expect(dispatch("/update", { chatType: "group" }).calls[0].body.isGroup).toBe(true);
   });

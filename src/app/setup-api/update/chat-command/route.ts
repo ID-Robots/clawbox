@@ -1,7 +1,7 @@
 // /setup-api/update/chat-command — /update and the weekly notice's Update
 // button, handed over by the harness's own hook (TASK-2260).
 //
-//   POST { senderId, chatId?, isGroup?, text, channel, harness } -> { handled }
+//   POST { senderId, chatId?, isGroup?, text, channel, harness } -> { handled, outcome? }
 //
 // WHO CALLS THIS. Not the agent, and not a tool. ClawBox's own plugins inside
 // the two harnesses, the same two that already carry the owner's emailed-draft
@@ -130,8 +130,14 @@ export async function POST(request: Request) {
         console.error("[update/chat-command] budget exhausted; claimed without an answer");
       }
     }
-    if (claim.handled) console.log(`[update/chat-command] ${claim.outcome} via ${harness}`);
-    return NextResponse.json({ handled: claim.handled });
+    if (claim.handled || claim.outcome === "not_owner") console.log(`[update/chat-command] ${claim.outcome} via ${harness}`);
+    // `not_owner` travels with an unclaimed answer so the Hermes hook can tell
+    // "a stranger: let Hermes' own auth refuse him" from "ClawBox could not be
+    // asked", which it fails CLOSED on (update_commands.py).
+    return NextResponse.json({
+      handled: claim.handled,
+      ...(!claim.handled && claim.outcome === "not_owner" ? { outcome: "not_owner" } : {}),
+    });
   } catch (err) {
     console.error("[update/chat-command] failed:", err instanceof Error ? err.message : err);
     return NextResponse.json({ handled: false }, { status: 200 });

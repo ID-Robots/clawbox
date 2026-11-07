@@ -133,12 +133,14 @@ describe("what it claims", () => {
     expect(startUpdate).not.toHaveBeenCalled();
   });
 
-  it("weighs a Hermes sender against the HERMES allowlist", async () => {
+  it("weighs a Hermes sender against the HERMES allowlist, and hands a stranger back to Hermes' own auth", async () => {
     // 6001 is OpenClaw's owner, not Hermes'.
-    await post({ senderId: "6001", text: "/update", channel: "telegram", harness: "hermes" });
+    const refused = await post({ senderId: "6001", text: "/update", channel: "telegram", harness: "hermes" });
+    expect(await refused.json()).toEqual({ handled: false, outcome: "not_owner" });
     await settle();
-    expect(sendOwnerTelegramText).toHaveBeenCalledWith("6001", "Only this ClawBox's owner can do that.", { harness: "hermes" });
-    sendOwnerTelegramText.mockClear();
+    expect(sendOwnerTelegramText).not.toHaveBeenCalled();
+    expect(sendOwnerTelegramButtons).not.toHaveBeenCalled();
+    expect(power.pendingPowerApproval()).toBeNull();
     await post({ senderId: "7001", chatId: "7001", text: "/update", channel: "telegram", harness: "hermes" });
     await settle();
     expect(sendOwnerTelegramButtons).toHaveBeenCalledWith("7001", expect.stringContaining("4.3.1"), expect.any(Array), { harness: "hermes" });

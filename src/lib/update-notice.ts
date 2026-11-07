@@ -556,6 +556,18 @@ export async function claimUpdateChatCommand(input: UpdateChatInput): Promise<Up
 
   if (!senderId || !owners.includes(senderId)) {
     console.error(`${TAG} /update or the Update button came from a user who is not on the owner allowlist; refused`);
+    if (harness === "hermes") {
+      // GIVEN BACK to Hermes, whose own auth runs right after this hook and
+      // refuses an unknown sender (its pairing reply) before any command —
+      // its own /update included — can run. Claiming it here instead was
+      // measured on a lab board to leave Hermes' typing indicator running in
+      // the stranger's chat for as long as the gateway stays up: the skip
+      // path never stops the keep-typing loop ingress started for him.
+      return { handled: false, outcome: "not_owner" };
+    }
+    // On OpenClaw a stranger never reaches the hook (the core's own sender
+    // authorization runs first); one that does is claimed and refused, so his
+    // message cannot fall through to the core's own /update.
     return {
       handled: true,
       outcome: "not_owner",

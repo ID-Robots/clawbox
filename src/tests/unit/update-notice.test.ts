@@ -326,6 +326,15 @@ describe("the chat: /update and the Update button", () => {
     expect(requestPowerApproval).not.toHaveBeenCalled();
   });
 
+  it("on Hermes, hands a stranger back to Hermes' own auth instead of claiming him", async () => {
+    // Hermes runs the hook BEFORE its own auth, which refuses an unknown sender
+    // before any command; a claim there left Hermes typing in his chat forever.
+    const claim = await notice.claimUpdateChatCommand({ senderId: "999", text: "/update", harness: "hermes" });
+    expect(claim).toEqual({ handled: false, outcome: "not_owner" });
+    expect(versionInfo).not.toHaveBeenCalled();
+    expect(requestPowerApproval).not.toHaveBeenCalled();
+  });
+
   it("refuses a stranger's tap on the button too — no approval is ever asked for him", async () => {
     const claim = await notice.claimUpdateChatCommand({ senderId: "999", text: "callback_data: clawbox-update", harness: "openclaw" });
     expect(claim.outcome).toBe("not_owner");

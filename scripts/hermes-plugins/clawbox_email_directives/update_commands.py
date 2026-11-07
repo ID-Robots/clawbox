@@ -24,7 +24,10 @@ only when the owner confirms on the desktop or the approvals bot.
 FAIL CLOSED. A /update this hook does not claim goes on to Hermes' own
 ``/update`` command — ``hermes update``, which moves the agent off the commit
 ClawBox pins. An owner who typed /update meant the ClawBox update; if ClawBox
-cannot be asked, the message is dropped and the log says why.
+cannot be asked, the message is dropped and the log says why. The one message
+handed BACK is a stranger's: ClawBox answers ``outcome: "not_owner"`` and
+Hermes' own auth, which runs right after this hook, refuses him before any
+command runs.
 """
 
 from __future__ import annotations
@@ -63,10 +66,25 @@ def looks_like_update_command(text) -> bool:
     )
 
 
-def _post(token: str, body: dict) -> tuple[int, bool]:
+#: What ClawBox answered: it took the message, it refused a stranger (whom
+#: Hermes' own auth then refuses), or nothing usable — which fails closed.
+CLAIMED, STRANGER, NO_ANSWER = "claimed", "stranger", "no_answer"
+
+
+def _verdict(answer) -> str:
+    if not isinstance(answer, dict):
+        return NO_ANSWER
+    if answer.get("handled") is True:
+        return CLAIMED
+    if answer.get("outcome") == "not_owner":
+        return STRANGER
+    return NO_ANSWER
+
+
+def _post(token: str, body: dict) -> tuple[int, str]:
     matched = approvals.TOKEN_RE.fullmatch(token.strip())
     if not matched:
-        return 0, False
+        return 0, NO_ANSWER
     request = urllib.request.Request(
         f"{approvals.API_BASE}/setup-api/update/chat-command",
         data=json.dumps(body).encode("utf-8"),
@@ -76,29 +94,29 @@ def _post(token: str, body: dict) -> tuple[int, bool]:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:  # noqa: S310 - loopback, fixed scheme
             if response.status != 200:
-                return response.status, False
+                return response.status, NO_ANSWER
             answer = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as err:
-        return err.code, False
-    return 200, isinstance(answer, dict) and answer.get("handled") is True
+        return err.code, NO_ANSWER
+    return 200, _verdict(answer)
 
 
-def ask_clawbox(body: dict) -> bool:
-    """True when ClawBox took the message. Never raises."""
+def ask_clawbox(body: dict) -> str:
+    """``CLAIMED``, ``STRANGER`` or ``NO_ANSWER``. Never raises."""
     token = approvals._api_token()
     if not token:
-        return False
+        return NO_ANSWER
     try:
-        status, handled = _post(token, body)
+        status, verdict = _post(token, body)
         if status in (401, 403):
             approvals._cached_token = None
             fresh = approvals._api_token()
             if fresh and fresh != token:
-                _, handled = _post(fresh, body)
-        return handled
+                _, verdict = _post(fresh, body)
+        return verdict
     except Exception:  # noqa: BLE001 - a hook must never raise into the dispatch path
         logger.warning("clawbox_email_directives: ClawBox could not be asked about /update", exc_info=True)
-        return False
+        return NO_ANSWER
 
 
 def _platform_of(event) -> str:
@@ -134,8 +152,15 @@ def pre_gateway_dispatch(event=None, **kwargs):
             "channel": "telegram",
             "harness": "hermes",
         }
-        if sender and ask_clawbox(body):
+        verdict = ask_clawbox(body) if sender else NO_ANSWER
+        if verdict == CLAIMED:
             return {"action": "skip", "reason": "clawbox_update"}
+        if verdict == STRANGER:
+            # Not the owner: Hermes' own auth, which runs right after this hook,
+            # refuses him before any command runs. Claiming it here would leave
+            # Hermes' typing indicator running in his chat (the skip path never
+            # stops the keep-typing loop ingress started).
+            return None
         logger.warning("clawbox_email_directives: /update could not be handed to ClawBox; dropped rather than run Hermes' own update")
         return {"action": "skip", "reason": "clawbox_update_unavailable"}
     except Exception:  # noqa: BLE001
@@ -166,7 +191,7 @@ async def on_update_button(update, context=None) -> None:
         }
         if not body["senderId"]:
             return
-        handled = await asyncio.to_thread(ask_clawbox, body)
+        handled = await asyncio.to_thread(ask_clawbox, body) == CLAIMED
         if handled:
             # One tap, one question — the way OpenClaw clears a routed button.
             try:
