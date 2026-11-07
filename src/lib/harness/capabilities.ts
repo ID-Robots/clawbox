@@ -52,6 +52,15 @@ export interface HarnessFacts {
    */
   openclawCannotSeePictures?: boolean;
   /**
+   * The OpenClaw chat model is text-only (the vision check found Flash blind)
+   * and a picture is looked at through the `view_image` tool instead, with the
+   * model the check chose. The chat then SAYS so beside the attached picture:
+   * a model that answered pictures directly earlier in the same conversation
+   * otherwise answers from that history without looking — measured on a lab
+   * box, a confident description of a picture it never saw.
+   */
+  openclawPicturesViaTool?: boolean;
+  /**
    * Turns can be run through the already-running `hermes dashboard` process and
    * streamed back token by token, instead of spawning a `chat -q` per message.
    *
@@ -264,6 +273,7 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     // A picture is refused, with the composer's own sentence, only when the
     // box positively has nothing to look at it with — never on a guess.
     canAttachImages: facts.openclawCannotSeePictures !== true,
+    picturesViaTool: facts.openclawPicturesViaTool === true,
     canAttachDocuments: true,
     maxAttachmentsPerTurn: MAX_ATTACHMENTS.openclaw,
     // Follows the credential here too, for the same reason it does on Hermes:

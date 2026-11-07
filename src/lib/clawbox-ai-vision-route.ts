@@ -1,5 +1,7 @@
 /**
- * Does an OpenClaw box have NOTHING to look at an attached picture with?
+ * Does an OpenClaw box have NOTHING to look at an attached picture with — and
+ * when it has something, does the chat model see the picture itself or only
+ * through a tool?
  *
  * Pure, over openclaw.json as `readConfig` returns it, so the capabilities
  * route can ask it without a probe and a test can ask it without a box. True
@@ -38,21 +40,36 @@ function hasModel(slot: unknown): boolean {
   return Array.isArray(fallbacks) && fallbacks.some((ref) => typeof ref === "string" && ref.trim());
 }
 
-export function openclawCannotSeePictures(config: unknown): boolean {
-  if (!config || typeof config !== "object") return false;
+/**
+ * How a picture attached to a ClawBox AI chat on OpenClaw gets looked at:
+ *
+ *   direct    the chat model's row takes `image`: OpenClaw hands it the picture
+ *   tool      the chat model is text-only and `agents.defaults.imageModel` is
+ *             set: the model must call the `view_image` tool to look at it
+ *   none      text-only, and nothing set to look with
+ *   other     not a ClawBox AI chat, or not something this can tell
+ */
+export type OpenclawPictureRoute = "direct" | "tool" | "none" | "other";
+
+export function openclawPictureRoute(config: unknown): OpenclawPictureRoute {
+  if (!config || typeof config !== "object") return "other";
   const cfg = config as OpenclawConfigLike;
   const primary = primaryOf(cfg.agents?.defaults?.model);
   const slash = primary.indexOf("/");
-  if (slash <= 0) return false;
+  if (slash <= 0) return "other";
   const provider = primary.slice(0, slash).toLowerCase();
-  if (provider !== CLAWBOX_AI_PROVIDER && provider !== "clawai") return false;
+  if (provider !== CLAWBOX_AI_PROVIDER && provider !== "clawai") return "other";
   const id = primary.slice(slash + 1);
   const rows = cfg.models?.providers?.[CLAWBOX_AI_PROVIDER]?.models;
-  if (!Array.isArray(rows)) return false;
+  if (!Array.isArray(rows)) return "other";
   const row = rows.find((entry) => entry && typeof entry === "object" && (entry as { id?: unknown }).id === id) as
     | { input?: unknown }
     | undefined;
-  if (!row || !Array.isArray(row.input)) return false;
-  if (row.input.includes("image")) return false;
-  return !hasModel(cfg.agents?.defaults?.imageModel);
+  if (!row || !Array.isArray(row.input)) return "other";
+  if (row.input.includes("image")) return "direct";
+  return hasModel(cfg.agents?.defaults?.imageModel) ? "tool" : "none";
+}
+
+export function openclawCannotSeePictures(config: unknown): boolean {
+  return openclawPictureRoute(config) === "none";
 }

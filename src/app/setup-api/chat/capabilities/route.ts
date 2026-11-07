@@ -16,7 +16,7 @@ import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
 import { hermesSpeaksReplies, hermesVoiceProbePending } from "@/lib/hermes-tts";
 import { onboardingRitualArmed } from "@/lib/language-persona";
 import { readConfig as readOpenclawConfig } from "@/lib/openclaw-config";
-import { openclawCannotSeePictures } from "@/lib/clawbox-ai-vision-route";
+import { openclawPictureRoute, type OpenclawPictureRoute } from "@/lib/clawbox-ai-vision-route";
 
 export const dynamic = "force-dynamic";
 
@@ -104,16 +104,17 @@ export async function GET() {
   // OpenClaw: is there positively nothing to look at an attached picture with?
   // Read off openclaw.json, which the vision check wrote (TASK-2261); a config
   // that cannot be read keeps the attach button, as it always had.
-  const cannotSeePictures = harness === "openclaw" && linked
-    ? await readOpenclawConfig().then(openclawCannotSeePictures, () => false)
-    : false;
+  const pictureRoute: OpenclawPictureRoute = harness === "openclaw" && linked
+    ? await readOpenclawConfig().then(openclawPictureRoute, () => "other" as const)
+    : "other";
   const facts: HarnessFacts = {
     // A boolean precisely so the device credential never travels to a browser.
     hasClawaiToken: linked,
     onboardingArmed,
     hermesSupportsImages: supportsImages,
     hermesHasVisionRoute: hasVisionRoute,
-    openclawCannotSeePictures: cannotSeePictures,
+    openclawCannotSeePictures: pictureRoute === "none",
+    openclawPicturesViaTool: pictureRoute === "tool",
     hermesStreamsTurns: streamsTurns,
     hermesSpeaksReplies: speaksReplies,
     hasClawaiImageRoute: hasImageRoute,

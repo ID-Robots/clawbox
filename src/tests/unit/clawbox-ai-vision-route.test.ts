@@ -40,3 +40,36 @@ describe("the OpenClaw attach button", () => {
     expect(capabilitiesFor("openclaw", { ...UNKNOWN_FACTS, openclawCannotSeePictures: true }).canAttachDocuments).toBe(true);
   });
 });
+
+describe("a picture a text-only ClawBox AI chat model can only look at through a tool", () => {
+  it("is read off openclaw.json as the tool route", async () => {
+    const { openclawPictureRoute } = await import("@/lib/clawbox-ai-vision-route");
+    expect(openclawPictureRoute(box(["text"], { primary: "deepseek/gpt-5.6-luna" }))).toBe("tool");
+    expect(openclawPictureRoute(box(["text", "image"], { primary: "deepseek/deepseek-v4-flash" }))).toBe("direct");
+    expect(openclawPictureRoute(box(["text"]))).toBe("none");
+    expect(openclawPictureRoute(box(["text"], undefined, "anthropic/claude-opus-5"))).toBe("other");
+  });
+
+  it("becomes a capability only OpenClaw carries", () => {
+    expect(capabilitiesFor("openclaw", { ...UNKNOWN_FACTS, openclawPicturesViaTool: true }).picturesViaTool).toBe(true);
+    expect(capabilitiesFor("openclaw", UNKNOWN_FACTS).picturesViaTool).toBe(false);
+  });
+
+  it("names the picture with the way to look at it, and reads back as the same picture", async () => {
+    const { attachmentLine } = await import("@/lib/harness/openclaw-gateway-adapter");
+    const { splitUserAttachments } = await import("@/lib/chat-media");
+    const picture = { path: "/home/clawbox/.openclaw/media/chat-attachments/abc-shot.png", type: "image/png" };
+    const doc = { path: "/home/clawbox/.openclaw/media/chat-attachments/abc-notes.pdf", type: "application/pdf" };
+
+    expect(attachmentLine(picture, false)).toBe(`[Attached file: ${picture.path}]`);
+    const line = attachmentLine(picture, true);
+    expect(line).toMatch(/^\[Attached image: \/home\/clawbox\/.*shot\.png — .*view_image tool.*\]$/);
+    expect(attachmentLine(doc, true)).toBe(`[Attached file: ${doc.path}]`);
+
+    const plain = splitUserAttachments(`[Attached file: ${picture.path}]\nwhat is this?`);
+    const hinted = splitUserAttachments(`${line}\nwhat is this?`);
+    expect(hinted).toEqual(plain);
+    expect(hinted.text).toBe("what is this?");
+    expect(hinted.images).toHaveLength(1);
+  });
+});

@@ -400,6 +400,21 @@ export function agentIdFromSessionKey(key: string): string | undefined {
   return parts[1].toLowerCase();
 }
 
+/**
+ * How a staged file is named in the turn. A picture on a box whose chat model
+ * cannot see (TASK-2261: the vision check found Flash blind) also says how to
+ * look at it: OpenClaw hands a text-only model the PATH, and a model that saw
+ * pictures directly earlier in the conversation was measured answering from
+ * that history instead of calling `view_image` — a description of a picture
+ * nobody looked at.
+ */
+export function attachmentLine(attachment: { path: string; type: string }, picturesViaTool: boolean): string {
+  if (picturesViaTool && typeof attachment.type === "string" && attachment.type.startsWith("image/")) {
+    return `[Attached image: ${attachment.path} — you cannot see this picture directly; look at it with the view_image tool before you say anything about it]`;
+  }
+  return `[Attached file: ${attachment.path}]`;
+}
+
 export class OpenClawGatewayAdapter implements HarnessAdapter {
   readonly id = "openclaw" as const;
 
@@ -469,7 +484,7 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     void _onEvent;
     let messageText = req.text;
     if (req.attachments.length > 0) {
-      const filePaths = req.attachments.map((a) => `[Attached file: ${a.path}]`).join("\n");
+      const filePaths = req.attachments.map((a) => attachmentLine(a, this.capabilities.picturesViaTool === true)).join("\n");
       messageText = [filePaths, req.text].filter(Boolean).join("\n");
     }
     // The transport contract says a turn rejects `HarnessError('aborted')` when
