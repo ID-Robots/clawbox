@@ -8,7 +8,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: vi.fn(async () => "openclaw"),
+  getActiveHarnessSource: vi.fn(async () => ({ active: "openclaw", defaulted: false, edition: "openclaw", locked: true })),
+}));
 vi.mock("@/lib/hermes-telegram", () => ({ notifyHermesTelegramUser: vi.fn(async () => true) }));
 vi.mock("@/lib/telegram-bot-identity", () => ({ readActiveTelegramBot: vi.fn() }));
 
@@ -165,11 +168,12 @@ describe("a message with buttons (TASK-2260, the weekly update notice)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("follows the active harness when none is named", async () => {
-    vi.mocked(harness.getActiveHarness).mockResolvedValue("hermes");
+  it("follows the active harness when none is named — one resolution, handed over whole", async () => {
+    const source = { active: "hermes" as const, defaulted: false, edition: "dual" as const, locked: false };
+    vi.mocked(harness.getActiveHarnessSource).mockResolvedValue(source);
     stubTelegram();
     await send.sendOwnerTelegramButtons("6001", "hi", BUTTON);
-    expect(identity.readActiveTelegramBot).toHaveBeenCalledWith("hermes");
+    expect(identity.readActiveTelegramBot).toHaveBeenCalledWith(source);
   });
 
   it("answers false — never throws — with no token, a bad chat id or a refusal", async () => {

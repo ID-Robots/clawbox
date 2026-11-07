@@ -21,7 +21,7 @@ import {
 } from "../../../scripts/openclaw-plugins/clawbox-email-directives/update-commands.mjs";
 import plugin, { onInboundBeforeDispatch } from "../../../scripts/openclaw-plugins/clawbox-email-directives/index.mjs";
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO = path.resolve(__dirname, "../../..");
 const PLUGINS_ROOT = path.join(REPO, "scripts/hermes-plugins");

@@ -27,7 +27,7 @@
 // already succeeded, and a Telegram outage must not turn a queued draft or a
 // finished run into a failure. The boolean is the whole report.
 
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarness, getActiveHarnessSource } from "@/lib/harness";
 import { notifyHermesTelegramUser } from "@/lib/hermes-telegram";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
@@ -226,7 +226,7 @@ export async function sendOwnerTelegramText(
  * chats with — the one message here that `hermes send` cannot carry.
  *
  * So BOTH editions take the Bot API, with the harness's OWN token
- * (`readActiveTelegramBot(harness)`: `channels.telegram` on OpenClaw,
+ * (`readActiveTelegramBot` for that harness: `channels.telegram` on OpenClaw,
  * ~/.hermes/.env on Hermes — never ClawBox's mirror on a dual box). Sending is
  * not receiving: nothing here touches the update stream the harness polls.
  * `false` when there is no usable token, which the caller turns into its own
@@ -242,8 +242,16 @@ export async function sendOwnerTelegramButtons(
   const body = text.slice(0, MAX_TELEGRAM_CHARS);
   if (!body) return false;
   try {
-    const harness = opts.harness ?? (await getActiveHarness());
-    const { token } = await readActiveTelegramBot(harness);
+    // A NAMED harness is passed as its literal; the active one as the whole
+    // resolution, so the dual-box guard in readActiveTelegramBot judges the
+    // edition from the same read as the harness.
+    let token: string | null;
+    if (opts.harness === "hermes") ({ token } = await readActiveTelegramBot("hermes"));
+    else if (opts.harness === "openclaw") ({ token } = await readActiveTelegramBot("openclaw"));
+    else {
+      const source = await getActiveHarnessSource();
+      ({ token } = await readActiveTelegramBot(source));
+    }
     if (typeof token !== "string" || !token.trim()) return false;
     return await sendTelegramBotMessage(token, chatId, body, opts.timeoutMs, buttons);
   } catch (err) {
