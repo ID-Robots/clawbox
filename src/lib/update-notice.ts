@@ -524,9 +524,13 @@ export interface UpdateChatClaim {
 }
 
 async function reply(chatId: string, text: string, harness: Harness): Promise<void> {
-  if (!(await sendOwnerTelegramText(chatId, text, { harness }))) {
-    console.warn(`${TAG} a reply in the owner's chat was not delivered`);
-  }
+  if (await sendOwnerTelegramText(chatId, text, { harness })) return;
+  // On Hermes the plain path is `hermes send`, a CLI of its own that can fail
+  // where the bot works — a cold start that times out on a loaded box, or a
+  // Bot API root it does not read (the lab stub). The same bot through the Bot
+  // API, with Hermes' own token, is the path the notice itself takes.
+  if (harness === "hermes" && (await sendOwnerTelegramButtons(chatId, text, [], { harness }))) return;
+  console.warn(`${TAG} a reply in the owner's chat was not delivered`);
 }
 
 /**

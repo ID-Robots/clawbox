@@ -406,6 +406,25 @@ describe("the chat: /update and the Update button", () => {
     expect(sendOwnerTelegramText.mock.calls[0][1]).toContain("approvals bot");
   });
 
+  it("on Hermes, a reply `hermes send` could not deliver goes out on the Bot API with Hermes' own token", async () => {
+    requestPowerApproval.mockResolvedValue({ id: "a".repeat(32), action: "update", messages: [] });
+    sendOwnerTelegramText.mockResolvedValue(false);
+    await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "hermes" })).run?.();
+    expect(sendOwnerTelegramButtons).toHaveBeenCalledWith(
+      "6001",
+      "Update requested. Confirm it on the ClawBox desktop within 2 minutes.",
+      [],
+      { harness: "hermes" },
+    );
+  });
+
+  it("on OpenClaw, where the plain path already IS the Bot API, a failed reply is not sent twice", async () => {
+    requestPowerApproval.mockResolvedValue({ id: "a".repeat(32), action: "update", messages: [] });
+    sendOwnerTelegramText.mockResolvedValue(false);
+    await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
+    expect(sendOwnerTelegramButtons).not.toHaveBeenCalled();
+  });
+
   it("a stale button on an up-to-date box asks nothing", async () => {
     versionInfo.mockResolvedValue(CURRENT);
     await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
