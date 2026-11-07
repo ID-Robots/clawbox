@@ -90,6 +90,22 @@ describe("POST", () => {
     expect(await config.get("update_weekly_check")).toBeUndefined();
   });
 
+  it("refuses a cross-origin POST even with the owner's cookie — another page cannot silence the notice", async () => {
+    const res = await route.POST(req("POST", { cookie: ownerCookie, origin: "http://127.0.0.1:3000" }, { enabled: false }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("cross_origin");
+    const sameSite = await route.POST(req("POST", { cookie: ownerCookie, "sec-fetch-site": "same-site" }, { enabled: false }));
+    expect(sameSite.status).toBe(403);
+    const config = await import("@/lib/config-store");
+    expect(await config.get("update_weekly_check")).toBeUndefined();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("accepts the box's own page", async () => {
+    const res = await route.POST(req("POST", { cookie: ownerCookie, origin: "http://127.0.0.1" }, { enabled: false }));
+    expect(res.status).toBe(200);
+  });
+
   it("refuses anything but a boolean", async () => {
     expect((await route.POST(req("POST", { cookie: ownerCookie }, { enabled: "no" }))).status).toBe(400);
     expect((await route.POST(req("POST", { cookie: ownerCookie }, "{nope"))).status).toBe(400);

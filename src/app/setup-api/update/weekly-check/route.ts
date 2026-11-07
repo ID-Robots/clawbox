@@ -7,10 +7,12 @@
 // ON by default. Turning it off does not disarm the timer: the slot fires,
 // reads the switch and records the week as skipped (update-notice-scheduler.ts
 // says why). The POST is the OWNER's — not another ClawBox user's, and not the
-// agent's bearer: the notice is how the owner hears that his box is behind.
+// agent's bearer: the notice is how the owner hears that his box is behind —
+// and from this box's own pages only (same-origin), never a cross-site form.
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   isWeeklyUpdateCheckEnabled,
   readUpdateNoticeState,
@@ -60,6 +62,16 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const refused = await requireSession(request, { ownerOnly: true });
   if (refused) return refused;
+  // The owner's cookie rides along on a request from any page he visits,
+  // including another app on this box's own host at a different port; a
+  // text/plain POST needs no preflight. Only this ClawBox's own pages may
+  // switch his notice off.
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "The weekly update check can only be changed from this ClawBox's own pages.", code: "cross_origin" },
+      { status: 403 },
+    );
+  }
   let enabled: unknown;
   try {
     ({ enabled } = await request.json());
