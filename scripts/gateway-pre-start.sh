@@ -2898,17 +2898,15 @@ if _one_model_moved:
     )
 
 
-def _clawai_vision_look(model, token, base):
-    # "sees" | "blind" | "unknown": what `model` did with the probe picture.
-    # Twice at most, and only past an EMPTY answer (a reasoning model can spend
-    # a small budget thinking and say nothing, which is not blindness).
+def _clawai_vision_ask(model, token, base):
+    # One showing of the probe picture: ("sees" | "blind" | "unknown" | "empty", why).
     import urllib.request
     import urllib.error
 
     payload = json.dumps({
         "model": model,
         # Room for the thought AND the word: Flash reasons before it answers
-        # (25-64 tokens measured), and a 64-token budget came back empty.
+        # (25-94 tokens measured), and a 64-token budget came back empty.
         "max_tokens": 1024,
         "messages": [{
             "role": "user",
@@ -2918,27 +2916,48 @@ def _clawai_vision_look(model, token, base):
             ],
         }],
     }).encode()
+    req = urllib.request.Request(
+        base.rstrip("/") + "/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as err:
+        return ("blind" if err.code in (400, 404, 415, 422) else "unknown"), "HTTP " + str(err.code)
+    except Exception as err:
+        return "unknown", type(err).__name__
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except Exception:
+        text = None
+    if not isinstance(text, str) or not text.strip():
+        return "empty", "empty answer"
+    said = "said " + json.dumps(text.strip()[:24])
+    return ("sees" if re.search(r"\b(red|crimson|scarlet|maroon)\b", text, re.I) else "blind"), said
+
+
+_clawai_vision_why = []
+
+
+def _clawai_vision_look(model, token, base):
+    # "sees" | "blind" | "unknown". Asked again past an EMPTY answer (a
+    # reasoning model can spend its budget thinking and say nothing) and past a
+    # "blind" one: a single refusal can be the proxy's moment, and moving every
+    # picture on the box is not something one answer should decide.
+    blind = False
     for _attempt in range(2):
-        req = urllib.request.Request(
-            base.rstrip("/") + "/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                body = json.loads(resp.read().decode("utf-8", "replace"))
-        except urllib.error.HTTPError as err:
-            return "blind" if err.code in (400, 404, 415, 422) else "unknown"
-        except Exception:
-            return "unknown"
-        try:
-            text = body["choices"][0]["message"]["content"]
-        except Exception:
-            text = None
-        if isinstance(text, str) and text.strip():
-            return "sees" if re.search(r"\b(red|crimson|scarlet|maroon)\b", text, re.I) else "blind"
-    return "unknown"
+        look, why = _clawai_vision_ask(model, token, base)
+        _clawai_vision_why.append(model + ": " + why)
+        if look in ("sees", "unknown"):
+            return look
+        if look == "blind":
+            if blind:
+                return "blind"
+            blind = True
+    return "blind" if blind else "unknown"
 
 
 def _clawai_vision_probe_url():
@@ -3034,7 +3053,10 @@ if _deepseek_is_clawai and _flash_row is not None and isinstance(_one_model_toke
         # The owner's own picture model; Flash keeps whatever it declared.
         _flash_input = _flash_row.get("input")
         _vision_model = CLAWBOX_AI_FLASH_ID if isinstance(_flash_input, list) and "image" in _flash_input else None
-    print("  ClawBox AI vision check: " + _vision_verdict + " (pictures go to " + (_vision_model or "nothing") + ")")
+    print(
+        "  ClawBox AI vision check: " + _vision_verdict + " (pictures go to " + (_vision_model or "nothing")
+        + ("; " + "; ".join(_clawai_vision_why) if _clawai_vision_why else "") + ")"
+    )
 
     _want_input = ["text", "image"] if _vision_model == CLAWBOX_AI_FLASH_ID else ["text"]
     if _flash_row.get("input") != _want_input:

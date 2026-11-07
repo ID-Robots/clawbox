@@ -298,7 +298,7 @@ export async function applyClawaiToHermes(
         ["config", "unset", "auxiliary.vision.provider"],
       ];
     }
-    console.log(`[Hermes ClawAI] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"})`);
+    console.log(`[Hermes ClawAI] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"}; ${(vision.why ?? []).join("; ")})`);
   } else {
     console.log(`[Hermes ClawAI] Vision left untouched (${visionSlot.state === "owner" ? "the owner's own model" : "the config could not be read"})`);
   }
@@ -740,12 +740,15 @@ export async function refreshClawaiVisionOnHermes(): Promise<void> {
     const current = slot.state === "ours" ? slot.model : null;
     const model = clawboxAiVisionModelFor(vision, current);
     await recordClawboxAiVision(vision, model);
+    const why = (vision.why ?? []).join("; ");
     if (model && current !== model) {
       await patchHermesConfig({ set: { "auxiliary.vision.provider": CLAWAI_PROVIDER, "auxiliary.vision.model": model } });
-      console.log(`[hermes/clawai] vision check ${vision.verdict}: pictures go to ${model}`);
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: pictures go to ${model} (${why})`);
     } else if (!model && slot.state === "ours") {
       await patchHermesConfig({ unset: ["auxiliary.vision.model", "auxiliary.vision.provider"] });
-      console.log(`[hermes/clawai] vision check ${vision.verdict}: no ClawBox AI model can look at pictures right now`);
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: no ClawBox AI model can look at pictures right now (${why})`);
+    } else {
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: pictures stay on ${model ?? "nothing"} (${why})`);
     }
   } catch (err) {
     console.warn("[hermes/clawai] vision check failed:", err instanceof Error ? err.message : err);

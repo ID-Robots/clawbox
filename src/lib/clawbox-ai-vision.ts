@@ -45,6 +45,8 @@ export interface ClawboxAiVisionProbe {
   model: string | null;
   flash: ClawboxAiVisionLook;
   fallback: ClawboxAiVisionLook | null;
+  /** What each answer was, for the log: statuses and a few words, never the token. */
+  why?: string[];
 }
 
 /** A 32x32 solid red PNG (99 bytes): the picture the check shows. */
@@ -93,46 +95,69 @@ export async function clawboxAiVisionProbeUrl(baseUrl?: string | null): Promise<
   return chosen.replace(/\/+$/, "");
 }
 
-async function looks(
+/** One showing of the probe picture: what the model did, and why, for the log. */
+async function askOnce(
   model: string,
   { token, baseUrl, fetchImpl }: { token: string; baseUrl: string; fetchImpl: typeof fetch },
-): Promise<ClawboxAiVisionLook> {
-  // Twice at most, and only past an EMPTY answer: a reasoning model can spend
-  // a small budget thinking and say nothing, which is not blindness.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let res: Response;
-    try {
-      res = await fetchImpl(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          model,
-          max_tokens: PROBE_MAX_TOKENS,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "text", text: CLAWBOX_AI_VISION_PROBE_QUESTION },
-              { type: "image_url", image_url: { url: `data:image/png;base64,${CLAWBOX_AI_VISION_PROBE_PNG}` } },
-            ],
-          }],
-        }),
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-      });
-    } catch {
-      return "unknown";
-    }
-    if (REFUSED_STATUSES.has(res.status)) return "blind";
-    if (!res.ok) return "unknown";
-    let data: { choices?: { message?: { content?: unknown } }[] };
-    try {
-      data = await res.json();
-    } catch {
-      return "unknown";
-    }
-    const text = data.choices?.[0]?.message?.content;
-    if (typeof text === "string" && text.trim()) return SAW_RED.test(text) ? "sees" : "blind";
+): Promise<{ look: ClawboxAiVisionLook | "empty"; why: string }> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        model,
+        max_tokens: PROBE_MAX_TOKENS,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: CLAWBOX_AI_VISION_PROBE_QUESTION },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${CLAWBOX_AI_VISION_PROBE_PNG}` } },
+          ],
+        }],
+      }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return { look: "unknown", why: err instanceof Error && err.name === "TimeoutError" ? "timed out" : "request failed" };
   }
-  return "unknown";
+  if (REFUSED_STATUSES.has(res.status)) return { look: "blind", why: `HTTP ${res.status}` };
+  if (!res.ok) return { look: "unknown", why: `HTTP ${res.status}` };
+  let data: { choices?: { message?: { content?: unknown } }[] };
+  try {
+    data = await res.json();
+  } catch {
+    return { look: "unknown", why: "unreadable answer" };
+  }
+  const text = data.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || !text.trim()) return { look: "empty", why: "empty answer" };
+  // A model's own words about a red square, clipped: nothing else is logged.
+  const said = JSON.stringify(text.trim().slice(0, 24));
+  return SAW_RED.test(text) ? { look: "sees", why: `said ${said}` } : { look: "blind", why: `said ${said}` };
+}
+
+async function looks(
+  model: string,
+  options: { token: string; baseUrl: string; fetchImpl: typeof fetch },
+  why: string[],
+): Promise<ClawboxAiVisionLook> {
+  // Asked again past an EMPTY answer (a reasoning model can spend its budget
+  // thinking and say nothing, which is not blindness) and past a "blind" one:
+  // a single refusal can be the proxy's moment, and moving every picture on
+  // the box is not something one answer should decide. Two blinds in a row
+  // are an answer.
+  let blind = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const answer = await askOnce(model, options);
+    why.push(`${model}: ${answer.why}`);
+    if (answer.look === "sees") return "sees";
+    if (answer.look === "unknown") return "unknown";
+    if (answer.look === "blind") {
+      if (blind) return "blind";
+      blind = true;
+    }
+  }
+  return blind ? "blind" : "unknown";
 }
 
 /**
@@ -143,17 +168,18 @@ export async function probeClawboxAiVision(
   { token, baseUrl, fetchImpl = fetch }: { token: string; baseUrl?: string | null; fetchImpl?: typeof fetch },
 ): Promise<ClawboxAiVisionProbe> {
   const url = await clawboxAiVisionProbeUrl(baseUrl);
-  const flash = await looks(CLAWBOX_AI_FLASH_MODEL_ID, { token, baseUrl: url, fetchImpl });
-  if (flash === "sees") return { verdict: "flash", model: CLAWBOX_AI_FLASH_MODEL_ID, flash, fallback: null };
+  const why: string[] = [];
+  const flash = await looks(CLAWBOX_AI_FLASH_MODEL_ID, { token, baseUrl: url, fetchImpl }, why);
+  if (flash === "sees") return { verdict: "flash", model: CLAWBOX_AI_FLASH_MODEL_ID, flash, fallback: null, why };
   // A Flash that could not be ASKED is not a Flash that cannot see: only a
   // definite "blind" moves pictures to the fallback.
-  if (flash === "unknown") return { verdict: "unknown", model: null, flash, fallback: null };
-  const fallback = await looks(CLAWBOX_AI_VISION_FALLBACK_MODEL_ID, { token, baseUrl: url, fetchImpl });
+  if (flash === "unknown") return { verdict: "unknown", model: null, flash, fallback: null, why };
+  const fallback = await looks(CLAWBOX_AI_VISION_FALLBACK_MODEL_ID, { token, baseUrl: url, fetchImpl }, why);
   if (fallback === "sees") {
-    return { verdict: "fallback", model: CLAWBOX_AI_VISION_FALLBACK_MODEL_ID, flash, fallback };
+    return { verdict: "fallback", model: CLAWBOX_AI_VISION_FALLBACK_MODEL_ID, flash, fallback, why };
   }
-  if (fallback === "blind") return { verdict: "none", model: null, flash, fallback };
-  return { verdict: "unknown", model: null, flash, fallback };
+  if (fallback === "blind") return { verdict: "none", model: null, flash, fallback, why };
+  return { verdict: "unknown", model: null, flash, fallback, why };
 }
 
 /**
@@ -212,11 +238,13 @@ export interface ClawboxAiVisionRecord {
   verdict: ClawboxAiVisionVerdict;
   model: string | null;
   checkedAt: number;
+  /** What the answers were (statuses and a few words), for whoever reads the store. */
+  why?: string[];
 }
 
 /** Remember the last check, for the describe route and for anyone reading the store. Best-effort. */
 export async function recordClawboxAiVision(probe: ClawboxAiVisionProbe, model: string | null): Promise<void> {
-  const record: ClawboxAiVisionRecord = { verdict: probe.verdict, model, checkedAt: Date.now() };
+  const record: ClawboxAiVisionRecord = { verdict: probe.verdict, model, checkedAt: Date.now(), why: probe.why ?? [] };
   try {
     await configSet(CLAWBOX_AI_VISION_STORE_KEY, record);
   } catch (err) {

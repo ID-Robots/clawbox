@@ -58,19 +58,29 @@ describe("probeClawboxAiVision", () => {
   it("shows Flash a picture, and stops there when Flash names its colour", async () => {
     const { fetchImpl, seen } = proxy({ [FLASH]: "Red." });
     expect(await probeClawboxAiVision({ token: "claw_t", baseUrl: "https://proxy.test/api/ai/", fetchImpl }))
-      .toEqual({ verdict: "flash", model: FLASH, flash: "sees", fallback: null });
+      .toEqual({ verdict: "flash", model: FLASH, flash: "sees", fallback: null, why: [`${FLASH}: said "Red."`] });
     expect(seen).toEqual([{ url: "https://proxy.test/api/ai/chat/completions", model: FLASH, image: true }]);
   });
 
   it("asks the fallback when the proxy refuses Flash a picture", async () => {
     const { fetchImpl } = proxy({ [FLASH]: 400, [FALLBACK]: "red" });
     expect(await probeClawboxAiVision({ token: "t", fetchImpl }))
-      .toEqual({ verdict: "fallback", model: FALLBACK, flash: "blind", fallback: "sees" });
+      .toMatchObject({ verdict: "fallback", model: FALLBACK, flash: "blind", fallback: "sees" });
   });
 
   it("counts an answer that never saw the picture as blind", async () => {
     const { fetchImpl } = proxy({ [FLASH]: "I can't see images.", [FALLBACK]: 422 });
     expect((await probeClawboxAiVision({ token: "t", fetchImpl })).verdict).toBe("none");
+  });
+
+  it("asks Flash twice before calling it blind, and believes a second look that sees", async () => {
+    const twice = proxy({ [FLASH]: [400, 400], [FALLBACK]: "red" });
+    const blind = await probeClawboxAiVision({ token: "t", fetchImpl: twice.fetchImpl });
+    expect(blind.verdict).toBe("fallback");
+    expect(blind.why).toEqual([`${FLASH}: HTTP 400`, `${FLASH}: HTTP 400`, `${FALLBACK}: said "red"`]);
+
+    const once = proxy({ [FLASH]: [400, "Red"] });
+    expect((await probeClawboxAiVision({ token: "t", fetchImpl: once.fetchImpl })).verdict).toBe("flash");
   });
 
   it("asks once more past an EMPTY answer, which is a spent budget, not blindness", async () => {

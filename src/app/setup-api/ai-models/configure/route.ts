@@ -1863,7 +1863,7 @@ async function configureClawboxAi(
   const vision = await probeClawboxAiVision({ token: clawboxAiToken, baseUrl: CLAWBOX_AI_PROXY_URL });
   const visionModel = clawboxAiVisionModelFor(vision, imageSlotIsOurs ? currentImagePrimary : null);
   await recordClawboxAiVision(vision, visionModel);
-  console.log(`[AI Config] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"})`);
+  console.log(`[AI Config] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"}; ${(vision.why ?? []).join("; ")})`);
   const visionRef = visionModel ? `${CLAWBOX_AI_PROVIDER}/${visionModel}` : null;
 
   // `agents.defaults.models` is a map the CLI will not shrink without
