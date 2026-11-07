@@ -2170,15 +2170,18 @@ choose_node_headers() {
 }
 
 # node-gyp's devdir, where it keeps the headers it fetches, worked out the way
-# node-gyp works it out (bin/node-gyp.js) in the environment the rebuild runs
-# in, the clawbox user's login: its devdir option, which npm hands it as
-# npm_config_devdir (a leading ~ is that user's home), else env-paths' cache
-# directory, ${XDG_CACHE_HOME:-~/.cache}/node-gyp. Only ever read: a path the
-# clawbox user's own environment names is no path for root to create or chown.
+# node-gyp works it out (bin/node-gyp.js) where the rebuild runs: the clawbox
+# user's login, in $PROJECT_DIR. Its devdir option, highest first:
+# npm_package_config_node_gyp_devdir, then npm's own config, which npm hands it
+# as npm_config_devdir from the environment or from any .npmrc — asked of npm,
+# which reads them all and says "undefined" when none sets it. A leading ~ is
+# that user's home. Without the option: env-paths' cache directory,
+# ${XDG_CACHE_HOME:-~/.cache}/node-gyp. Only ever read: a path the clawbox
+# user's own environment names is no path for root to create or chown.
 node_gyp_devdir() {
   local dir
   # The last line: a login shell may print before the command runs.
-  dir="$(as_clawbox_login 'd="${npm_config_devdir:-${NPM_CONFIG_DEVDIR:-}}"; case "$d" in "~"*) d="$HOME${d#"~"}" ;; esac; printf "%s\n" "${d:-${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"' 2>/dev/null | tail -n 1)" || dir=""
+  dir="$(as_clawbox_login "cd $PROJECT_DIR && "'d="${npm_package_config_node_gyp_devdir:-${NPM_PACKAGE_CONFIG_NODE_GYP_DEVDIR:-}}"; [ -n "$d" ] || d="$(npm config get devdir 2>/dev/null)" || d=""; [ "$d" != undefined ] || d=""; case "$d" in "~"*) d="$HOME${d#"~"}" ;; esac; printf "%s\n" "${d:-${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"' 2>/dev/null | tail -n 1)" || dir=""
   printf '%s\n' "${dir:-$CLAWBOX_HOME/.cache/node-gyp}"
 }
 
