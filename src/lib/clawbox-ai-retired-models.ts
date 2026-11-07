@@ -210,18 +210,8 @@ function writablePath(path: string[]): string {
  * ------------------------------------------------------------------------ */
 
 /**
- * The Hermes config slots ClawBox AI writes a CHAT model into, as
- * `[provider key, model key]`. `auxiliary.vision` is not one of them: the
- * vision check decides what looks at a picture (src/lib/clawbox-ai-vision.ts).
- */
-export const HERMES_CLAWAI_MODEL_SLOTS = [
-  ["model.provider", "model.default"],
-  ["auxiliary.title_generation.provider", "auxiliary.title_generation.model"],
-  ["auxiliary.compression.provider", "auxiliary.compression.model"],
-] as const;
-
-/**
- * What a Hermes chat slot should hold instead, or null to leave it: Flash, when
+ * What a Hermes chat slot (`model.default`, `auxiliary.title_generation` or
+ * `auxiliary.compression`) should hold instead, or null to leave it: Flash, when
  * the slot's provider is `clawai` and its model the retired Max-plan id (bare,
  * the way Hermes stores it).
  */

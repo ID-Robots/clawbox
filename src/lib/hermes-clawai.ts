@@ -33,7 +33,6 @@ import {
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import {
-  HERMES_CLAWAI_MODEL_SLOTS,
   hermesSlotFlashTarget,
   isRetiredClawboxAiModel,
 } from "@/lib/clawbox-ai-retired-models";
@@ -780,24 +779,38 @@ export async function migrateRetiredClawaiModelsInHermes(): Promise<boolean> {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return false;
     throw err;
   }
-  const set: Record<string, string> = {};
-  for (const [providerKey, modelKey] of HERMES_CLAWAI_MODEL_SLOTS) {
-    const [provider, model] = await Promise.all([
-      resolveHermesConfigValue(providerKey),
-      resolveHermesConfigValue(modelKey),
-    ]);
-    if (provider.state === "unreadable" || model.state === "unreadable") {
-      throw new Error(`Hermes config could not be read at ${modelKey}`);
-    }
-    if (provider.state !== "value" || model.state !== "value") continue;
-    const target = hermesSlotFlashTarget(provider.value, model.value);
-    if (target) set[modelKey] = target;
+  // Literal keys, every one of them: scripts/harness-contract checks each key
+  // ClawBox reads or writes against the pinned Hermes, which it can only do
+  // for a key it can read off the source.
+  const reads = await Promise.all([
+    resolveHermesConfigValue("model.provider"),
+    resolveHermesConfigValue("model.default"),
+    resolveHermesConfigValue("auxiliary.title_generation.provider"),
+    resolveHermesConfigValue("auxiliary.title_generation.model"),
+    resolveHermesConfigValue("auxiliary.compression.provider"),
+    resolveHermesConfigValue("auxiliary.compression.model"),
+  ]);
+  if (reads.some((read) => read.state === "unreadable")) throw new Error("Hermes config could not be read");
+  const [modelProvider, modelDefault, titleProvider, titleModel, compressionProvider, compressionModel] = reads;
+  const target = (provider: typeof reads[number], model: typeof reads[number]) =>
+    provider.state === "value" && model.state === "value" ? hermesSlotFlashTarget(provider.value, model.value) : null;
+  const moved: string[] = [];
+  const defaultTarget = target(modelProvider, modelDefault);
+  if (defaultTarget) {
+    await patchHermesConfig({ set: { "model.default": defaultTarget } });
+    moved.push("model.default");
   }
-  const moved = Object.keys(set);
-  if (moved.length > 0) {
-    await patchHermesConfig({ set });
-    console.log(`[hermes/clawai] moved ${moved.join(", ")} to ${CLAWAI_DEFAULT_MODEL}`);
+  const titleTarget = target(titleProvider, titleModel);
+  if (titleTarget) {
+    await patchHermesConfig({ set: { "auxiliary.title_generation.model": titleTarget } });
+    moved.push("auxiliary.title_generation.model");
   }
+  const compressionTarget = target(compressionProvider, compressionModel);
+  if (compressionTarget) {
+    await patchHermesConfig({ set: { "auxiliary.compression.model": compressionTarget } });
+    moved.push("auxiliary.compression.model");
+  }
+  if (moved.length > 0) console.log(`[hermes/clawai] moved ${moved.join(", ")} to ${CLAWAI_DEFAULT_MODEL}`);
   // The picker list rides the repair that owns it: it reads the block, writes
   // and verifies it (see `clawaiCatalogueVerdict`, which now also treats a
   // retired id in the list as something to write over).
