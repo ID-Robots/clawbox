@@ -2074,32 +2074,173 @@ ensure_playwright_chromium() {
   echo "  Playwright Chromium runtime ready"
 }
 
+# ── Node headers for the node-pty build ──────────────────────────────────────
+
+# Where a distribution can put Node's development headers, searched in this
+# order. A directory is used only on the terms choose_node_headers sets.
+NODE_SYSTEM_HEADER_DIRS="/usr/include/nodejs /usr/include/node"
+
+# What choose_node_headers decided, for ensure_node_pty and the preflight.
+NODE_HEADERS_NODEDIR=""
+NODE_HEADERS_FALLBACK=""
+NODE_HEADERS_FALLBACK_DESC=""
+NODE_HEADERS_CHOICE=""
+# Why the last node-pty rebuild failed, in one line, for do_rebuild's failure
+# sentence: that sentence is what the update screen shows. Empty otherwise.
+NODE_PTY_FAILURE=""
+
+# The Node version a header directory belongs to ("24.22.2"), read from its
+# node_version.h. Prints nothing and returns non-zero when it cannot say.
+node_header_version() {
+  [ -f "$1/node_version.h" ] || return 1
+  awk '$1 == "#define" && $2 == "NODE_MAJOR_VERSION" { ma = $3 }
+       $1 == "#define" && $2 == "NODE_MINOR_VERSION" { mi = $3 }
+       $1 == "#define" && $2 == "NODE_PATCH_VERSION" { pa = $3 }
+       END {
+         if (ma ~ /^[0-9]+$/ && mi ~ /^[0-9]+$/ && pa ~ /^[0-9]+$/) print ma "." mi "." pa
+         else exit 1
+       }' "$1/node_version.h"
+}
+
+# Which Node headers node-gyp builds node-pty against (TASK-2244).
+#
+# Two facts, both measured on a nano-lab board running NodeSource's Node
+# 24.22.2, whose nodejs package ships its headers in /usr/include/node:
+#
+#   - node-gyp's nodedir is a PREFIX: it compiles with -I<nodedir>/include/node.
+#     The `npm_config_nodedir=/usr/include/node` this replaced, exported
+#     whenever node_api.h was there, sent the compiler to
+#     /usr/include/node/include/node, and every rebuild stopped at
+#     `napi.h:13:10: fatal error: node_api.h: No such file or directory`, with
+#     headers that matched the running Node exactly. `/usr` builds, and so does
+#     no nodedir at all, when node-gyp fetches the headers itself.
+#   - headers for another Node (Ubuntu's libnode-dev, a Node 22 left behind by
+#     the move to 24) are not this Node's headers, whatever their layout.
+#
+# So a system directory is used only when it is <prefix>/include/node AND its
+# node_version.h names exactly the running Node; npm_config_nodedir is then the
+# prefix. Otherwise nodedir stays unset and node-gyp fetches the matching
+# headers into ~/.cache/node-gyp/<version>/, and a mismatched system directory
+# is only kept as the fallback for a box that cannot fetch (ensure_node_pty).
+#
+# $1 is the running Node's `process.versions.node`. Sets NODE_HEADERS_NODEDIR
+# (the prefix; "" lets node-gyp fetch), NODE_HEADERS_FALLBACK and
+# NODE_HEADERS_FALLBACK_DESC (a mismatched prefix, or ""), and
+# NODE_HEADERS_CHOICE, the preflight's account of the choice.
+choose_node_headers() {
+  local want="$1" dir real ver prefix ignored=""
+  NODE_HEADERS_NODEDIR=""
+  NODE_HEADERS_FALLBACK=""
+  NODE_HEADERS_FALLBACK_DESC=""
+  for dir in $NODE_SYSTEM_HEADER_DIRS; do
+    [ -f "$dir/node_api.h" ] || continue
+    real="$(readlink -f "$dir" 2>/dev/null)" || real=""
+    ver="$(node_header_version "$dir")" || ver=""
+    case "$real" in
+      ?*/include/node) prefix="${real%/include/node}" ;;
+      *)
+        ignored="$ignored; $dir is not laid out as <prefix>/include/node, which node-gyp needs"
+        continue
+        ;;
+    esac
+    if [ -n "$want" ] && [ "$ver" = "$want" ]; then
+      NODE_HEADERS_NODEDIR="$prefix"
+      NODE_HEADERS_CHOICE="$dir (Node $ver, matches the running Node) — node-gyp nodedir=$prefix"
+      return 0
+    fi
+    ignored="$ignored; $dir holds Node ${ver:-of unknown version}, not the running ${want:-Node}"
+    if [ -z "$NODE_HEADERS_FALLBACK" ]; then
+      NODE_HEADERS_FALLBACK="$prefix"
+      NODE_HEADERS_FALLBACK_DESC="$dir (Node ${ver:-of unknown version})"
+    fi
+  done
+  NODE_HEADERS_CHOICE="auto — node-gyp fetches v${want:-?} into ~/.cache/node-gyp/${want:-<version>}/"
+  if [ -n "$ignored" ]; then
+    NODE_HEADERS_CHOICE="$NODE_HEADERS_CHOICE (ignored: ${ignored#; })"
+  fi
+}
+
+# Does node-gyp hold the headers for Node $1 in the clawbox user's cache, its
+# default devdir? Yes after a fetch that worked; no after one that could not.
+node_gyp_has_headers() {
+  [ -n "$1" ] && [ -f "$CLAWBOX_HOME/.cache/node-gyp/$1/include/node/node_version.h" ]
+}
+
+# One `npm rebuild node-pty`, as the clawbox user, against the headers under
+# the prefix $1 ("" = whatever node-gyp fetches). The output streams, because
+# this step's journal IS the update log, and is also kept in $2, when there is
+# one, for the failure report. Returns npm's status.
+#
+# Through `tee` even with no file to keep it in. journald files a line under
+# the unit of the process that WROTE it, and `su -` puts the build in the
+# clawbox user's session scope: written straight from there, the compiler's
+# error was in the journal but not in `journalctl -u
+# clawbox-root-update@rebuild_reboot`, the log the update points at, which is
+# why the 4.3 field report had none of it. `tee` is this script's own process.
+run_node_pty_rebuild() {
+  local nodedir="$1" log="${2:-}" cmd rc
+  cmd="cd $PROJECT_DIR && export npm_config_python=/usr/bin/python3 && export npm_config_build_from_source=true && "
+  if [ -n "$nodedir" ]; then
+    cmd+="export npm_config_nodedir=\"$nodedir\" && "
+  else
+    cmd+="unset npm_config_nodedir && "
+  fi
+  cmd+="npm rebuild node-pty --foreground-scripts"
+  # PIPESTATUS, not the pipeline's status: a `tee` that could not write the
+  # file must not fail a build that worked.
+  if as_clawbox_login "$cmd" 2>&1 | tee "${log:-/dev/null}"; then
+    return 0
+  else
+    rc=${PIPESTATUS[0]}
+  fi
+  return "$rc"
+}
+
+# The line that says why a node-pty build failed, from its output in $1: the
+# compiler's own error first (`napi.h:13:10: fatal error: node_api.h: …`), then
+# node-gyp's first stack line (a header download that failed says so there),
+# then the first line node-gyp or npm called an error. One line of at most 200
+# characters; nothing when there is no output to read.
+node_pty_failure_summary() {
+  if [ -z "${1:-}" ] || [ ! -s "$1" ]; then return 0; fi
+  awk '
+    { sub(/\r$/, "") }
+    cc == "" && / (fatal )?error: / { cc = $0 }
+    st == "" && /^gyp ERR! stack / { st = $0 }
+    gy == "" && /^gyp ERR! / { gy = $0 }
+    np == "" && /^npm (error|ERR!) / { np = $0 }
+    END {
+      s = cc
+      if (s == "") s = st
+      if (s == "") s = gy
+      if (s == "") s = np
+      if (s != "") print s
+    }
+  ' "$1" | sed -e 's/^[[:space:]]*//' | tr -d '\000-\010\013-\037' | cut -c1-200
+}
+
 print_native_build_preflight() {
-  local node_version node_abi npm_version python_version make_version gpp_version node_header_dir
+  local node_version node_abi npm_version python_version make_version gpp_version
 
   node_version=$(as_clawbox_login "node -p 'process.version'" 2>/dev/null || echo "missing")
   node_abi=$(as_clawbox_login "node -p 'process.versions.modules'" 2>/dev/null || echo "unknown")
   npm_version=$(as_clawbox_login "npm --version" 2>/dev/null || echo "missing")
   python_version=$(/usr/bin/python3 --version 2>/dev/null || echo "python3 missing")
 
+  # `awk 'NR == 1'`, never `head -1`: head exits after one line, the tool takes
+  # SIGPIPE writing the rest, and under `pipefail` the assignment is a 141 —
+  # measured 153 in 300 here. step_build calls ensure_node_pty bare, so that
+  # 141 ended a fresh install at this preflight, before any build was tried.
   if command -v make >/dev/null 2>&1; then
-    make_version=$(make --version | head -1)
+    make_version=$(make --version 2>/dev/null | awk 'NR == 1')
   else
     make_version="make missing"
   fi
 
   if command -v g++ >/dev/null 2>&1; then
-    gpp_version=$(g++ --version | head -1)
+    gpp_version=$(g++ --version 2>/dev/null | awk 'NR == 1')
   else
     gpp_version="g++ missing"
-  fi
-
-  if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
-    node_header_dir="/usr/include/nodejs"
-  elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
-    node_header_dir="/usr/include/node"
-  else
-    node_header_dir="auto (node-gyp will fetch into ~/.cache/node-gyp/<version>/)"
   fi
 
   echo "  Native build preflight:"
@@ -2108,7 +2249,9 @@ print_native_build_preflight() {
   echo "    Python: $python_version"
   echo "    make: $make_version"
   echo "    g++: $gpp_version"
-  echo "    Node headers: $node_header_dir"
+  # What choose_node_headers picked and why, so a failed build's log says
+  # which headers it compiled against.
+  echo "    Node headers: ${NODE_HEADERS_CHOICE:-not chosen}"
 }
 
 ensure_node_pty() {
@@ -2117,8 +2260,12 @@ ensure_node_pty() {
     echo "  node-pty is already loadable"
     return 0
   fi
+  NODE_PTY_FAILURE=""
 
   echo "  node-pty is missing or built for the wrong Node ABI; preparing native build prerequisites..."
+  local want
+  want="$(as_clawbox_login "node -p 'process.versions.node'" 2>/dev/null)" || want=""
+  choose_node_headers "$want"
   print_native_build_preflight
   wait_for_apt
   apt-get install -y -qq python3 python3-pip python-is-python3 build-essential pkg-config
@@ -2129,43 +2276,107 @@ ensure_node_pty() {
     "$CLAWBOX_HOME/.cache/node-gyp" \
     "$PROJECT_DIR/node_modules" 2>/dev/null || true
 
-  # Only point node-gyp at system headers if they actually contain node_api.h
-  # for the running Node ABI. Ubuntu's libnode-dev / nodejs packages can leave
-  # a /usr/include/node directory that's missing node_api.h or holds headers
-  # for a Node version different from the one installed via NodeSource — both
-  # break the node-addon-api include chain. When neither path is usable, leave
-  # npm_config_nodedir unset so node-gyp auto-fetches matching headers into
-  # ~/.cache/node-gyp/<version>/.
-  local rebuild_cmd="
-    cd $PROJECT_DIR &&
-    export npm_config_python=/usr/bin/python3 &&
-    export npm_config_build_from_source=true &&
-    if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
-      export npm_config_nodedir=/usr/include/nodejs
-    elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
-      export npm_config_nodedir=/usr/include/node
-    fi &&
-    npm rebuild node-pty --foreground-scripts
-  "
+  # Each attempt's output is kept as well as streamed. A failure then ends with
+  # the last 80 lines of the attempt that failed, and the compiler's own error
+  # in the line the update screen shows; "check the node-gyp output above" was
+  # all a field report had to go on (TASK-2244).
+  local log_dir log="" nodedir="$NODE_HEADERS_NODEDIR" rc=0 why="" first_why="" fetch_retry=0
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-node-pty-XXXXXX" 2>/dev/null)" || log_dir=""
+  if [ -n "$log_dir" ]; then log="$log_dir/rebuild.log"; fi
 
   echo "  Rebuilding native modules (node-pty)..."
-  if ! as_clawbox_login "$rebuild_cmd"; then
-    echo "  Initial node-pty rebuild failed; clearing stale build output and retrying once..."
-    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin"
-    as_clawbox_login "$rebuild_cmd"
+  if ! run_node_pty_rebuild "$nodedir" "$log"; then
+    why="$(node_pty_failure_summary "$log")" || why=""
+    first_why="$why"
+    # `|| true`: step_build calls this bare, and a clean-up that failed must
+    # not end the install before the retry and the report below.
+    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin" || true
+    # The retry takes the OTHER source of headers, when there is one: matching
+    # system headers that failed give way to the ones node-gyp fetches, and a
+    # fetch that never arrived (no network) to the system directory the
+    # version check passed over. A build against those may still load, since
+    # node-pty is a Node-API module; one that does not is reported below.
+    if [ -n "$nodedir" ]; then
+      nodedir=""
+      fetch_retry=1
+      echo "  Initial node-pty rebuild failed${why:+ ($why)}; clearing stale build output and retrying once with the headers node-gyp fetches for Node v$want..."
+    elif [ -n "$NODE_HEADERS_FALLBACK" ] && ! node_gyp_has_headers "$want"; then
+      nodedir="$NODE_HEADERS_FALLBACK"
+      echo "  node-gyp could not fetch the headers for Node v$want (no network?)${why:+ ($why)}; falling back to the system headers in $NODE_HEADERS_FALLBACK_DESC, which do NOT match the running Node, and retrying once..."
+    else
+      echo "  Initial node-pty rebuild failed${why:+ ($why)}; clearing stale build output and retrying once..."
+    fi
+    run_node_pty_rebuild "$nodedir" "$log" || rc=$?
   fi
 
-  if ! as_clawbox_login "$verify_cmd" &>/dev/null; then
-    echo "Error: node-pty is still not loadable after rebuild. Check the node-gyp output above." >&2
-    # `return`, not `exit`: do_rebuild stops clawbox-setup before it calls this
-    # and has a restore path to run before anything may leave the function. A
-    # bare `exit` from here jumped over it and left the box exactly as TASK-709
-    # describes. Callers that want the old behaviour get it for free — a
-    # non-zero return from a bare call still ends the script under `set -e`.
-    return 1
+  local verify_out
+  if verify_out="$(as_clawbox_login "$verify_cmd" 2>&1)"; then
+    if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+    echo "  node-pty rebuilt and verified"
+    return 0
   fi
 
-  echo "  node-pty rebuilt and verified"
+  # Why: the failed attempt's own error, or, after a build that said it
+  # worked, what node said when it could not load the result.
+  why=""
+  if [ "$rc" -ne 0 ]; then why="$(node_pty_failure_summary "$log")" || why=""; fi
+  # A retry that could not even fetch its headers says nothing about the
+  # build: the first attempt's compiler error is still the reason.
+  if [ "$rc" -ne 0 ] && [ "$fetch_retry" -eq 1 ] && [ -n "$first_why" ] && ! node_gyp_has_headers "$want"; then
+    why="$first_why (the retry could not fetch the headers for Node v$want)"
+  fi
+  if [ -z "$why" ]; then
+    # awk to the end, no `exit`: under pipefail an awk that stops early can
+    # SIGPIPE printf into a 141, and a bare call (step_build) would end on it
+    # before the error line below.
+    why="$(printf '%s\n' "$verify_out" | awk 'w == "" && /^[A-Za-z]*Error[: ]/ { w = $0 } END { if (w != "") print w }' | cut -c1-200)" || why=""
+  fi
+  NODE_PTY_FAILURE="$why"
+  local where="Its build output is above."
+  if [ -n "$log" ] && [ -s "$log" ]; then
+    echo "  node-pty rebuild — the last 80 lines of its last attempt (Node v${want:-?}, headers: ${nodedir:-fetched by node-gyp}):" >&2
+    # Prefixed, so no line of it can pass for this script's own `Error:` line.
+    tail -n 80 "$log" | sed -e 's/^/    | /' >&2
+    where="The last 80 lines of its last attempt are above."
+  fi
+  if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+  echo "Error: node-pty is still not loadable after rebuild${why:+: $why}. $where" >&2
+  # `return`, not `exit`: do_rebuild stops clawbox-setup before it calls this
+  # and has a restore path to run before anything may leave the function. A
+  # bare `exit` from here jumped over it and left the box exactly as TASK-709
+  # describes. Callers that want the old behaviour get it for free — a
+  # non-zero return from a bare call still ends the script under `set -e`.
+  return 1
+}
+
+# node-pty on the box a failed rebuild has put back (TASK-2244).
+#
+# The rollback restores .next, never node_modules: `bun install` has run by
+# then, and can leave node-pty as a package that was never built. The restored
+# dashboard then serves fine and the web terminal is dead, which is what a box
+# rolled back from the 4.3 update was left with. So the restored box gets its
+# own ensure_node_pty.
+#
+# QUIET, on purpose: its output goes to a file and the step's journal gets one
+# line. The update screen shows the newest `Error:` line among the LAST 40
+# lines of this step's journal (readRootStepFailure in src/lib/updater.ts); a
+# rebuild streamed here would push out the sentence saying why the update
+# failed, and an `Error:` line of its own would replace it.
+ensure_node_pty_after_rollback() {
+  if as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
+    return 0
+  fi
+  local log_dir log=/dev/null
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-node-pty-XXXXXX" 2>/dev/null)" || log_dir=""
+  if [ -n "$log_dir" ]; then log="$log_dir/after-rollback.log"; fi
+  echo "  node-pty does not load on the restored box; rebuilding it for the web terminal..."
+  if ensure_node_pty >"$log" 2>&1; then
+    if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+    echo "  node-pty rebuilt and verified on the restored box"
+    return 0
+  fi
+  echo "  Warning: node-pty still does not load after the rollback, so the web terminal stays unavailable${NODE_PTY_FAILURE:+: $NODE_PTY_FAILURE}${log_dir:+ (full output: $log)}" >&2
+  return 1
 }
 
 # ── Memory for the build ─────────────────────────────────────────────────────
@@ -3319,7 +3530,7 @@ oom_killer_in_kernel_log() {
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0 reboot_follows=0 failed_at="the rebuild"
+  local rc=0 built=0 reboot_follows=0 failed_at="the rebuild" failed_why="" pty_failed=0
   if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
   # Check before stopping the dashboard: zram alone did not prevent TASK-789.
@@ -3366,7 +3577,11 @@ do_rebuild() {
     failed_at="bun install"
   elif ! ensure_node_pty; then
     rc=1
+    pty_failed=1
     failed_at="the node-pty rebuild"
+    # The compiler's own error, so the update screen names the cause instead
+    # of pointing at output it does not show (TASK-2244).
+    failed_why="${NODE_PTY_FAILURE:-}"
   # A CONDITION, like its two neighbours above, and for a reason the neighbours
   # did not have: errexit is live in this function (both callers invoke it
   # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
@@ -3412,6 +3627,8 @@ do_rebuild() {
       echo "Error: rebuild failed (exit $rc) — $failed_at was killed by the kernel's OOM killer: the device ran out of memory during the build." >&2
     elif [ "$sig" -ne 0 ]; then
       echo "Error: rebuild failed (exit $rc) — $failed_at was killed by signal $sig (no OOM kill in the kernel log; a stop, a timeout or an operator looks the same)." >&2
+    elif [ -n "$failed_why" ]; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed: $failed_why" >&2
     else
       echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed." >&2
     fi
@@ -3427,6 +3644,13 @@ do_rebuild() {
     # before it.
     resume_paused_engines
     report_gateway_build_pause
+    # A web terminal that works on the box this leaves (TASK-2244): after the
+    # dashboard and the engines, because it can take minutes and neither waits
+    # on it. Not when node-pty was what failed: both header sources were tried
+    # moments ago, and the same attempt again can only fail the same way.
+    if [ "$pty_failed" -eq 0 ]; then
+      ensure_node_pty_after_rollback || true
+    fi
     return "$rc"
   fi
 

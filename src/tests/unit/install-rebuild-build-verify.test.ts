@@ -144,6 +144,14 @@ interface Scenario {
   /** Can `run_next_build` open its build log at all? */
   buildLog?: "writable" | "unwritable";
   nodePty?: "succeeds" | "fails";
+  /**
+   * The build takes node-pty down with it: its compiled module is gone by the
+   * time do_rebuild restores the previous build, the state a rolled-back box
+   * was left in with a dead web terminal (TASK-2244).
+   */
+  ptyBrokenByBuild?: boolean;
+  /** How the rebuild that follows a rollback goes, when one runs. */
+  ptyRebuildAfterRollback?: "works" | "fails";
   /** Which shipped function to run. */
   entry?: "do_rebuild" | "step_build";
   /** Call `do_rebuild --reboot-follows`, as step_rebuild_reboot's real arm does. */
@@ -183,6 +191,10 @@ interface Run {
   ownerLeftBehind: boolean;
   /** How many times `bun run build` was actually invoked. */
   attempts: number;
+  /** Does node-pty load on the box this leaves? */
+  ptyLoadable: boolean;
+  /** How many times ensure_node_pty ran. */
+  ptyRebuilds: number;
 }
 
 let sandbox: string;
@@ -191,6 +203,8 @@ let projectDir: string;
 let ownerProbe: string;
 let buildAttempts: string;
 let unwritableTmp: string;
+let ptyOk: string;
+let ptyCalls: string;
 
 function writeBuild(dir: string, buildId: string, withEntry = true): void {
   mkdirSync(path.join(dir, "standalone"), { recursive: true });
@@ -215,6 +229,8 @@ function run(scenario: Scenario = {}): Run {
     rebootFollows = false,
     probeWindow = "2",
     previousCache = false,
+    ptyBrokenByBuild = false,
+    ptyRebuildAfterRollback = "works",
   } = scenario;
   // `step_build` calls run_next_build directly and ignores its arguments, so
   // pairing it with the flag would silently omit the behaviour and read as
@@ -226,6 +242,9 @@ function run(scenario: Scenario = {}): Run {
   // Per RUN, not per test: a case that calls this twice must not read the
   // first build's attempts as the second's.
   rmSync(buildAttempts, { force: true });
+  rmSync(ptyCalls, { force: true });
+  // The box starts with a node-pty that loads, as one with a working terminal.
+  writeFileSync(ptyOk, "", "utf-8");
   mkdirSync(projectDir, { recursive: true });
   if (previousBuild === "servable") writeBuild(path.join(projectDir, ".next"), "old-build-id");
   if (previousCache) {
@@ -329,7 +348,9 @@ function run(scenario: Scenario = {}): Run {
   ].join("\n");
   writeFileSync(
     fakeBuild,
-    "#!/usr/bin/env bash\n" + countAttempt + "\n" + probeOwner + "\n" + bodies[build] + "\n",
+    "#!/usr/bin/env bash\n" + countAttempt + "\n" + probeOwner + "\n"
+      + (ptyBrokenByBuild ? "rm -f " + JSON.stringify(ptyOk) + "\n" : "")
+      + bodies[build] + "\n",
     "utf-8",
   );
   spawnSync("chmod", ["+x", fakeBuild]);
@@ -362,10 +383,32 @@ function run(scenario: Scenario = {}): Run {
     "# The cache carry moves the parked build's .next/cache as clawbox; here that",
     "# is whoever runs the test.",
     'as_clawbox() { "$@"; }',
+    // node-pty's state is a file: present while the module loads. The first
+    // run is do_rebuild's own, before the build; a second can only be the
+    // rebuild after a rollback. Logged beside systemctl so the order shows.
+    "PTY_OK=" + JSON.stringify(ptyOk),
+    "PTY_CALLS=" + JSON.stringify(ptyCalls),
     "ensure_node_pty() {",
+    '  local n=$(( $(cat "$PTY_CALLS" 2>/dev/null || echo 0) + 1 ))',
+    '  printf "%s\\n" "$n" > "$PTY_CALLS"',
+    '  printf "ensure_node_pty\\n" >> "$SYSTEMCTL_LOG"',
+    '  if [ "$n" -eq 1 ]; then',
     nodePty === "succeeds"
-      ? "  echo '  node-pty is already loadable'"
-      : "  echo 'Error: node-pty is still not loadable' >&2; return 1",
+      ? "    : > \"$PTY_OK\"; echo '  node-pty is already loadable'"
+      : [
+        '    rm -f "$PTY_OK"',
+        "    NODE_PTY_FAILURE='../../node-addon-api/napi.h:13:10: fatal error: node_api.h: No such file or directory'",
+        '    echo "Error: node-pty is still not loadable after rebuild: $NODE_PTY_FAILURE." >&2; return 1',
+      ].join("\n"),
+    "  else",
+    ptyRebuildAfterRollback === "works"
+      ? "    : > \"$PTY_OK\"; echo '  node-pty rebuilt and verified'"
+      : [
+        "    NODE_PTY_FAILURE='../src/unix/pty.cc:42:1: error: forkpty was not declared in this scope'",
+        "    echo '    | gyp ERR! not ok'",
+        '    echo "Error: node-pty is still not loadable after rebuild: $NODE_PTY_FAILURE." >&2; return 1',
+      ].join("\n"),
+    "  fi",
     "}",
     "",
     "# The build runs as the clawbox user through this one seam. `bun install`",
@@ -374,6 +417,7 @@ function run(scenario: Scenario = {}): Run {
     "as_clawbox_login() {",
     '  case "$*" in',
     '    *"run build"*) "$FAKE_BUILD" "$PROJECT_DIR" ;;',
+    "    *\"require('node-pty')\"*) [ -f \"$PTY_OK\" ] ;;",
     bunInstall === "succeeds" ? "    *) return 0 ;;" : '    *"install"*) return 1 ;;\n    *) return 0 ;;',
     "  esac",
     "}",
@@ -469,6 +513,8 @@ function run(scenario: Scenario = {}): Run {
       "carry_build_cache",
       "restore_previous_build",
       "run_next_build",
+      // The rebuild a rollback ends with (TASK-2244), against the stub above.
+      "ensure_node_pty_after_rollback",
     ),
     "",
     shellFunction(entry),
@@ -509,6 +555,8 @@ function run(scenario: Scenario = {}): Run {
     attempts: existsSync(buildAttempts)
       ? Number(readFileSync(buildAttempts, "utf-8").trim())
       : 0,
+    ptyLoadable: existsSync(ptyOk),
+    ptyRebuilds: existsSync(ptyCalls) ? Number(readFileSync(ptyCalls, "utf-8").trim()) : 0,
   };
 }
 
@@ -523,6 +571,8 @@ beforeEach(() => {
   // fallback these cases exist for. A file makes `mktemp -d` under it fail
   // with ENOTDIR whoever runs the tests.
   unwritableTmp = path.join(sandbox, "no-write");
+  ptyOk = path.join(sandbox, "node-pty-loads");
+  ptyCalls = path.join(sandbox, "ensure-node-pty-calls.txt");
   writeFileSync(unwritableTmp, "", "utf-8");
 });
 
@@ -999,6 +1049,92 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
 
     expect(r.status).not.toBe(0);
     expect(r.buildId).toBe("old-build-id");
+  });
+});
+
+// TASK-2244. A box rolled back from the 4.3 update served its previous build
+// with a dead web terminal: the rollback restores .next, never node_modules, so
+// a node-pty that did not load stayed that way. And the update screen said only
+// "node-pty is still not loadable … check the node-gyp output above" — output
+// it never showed.
+describe("do_rebuild after a rollback: node-pty and the failure sentence (TASK-2244)", () => {
+  /** The newest line that starts with Error/fatal — what the update screen shows. */
+  const failureLine = (r: Run) =>
+    (r.stdout + "\n" + r.stderr)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^(?:error|fatal)\b/i.test(l))
+      .pop();
+
+  it("names the compiler's own error when the node-pty rebuild is what failed", () => {
+    const r = run({ nodePty: "fails" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(
+      "Error: rebuild failed (exit 1) — the node-pty rebuild did not succeed: "
+        + "../../node-addon-api/napi.h:13:10: fatal error: node_api.h: No such file or directory",
+    );
+  });
+
+  it("keeps the plain sentence for a failure that carries no reason of its own", () => {
+    const r = run({ bunInstall: "fails" });
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 1\) — bun install did not succeed\.$/m);
+  });
+
+  it("rebuilds node-pty on the restored box when it no longer loads there", () => {
+    const r = run({ build: "oom-killed", ptyBrokenByBuild: true });
+    expect(r.status).not.toBe(0);
+    expect(r.buildId).toBe("old-build-id");
+    expect(r.ptyLoadable).toBe(true);
+    expect(r.ptyRebuilds).toBe(2);
+    expect(r.stdout).toContain("node-pty rebuilt and verified on the restored box");
+  });
+
+  it("rebuilds it only once the dashboard is back, not before", () => {
+    const r = run({ build: "oom-killed", ptyBrokenByBuild: true });
+    const restart = r.systemctl.findIndex((l) => /^systemctl restart clawbox-setup\.service$/.test(l));
+    const rebuilds = r.systemctl.flatMap((l, i) => (l === "ensure_node_pty" ? [i] : []));
+    expect(restart).toBeGreaterThan(-1);
+    expect(rebuilds).toHaveLength(2);
+    expect(rebuilds[1]).toBeGreaterThan(restart);
+  });
+
+  it("leaves a node-pty that still loads alone", () => {
+    const r = run({ build: "oom-killed" });
+    expect(r.status).not.toBe(0);
+    expect(r.ptyLoadable).toBe(true);
+    expect(r.ptyRebuilds).toBe(1);
+    expect(r.stdout).not.toContain("on the restored box");
+  });
+
+  it("does not repeat a node-pty rebuild that has just failed", () => {
+    const r = run({ nodePty: "fails" });
+    expect(r.ptyRebuilds).toBe(1);
+  });
+
+  it("does not let the rollback's rebuild replace the sentence that says why the update failed", () => {
+    // The update screen shows the newest Error/fatal line of this step's
+    // journal. The rebuild after the rollback is quiet: its own output, and its
+    // own `Error:` line, go to a file.
+    const r = run({ build: "oom-killed", ptyBrokenByBuild: true, ptyRebuildAfterRollback: "fails" });
+    expect(r.status).not.toBe(0);
+    expect(r.ptyLoadable).toBe(false);
+    expect(failureLine(r)).toMatch(/^Error: rebuild failed \(exit 137\) — bun run build was killed by signal 9/);
+    // failureLine reads stdout before stderr; an error line on stdout could
+    // be newer than it shows, so there must be none at all.
+    expect(r.stdout.split("\n").some((l) => /^(?:error|fatal)\b/i.test(l.trim()))).toBe(false);
+    expect(r.stdout + r.stderr).not.toContain("gyp ERR! not ok");
+    expect(r.stderr).toMatch(
+      /Warning: node-pty still does not load after the rollback, so the web terminal stays unavailable: \.\.\/src\/unix\/pty\.cc:42:1: error: forkpty/,
+    );
+  });
+
+  it("adds at most two lines to the journal when it rebuilds after a rollback", () => {
+    // readRootStepFailure reads the last 40 lines; the failure sentence must
+    // stay inside them.
+    const healthy = run({ build: "oom-killed" });
+    const healed = run({ build: "oom-killed", ptyBrokenByBuild: true });
+    const lines = (x: Run) => (x.stdout + x.stderr).split("\n").filter(Boolean).length;
+    expect(lines(healed) - lines(healthy)).toBeLessThanOrEqual(2);
   });
 });
 
