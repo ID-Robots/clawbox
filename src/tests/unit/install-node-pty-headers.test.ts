@@ -39,6 +39,7 @@ function shellFunction(name: string): string {
 const FUNCTIONS = [
   "node_header_version",
   "choose_node_headers",
+  "node_gyp_devdir",
   "node_gyp_has_headers",
   "run_node_pty_rebuild",
   "node_pty_failure_summary",
@@ -73,6 +74,8 @@ interface Scenario {
   bare?: boolean;
   /** node-pty already loads before the entry runs. */
   ptyLoads?: boolean;
+  /** What the clawbox user's login environment sets (XDG_CACHE_HOME, npm_config_devdir). */
+  loginEnv?: Record<string, string>;
 }
 
 interface Run {
@@ -137,7 +140,9 @@ exit 1
 `;
 
 // node-gyp as measured: -I<nodedir>/include/node, or the headers it fetches
-// into ~/.cache/node-gyp/<version>/include/node when no nodedir is given.
+// into <devdir>/<version>/include/node when no nodedir is given. The devdir
+// as node-gyp 11's bin/node-gyp.js takes it: npm_config_devdir (a leading ~
+// is the home), else env-paths' cache, ${XDG_CACHE_HOME:-~/.cache}/node-gyp.
 const FAKE_NPM = `#!/usr/bin/env bash
 [ "\${1:-}" = "--version" ] && { echo 11.19.1; exit 0; }
 attempt=$(( $(cat "$NPM_ATTEMPTS" 2>/dev/null || echo 0) + 1 ))
@@ -147,7 +152,9 @@ for i in $(seq 1 "$NOISE"); do echo "gyp info attempt $attempt line $i"; done
 if [ -n "\${npm_config_nodedir:-}" ]; then
   hdr="$npm_config_nodedir/include/node"
 else
-  hdr="$HOME/.cache/node-gyp/$FAKE_NODE_VERSION/include/node"
+  devdir="\${npm_config_devdir:-\${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"
+  case "$devdir" in "~"*) devdir="$HOME\${devdir#"~"}" ;; esac
+  hdr="$devdir/$FAKE_NODE_VERSION/include/node"
   if [ ! -f "$hdr/node_version.h" ]; then
     echo "gyp http GET https://nodejs.org/download/release/v$FAKE_NODE_VERSION/node-v$FAKE_NODE_VERSION-headers.tar.gz" >&2
     if [ "$NETWORK" != online ]; then
@@ -201,6 +208,7 @@ function run(scenario: Scenario = {}): Run {
     entry = "ensure_node_pty",
     bare = false,
     ptyLoads = false,
+    loginEnv = {},
   } = scenario;
 
   // Per RUN: a case that calls this twice must not start from the first one's
@@ -239,8 +247,12 @@ function run(scenario: Scenario = {}): Run {
     `export LEAVES_NOTHING=${buildLeavesNothing ? 1 : 0}`,
     "export NPM_CALLS=" + JSON.stringify(npmCalls),
     "export NPM_ATTEMPTS=" + JSON.stringify(path.join(sandbox, "npm-attempts.txt")),
-    // `su - clawbox -c "<command>"`, minus the user switch.
-    `as_clawbox_login() { HOME=${JSON.stringify(home)} PATH=${JSON.stringify(fakeBin)}:"$PATH" bash -c "$*"; }`,
+    // `su - clawbox -c "<command>"`, minus the user switch: a login
+    // environment, so none of the runner's own devdir settings leak in.
+    "as_clawbox_login() { env -u XDG_CACHE_HOME -u npm_config_devdir -u NPM_CONFIG_DEVDIR "
+      + `HOME=${JSON.stringify(home)} `
+      + Object.entries(loginEnv).map(([k, v]) => `${k}=${JSON.stringify(v)} `).join("")
+      + `PATH=${JSON.stringify(fakeBin)}:"$PATH" bash -c "$*"; }`,
     "wait_for_apt() { :; }",
     "apt-get() { :; }",
     "chown() { :; }",
@@ -384,6 +396,55 @@ describe("ensure_node_pty builds against headers that match the running Node", (
     expect(r.status).toBe(0);
     expect(r.nodedirs).toEqual([]);
     expect(r.stdout).toContain("node-pty is already loadable");
+  });
+});
+
+describe("the headers node-gyp fetched are looked for where node-gyp keeps them", () => {
+  // A devdir the clawbox user's login environment moves: XDG_CACHE_HOME
+  // (env-paths) or npm_config_devdir. ~/.cache/node-gyp stays empty then.
+  const xdg = () => ({ XDG_CACHE_HOME: path.join(sandbox, "xdg") });
+  const fetched = (devdir: string) => existsSync(path.join(devdir, RUNNING, "include", "node", "node_version.h"));
+
+  it.each([
+    ["XDG_CACHE_HOME", () => xdg(), () => path.join(sandbox, "xdg", "node-gyp")],
+    ["npm_config_devdir", () => ({ npm_config_devdir: path.join(sandbox, "gyp") }), () => path.join(sandbox, "gyp")],
+    ["npm_config_devdir under ~", () => ({ npm_config_devdir: "~/gyp-dev" }), () => path.join(home, "gyp-dev")],
+  ])("a build that failed after the fetch worked (%s) retries, without the mismatched system headers", (_label, env, devdir) => {
+    const r = run({ systemHeaders: "22.21.0", compiler: "broken", loginEnv: env() });
+    expect(fetched(devdir())).toBe(true);
+    expect(fetched(path.join(home, ".cache", "node-gyp"))).toBe(false);
+    expect(r.nodedirs).toEqual(["<unset>", "<unset>"]);
+    expect(r.stdout).not.toContain("could not fetch");
+    expect(r.stdout).toContain("Initial node-pty rebuild failed (../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 1)); clearing stale build output and retrying once...");
+  });
+
+  it("still falls back to the system headers when the fetch into that devdir could not happen", () => {
+    const r = run({ systemHeaders: "22.21.0", network: "offline", loginEnv: xdg() });
+    expect(r.status).toBe(0);
+    expect(r.nodedirs).toEqual(["<unset>", path.join(sys, "usr")]);
+    expect(r.stdout).toContain(`node-gyp could not fetch the headers for Node v${RUNNING} (no network?)`);
+  });
+
+  it("names the retry's own error when its fetch into that devdir worked", () => {
+    const r = run({ systemHeaders: RUNNING, compiler: "broken", loginEnv: xdg() });
+    expect(r.status).toBe(1);
+    expect(r.nodedirs).toEqual([path.join(sys, "usr"), "<unset>"]);
+    expect(r.failure).toBe("../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 2)");
+  });
+
+  it("keeps the first error when the retry's fetch into that devdir could not happen", () => {
+    const r = run({ systemHeaders: RUNNING, compiler: "broken", network: "offline", loginEnv: xdg() });
+    expect(r.failure).toBe(
+      `../src/unix/pty.cc:42:1: error: 'forkpty' was not declared in this scope (attempt 1) (the retry could not fetch the headers for Node v${RUNNING})`,
+    );
+  });
+
+  it("names that devdir in the preflight", () => {
+    const r = run({ systemHeaders: null, loginEnv: xdg() });
+    expect(r.status).toBe(0);
+    expect(headersLine(r)).toBe(`auto — node-gyp fetches v${RUNNING} into ${path.join(sandbox, "xdg", "node-gyp")}/${RUNNING}/`);
+    expect(headersLine(run({ systemHeaders: null, loginEnv: { npm_config_devdir: "~/gyp-dev" } })))
+      .toBe(`auto — node-gyp fetches v${RUNNING} into ~/gyp-dev/${RUNNING}/`);
   });
 });
 

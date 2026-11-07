@@ -2088,6 +2088,9 @@ NODE_HEADERS_CHOICE=""
 # Why the last node-pty rebuild failed, in one line, for do_rebuild's failure
 # sentence: that sentence is what the update screen shows. Empty otherwise.
 NODE_PTY_FAILURE=""
+# node-gyp's devdir for this rebuild (node_gyp_devdir), set by ensure_node_pty.
+# Empty: the default, the clawbox user's ~/.cache/node-gyp.
+NODE_GYP_DEVDIR=""
 
 # The Node version a header directory belongs to ("24.22.2"), read from its
 # node_version.h. Prints nothing and returns non-zero when it cannot say.
@@ -2120,7 +2123,8 @@ node_header_version() {
 # So a system directory is used only when it is <prefix>/include/node AND its
 # node_version.h names exactly the running Node; npm_config_nodedir is then the
 # prefix. Otherwise nodedir stays unset and node-gyp fetches the matching
-# headers into ~/.cache/node-gyp/<version>/, and a mismatched system directory
+# headers into <devdir>/<version>/ (node_gyp_devdir; ~/.cache/node-gyp unless
+# the clawbox user's environment says otherwise), and a mismatched system directory
 # is only kept as the fallback for a box that cannot fetch (ensure_node_pty).
 #
 # $1 is the running Node's `process.versions.node`. Sets NODE_HEADERS_NODEDIR
@@ -2154,16 +2158,34 @@ choose_node_headers() {
       NODE_HEADERS_FALLBACK_DESC="$dir (Node ${ver:-of unknown version})"
     fi
   done
-  NODE_HEADERS_CHOICE="auto — node-gyp fetches v${want:-?} into ~/.cache/node-gyp/${want:-<version>}/"
+  # Where node-gyp really fetches to, under the user's home spelled `~/`.
+  local devdir="${NODE_GYP_DEVDIR:-$CLAWBOX_HOME/.cache/node-gyp}"
+  case "$devdir" in
+    "$CLAWBOX_HOME"/*) devdir="~/${devdir#"$CLAWBOX_HOME"/}" ;;
+  esac
+  NODE_HEADERS_CHOICE="auto — node-gyp fetches v${want:-?} into $devdir/${want:-<version>}/"
   if [ -n "$ignored" ]; then
     NODE_HEADERS_CHOICE="$NODE_HEADERS_CHOICE (ignored: ${ignored#; })"
   fi
 }
 
-# Does node-gyp hold the headers for Node $1 in the clawbox user's cache, its
-# default devdir? Yes after a fetch that worked; no after one that could not.
+# node-gyp's devdir, where it keeps the headers it fetches, worked out the way
+# node-gyp works it out (bin/node-gyp.js) in the environment the rebuild runs
+# in, the clawbox user's login: its devdir option, which npm hands it as
+# npm_config_devdir (a leading ~ is that user's home), else env-paths' cache
+# directory, ${XDG_CACHE_HOME:-~/.cache}/node-gyp. Only ever read: a path the
+# clawbox user's own environment names is no path for root to create or chown.
+node_gyp_devdir() {
+  local dir
+  # The last line: a login shell may print before the command runs.
+  dir="$(as_clawbox_login 'd="${npm_config_devdir:-${NPM_CONFIG_DEVDIR:-}}"; case "$d" in "~"*) d="$HOME${d#"~"}" ;; esac; printf "%s\n" "${d:-${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"' 2>/dev/null | tail -n 1)" || dir=""
+  printf '%s\n' "${dir:-$CLAWBOX_HOME/.cache/node-gyp}"
+}
+
+# Does node-gyp hold the headers for Node $1 in its devdir (NODE_GYP_DEVDIR)?
+# Yes after a fetch that worked; no after one that could not.
 node_gyp_has_headers() {
-  [ -n "$1" ] && [ -f "$CLAWBOX_HOME/.cache/node-gyp/$1/include/node/node_version.h" ]
+  [ -n "$1" ] && [ -f "${NODE_GYP_DEVDIR:-$CLAWBOX_HOME/.cache/node-gyp}/$1/include/node/node_version.h" ]
 }
 
 # One `npm rebuild node-pty`, as the clawbox user, against the headers under
@@ -2265,11 +2287,16 @@ ensure_node_pty() {
   echo "  node-pty is missing or built for the wrong Node ABI; preparing native build prerequisites..."
   local want
   want="$(as_clawbox_login "node -p 'process.versions.node'" 2>/dev/null)" || want=""
+  # Before the choice: its account names the directory node-gyp fetches into,
+  # and both "did the fetch work?" checks below look there.
+  NODE_GYP_DEVDIR="$(node_gyp_devdir)"
   choose_node_headers "$want"
   print_native_build_preflight
   wait_for_apt
   apt-get install -y -qq python3 python3-pip python-is-python3 build-essential pkg-config
 
+  # The DEFAULT devdir, made the clawbox user's whatever NODE_GYP_DEVDIR says:
+  # a devdir the user's own environment names is theirs to have made.
   mkdir -p "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" \
     "$CLAWBOX_HOME/.npm" \
@@ -7732,7 +7759,7 @@ step_clawkeep_install_pip_user_fallback() {
 openclaw_reasoning_stream_patch() {
   local script="$PROJECT_DIR/scripts/openclaw-reasoning-stream-patch.mjs"
   if [ ! -f "$script" ]; then
-    echo "  Reasoning stream patch: $script not found, skipping"
+    echo "  WARNING: reasoning stream patch not applied: $script not found; answers of reasoning models reach the chat in one piece"
     return 0
   fi
   as_clawbox node "$script" "${GATEWAY_DIST%/dist}" \
