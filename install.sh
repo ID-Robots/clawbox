@@ -2179,14 +2179,16 @@ choose_node_headers() {
 # ${XDG_CACHE_HOME:-~/.cache}/node-gyp. Only ever read: a path the clawbox
 # user's own environment names is no path for root to create or chown.
 #
-# Two of node-gyp's rules that are easy to miss: a package config that is SET
-# but empty still wins, and clears the devdir (node-gyp then takes its
-# default); and a relative devdir is relative to the directory node-gyp runs
-# in, node-pty's own, where npm runs its install script.
+# Three of node-gyp's rules that are easy to miss: it reads the package config
+# under any case of its name; a package config that is SET but empty still
+# wins, and clears the devdir (node-gyp then takes its default); and a
+# relative devdir is relative to the directory node-gyp runs in, node-pty's
+# own, where npm runs its install script. (npm's own config already takes
+# npm_config_devdir under any case.)
 node_gyp_devdir() {
   local dir script
-  script='if [ -n "${npm_package_config_node_gyp_devdir+set}" ]; then d=$npm_package_config_node_gyp_devdir
-elif [ -n "${NPM_PACKAGE_CONFIG_NODE_GYP_DEVDIR+set}" ]; then d=$NPM_PACKAGE_CONFIG_NODE_GYP_DEVDIR
+  script="$(cat <<'EOS'
+if d="$(env | awk -F= 'tolower($1) == "npm_package_config_node_gyp_devdir" { sub(/^[^=]*=/, ""); print; f = 1; exit } END { exit !f }')"; then :
 else
   d="$(npm config get devdir 2>/dev/null)" || d=""
   [ "$d" != undefined ] || d=""
@@ -2194,7 +2196,9 @@ fi
 case "$d" in "~"*) d="$HOME${d#"~"}" ;; esac
 d="${d:-${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"
 case "$d" in /*) ;; *) d="$PWD/node_modules/node-pty/$d" ;; esac
-printf "%s\n" "$d"'
+printf "%s\n" "$d"
+EOS
+)"
   # The last line: a login shell may print before the command runs.
   dir="$(as_clawbox_login "cd $PROJECT_DIR || exit 1; $script" 2>/dev/null | tail -n 1)" || dir=""
   printf '%s\n' "${dir:-$CLAWBOX_HOME/.cache/node-gyp}"

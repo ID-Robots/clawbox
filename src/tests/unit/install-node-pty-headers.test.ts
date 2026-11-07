@@ -151,7 +151,9 @@ exit 1
 const FAKE_NPM = `#!/usr/bin/env bash
 [ "\${1:-}" = "--version" ] && { echo 11.19.1; exit 0; }
 npm_devdir_config() {
-  local v="\${npm_config_devdir:-\${NPM_CONFIG_DEVDIR:-}}" rc
+  # npm's env layer: npm_config_devdir under any case, an empty one skipped.
+  local v rc
+  v="$(env | awk -F= 'tolower($1) == "npm_config_devdir" && length($0) > length($1) + 1 { sub(/^[^=]*=/, ""); print; exit }')"
   for rc in "$PWD/.npmrc" "$HOME/.npmrc"; do
     [ -n "$v" ] || v="$(sed -n 's/^devdir=//p' "$rc" 2>/dev/null)"
   done
@@ -165,8 +167,11 @@ for i in $(seq 1 "$NOISE"); do echo "gyp info attempt $attempt line $i"; done
 if [ -n "\${npm_config_nodedir:-}" ]; then
   hdr="$npm_config_nodedir/include/node"
 else
-  # Set but empty still wins; relative is node-pty's directory's, where npm runs it.
-  devdir="\${npm_package_config_node_gyp_devdir-$(npm_devdir_config)}"
+  # The package config under any case, and set but empty still wins; relative
+  # is node-pty's directory's, where npm runs it.
+  if devdir="$(env | awk -F= 'tolower($1) == "npm_package_config_node_gyp_devdir" { sub(/^[^=]*=/, ""); print; f = 1; exit } END { exit !f }')"; then :
+  else devdir="$(npm_devdir_config)"
+  fi
   [ "$devdir" != undefined ] || devdir=""
   case "$devdir" in "~"*) devdir="$HOME\${devdir#"~"}" ;; esac
   devdir="\${devdir:-\${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"
@@ -443,6 +448,17 @@ describe("the headers node-gyp fetched are looked for where node-gyp keeps them"
       () => ({ loginEnv: { npm_config_devdir: dev("gyp"), npm_package_config_node_gyp_devdir: dev("pkg") } }),
       () => dev("pkg"),
     ],
+    [
+      "NPM_PACKAGE_CONFIG_NODE_GYP_DEVDIR, over npm_config_devdir",
+      () => ({ loginEnv: { npm_config_devdir: dev("gyp"), NPM_PACKAGE_CONFIG_NODE_GYP_DEVDIR: dev("pkg") } }),
+      () => dev("pkg"),
+    ],
+    [
+      "Npm_Package_Config_Node_Gyp_Devdir, over npm_config_devdir",
+      () => ({ loginEnv: { npm_config_devdir: dev("gyp"), Npm_Package_Config_Node_Gyp_Devdir: dev("pkg") } }),
+      () => dev("pkg"),
+    ],
+    ["Npm_Config_Devdir", () => ({ loginEnv: { Npm_Config_Devdir: dev("gyp") } }), () => dev("gyp")],
     [
       "an empty npm_package_config_node_gyp_devdir, which clears npm_config_devdir",
       () => ({ loginEnv: { npm_config_devdir: dev("gyp"), npm_package_config_node_gyp_devdir: "" } }),
