@@ -1073,7 +1073,12 @@ export async function parseMemoryStatus(
 
   return {
     available: Boolean(provider || model || files || chunks),
-    agentId: cleanString(row.agentId) || agentId,
+    // The agent ASKED about, never the label on the row: a fallback row a core
+    // labels some other way (the roster key as written, say) is still the
+    // answer about this agent, and `getMemoryStatus` reloads any reading whose
+    // id is not the default agent's, so the row's label made every read wait
+    // on a cold probe. `rebuildKeywordOnlyIndex` keys its claim on it too.
+    agentId,
     provider,
     model,
     // Where the embedder that did not answer is SUPPOSED to be, rather than

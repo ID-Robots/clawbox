@@ -129,6 +129,26 @@ describe("the default agent of this box's openclaw.json", () => {
 
   const write = (value: unknown) => fs.writeFile(config, typeof value === "string" ? value : JSON.stringify(value));
 
+  /**
+   * `fs.open` as the module calls it, with every read of a handle counted and,
+   * when `stats` is given, the handle's `fstat` answered by it.
+   */
+  function watchHandles(stats?: () => { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint }) {
+    const realOpen = fs.open.bind(fs);
+    const counts = { reads: 0 };
+    vi.spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await realOpen(...args);
+      const realRead = handle.readFile.bind(handle);
+      handle.readFile = ((...a: Parameters<typeof realRead>) => {
+        counts.reads += 1;
+        return realRead(...a);
+      }) as typeof handle.readFile;
+      if (stats) handle.stat = (async () => stats()) as unknown as typeof handle.stat;
+      return handle;
+    }) as typeof fs.open);
+    return counts;
+  }
+
   it("is main when there is no config", async () => {
     expect(await openclawDefaultAgentId(config)).toBe("main");
   });
@@ -142,13 +162,29 @@ describe("the default agent of this box's openclaw.json", () => {
 
   it("follows a rename at once and reads the file only when it changed", async () => {
     await write({ agents: { entries: entries("main") } });
-    const read = vi.spyOn(fs, "readFile");
+    const counts = watchHandles();
     expect(await openclawDefaultAgentId(config)).toBe("main");
     expect(await openclawDefaultAgentId(config)).toBe("main");
-    expect(read).toHaveBeenCalledTimes(1);
+    expect(counts.reads).toBe(1);
     await write({ agents: { entries: { "default-agent": {} } } });
     expect(await openclawDefaultAgentId(config)).toBe("default-agent");
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(counts.reads).toBe(2);
+  });
+
+  it("tells apart two writes a nanosecond apart, which a float millisecond mtime rounds together", async () => {
+    let mtimeNs = BigInt("1700000000000000001");
+    const counts = watchHandles(() => ({ dev: BigInt(1), ino: BigInt(2), size: BigInt(3), mtimeNs }));
+    await write({ agents: { entries: entries("main") } });
+    expect(await openclawDefaultAgentId(config)).toBe("main");
+    await write({ agents: { entries: entries("travel") } });
+    // The same identity: the cached answer stands and nothing is read.
+    expect(await openclawDefaultAgentId(config)).toBe("main");
+    expect(counts.reads).toBe(1);
+    mtimeNs += BigInt(1);
+    // What a key built from `mtimeMs` would have seen: no change at all.
+    expect(Number(mtimeNs) / 1e6).toBe(Number(mtimeNs - BigInt(1)) / 1e6);
+    expect(await openclawDefaultAgentId(config)).toBe("travel");
+    expect(counts.reads).toBe(2);
   });
 
   it("keeps the last answer over a file it cannot read for a moment, and is main once it is gone", async () => {
@@ -158,7 +194,7 @@ describe("the default agent of this box's openclaw.json", () => {
     expect(await openclawDefaultAgentId(config)).toBe("default");
     await write({ agents: { entries: entries("travel") } });
     expect(await openclawDefaultAgentId(config)).toBe("travel");
-    vi.spyOn(fs, "stat").mockRejectedValueOnce(Object.assign(new Error("EIO"), { code: "EIO" }));
+    vi.spyOn(fs, "open").mockRejectedValueOnce(Object.assign(new Error("EIO"), { code: "EIO" }));
     expect(await openclawDefaultAgentId(config)).toBe("travel");
     await fs.rm(config);
     expect(await openclawDefaultAgentId(config)).toBe("main");

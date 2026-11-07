@@ -35,6 +35,7 @@
  */
 
 import { promises as fs } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import { CONFIG_PATH } from "@/lib/openclaw-config";
 
 /** The core's implicit agent, and the answer when nothing else is configured. */
@@ -130,11 +131,12 @@ let cached: { path: string; key: string; id: string } | null = null;
  *
  * Every status read and every pass asks, and the answer changes only when the
  * owner adds, renames or re-points an agent, so it is kept against the file's
- * identity (inode, size, mtime): one `stat` per ask, a re-read the moment the
- * config is written, never a stale id across a rename. A file that is not
- * there answers {@link FALLBACK_AGENT_ID}; one that cannot be read for a
- * moment (caught half-written, an EIO) keeps the last answer read from it
- * rather than flipping a status read to an agent the box may not have.
+ * identity (device, inode, size, mtime): one open and `fstat` per ask, a
+ * re-read the moment the config is written, never a stale id across a rename.
+ * A file that is not there answers {@link FALLBACK_AGENT_ID}; one that cannot
+ * be read for a moment (caught half-written, an EIO) keeps the last answer
+ * read from it rather than flipping a status read to an agent the box may not
+ * have.
  *
  * Never rejects, whatever goes wrong: an index pass asks for it with the run
  * lock already taken.
@@ -149,22 +151,30 @@ export async function openclawDefaultAgentId(configPath?: string): Promise<strin
 
 async function readDefaultAgentId(configPath: string): Promise<string> {
   const last = cached?.path === configPath ? cached : null;
-  let key: string;
+  // ONE handle for the identity and the content, so the id cached under a key
+  // is the content of the very file that key describes: a path `stat` followed
+  // by a path read could pair one file's identity with the next one's text.
+  let handle: FileHandle;
   try {
-    const stat = await fs.stat(configPath);
-    key = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    handle = await fs.open(configPath, "r");
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return FALLBACK_AGENT_ID;
     return last?.id ?? FALLBACK_AGENT_ID;
   }
-  if (last?.key === key) return last.id;
-  let config: unknown;
   try {
-    config = JSON.parse(await fs.readFile(configPath, "utf8"));
+    // BigInt stats: a float `mtimeMs` rounds two writes a few hundred
+    // nanoseconds apart to one value, and a large inode loses digits as a
+    // number. (ClawBox and OpenClaw both write the file by rename, so a
+    // rewrite also brings a new inode.)
+    const stat = await handle.stat({ bigint: true });
+    const key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+    if (last?.key === key) return last.id;
+    const id = resolveDefaultAgentId(JSON.parse(await handle.readFile({ encoding: "utf8" })));
+    cached = { path: configPath, key, id };
+    return id;
   } catch {
     return last?.id ?? FALLBACK_AGENT_ID;
+  } finally {
+    await handle.close().catch(() => { /* already closed */ });
   }
-  const id = resolveDefaultAgentId(config);
-  cached = { path: configPath, key, id };
-  return id;
 }

@@ -1995,6 +1995,22 @@ describe("a box whose default agent is not called main", () => {
     expect(status.health).toBe("healthy");
   });
 
+  it("settles its cache when the core labels its row differently from the agent asked about", async () => {
+    // A core may print the roster key as written where ClawBox passed the
+    // normalised id. The reading is still about the agent that was asked for;
+    // reported under the row's label it never matched the default agent, and
+    // every read waited on a cold `memory status --deep` probe.
+    const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("Default")]);
+    const { getMemoryStatus } = await lib();
+    const first = await getMemoryStatus();
+    const second = await getMemoryStatus();
+    // One probe: the second read is answered from the cache.
+    expect(await calls(argv, "memory status")).toEqual(["memory status --agent default --deep --json"]);
+    expect(first.agentId).toBe("default");
+    expect(second.agentId).toBe("default");
+    expect(second.provider).toBe("ollama");
+  });
+
   it("indexes that agent", async () => {
     const argv = await boxWithAgents(customer, [realRow("default")]);
     const { startMemoryIndex } = await lib();
