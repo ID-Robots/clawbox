@@ -19,10 +19,10 @@
  *  - it is in the gateway unit's own cgroup and a DIRECT child of the gateway
  *    server, so a `codex app-server` the agent starts from a shell, or a
  *    coding run's, is never a candidate;
- *  - argv[0] makes it a codex app-server: node running
- *    `@openai/codex/bin/codex.js`, or the native `codex` binary, with
- *    `app-server` as the subcommand (see process-match.ts for why argv[0]
- *    comes first);
+ *  - it is the plugin's launcher, node running `@openai/codex/bin/codex.js`
+ *    with `app-server` as the subcommand (argv[0] first, see process-match.ts),
+ *    and it runs with the plugin's per-agent home,
+ *    `CODEX_HOME=…/agents/<id>/agent/codex-home`;
  *  - nothing runs under it except its own native binary, so a command it is
  *    running, a background terminal or an MCP server keeps it alive;
  *  - the wrapper and binary together have stayed under
@@ -30,9 +30,10 @@
  *    {@link CODEX_APP_SERVER_IDLE_MS}, the plugin's own idle window for a
  *    retained thread. The clock starts when this process first sees the
  *    app-server, so a web-server restart starts it over;
- *  - the gateway, asked right before the stop, says no session has agent work
+ *  - the gateway, asked right before each stop, says no session has agent work
  *    running or queued (`sessions.list` with `activeOnly`, read-only). When the
- *    gateway does not answer, nothing is stopped.
+ *    gateway does not answer, or answers without a session list, nothing is
+ *    stopped.
  *
  * WHAT HAPPENS NEXT. SIGTERM goes to the wrapper, which forwards it to the
  * binary and exits with it. If the tree is still there after
@@ -50,9 +51,10 @@
 import fs from "fs/promises";
 import path from "./runtime-path";
 import { gatewayCgroupDirs, isGatewayServerProcess } from "@/lib/gateway-start-guard";
-import { gatewayWsActiveSessions } from "@/lib/openclaw-gateway-ws";
+import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { parseProcCmdline } from "@/lib/process-match";
 import { logSafe } from "@/lib/log-safe";
+import { monotonicNow } from "@/lib/monotonic-clock";
 
 /** How often the web server looks. */
 export const CODEX_REAP_SWEEP_MS = 5 * 60_000;
@@ -100,6 +102,7 @@ export interface ReaperDeps {
   rssKb(pid: number): Promise<number>;
   /** The agent whose `CODEX_HOME` the app-server runs with, when it can be read. */
   agentOf(pid: number): Promise<string | null>;
+  /** Milliseconds on a monotonic clock; only differences are used. */
   now(): number;
   sleep(ms: number): Promise<void>;
   log(line: string): void;
@@ -107,7 +110,7 @@ export interface ReaperDeps {
 
 export interface StoppedAppServer {
   pid: number;
-  agent: string | null;
+  agent: string;
   idleMs: number;
   rssKb: number;
   killed: boolean;
@@ -143,15 +146,21 @@ function runsAppServer(args: readonly string[]): boolean {
 }
 
 /**
- * Whether an argv is a codex app-server: the native `codex` binary, or node
- * running the npm launcher, followed by the `app-server` subcommand. Anchored
- * on argv[0]; a shell whose arguments merely mention one never matches.
+ * Whether an argv is the plugin's app-server launcher: node running the npm
+ * package's `codex.js` with the `app-server` subcommand. This is the only form
+ * a root may have. The plugin always starts the launcher, and a bare `codex
+ * app-server` that a shell exec'd in place would also be a direct child of the
+ * gateway. Anchored on argv[0], so a shell whose arguments merely mention one
+ * never matches.
  */
+export function isCodexLauncherArgv(argv: readonly string[]): boolean {
+  return NODE_EXECUTABLE.test(executableName(argv[0])) && isCodexLauncherScript(argv[1]) && runsAppServer(argv.slice(2));
+}
+
+/** Whether an argv is a codex app-server in either form: the launcher, or the native `codex` binary it starts. */
 export function isCodexAppServerArgv(argv: readonly string[]): boolean {
-  const exe = executableName(argv[0]);
-  if (exe === "codex") return runsAppServer(argv.slice(1));
-  if (NODE_EXECUTABLE.test(exe) && isCodexLauncherScript(argv[1])) return runsAppServer(argv.slice(2));
-  return false;
+  if (executableName(argv[0]) === "codex") return runsAppServer(argv.slice(1));
+  return isCodexLauncherArgv(argv);
 }
 
 interface AppServerTree {
@@ -171,7 +180,7 @@ export function gatewayAppServers(processes: readonly UnitProcess[]): AppServerT
   }
   const trees: AppServerTree[] = [];
   for (const root of processes) {
-    if (!gateways.has(root.ppid) || !isCodexAppServerArgv(root.argv)) continue;
+    if (!gateways.has(root.ppid) || !isCodexLauncherArgv(root.argv)) continue;
     const descendants: UnitProcess[] = [];
     const queue = [...(children.get(root.pid) ?? [])];
     while (queue.length) {
@@ -196,24 +205,45 @@ function treeState(tree: AppServerTree): { members: string; cpuTicks: number; bu
   };
 }
 
-/** `/proc/<pid>/stat` after the command name, which may hold spaces and parentheses. */
-function statFields(stat: string): string[] {
-  return stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+/**
+ * The fields of `/proc/<pid>/stat` this module reads, or null for a line it
+ * cannot parse. The command name is in parentheses and may hold spaces and
+ * parentheses itself, so fields are counted from the LAST `)`: state is field
+ * 3, ppid 4, utime 14, stime 15, starttime 22 (proc(5)).
+ */
+export function parseProcStat(stat: string): { state: string; ppid: number; cpuTicks: number; startTicks: number } | null {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return null;
+  const fields = stat.slice(close + 2).trim().split(" ");
+  const ppid = Number.parseInt(fields[1] ?? "", 10);
+  const cpuTicks = Number.parseInt(fields[11] ?? "", 10) + Number.parseInt(fields[12] ?? "", 10);
+  const startTicks = Number.parseInt(fields[19] ?? "", 10);
+  if (!fields[0] || ![ppid, cpuTicks, startTicks].every(Number.isFinite)) return null;
+  return { state: fields[0], ppid, cpuTicks, startTicks };
 }
 
 async function readUnitProcess(pid: number): Promise<UnitProcess | null> {
   try {
-    const fields = statFields(await fs.readFile(`/proc/${pid}/stat`, "utf8"));
-    const ppid = Number.parseInt(fields[1] ?? "", 10);
-    const cpuTicks = Number.parseInt(fields[11] ?? "", 10) + Number.parseInt(fields[12] ?? "", 10);
-    const startTicks = Number.parseInt(fields[19] ?? "", 10);
-    if (![ppid, cpuTicks, startTicks].every(Number.isFinite)) return null;
+    const stat = parseProcStat(await fs.readFile(`/proc/${pid}/stat`, "utf8"));
+    if (!stat) return null;
     const argv = parseProcCmdline(await fs.readFile(`/proc/${pid}/cmdline`, "utf8"));
-    const parentComm = await fs.readFile(`/proc/${ppid}/comm`, "utf8").then((s) => s.trim(), () => null);
-    return { pid, ppid, startTicks, cpuTicks, argv, parentComm };
+    const parentComm = await fs.readFile(`/proc/${stat.ppid}/comm`, "utf8").then((s) => s.trim(), () => null);
+    return { pid, ppid: stat.ppid, startTicks: stat.startTicks, cpuTicks: stat.cpuTicks, argv, parentComm };
   } catch {
     return null; // gone between the reads
   }
+}
+
+/**
+ * How many sessions have agent work running or queued: `sessions.list` with
+ * `activeOnly`, as `gatewayWsActiveSessions` asks it. An answer without a
+ * `sessions` list is not taken as "none", because a stop rests on this answer.
+ */
+async function countActiveSessions(): Promise<number> {
+  const payload = await gatewayWsCall("sessions.list", { activeOnly: true, rowMode: "compact", limit: 50 }, { timeoutMs: 5_000 });
+  if (!Array.isArray(payload.sessions)) throw new Error("sessions.list answered without a sessions list");
+  // A row that says it has no active run is not counted; anything else is.
+  return payload.sessions.filter((row) => !(row && typeof row === "object" && (row as Record<string, unknown>).hasActiveRun === false)).length;
 }
 
 const realDeps: ReaperDeps = {
@@ -226,14 +256,10 @@ const realDeps: ReaperDeps = {
     const found = await Promise.all([...pids].map(readUnitProcess));
     return found.filter((p): p is UnitProcess => p !== null);
   },
-  async activeSessionCount() {
-    return (await gatewayWsActiveSessions({ timeoutMs: 5_000 })).sessionKeys.length;
-  },
+  activeSessionCount: countActiveSessions,
   async isAlive(pid, startTicks) {
-    const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
-    if (!stat) return false;
-    const fields = statFields(stat);
-    return fields[0] !== "Z" && Number.parseInt(fields[19] ?? "", 10) === startTicks;
+    const stat = parseProcStat(await fs.readFile(`/proc/${pid}/stat`, "utf8").catch(() => ""));
+    return stat !== null && stat.state !== "Z" && stat.startTicks === startTicks;
   },
   signal(pid, signal) {
     process.kill(pid, signal);
@@ -247,7 +273,9 @@ const realDeps: ReaperDeps = {
     const home = environ.split("\0").find((entry) => entry.startsWith("CODEX_HOME="));
     return /\/agents\/([^/]+)\/agent\/codex-home\/?$/.exec(home ?? "")?.[1] ?? null;
   },
-  now: () => Date.now(),
+  // Monotonic: timesyncd steps the clock forward after a cold boot, and a
+  // wall-clock jump would read as half a day of quiet.
+  now: monotonicNow,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   log: (line) => console.log(line),
 };
@@ -283,14 +311,17 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
   let sweeping = false;
   let lastRefusal = "";
 
-  async function stop(tree: AppServerTree, idleFor: number): Promise<StoppedAppServer | null> {
+  async function stop(tree: AppServerTree, idleFor: number, agent: string): Promise<StoppedAppServer | null> {
     const members = [tree.root, ...tree.descendants];
-    const [agent, ...rss] = await Promise.all([deps.agentOf(tree.root.pid), ...members.map((p) => deps.rssKb(p.pid))]);
+    const rss = await Promise.all(members.map((p) => deps.rssKb(p.pid)));
     try {
       deps.signal(tree.root.pid, "SIGTERM");
     } catch (err) {
-      deps.log(`[codex-reaper] could not stop codex app-server pid ${tree.root.pid}: ${logSafe(err instanceof Error ? err.message : String(err))}`);
-      return null;
+      // Gone already: what it started may still be there, and is seen to below.
+      if ((err as NodeJS.ErrnoException)?.code !== "ESRCH") {
+        deps.log(`[codex-reaper] could not stop codex app-server pid ${tree.root.pid}: ${logSafe(err instanceof Error ? err.message : String(err))}`);
+        return null;
+      }
     }
     const alive = async () => (await Promise.all(members.map(async (p) => ((await deps.isAlive(p.pid, p.startTicks)) ? p : null)))).filter((p): p is UnitProcess => p !== null);
     let left = await alive();
@@ -307,9 +338,23 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
     }
     const stopped = { pid: tree.root.pid, agent, idleMs: idleFor, rssKb: rss.reduce((a, b) => a + b, 0), killed: left.length > 0 };
     deps.log(
-      `[codex-reaper] stopped the idle codex app-server${agent ? ` of agent ${logSafe(agent, 64)}` : ""} (pid ${stopped.pid}, idle ${Math.round(idleFor / 60_000)} min, ${Math.round(stopped.rssKb / 1024)} MB${stopped.killed ? ", SIGKILL after SIGTERM" : ""})`,
+      `[codex-reaper] stopped the idle codex app-server of agent ${logSafe(agent, 64)} (pid ${stopped.pid}, idle ${Math.round(idleFor / 60_000)} min, ${Math.round(stopped.rssKb / 1024)} MB${stopped.killed ? ", SIGKILL after SIGTERM" : ""})`,
     );
     return stopped;
+  }
+
+  /** The gateway's answer, or null (logged once per distinct reason) when it gave none. */
+  async function activeSessions(waiting: number): Promise<number | null> {
+    try {
+      const active = await deps.activeSessionCount();
+      lastRefusal = "";
+      return active;
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      if (why !== lastRefusal) deps.log(`[codex-reaper] left ${waiting} idle codex app-server(s) running: the gateway did not say whether it is busy (${logSafe(why)})`);
+      lastRefusal = why;
+      return null;
+    }
   }
 
   async function sweep(): Promise<StoppedAppServer[]> {
@@ -329,32 +374,25 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
         if (now - quietSince >= idleMs) idle.push({ tree, idleFor: now - quietSince });
       }
       for (const key of [...watched.keys()]) if (!seen.has(key)) watched.delete(key);
-      if (!idle.length) return [];
 
-      let active: number;
-      try {
-        active = await deps.activeSessionCount();
-      } catch (err) {
-        const why = err instanceof Error ? err.message : String(err);
-        if (why !== lastRefusal) deps.log(`[codex-reaper] left ${idle.length} idle codex app-server(s) running: the gateway did not say whether it is busy (${logSafe(why)})`);
-        lastRefusal = why;
-        return [];
-      }
-      lastRefusal = "";
-      if (active > 0) return [];
-
-      // Looked at again after the gateway answered: only a tree that is still
-      // what was judged idle, and has stayed quiet meanwhile, is stopped.
-      const current = new Map(gatewayAppServers(await deps.listUnitProcesses()).map((tree) => [identity(tree.root), tree]));
-      const recheckedAt = deps.now();
+      // One at a time, each on a fresh answer and a fresh look: a stop takes
+      // up to STOP_GRACE_MS, and a turn may start on the next one meanwhile.
       const stopped: StoppedAppServer[] = [];
-      for (const { tree, idleFor } of idle) {
+      for (const [index, { tree, idleFor }] of idle.entries()) {
         const key = identity(tree.root);
-        const latest = current.get(key);
+        // The plugin starts every app-server with the agent's own Codex home;
+        // one without it is not the plugin's, whoever started it.
+        const agent = await deps.agentOf(tree.root.pid);
+        if (!agent) continue;
+        const active = await activeSessions(idle.length - index);
+        if (active === null || active > 0) break;
+        // Looked at again after the gateway answered: only a tree that is still
+        // what was judged idle, and has stayed quiet meanwhile, is stopped.
+        const latest = gatewayAppServers(await deps.listUnitProcesses()).find((t) => identity(t.root) === key);
         const before = watched.get(key);
-        if (!latest || !before || !stayedQuiet(before, treeState(latest), recheckedAt)) continue;
+        if (!latest || !before || !stayedQuiet(before, treeState(latest), deps.now())) continue;
         watched.delete(key);
-        const result = await stop(latest, idleFor);
+        const result = await stop(latest, idleFor, agent);
         if (result) stopped.push(result);
       }
       return stopped;
