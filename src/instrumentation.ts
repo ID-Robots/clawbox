@@ -836,6 +836,27 @@ export async function register() {
     console.error('[instrumentation] Could not load the app unit caps:', err instanceof Error ? err.message : err)
   }
   try {
+    // The codex app-servers the gateway keeps after an agent's turn, one per
+    // agent and 130-260 MB each, are never closed by the pinned Codex plugin
+    // (src/lib/codex-app-server-reaper.ts). Every CODEX_REAP_SWEEP_MS, one that
+    // has been quiet for 30 min is stopped while the gateway reports no agent
+    // work; the agent's next turn starts a fresh one. CLAWBOX_CODEX_REAP=0
+    // turns it off. Starts nothing on a box with no gateway running.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { reapIdleCodexAppServers, CODEX_REAP_SWEEP_MS } = require('./lib/codex-app-server-reaper')
+    const pass = () => {
+      void (reapIdleCodexAppServers() as Promise<unknown[]>).catch((err: unknown) => {
+        console.error('[instrumentation] Could not look for idle codex app-servers:', err instanceof Error ? err.message : err)
+      })
+    }
+    if (process.env.CLAWBOX_CODEX_REAP !== '0') {
+      setTimeout(pass, 120_000).unref()
+      setInterval(pass, CODEX_REAP_SWEEP_MS as number).unref()
+    }
+  } catch (err) {
+    console.error('[instrumentation] Could not load the codex app-server reaper:', err instanceof Error ? err.message : err)
+  }
+  try {
     // The long work Settings started (src/lib/background-tasks.ts) is read at
     // boot, not at the first request that asks: a root step left running by
     // the last server is adopted, and installs left queued behind it move on
