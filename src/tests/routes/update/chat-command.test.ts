@@ -155,6 +155,16 @@ describe("what it claims", () => {
   });
 });
 
+describe("the answer budget", () => {
+  it("is per sender: a stranger hammering the bot cannot spend the owner's answers", async () => {
+    for (let i = 0; i < 25; i++) await post(fromOpenclaw({ senderId: "999", chatId: "999", text: "/update" }));
+    await vi.waitFor(() => expect(sendOwnerTelegramText).toHaveBeenCalledTimes(20), WAIT);
+    const res = await post(fromOpenclaw({ senderId: "6001", chatId: "6001", text: "/update" }));
+    expect(await res.json()).toEqual({ handled: true });
+    await vi.waitFor(() => expect(sendOwnerTelegramButtons).toHaveBeenCalledTimes(1), WAIT);
+  });
+});
+
 describe("the owner", () => {
   it("/update gets the notice with its button", async () => {
     const res = await post(fromOpenclaw({ senderId: "6001", chatId: "6001", text: "/update" }));

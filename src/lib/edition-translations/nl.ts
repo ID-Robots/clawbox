@@ -1977,4 +1977,5 @@ export const nl: Record<string, string> = {
   "updateNotice.nothingToInstall": "Niets te installeren — ClawBox is al up-to-date ({current}).",
   "updateNotice.alreadyUpdating": "Er loopt al een update op deze box.",
   "updateNotice.waitingOnAnother": "De box wacht al op een andere bevestiging van je, of je hebt net geweigerd. Probeer het over een minuut opnieuw.",
+  "updateNotice.busy": "Er zijn nu agents aan het werk ({count} actief) en de update zou ze midden in hun taak stoppen. Tik opnieuw op ‘Bijwerken’ als ze klaar zijn, of gebruik ‘Toch updaten’ in Instellingen → Systeemupdate.",
 };

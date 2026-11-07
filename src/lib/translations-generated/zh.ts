@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "本次更新的新内容",
   "updateNotice.alreadyUpdating": "这台盒子已经在更新了。",
   "updateNotice.available": "ClawBox {version} 已可用——这台盒子运行的是 {current}。",
+  "updateNotice.busy": "智能体正在工作（{count} 个进行中），更新会在任务中途停止它们。请等它们完成后再点按“更新”，或在 设置 → 系统更新 中使用“仍然更新”。",
   "updateNotice.button": "更新",
   "updateNotice.confirmInApprovals": "已请求更新。请在 2 分钟内使用 ClawBox 审批机器人刚发给你的按钮确认，或在桌面上确认。",
   "updateNotice.confirmOnDesktop": "已请求更新。请在 2 分钟内在 ClawBox 桌面上确认。",

@@ -61,6 +61,20 @@ describe("update-notice-scheduler", () => {
     expect(new Date(scheduler.nextRunAtMs())).toEqual(new Date(2026, 10, 16, 10, 0));
   });
 
+  it("backs off an hour after a run that broke, instead of waking again at once", async () => {
+    const thursday = new Date(2026, 10, 12, 9, 0);
+    vi.setSystemTime(thursday);
+    scheduler.resetStartForTests(thursday.getTime() - 60 * 60_000);
+    state.lastCheckedWeek = "2026-11-02"; // due, and stays due: the run cannot record it
+    runWeeklyUpdateCheck.mockResolvedValueOnce({ ran: false, failed: true } as never);
+    await scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(runWeeklyUpdateCheck).toHaveBeenCalledTimes(1);
+    expect(scheduler.nextRunAtMs()).toBeGreaterThanOrEqual(thursday.getTime() + 60 * 60_000);
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(runWeeklyUpdateCheck).toHaveBeenCalledTimes(1);
+  });
+
   it("the lab hook only SHORTENS the boot delay", async () => {
     process.env.CLAWBOX_UPDATE_NOTICE_BOOT_DELAY_MS = "5000";
     expect(scheduler.bootDelayMs()).toBe(5_000);

@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "Nieuw in deze update",
   "updateNotice.alreadyUpdating": "Er loopt al een update op deze box.",
   "updateNotice.available": "ClawBox {version} is beschikbaar — deze box draait {current}.",
+  "updateNotice.busy": "Er zijn nu agents aan het werk ({count} actief) en de update zou ze midden in hun taak stoppen. Tik opnieuw op ‘Bijwerken’ als ze klaar zijn, of gebruik ‘Toch updaten’ in Instellingen → Systeemupdate.",
   "updateNotice.button": "Bijwerken",
   "updateNotice.confirmInApprovals": "Update aangevraagd. Bevestig hem binnen 2 minuten met de knop die de goedkeuringsbot van ClawBox je net heeft gestuurd, of op het bureaublad.",
   "updateNotice.confirmOnDesktop": "Update aangevraagd. Bevestig hem binnen 2 minuten op het ClawBox-bureaublad.",

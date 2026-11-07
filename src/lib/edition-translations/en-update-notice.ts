@@ -34,4 +34,5 @@ export const updateNoticeEn: Record<string, string> = {
   "updateNotice.nothingToInstall": "Nothing to install — ClawBox is already up to date ({current}).",
   "updateNotice.alreadyUpdating": "An update is already running on this box.",
   "updateNotice.waitingOnAnother": "The box is already waiting for you to confirm something else, or you just declined. Try again in a minute.",
+  "updateNotice.busy": "Agents are working right now ({count} active), and the update would stop them mid-task. Tap Update again when they finish, or use Update anyway in Settings → System Update.",
 };

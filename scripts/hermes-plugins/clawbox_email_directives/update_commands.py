@@ -214,14 +214,15 @@ def telegram_handler_factory(native, adapter=None) -> None:
 def register_telegram_handlers(ctx) -> bool:
     """Wire the button where this Hermes can; True when it did. Never raises.
 
-    A Hermes without ``register_telegram_handler`` (older than the pinned
-    commit), or one running plugins out of process (``plugins.isolation: host``
-    refuses native SDK handlers), still gets /update — only the tap is missing,
-    and the notice says how to install from the desktop either way.
+    A Hermes without ``register_telegram_handler`` (older than the commit
+    ClawBox pins), or one running plugins out of process (``plugins.isolation:
+    host`` refuses native SDK handlers), still answers /update, and the desktop's
+    Settings → System Update still installs; but a tap on the button is then
+    dropped by Hermes unanswered. The warning below is what says so.
     """
     register = getattr(ctx, "register_telegram_handler", None)
     if not callable(register):
-        logger.info("clawbox_email_directives: this Hermes cannot register Telegram handlers; the Update button is not wired")
+        logger.warning("clawbox_email_directives: this Hermes cannot register Telegram handlers; the update notice's Update button will not answer (use /update or Settings → System Update)")
         return False
     try:
         register(telegram_handler_factory)

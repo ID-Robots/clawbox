@@ -22,7 +22,7 @@
 
 import { processStore } from "@/lib/process-store";
 import { readUpdateNoticeState, runWeeklyUpdateCheck } from "@/lib/update-notice";
-import { planNextCheck } from "@/lib/update-notice-schedule";
+import { planNextCheck, UPDATE_CHECK_RETRY_MS } from "@/lib/update-notice-schedule";
 
 /** How long after the web server starts a due (catch-up) check waits. */
 export const BOOT_DELAY_MS = 3 * 60_000;
@@ -46,6 +46,8 @@ const state = processStore("update-notice:scheduler", () => ({
   armedFor: 0,
   generation: 0,
   startedAt: Date.now(),
+  /** After a run that broke, nothing before this — so a broken data/ cannot spin the timer. */
+  backoffUntil: 0,
 }));
 
 function clear(): void {
@@ -58,6 +60,7 @@ function fire(): void {
   clear();
   void runWeeklyUpdateCheck(new Date())
     .then((result) => {
+      state.backoffUntil = result.failed ? Date.now() + UPDATE_CHECK_RETRY_MS : 0;
       if (result.ran) console.log(`[update-notice] week ${result.week}: ${result.outcome}${result.via ? ` (via ${result.via})` : ""}`);
     })
     .catch((err) => console.warn("[update-notice] the weekly check failed:", err instanceof Error ? err.message : err))
@@ -72,7 +75,7 @@ async function rearm(): Promise<void> {
   let at: number;
   try {
     const plan = planNextCheck(await readUpdateNoticeState(), new Date());
-    at = Math.max(plan.at, state.startedAt + bootDelayMs());
+    at = Math.max(plan.at, state.startedAt + bootDelayMs(), state.backoffUntil);
   } catch (err) {
     console.warn("[update-notice] could not plan the weekly check:", err instanceof Error ? err.message : err);
     return;
@@ -108,4 +111,5 @@ export function stop(): void {
 export function resetStartForTests(startedAt: number = Date.now()): void {
   stop();
   state.startedAt = startedAt;
+  state.backoffUntil = 0;
 }

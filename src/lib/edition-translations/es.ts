@@ -1972,4 +1972,5 @@ export const es: Record<string, string> = {
   "updateNotice.nothingToInstall": "Nada que instalar — ClawBox ya está al día ({current}).",
   "updateNotice.alreadyUpdating": "Ya hay una actualización en curso en esta caja.",
   "updateNotice.waitingOnAnother": "La caja ya está esperando que confirmes otra cosa, o acabas de rechazarla. Vuelve a intentarlo en un minuto.",
+  "updateNotice.busy": "Hay agentes trabajando ahora mismo ({count} activos) y la actualización los detendría a mitad de tarea. Pulsa «Actualizar» de nuevo cuando terminen, o usa «Actualizar de todos modos» en Ajustes → Actualización del sistema.",
 };

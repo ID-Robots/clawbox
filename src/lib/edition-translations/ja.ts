@@ -1977,4 +1977,5 @@ export const ja: Record<string, string> = {
   "updateNotice.nothingToInstall": "インストールするものはありません。ClawBox はすでに最新です ({current})。",
   "updateNotice.alreadyUpdating": "この本体ではすでにアップデートが実行中です。",
   "updateNotice.waitingOnAnother": "本体はすでに別の確認を待っているか、たった今拒否されたところです。1 分後にもう一度お試しください。",
+  "updateNotice.busy": "現在エージェントが作業中です ({count} 件)。アップデートすると作業の途中で停止します。終わってからもう一度「アップデート」をタップするか、設定 → システムアップデート の「このまま更新」を使ってください。",
 };

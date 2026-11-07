@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "Nytt i den här uppdateringen",
   "updateNotice.alreadyUpdating": "En uppdatering pågår redan på den här boxen.",
   "updateNotice.available": "ClawBox {version} finns — den här boxen kör {current}.",
+  "updateNotice.busy": "Agenter arbetar just nu ({count} aktiva) och uppdateringen skulle stoppa dem mitt i uppgiften. Tryck på ”Uppdatera” igen när de är klara, eller använd ”Uppdatera ändå” under Inställningar → Systemuppdatering.",
   "updateNotice.button": "Uppdatera",
   "updateNotice.confirmInApprovals": "Uppdatering begärd. Bekräfta den inom 2 minuter med knappen som ClawBox godkännandebot just skickade dig, eller på skrivbordet.",
   "updateNotice.confirmOnDesktop": "Uppdatering begärd. Bekräfta den på ClawBox-skrivbordet inom 2 minuter.",

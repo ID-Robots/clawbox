@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "Novedades de esta actualización",
   "updateNotice.alreadyUpdating": "Ya hay una actualización en curso en esta caja.",
   "updateNotice.available": "ClawBox {version} está disponible — esta caja tiene {current}.",
+  "updateNotice.busy": "Hay agentes trabajando ahora mismo ({count} activos) y la actualización los detendría a mitad de tarea. Pulsa «Actualizar» de nuevo cuando terminen, o usa «Actualizar de todos modos» en Ajustes → Actualización del sistema.",
   "updateNotice.button": "Actualizar",
   "updateNotice.confirmInApprovals": "Actualización solicitada. Confírmala en los próximos 2 minutos con el botón que te acaba de enviar el bot de aprobaciones de ClawBox, o en el escritorio.",
   "updateNotice.confirmOnDesktop": "Actualización solicitada. Confírmala en el escritorio de ClawBox en los próximos 2 minutos.",

@@ -1976,4 +1976,5 @@ export const de: Record<string, string> = {
   "updateNotice.nothingToInstall": "Nichts zu installieren — ClawBox ist bereits auf dem neuesten Stand ({current}).",
   "updateNotice.alreadyUpdating": "Auf dieser Box läuft bereits ein Update.",
   "updateNotice.waitingOnAnother": "Die Box wartet bereits auf eine andere Bestätigung von Ihnen, oder Sie haben gerade abgelehnt. Versuchen Sie es in einer Minute erneut.",
+  "updateNotice.busy": "Gerade arbeiten Agenten ({count} aktiv), und das Update würde sie mitten in der Aufgabe stoppen. Tippen Sie erneut auf „Aktualisieren“, wenn sie fertig sind, oder nutzen Sie „Trotzdem aktualisieren“ unter Einstellungen → Systemaktualisierung.",
 };

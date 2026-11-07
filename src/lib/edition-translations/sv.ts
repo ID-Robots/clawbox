@@ -1973,4 +1973,5 @@ export const sv: Record<string, string> = {
   "updateNotice.nothingToInstall": "Inget att installera — ClawBox är redan uppdaterad ({current}).",
   "updateNotice.alreadyUpdating": "En uppdatering pågår redan på den här boxen.",
   "updateNotice.waitingOnAnother": "Boxen väntar redan på att du bekräftar något annat, eller så har du just tackat nej. Försök igen om en minut.",
+  "updateNotice.busy": "Agenter arbetar just nu ({count} aktiva) och uppdateringen skulle stoppa dem mitt i uppgiften. Tryck på ”Uppdatera” igen när de är klara, eller använd ”Uppdatera ändå” under Inställningar → Systemuppdatering.",
 };

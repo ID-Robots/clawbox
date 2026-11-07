@@ -121,7 +121,8 @@ export async function POST(request: Request) {
       harness: harness as "openclaw" | "hermes",
     });
     if (claim.handled && claim.run) {
-      if (checkRateLimit("update-chat-command", "harness", COMMAND_BUDGET)) {
+      // Per sender: a stranger hammering the bot cannot spend the owner's answers.
+      if (checkRateLimit("update-chat-command", `${harness}:${senderId}`, COMMAND_BUDGET)) {
         void claim.run().catch((err) =>
           console.error("[update/chat-command] answering failed:", err instanceof Error ? err.message : err));
       } else {

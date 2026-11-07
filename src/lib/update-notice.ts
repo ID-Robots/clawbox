@@ -413,6 +413,8 @@ export async function setWeeklyUpdateCheckEnabled(enabled: boolean): Promise<voi
 
 export interface WeeklyRunResult {
   ran: boolean;
+  /** The run broke (the state could not be read or written): the scheduler backs off. */
+  failed?: boolean;
   week?: string;
   outcome?: WeeklyOutcome;
   via?: NoticeChannel;
@@ -457,6 +459,17 @@ export async function runWeeklyUpdateCheck(now: Date = new Date()): Promise<Week
         console.log(`${TAG} ${a.target} is still the newest; the owner was already told`);
         return settle("already-notified", { lastCheckAt: now.getTime() });
       }
+      const notified = settle("notified", {
+        lastCheckAt: now.getTime(),
+        lastNotifiedTarget: a.target,
+        lastNotifiedVersion: a.version,
+        lastNotifiedAt: now.getTime(),
+        lastNotifiedVia: null,
+      });
+      // RECORDED BEFORE IT IS SENT. A box whose state cannot be written (a full
+      // or read-only data/) would otherwise announce the same version every
+      // time the timer woke; this throws first, and nothing goes out.
+      await writeState(notified.next);
       const via = await deliverUpdateNotice(a, t ?? translatorFor(updateNoticeEn));
       if (!via) {
         return {
@@ -464,17 +477,14 @@ export async function runWeeklyUpdateCheck(now: Date = new Date()): Promise<Week
           value: { ran: true, week: due.week, outcome: "undelivered" },
         };
       }
-      return settle("notified", {
-        lastCheckAt: now.getTime(),
-        lastNotifiedTarget: a.target,
-        lastNotifiedVersion: a.version,
-        lastNotifiedAt: now.getTime(),
-        lastNotifiedVia: via,
-      });
+      return {
+        next: { ...notified.next, lastNotifiedVia: via },
+        value: { ...notified.value, via },
+      };
     });
   } catch (err) {
     console.error(`${TAG} the weekly check failed:`, err instanceof Error ? err.message : err);
-    return { ran: false };
+    return { ran: false, failed: true };
   }
 }
 
@@ -596,22 +606,26 @@ export async function answerUpdateCommand(chatId: string, harness: Harness): Pro
   const a = await checkForUpdate(Date.now() - forced.at >= FORCED_CHECK_MIN_INTERVAL_MS);
   if (a.status === "current") return reply(chatId, t("updateNotice.upToDate", { current: a.current }), harness);
   if (a.status === "unknown") return reply(chatId, t("updateNotice.couldNotCheck"), harness);
-  if (!(await sendNoticeTo(chatId, a, t, harness))) {
-    console.warn(`${TAG} the /update answer was not delivered`);
-    return;
-  }
-  // Told now, so Monday's check does not tell him again.
-  await updateState(async (state) => ({
-    next: {
-      ...state,
-      lastCheckAt: Date.now(),
-      lastNotifiedTarget: a.target,
-      lastNotifiedVersion: a.version,
-      lastNotifiedAt: Date.now(),
-      lastNotifiedVia: "telegram",
-    },
-    value: undefined,
-  })).catch((err) => console.warn(`${TAG} could not record the /update answer:`, err instanceof Error ? err.message : err));
+  // Sent INSIDE the state lock and recorded with it, so a weekly run that
+  // wakes meanwhile sees the target as told instead of announcing it again.
+  await updateState(async (state) => {
+    if (!(await sendNoticeTo(chatId, a, t, harness))) {
+      console.warn(`${TAG} the /update answer was not delivered`);
+      return { next: null, value: undefined };
+    }
+    // Told now, so Monday's check does not tell him again.
+    return {
+      next: {
+        ...state,
+        lastCheckAt: Date.now(),
+        lastNotifiedTarget: a.target,
+        lastNotifiedVersion: a.version,
+        lastNotifiedAt: Date.now(),
+        lastNotifiedVia: "telegram",
+      },
+      value: undefined,
+    };
+  }).catch((err) => console.warn(`${TAG} could not record the /update answer:`, err instanceof Error ? err.message : err));
 }
 
 /**
@@ -626,6 +640,17 @@ export async function answerUpdateButton(chatId: string, harness: Harness): Prom
   // updater itself decides what an update installs.
   const a = await checkForUpdate(false);
   if (a.status === "current") return reply(chatId, t("updateNotice.nothingToInstall", { current: a.current }), harness);
+  // The gate /update/run keeps (GitHub #1269): the update stops the gateway
+  // and restarts this server, so agent work running now would die mid-task.
+  // Asked BEFORE the question, so a Confirm on the desktop cannot walk past it;
+  // the owner who wants it anyway has "Update anyway" in Settings.
+  try {
+    const { activeAgentWork } = await import("@/lib/update-busy");
+    const work = await activeAgentWork();
+    if (work.total > 0) return reply(chatId, t("updateNotice.busy", { count: work.total }), harness);
+  } catch {
+    // Not knowing is not "busy": the question still asks the owner.
+  }
   try {
     const { requestPowerApproval } = await import("@/lib/power-approval");
     const prompt = await requestPowerApproval("update", "Update button in Telegram");

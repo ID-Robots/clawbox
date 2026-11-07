@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "What's new in this update",
   "updateNotice.alreadyUpdating": "An update is already running on this box.",
   "updateNotice.available": "ClawBox {version} is available — this box runs {current}.",
+  "updateNotice.busy": "Agents are working right now ({count} active), and the update would stop them mid-task. Tap Update again when they finish, or use Update anyway in Settings → System Update.",
   "updateNotice.button": "Update",
   "updateNotice.confirmInApprovals": "Update requested. Confirm it with the button the ClawBox approvals bot just sent you, or on the desktop, within 2 minutes.",
   "updateNotice.confirmOnDesktop": "Update requested. Confirm it on the ClawBox desktop within 2 minutes.",

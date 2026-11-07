@@ -41,6 +41,9 @@ vi.mock("@/lib/power-approval", () => {
   return { requestPowerApproval: (...a: unknown[]) => requestPowerApproval(...a), PowerApprovalConflict };
 });
 
+const activeAgentWork = vi.fn(async () => ({ coding: 0, agents: 0, total: 0 }));
+vi.mock("@/lib/update-busy", () => ({ activeAgentWork: () => activeAgentWork() }));
+
 let root: string;
 let notice: typeof import("@/lib/update-notice");
 let config: typeof import("@/lib/config-store");
@@ -87,6 +90,7 @@ beforeEach(async () => {
   sendOwnerTelegramButtons.mockResolvedValue(true);
   sendOwnerTelegramText.mockResolvedValue(true);
   getUpdateState.mockReturnValue({ phase: "idle", steps: [] });
+  activeAgentWork.mockResolvedValue({ coding: 0, agents: 0, total: 0 });
   config = await import("@/lib/config-store");
   notice = await import("@/lib/update-notice");
   notice.resetForcedCheckForTests();
@@ -234,6 +238,16 @@ describe("the weekly run", () => {
     expect(notifyOwner).not.toHaveBeenCalled();
   });
 
+  it("sends NOTHING when the state cannot be written — and says the run failed, so the timer backs off", async () => {
+    await writeState({ lastCheckedWeek: "2026-11-02" });
+    // A data/ that cannot take the record: the temporary file's name is a directory.
+    fs.mkdirSync(path.join(root, "data", `update-notice.json.${process.pid}.tmp`));
+    const result = await notice.runWeeklyUpdateCheck(monday(10, 30));
+    expect(result).toEqual({ ran: false, failed: true });
+    expect(sendOwnerTelegramButtons).not.toHaveBeenCalled();
+    expect(notifyOwner).not.toHaveBeenCalled();
+  });
+
   it("is ON by default, and the switch round-trips", async () => {
     expect(await notice.isWeeklyUpdateCheckEnabled()).toBe(true);
     await notice.setWeeklyUpdateCheckEnabled(false);
@@ -375,6 +389,19 @@ describe("the chat: /update and the Update button", () => {
     expect(readState()).toMatchObject({ lastNotifiedTarget: "v4.3.1", lastNotifiedVia: "telegram" });
   });
 
+  it("/update and a weekly run waking together announce a version once", async () => {
+    await writeState({ lastCheckedWeek: "2026-11-02" });
+    let release!: () => void;
+    sendOwnerTelegramButtons.mockImplementationOnce(() => new Promise((r) => { release = () => r(true); }));
+    const command = (await notice.claimUpdateChatCommand({ senderId: "6001", text: "/update", harness: "openclaw" })).run!();
+    await vi.waitFor(() => expect(sendOwnerTelegramButtons).toHaveBeenCalledTimes(1));
+    const weekly = notice.runWeeklyUpdateCheck(monday(10, 30));
+    release();
+    await command;
+    expect((await weekly).outcome).toBe("already-notified");
+    expect(sendOwnerTelegramButtons).toHaveBeenCalledTimes(1);
+  });
+
   it("/update typed twice in a minute does not ask GitHub twice", async () => {
     await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "/update", harness: "openclaw" })).run?.();
     await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "/update", harness: "openclaw" })).run?.();
@@ -439,6 +466,20 @@ describe("the chat: /update and the Update button", () => {
     await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
     expect(requestPowerApproval).not.toHaveBeenCalled();
     expect(sendOwnerTelegramText.mock.calls[0][1]).toContain("Nothing to install");
+  });
+
+  it("does not ask while agents are working — the gate /update/run keeps", async () => {
+    activeAgentWork.mockResolvedValue({ coding: 1, agents: 1, total: 2 });
+    await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
+    expect(requestPowerApproval).not.toHaveBeenCalled();
+    expect(sendOwnerTelegramText.mock.calls[0][1]).toContain("Agents are working right now (2 active)");
+  });
+
+  it("asks anyway when it cannot tell whether agents are working", async () => {
+    activeAgentWork.mockRejectedValue(new Error("gateway down"));
+    requestPowerApproval.mockResolvedValue({ id: "a".repeat(32), action: "update", messages: [] });
+    await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
+    expect(requestPowerApproval).toHaveBeenCalledTimes(1);
   });
 
   it("says so when another question is already waiting", async () => {

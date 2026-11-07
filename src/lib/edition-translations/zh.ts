@@ -1985,4 +1985,5 @@ export const zh: Record<string, string> = {
   "updateNotice.nothingToInstall": "无需安装——ClawBox 已是最新版本（{current}）。",
   "updateNotice.alreadyUpdating": "这台盒子已经在更新了。",
   "updateNotice.waitingOnAnother": "盒子已经在等你确认另一件事，或者你刚刚拒绝了。请一分钟后再试。",
+  "updateNotice.busy": "智能体正在工作（{count} 个进行中），更新会在任务中途停止它们。请等它们完成后再点按“更新”，或在 设置 → 系统更新 中使用“仍然更新”。",
 };

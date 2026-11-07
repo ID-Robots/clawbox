@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "このアップデートの新機能",
   "updateNotice.alreadyUpdating": "この本体ではすでにアップデートが実行中です。",
   "updateNotice.available": "ClawBox {version} が利用できます。この本体は {current} です。",
+  "updateNotice.busy": "現在エージェントが作業中です ({count} 件)。アップデートすると作業の途中で停止します。終わってからもう一度「アップデート」をタップするか、設定 → システムアップデート の「このまま更新」を使ってください。",
   "updateNotice.button": "アップデート",
   "updateNotice.confirmInApprovals": "アップデートを要求しました。2 分以内に、ClawBox の承認ボットが今送ったボタンか、デスクトップで確定してください。",
   "updateNotice.confirmOnDesktop": "アップデートを要求しました。2 分以内に ClawBox のデスクトップで確定してください。",

@@ -1988,4 +1988,5 @@ export const it: Record<string, string> = {
   "updateNotice.nothingToInstall": "Niente da installare — ClawBox è già aggiornato ({current}).",
   "updateNotice.alreadyUpdating": "Su questo box è già in corso un aggiornamento.",
   "updateNotice.waitingOnAnother": "Il box sta già aspettando che tu confermi qualcos'altro, oppure hai appena rifiutato. Riprova tra un minuto.",
+  "updateNotice.busy": "Ci sono agenti al lavoro in questo momento ({count} attivi) e l'aggiornamento li interromperebbe a metà. Tocca di nuovo «Aggiorna» quando hanno finito, oppure usa «Aggiorna comunque» in Impostazioni → Aggiornamento di sistema.",
 };

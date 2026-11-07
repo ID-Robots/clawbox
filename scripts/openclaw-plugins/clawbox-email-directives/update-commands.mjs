@@ -80,6 +80,9 @@ export async function onUpdateCommand(event, ctx) {
     text,
     channel: "telegram",
     harness: "openclaw",
+    // The core's before_dispatch event carries `isGroup` (dispatch-from-config
+    // passes hookContext.isGroup); there is no chat id beside it, and in a
+    // private chat the chat IS the sender, so this is the whole question.
     isGroup: event?.isGroup === true || ctx?.isGroup === true,
   };
   try {

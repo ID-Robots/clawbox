@@ -4670,6 +4670,7 @@ const table: Record<string, string> = {
   "update.whatsNewTitleGeneric": "Какво е новото в тази актуализация",
   "updateNotice.alreadyUpdating": "На тази кутия вече тече актуализация.",
   "updateNotice.available": "Налична е ClawBox {version} — тази кутия работи с {current}.",
+  "updateNotice.busy": "В момента работят агенти ({count} активни) и актуализацията би ги спряла по средата на задачата. Натиснете „Актуализирай“ отново, когато приключат, или използвайте „Актуализирай въпреки това“ в Настройки → Системна актуализация.",
   "updateNotice.button": "Актуализирай",
   "updateNotice.confirmInApprovals": "Актуализацията е заявена. Потвърдете я с бутона, който ботът за одобрения на ClawBox току-що ви изпрати, или на работния плот, до 2 минути.",
   "updateNotice.confirmOnDesktop": "Актуализацията е заявена. Потвърдете я на работния плот на ClawBox до 2 минути.",
