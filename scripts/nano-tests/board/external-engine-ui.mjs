@@ -6,8 +6,8 @@
 //
 //   1. Settings → Local AI (`/app/settings?section=localAi`): the External
 //      engine card says the model answers Local AI.
-//   2. The chat (`/app/clawbox`, the chat app's own page): the header names
-//      the engine's model.
+//   2. The desktop's chat window: its model picker names the engine's model
+//      (the standalone chat page, /app/clawbox, draws no pickers).
 //
 // Prints `RESULT ok - …` / `RESULT not ok - …` lines the test turns into TAP,
 // and `NOTE …` lines. With SHOTS_DIR set, a PNG of each page is left there
@@ -117,25 +117,34 @@ async function run() {
       say(`not ok - Settings → Local AI drew no External engine summary (${err instanceof Error ? err.message : err}; page ${where})`);
     }
 
-    // 2. The chat header.
-    await page.send("Page.navigate", { url: `${BASE}/app/clawbox` });
+    // 2. The desktop's chat window, where the model pickers live (the
+    //    standalone chat page has none): opened the way the desktop opens it.
+    await page.send("Page.navigate", { url: `${BASE}/` });
     try {
-      const header = await waitFor(
-        "the chat header naming the model",
+      await waitFor("the desktop", () => page.evaluate(`!!document.querySelector('[data-testid="desktop-root"]')`), 120_000, 1000);
+      // The "What's new" card holds the desktop's corners for 30 s on a board
+      // that never dismissed it; waited out, not dismissed (that is recorded).
+      const whatsNew = `!!document.querySelector('[data-testid="whats-new-card"]')`;
+      if (await waitFor("the What's new card", () => page.evaluate(whatsNew), 8_000).catch(() => false)) {
+        await waitFor("the What's new card to leave", async () => !(await page.evaluate(whatsNew)), 60_000, 1000).catch(() => null);
+      }
+      await page.evaluate(`window.dispatchEvent(new CustomEvent("clawbox:open-chat"))`);
+      const pill = await waitFor(
+        "the chat's model picker naming the model",
         () => page.evaluate(`(() => {
-          const pill = document.querySelector('[aria-label="Chat provider"], [aria-label="Provider"]');
-          const text = document.body.innerText || "";
-          return text.includes(${json(NAME)}) ? (pill?.innerText || "body") : null;
+          const pills = [...document.querySelectorAll('.chat-header-pills')].map((el) => el.innerText || "").join(" | ");
+          return pills.includes(${json(NAME)}) ? pills : null;
         })()`),
         120_000,
         1000,
       );
-      await shot(page, "chat-header-external");
-      say(`ok - the chat names ${NAME} as its model (${json(String(header).slice(0, 80))})`);
+      await sleep(1500);
+      await shot(page, "chat-pickers-external");
+      say(`ok - the chat's model picker names ${NAME} (${json(String(pill).replace(/\s+/g, " ").slice(0, 120))})`);
     } catch (err) {
-      await shot(page, "chat-header-missing");
-      const where = await page.evaluate("location.pathname").catch(() => "?");
-      say(`not ok - the chat does not name ${NAME} (${err instanceof Error ? err.message : err}; page ${where})`);
+      await shot(page, "chat-pickers-missing");
+      const pills = await page.evaluate(`[...document.querySelectorAll('.chat-header-pills')].map((el) => el.innerText).join(" | ")`).catch(() => "?");
+      say(`not ok - the chat's model picker does not name ${NAME} (${err instanceof Error ? err.message : err}; pickers: ${json(String(pills).slice(0, 160))})`);
     }
   } finally {
     page?.close();
