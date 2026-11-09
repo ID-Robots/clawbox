@@ -327,6 +327,8 @@ export const RUNNER_STEP = {
    *  the loop was ever going to watch it — see PrFoundBy. */
   pullRequestAdopted: (num: number, base: string | null) => `Picked up pull request #${num} into ${base}, opened by the run itself`,
   notMerged: (reason: string) => `Not merged: ${reason}`,
+  /** The project folder sat on a finished coding team's branch; the box put it back on the base to bring the run's work home (mergeRunBranch). */
+  checkoutReturned: (from: string, base: string) => `The project folder was on ${from}, a coding team's branch; it is back on ${base} so this run's work could be merged`,
   /** The box handed the merge to GitHub's auto-merge (reconcileAutoMerge). */
   autoMergeOn: (num: number) => `Turned on GitHub's auto-merge for pull request #${num}: it merges the moment its required checks pass`,
   /** ...and took it back; `reason` is the box's own words (decideAutoMerge). */

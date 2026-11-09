@@ -39,7 +39,7 @@
 import fs from "fs";
 import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
-import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, TEAM_BRANCH_RE, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
 import { writeRunMarker } from "./coding-folder-kind";
@@ -293,7 +293,14 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
  *
  *   - only when the checkout is on the branch the run forked from. It may
  *     have been moved since, and merging into whatever happens to be checked
- *     out now is a guess;
+ *     out now is a guess. ONE exception, and it is not a guess: a checkout
+ *     sitting on a coding TEAM's branch (`clawbox/team-…`) was left there by
+ *     the box, not moved there by the owner — a team leaves the checkout on
+ *     its branch — and a run started in that project forks from the base
+ *     (`forkBase`), so its merge home was refused before it began. Runs worked
+ *     for hours and then "did not land" (team-yykapje9, 95M tokens,
+ *     2026-11-07). A CLEAN checkout on a team's branch is put back on the
+ *     base first; the team's branch stays, with everything on it;
  *   - only when the checkout is clean. The team's merge commits what it finds
  *     lying there first; that is right for a tree only the team uses and
  *     wrong for the owner's own folder, where uncommitted work is theirs.
@@ -311,17 +318,30 @@ export function mergeRunBranch(input: {
   base: string;
   message: string;
 }): Promise<
-  | { ok: true; merged: boolean; commit: string | null }
+  /** `returnedFrom`: the coding team's branch the checkout was on, when it was put back on the base for this merge. */
+  | { ok: true; merged: boolean; commit: string | null; returnedFrom?: string }
   | { ok: false; reason: MergeHomeBlocker; detail: string }
 > {
   return withDirLock(input.projectDir, async () => {
     const dir = path.resolve(input.projectDir);
-    const on = await currentBranch(dir);
+    let on = await currentBranch(dir);
+    let returnedFrom: string | undefined;
     if (on !== input.base) {
-      return { ok: false, reason: "not_on_base", detail: `the project is on ${on}, not on ${input.base}` };
+      // On a coding team's branch, clean, with work to land: back to the base.
+      // With nothing to land the checkout is left where the team left it.
+      if (TEAM_BRANCH_RE.test(on) && ((await commitsAhead(dir, input.branch, input.base)) ?? 0) > 0) {
+        const seen = await readCheckout(dir, "normal");
+        if (seen.ok && !seen.changed && ok(await gitIn(dir, ["checkout", "-q", input.base]))) {
+          returnedFrom = on;
+          on = await currentBranch(dir);
+        }
+      }
+      if (on !== input.base) {
+        return { ok: false, reason: "not_on_base", detail: `the project is on ${returnedFrom ?? on}, not on ${input.base}` };
+      }
     }
     const ahead = await commitsAhead(dir, input.branch, input.base);
-    if (ahead === 0) return { ok: true, merged: false, commit: null };
+    if (ahead === 0) return { ok: true, merged: false, commit: null, ...(returnedFrom ? { returnedFrom } : {}) };
     const seen = await readCheckout(dir, "normal");
     if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project before the merge") };
     if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
@@ -335,7 +355,7 @@ export function mergeRunBranch(input: {
       // in <base>, as <sha>". Best-effort: a rev-parse that will not answer
       // does not turn a landed merge into a failed one.
       const head = await gitIn(dir, ["rev-parse", "HEAD"]);
-      return { ok: true, merged: true, commit: ok(head) && out(head) ? out(head) : null };
+      return { ok: true, merged: true, commit: ok(head) && out(head) ? out(head) : null, ...(returnedFrom ? { returnedFrom } : {}) };
     }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await gitIn(dir, ["merge", "--abort"]);

@@ -13678,6 +13678,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
+    if (merged.returnedFrom) pushProgress(run, RUNNER_STEP.checkoutReturned(merged.returnedFrom, wt.base));
     // The merge took the branch home, not what the tree holds beside it.
     const unsaved = (await unsavedWork()) ?? inUse;
     if (unsaved) {

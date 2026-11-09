@@ -423,6 +423,41 @@ describe("merging a run's branch home", () => {
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("release");
   });
 
+  it("puts a CLEAN checkout a coding team left on its branch back on the base, and lands the run's work there", async () => {
+    // A team leaves the checkout on its branch; a run started there forks from
+    // the base (forkBase), so its merge home was refused before it began.
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    fs.writeFileSync(path.join(dir, "team.txt"), "the team's unmerged work\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "the team's work");
+    const made = await withWork("run-teamhome01");
+    expect(made.base).not.toBe("clawbox/team-abcd1234");
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true, returnedFrom: "clawbox/team-abcd1234" });
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe(made.base);
+    // The team's branch keeps everything on it; the base holds the run's work and not the team's.
+    expect(git(dir, "log", "-1", "--format=%s", "clawbox/team-abcd1234")).toBe("the team's work");
+    expect(fs.existsSync(path.join(dir, "team.txt"))).toBe(false);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
+  it("leaves a team's branch checked out when the folder holds uncommitted work, and when the run has nothing to land", async () => {
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    const empty = await addRunWorktree({ projectDir: dir, runId: "run-teamhome02", protectedRoot: PROTECTED });
+    if (!empty.ok) throw new Error(empty.detail);
+    expect(await merge(empty.branch, empty.base)).toMatchObject({ ok: false, reason: "not_on_base" });
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+
+    const made = await withWork("run-teamhome03");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>the owner's unsaved line</h1>\n");
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: false, reason: "not_on_base" });
+    if (out.ok) return;
+    expect(out.detail).toContain("clawbox/team-abcd1234");
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>the owner's unsaved line</h1>\n");
+  });
+
   it("refuses `conflict` and aborts rather than guessing, leaving the project on its own commit", async () => {
     const made = await addRunWorktree({ projectDir: dir, runId: "run-clash0001", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
