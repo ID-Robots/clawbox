@@ -55,6 +55,10 @@ const RENDERED = [
   "settings.providers.empty",
   "settings.providers.signOut",
   "settings.providers.signOutConfirm",
+  // The button's own short words (TASK-2246) and its name while armed: the
+  // provider moved off the button into its name and tooltip.
+  "settings.providers.signOutShort",
+  "settings.providers.signOutConfirmNamed",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
   // The sign-out in hand (TASK-2126): the spinner's words, the line under it
@@ -71,6 +75,7 @@ const RENDERED = [
 /** The sign-out strings that name the row they are on. */
 const NAMED_SIGN_OUT = [
   "settings.providers.signOut",
+  "settings.providers.signOutConfirmNamed",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
   "settings.providers.signOutTimedOut",
@@ -83,6 +88,17 @@ describe("the cloud-provider list is translated everywhere", () => {
       expect(translations.en[key], `en["${key}"] missing from the merged table`).toBe(settingsSecurityEn[key]);
     }
     expect(KEYS.sort()).toEqual([...RENDERED].sort());
+  });
+
+  // The sign-out shows a word or two and names the provider only for
+  // assistive tech and in its tooltip (TASK-2246). That name must carry the
+  // words on the button — WCAG's label-in-name — or a voice user saying what
+  // they see does not reach it.
+  it("the sign-out's names carry the words on the button, in every language", () => {
+    for (const table of [editionEn, ...NON_EN.map((locale) => OVERRIDES[locale])]) {
+      expect(table["settings.providers.signOutConfirmNamed"].startsWith(table["settings.providers.signOutConfirm"])).toBe(true);
+      expect(table["settings.providers.signOut"].toLowerCase()).toContain(table["settings.providers.signOutShort"].toLowerCase());
+    }
   });
 
   it("the switch's name carries the provider's own label", () => {

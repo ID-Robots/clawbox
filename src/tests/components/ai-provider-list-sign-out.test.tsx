@@ -1,6 +1,7 @@
 /**
  * Signing out of a provider from the provider list (src/components/AiProviderList.tsx):
- * a two-tap "Sign out of <Provider>" on EVERY signed-in row, on either
+ * a two-tap "Sign out" on EVERY signed-in row — named "Sign out of <Provider>"
+ * for assistive tech and in its tooltip — on either
  * harness, that posts the row's sign-out, re-reads the box and tells every
  * other surface, and draws the signed-out state from the box's own answer.
  * The default's sign-out is locked with the switch's hint — except ClawBox
@@ -50,13 +51,15 @@ function stubBox(opts: {
   /** The sign-out starts, and its task fails with this sentence. */
   failTask?: string;
   answer?: Promise<void>;
+  /** The owner's UI language, as the I18nProvider reads it. */
+  locale?: string;
 } = {}): Box {
   const state: Box = { posts: [], signedOut: new Set(), rows: opts.rows ?? OPENCLAW_ROWS, tasks: new Map() };
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-    if (url.startsWith("/setup-api/preferences")) return json({});
+    if (url.startsWith("/setup-api/preferences")) return json(opts.locale ? { ui_language: opts.locale } : {});
     if (url.startsWith("/setup-api/providers/status")) {
       // What the box answers once a row is signed out: the default stays
       // listed with no credential, any other row is gone from this list.
@@ -95,13 +98,24 @@ function stubBox(opts: {
 const renderList = () => render(<I18nProvider><AiProviderList /></I18nProvider>);
 
 /**
- * A row's button, by its role and the name a person reads — once the English
- * table (a chunk of its own) has named it — and on the row it belongs to.
+ * A row's button, by its role and the name assistive tech reads — once the
+ * English table (a chunk of its own) has named it — and on the row it belongs to.
  */
 async function signOutButton(id: string, label: string): Promise<HTMLElement> {
   const button = await screen.findByRole("button", { name: `Sign out of ${label}` }, { timeout: 5_000 });
   expect(button).toHaveAttribute("data-testid", `ai-provider-sign-out-${id}`);
   return button;
+}
+
+/** A button at rest: the bare verb on it, the provider in its name and tooltip. */
+function expectAtRest(button: HTMLElement, label: string) {
+  expect(button).toHaveTextContent(/^Sign out$/);
+  expect(button).toHaveAccessibleName(`Sign out of ${label}`);
+  expect(button).toHaveAttribute("title", `Sign out of ${label}`);
+}
+
+function classes(el: Element): string[] {
+  return el.className.split(/\s+/).filter(Boolean);
 }
 
 afterEach(() => {
@@ -116,9 +130,7 @@ describe("AiProviderList — signing out of a provider", () => {
     for (const row of OPENCLAW_ROWS) {
       const button = await signOutButton(row.id, row.label);
       expect(button, row.id).toBeEnabled();
-      // Under the name, not among the controls: beside them the name had no
-      // room left and "ClawBox AI" drew as "C…".
-      expect(screen.getByTestId(`ai-provider-controls-${row.id}`)).not.toContainElement(button);
+      expectAtRest(button, row.label);
       expect(screen.getByTestId(`ai-provider-${row.id}`)).toContainElement(button);
     }
     expect(screen.getByTestId("ai-provider-default-clawai")).toBeInTheDocument();
@@ -132,9 +144,13 @@ describe("AiProviderList — signing out of a provider", () => {
       renderList();
       const button = await signOutButton("openai", "OpenAI GPT");
       fireEvent.click(button);
-      expect(button).toHaveTextContent("Sign out — tap again");
+      expect(button).toHaveTextContent(/^Tap again$/);
+      // Armed, it still says whose sign-in it is about to remove — after the
+      // words on it, so a voice user can say what they see.
+      expect(button).toHaveAccessibleName("Tap again to sign out of OpenAI GPT");
+      expect(button).toHaveAttribute("title", "Tap again to sign out of OpenAI GPT");
       // Only the tapped row is armed.
-      expect(screen.getByTestId("ai-provider-sign-out-xai")).toHaveTextContent("Sign out of xAI Grok");
+      expectAtRest(screen.getByTestId("ai-provider-sign-out-xai"), "xAI Grok");
       expect(box.posts).toEqual([]);
       fireEvent.click(button);
       await waitFor(() => expect(box.posts).toEqual([{ provider: "openai" }]));
@@ -210,9 +226,9 @@ describe("AiProviderList — signing out of a provider", () => {
     const button = await signOutButton("xai", "xAI Grok");
     vi.useFakeTimers();
     fireEvent.click(button);
-    expect(button).toHaveTextContent("Sign out — tap again");
+    expect(button).toHaveTextContent(/^Tap again$/);
     act(() => { vi.advanceTimersByTime(5_100); });
-    expect(button).toHaveTextContent("Sign out of xAI Grok");
+    expectAtRest(button, "xAI Grok");
     expect(box.posts).toEqual([]);
   });
 
@@ -224,8 +240,8 @@ describe("AiProviderList — signing out of a provider", () => {
     fireEvent.click(openai);
     fireEvent.blur(openai);
     fireEvent.click(xai);
-    expect(openai).toHaveTextContent("Sign out of OpenAI GPT");
-    expect(xai).toHaveTextContent("Sign out — tap again");
+    expectAtRest(openai, "OpenAI GPT");
+    expect(xai).toHaveTextContent(/^Tap again$/);
     expect(box.posts).toEqual([]);
   });
 
@@ -301,5 +317,119 @@ describe("AiProviderList — signing out of a provider", () => {
     act(() => notifyProvidersChanged());
     await waitFor(() => expect(screen.getByTestId("ai-provider-openai")).toHaveTextContent(/Needs sign-in/));
     expect(screen.getByTestId("ai-provider-sign-out-note")).toHaveTextContent("");
+  });
+});
+
+/**
+ * Where the button stands and what it looks like (TASK-2246). It used to sit
+ * under the row's status: alone under the default's hint on ClawBox AI's row,
+ * inline beside "Connected" — into it — on OpenAI's, and as "Sign out of
+ * Anthropic Claude" on two lines in a tall button on Anthropic's. Now it is
+ * one of the row's controls, the bare verb, the same box as Make default.
+ * jsdom does no layout, so the half held here is the structure and the class
+ * contract that produce it; the pixels are the screenshots on the PR.
+ */
+describe("AiProviderList — the sign-out among the row's controls", () => {
+  /** The classes that give a labelled row control its height, type and centring. */
+  const ROW_BOX = ["inline-flex", "items-center", "text-[11px]", "px-2.5", "py-1", "rounded-lg", "border"];
+
+  it("sits in the row's controls just left of the switch on every row, the default's too, and never in the name's column", async () => {
+    stubBox();
+    renderList();
+    for (const row of OPENCLAW_ROWS) {
+      const button = await signOutButton(row.id, row.label);
+      const controls = screen.getByTestId(`ai-provider-controls-${row.id}`);
+      const slot = screen.getByTestId(`ai-provider-sign-out-slot-${row.id}`);
+      const toggle = screen.getByTestId(`ai-provider-switch-${row.id}`);
+      expect(controls, row.id).toContainElement(button);
+      // One slot, the last of the controls, holding the sign-out and then the
+      // switch — so it lines up the same on every row.
+      expect(controls.lastElementChild, row.id).toBe(slot);
+      expect(slot.firstElementChild, row.id).toBe(button);
+      expect(slot.lastElementChild, row.id).toContainElement(toggle);
+      expect(button.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING, row.id).toBeTruthy();
+      // The status line, the default's hint and the name are in the other column.
+      const identity = screen.getByTestId(`ai-provider-identity-${row.id}`);
+      expect(identity, row.id).not.toContainElement(button);
+      expect(identity, row.id).toHaveTextContent(row.enabled ? "Connected" : "Switched off");
+    }
+    expect(screen.getByTestId("ai-provider-identity-clawai")).toContainElement(screen.getByTestId("ai-provider-locked-hint-clawai"));
+  });
+
+  it("is the same box as Make default and the disclosure beside it, and its words never wrap — at rest, armed and in hand", async () => {
+    let answer!: () => void;
+    const box = stubBox({ answer: new Promise<void>((resolve) => { answer = resolve; }) });
+    renderList();
+    const button = await signOutButton("openai", "OpenAI GPT");
+    const makeDefault = screen.getByTestId("ai-provider-make-default-openai");
+    const usage = screen.getByTestId("clawai-usage-toggle");
+    for (const cls of ROW_BOX) {
+      expect(classes(button), cls).toContain(cls);
+      expect(classes(makeDefault), cls).toContain(cls);
+    }
+    expect(screen.getByTestId("ai-provider-sign-out-label-openai")).toHaveAttribute("data-sizer", "Tap again");
+    for (const cls of ["items-center", "text-[11px]", "px-2.5", "py-1", "rounded-lg", "border"]) {
+      expect(classes(usage), cls).toContain(cls);
+    }
+    expect(classes(button)).toContain("whitespace-nowrap");
+    expect(classes(button)).toContain("shrink-0");
+    // No margin of its own pushing it off the controls' centre line.
+    expect(classes(button).filter((c) => /^-?m[trblxy]?-/.test(c))).toEqual([]);
+
+    fireEvent.click(button);
+    expect(button).toHaveTextContent(/^Tap again$/);
+    expect(classes(button)).toContain("whitespace-nowrap");
+    // The two words share one grid cell, the hidden one as the `::after`
+    // sizer: the button is as wide as the wider word at rest and armed alike,
+    // so arming it never reflows the row out from under the second tap.
+    const label = screen.getByTestId("ai-provider-sign-out-label-openai");
+    expect(label).toHaveAttribute("data-sizer", "Sign out");
+    for (const cls of ["grid", "after:invisible", "after:[grid-area:1/1]", "after:content-[attr(data-sizer)]"]) {
+      expect(classes(label), cls).toContain(cls);
+    }
+    fireEvent.click(button);
+    await waitFor(() => expect(box.posts).toEqual([{ provider: "openai" }]));
+    expect(button).toHaveTextContent("Signing out…");
+    expect(classes(button)).toContain("whitespace-nowrap");
+    for (const cls of ROW_BOX) expect(classes(button), cls).toContain(cls);
+    answer();
+    await waitFor(() => expect(screen.queryByTestId("ai-provider-openai")).not.toBeInTheDocument());
+  });
+
+  it("dims the row's other controls while it is in hand, never itself", async () => {
+    let answer!: () => void;
+    const box = stubBox({ answer: new Promise<void>((resolve) => { answer = resolve; }) });
+    renderList();
+    const button = await signOutButton("openai", "OpenAI GPT");
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(box.posts).toEqual([{ provider: "openai" }]));
+    expect(button.closest(".provider-sign-out-dim")).toBeNull();
+    expect(screen.getByTestId("ai-provider-switch-openai").closest(".provider-sign-out-dim")).not.toBeNull();
+    expect(screen.getByTestId("ai-provider-make-default-openai").closest(".provider-sign-out-dim")).not.toBeNull();
+    answer();
+    await waitFor(() => expect(screen.queryByTestId("ai-provider-openai")).not.toBeInTheDocument());
+  });
+
+  it("keeps the provider's name on a locked default, with the reason in its tooltip", async () => {
+    stubBox({ harness: "hermes", rows: HERMES_ROWS });
+    renderList();
+    const locked = await signOutButton("openrouter", "OpenRouter");
+    expect(locked).toBeDisabled();
+    expect(locked).toHaveTextContent(/^Sign out$/);
+    expect(locked).toHaveAttribute("title", "Make another provider the default first.");
+    expect(screen.getByTestId("ai-provider-controls-openrouter")).toContainElement(locked);
+  });
+
+  it("says it in the owner's language: the short verb on the button, the provider in its name", async () => {
+    stubBox({ locale: "de" });
+    renderList();
+    const button = await screen.findByRole("button", { name: "Von OpenAI GPT abmelden" }, { timeout: 5_000 });
+    expect(button).toHaveAttribute("data-testid", "ai-provider-sign-out-openai");
+    expect(button).toHaveTextContent(/^Abmelden$/);
+    expect(button).toHaveAttribute("title", "Von OpenAI GPT abmelden");
+    fireEvent.click(button);
+    expect(button).toHaveTextContent(/^Nochmal tippen$/);
+    expect(button).toHaveAccessibleName("Nochmal tippen, um sich von OpenAI GPT abzumelden");
   });
 });
