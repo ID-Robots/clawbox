@@ -1219,6 +1219,14 @@ step_llamacpp_install() {
   # was proven against (draft-mtp, --spec-draft-n-max; 2026-11-02 on a DGX
   # Spark). start-llamacpp.sh still asks the binary before using either.
   local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-29c720eaf72fcf8e4e61a56a88b994d92668261d}"
+  # Both reach the `bash -lc` strings below, run as the owner: the pin may only
+  # be a commit hash, and the directory goes in as one quoted word.
+  if ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
+    echo "Error: LLAMACPP_COMMIT must be a hexadecimal commit hash (got '$LLAMACPP_COMMIT')" >&2
+    return 1
+  fi
+  local LLAMA_DIR_Q
+  LLAMA_DIR_Q="$(printf '%q' "$LLAMA_DIR")"
   local CMAKE_ARGS
   CMAKE_ARGS="$(llamacpp_cmake_args)"
   echo "  llama.cpp build: $CMAKE_ARGS"
@@ -1265,14 +1273,14 @@ step_llamacpp_install() {
         return 1
       fi
     fi
-    if ! as_user_login "cd $LLAMA_DIR && git fetch --quiet --depth 1 origin $LLAMACPP_COMMIT && git checkout --quiet $LLAMACPP_COMMIT"; then
+    if ! as_user_login "cd $LLAMA_DIR_Q && git fetch --quiet --depth 1 origin $LLAMACPP_COMMIT && git checkout --quiet $LLAMACPP_COMMIT"; then
       echo "  Warning: could not check out llama.cpp $LLAMACPP_COMMIT; building $(as_user git -C "$LLAMA_DIR" rev-parse --short HEAD 2>/dev/null || echo 'the checkout as it is')" >&2
     fi
-    if ! as_user_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build $CMAKE_ARGS"; then
+    if ! as_user_login "rm -f $LLAMA_DIR_Q/build/CMakeCache.txt && rm -rf $LLAMA_DIR_Q/build/CMakeFiles && cd $LLAMA_DIR_Q && cmake -S . -B build $CMAKE_ARGS"; then
       echo "Error: failed to configure llama.cpp build in $LLAMA_DIR" >&2
       return 1
     fi
-    if ! as_user_login "cd $LLAMA_DIR && cmake --build build --config Release -j$(nproc) --target llama-server"; then
+    if ! as_user_login "cd $LLAMA_DIR_Q && cmake --build build --config Release -j$(nproc) --target llama-server"; then
       echo "Error: failed to build llama-server in $LLAMA_DIR" >&2
       return 1
     fi

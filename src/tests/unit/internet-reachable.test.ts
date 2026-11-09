@@ -27,12 +27,15 @@ vi.mock("child_process", () => ({
   },
 }));
 
-// A TCP connect to 1.1.1.1:443 — the fallback where ICMP is dropped. Each test
-// says how the connect ends.
+// The fallback where ICMP is dropped: a TLS handshake with 1.1.1.1:443 that
+// verifies its certificate. `net` is mocked too, so a probe that settled for a
+// bare TCP connect would be caught answering online behind a captive portal,
+// which accepts any connection. Each test says how each ends.
 let tcp: "connect" | "error" | "timeout" = "error";
-vi.mock("net", () => {
-  const connect = (opts: { host: string; port: number }) => {
-    calls.push(`tcp ${opts.host}:${opts.port}`);
+let handshake: "secureConnect" | "error" | "timeout" = "error";
+function fakeSocket(label: string, outcome: () => string) {
+  return (opts: { host: string; port: number; servername?: string }) => {
+    calls.push(`${label} ${opts.host}:${opts.port}${opts.servername ? ` as ${opts.servername}` : ""}`);
     const handlers: Record<string, () => void> = {};
     let onTimeout: (() => void) | null = null;
     const socket = {
@@ -41,11 +44,19 @@ vi.mock("net", () => {
       destroy: () => socket,
     };
     queueMicrotask(() => {
-      if (tcp === "timeout") onTimeout?.();
-      else handlers[tcp]?.();
+      const ends = outcome();
+      if (ends === "timeout") onTimeout?.();
+      else handlers[ends]?.();
     });
     return socket;
   };
+}
+vi.mock("net", () => {
+  const connect = fakeSocket("tcp", () => tcp);
+  return { default: { connect }, connect };
+});
+vi.mock("tls", () => {
+  const connect = fakeSocket("tls", () => handshake);
   return { default: { connect }, connect };
 });
 
@@ -53,6 +64,7 @@ beforeEach(() => {
   calls.length = 0;
   outcomes = {};
   tcp = "error";
+  handshake = "error";
   vi.resetModules();
 });
 afterEach(() => vi.useRealTimers());
@@ -69,15 +81,25 @@ describe("internetReachable", () => {
     expect(calls.filter((c) => c.startsWith("ping"))).toHaveLength(1);
   });
 
-  it("asks with a fresh TCP connection when ping is blocked", async () => {
-    // Many office networks drop outbound ICMP. A fresh connect, not a cached
+  it("asks with a fresh, verified TLS handshake when ping is blocked", async () => {
+    // Many office networks drop outbound ICMP. A fresh handshake, not a cached
     // verdict: the tray's online dot reads this too and must go offline when
     // the internet does.
     outcomes.ping = async () => ({ error: new Error("100% packet loss") });
-    tcp = "connect";
+    handshake = "secureConnect";
     const { internetReachable } = await import("@/lib/internet-reachable");
     expect(await internetReachable()).toBe(true);
-    expect(calls).toContain("tcp 1.1.1.1:443");
+    expect(calls).toContain("tls 1.1.1.1:443 as one.one.one.one");
+  });
+
+  it("stays offline behind a captive portal that accepts any connection", async () => {
+    // The portal answers the SYN, so a bare TCP connect succeeds; it cannot
+    // present 1.1.1.1's certificate, so the handshake fails.
+    outcomes.ping = async () => ({ error: new Error("100% packet loss") });
+    tcp = "connect";
+    handshake = "error";
+    const { internetReachable } = await import("@/lib/internet-reachable");
+    expect(await internetReachable()).toBe(false);
   });
 
   it("stays offline when neither gets through, as on a box broadcasting its setup hotspot", async () => {
@@ -85,6 +107,7 @@ describe("internetReachable", () => {
       vi.resetModules();
       outcomes.ping = async () => ({ error: new Error("unreachable") });
       tcp = outcome;
+      handshake = outcome;
       const { internetReachable } = await import("@/lib/internet-reachable");
       expect(await internetReachable()).toBe(false);
     }

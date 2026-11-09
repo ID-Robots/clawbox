@@ -120,12 +120,19 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
   });
 
   describe("llama.cpp is built for the GPU the host has", () => {
+    // `llamacpp_cmake_args` asks `command -v nvcc` before the candidate list, so
+    // a CUDA machine running these tests (the hardware this is for) would answer
+    // with its own /usr/bin/nvcc. Each script hides that lookup.
+    const HIDE_HOST_NVCC =
+      'command() { if [ "$1" = "-v" ] && [ "$2" = "nvcc" ]; then return 1; fi; builtin command "$@"; }';
+
     it("finds nvcc where NVIDIA installs it, off every root and systemd PATH", () => {
       // The Jetson installer learned this in install.sh::step_llamacpp_install;
       // this copy kept `command -v nvcc` alone and built a CPU-only server.
       const nvcc = stub("nvcc-real", "echo 'Cuda compilation tools, release 13.0'");
       stub("nvidia-smi", "echo '12.1'");
       const r = runBash([
+        HIDE_HOST_NVCC,
         `LLAMACPP_NVCC_CANDIDATES=("${nvcc}")`,
         sliceFunction("llamacpp_cmake_args"),
         "llamacpp_cmake_args",
@@ -139,6 +146,7 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
       const nvcc = stub("nvcc-real", "true");
       stub("nvidia-smi", "echo '12.1'");
       const r = runBash([
+        HIDE_HOST_NVCC,
         `LLAMACPP_NVCC_CANDIDATES=("${nvcc}")`,
         sliceFunction("llamacpp_cmake_args"),
         "llamacpp_cmake_args",
@@ -150,6 +158,7 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
       const nvcc = stub("nvcc-real", "true");
       stub("nvidia-smi", "echo '8.9'");
       const r = runBash([
+        HIDE_HOST_NVCC,
         `LLAMACPP_NVCC_CANDIDATES=("${nvcc}")`,
         sliceFunction("llamacpp_cmake_args"),
         "llamacpp_cmake_args",
@@ -160,6 +169,7 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
 
     it("builds for the CPU when there is no CUDA compiler at all", () => {
       const r = runBash([
+        HIDE_HOST_NVCC,
         `LLAMACPP_NVCC_CANDIDATES=("${path.join(dir, "no-such-nvcc")}")`,
         sliceFunction("llamacpp_cmake_args"),
         "llamacpp_cmake_args",
@@ -179,6 +189,21 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
       expect(step).toMatch(/git fetch --quiet --depth 1 origin \$LLAMACPP_COMMIT && git checkout --quiet \$LLAMACPP_COMMIT/);
       expect(step).not.toContain('local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"');
       expect(step).toContain('local LLAMA_DIR="$CLAWBOX_HOME/.local/share/clawbox/llama.cpp"');
+    });
+
+    it("takes only a commit hash as the pin, and the directory as one quoted word", () => {
+      // Both reach a `bash -lc` string run as the owner: an override with a
+      // space or a `;` in it would be split, or run, instead of reaching git.
+      const step = sliceFunction("step_llamacpp_install");
+      const check = /if ! \[\[ "\$LLAMACPP_COMMIT" =~ (\^\[0-9a-f\]\{7,40\}\$) \]\]/.exec(step);
+      expect(check, "a hex-only check on LLAMACPP_COMMIT").not.toBeNull();
+      const valid = (v: string) => runBash(`[[ "${v}" =~ ^[0-9a-f]{7,40}$ ]] && echo yes || echo no`).out.trim();
+      expect(valid("29c720eaf72fcf8e4e61a56a88b994d92668261d")).toBe("yes");
+      expect(valid("main; touch /tmp/x")).toBe("no");
+      for (const line of step.split("\n").filter((l) => l.includes("as_user_login"))) {
+        expect(line).not.toMatch(/\$LLAMA_DIR\b/);
+      }
+      expect(step).toContain(`LLAMA_DIR_Q="$(printf '%q' "$LLAMA_DIR")"`);
     });
 
     it("uses that decision in the build step instead of `command -v nvcc`", () => {

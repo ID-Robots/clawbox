@@ -1,10 +1,10 @@
 import { execFile } from "child_process";
-import net from "net";
+import tls from "tls";
 import { promisify } from "util";
 
 /**
  * Whether this machine can reach the internet right now: one ping to 1.1.1.1
- * (a TCP connection to it where ICMP is dropped), shared by
+ * (a verified TLS handshake with it where ICMP is dropped), shared by
  * every caller while it runs and remembered for five seconds, so the screens
  * that poll it (the tray's online dot, the setup wizard's network step) share
  * one probe instead of each spawning their own.
@@ -28,15 +28,21 @@ let cache: InternetStatus | null = null;
 // than each spawning their own (the route that reads it is open before sign-in).
 let inflight: Promise<InternetStatus> | null = null;
 
-function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+/**
+ * A TLS handshake with `host` that verifies its certificate for `servername`.
+ * A bare TCP connect proves only that something answered the SYN: a captive
+ * portal or a transparent proxy accepts any connection, and a box behind one
+ * would read as online. Neither can present 1.1.1.1's certificate.
+ */
+function tlsReachable(host: string, servername: string, port: number, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.connect({ host, port });
+    const socket = tls.connect({ host, port, servername });
     const done = (ok: boolean) => {
       socket.destroy();
       resolve(ok);
     };
     socket.setTimeout(timeoutMs, () => done(false));
-    socket.once("connect", () => done(true));
+    socket.once("secureConnect", () => done(true));
     socket.once("error", () => done(false));
   });
 }
@@ -47,12 +53,13 @@ async function check(): Promise<{ online: boolean; latencyMs: number | null }> {
     await execFileAsync("ping", ["-c", "1", "-W", "2", "-n", "1.1.1.1"], { timeout: 3000 });
     return { online: true, latencyMs: Date.now() - t0 };
   } catch {
-    // Many office networks drop outbound ICMP: ask with a fresh TCP connection
-    // to the same host instead. Fresh on every probe, never a cached verdict —
-    // the tray's online dot reads this and must go offline when the internet
-    // does. A box broadcasting its setup hotspot has no route out at all.
+    // Many office networks drop outbound ICMP: ask with a fresh, verified TLS
+    // handshake with the same host instead. Fresh on every probe, never a
+    // cached verdict — the tray's online dot reads this and must go offline
+    // when the internet does. A box broadcasting its setup hotspot has no route
+    // out at all.
     const t0 = Date.now();
-    return (await tcpReachable("1.1.1.1", 443, 2000))
+    return (await tlsReachable("1.1.1.1", "one.one.one.one", 443, 2000))
       ? { online: true, latencyMs: Date.now() - t0 }
       : { online: false, latencyMs: null };
   }

@@ -14,6 +14,11 @@ import { OLLAMA_MAX_MODEL_PARAM_B } from "./resource-limits";
  * 60% of the memory for its weights; the rest is the desktop, the KV cache and
  * everything else the machine runs. A 128 GB DGX Spark gets 120B-class models,
  * a 16 GB laptop 16B. Never below the Jetson's figure.
+ *
+ * The assumption: system memory holds the weights. True on GB10 and every
+ * unified-memory host; on a PC with a discrete GPU smaller than its RAM, a
+ * model near the cap runs partly on the CPU. The figure only filters the model
+ * search, so the cost of that is a slow model, never a failed install.
  */
 export const OLLAMA_MEMORY_DROPIN = "/etc/systemd/system/ollama.service.d/50-clawbox-memory.conf";
 
