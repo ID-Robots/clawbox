@@ -1169,7 +1169,8 @@ async function withLiveRunState(base: ClawKeepMemoryStatus): Promise<ClawKeepMem
 /**
  * One fresh reading about the box's default agent: the core's probe (or the
  * local index's answer where there is no OpenClaw), then the run state and the
- * schedule. Never rejects: a probe that fails is the unavailable status.
+ * schedule. A probe that fails, or an answer that cannot be parsed, is the
+ * unavailable status rather than a rejection.
  */
 async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   // Where there is no OpenClaw there is no CLI to probe: ClawBox's own index
@@ -1534,6 +1535,12 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
   // Per agent too: a renamed agent's index is a different index, and one
   // rebuilt for the old name says nothing about it.
   const setting = `${status.agentId}/${status.provider}/${status.model}/${status.location}`;
+  // A reading about an agent the box no longer means (renamed or re-pointed
+  // since) is no reason to force the index of the one it means now. It claims
+  // nothing, so it cannot overwrite the claim of the agent the box does mean:
+  // the next reading, about that one, decides. Asked BEFORE the claim is read,
+  // so nothing is awaited between reading the claim and taking it.
+  if (status.agentId !== await openclawDefaultAgentId()) return false;
   const claim = keywordOnlyRebuild;
   if (claim?.setting === setting) {
     // The run the reading carries is the live one (both callers read it after
@@ -1544,17 +1551,13 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
     const retryAtMs = startedPassFailed ? run.finishedAtMs + KEYWORD_ONLY_RETRY_MS : claim.retryAtMs;
     if (Date.now() < retryAtMs) return false;
   }
-  // Claimed before the first await, so two reads that arrive together cannot
-  // both start one; every path that started nothing leaves a retry time.
+  // Claimed with no await since the claim was read, so two reads that arrive
+  // together cannot both start one; every path that started nothing leaves a
+  // retry time.
   keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: null };
   let started = false;
   let askedAtMs = 0;
   try {
-    // A reading about an agent the box no longer means (renamed or re-pointed
-    // since) is no reason to force the index of the one it means now, which
-    // the pass below would rebuild. The retry time lands on the old agent's
-    // setting only: the next reading, about the right agent, decides afresh.
-    if (status.agentId !== await openclawDefaultAgentId()) return false;
     if ((await readMemoryRunState()).status === "running") return false;
     if (!(await embedLockFree())) return false;
     const { updateInFlight } = await import("@/lib/updater");
@@ -1564,7 +1567,7 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
       + "answers; asking OpenClaw for one full rebuild (memory index --force)",
     );
     askedAtMs = Date.now();
-    const result = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true, forAgent: status.agentId });
     started = result.accepted;
     if (started) keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: askedAtMs };
     else console.warn(`[clawkeep-memory] the keyword-only rebuild was not started: ${result.declined ?? "declined"}`);
@@ -1644,7 +1647,9 @@ function providerFellBack(status: Pick<ClawKeepMemoryStatus, "errorCode">): bool
  * Answered from the cached reading when there is one (stale included, and
  * one a run has changed since: the cost of a stale zero is one more pass
  * over an index that was just built, inside the ten seconds before the
- * refresh lands). Only a box that has never been probed waits for the probe —
+ * refresh lands). Only a box that has never been probed — or whose reading is
+ * about another agent than the default, which counts as none (see
+ * planIndexPass) — waits for the probe —
  * `lastMemoryStatus` rather than `getMemoryStatus`, which now waits for the
  * settled reading after a run, and a click of "Index now" seconds after a
  * pass must not sit behind that probe — and `startMemoryIndex` asks this
@@ -2152,23 +2157,43 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * with no regard for the switch, and so does the gateway pre-start's for a
  * change of the index's settings. Where ClawBox is the indexer its index holds
  * only the folders the owner chose, so there the switch still decides.
+ *
+ * `forAgent` is for a caller whose reason to index is a reading about one
+ * agent (the keyword-only rebuild): when the box's default agent is no longer
+ * that one by the time the pass is planned, nothing starts and the answer is
+ * `agent_changed` — a verdict about one agent's index never forces another's.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
-  options: { embedderChanged?: boolean } = {},
-): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" | "full_reindex_required" }> {
+  options: { embedderChanged?: boolean; forAgent?: string } = {},
+): Promise<{
+  accepted: boolean;
+  run: MemoryRunState;
+  declined?: "running" | "disabled" | "full_reindex_required" | "agent_changed";
+}> {
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
-  // The agent this pass is about, read ONCE (it never rejects) and before the
-  // plan: the reading that decides the mode and the pass that runs it answer
-  // for the same agent, so a default re-pointed in between cannot have the old
-  // agent's empty index send `--force` to the new one's populated index. Read
-  // before the run is on record, too, so nothing between the state write and
-  // the spawn below waits on the disk.
-  const agentId = await openclawDefaultAgentId();
-  const { mode, fellBack, heldBack } = await planIndexPass(requested, trigger, agentId);
+  // The agent this pass is about, bound before the plan (the read never
+  // rejects): the reading that decides the mode and the pass that runs it
+  // answer for the same agent, so a default re-pointed in between cannot have
+  // the old agent's empty index send `--force` to the new one's populated
+  // index. The plan may wait seconds on a probe, so the id is read again after
+  // it, and a re-point inside that wait is planned once more for the agent
+  // the box means now. Read before the run is on record, too, so nothing
+  // between the state write and the spawn below waits on the disk.
+  let agentId = await openclawDefaultAgentId();
+  let plan = await planIndexPass(requested, trigger, agentId);
+  const repointed = await openclawDefaultAgentId();
+  if (repointed !== agentId) {
+    agentId = repointed;
+    plan = await planIndexPass(requested, trigger, agentId);
+  }
+  const { mode, fellBack, heldBack } = plan;
+  if (options.forAgent !== undefined && options.forAgent !== agentId) {
+    return { accepted: false, declined: "agent_changed", run: await readMemoryRunState() };
+  }
   if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
   if (!await acquireRunLock()) {
     return { accepted: false, declined: "running", run: await readMemoryRunState() };

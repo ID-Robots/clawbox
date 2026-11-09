@@ -2071,8 +2071,24 @@ describe("a box whose default agent is not called main", () => {
     expect(await calls(argv, "memory index")).toEqual([]);
     // The same verdict about the agent the box means is rebuilt, at once: the
     // decline above left no retry time on this agent's setting.
-    expect(await rebuildKeywordOnlyIndex({ ...aboutMain, agentId: "default" })).toBe(true);
+    const aboutDefault = { ...aboutMain, agentId: "default" };
+    expect(await rebuildKeywordOnlyIndex(aboutDefault)).toBe(true);
     await settledMemoryRun(tmpDir);
     expect(await calls(argv, "memory index")).toEqual(["memory index --agent default --force"]);
+    // A late reading about the other agent claims nothing, so it cannot wipe
+    // that agent's once-per-setting record: the next reading about it, still
+    // keyword-only, is not rebuilt a second time.
+    expect(await rebuildKeywordOnlyIndex(aboutMain)).toBe(false);
+    expect(await rebuildKeywordOnlyIndex(aboutDefault)).toBe(false);
+    expect(await calls(argv, "memory index")).toHaveLength(1);
+  });
+
+  it("starts no pass for a caller whose reading is about an agent that is no longer the default", async () => {
+    const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("default")]);
+    const { startMemoryIndex } = await lib();
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true, forAgent: "main" });
+    expect(result).toMatchObject({ accepted: false, declined: "agent_changed" });
+    expect(result.run.status).not.toBe("running");
+    expect(await calls(argv, "memory index")).toEqual([]);
   });
 });
