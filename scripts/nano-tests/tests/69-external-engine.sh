@@ -98,8 +98,13 @@ engine_call() {
   # shellcheck disable=SC2016  # expanded on the board
   out=$(board '
     case "$3" in key) k=$(cat "$6/key") ;; wrong) k=not-the-engines-key ;; *) k="" ;; esac
-    body=$(jq -n --arg b "$5" --arg m "$4" --arg k "$k" \
-      "{baseUrl: \$b, modelId: \$m, contextWindow: 131072, maxTokens: 4096, imageInput: false} + (if \$k == \"\" then {} else {apiKey: \$k} end)")
+    # python3, not jq (a board has no jq); the key through the environment,
+    # never on a command line.
+    body=$(EXT_KEY="$k" EXT_BASE="$5" EXT_MODEL="$4" python3 -c "
+import json, os
+d = {\"baseUrl\": os.environ[\"EXT_BASE\"], \"modelId\": os.environ[\"EXT_MODEL\"], \"contextWindow\": 131072, \"maxTokens\": 4096, \"imageInput\": False}
+if os.environ.get(\"EXT_KEY\"): d[\"apiKey\"] = os.environ[\"EXT_KEY\"]
+print(json.dumps(d))")
     owner_api "$1" "$2" "$body"
   ' "$1" "$2" "$3" "$4" "${5:-http://127.0.0.1:$PORT/v1}" "$DIR")
   API_STATUS=$(printf '%s\n' "$out" | head -n1)
@@ -170,7 +175,19 @@ if [ "$(api_json '.external_engine.displayName')" = "$NAME" ]; then ok "setup st
 # 5. A real chat turn, answered by the engine.
 runtime_chat_turn
 # shellcheck disable=SC2016  # expanded on the board
-hits=$(board 'jq -c "select(.path == \"/v1/chat/completions\" and .authorized == true and .model == \"$2\")" "$1/requests.jsonl" 2>/dev/null | grep -c "NANO-CI-OK" || true' "$DIR" "$MODEL" | tail -n1)
+hits=$(board '
+  python3 -c "
+import json, sys
+n = 0
+for line in open(sys.argv[1]):
+    try:
+        r = json.loads(line)
+    except ValueError:
+        continue
+    if r.get(\"path\") == \"/v1/chat/completions\" and r.get(\"authorized\") and r.get(\"model\") == sys.argv[2] and \"NANO-CI-OK\" in (r.get(\"reply\") or \"\"):
+        n += 1
+print(n)" "$1/requests.jsonl" "$2" 2>/dev/null || echo 0
+' "$DIR" "$MODEL" | tail -n1)
 if [ "${hits:-0}" -ge 1 ]; then ok "the turn reached the engine with its key ($hits request(s) in the mock's log)"; else not_ok "the mock's log holds no authorized chat request for the turn"; fi
 
 # 6. The on-device chat model stays down.

@@ -16,8 +16,8 @@
 // Every request must carry `Authorization: Bearer <the key in --key-file>`;
 // anything else is a 401, which is how the test proves the box sends the key
 // it was given. Each request is appended to --log as one JSON line — path,
-// model, stream, whether it was authorized and the start of the last user
-// message — never the key. Prints READY once it listens.
+// model, stream, whether it was authorized, the end of the last user message
+// and the reply given — never the key. Prints READY once it listens.
 import http from "node:http";
 import fs from "node:fs";
 
@@ -87,7 +87,9 @@ const server = http.createServer((req, res) => {
         method: req.method, path, authorized: true, model: body.model, stream,
         messages: Array.isArray(body.messages) ? body.messages.length : 0,
         tools: Array.isArray(body.tools) ? body.tools.length : 0,
-        lastUser: last.slice(0, 160),
+        // The END of the message: a harness may put an envelope in front.
+        lastUser: last.slice(-160),
+        reply: reply.slice(0, 120),
       });
       if (body.model !== MODEL) {
         send(res, 404, { error: { message: `The model \`${body.model}\` does not exist.`, type: "invalid_request_error" } });

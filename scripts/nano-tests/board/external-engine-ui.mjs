@@ -6,7 +6,8 @@
 //
 //   1. Settings → Local AI (`/app/settings?section=localAi`): the External
 //      engine card says the model answers Local AI.
-//   2. The chat (`/app/chat`): the header names the engine's model.
+//   2. The chat (`/app/clawbox`, the chat app's own page): the header names
+//      the engine's model.
 //
 // Prints `RESULT ok - …` / `RESULT not ok - …` lines the test turns into TAP,
 // and `NOTE …` lines. With SHOTS_DIR set, a PNG of each page is left there
@@ -117,7 +118,7 @@ async function run() {
     }
 
     // 2. The chat header.
-    await page.send("Page.navigate", { url: `${BASE}/app/chat` });
+    await page.send("Page.navigate", { url: `${BASE}/app/clawbox` });
     try {
       const header = await waitFor(
         "the chat header naming the model",
