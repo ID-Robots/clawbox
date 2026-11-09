@@ -161,7 +161,7 @@ describe("the vocabulary", () => {
     // The literal is the point. An unnamed run's model reaches Claude Code as
     // a string, so a typo here ("claude-opus-5.5", an alias) is not a type
     // error — it is a run that fails several minutes in, on the owner's bill.
-    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]);
+    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]);
     expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-opus-5-5");
     expect(defaultModelForProvider("anthropic")).toBe("claude-opus-5-5");
     expect(defaultModelForProvider("clawbox-ai")).toBeNull();

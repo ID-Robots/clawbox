@@ -53,6 +53,7 @@ describe("the vocabulary", () => {
     expect(isRecordableModel("clawbox-ai", "claude-opus-5-5")).toBe(false);
     expect(isRecordableModel("anthropic", "claude-opus-5")).toBe(true);
     expect(isRecordableModel("anthropic", "claude-fable-5-1")).toBe(true);
+    expect(isRecordableModel("anthropic", "claude-fable-5-2")).toBe(true);
     expect(isRecordableModel("anthropic", null)).toBe(false);
   });
 
@@ -77,9 +78,11 @@ describe("the vocabulary", () => {
 });
 
 describe("the models a role may name", () => {
-  it("is the coding fence on Anthropic — Fable 5.1 included — and the flash tier alone on ClawBox AI", () => {
+  it("is the coding fence on Anthropic — the Fable models and the 5.5 generation included — and the flash tier alone on ClawBox AI", () => {
     expect([...roleModelOptions("anthropic")]).toEqual([...ANTHROPIC_MODELS]);
-    expect(roleModelOptions("anthropic")).toContain("claude-fable-5-1");
+    for (const id of ["claude-fable-5-2", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+      expect(roleModelOptions("anthropic"), id).toContain(id);
+    }
     expect([...roleModelOptions("clawbox-ai")]).toEqual(["deepseek-v4-flash"]);
   });
 
@@ -141,6 +144,12 @@ describe("relative cost", () => {
     expect(cost("claude-sonnet-5")).toBeLessThan(cost("claude-opus-5-5"));
     expect(cost("claude-opus-5")).toBeLessThanOrEqual(cost("claude-opus-5-5"));
     expect(cost("claude-opus-5-5")).toBeLessThanOrEqual(cost("claude-fable-5-1"));
+    // The 5.5 generation: Haiku under Sonnet, Sonnet level with the Sonnet it
+    // replaced, Fable 5.2 above Opus and no dearer than Fable 5.1.
+    expect(cost("claude-haiku-5-5")).toBeLessThan(cost("claude-sonnet-5-5"));
+    expect(cost("claude-sonnet-5-5")).toBe(cost("claude-sonnet-5"));
+    expect(cost("claude-opus-5-5")).toBeLessThan(cost("claude-fable-5-2"));
+    expect(cost("claude-fable-5-2")).toBeLessThanOrEqual(cost("claude-fable-5-1"));
   });
 
   it("reads a missing model as the provider's default, and says null where nobody can tell", () => {
@@ -160,7 +169,7 @@ describe("the defaults — a box that never chose", () => {
   // provider's best model, a worker and a reviewer on its middle one; ClawBox
   // AI on its flash tier throughout, never the pro tier.
   const EXPECTED = {
-    anthropic: { planner: "claude-fable-5-1", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+    anthropic: { planner: "claude-fable-5-2", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
     openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
     "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
   } as const;
@@ -189,7 +198,10 @@ describe("the defaults — a box that never chose", () => {
   it("gives planning the provider's most capable model, never less than the others", () => {
     for (const provider of CODING_PROVIDERS) {
       const cost = (role: (typeof MODEL_ROLES)[number]) => relativeModelCost(provider, ROLE_DEFAULT_MODELS[provider][role])!;
-      expect(cost("planner")).toBe(Math.max(...roleModelOptions(provider).map((m) => relativeModelCost(provider, m)!)));
+      // Not "the dearest on the list": Fable 5.2 lists BELOW the Fable 5.1 it
+      // replaced, and the planner's default follows the newer one. Never
+      // cheaper than the model a run nobody chose for lands on, though.
+      expect(cost("planner")).toBeGreaterThanOrEqual(relativeModelCost(provider, null) ?? 1);
       expect(cost("planner")).toBeGreaterThanOrEqual(cost("worker"));
       expect(cost("planner")).toBeGreaterThanOrEqual(cost("reviewer"));
     }

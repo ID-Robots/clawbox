@@ -1067,7 +1067,7 @@ describe("a team's model and effort per role", () => {
     await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { planner: { provider: "anthropic" } } } }));
     await waitFor(() => expect(provider("planner").value).toBe("anthropic"));
     // Pinned, the model select offers that account's models and no tier.
-    expect(texts(model("planner"))).toEqual([t("codingAgent.roleModel.autoForProvider"), "Opus 5.5", "Fable 5.1", "Opus 5", "Sonnet 5"]);
+    expect(texts(model("planner"))).toEqual([t("codingAgent.roleModel.autoForProvider"), "Opus 5.5", "Fable 5.2", "Sonnet 5.5", "Haiku 5.5", "Fable 5.1", "Opus 5", "Sonnet 5"]);
     expect(values(model("planner"))).not.toContain(RETIRED_CHAT_ID);
 
     fireEvent.change(model("planner"), { target: { value: "claude-fable-5-1" } });

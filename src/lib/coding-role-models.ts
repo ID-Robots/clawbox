@@ -116,7 +116,7 @@ export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { effortCap: RoleEffort |
  * stored keeps exactly that, a stored `standard`/`economy` included.
  */
 export const ROLE_DEFAULT_MODELS: Readonly<Record<CodingProvider, Readonly<Record<ModelRole, string>>>> = {
-  anthropic: { planner: "claude-fable-5-1", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+  anthropic: { planner: "claude-fable-5-2", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
   openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
   "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
 };
@@ -163,10 +163,14 @@ export function isRoleModelId(provider: CodingProvider, value: unknown): value i
  */
 export const RELATIVE_MODEL_COST: Readonly<Record<string, number>> = {
   "deepseek-v4-flash": 1,
+  // Haiku 5.5 lists at a twentieth of Sonnet; 1 is the floor of this scale.
+  "claude-haiku-5-5": 1,
   "claude-sonnet-5": 10,
+  "claude-sonnet-5-5": 10,
   "claude-opus-5": 20,
   "claude-opus-5-5": 20,
-  "claude-fable-5-1": 40,
+  "claude-fable-5-2": 40,
+  "claude-fable-5-1": 50,
   // OpenAI's: TIER ESTIMATES, not list prices — read off the Codex CLI's own
   // catalogue descriptions (flagship, balanced everyday, fast and affordable)
   // and set level with the Anthropic tier each one stands beside. OpenAI's

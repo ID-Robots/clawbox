@@ -238,7 +238,7 @@ describe("GET", () => {
       connectedProviders: ["clawbox-ai", "anthropic"],
       providerModels: {
         "clawbox-ai": ["deepseek-v4-flash"],
-        anthropic: ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+        anthropic: ["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
       },
       reviewPass: false,
       autoPr: false,

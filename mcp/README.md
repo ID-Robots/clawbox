@@ -1167,7 +1167,7 @@ STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 What a team COSTS is on its answer too. By default the planner (and the lead)
 runs on the provider's best model and the workers and reviewers on its middle
-one — `claude-fable-5-1` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
+one — `claude-fable-5-2` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
 `gpt-5.6-sol` on OpenAI, the plan's `deepseek-v4-flash` for every role on
 ClawBox AI; the planner and reviewers at no more than `xhigh` effort, workers
 at the owner's effort; the owner may pick
