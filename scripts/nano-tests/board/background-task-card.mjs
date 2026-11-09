@@ -142,16 +142,49 @@ async function run() {
     // Whichever is offered, not what FORCE expected: once memory search is on
     // the box, clawbox-embed.service fetches a missing model itself the first
     // time a search wakes it.
+    //
+    // Opened the way the box's own links open a section
+    // (dispatchOpenSettingsSection in src/lib/ui-events.ts): the cold-open
+    // handoff on `window` AND the event an open Settings window listens for.
+    // The handoff alone reaches only a Settings that mounts after it — and the
+    // desktop brings back the windows its owner left open (TASK-1306), so on a
+    // board whose saved desktop holds a Settings window, "open Settings" only
+    // focused that window, still on Appearance: no Local AI page, so no
+    // memory-search row to find (TASK-2379).
+    const restoredSettings = await page.evaluate(`!!document.querySelector('[data-testid="chrome-window-settings"]')`).catch(() => false);
+    if (restoredSettings) note("the owner's saved desktop brought a Settings window back on load; it is moved to Local AI the way the box's own links move it");
     await page.evaluate(`window.__clawboxPendingSettingsSection = "localAi";
+      delete window.__clawboxPendingSettingsFocus;
+      window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localAi" } }));
       window.dispatchEvent(new CustomEvent("clawbox:open-app", { detail: { appId: "settings" } })); true`);
+    // Local AI's page first (its skeleton while the inventory loads), so a
+    // Settings that opened somewhere else says where rather than "no row".
+    const localAiPage = `!!document.querySelector('[data-testid="chrome-window-settings"] :is([data-testid="local-ai-panel"], [data-testid="local-ai-loading"])')`;
+    if (!(await waitFor("Settings -> Local AI", () => page.evaluate(localAiPage), 30_000, 500).catch(() => false))) {
+      const where = await page.evaluate(`(() => {
+        const win = document.querySelector('[data-testid="chrome-window-settings"]');
+        if (!win) return "Settings did not open";
+        const heading = win.querySelector("h1, h2")?.textContent?.trim();
+        return "Settings shows " + (heading ? JSON.stringify(heading) : "another page");
+      })()`).catch(() => "the page could not be read");
+      say(`not ok - Settings -> Local AI did not open within 30 s (${where}${restoredSettings ? ", in the Settings window the saved desktop brought back" : ""})`);
+      return;
+    }
     const controls = force ? ["local-ai-embed-download", "local-model-action-embeddings-install"] : ["local-model-action-embeddings-install", "local-ai-embed-download"];
     let button;
     try {
       button = await waitFor("Settings -> Local AI's memory-model download", () => page.evaluate(`${JSON.stringify(controls)}.find((id) => document.querySelector('[data-testid="' + id + '"]:not([disabled]):not([aria-disabled="true"])')) ?? null`), 90_000, 1000);
     } catch {
-      // What the row said instead, so a board that offered nothing says why.
-      const row = await page.evaluate(`document.querySelector('[data-testid="local-model-embeddings"]')?.textContent.replace(/\\s+/g, " ").trim().slice(0, 200) ?? null`).catch(() => null);
-      say(`not ok - Settings -> Local AI never offered the memory model: no Install on its row, no Download again on its card (${row ? `the row said: ${row}` : "no memory-search row was drawn"})`);
+      // What the row said instead, so a board that offered nothing says why:
+      // the row's words, or which rows the page drew without it.
+      const seen = await page.evaluate(`(() => {
+        const row = document.querySelector('[data-testid="local-model-embeddings"]');
+        if (row) return "the row said: " + row.textContent.replace(/\\s+/g, " ").trim().slice(0, 200);
+        if (!document.querySelector('[data-testid="local-ai-panel"]')) return "no memory-search row was drawn: the Local AI page never loaded its inventory";
+        const rows = [...document.querySelectorAll('[data-testid="local-ai-panel"] li[data-testid^="local-model-"]')].map((li) => li.getAttribute("data-testid").slice("local-model-".length));
+        return "no memory-search row was drawn; the page drew " + (rows.length ? rows.join(", ") : "no rows");
+      })()`).catch(() => "no memory-search row was drawn");
+      say(`not ok - Settings -> Local AI never offered the memory model: no Install on its row, no Download again on its card (${seen})`);
       return;
     }
     await page.evaluate(`document.querySelector('[data-testid="${button}"]').click(); true`);
