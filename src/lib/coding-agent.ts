@@ -6502,13 +6502,14 @@ export const LEAN_VISUAL_BRIEF = [
  * model, and a Claude run that believed it judged its own interface by a
  * small vision model's paragraph, which names what is on a screen and misses
  * what is wrong with it: a clipped label, two overlapping controls, a colour
- * that is off. The description still comes back with every screenshot — it is
- * the cheap first look — and the picture itself is one Read away, in the
- * evidence folder the run may already read.
+ * that is off. The description still comes back with every screenshot — the
+ * pull request's evidence table is written from it — and for such a run the
+ * picture comes back with it, in the same reply (mcp/tools/browser.ts
+ * `pageResult`): a separate Read of the PNG was a second call per screen.
  */
 export const LEAN_VISUAL_BRIEF_SIGHTED = [
   VISUAL_BRIEF_SERVE,
-  "browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with a short description of it written by a small vision model. You can see images yourself: Read the saved PNG wherever layout, spacing, colour or exact text matters, and always before you report an interface done — the description names what is on the screen and misses what is wrong with it.",
+  "browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with the picture itself and a short description of it written by a small vision model. You can see images: judge layout, spacing, colour and exact text by the picture, never by the description alone — it names what is on the screen and misses what is wrong with it — and look at every changed screen before you report an interface done.",
   VISUAL_BRIEF_DRIVE,
 ].join(" ");
 

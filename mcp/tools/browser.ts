@@ -23,7 +23,7 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { isInside } from "../../src/lib/file-guard";
 import { recordShotNote } from "../../src/lib/coding-shot-notes";
-import { runBrowserAllowed, runContext } from "../lib/run-context";
+import { runBrowserAllowed, runContext, runSeesImages } from "../lib/run-context";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
@@ -389,6 +389,12 @@ function briefResult(message: string, reply: BrowserReply): ToolResult {
  * page (describe: true) — archive the PNG it captured, relay the words, no
  * image. The description comes from the backend's own smaller JPEG capture a
  * moment after the PNG, so on an animating page the two can differ slightly.
+ *
+ * A run on a model that SEES (`runSeesImages`: an Anthropic run) gets the
+ * picture as well, in the same reply: the words are still archived for the
+ * pull request, but the run judges the page by the page — and does not spend
+ * a second call reading the PNG back, by which time a six-second toast it
+ * meant to check has gone (run-9iezkj6v, 2026-11-10).
  */
 function pageResult(message: string, reply: BrowserReply): ToolResult {
   if (!runContext()) return withScreenshot(message, reply);
@@ -412,9 +418,11 @@ function pageResult(message: string, reply: BrowserReply): ToolResult {
     lines.push(`What the page shows: ${reply.description}`);
   } else {
     const reason = reply.descriptionError ? ` (${reply.descriptionError})` : "";
-    lines.push(`No vision description is available${reason}. Rely on the URL, the title and your knowledge of the code.`);
+    lines.push(`No vision description is available${reason}. ${runSeesImages() && reply.screenshot ? "Judge by the picture itself." : "Rely on the URL, the title and your knowledge of the code."}`);
   }
-  return { content: [{ type: "text", text: lines.join("\n") }] };
+  const content: ToolResult["content"] = [{ type: "text", text: lines.join("\n") }];
+  if (runSeesImages() && reply.screenshot) content.push({ type: "image", data: reply.screenshot, mimeType: "image/png" });
+  return { content };
 }
 
 /** In run context, the capturing actions describe the frame they capture. */

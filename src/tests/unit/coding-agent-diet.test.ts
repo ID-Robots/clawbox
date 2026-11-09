@@ -112,7 +112,8 @@ describe("the brief", () => {
     const sighted = headlessBrief({ reviewedSeparately: false, visual: true, seesImages: true });
     expect(sighted).toContain(LEAN_VISUAL_BRIEF_SIGHTED);
     expect(sighted).not.toMatch(/You cannot see images/);
-    expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(/You can see images yourself: Read the saved PNG/);
+    expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(/answer with the picture itself and a short description/);
+    expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(/You can see images: judge layout, spacing, colour and exact text by the picture/);
     // The serving and driving sentences are the same two in both.
     for (const shared of [/\$CLAWBOX_PREVIEW/, /browser_fill/, /key by key/, /ONE pass, one screenshot per state/]) {
       expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(shared);
