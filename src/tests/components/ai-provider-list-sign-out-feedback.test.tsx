@@ -185,7 +185,8 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     expect(row).toHaveAttribute("aria-busy", "true");
     // Only the tapped row is in hand.
     expect(screen.getByTestId("ai-provider-xai")).not.toHaveAttribute("data-sign-out");
-    expect(screen.getByTestId("ai-provider-sign-out-xai")).toHaveTextContent("Sign out of xAI Grok");
+    expect(screen.getByTestId("ai-provider-sign-out-xai")).toHaveTextContent(/^Sign out$/);
+    expect(screen.getByTestId("ai-provider-sign-out-xai")).toHaveAccessibleName("Sign out of xAI Grok");
 
     // No double submit, however often it is pressed.
     fireEvent.click(button);
@@ -241,7 +242,7 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     // A picture of the row, not the row: it keeps its spinner to the end, can
     // be pressed by nobody, and answers to none of the row's test ids.
     expect(within(leaving).getByText("Signing out…").closest("button")).toBeDisabled();
-    expect(within(leaving).queryByText("Sign out of OpenAI GPT")).not.toBeInTheDocument();
+    expect(within(leaving).queryByText("Sign out")).not.toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-sign-out-openai")).not.toBeInTheDocument();
     const order = screen.getAllByTestId(/^ai-provider-(held-)?(clawai|openai|xai)$/).map((el) => el.dataset.testid);
     expect(order).toEqual(["ai-provider-clawai", "ai-provider-held-openai", "ai-provider-xai"]);
@@ -294,7 +295,8 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     expect(screen.getAllByRole("alert")).toEqual([error]);
     await waitFor(() => expect(row).not.toHaveAttribute("data-sign-out"));
     const button = screen.getByTestId("ai-provider-sign-out-openai");
-    expect(button).toHaveTextContent("Sign out of OpenAI GPT");
+    expect(button).toHaveTextContent(/^Sign out$/);
+    expect(button).toHaveAccessibleName("Sign out of OpenAI GPT");
     expect(button).toBeEnabled();
     expect(button).not.toHaveAttribute("aria-busy", "true");
     expect(screen.queryByTestId("ai-provider-sign-out-spinner-openai")).not.toBeInTheDocument();
@@ -343,7 +345,8 @@ describe("AiProviderList — what a sign-out looks like while it runs", () => {
     const error = await screen.findByTestId("ai-provider-sign-out-error-openai");
     expect(error).toHaveTextContent("The box took too long to answer. The list has been read again — if OpenAI GPT is no longer in it, the sign-out went through.");
     await waitFor(() => expect(screen.getByTestId("ai-provider-switch-xai")).toBeEnabled());
-    expect(screen.getByTestId("ai-provider-sign-out-openai")).toHaveTextContent("Sign out of OpenAI GPT");
+    expect(screen.getByTestId("ai-provider-sign-out-openai")).toHaveTextContent(/^Sign out$/);
+    expect(screen.getByTestId("ai-provider-sign-out-openai")).toHaveAccessibleName("Sign out of OpenAI GPT");
     expect(screen.queryByTestId("ai-provider-signed-out")).not.toBeInTheDocument();
   });
 

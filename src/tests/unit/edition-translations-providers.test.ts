@@ -55,6 +55,10 @@ const RENDERED = [
   "settings.providers.empty",
   "settings.providers.signOut",
   "settings.providers.signOutConfirm",
+  // The button's own short words (TASK-2246) and its name while armed: the
+  // provider moved off the button into its name and tooltip.
+  "settings.providers.signOutShort",
+  "settings.providers.signOutConfirmNamed",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
   // The sign-out in hand (TASK-2126): the spinner's words, the line under it
@@ -71,6 +75,7 @@ const RENDERED = [
 /** The sign-out strings that name the row they are on. */
 const NAMED_SIGN_OUT = [
   "settings.providers.signOut",
+  "settings.providers.signOutConfirmNamed",
   "settings.providers.signOutFailed",
   "settings.providers.signedOut",
   "settings.providers.signOutTimedOut",

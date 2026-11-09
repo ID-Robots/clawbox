@@ -102,6 +102,14 @@ const SIGN_OUT_ROW_CLASS = {
   settled: "provider-sign-out-settled",
 } as const;
 
+/**
+ * The box of a labelled button among a row's controls — Make default and the
+ * sign-out — matching the inline disclosures beside them (SettingsDisclosureButton)
+ * in height, type size and centring. Never wraps: a two-line button in a row of
+ * one-line ones is the defect this replaced.
+ */
+const ROW_BUTTON = "inline-flex items-center whitespace-nowrap shrink-0 text-[11px] px-2.5 py-1 rounded-lg border";
+
 function prefersReducedMotion(): boolean {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
 }
@@ -591,16 +599,18 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
           ))}
         </div>
       ) : (
-        /* A CONTAINER, not the viewport. The defect is about how wide this
-           PANE is: Settings caps it at `max-w-xl` (576 px) and draws it inside
-           a ChromeWindow the owner can drag down to 300 px, so a `sm:`
-           breakpoint — which asks the viewport — is answered "wide" on a
-           desktop whose provider rows are 300 px across. `@container` is what
-           the rest of this codebase already uses for exactly this (the Coding
-           Agent panel, the skills store). `@md` is 28 rem: below it the icon,
-           the name, the Default pill, the Make-default button and the 44 px
-           switch cannot share a line without the name giving way. */
-        <ul className="@container rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
+        /* Each ROW decides, by its own content, not a breakpoint. The defect
+           is about how wide this PANE is: Settings caps it at `max-w-xl`
+           (576 px) and draws it inside a ChromeWindow the owner can drag down
+           to 300 px, so a `sm:` breakpoint — which asks the viewport — is
+           answered "wide" on a desktop whose provider rows are 300 px across.
+           And no one pane width suits every row: the Anthropic row's accounts,
+           Make default, sign-out and switch do not fit beside its name even at
+           576 px, while ClawBox AI's three do with room to spare. So a row
+           wraps: its controls stay beside the name while the name keeps
+           `basis-40` (10 rem) of it, and take a line of their own under it
+           when it would not. */
+        <ul className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
           {shown.map(({ row, index, held: isHeld }) => {
             // Where this row is in a sign-out: running (`pending`), just
             // signed out and no longer listed (`leaving`, folding away), or
@@ -662,27 +672,33 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
               || (row.state === "needs-reauth" && (row.credentialHeld ?? !row.isDefault));
             const signOutLocked = row.isDefault && (row.id !== "clawai" || summary?.harness === "hermes");
             const armed = signOutArmed === row.id;
+            // The button shows the bare verb; its name and tooltip say whose
+            // sign-in it removes, armed or not.
+            const signOutName = armed
+              ? t("settings.providers.signOutConfirmNamed", { name: row.label })
+              : t("settings.providers.signOut", { name: row.label });
             return (
               <Fragment key={row.id}>
-              {/* Stacked below `sm:`, one line above it. At 390 px the row had
+              {/* One line where the controls fit beside the name, two where
+                  they do not (see the list above). At 390 px the row once had
                   an icon, a name, a Default pill, a Make-default button and a
                   44 px switch competing for ~290 px, so the only thing that
                   could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
-                  The controls go under the name at phone widths instead, and
-                  the name is allowed to wrap there rather than be clipped. */}
+                  The name's column now keeps its basis or the controls move
+                  under it, and the name wraps rather than being clipped. */}
               {/* A held row answers to a test id of its own (see `tid`). The
                   parts that dim while a row is in hand carry
                   `provider-sign-out-dim`; the button and its words do not. */}
               <li
                 ref={hasAccounts ? anthropicRowRef : undefined}
-                className={`flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5 ${signOutState ? SIGN_OUT_ROW_CLASS[signOutState] : ""}`}
+                className={`flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5 ${signOutState ? SIGN_OUT_ROW_CLASS[signOutState] : ""}`}
                 data-testid={isHeld ? `ai-provider-held-${row.id}` : `ai-provider-${row.id}`}
                 data-sign-out={signOutState}
                 aria-busy={pending || undefined}
                 aria-hidden={signOutState === "leaving" || undefined}
                 inert={signOutState === "leaving" || undefined}
               >
-                <span className="flex items-center gap-3 min-w-0 @md:flex-1">
+                <span className="flex grow basis-40 items-center gap-3 min-w-0" data-testid={tid(`ai-provider-identity-${row.id}`)}>
                   {/* A switched-off provider's icon is already faded; dimmed
                       again on top it would all but vanish. */}
                   <span className={`shrink-0 ${row.enabled ? "provider-sign-out-dim" : ""}`}>
@@ -691,7 +707,7 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                     </span>
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="provider-sign-out-dim flex flex-wrap @md:flex-nowrap items-center gap-2">
+                    <span className="provider-sign-out-dim flex flex-wrap items-center gap-2">
                       <span
                         data-testid={tid(`ai-provider-name-${row.id}`)}
                         /* `break-words` beside the wrap: on Hermes the label is
@@ -701,8 +717,10 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                            `overflow-wrap: break-word` does NOT reduce a flex
                            item's min-content width, so without it the item
                            refuses to shrink and the long word overflows the
-                           pane instead of wrapping inside it. */
-                        className={`min-w-0 text-sm font-medium break-words @md:truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
+                           pane instead of wrapping inside it. Never truncated:
+                           its column keeps at least `basis-40`, and a label
+                           longer than that wraps rather than losing its end. */
+                        className={`min-w-0 text-sm font-medium break-words ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
                       >
                         {row.label}
                       </span>
@@ -728,49 +746,6 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                       >
                         {t("settings.providers.lockedHint")}
                       </span>
-                    )}
-                    {/* Under the row's status, not among the controls: beside the
-                        usage disclosure, Make default and the switch, a labelled
-                        sign-out left a 576 px pane too little room for the name
-                        ("ClawBox AI" drew as "C…" on a board). The name column
-                        has the width; the label stays whole. */}
-                    {canSignOut && (
-                      <button
-                        type="button"
-                        onClick={() => onSignOutClick(row, index)}
-                        onBlur={armed ? disarmSignOut : undefined}
-                        // The one in hand is disabled by `aria-disabled` and the
-                        // guard in onSignOutClick, not by `disabled`: that would
-                        // drop the focus it has from the second tap onto the
-                        // page for the whole sign-out.
-                        disabled={!pending && (busy || settingDefault !== null || signOutLocked)}
-                        aria-disabled={pending || undefined}
-                        aria-busy={pending}
-                        aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
-                        title={signOutLocked ? t("settings.providers.lockedHint") : undefined}
-                        data-testid={tid(`ai-provider-sign-out-${row.id}`)}
-                        // In hand it is a label, not a dead control: full
-                        // strength, while the rest of the row dims around it.
-                        className={`mt-1 inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg border transition-colors ${
-                          showPending
-                            ? "border-white/15 text-[var(--text-primary)] cursor-progress"
-                            : `disabled:opacity-50 disabled:cursor-not-allowed ${armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"}`
-                        }`}
-                      >
-                        {showPending ? (
-                          <>
-                            <span
-                              aria-hidden="true"
-                              className="material-symbols-rounded motion-safe:animate-spin"
-                              style={{ fontSize: 14 }}
-                              data-testid={tid(`ai-provider-sign-out-spinner-${row.id}`)}
-                            >
-                              progress_activity
-                            </span>
-                            {t("settings.providers.signingOut")}
-                          </>
-                        ) : armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOut", { name: row.label })}
-                      </button>
                     )}
                     {/* A minute is long enough to need saying: the chat is
                         being restarted to drop the sign-in, not the page
@@ -813,68 +788,130 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                   </span>
                 </span>
 
-                {/* `flex-wrap` for the Anthropic row in a narrow pane: its
-                    accounts button, Make-default and the switch are wider
-                    together than a 300 px window's row, and a line that cannot
-                    wrap is clipped by the list's `overflow-hidden`. A wide pane
-                    keeps them on one line — this span does not shrink there. */}
-                <span className="provider-sign-out-dim flex flex-wrap items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={tid(`ai-provider-controls-${row.id}`)}>
+                {/* The row's controls, right-aligned beside the name — or, when
+                    they do not fit beside it, on a line of their own under it,
+                    still right-aligned (`ml-auto`). `flex-wrap` inside for a
+                    300 px window, where even that line is too short for the
+                    Anthropic row's four; a line that cannot wrap is clipped by
+                    the list's `overflow-hidden`. Each control dims on its own
+                    (`provider-sign-out-dim`) so the sign-out among them can stay
+                    at full strength while its row is in hand. */}
+                <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 ml-auto max-w-full" data-testid={tid(`ai-provider-controls-${row.id}`)}>
                   {hasUsage && (
-                    <SettingsDisclosureButton
-                      open={usageOpen}
-                      onToggle={() => setUsageOpen((open) => !open)}
-                      // The block's own name, so the button says exactly what it
-                      // reveals. Already translated into all ten locales as the
-                      // card's heading — the disclosure needs no word of its own.
-                      label={t("clawaiUsage.title")}
-                      controls="clawai-usage-panel"
-                      variant="inline"
-                      testId="clawai-usage-toggle"
-                    />
+                    <span className="provider-sign-out-dim flex shrink-0">
+                      <SettingsDisclosureButton
+                        open={usageOpen}
+                        onToggle={() => setUsageOpen((open) => !open)}
+                        // The block's own name, so the button says exactly what it
+                        // reveals. Already translated into all ten locales as the
+                        // card's heading — the disclosure needs no word of its own.
+                        label={t("clawaiUsage.title")}
+                        controls="clawai-usage-panel"
+                        variant="inline"
+                        testId="clawai-usage-toggle"
+                      />
+                    </span>
                   )}
 
                   {hasAccounts && (
-                    <SettingsDisclosureButton
-                      open={accountsOpen}
-                      onToggle={() => setAccountsOpen((open) => !open)}
-                      // The card's own heading, translated in every locale.
-                      label={t("settings.anthropicAccounts.title")}
-                      controls="anthropic-accounts-panel"
-                      variant="inline"
-                      testId="anthropic-accounts-toggle"
-                    />
+                    <span className="provider-sign-out-dim flex shrink-0">
+                      <SettingsDisclosureButton
+                        open={accountsOpen}
+                        onToggle={() => setAccountsOpen((open) => !open)}
+                        // The card's own heading, translated in every locale.
+                        label={t("settings.anthropicAccounts.title")}
+                        controls="anthropic-accounts-panel"
+                        variant="inline"
+                        testId="anthropic-accounts-toggle"
+                      />
+                    </span>
                   )}
 
                   {canMakeDefault && (
-                    <button
-                      type="button"
-                      onClick={() => void setDefault(row.id)}
-                      disabled={busy}
-                      data-testid={tid(`ai-provider-make-default-${row.id}`)}
-                      className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 shrink-0"
-                    >
-                      {t("settings.providers.makeDefault")}
-                    </button>
+                    <span className="provider-sign-out-dim flex shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void setDefault(row.id)}
+                        disabled={busy}
+                        data-testid={tid(`ai-provider-make-default-${row.id}`)}
+                        className={`${ROW_BUTTON} border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50`}
+                      >
+                        {t("settings.providers.makeDefault")}
+                      </button>
+                    </span>
                   )}
 
-                  {/* The default cannot be switched off — the hint says what to do instead. */}
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={row.enabled}
-                    aria-label={t("settings.providers.enable", { name: row.label })}
-                    aria-busy={busy}
-                    aria-describedby={row.isDefault ? `ai-provider-locked-${row.id}` : undefined}
-                    disabled={busy || row.isDefault}
-                    title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
-                    onClick={() => void setEnabled(row, !row.enabled)}
-                    data-testid={tid(`ai-provider-switch-${row.id}`)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
-                      row.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-                    }`}
-                  >
-                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${row.enabled ? "translate-x-6" : "translate-x-1"}`} />
-                  </button>
+                  {/* The sign-out and the switch travel as one, the sign-out
+                      always just left of the switch: the same place on every
+                      row, the default's included, at every width. Its label is
+                      the bare verb — "Sign out of Anthropic Claude" wrapped
+                      onto two lines in a tall button here, and inline under
+                      the status it ran into "Connected" — and the provider it
+                      signs out of is in its name and tooltip instead. */}
+                  <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 max-w-full" data-testid={tid(`ai-provider-sign-out-slot-${row.id}`)}>
+                    {canSignOut && (
+                      <button
+                        type="button"
+                        onClick={() => onSignOutClick(row, index)}
+                        onBlur={armed ? disarmSignOut : undefined}
+                        // The one in hand is disabled by `aria-disabled` and the
+                        // guard in onSignOutClick, not by `disabled`: that would
+                        // drop the focus it has from the second tap onto the
+                        // page for the whole sign-out.
+                        disabled={!pending && (busy || settingDefault !== null || signOutLocked)}
+                        aria-disabled={pending || undefined}
+                        aria-busy={pending}
+                        // In hand the button's own words, "Signing out…", are
+                        // its name; before that the visible verb names nobody.
+                        aria-label={showPending ? undefined : signOutName}
+                        aria-describedby={signOutLocked ? `ai-provider-locked-${row.id}` : undefined}
+                        title={signOutLocked ? t("settings.providers.lockedHint") : showPending ? undefined : signOutName}
+                        data-testid={tid(`ai-provider-sign-out-${row.id}`)}
+                        // In hand it is a label, not a dead control: full
+                        // strength, while the rest of the row dims around it.
+                        className={`${ROW_BUTTON} gap-1.5 transition-colors ${
+                          showPending
+                            ? "border-white/15 text-[var(--text-primary)] cursor-progress"
+                            : `disabled:opacity-50 disabled:cursor-not-allowed ${armed ? "border-red-400/40 text-red-300 hover:bg-red-400/10" : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"}`
+                        }`}
+                      >
+                        {showPending ? (
+                          <>
+                            <span
+                              aria-hidden="true"
+                              className="material-symbols-rounded motion-safe:animate-spin"
+                              style={{ fontSize: 14 }}
+                              data-testid={tid(`ai-provider-sign-out-spinner-${row.id}`)}
+                            >
+                              progress_activity
+                            </span>
+                            {t("settings.providers.signingOut")}
+                          </>
+                        ) : armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOutShort")}
+                      </button>
+                    )}
+
+                    {/* The default cannot be switched off — the hint says what to do instead. */}
+                    <span className="provider-sign-out-dim flex shrink-0">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={row.enabled}
+                        aria-label={t("settings.providers.enable", { name: row.label })}
+                        aria-busy={busy}
+                        aria-describedby={row.isDefault ? `ai-provider-locked-${row.id}` : undefined}
+                        disabled={busy || row.isDefault}
+                        title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
+                        onClick={() => void setEnabled(row, !row.enabled)}
+                        data-testid={tid(`ai-provider-switch-${row.id}`)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+                          row.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+                        }`}
+                      >
+                        <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${row.enabled ? "translate-x-6" : "translate-x-1"}`} />
+                      </button>
+                    </span>
+                  </span>
                 </span>
               </li>
 
