@@ -315,6 +315,19 @@ describe("/setup-api/chat/model", () => {
     expect(body.local.label).toBe("Qwen 3.6 Local");
   });
 
+  it("reads a doubled llamacpp/ prefix as the model, not as the Llama family", async () => {
+    // A Jetson that saved Local AI before TASK-1076 can hold
+    // `llamacpp/llamacpp/<id>` in its store; its row said "Gemma 4 Local".
+    vi.mocked(getAll).mockResolvedValue({
+      ai_model_provider: "clawai",
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    const body = await (await GET()).json();
+    expect(body.local.label).toBe("Gemma 4 Local");
+  });
+
   describe("a provider the box can run no model from", () => {
     /** The three-profile box of the test above: ClawBox AI, OpenAI, Anthropic. */
     function threeProviderBox(primary: string) {

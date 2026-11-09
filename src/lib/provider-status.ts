@@ -42,7 +42,7 @@ import {
   type PluginRepairStage,
 } from "@/lib/plugin-repair";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
-import { friendlyModelName } from "@/lib/local-models";
+import { llamaCppModelName } from "@/lib/local-models";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -205,13 +205,14 @@ const LOCAL_PROVIDER_IDS = new Set(Object.keys(LOCAL_PROVIDER_LABELS));
 
 /**
  * The local engine row's label on OpenClaw. A llama.cpp row is named for the
- * model the box runs ("Qwen 3.6 (on-device)" on a DGX Spark), by the same
- * `friendlyModelName` the Local AI card uses, so the strip and the card name
- * one model. The table's label is the fallback for a box with no model stored.
+ * model the box runs ("Qwen 3.6 (on-device)" on a DGX Spark), by
+ * `llamaCppModelName` over the `friendlyModelName` the Local AI card uses, so
+ * the strip and the card name one model. The table's label is the fallback for
+ * a box with no model stored.
  */
 function openclawLocalRowLabel(provider: string, storedModel: unknown): string {
   if (provider === "llamacpp" && typeof storedModel === "string") {
-    const name = friendlyModelName(storedModel.slice(storedModel.indexOf("/") + 1));
+    const name = llamaCppModelName(storedModel);
     if (name) return `${name} (on-device)`;
   }
   return LOCAL_PROVIDER_LABELS[provider];
@@ -599,7 +600,11 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
   if (defaultProvider && !rows.some((r) => r.id === defaultProvider)) {
     rows.push({
       id: defaultProvider,
-      label: LOCAL_PROVIDER_LABELS[defaultProvider] ?? defaultProvider,
+      // The setup wizard's scope "primary" stores no local engine, so a box
+      // whose local model came from there reaches this row from its primary.
+      label: LOCAL_PROVIDER_IDS.has(defaultProvider)
+        ? openclawLocalRowLabel(defaultProvider, primary)
+        : defaultProvider,
     });
   }
 

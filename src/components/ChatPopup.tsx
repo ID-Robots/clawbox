@@ -505,7 +505,6 @@ function thinkingSnapDue(state: ChatModelState, current: ThinkingLevel): boolean
   return readPersistedThinkingLevel(provider, cfg) !== current
 }
 
-
 function getProviderPillText(option: ChatModelState['options'][number]): string {
   const full = getChatModelOptionText(option)
   if (!option.available) return full

@@ -426,6 +426,27 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(rowFor(jetson, "llamacpp")!.label).toBe("Gemma 4 (on-device)");
   });
 
+  it("names the local row after the primary when no local engine is stored", async () => {
+    // The setup wizard's scope "primary" writes no local_ai_* keys: the row
+    // comes from the primary alone, and said "Gemma 4" over a Qwen primary.
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "llamacpp/qwen3.6-35b-a3b-mtp" } } } });
+    getConfigValue.mockResolvedValue(null);
+    const body = await (await GET()).json();
+    expect(rowFor(body, "llamacpp")!.label).toBe("Qwen 3.6 (on-device)");
+  });
+
+  it("reads a doubled llamacpp/ prefix as the model, not as the Llama family", async () => {
+    // configure could save `llamacpp/llamacpp/<id>` before TASK-1076, and
+    // nothing rewrites the config store.
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } } });
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+    } as Record<string, string>)[key] ?? null);
+    const body = await (await GET()).json();
+    expect(rowFor(body, "llamacpp")!.label).toBe("Gemma 4 (on-device)");
+  });
+
   // TASK-663, the OpenClaw leg. This path reads `openclaw.json` off disk and
   // performs NO probe at all, so it has no window in which an answer is owed:
   // it must never emit `checking`, and it must never degrade over a cold box.

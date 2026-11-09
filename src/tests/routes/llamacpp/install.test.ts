@@ -194,6 +194,46 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("\"success\":true");
   });
 
+  it("installs the box's own model when the browser sends the built-in default alias", async () => {
+    // The panels cannot read LLAMACPP_MODEL (it is not in the client bundle),
+    // so "Enable" sends the built-in Gemma alias. On a workstation whose .env
+    // names Qwen, llama-server loads the Qwen GGUF whatever alias it is given:
+    // configuring the Gemma alias wrote Qwen into openclaw.json as Gemma, and
+    // every row read from it said "Gemma 4".
+    vi.stubEnv("LLAMACPP_MODEL", "qwen3.6-35b-a3b-mtp");
+    try {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ id: "qwen3.6-35b-a3b-mtp" }] }),
+      }));
+
+      await readStream(await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0", scope: "primary" })));
+
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      const configured = await (mockConfigureAiModel.mock.calls[0][0] as Request).clone().json();
+      expect(JSON.stringify(configured)).toContain("qwen3.6-35b-a3b-mtp");
+      expect(JSON.stringify(configured)).not.toContain("gemma4-e2b-it-q4_0");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps an alias the request names that is not the built-in default", async () => {
+    vi.stubEnv("LLAMACPP_MODEL", "qwen3.6-35b-a3b-mtp");
+    try {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ id: "my-own-model" }] }),
+      }));
+      await readStream(await installPost(jsonRequest({ model: "my-own-model", scope: "primary" })));
+      await vi.waitFor(() => expect(mockConfigureAiModel).toHaveBeenCalled());
+      const configured = await (mockConfigureAiModel.mock.calls[0][0] as Request).clone().json();
+      expect(JSON.stringify(configured)).toContain("my-own-model");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   describe("as a background task", () => {
     // The install belongs to the server, not to the request that started it.
     // It used to run inside the response stream, whose enqueue throws once the
