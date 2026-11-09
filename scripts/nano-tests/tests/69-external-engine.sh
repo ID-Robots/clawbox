@@ -132,11 +132,14 @@ if [ "${leak:-0}" = 0 ]; then ok "the key is not in the device store (data/confi
 perm=$(board 'stat -c %a "$REPO/data/.external-engine-key" 2>/dev/null' | tail -n1)
 if [ "$perm" = 600 ]; then ok "the key's own file is 0600"; else not_ok "data/.external-engine-key is ${perm:-missing}, not 0600"; fi
 
+# The key VALUE, looked for on the board in what the owner's GET answers.
+# shellcheck disable=SC2016  # expanded on the board
+seen=$(board 'k=$(cat "$1/key"); owner_api GET "/setup-api/local-ai/external?probe=1" | grep -c -F "$k" || true' "$DIR" | tail -n1)
 board_owner_api GET /setup-api/local-ai/external?probe=1
-if [ "$(api_json '.apiKeySet')" = true ] && [ "$(api_json '.status.modelListed')" = true ] && ! printf '%s' "$API_BODY" | grep -q '"apiKey"'; then
+if [ "${seen:-1}" = 0 ] && [ "$(api_json '.apiKeySet')" = true ] && [ "$(api_json '.status.modelListed')" = true ]; then
   ok "GET answers the engine and its live status, never the key"
 else
-  not_ok "GET after save: $(printf '%s' "$API_BODY" | head -c 300)"
+  not_ok "GET after save (key seen ${seen:-?} time(s)): $(printf '%s' "$API_BODY" | head -c 300)"
 fi
 
 # 4. What the UI reads.

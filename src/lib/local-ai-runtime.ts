@@ -7,6 +7,7 @@ import { isOllamaExecutable } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { getActiveHarnessSource } from "@/lib/harness";
+import { externalEngineSelected } from "@/lib/external-engine";
 import {
   getLlamaCppLaunchSpec,
   getLlamaCppProvisioningStatus,
@@ -603,6 +604,12 @@ export async function activateLocalAiProvider(provider: LocalAiProvider): Promis
 }
 
 export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<void> {
+  // An external AI engine holds the Local AI slot (TASK-2376): the on-device
+  // runtimes are not started by any caller — the proxy, the Ollama pull and
+  // delete routes, an activation. The memory embedder is not one of them.
+  if (provider !== "embed" && await externalEngineSelected()) {
+    throw new Error("An external AI engine is selected as Local AI, so the on-device model is not started. Remove the engine in Settings → Local AI first.");
+  }
   clearIdleTimer(provider);
 
   const state = runtimeStates[provider];

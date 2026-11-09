@@ -1,7 +1,7 @@
 import { getAll } from "@/lib/config-store";
 import { patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
-import { EXTERNAL_ENGINE_PROVIDER, externalEngineDisplayName, type ExternalEngineSettings } from "@/lib/external-engine-shared";
+import { EXTERNAL_ENGINE_PROVIDER, HERMES_MIN_CONTEXT_WINDOW, externalEngineDisplayName, type ExternalEngineSettings } from "@/lib/external-engine-shared";
 import { NO_KEY_PLACEHOLDER, externalEngineFromState, readExternalEngineKey } from "@/lib/external-engine";
 
 /**
@@ -40,6 +40,12 @@ export async function reconcileExternalEngineWithHermes(): Promise<void> {
   try {
     const record = externalEngineFromState(await getAll());
     if (!record) return;
+    // Hermes refuses a session under its window floor: a provider it cannot
+    // run is not registered; Settings tells the owner to save it again here.
+    if (record.contextWindow < HERMES_MIN_CONTEXT_WINDOW) {
+      console.warn(`[external-engine] not registered with Hermes: its ${record.contextWindow}-token window is under Hermes' ${HERMES_MIN_CONTEXT_WINDOW} floor`);
+      return;
+    }
     const declared = await resolveHermesConfigValue(`providers.${EXTERNAL_ENGINE_PROVIDER}.base_url`);
     if (declared.state !== "absent") return;
     const key = readExternalEngineKey();

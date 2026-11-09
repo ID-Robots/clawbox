@@ -236,7 +236,6 @@ describe("on OpenClaw", () => {
     expect((record.previous as { openclaw: unknown }).openclaw).toEqual({
       primary: "llamacpp/gemma4-e2b-it-q4_0",
       removedFallbacks: ["llamacpp/gemma4-e2b-it-q4_0"],
-      addedFallbacks: [],
     });
     expect(stopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
     expect(keyFile()).toBe(KEY);
@@ -311,6 +310,22 @@ describe("on OpenClaw", () => {
   });
 });
 
+describe("on a dual box", () => {
+  it("remove while Hermes runs puts OpenClaw's primary back in the file, not through chat/model", async () => {
+    await POST(req("POST", saveBody()));
+    vi.mocked(getActiveHarness).mockResolvedValue("hermes");
+    vi.mocked(chatModelPost).mockClear();
+    const res = await DELETE(req("DELETE"));
+    expect(res.status).toBe(200);
+    expect(chatModelPost).not.toHaveBeenCalled();
+    expect(vi.mocked(runOpenclawConfigSetBatch)).toHaveBeenCalledWith(
+      [["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]],
+      expect.anything(),
+    );
+    expect((openclaw.models as { providers: Record<string, unknown> }).providers.clawext).toBeUndefined();
+  });
+});
+
 describe("on Hermes", () => {
   beforeEach(() => {
     vi.mocked(getActiveHarness).mockResolvedValue("hermes");
@@ -347,6 +362,29 @@ describe("on Hermes", () => {
     });
     expect(stopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
     expect(logs.join("\n")).not.toContain(KEY);
+  });
+
+  it("a first save Hermes refuses puts the on-device model back and keeps no key", async () => {
+    vi.mocked(patchHermesConfig).mockRejectedValueOnce(new Error(`config set failed for ${KEY}`));
+    const res = await POST(req("POST", saveBody()));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("hermes_write_failed");
+    expect(JSON.stringify(body)).not.toContain(KEY);
+    expect(applyLocalAiToHermes).toHaveBeenCalledWith({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0", makeDefault: true });
+    expect(store.local_ai_provider).toBe("llamacpp");
+    expect(store.external_engine).toBeUndefined();
+    expect(keyFile()).toBeNull();
+    expect(logs.join("\n")).not.toContain(KEY);
+  });
+
+  it("a re-save Hermes refuses leaves the key the harness still holds", async () => {
+    await POST(req("POST", saveBody()));
+    vi.mocked(patchHermesConfig).mockRejectedValueOnce(new Error("disk full"));
+    const res = await POST(req("POST", saveBody({ apiKey: "sk-test-another-placeholder-key-987654" })));
+    expect(res.status).toBe(502);
+    expect(keyFile()).toBe(KEY);
+    expect(store.local_ai_provider).toBe("clawext");
   });
 
   it("remove takes the block out and registers the on-device model as the default again", async () => {

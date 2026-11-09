@@ -24,10 +24,10 @@ export interface PreviousLocalAiState {
   store: Record<(typeof LOCAL_AI_STORE_KEYS)[number], unknown>;
   /**
    * OpenClaw: the chat primary before the save, and the fallback entries the
-   * save took out (the on-device ones) and put in. Removal undoes exactly
-   * those, so a fallback the owner changed in between stays as they left it.
+   * save took out (the on-device ones). Removal puts exactly those back, so a
+   * fallback the owner changed in between stays as they left it.
    */
-  openclaw?: { primary: string | null; removedFallbacks: string[]; addedFallbacks: string[] };
+  openclaw?: { primary: string | null; removedFallbacks: string[] };
   /** Hermes: the selection, and whether the on-device model was registered there. */
   hermes?: { provider: string | null; model: string | null; localRegistered: boolean };
 }
@@ -108,6 +108,11 @@ export function externalEngineFromState(state: Record<string, unknown> | null | 
     savedAt: typeof r.savedAt === "string" ? r.savedAt : "",
     previous: { ...previous, store: previous.store ?? ({} as PreviousLocalAiState["store"]) },
   };
+}
+
+/** Is an engine selected in this store snapshot? The rule every start gate applies. */
+export function externalEngineSelectedIn(state: Record<string, unknown> | null | undefined): boolean {
+  return externalEngineFromState(state) !== null;
 }
 
 /** The selected engine, or null. A store that cannot be read is "none selected" — the appliance default. */

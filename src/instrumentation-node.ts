@@ -328,11 +328,12 @@ export async function startLlamaCppServer(alias?: string): Promise<LlamaCppStart
 
 async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStartStatus> {
   const stopGeneration = llamaCppStopGeneration
-  const [{ getAll }, { readConfig }, llamaCpp, { getActiveHarness }] = await Promise.all([
+  const [{ getAll }, { readConfig }, llamaCpp, { getActiveHarness }, { externalEngineSelectedIn }] = await Promise.all([
     import('./lib/config-store'),
     import('./lib/openclaw-config'),
     import('./lib/llamacpp-server'),
     import('./lib/harness'),
+    import('./lib/external-engine'),
   ])
 
   // The runtime sizes the window: Hermes refuses one under its floor
@@ -345,7 +346,7 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
   // An external AI engine is the Local AI (TASK-2376): llama.cpp is not started
   // for chat on any path while it is selected — the proxy refuses first, this
   // is the floor under every other caller.
-  if (state['external_engine'] && typeof state['external_engine'] === 'object') {
+  if (externalEngineSelectedIn(state)) {
     console.log('[instrumentation] llama.cpp start skipped (an external AI engine is selected)')
     return 'skipped-disabled'
   }

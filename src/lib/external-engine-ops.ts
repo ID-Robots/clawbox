@@ -72,6 +72,34 @@ function isOnDeviceRef(ref: unknown): ref is string {
 
 const HERMES_PROVIDER_KEYS = ["base_url", "api_key", "api_mode", "models", "models_discovered", "name", "context_length"];
 
+/**
+ * An error's text for a log line or a response, with the engine's key taken
+ * out whatever echoed it (a CLI repeating its argv, a library quoting a
+ * header) on top of `sanitizeErrorMessage`'s generic credential shapes.
+ */
+function scrub(err: unknown, key: string | null): string {
+  let text = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const stored = readExternalEngineKey();
+  for (const secret of [key, stored]) {
+    if (secret && secret !== NO_KEY_PLACEHOLDER && secret.length >= 4) text = text.split(secret).join("<redacted>");
+  }
+  return sanitizeErrorMessage(text) ?? "";
+}
+
+/** Register the on-device model with Hermes again, as the box had it before the engine. */
+async function reRegisterOnDevice(previous: PreviousLocalAiState, makeDefault: boolean): Promise<boolean> {
+  const provider = previous.store.local_ai_provider === "ollama" ? "ollama" : "llamacpp";
+  const stored = previous.store.local_ai_model;
+  const model = typeof stored === "string" ? stored.slice(stored.indexOf("/") + 1) : "";
+  try {
+    await applyLocalAiToHermes({ provider, model, makeDefault });
+    return true;
+  } catch (err) {
+    console.error("[external-engine] re-registering the on-device model with Hermes failed:", scrub(err, null));
+    return false;
+  }
+}
+
 function originOf(url: string): string {
   try {
     return new URL(url).origin;
@@ -183,11 +211,10 @@ async function applyToOpenclaw(
   return {
     primary: firstSave ? (config.agents?.defaults?.model?.primary ?? null) : (prior?.primary ?? null),
     removedFallbacks: [...new Set([...(prior?.removedFallbacks ?? []), ...removed.filter(isOnDeviceRef)])],
-    addedFallbacks: prior?.addedFallbacks ?? [],
   };
 }
 
-async function removeFromOpenclaw(record: ExternalEngineRecord): Promise<string | undefined> {
+async function removeFromOpenclaw(record: ExternalEngineRecord, harness: Harness): Promise<string | undefined> {
   const config = await readConfig();
   const primary = config.agents?.defaults?.model?.primary;
   const previous = record.previous.openclaw;
@@ -205,10 +232,21 @@ async function removeFromOpenclaw(record: ExternalEngineRecord): Promise<string 
       // No cloud row to offer: only the previous primary is tried.
     }
     let moved = false;
-    for (const candidate of candidates) {
-      if (await chatModelPost(candidate, true)) {
+    if (harness === "openclaw") {
+      for (const candidate of candidates) {
+        if (await chatModelPost(candidate, true)) {
+          moved = true;
+          break;
+        }
+      }
+    } else if (candidates.length > 0) {
+      // A dual box running Hermes: chat/model answers 409 WRONG_STORE there,
+      // and no OpenClaw session is live to sweep. The file is all there is.
+      try {
+        await runOpenclawConfigSetBatch([["agents.defaults.model.primary", candidates[0]]], HOME_ENV());
         moved = true;
-        break;
+      } catch (err) {
+        console.error("[external-engine] could not put OpenClaw's primary back:", scrub(err, null));
       }
     }
     if (!moved) {
@@ -223,7 +261,7 @@ async function removeFromOpenclaw(record: ExternalEngineRecord): Promise<string 
   const baseline = await readGatewayConfigBaseline();
   const listed = after.agents?.defaults?.model?.fallbacks;
   const fallbacks = Array.isArray(listed) ? listed.filter((f): f is string => typeof f === "string") : [];
-  const restored = fallbacks.filter((f) => !isExternalEngineRef(f) && !(previous?.addedFallbacks ?? []).includes(f));
+  const restored = fallbacks.filter((f) => !isExternalEngineRef(f));
   for (const f of previous?.removedFallbacks ?? []) if (!restored.includes(f)) restored.push(f);
   if (JSON.stringify(restored) !== JSON.stringify(fallbacks)) {
     await runOpenclawConfigSetBatch([["agents.defaults.model.fallbacks", JSON.stringify(restored), "--json"]], HOME_ENV());
@@ -233,7 +271,7 @@ async function removeFromOpenclaw(record: ExternalEngineRecord): Promise<string 
     try {
       await runOpenclawConfigUnset(`models.providers.${EXTERNAL_ENGINE_PROVIDER}`, HOME_ENV());
     } catch (err) {
-      console.error("[external-engine] could not remove the OpenClaw provider:", sanitizeErrorMessage(err instanceof Error ? err.message : "") ?? "");
+      console.error("[external-engine] could not remove the OpenClaw provider:", scrub(err, null));
       warning = "The engine was removed from Local AI, but its OpenClaw provider entry could not be deleted. It is unused; remove it again to finish.";
     }
   }
@@ -276,29 +314,33 @@ async function applyToHermes(
           throw new ExternalEngineRefusal(
             "hermes_local_removal_failed",
             err instanceof HermesLocalRemovalError || err instanceof Error
-              ? `The on-device model could not be taken out of Hermes first: ${sanitizeErrorMessage(err.message) ?? "unknown error"}`
+              ? `The on-device model could not be taken out of Hermes first: ${scrub(err, key) || "unknown error"}`
               : "The on-device model could not be taken out of Hermes first.",
             502,
           );
         }
       }
-    } else {
-      // A re-save replaces the whole block: a catalogue Hermes persisted for
-      // the old model (a mapping, `models_discovered`) must not outlive it.
-      await patchHermesConfig({ unset: HERMES_PROVIDER_KEYS.map((k) => `providers.${EXTERNAL_ENGINE_PROVIDER}.${k}`) });
     }
     try {
+      // ONE write, re-save included: every key of the block is a scalar that
+      // the set replaces, so the provider is never left half there. A
+      // catalogue Hermes persisted for an older model (`models_discovered`)
+      // goes in the same patch.
       await patchHermesConfig({
         set: {
           ...hermesProviderSet(settings, key),
           "model.provider": EXTERNAL_ENGINE_PROVIDER,
           "model.default": settings.modelId,
         },
+        ...(firstSave ? {} : { unset: [`providers.${EXTERNAL_ENGINE_PROVIDER}.models_discovered`] }),
       });
     } catch (err) {
+      // The on-device model was taken out above for an engine that did not
+      // land: put it back where it was, so Hermes is never left with neither.
+      if (firstSave && snapshot?.localRegistered) await reRegisterOnDevice(previous, snapshot.provider === "clawlocal");
       throw new ExternalEngineRefusal(
         "hermes_write_failed",
-        sanitizeErrorMessage(err instanceof Error ? err.message : "") || "The engine could not be written into Hermes' config.",
+        scrub(err, key) || "The engine could not be written into Hermes' config.",
         502,
       );
     } finally {
@@ -332,7 +374,7 @@ async function removeFromHermes(record: ExternalEngineRecord): Promise<string | 
     } catch (err) {
       throw new ExternalEngineRefusal(
         "hermes_write_failed",
-        sanitizeErrorMessage(err instanceof Error ? err.message : "") || "The engine could not be removed from Hermes' config.",
+        scrub(err, null) || "The engine could not be removed from Hermes' config.",
         502,
       );
     } finally {
@@ -340,16 +382,10 @@ async function removeFromHermes(record: ExternalEngineRecord): Promise<string | 
     }
     await forgetProviderVerified(EXTERNAL_ENGINE_PROVIDER).catch(() => {});
     if (!reRegisterLocal) return undefined;
-    const provider = record.previous.store.local_ai_provider === "ollama" ? "ollama" : "llamacpp";
-    const stored = record.previous.store.local_ai_model;
-    const model = typeof stored === "string" ? stored.slice(stored.indexOf("/") + 1) : "";
-    try {
-      await applyLocalAiToHermes({ provider, model, makeDefault: previous?.provider === "clawlocal" && selection === EXTERNAL_ENGINE_PROVIDER });
-      return undefined;
-    } catch (err) {
-      console.error("[external-engine] re-registering the on-device model with Hermes failed:", err instanceof Error ? err.message : err);
-      return "The engine was removed, but the on-device model could not be registered with Hermes again. Turn it on in Settings → Local AI.";
-    }
+    const back = await reRegisterOnDevice(record.previous, previous?.provider === "clawlocal" && selection === EXTERNAL_ENGINE_PROVIDER);
+    return back
+      ? undefined
+      : "The engine was removed, but the on-device model could not be registered with Hermes again. Turn it on in Settings → Local AI.";
   });
 }
 
@@ -394,6 +430,7 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
 
   const firstSave = existing === null;
   const previous: PreviousLocalAiState = firstSave ? { store: previousStoreOf(state) } : existing.previous;
+  const keyBefore = readExternalEngineKey();
   writeExternalEngineKey(key || NO_KEY_PLACEHOLDER);
 
   const record: ExternalEngineRecord = {
@@ -412,11 +449,13 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
       record.previous = { ...previous, openclaw: await applyToOpenclaw(settings, key, previous, firstSave || !previous.openclaw) };
     }
   } catch (err) {
-    if (firstSave) deleteExternalEngineKey();
+    // The key on file goes back to what the harness still holds.
+    if (firstSave || keyBefore === null) deleteExternalEngineKey();
+    else writeExternalEngineKey(keyBefore);
     if (err instanceof ExternalEngineRefusal) throw err;
     throw new ExternalEngineRefusal(
       "write_failed",
-      sanitizeErrorMessage(err instanceof Error ? err.message : "") || "The engine could not be written into the assistant's config.",
+      scrub(err, key) || "The engine could not be written into the assistant's config.",
       502,
     );
   }
@@ -453,7 +492,7 @@ export async function removeExternalEngine(): Promise<{ removed: boolean; warnin
   const warnings: string[] = [];
   try {
     if (!openclawIsAbsent() && (harness === "openclaw" || (await readConfig()).models?.providers?.[EXTERNAL_ENGINE_PROVIDER])) {
-      const w = await removeFromOpenclaw(record);
+      const w = await removeFromOpenclaw(record, harness);
       if (w) warnings.push(w);
     }
     const hermesDeclared = harness === "hermes"
@@ -468,7 +507,7 @@ export async function removeExternalEngine(): Promise<{ removed: boolean; warnin
     if (err instanceof ExternalEngineRefusal) throw err;
     throw new ExternalEngineRefusal(
       "write_failed",
-      sanitizeErrorMessage(err instanceof Error ? err.message : "") || "The engine could not be removed from the assistant's config.",
+      scrub(err, null) || "The engine could not be removed from the assistant's config.",
       502,
     );
   }
