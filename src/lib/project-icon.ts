@@ -34,10 +34,8 @@
  *     existed, or a project whose favicon the owner deleted, must not have to
  *     spend a second picture to get one.
  */
-import { randomUUID } from "crypto";
 import fsp from "fs/promises";
 import path from "@/lib/runtime-path";
-import { runChild } from "@/lib/child-run";
 import {
   ensureIconFile,
   isPng,
@@ -151,52 +149,9 @@ async function writeFavicons(directory: string, source: Buffer): Promise<boolean
   // a 1024 px favicon is still a favicon, and better than none. Not inside an
   // ICO, though: one whose PNG is not the 64 px RGBA its header promises is
   // the file a Next build stops on, and no favicon.ico is better than that.
-  if (!isRgbaPngOf(small, FAVICON_PX)) return placeNew(path.join(directory, FAVICON_PNG), small);
-  // The pair the box wrote before its favicons were RGBA is put right; any
-  // other favicon already there stays as it is.
-  if (await boxMadeRgbFavicons(directory)) {
-    await replaceFile(path.join(directory, FAVICON_PNG), small);
-    await replaceFile(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX));
-    return true;
-  }
   const png = await placeNew(path.join(directory, FAVICON_PNG), small);
-  const ico = await placeNew(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX));
+  const ico = isRgbaPngOf(small, FAVICON_PX) ? await placeNew(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX)) : false;
   return png || ico;
-}
-
-/**
- * Are the favicons at the project's root the RGB pair the box itself wrote
- * before TASK-2323? Only what the box can prove is its own: favicon.ico is,
- * byte for byte, the box's ICO of the favicon.png beside it; that PNG is not
- * RGBA; and the project does not track either file — a tracked favicon is the
- * project's own (BOX_FAVICONS), and so is anything git could not answer for.
- */
-async function boxMadeRgbFavicons(directory: string): Promise<boolean> {
-  const [png, ico] = await Promise.all([
-    fsp.readFile(path.join(directory, FAVICON_PNG)).catch(() => null),
-    fsp.readFile(path.join(directory, FAVICON_ICO)).catch(() => null),
-  ]);
-  if (!png || !ico || !isPng(png) || isRgbaPngOf(png, FAVICON_PX)) return false;
-  if (!ico.equals(icoFromPng(png, FAVICON_PX))) return false;
-  const listed = await runChild("git", ["-C", directory, "ls-files", "--", FAVICON_PNG, FAVICON_ICO], {
-    timeoutMs: 5_000,
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/", LANG: "C" },
-  });
-  if (listed.code === 0) return listed.stdout.trim() === "";
-  // Not a repository at all: nothing in it is tracked.
-  return /not a git repository/i.test(listed.stderr);
-}
-
-/** Put the bytes at `target` in one rename, over what is there. */
-async function replaceFile(target: string, bytes: Buffer): Promise<void> {
-  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
-  try {
-    await fsp.writeFile(tmp, bytes, { mode: FAVICON_MODE });
-    await fsp.chmod(tmp, FAVICON_MODE).catch(() => undefined);
-    await fsp.rename(tmp, target);
-  } finally {
-    await fsp.rm(tmp, { force: true }).catch(() => undefined);
-  }
 }
 
 /** Is this a PNG of `size` × `size`, 8-bit RGBA? Read off its IHDR: width, height, bit depth, colour type 6. Exported for its test. */
