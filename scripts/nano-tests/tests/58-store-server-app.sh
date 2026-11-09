@@ -35,9 +35,11 @@
 #      no scope — to say whose failure it is: one that stops there too is the
 #      Store package's, a SKIP naming its error, and the checks that need the
 #      app running are skipped; one that serves there (the box's environment
-#      is what broke it) or cannot run at all (exit 126/127) is not ok. A
-#      toolchain the box ships that breaks every build in and out of the box
-#      alike reads as the package's: the skip's error line is there to tell.
+#      is what broke it) or cannot run at all (exit 126/127) is not ok, and so
+#      is a start that never ran because the box could not install the app's
+#      dependencies. A toolchain the box ships that breaks every build in and
+#      out of the box alike reads as the package's: the skip's error line is
+#      there to tell.
 #
 # On a Hermes box the Store is not there (it is OpenClaw-only, and its routes
 # answer 404 not_openclaw): the Store flow is skipped and says so; the window
@@ -195,20 +197,23 @@ window_says() {
 }
 
 # own_start — the start command of the app itself, run in its folder OUTSIDE the box:
-# env -i (HOME, a plain PATH with bun and npm on it, LANG), no scope, no box
-# variable. "served" (and stopped again), "stopped <exit code>", "silent" when
-# it neither served nor stopped within 300 s, or "unreadable" when
+# env -i (HOME, a plain PATH with bun and npm on it, LANG, and the PORT the box
+# hands a start too), no scope, no other box variable. "served" (and stopped
+# again), "stopped <exit code>", "silent" when it neither served nor stopped
+# within 300 s or what is left of the deadline, or "unreadable" when
 # clawbox.json names no start and port. What it printed goes to $OWN_LOG,
 # which the caller makes: this runs in a command substitution.
 own_start() {
-  local start port pid rc end
+  local start port pid rc end budget
   start=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"start\") or \"\")" "$FOLDER/clawbox.json" 2>/dev/null)
   port=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"port\") or \"\")" "$FOLDER/clawbox.json" 2>/dev/null)
   if [ -z "$start" ] || [ -z "$port" ]; then echo unreadable; return; fi
   # Not a job-control shell, so setsid needs no fork: $! leads its own group.
-  ( cd "$FOLDER" && exec env -i HOME="$HOME" PATH="$HOME/.bun/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 setsid sh -c "$start" ) > "$OWN_LOG" 2>&1 < /dev/null &
+  ( cd "$FOLDER" && exec env -i HOME="$HOME" PATH="$HOME/.bun/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 PORT="$port" setsid sh -c "$start" ) > "$OWN_LOG" 2>&1 < /dev/null &
   pid=$!
-  end=$(( $(date +%s) + 300 ))
+  budget=$(left 780)
+  [ "$budget" -gt 300 ] && budget=300
+  end=$(( $(date +%s) + budget ))
   while :; do
     if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$port/"; then
       kill -- "-$pid" 2>/dev/null; sleep 3; kill -9 -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null
@@ -285,7 +290,18 @@ for round in install reinstall; do
     RUNNING=no
     DETAIL=$(body_of "$r" | py "j.get(\"detail\") or \"\"")
     say "$round: the install put $APP $VERSION in place, and its server did not start: $DETAIL"
-    if [ "$round" = install ]; then
+    DEPS_FAILED=""
+    case "$DETAIL" in
+      # The box could not install its dependencies, so its start never ran:
+      # nothing the app itself did is in question, and a run outside the box
+      # without them would only blame the package for it.
+      *"bun install failed:"* | *"npm install failed:"* | *"npm ci failed:"* | *"its server was not started:"*)
+        DEPS_FAILED=yes
+        say "not ok - $round: the box could not install the dependencies of $APP, so its start never ran: $DETAIL" ;;
+    esac
+    if [ -n "$DEPS_FAILED" ]; then
+      :
+    elif [ "$round" = install ]; then
       OWN_LOG=$(mktemp)
       OWN=$(own_start)
       # Where its own start stopped, when its output names a file of the

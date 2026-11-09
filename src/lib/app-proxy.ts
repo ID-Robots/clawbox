@@ -518,14 +518,14 @@ export async function registerServerApp(input: { id: string; directory: string; 
       }),
       "utf-8",
     );
+    // Registered, and its server answers, however it came up: a start that
+    // failed before has nothing left to say in its window.
+    await clearAppStartFailure(id);
     await registerWebappInPreferences(id, manifest.name, {
       webappUrl: appProxyPath(id),
       description: manifest.description ?? undefined,
     });
     await pushPendingAction({ type: "register_webapp", appId: id, name: manifest.name, color: "#f97316", url: appProxyPath(id) }).catch(() => undefined);
-    // Its server answers now, however it came up: a start that failed before
-    // has nothing left to say in its window.
-    await clearAppStartFailure(id);
     return { ok: true };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

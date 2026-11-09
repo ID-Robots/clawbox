@@ -125,6 +125,23 @@ describe("a start that does not come up", () => {
     }
   });
 
+  it("is forgotten when there is nothing to start, and when the boot pass finds the app up", async () => {
+    const record = () => failures.recordAppStartFailure({ id: "hello-app", name: "Hello App", command: "node server.js", port: 4321, directory: project, stage: "start", exitCode: 1, detail: "an older start stopped" });
+    await record();
+    const noStart = { name: "Hello App", description: null, kind: "server" as const, port: 4321, start: null, stripBasePath: false };
+    expect(await start.startServerApp({ id: "hello-app", directory: project, manifest: noStart, searchPath, noScope: true })).toMatchObject({ ok: false });
+    expect(await failures.readAppStartFailure("hello-app")).toBeNull();
+
+    // Up and registered (which records `start` for the boot pass); then a
+    // record left from before: the boot pass finds it served and forgets it.
+    const port = await freePort();
+    expect(await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath, noScope: true })).toEqual({ ok: true });
+    await record();
+    const started = await start.restartServerAppsAtBoot({ webappsDir: path.join(root, "data", "webapps"), start: async () => ({ ok: true }) });
+    expect(started).toEqual([]);
+    expect(await failures.readAppStartFailure("hello-app")).toBeNull();
+  });
+
   it("says nothing once the app's folder has gone, and never names a file outside its own folder", async () => {
     await failures.recordAppStartFailure({ id: "hello-app", name: "Hello App", command: "npm start", port: 4321, directory: project, stage: "start", exitCode: 1, detail: "it stopped" });
     expect(await failures.readAppStartFailure("hello-app")).not.toBeNull();
@@ -173,7 +190,8 @@ describe("the page the app's window shows instead", () => {
     expect(html).toContain("that install failed, so the command was not run");
     expect(html).not.toContain("The end of what it printed");
     expect(html).toContain("Open the project in the Coding Agent");
-    expect(failures.appStartFailureText(failure())).toBe(`Hello App is not running: its server did not start. ${failure().detail}`);
+    // The sentence for requests without a session names nothing the start printed.
+    expect(failures.appStartFailureText(failure())).toBe("Hello App is not running: its server did not start. Its window on the desktop says why.");
   });
 
   it("keeps the last lines of a long output, without colours or control characters", () => {

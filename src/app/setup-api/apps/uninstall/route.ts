@@ -286,8 +286,6 @@ export async function POST(req: Request) {
     // Its folder is gone: a unit of its own left enabled would start a server
     // from nowhere at the next boot.
     if (projectRemoved) await disableUserUnits(serverUnits);
-    // A failed start of the app is not news once the app is gone (src/lib/app-start-failure.ts).
-    await clearAppStartFailure(appId);
 
     // Remove the deployed webapp, if this app is one. `webapp_create`,
     // `webapp_update` and `code_project_build` all deploy to
@@ -412,6 +410,11 @@ export async function POST(req: Request) {
     // watched skill root, so the agent drops the skill on its next turn. The
     // skill-info cache rescans behind this reply.
     refreshSkillsCache();
+    // A failed start of the app is not news once the app is gone
+    // (src/lib/app-start-failure.ts). Here, once nothing above can refuse:
+    // an uninstall stopped part-way leaves the app, and its window keeps
+    // saying why it is not running.
+    await clearAppStartFailure(appId);
     // The field is present only when it is false, so an older MCP or desktop
     // reading `undefined` degrades to exactly today's answer.
     return NextResponse.json({

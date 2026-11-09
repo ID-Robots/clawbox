@@ -8,6 +8,7 @@ import {
   appUpstreamOrigin,
   exposeAllHeaders,
   isAppApiPath,
+  isDocumentRequest,
   isNextRouterPreflight,
   isNextRouterRequest,
   mergeExposedHeaders,
@@ -54,20 +55,26 @@ function plain(text: string, status: number): NextResponse {
   return new NextResponse(text, { status, headers: { "content-type": "text/plain; charset=utf-8", "content-security-policy": APP_PROXY_CSP } });
 }
 
-/** A window loading the app's page, as opposed to one of its fetches. */
-function wantsPage(request: NextRequest): boolean {
+/**
+ * The owner's window loading the app's page — a document the middleware let
+ * through only with the owner's session — as opposed to one of the app's own
+ * fetches, which reach this route with no session at all (src/middleware.ts,
+ * step 2b): those, and anything from the sandbox's opaque origin, never get
+ * the page, whose lines are the app's own output.
+ */
+function ownerWindow(request: NextRequest): boolean {
   const method = request.method.toUpperCase();
-  if ((method !== "GET" && method !== "HEAD") || isNextRouterRequest(request.headers)) return false;
-  const dest = request.headers.get("sec-fetch-dest");
-  if (dest) return dest === "document" || dest === "iframe";
-  return (request.headers.get("accept") ?? "").includes("text/html");
+  if (method !== "GET" && method !== "HEAD") return false;
+  if (isNextRouterRequest(request.headers) || request.headers.get("origin") === "null") return false;
+  return isDocumentRequest(request.headers);
 }
 
 /**
  * An app the proxy cannot reach. When its last start failed (it was never
- * registered, or it is registered and nothing listens), the answer says so —
- * what failed and the end of what it printed (src/lib/app-start-failure.ts) —
- * as a 503: a page for the app's window, a sentence for anything else. That
+ * registered, or it is registered and nothing listens), the answer says so as
+ * a 503: the owner's window gets a page with what failed and the end of what
+ * it printed (src/lib/app-start-failure.ts), anything else one sentence that
+ * names nothing of it. That
  * used to be the 404 "No app is served under this name" for every window,
  * reopen and App Router fetch of a Store app whose own build failed
  * (TASK-2323). Otherwise the listener's own refusal, as before.
@@ -76,7 +83,7 @@ async function unreachable(request: NextRequest, id: string, resolved: Exclude<A
   if (resolved.reason === "unregistered" || resolved.reason === "not_listening") {
     const failure = await readAppStartFailure(id);
     if (failure) {
-      if (!wantsPage(request)) return plain(appStartFailureText(failure), 503);
+      if (!ownerWindow(request)) return plain(appStartFailureText(failure), 503);
       const html = await appStartFailureHtml(failure);
       return new NextResponse(request.method.toUpperCase() === "HEAD" ? null : html, {
         status: 503,

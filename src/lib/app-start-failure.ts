@@ -21,6 +21,7 @@
  * `<id>.start-failed.json`. Only an id `APP_ID_RE` accepts is ever written or
  * read, so the name cannot leave that folder.
  */
+import { randomUUID } from "crypto";
 import fs from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { APP_ID_RE } from "@/lib/code-projects";
@@ -91,7 +92,9 @@ export async function recordAppStartFailure(failure: Omit<AppStartFailure, "at" 
     output: failureOutputLines(failure.output ?? ""),
   };
   const file = appStartFailurePath(failure.id);
-  const tmp = `${file}.${process.pid}.tmp`;
+  // Two writers of one app's record (a Store install and the start it
+  // shares a dependency install with) must not share a temp name.
+  const tmp = `${file}.${randomUUID()}.tmp`;
   try {
     await fs.promises.mkdir(path.dirname(file), { recursive: true });
     await fs.promises.writeFile(tmp, JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
@@ -143,9 +146,13 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] as string);
 }
 
-/** The one-line answer for a request that is not a page: an App Router fetch, an API call, a preflight. */
+/**
+ * The one-line answer for a request that is not the owner's window: an App
+ * Router fetch, an API call, a preflight. Those reach the proxy with no
+ * session, so it names nothing the start printed: the window says that.
+ */
 export function appStartFailureText(failure: AppStartFailure): string {
-  return `${failure.name} is not running: its server did not start. ${failure.detail}`;
+  return `${failure.name} is not running: its server did not start. Its window on the desktop says why.`;
 }
 
 /**

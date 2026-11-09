@@ -397,11 +397,18 @@ describe("the app proxy", () => {
     expect(html).toContain("The PNG is not in RGBA format!");
     expect(html).toContain("<code>bun run serve</code>");
 
-    // The App Router's own fetch and its preflight: the sentence, not a page.
+    // The App Router's own fetch and its preflight, which reach the proxy with
+    // no session: one sentence that names nothing the start printed.
     const rsc = await routes.GET(req("/apps/books/?_rsc=1", { headers: { rsc: "1", accept: "*/*" } }), ctx("books"));
     expect(rsc.status).toBe(503);
     expect(rsc.headers.get("content-type")).toContain("text/plain");
-    expect(await rsc.text()).toBe(`Books is not running: its server did not start. ${detail}`);
+    expect(await rsc.text()).toBe("Books is not running: its server did not start. Its window on the desktop says why.");
+    // A "frame" asking from the sandbox's opaque origin passes the middleware
+    // without a session too: never the page.
+    const opaque = await routes.GET(req("/apps/books/", { headers: { origin: "null", "sec-fetch-dest": "iframe", accept: "text/html" } }), ctx("books"));
+    expect(opaque.status).toBe(503);
+    expect(opaque.headers.get("content-type")).toContain("text/plain");
+    expect(await opaque.text()).not.toContain("favicon");
     const preflight = await routes.OPTIONS(req("/apps/books/", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "GET", "access-control-request-headers": "rsc,next-router-state-tree,next-url" } }), ctx("books"));
     expect(preflight.status).toBe(503);
 

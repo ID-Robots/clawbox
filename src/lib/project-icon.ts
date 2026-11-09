@@ -146,10 +146,18 @@ async function writeFavicons(directory: string, source: Buffer): Promise<boolean
   // derives from it has the alpha channel too.
   const small = await shrinkIcon(source, FAVICON_PX, { alpha: true });
   // If sharp could not load its native binding it hands back the original;
-  // a 1024 px favicon is still a favicon, and better than none.
+  // a 1024 px favicon is still a favicon, and better than none. Not inside an
+  // ICO, though: one whose PNG is not the 64 px RGBA its header promises is
+  // the file a Next build stops on, and no favicon.ico is better than that.
   const png = await placeNew(path.join(directory, FAVICON_PNG), small);
-  const ico = await placeNew(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX));
+  const ico = isRgbaPngOf(small, FAVICON_PX) ? await placeNew(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX)) : false;
   return png || ico;
+}
+
+/** Is this a PNG of `size` × `size`, 8-bit RGBA? Read off its IHDR: width, height, bit depth, colour type 6. Exported for its test. */
+export function isRgbaPngOf(png: Buffer, size: number): boolean {
+  if (!isPng(png) || png.length < 26 || png.toString("latin1", 12, 16) !== "IHDR") return false;
+  return png.readUInt32BE(16) === size && png.readUInt32BE(20) === size && png.readUInt8(24) === 8 && png.readUInt8(25) === 6;
 }
 
 /**

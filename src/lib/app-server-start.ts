@@ -639,7 +639,15 @@ export function startServerApp(input: StartServerAppInput): Promise<StartOutcome
   const running = inFlight.get(input.id);
   if (running) return running;
   const attempt = startOnce(input)
-    .catch((err): StartOutcome => ({ ok: false, detail: `Starting the app failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) }))
+    .catch(async (err): Promise<StartOutcome> => {
+      const detail = `Starting the app failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300);
+      // Written down like any start that did not come up, so the window
+      // does not show an older attempt's reason instead.
+      if (input.manifest.start && input.manifest.port) {
+        await recordAppStartFailure({ id: input.id, name: input.manifest.name || input.id, command: input.manifest.start, port: input.manifest.port, directory: input.directory, stage: "start", exitCode: null, detail });
+      }
+      return { ok: false, detail };
+    })
     .finally(() => { inFlight.delete(input.id); });
   inFlight.set(input.id, attempt);
   return attempt;
@@ -649,7 +657,11 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
   const { id, directory, manifest, searchPath } = input;
   const port = manifest.port;
   const command = manifest.start;
-  if (!APP_ID_RE.test(id) || !isProxyablePort(port) || !command) return { ok: false, detail: "The manifest names no start command." };
+  if (!APP_ID_RE.test(id) || !isProxyablePort(port) || !command) {
+    // Nothing the box could start: an earlier start's failure is not this one's.
+    await clearAppStartFailure(id);
+    return { ok: false, detail: "The manifest names no start command." };
+  }
   const stat = await fs.promises.stat(directory).catch(() => null);
   if (!stat?.isDirectory()) return { ok: false, detail: "The project folder is gone." };
   // From here on a start that does not come up is written down, so the app's
@@ -677,7 +689,8 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
     { bin: START_SHELL, argv: ["-c", command] },
   ];
   const waitMs = input.waitMs ?? APP_START_WAIT_MS;
-  let exited: number | null = null;
+  // Widened by hand: TypeScript does not see the assignment in the `exit` callback.
+  let exited = null as number | null;
   for (const plan of plans) {
     const log = await fs.promises.open(logFile, "w");
     let child: ChildProcess;
@@ -1096,7 +1109,11 @@ export async function restartServerAppsAtBoot(options: BootRestartOptions = {}):
     // Already up: a run, the owner's terminal, or a start that outlived a
     // web-server restart. Starting a second copy would fail on the port.
     const verdict = await listenerOwnedBy(port, directory);
-    if (verdict === "owned") continue;
+    if (verdict === "owned") {
+      // Up after all: whatever start failed before has nothing to say now.
+      await clearAppStartFailure(id);
+      continue;
+    }
     // Taken by something that is not the app as it is now: its own leftover
     // (a folder removed and made again under it) is stopped first, exactly as
     // an install again does; anything else keeps the port, and a start that
