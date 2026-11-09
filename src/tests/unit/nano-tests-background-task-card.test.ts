@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { dispatchOpenSettingsSection, OPEN_APP_EVENT, OPEN_SETTINGS_SECTION_EVENT } from "@/lib/ui-events";
+
+// The put-back cases start a real bash: see src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // TASK-2379. Nano tests 66 and 99 (scripts/nano-tests/board/background-task-
 // card.*) open Settings -> Local AI in a browser of their own and follow the
@@ -90,7 +95,7 @@ describe("nano tests 66/99: opening Settings -> Local AI (TASK-2379)", () => {
 
   it("puts the owner's saved desktop back after the browser has re-saved it, also when the run is cut short", () => {
     const read = BOARD_SCRIPT.indexOf("DESKTOP_BEFORE=$(call GET /setup-api/desktop/state)");
-    const trap = BOARD_SCRIPT.indexOf("trap 'put_desktop_back; hand_memory_back; switch_back' EXIT");
+    const trap = BOARD_SCRIPT.indexOf(`trap 'put_desktop_back "at exit"; hand_memory_back; switch_back' EXIT`);
     const driverRun = BOARD_SCRIPT.indexOf('node "$DRIVER"');
     const inline = BOARD_SCRIPT.indexOf("\nput_desktop_back\n", driverRun);
     expect(read).toBeGreaterThan(0);
@@ -102,7 +107,88 @@ describe("nano tests 66/99: opening Settings -> Local AI (TASK-2379)", () => {
     expect(BOARD_SCRIPT.slice(driverRun)).not.toMatch(/^\s*trap /m);
     // And at the end of a run that was not cut short, so its line comes in order.
     expect(inline).toBeGreaterThan(0);
-    // The desktop as it was read, once: the function disarms itself.
-    expect(BOARD_SCRIPT).toMatch(/put_desktop_back\(\) \{\n\s+\[ -n "\$DESKTOP_SAVED" \] \|\| return 0\n\s+local r saved=\$DESKTOP_SAVED\n\s+DESKTOP_SAVED=""\n\s+r=\$\(call PUT \/setup-api\/desktop\/state "\$saved"\)/);
+  });
+});
+
+// The put-back itself, run in bash against a stand-in for the box: the
+// function as the board script defines it, with `call` answering the PUT from
+// a script of status codes and `sleep` made instant.
+const canRunBash = process.platform === "linux" && spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
+
+function putBackFunction(): string {
+  const match = /\nput_desktop_back\(\) \{\n[\s\S]*?\n\}\n/.exec(BOARD_SCRIPT);
+  if (!match) throw new Error("the board script no longer defines put_desktop_back");
+  return match[0];
+}
+
+/** Runs the end-of-run put-back, then the EXIT trap's, with the box answering `answers` in turn. */
+function runPutBack(answers: number[]): { lines: string[]; puts: string[]; armed: string[] } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nano-put-back-"));
+  try {
+    const script = [
+      "set -uo pipefail",
+      `ANSWERS=(${answers.join(" ")})`,
+      `COUNT=${JSON.stringify(path.join(dir, "count"))}; echo 0 > "$COUNT"`,
+      `PUTS=${JSON.stringify(path.join(dir, "puts"))}; : > "$PUTS"`,
+      `say() { printf 'RESULT %s\\n' "$*"; }`,
+      `status_of() { printf '%s\\n' "$1" | head -n1; }`,
+      `body_of() { printf '%s\\n' "$1" | tail -n +2; }`,
+      "sleep() { :; }",
+      // Runs in the $(...) of its caller, so the count lives in a file.
+      `call() { local n; n=$(cat "$COUNT"); echo $((n + 1)) > "$COUNT"; printf '%s %s %s\\n' "$1" "$2" "$3" >> "$PUTS"; printf '%s\\n{"code":"stub"}\\n' "\${ANSWERS[$n]:-500}"; }`,
+      `DESKTOP_SAVED='{"state":{"v":1,"savedAt":1,"windows":[],"focusedId":null}}'`,
+      putBackFunction(),
+      "put_desktop_back",
+      `echo "ARMED \${DESKTOP_SAVED:+yes}"`,
+      `put_desktop_back "at exit"`,
+      `echo "ARMED \${DESKTOP_SAVED:+yes}"`,
+    ].join("\n");
+    const run = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    if (run.status !== 0) throw new Error(`bash exited ${run.status}: ${run.stderr}`);
+    const out = run.stdout.split("\n").filter(Boolean);
+    return {
+      lines: out.filter((l) => l.startsWith("RESULT ")),
+      puts: fs.readFileSync(path.join(dir, "puts"), "utf8").split("\n").filter(Boolean),
+      armed: out.filter((l) => l.startsWith("ARMED")).map((l) => l.slice("ARMED".length).trim()),
+    };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe.skipIf(!canRunBash)("nano tests 66/99: putting the owner's desktop back (TASK-2379)", () => {
+  it("puts it back once and disarms when the box takes it", () => {
+    const run = runPutBack([200]);
+    expect(run.puts).toEqual([`PUT /setup-api/desktop/state {"state":{"v":1,"savedAt":1,"windows":[],"focusedId":null}}`]);
+    expect(run.lines).toEqual(["RESULT ok - the owner's saved desktop is put back as it was found"]);
+    // The EXIT trap's call finds nothing left to do.
+    expect(run.armed).toEqual(["", ""]);
+  });
+
+  it("tries again, at most three times, before it says anything", () => {
+    const run = runPutBack([503, 500, 200]);
+    expect(run.puts).toHaveLength(3);
+    expect(run.lines).toEqual(["RESULT ok - the owner's saved desktop is put back as it was found"]);
+    expect(run.armed).toEqual(["", ""]);
+  });
+
+  it("stays armed after three refusals, so the EXIT trap tries once more", () => {
+    const run = runPutBack([500, 500, 500, 500, 200]);
+    expect(run.puts).toHaveLength(5);
+    expect(run.lines).toEqual([
+      `RESULT not ok - putting the owner's saved desktop back answered 500 three times: {"code":"stub"}`,
+      "RESULT ok - the owner's saved desktop is put back as it was found (at exit)",
+    ]);
+    expect(run.armed).toEqual(["yes", ""]);
+  });
+
+  it("says so at exit too when the box never takes it", () => {
+    const run = runPutBack([]);
+    expect(run.puts).toHaveLength(6);
+    expect(run.lines).toEqual([
+      `RESULT not ok - putting the owner's saved desktop back answered 500 three times: {"code":"stub"}`,
+      `RESULT not ok - putting the owner's saved desktop back (at exit) answered 500 three times: {"code":"stub"}`,
+    ]);
+    expect(run.armed).toEqual(["yes", "yes"]);
   });
 });

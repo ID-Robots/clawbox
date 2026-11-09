@@ -220,20 +220,25 @@ if [ "$(status_of "$DESKTOP_BEFORE")" = 200 ]; then
 else
   printf 'NOTE the owner'"'"'s saved desktop could not be read (%s), so the windows the browser saves are not put back\n' "$(status_of "$DESKTOP_BEFORE")"
 fi
-# Once: from the end of the run, or from the EXIT trap when the run is cut short.
+# put_desktop_back [WHEN]: from the end of the run, and from the EXIT trap. Up
+# to three tries, five seconds apart; it disarms only once the box has taken
+# the desktop, so a put-back that failed at the end is tried again at exit.
 put_desktop_back() {
   [ -n "$DESKTOP_SAVED" ] || return 0
-  local r saved=$DESKTOP_SAVED
-  DESKTOP_SAVED=""
-  r=$(call PUT /setup-api/desktop/state "$saved")
-  if [ "$(status_of "$r")" = 200 ]; then
-    say "ok - the owner's saved desktop is put back as it was found"
-  else
-    say "not ok - putting the owner's saved desktop back answered $(status_of "$r"): $(body_of "$r" | head -c 200)"
-  fi
+  local r try
+  for try in 1 2 3; do
+    r=$(call PUT /setup-api/desktop/state "$DESKTOP_SAVED")
+    if [ "$(status_of "$r")" = 200 ]; then
+      DESKTOP_SAVED=""
+      say "ok - the owner's saved desktop is put back as it was found${1:+ ($1)}"
+      return 0
+    fi
+    [ "$try" = 3 ] || sleep 5
+  done
+  say "not ok - putting the owner's saved desktop back${1:+ ($1)} answered $(status_of "$r") three times: $(body_of "$r" | head -c 200)"
 }
 # Each of the three does nothing unless armed, so one trap serves every path.
-trap 'put_desktop_back; hand_memory_back; switch_back' EXIT
+trap 'put_desktop_back "at exit"; hand_memory_back; switch_back' EXIT
 
 PROFILE=$(mktemp -d /tmp/nano-bg-task-XXXXXX)
 OWNER_COOKIE=$OWNER CHROME=$CHROME PROFILE_DIR=$PROFILE FORCE=$PRESENT DEADLINE_S=${DEADLINE_S:-480} \
