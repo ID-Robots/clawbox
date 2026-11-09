@@ -13,6 +13,8 @@ import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/compon
 import { BackgroundTaskInline, queuedLine } from "@/components/BackgroundTaskProgress";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
+import ExternalEngineCard from "@/components/local-ai/ExternalEngineCard";
+import { EXTERNAL_ENGINE_PROVIDER } from "@/lib/external-engine-shared";
 
 /**
  * Settings → Local AI: a plain inventory of everything that runs on the box
@@ -231,6 +233,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   }, [t]);
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
   const [roles, setRoles] = useState<Roles>({});
+  // An external AI engine holds the Local AI slot (TASK-2376): the on-device
+  // model keeps Install / Uninstall, but nothing here may wire it to the chat.
+  const [externalSelected, setExternalSelected] = useState(false);
   /**
    * Whether the ClawBox cloud is behind the transcription row's OTHER engine.
    *
@@ -307,8 +312,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       read("/setup-api/stt"),
     ]);
     const rows = Array.isArray(providers?.providers) ? providers.providers as { section: string; state: string; isDefault: boolean }[] : [];
-    // The provider list already says which row is the on-device one.
-    const local = rows.find((r) => r.section === "localAi");
+    // The provider list already says which row is the on-device one — and
+    // whether the slot is the owner's external engine instead, whose row is
+    // not this panel's llama.cpp.
+    const local = rows.find((r) => r.section === "localAi" && (r as { id?: string }).id !== EXTERNAL_ENGINE_PROVIDER);
+    setExternalSelected(rows.some((r) => (r as { id?: string }).id === EXTERNAL_ENGINE_PROVIDER));
     const llm: Role = !local ? null : local.isDefault ? "primary" : local.state === "connected" ? "fallback" : null;
     const localVoice = Array.isArray(tts?.engines) && (tts.engines as { id: string; configured: boolean }[]).some((e) => e.id === "local" && e.configured);
     const ttsRole: Role = !localVoice ? null : tts?.choice === "local" ? "primary" : "fallback";
@@ -631,6 +639,14 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     switch (entry.kind) {
       case "llm": {
         if (entry.id !== "llamacpp") break;
+        if (externalSelected) {
+          // Uninstall only. Install, Enable and Make primary all end in the
+          // configure route, which refuses the on-device model while the
+          // engine holds the slot (409 `external_engine_selected`) — the
+          // engine's own Remove comes first.
+          if (entry.installed) uninstall = removal("/setup-api/llamacpp/models?engine=1");
+          break;
+        }
         if (!entry.installed) {
           install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local" }) };
           break;
@@ -807,6 +823,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           </button>
         </div>
       )}
+
+      {/* The owner's own OpenAI-compatible server as Local AI (TASK-2376), on
+          both editions. */}
+      <ExternalEngineCard onChanged={afterInstall} />
 
       {GROUPS.map((group) => {
         const entries = snapshot.models.filter((m) => m.kind === group.kind);

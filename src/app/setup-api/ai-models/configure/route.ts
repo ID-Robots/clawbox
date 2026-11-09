@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { getAll, set as setConfigKey, setMany } from "@/lib/config-store";
+import { externalEngineSelected } from "@/lib/external-engine";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -2784,6 +2785,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
+      );
+    }
+    // An external AI engine holds the Local AI slot (TASK-2376). Turning the
+    // on-device model on beside it would hand the chat back to a runtime the
+    // proxy refuses to start; the engine's own Remove is the way back.
+    if ((isOllama || isLlamaCpp) && await externalEngineSelected()) {
+      return NextResponse.json(
+        {
+          error: "An external AI engine is selected as Local AI. Remove it in Settings → Local AI → External engine before turning on the on-device model.",
+          code: "external_engine_selected",
+        },
+        { status: 409 },
       );
     }
     // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.

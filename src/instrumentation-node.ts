@@ -342,6 +342,14 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
     getAll().catch(() => ({} as Record<string, unknown>)),
     getActiveHarness(),
   ])
+  // An external AI engine is the Local AI (TASK-2376): llama.cpp is not started
+  // for chat on any path while it is selected — the proxy refuses first, this
+  // is the floor under every other caller.
+  if (state['external_engine'] && typeof state['external_engine'] === 'object') {
+    console.log('[instrumentation] llama.cpp start skipped (an external AI engine is selected)')
+    return 'skipped-disabled'
+  }
+
   const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(state, 'local_ai_configured')
   if (hasExplicitLocalAiFlag && state['local_ai_configured'] === false) {
     const primaryModel = config.agents?.defaults?.model?.primary?.trim()

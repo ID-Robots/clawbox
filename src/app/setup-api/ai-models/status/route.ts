@@ -43,6 +43,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   // "clawlocal" leaked into the UI as a provider name. Matches the wording in
   // lib/hermes-providers.ts so the same model isn't called two things.
   clawlocal: "Gemma 4 (on-device)",
+  // The owner's external AI engine in the Local AI slot (TASK-2376).
+  clawext: "External engine",
 };
 
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";

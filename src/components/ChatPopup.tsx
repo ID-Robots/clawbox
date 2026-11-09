@@ -470,8 +470,9 @@ interface ChatModelState {
     thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
-  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127). */
-  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null }
+  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127).
+   *  `external`: the slot holds the owner's external AI engine (TASK-2376). */
+  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null; external?: boolean }
   /** Providers this box authenticates to by SUBSCRIPTION only. The catalogue's
    * `availableOnSubscription` stamp says what a provider's subscription
    * surface carries; this says whether that applies to this device. Optional
@@ -2525,7 +2526,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // idle, so the chat says so: a note at the top (LocalAiChatBanner) and,
   // until the turn's first token, "Loading the local model…" in place of a
   // spinner verb.
-  const onLocalAi = harnessLoaded && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource)
+  // An external engine in the Local AI slot is not on this box: no load note,
+  // no on-device long-chat handling (TASK-2376).
+  const onLocalAi = harnessLoaded
+    && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource, chatModelState?.local?.external === true)
   const [localAiBannerDismissed, dismissLocalAiBanner] = useLocalAiBannerDismissed()
   const localAiLoadingLabel = useLocalAiLoadingLabel()
   // A long conversation on Local AI (TASK-2127): measured between turns, held

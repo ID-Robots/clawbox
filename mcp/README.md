@@ -1398,7 +1398,10 @@ embedding service's unit state (`GET /setup-api/embed/status`). Each leg past
 the inventory is independent, so one that does not answer costs only its line.
 The inventory leaves the embeddings row out until the device has read the
 memory index once; the answer then says `not_read_yet` rather than implying
-there is no embedding model.
+there is no embedding model. When the owner has selected an external AI engine
+as Local AI (TASK-2376, the inventory's `externalEngine`), the answer carries
+`external_engine` — its model, endpoint and context window, never its key —
+and says the on-device chat model is not started while it is selected.
 
 **There is no install tool.** Since 2026-09-15 an install or update puts no
 engine or model on a box but llama.cpp and Gemma 4, so Settings → Local AI's

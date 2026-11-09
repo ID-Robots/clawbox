@@ -45,7 +45,7 @@ const WHISPER_STATE = {
 };
 const EMBED_STATUS = { installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 640 * 1024 * 1024, model: "qwen3-embedding-0.6b", engine: "llama.cpp" };
 
-function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; sttChain?: string[]; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
+function stubFetch(over: { external?: boolean; llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; sttChain?: string[]; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
   posts = [];
   deletes = [];
   const json = (body: unknown, status = 200) =>
@@ -68,6 +68,8 @@ function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?:
         { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault, section: "ai", enabled: true },
         // `llmWired: false` is a Gemma that is on the disk but wired to nothing.
         { id: "llamacpp", label: "Gemma 4", state: over.llmWired === false ? "not_configured" : "connected", isDefault: !!over.llmDefault, section: "localAi", enabled: true },
+        // TASK-2376: the owner's external engine holds the Local AI slot.
+        ...(over.external ? [{ id: "clawext", label: "Qwen3-32B (external engine)", state: "connected", isDefault: true, section: "localAi", enabled: true }] : []),
       ] });
     }
     if (url.startsWith("/setup-api/whisper")) return json(WHISPER_STATE);
@@ -98,6 +100,17 @@ afterEach(() => {
 });
 
 describe("LocalAiPanel", () => {
+
+  it("offers no way to wire Gemma to the chat while an external engine holds the slot (TASK-2376)", async () => {
+    stubFetch({ external: true, llmWired: false });
+    renderPanel();
+    const row = await screen.findByTestId("local-model-llamacpp");
+    await screen.findByTestId("local-ai-external-card");
+    await waitFor(() => expect(within(row).queryByTestId("local-model-action-llamacpp-uninstall")).not.toBeNull());
+    expect(within(row).queryByTestId("local-model-action-llamacpp-enable")).toBeNull();
+    expect(within(row).queryByTestId("local-model-action-llamacpp-disable")).toBeNull();
+    expect(screen.queryByTestId("local-ai-local-only")).toBeNull();
+  });
 
   it("refreshes other provider surfaces only after a successful streamed model activation", async () => {
     let finish!: () => void;

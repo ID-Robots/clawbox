@@ -1503,7 +1503,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // its own inventory. Read once when the section opens and again when the
   // providers change — the subtitle names the configured model, which changes
   // through actions, not on its own.
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null } | null>(null);
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; externalName?: string | null } | null>(null);
   const localTabOpen = section === "localAi";
   useEffect(() => {
     if (!localTabOpen && !isMobile) return;
@@ -1514,6 +1514,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           configured: !!data.local_ai_configured,
           provider: typeof data.local_ai_provider === "string" ? data.local_ai_provider : null,
           model: typeof data.local_ai_model === "string" ? data.local_ai_model : null,
+          // An external engine in the slot (TASK-2376) is named for its model,
+          // the way the chat header names it.
+          externalName: typeof data.external_engine?.displayName === "string" ? data.external_engine.displayName : null,
         }))
         .catch(() => setLocalAiStatus({ configured: false, provider: null, model: null }));
     };
@@ -6998,6 +7001,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       case "localAi": {
         if (localAiStatus === null) return { subtitle: null };
         if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        if (localAiStatus.externalName) {
+          return { subtitle: t("localModels.external.subtitle", { model: localAiStatus.externalName }) };
+        }
         return { subtitle: localAiStatus.model || localAiStatus.provider };
       }
       case "telegram": {

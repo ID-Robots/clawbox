@@ -31,6 +31,7 @@ For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-a
 | **xAI Grok** | `xai-…` API key, or a SuperGrok / X Premium sign-in | `xai/…` | the newest of `grok-4.7`, `grok-4.6`, `grok-4.5` | New in 4.3. The sign-in is run by the core's own xAI plugin through `/setup-api/ai-models/xai-login` and approved on any device |
 | **Ollama** (local) | none (per-install bearer) | `ollama/…` | `llama3.2:3b` | Context capped 32k / 8k output for Jetson RAM |
 | **llama.cpp** (local) | none (per-install bearer) | `llamacpp/…` | (bundled model) | OpenAI-compat local server |
+| **External engine** (Local AI) | the engine's own key, or none | `clawext/…` | (the model you enter) | Any OpenAI-compatible server you run, in place of the on-device model — see [External AI engine](#external-ai-engine) |
 
 <Warning>
 **OpenAI has two distinct lanes, and since OpenClaw 2 they share one namespace.** Both are `openai/…`; what separates them is the *credential* and one config key. The API key is the auth profile `openai:default`; the ChatGPT subscription is the OAuth profile `openai:chatgpt`, and its models carry `agents.defaults.models."openai/<id>".agentRuntime.id = "codex"`, which is what routes the turn through the Codex app-server and your ChatGPT plan. The catalogs still differ: the API lane carries the `-pro` tiers *in addition* to `gpt-5.4/5.5/5.6`, while the subscription serves `gpt-5.6-sol/terra/luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` and no `-pro` at all. Mixing them up is the root of most "Incorrect API key" tickets — see self-healing below.
@@ -189,3 +190,46 @@ All heals are idempotent — a healthy config is left untouched.
 - `Config validation failed: … Unrecognized key` → stale OpenClaw core; `sudo bash install.sh --step openclaw_install`
 - Codex chats crash immediately (`createDiagnosticTraceContext… is not a function`) → `@openclaw/codex` plugin version skew vs core; re-run `sudo bash install.sh --step openclaw_install` (re-pins plugins)
 - Model picker rejects a model ID → each lane validates against its own catalog; remember the two OpenAI lanes have different catalogs.
+
+## External AI engine
+
+**Settings → Local AI → External engine** (`/setup-api/local-ai/external`, owner only)
+makes an OpenAI-compatible endpoint the owner runs the box's Local AI. The endpoint is
+validated with `GET {base}/models` (8 s, redirects not followed) before anything is
+written; `POST /setup-api/local-ai/external/test` runs the same check alone. Refusals carry
+a `code`: `unreachable`, `unauthorized` (401/403), `model_not_listed` (with the models the
+engine does list) or `bad_response`.
+
+| | OpenClaw | Hermes |
+|---|---|---|
+| Provider | `models.providers.clawext`: `baseUrl`, `api: openai-completions`, `apiKey`, one model row with `contextWindow`, `maxTokens`, `input` (`["text","image"]` with image input) | `providers.clawext`: `base_url`, `api_key`, `api_mode`, `models`, `name`, `context_length` |
+| Selection | the primary `clawext/<model id>`, written through `POST /setup-api/chat/model` (session sweep, Tool Search and the compaction model follow it as on any pick) | `model.provider: clawext`, `model.default: <model id>` |
+| Not supported | — | max output tokens and image input (Hermes decides both); a window under 64,000 tokens is refused |
+
+**Where the key goes.** `data/.external-engine-key` (0600) and the harness's own
+provider block, as for the other providers whose key is written inline. The
+`/setup-api` answers say only `apiKeySet`; the device store (`external_engine` in
+`data/config.json`) holds the endpoint, model and limits, never the key. A saved key is
+reused for a re-save or a Test only for the same origin, so a changed address is never
+sent the key of another.
+
+**What it replaces.** While it is selected, the Local AI store keys name it
+(`local_ai_provider: clawext`), so the chat picker, Settings and the provider list show
+its model as the local model. llama.cpp (and Ollama, when that was the local engine) is
+stopped on save, the on-device fallbacks leave `agents.defaults.model.fallbacks`, and the
+Local AI proxy answers `/setup-api/local-ai/llamacpp` and `/ollama` with
+`503 external_engine_selected` instead of starting them — for a stale session override
+or fallback as much as for a new turn. The gateway pre-start pass keeps the `clawext`
+entry and puts it back from the device store when it is missing (a dual box that switched
+runtime, a restored config). Turning the on-device model on (`ai-models/configure` with
+`llamacpp`/`ollama`), "turn Local AI off" and Local-only mode answer `409
+external_engine_selected` while it is selected: **Remove** (`DELETE`) is the way back,
+and it restores the previous Local AI exactly — store keys, the primary, the fallbacks it
+took out, and on Hermes the on-device registration and selection.
+
+The status surfaces report it: `setup/status` (`external_engine`), `local-models`
+(`externalEngine`), `llamacpp/status` (`externalEngine`), `GET
+/setup-api/local-ai/external?probe=1` (a live `/models` check) and the agent's
+`local_ai_status` tool. With no engine configured nothing of this runs and the box
+behaves exactly as before.
+

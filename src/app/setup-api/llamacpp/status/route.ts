@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiRuntimeSnapshot } from "@/lib/local-ai-runtime";
 import { getLlamaCppProvisioningStatus } from "@/lib/llamacpp-server";
+import { externalEngineSummary, readExternalEngine } from "@/lib/external-engine";
 
 interface LlamaCppModelResponse {
   id?: string;
@@ -15,6 +16,9 @@ export async function GET() {
   const defaultModel = getDefaultLlamaCppModel();
   const provisioning = await getLlamaCppProvisioningStatus(defaultModel);
   const runtime = getLocalAiRuntimeSnapshot("llamacpp");
+  // While an external engine holds the Local AI slot (TASK-2376) llama.cpp is
+  // not started for chat; this says which engine answers instead.
+  const externalEngine = externalEngineSummary(await readExternalEngine());
 
   try {
     const res = await fetch(`${baseUrl}/models`, {
@@ -32,6 +36,7 @@ export async function GET() {
         standbyEnabled: runtime.idleTimeoutMs > 0,
         idleTimeoutMs: runtime.idleTimeoutMs,
         proxyBaseUrl: runtime.proxyBaseUrl,
+        externalEngine,
       });
     }
 
@@ -56,6 +61,7 @@ export async function GET() {
       standbyEnabled: runtime.idleTimeoutMs > 0,
       idleTimeoutMs: runtime.idleTimeoutMs,
       proxyBaseUrl: runtime.proxyBaseUrl,
+      externalEngine,
     }, {
       headers: {
         "Cache-Control": "no-store",
@@ -73,6 +79,7 @@ export async function GET() {
       standbyEnabled: runtime.idleTimeoutMs > 0,
       idleTimeoutMs: runtime.idleTimeoutMs,
       proxyBaseUrl: runtime.proxyBaseUrl,
+      externalEngine,
     }, {
       headers: {
         "Cache-Control": "no-store",
