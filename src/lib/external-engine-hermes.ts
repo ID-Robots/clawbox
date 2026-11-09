@@ -1,7 +1,7 @@
 import { getAll } from "@/lib/config-store";
 import { patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
-import { EXTERNAL_ENGINE_PROVIDER, HERMES_MIN_CONTEXT_WINDOW, externalEngineDisplayName, type ExternalEngineSettings } from "@/lib/external-engine-shared";
+import { HERMES_MIN_CONTEXT_WINDOW, externalEngineDisplayName, type ExternalEngineSettings } from "@/lib/external-engine-shared";
 import { NO_KEY_PLACEHOLDER, externalEngineFromState, readExternalEngineKey } from "@/lib/external-engine";
 
 /**
@@ -11,19 +11,23 @@ import { NO_KEY_PLACEHOLDER, externalEngineFromState, readExternalEngineKey } fr
  * not pull in the save path's chat, gateway and runtime modules.
  */
 
-/** `providers.clawext.*` as Hermes reads a custom OpenAI-compatible provider. */
-export function hermesProviderSet(settings: ExternalEngineSettings, key: string | null): Record<string, string> {
-  const p = `providers.${EXTERNAL_ENGINE_PROVIDER}`;
+/**
+ * The values of `providers.clawext.*` as Hermes reads a custom
+ * OpenAI-compatible provider. The KEYS are written as literals at each call
+ * site, so the harness contract (scripts/harness-contract) checks every one
+ * against the pinned Hermes.
+ */
+export function hermesProviderValues(settings: ExternalEngineSettings, key: string | null) {
   return {
-    [`${p}.base_url`]: settings.baseUrl,
-    [`${p}.api_key`]: key || NO_KEY_PLACEHOLDER,
-    [`${p}.api_mode`]: "openai",
-    [`${p}.models`]: settings.modelId,
-    [`${p}.name`]: externalEngineDisplayName(settings.modelId),
+    baseUrl: settings.baseUrl,
+    apiKey: key || NO_KEY_PLACEHOLDER,
+    apiMode: "openai",
+    models: settings.modelId,
+    name: externalEngineDisplayName(settings.modelId),
     // Entry-level `context_length` backs every model the entry serves
     // (hermes_cli/config_providers.py); `model.context_length` would be global
     // and outlive a switch to a cloud model.
-    [`${p}.context_length`]: String(settings.contextWindow),
+    contextLength: String(settings.contextWindow),
   };
 }
 
@@ -46,10 +50,20 @@ export async function reconcileExternalEngineWithHermes(): Promise<void> {
       console.warn(`[external-engine] not registered with Hermes: its ${record.contextWindow}-token window is under Hermes' ${HERMES_MIN_CONTEXT_WINDOW} floor`);
       return;
     }
-    const declared = await resolveHermesConfigValue(`providers.${EXTERNAL_ENGINE_PROVIDER}.base_url`);
+    const declared = await resolveHermesConfigValue("providers.clawext.base_url");
     if (declared.state !== "absent") return;
     const key = readExternalEngineKey();
-    await patchHermesConfig({ set: hermesProviderSet(record, key === NO_KEY_PLACEHOLDER ? null : key) });
+    const v = hermesProviderValues(record, key === NO_KEY_PLACEHOLDER ? null : key);
+    await patchHermesConfig({
+      set: {
+        "providers.clawext.base_url": v.baseUrl,
+        "providers.clawext.api_key": v.apiKey,
+        "providers.clawext.api_mode": v.apiMode,
+        "providers.clawext.models": v.models,
+        "providers.clawext.name": v.name,
+        "providers.clawext.context_length": v.contextLength,
+      },
+    });
     invalidateModelOptions();
   } catch (err) {
     hermesReconciled = false;

@@ -15,7 +15,7 @@ import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
-import { hermesProviderSet } from "@/lib/external-engine-hermes";
+import { hermesProviderValues } from "@/lib/external-engine-hermes";
 import {
   EXTERNAL_ENGINE_PROVIDER,
   EXTERNAL_ENGINE_STORE_KEY,
@@ -70,7 +70,6 @@ function isOnDeviceRef(ref: unknown): ref is string {
   return provider.startsWith("llamacpp") || provider.startsWith("ollama");
 }
 
-const HERMES_PROVIDER_KEYS = ["base_url", "api_key", "api_mode", "models", "models_discovered", "name", "context_length"];
 
 /**
  * An error's text for a log line or a response, with the engine's key taken
@@ -326,13 +325,21 @@ async function applyToHermes(
       // the set replaces, so the provider is never left half there. A
       // catalogue Hermes persisted for an older model (`models_discovered`)
       // goes in the same patch.
+      // Literal keys, so the harness contract checks each one against the
+      // pinned Hermes (scripts/harness-contract).
+      const v = hermesProviderValues(settings, key);
       await patchHermesConfig({
         set: {
-          ...hermesProviderSet(settings, key),
+          "providers.clawext.base_url": v.baseUrl,
+          "providers.clawext.api_key": v.apiKey,
+          "providers.clawext.api_mode": v.apiMode,
+          "providers.clawext.models": v.models,
+          "providers.clawext.name": v.name,
+          "providers.clawext.context_length": v.contextLength,
           "model.provider": EXTERNAL_ENGINE_PROVIDER,
           "model.default": settings.modelId,
         },
-        ...(firstSave ? {} : { unset: [`providers.${EXTERNAL_ENGINE_PROVIDER}.models_discovered`] }),
+        unset: ["providers.clawext.models_discovered"],
       });
     } catch (err) {
       // The on-device model was taken out above for an engine that did not
@@ -355,22 +362,45 @@ async function removeFromHermes(record: ExternalEngineRecord): Promise<string | 
   return withProviderMcpRefresh(async () => {
     const selection = await hermesValue("model.provider");
     const previous = record.previous.hermes;
-    const unset = HERMES_PROVIDER_KEYS.map((k) => `providers.${EXTERNAL_ENGINE_PROVIDER}.${k}`);
-    const set: Record<string, string> = {};
     const reRegisterLocal = previous?.localRegistered === true;
-    if (selection === EXTERNAL_ENGINE_PROVIDER) {
-      if (previous?.provider && previous.provider !== EXTERNAL_ENGINE_PROVIDER && previous.provider !== "clawlocal" && previous.model) {
-        set["model.provider"] = previous.provider;
-        set["model.default"] = previous.model;
-      } else {
+    const cloudBack = selection === EXTERNAL_ENGINE_PROVIDER
+      && previous?.provider && previous.provider !== EXTERNAL_ENGINE_PROVIDER && previous.provider !== "clawlocal"
+      && previous.model
+      ? { provider: previous.provider, model: previous.model }
+      : null;
+    try {
+      // Three literal shapes rather than one built at runtime, so the harness
+      // contract checks every key against the pinned Hermes.
+      if (cloudBack) {
+        // The cloud selection the box had before goes back in the same write.
+        await patchHermesConfig({
+          set: { "model.provider": cloudBack.provider, "model.default": cloudBack.model },
+          unset: [
+            "providers.clawext.base_url", "providers.clawext.api_key", "providers.clawext.api_mode",
+            "providers.clawext.models", "providers.clawext.models_discovered", "providers.clawext.name",
+            "providers.clawext.context_length",
+          ],
+        });
+      } else if (selection === EXTERNAL_ENGINE_PROVIDER) {
         // Never left naming a block that is gone (every turn would 502 with
         // "Unknown provider"); the on-device model, when it was the
         // selection, is made the default again just below.
-        unset.push("model.provider", "model.default");
+        await patchHermesConfig({
+          unset: [
+            "providers.clawext.base_url", "providers.clawext.api_key", "providers.clawext.api_mode",
+            "providers.clawext.models", "providers.clawext.models_discovered", "providers.clawext.name",
+            "providers.clawext.context_length", "model.provider", "model.default",
+          ],
+        });
+      } else {
+        await patchHermesConfig({
+          unset: [
+            "providers.clawext.base_url", "providers.clawext.api_key", "providers.clawext.api_mode",
+            "providers.clawext.models", "providers.clawext.models_discovered", "providers.clawext.name",
+            "providers.clawext.context_length",
+          ],
+        });
       }
-    }
-    try {
-      await patchHermesConfig({ set, unset });
     } catch (err) {
       throw new ExternalEngineRefusal(
         "hermes_write_failed",
