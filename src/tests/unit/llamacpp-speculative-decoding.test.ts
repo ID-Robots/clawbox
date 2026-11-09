@@ -67,7 +67,7 @@ function start(env: Record<string, string> = {}) {
   const r = spawnSync(
     "bash",
     [SCRIPT, modelDir, "org/repo", "model.gguf", "local-model", "127.0.0.1", "8080", logPath, fakeServer, "/nonexistent/hf", "32768"],
-    { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: dir, ...env } },
+    { encoding: "utf8", env: { NODE_ENV: "test", PATH: "/usr/bin:/bin", HOME: dir, ...env } },
   );
   let args: string[] = [];
   try { args = readFileSync(argsFile, "utf8").trim().split("\n"); } catch { /* the server never ran */ }
