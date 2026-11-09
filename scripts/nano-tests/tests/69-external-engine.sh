@@ -59,7 +59,8 @@ else
 fi
 note "chat model before: ${BEFORE:-none}"
 
-# shellcheck disable=SC2016  # expanded on the board
+# SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
+# shellcheck disable=SC2016,SC2317
 cleanup() {
   if [ "$SAVED" = 1 ]; then
     board_owner_api DELETE /setup-api/local-ai/external
@@ -156,6 +157,7 @@ else
   sel=$(board 'PATH="$HOME/.local/bin:$PATH"; printf "%s %s\n" "$(timeout 60 hermes config get model.provider 2>/dev/null | tail -n1)" "$(timeout 60 hermes config get model.default 2>/dev/null | tail -n1)"' | tail -n1)
   if [ "$sel" = "clawext $MODEL" ]; then ok "Hermes' selection is clawext / $MODEL"; else not_ok "Hermes' selection after save: $sel"; fi
   board_owner_api GET "/setup-api/hermes/models?refresh=1"
+  # shellcheck disable=SC2016  # $m is jq's own variable
   row=$(api_json --arg m "$MODEL" '[.providers[]? | select(.id == "clawext")][0] | "\(.name) \(.models | map(.id) | any(. == $m))"')
   if [ "$row" = "$NAME true" ]; then ok "Hermes' model list offers the clawext row named \"$NAME\" with $MODEL"; else not_ok "Hermes model list clawext row: ${row:-absent}"; fi
 fi
