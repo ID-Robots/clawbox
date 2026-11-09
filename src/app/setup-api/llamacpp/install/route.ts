@@ -6,7 +6,7 @@ import {
   liveBackgroundTask,
   startBackgroundTask,
 } from "@/lib/background-tasks";
-import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
+import { getDefaultLlamaCppModel, DEFAULT_LLAMACPP_MODEL } from "@/lib/llamacpp";
 import { getActiveHarness } from "@/lib/harness";
 import {
   LLAMACPP_MODEL_ID_RE,
@@ -38,7 +38,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const alias = body.model?.trim() || getDefaultLlamaCppModel();
+  // The panels cannot read LLAMACPP_MODEL (it is not in the client bundle), so
+  // "Enable" sends the built-in Gemma alias as "the default". llama-server
+  // loads the GGUF .env names whatever alias it is given, so on a box whose
+  // .env names another model (install-x64.sh seeds Qwen on a workstation) that
+  // alias wrote Qwen into openclaw.json as Gemma. The built-in alias therefore
+  // means this box's own model; any other alias is taken as asked.
+  const requested = body.model?.trim();
+  const alias = !requested || requested === DEFAULT_LLAMACPP_MODEL
+    ? getDefaultLlamaCppModel()
+    : requested;
   const scope = body.scope === "local" ? "local" : "primary";
   // Only an explicit "switch to it" click sets this; a plain enable leaves the
   // customer's chosen provider in place.

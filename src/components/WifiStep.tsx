@@ -36,7 +36,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     message: string;
   } | null>(null);
   // null = first probe in flight ("detecting…"); otherwise the live cable/connection state.
-  const [eth, setEth] = useState<{ connected: boolean; cable: boolean } | null>(null);
+  // `online`: the machine already reaches the internet without a cable — a PC
+  // on the Wi-Fi its own operating system manages (install-x64.sh), where the
+  // box's scan has nothing to offer.
+  const [eth, setEth] = useState<{ connected: boolean; cable: boolean; online: boolean } | null>(null);
   // True once a cable has been plugged in but hasn't gained internet for a while
   // (bad cable / dead port / no DHCP) — lets us nudge to Wi-Fi instead of
   // spinning on "Connecting…" forever with the recommended button disabled.
@@ -88,12 +91,12 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       fetch("/setup-api/wifi/ethernet", { cache: "no-store" })
         .then((r) => r.json())
         .then((data) => {
-          if (!cancelled) setEth({ connected: data.connected === true, cable: data.cable === true });
+          if (!cancelled) setEth({ connected: data.connected === true, cable: data.cable === true, online: data.online === true });
         })
         .catch(() => {
           // A transport error says nothing about the cable — keep last-known-good
           // instead of de-gating the button on a transient hiccup.
-          if (!cancelled) setEth((prev) => prev ?? { connected: false, cable: false });
+          if (!cancelled) setEth((prev) => prev ?? { connected: false, cable: false, online: false });
         });
     };
     pollEth();
@@ -112,6 +115,11 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
     setCableStuck(false);
   }, [eth?.cable, eth?.connected]);
+
+  // Online without a working cable: the network is already the machine's own.
+  // A cable with carrier but no connection (an unconfigured second port, a DGX
+  // Spark's stacking port) does not hold back a machine that is online anyway.
+  const onlineWithoutCable = eth?.connected !== true && eth?.online === true;
 
   const [hasScanned, setHasScanned] = useState(false);
 
@@ -301,6 +309,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   </span>
                   <span className="text-sm text-[#00e5cc]">{t("wifi.ethConnected")}</span>
                 </div>
+              ) : onlineWithoutCable ? (
+                <div className="flex items-center gap-3 px-4 py-3 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc]" />
+                  </span>
+                  <span className="text-sm text-[#00e5cc]">{t("wifi.onlineReady")}</span>
+                </div>
               ) : eth?.cable ? (
                 <div className="flex items-center gap-3 px-4 py-3 bg-amber-400/10 border border-amber-400/20 rounded-lg">
                   {cableStuck ? (
@@ -322,11 +337,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               <button
                 type="button"
                 onClick={skipEthernet}
-                disabled={eth?.connected !== true}
+                disabled={eth?.connected !== true && !onlineWithoutCable}
                 className="w-full py-3 px-4 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed"
               >
                 <span className="whitespace-nowrap">
-                  {eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
+                  {onlineWithoutCable
+                    ? t("wifi.proceedOnline")
+                    : eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
                 </span>
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
