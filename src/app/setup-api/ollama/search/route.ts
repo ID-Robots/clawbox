@@ -165,8 +165,14 @@ export async function GET(request: Request) {
     return answer([], maxParamBillions);
   }
 
-  // Check cache first
-  const cacheKey = query.toLowerCase();
+  // Check cache first. The cap is part of the key: the entry holds results
+  // already filtered through filterForCap under ONE figure, and that figure
+  // changes under the process (the drop-in appears when the resource-limits
+  // step runs, os.totalmem() moves on a VM). Keyed on the query alone, a
+  // search made under a 4B cap was served back under the host's real 122B —
+  // with the larger number in the answer's `maxParamBillions` and none of the
+  // models it promises in `results`.
+  const cacheKey = `${maxParamBillions}:${query.toLowerCase()}`;
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return answer(cached.results, maxParamBillions);

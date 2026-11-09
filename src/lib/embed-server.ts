@@ -22,6 +22,7 @@
 
 import os from "os";
 import fs from "fs/promises";
+import { accessSync, constants as fsConstants } from "fs";
 import type { FileHandle } from "fs/promises";
 import path from "./runtime-path";
 import { DATA_DIR } from "./config-store";
@@ -42,9 +43,24 @@ const EMBED_RUNTIME_DIR = path.join(DATA_DIR, EMBED_RUNTIME_SUBDIR);
 const EMBED_MODEL_DIR = path.join(EMBED_RUNTIME_DIR, "models");
 const EMBED_LOG_PATH = path.join(EMBED_RUNTIME_DIR, "server.log");
 const DEFAULT_LLAMACPP_BIN = "/usr/local/bin/llama-server";
-// The running user's own: pipx puts `hf` in ~/.local/bin, and on a PC
-// (install-x64.sh) that user is the machine's owner, not `clawbox`.
+// Where the Hugging Face CLI is, when HF_BIN does not say. The same resolution
+// as src/lib/llamacpp-server.ts's, and the same reason: PATH holds `hf` on a PC
+// whose owner installed it with anything but pipx, and naming a home path that
+// holds nothing reported a missing CLI that was one directory over. The home
+// fallback is the appliance's, whose unit PATH is systemd's bare default.
 function defaultHfBin(): string {
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    // Skip "" and any relative entry: `hf` resolved against the cwd is not the
+    // host's CLI, and the cwd here is wherever the server happens to run.
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const candidate = path.join(dir, "hf");
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Not in this directory, or not executable by this user: keep looking.
+    }
+  }
   return path.join(os.homedir(), ".local", "bin", "hf");
 }
 /** A first start with no GGUF on disk downloads ~640 MB inside the unit. */

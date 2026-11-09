@@ -16,9 +16,20 @@ import { ollamaMaxModelParamB } from "@/lib/ollama-size-cap";
  */
 const GB = 1e9;
 let dir: string;
+/**
+ * The "this host is not a Jetson" argument every uncapped case has to pass.
+ *
+ * `ollamaMaxModelParamB`'s third parameter defaults to /etc/nv_tegra_release,
+ * so a case that leaves it out asks about the MACHINE RUNNING THE TEST: on a
+ * Jetson — a board in nano-lab1, a developer's Orin — every uncapped
+ * expectation below would read back the Jetson's 4 and fail, for a host fact
+ * that has nothing to do with what is being tested.
+ */
+let noTegra: string;
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), "clawbox-ollama-cap-"));
+  noTegra = path.join(dir, "absent-nv_tegra_release");
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -40,17 +51,17 @@ describe("ollamaMaxModelParamB", () => {
   });
 
   it("offers 120B-class models on an uncapped 128 GB workstation", () => {
-    const cap = ollamaMaxModelParamB(path.join(dir, "absent.conf"), 130.6 * GB);
+    const cap = ollamaMaxModelParamB(path.join(dir, "absent.conf"), 130.6 * GB, noTegra);
     expect(cap).toBeGreaterThanOrEqual(122);
   });
 
   it("scales with an uncapped PC's memory", () => {
     const absent = path.join(dir, "absent.conf");
-    expect(ollamaMaxModelParamB(absent, 16 * GB)).toBe(16);
-    expect(ollamaMaxModelParamB(absent, 32 * GB)).toBe(32);
+    expect(ollamaMaxModelParamB(absent, 16 * GB, noTegra)).toBe(16);
+    expect(ollamaMaxModelParamB(absent, 32 * GB, noTegra)).toBe(32);
   });
 
   it("never offers less than the Jetson's figure", () => {
-    expect(ollamaMaxModelParamB(path.join(dir, "absent.conf"), 2 * GB)).toBe(OLLAMA_MAX_MODEL_PARAM_B);
+    expect(ollamaMaxModelParamB(path.join(dir, "absent.conf"), 2 * GB, noTegra)).toBe(OLLAMA_MAX_MODEL_PARAM_B);
   });
 });

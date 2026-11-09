@@ -1057,14 +1057,37 @@ record_owner_password() {
   # The published factory default is nobody's password (src/lib/system-password.ts
   # FACTORY_DEFAULT_PASSWORD): the wizard may claim such an account and makes its
   # owner choose a real one. Checked the way the app checks it, as the account
-  # itself through unix_chkpwd; a check that cannot run fails closed, as the
-  # app's does, and counts the password as the owner's.
-  if printf 'clawbox\0' | as_user unix_chkpwd "$CLAWBOX_USER" nullok >/dev/null 2>&1; then
+  # itself through unix_chkpwd, and read by exit code, not by "did the pipeline
+  # succeed" — the three answers are not two:
+  #   0            the account IS on the factory default: nobody's yet, leave it
+  #   7            PAM_AUTH_ERR, the password is the owner's own: record it
+  #   anything else (helper missing, PAM_USER_UNKNOWN, PAM_SYSTEM_ERR, a signal)
+  #                the check never ran. That is unknown, not "the owner's":
+  #                src/lib/system-password.ts answers null there, and recording
+  #                the flag on a guess would let the wizard hand setup to
+  #                whoever can still log in with the published default.
+  # PIPESTATUS, so the answer is unix_chkpwd's own status and not printf's
+  # SIGPIPE when the helper exits before reading its stdin (set -o pipefail
+  # would otherwise report 141 for a helper that exited 0).
+  local chk_rc=0
+  printf 'clawbox\0' | as_user unix_chkpwd "$CLAWBOX_USER" nullok >/dev/null 2>&1 || chk_rc=${PIPESTATUS[1]:-1}
+  if [ "$chk_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$chk_rc" -ne 7 ]; then
+    echo "  WARN: could not check whether $CLAWBOX_USER still carries the factory default password (unix_chkpwd exit $chk_rc); not recording the owner password — the wizard will ask for one" >&2
     return 0
   fi
   # As the install user, written the way src/lib/config-store.ts writes it: a
   # 0600 temp file renamed into place. A file that does not parse is left alone.
-  as_user python3 - "$config" <<'PY'
+  # The whole writer is non-fatal: the flag only saves the owner a wizard step,
+  # so a data/ that cannot be written must not fail step_directories_permissions
+  # and take the install down with it (set -e would, python3 missing or not).
+  # -I (as the migration helper below runs it): a script read from stdin puts
+  # the CWD on sys.path, and the installer's CWD is wherever the admin typed
+  # `sudo bash install-x64.sh` — a planted json.py there would otherwise run as
+  # the install user on `import json`.
+  if ! as_user python3 -I - "$config" <<'PY'
 import json, os, sys, tempfile
 path = sys.argv[1]
 try:
@@ -1080,13 +1103,31 @@ except (OSError, ValueError) as err:
 if data.get("password_configured") is True:
     sys.exit(0)
 data["password_configured"] = True
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.json.")
-with os.fdopen(fd, "w") as f:
-    json.dump(data, f, indent=2)
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
+# A write that fails leaves no .config.json.* behind for the next install to
+# trip over, and is reported rather than raised: `tmp = None` after the rename
+# marks the temp as gone, so `finally` only unlinks one that still exists.
+tmp = None
+try:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".config.json.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    tmp = None
+except OSError as err:
+    print(f"  WARN: {path} could not be written ({err}); not recording the owner password", file=sys.stderr)
+    sys.exit(0)
+finally:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 print("  Recorded this account's existing password as the owner's sign-in")
 PY
+  then
+    echo "  WARN: could not record this account's password as the owner's sign-in; the wizard will ask for one" >&2
+  fi
 }
 
 step_directories_permissions() {

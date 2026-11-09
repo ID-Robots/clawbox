@@ -31,11 +31,16 @@ vi.mock("child_process", () => ({
 // verifies its certificate. `net` is mocked too, so a probe that settled for a
 // bare TCP connect would be caught answering online behind a captive portal,
 // which accepts any connection. Each test says how each ends.
-let tcp: "connect" | "error" | "timeout" = "error";
-let handshake: "secureConnect" | "error" | "timeout" = "error";
+let tcp: "connect" | "error" | "timeout" | "throw" = "error";
+let handshake: "secureConnect" | "error" | "timeout" | "throw" = "error";
 function fakeSocket(label: string, outcome: () => string) {
   return (opts: { host: string; port: number; servername?: string }) => {
     calls.push(`${label} ${opts.host}:${opts.port}${opts.servername ? ` as ${opts.servername}` : ""}`);
+    // "throw": connect raising before it returns a socket at all — the real one
+    // does that for options it cannot make a connection from (a host that is
+    // not a host, a port out of range, an unusable CA store), and no 'error'
+    // listener exists yet to catch it.
+    if (outcome() === "throw") throw new TypeError("ERR_INVALID_ARG_TYPE: options.host");
     const handlers: Record<string, () => void> = {};
     let onTimeout: (() => void) | null = null;
     const socket = {
@@ -100,6 +105,17 @@ describe("internetReachable", () => {
     handshake = "error";
     const { internetReachable } = await import("@/lib/internet-reachable");
     expect(await internetReachable()).toBe(false);
+  });
+
+  it("answers offline, not an exception, when tls.connect throws before the socket exists", async () => {
+    // Thrown out of the Promise executor it rejects the probe, and check()
+    // awaits it outside any try: every caller — the tray's online dot, the
+    // wizard's network step, /setup-api/wifi/ethernet before any owner exists —
+    // got a rejected promise where "no" is the only answer this question has.
+    outcomes.ping = async () => ({ error: new Error("100% packet loss") });
+    handshake = "throw";
+    const { internetStatus } = await import("@/lib/internet-reachable");
+    await expect(internetStatus()).resolves.toMatchObject({ online: false, latencyMs: null });
   });
 
   it("stays offline when neither gets through, as on a box broadcasting its setup hotspot", async () => {

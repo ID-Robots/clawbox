@@ -314,6 +314,38 @@ describe("GET /setup-api/ollama/search", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
+  it("does not answer one host figure's search from another's cached results", async () => {
+    // The cache holds results already filtered through filterForCap under ONE
+    // maxParamBillions. That figure is not fixed for the life of the process:
+    // the Jetson's drop-in appears when the resource-limits step runs, and
+    // os.totalmem() moves on a VM. Keyed on the query alone, the 4B-filtered
+    // answer came back under the host's real 130 — the body promising
+    // 120B-class models while `results` held only what fits in 4B.
+    const mockHtml = `
+      <li><a href="/library/gpt-oss">gpt-oss</a><span>20b</span><span>120b</span></li>
+      <li><a href="/library/tiny">tiny</a><span>3b</span></li>
+    `;
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve(mockHtml) });
+    vi.stubGlobal("fetch", mockFetch);
+
+    sizeCap.value = 4;
+    const capped = await (await ollamaSearchGet(createRequest("gpt-oss"))).json();
+    expect(capped.maxParamBillions).toBe(4);
+    expect(capped.results.map((r: { name: string }) => r.name)).toEqual(["tiny"]);
+
+    sizeCap.value = 130;
+    const uncapped = await (await ollamaSearchGet(createRequest("gpt-oss"))).json();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(uncapped.maxParamBillions).toBe(130);
+    expect(uncapped.results.map((r: { name: string }) => r.name)).toEqual(["gpt-oss", "tiny"]);
+
+    // Each figure still has its own entry: neither search is re-fetched.
+    await ollamaSearchGet(createRequest("gpt-oss"));
+    sizeCap.value = 4;
+    await ollamaSearchGet(createRequest("gpt-oss"));
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
   it("limits results to 20", async () => {
     // Create HTML with 25 models
     const models = Array.from({ length: 25 }, (_, i) => `

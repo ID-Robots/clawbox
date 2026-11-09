@@ -73,6 +73,14 @@ EMBED_PROVIDER="openai-compatible"
 EMBED_MODEL_DIR="${EMBED_MODEL_DIR:-/home/clawbox/clawbox/data/embed/models}"
 EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
 EMBED_HF_FILE="${EMBED_HF_FILE:-Qwen3-Embedding-0.6B-Q8_0.gguf}"
+# Where the Hugging Face CLI is, when HF_BIN does not say. PATH first: pipx's
+# ~/.local/bin is only one of the places `hf` lands — apt, an active venv, a
+# pyenv shim and /usr/local/bin all put it elsewhere — and a home path that
+# holds nothing made the `-x` check below log "not installed" for a CLI this
+# shell could run. The home fallback stays for the appliance, whose PATH at
+# gateway start is systemd's bare default: nothing to find, and the WARN still
+# names the path to install into. An explicit HF_BIN wins over both.
+HF_BIN="${HF_BIN:-$(command -v hf 2>/dev/null || true)}"
 HF_BIN="${HF_BIN:-${HOME:-/home/clawbox}/.local/bin/hf}"
 LOCAL_AI_TOKEN_FILE="${LOCAL_AI_TOKEN_FILE:-/home/clawbox/clawbox/data/.local-ai-token}"
 EMBED_STATE_FILE="${EMBED_STATE_FILE:-/home/clawbox/clawbox/data/local-embeddings.state}"

@@ -1,5 +1,6 @@
 import os from "os";
 import fs from "fs/promises";
+import { accessSync, constants as fsConstants } from "fs";
 import type { FileHandle } from "fs/promises";
 import path from "./runtime-path";
 import { CONFIG_ROOT, DATA_DIR, getAll } from "./config-store";
@@ -17,9 +18,28 @@ const LLAMACPP_RUNTIME_DIR = path.join(DATA_DIR, "llamacpp");
 const LLAMACPP_PID_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.pid");
 const LLAMACPP_LOG_PATH = path.join(LLAMACPP_RUNTIME_DIR, "server.log");
 const DEFAULT_LLAMACPP_BIN = "/usr/local/bin/llama-server";
-// The running user's own: pipx puts `hf` in ~/.local/bin, and on a PC
-// (install-x64.sh) that user is the machine's owner, not `clawbox`.
+// Where the Hugging Face CLI is, when HF_BIN does not say.
+//
+// PATH first: pipx's ~/.local/bin is only one of the places `hf` lands — apt,
+// an active venv, a pyenv shim, /usr/local/bin and a Homebrew-style prefix all
+// put it somewhere else, and a home-directory path that holds nothing made the
+// launcher report a missing CLI the very shell it spawns could have run. The
+// home fallback stays for the appliance case, where the unit's PATH is
+// systemd's bare default and `hf` is in the install user's ~/.local/bin —
+// there is nothing on PATH to find, and the message must name that path.
 function defaultHfBin(): string {
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    // Skip "" and any relative entry: `hf` resolved against the cwd is not the
+    // host's CLI, and the cwd here is wherever the server happens to run.
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const candidate = path.join(dir, "hf");
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Not in this directory, or not executable by this user: keep looking.
+    }
+  }
   return path.join(os.homedir(), ".local", "bin", "hf");
 }
 const DEFAULT_STARTUP_TIMEOUT_MS = 20 * 60 * 1000;

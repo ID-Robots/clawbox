@@ -36,14 +36,25 @@ let inflight: Promise<InternetStatus> | null = null;
  */
 function tlsReachable(host: string, servername: string, port: number, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = tls.connect({ host, port, servername });
-    const done = (ok: boolean) => {
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs, () => done(false));
-    socket.once("secureConnect", () => done(true));
-    socket.once("error", () => done(false));
+    // tls.connect throws synchronously, before any 'error' listener can catch
+    // it, when the options do not describe a connection it can make at all — a
+    // bad host string (ERR_INVALID_ARG_TYPE / ERR_INVALID_IP_ADDRESS), an
+    // out-of-range port (ERR_SOCKET_BAD_PORT), an unusable CA store. Thrown out
+    // of the executor it rejects this promise, and `check()` above awaits it
+    // outside any try: a route that asks "is the internet up" would answer 500
+    // instead of "no". Unreachable is the only answer this function has.
+    try {
+      const socket = tls.connect({ host, port, servername });
+      const done = (ok: boolean) => {
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.setTimeout(timeoutMs, () => done(false));
+      socket.once("secureConnect", () => done(true));
+      socket.once("error", () => done(false));
+    } catch {
+      resolve(false);
+    }
   });
 }
 
