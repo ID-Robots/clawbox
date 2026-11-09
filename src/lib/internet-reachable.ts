@@ -36,6 +36,20 @@ let inflight: Promise<InternetStatus> | null = null;
  */
 function tlsReachable(host: string, servername: string, port: number, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
+    let socket: tls.TLSSocket | null = null;
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket?.destroy();
+      resolve(ok);
+    };
+    // One deadline for the connection and the handshake together. The socket's
+    // own timeout is an idle timer, which any byte from the peer resets: a
+    // portal or proxy trickling a reply kept the probe, and every caller
+    // waiting on it, past its two seconds.
+    const deadline = setTimeout(() => done(false), timeoutMs);
     // tls.connect throws synchronously, before any 'error' listener can catch
     // it, when the options do not describe a connection it can make at all — a
     // bad host string (ERR_INVALID_ARG_TYPE / ERR_INVALID_IP_ADDRESS), an
@@ -44,16 +58,12 @@ function tlsReachable(host: string, servername: string, port: number, timeoutMs:
     // outside any try: a route that asks "is the internet up" would answer 500
     // instead of "no". Unreachable is the only answer this function has.
     try {
-      const socket = tls.connect({ host, port, servername });
-      const done = (ok: boolean) => {
-        socket.destroy();
-        resolve(ok);
-      };
-      socket.setTimeout(timeoutMs, () => done(false));
-      socket.once("secureConnect", () => done(true));
-      socket.once("error", () => done(false));
+      const connecting = tls.connect({ host, port, servername });
+      socket = connecting;
+      connecting.once("secureConnect", () => done(true));
+      connecting.once("error", () => done(false));
     } catch {
-      resolve(false);
+      done(false);
     }
   });
 }

@@ -32,7 +32,9 @@ vi.mock("child_process", () => ({
 // bare TCP connect would be caught answering online behind a captive portal,
 // which accepts any connection. Each test says how each ends.
 let tcp: "connect" | "error" | "timeout" | "throw" = "error";
-let handshake: "secureConnect" | "error" | "timeout" | "throw" = "error";
+// "trickle": a peer that keeps sending bytes and never finishes the handshake,
+// so a socket idle timer never fires and no event ever ends it.
+let handshake: "secureConnect" | "error" | "timeout" | "throw" | "trickle" = "error";
 function fakeSocket(label: string, outcome: () => string) {
   return (opts: { host: string; port: number; servername?: string }) => {
     calls.push(`${label} ${opts.host}:${opts.port}${opts.servername ? ` as ${opts.servername}` : ""}`);
@@ -119,13 +121,33 @@ describe("internetReachable", () => {
   });
 
   it("stays offline when neither gets through, as on a box broadcasting its setup hotspot", async () => {
+    // "timeout" is a handshake that never finishes; the probe's own deadline ends it.
+    vi.useFakeTimers();
     for (const outcome of ["error", "timeout"] as const) {
       vi.resetModules();
       outcomes.ping = async () => ({ error: new Error("unreachable") });
       tcp = outcome;
       handshake = outcome;
       const { internetReachable } = await import("@/lib/internet-reachable");
-      expect(await internetReachable()).toBe(false);
+      const answer = internetReachable();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await answer).toBe(false);
     }
+  });
+
+  it("answers offline at its own two-second deadline, whatever the socket's idle timer does", async () => {
+    // One timer for connect and handshake together. The socket's idle timeout
+    // is reset by every byte from the peer, so a portal trickling a reply could
+    // hold the probe, and every caller sharing it, open past two seconds.
+    vi.useFakeTimers();
+    outcomes.ping = async () => ({ error: new Error("100% packet loss") });
+    handshake = "trickle";
+    const { internetReachable } = await import("@/lib/internet-reachable");
+    let answered: boolean | undefined;
+    void internetReachable().then((online) => { answered = online; });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(answered).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(answered).toBe(false);
   });
 });
