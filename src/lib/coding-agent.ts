@@ -13934,7 +13934,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // the fix than about the code being fixed is a difference nobody asked for,
     // and on the fresh path — where the run has no memory to lean on — the
     // owner's current setting could be the weaker of the two.
-    if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
+    // The automatic REVIEW PASS is the same kind of continuation (it resumes
+    // the run's own session): a run asked for at `xhigh` was reviewed at the
+    // owner's `ultracode`, sub-agents and all (run-kuor6wxx, 2026-11-10), and
+    // a run asked for at `low` would be too.
+    if (previous && (typeof input.reviewLoopOf === "string" || typeof input.reviewOf === "string")) settings.effort = previous.effort;
     // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
     // unless the owner chose otherwise, a planner and a lead the provider's
     // best model, a worker and a reviewer its middle one, and a planner, a lead

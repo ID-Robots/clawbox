@@ -490,6 +490,22 @@ describe("a run asked for its own effort", () => {
     expect(handed(low.id, "effort")).toBe("low");
   });
 
+  it("reviews a run at the effort it ran on — the automatic review pass is the run's own continuation", async () => {
+    makePlainProject("plain");
+    // The owner's setting is what a pass used to take: here it is the heaviest.
+    writeConfig({ coding_agent_effort: "ultracode" });
+    const low = await lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "low" });
+    await finished(low.id);
+    const pass = await lib.startRun({ task: "review it", resumeRunId: low.id, source: "owner", reviewOf: low.id });
+    expect(pass).toMatchObject({ effort: "low", reviewOf: low.id });
+    await finished(pass.id);
+    expect(handed(pass.id, "effort")).toBe("low");
+    // A follow-up the owner starts themselves is a new ask: it takes their setting.
+    const next = await lib.startRun({ task: "and now the README", resumeRunId: low.id, source: "owner" });
+    expect(next).toMatchObject({ effort: "ultracode" });
+    await finished(next.id);
+  });
+
   it("still caps a planner and a reviewer at xhigh, and never runs a read-only run on ultracode", async () => {
     makePlainProject("plain");
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, effort: "ultracode", team: { id: TEAM, role: "planner", taskId: null } });
