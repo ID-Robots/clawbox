@@ -7,7 +7,7 @@ import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, runOpencla
 import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
 import { getActiveHarness } from "@/lib/harness";
 import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
-import { CLAWBOX_AI_DEFAULT_TIER, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_CHAT_MODEL, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { readChatModelStateUnfiltered, POST as setChatModel } from "@/app/setup-api/chat/model/route";
 
@@ -30,7 +30,7 @@ async function clawboxAiFallback(config: Awaited<ReturnType<typeof readOpenClawC
   const apiKey = config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
   if (typeof apiKey !== "string" || !apiKey.startsWith("claw_")) return null;
   if (parseDisabledProviders(await get(DISABLED_PROVIDERS_KEY)).has("clawai")) return null;
-  return CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
+  return CLAWBOX_AI_CHAT_MODEL;
 }
 
 /**

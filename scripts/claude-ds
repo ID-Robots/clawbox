@@ -17,11 +17,9 @@
 #
 # WHICH MODEL YOU GET
 #
-# The plan decides, not this script. ClawBox AI gates deepseek-v4-pro to the
-# Max plan and answers 403 for Free and Pro, so hard-wiring pro would ship a
-# harness that is broken for most owners. The device already records which
-# plan it is on (`clawai_tier`), and the chat path already maps that to a
-# model — this reads the same field and applies the same rule.
+# The one ClawBox AI serves: deepseek-v4-flash (DeepSeek V4.1 Flash), on every
+# plan (TASK-2261). The plan no longer picks a model; CLAUDE_DS_MODEL still
+# overrides it.
 #
 # WHICH ACCOUNT PAYS
 #
@@ -242,20 +240,15 @@ STATUS="$(printf '%s' "$CREDS" | sed -n 1p)"
 [ "$STATUS" = "OK" ] || die "$(printf '%s' "$CREDS" | sed -n 2p)"
 
 SECRET="$(printf '%s' "$CREDS" | sed -n 2p)"
-TIER="$(printf '%s' "$CREDS" | sed -n 3p)"
 # The effort the owner picked in the Coding Agent app. Read here so a terminal
 # the app opens (`claude-ds --resume ...`) thinks as hard as the delegated runs
 # do, instead of at a default the wrapper made up.
 OWNER_EFFORT="$(printf '%s' "$CREDS" | sed -n 4p)"
 HAS_LOGIN="$(printf '%s' "$CREDS" | sed -n 5p)"
 
-# "pro" is the device's name for the Max plan — the only tier ClawBox AI lets
-# reach deepseek-v4-pro. Anything else (flash, free, unset) gets flash, which
-# every plan can use. The [1m] suffix selects the 1M-context variant.
-case "$TIER" in
-  pro) TIER_MODEL="deepseek-v4-pro[1m]" ;;
-  *)   TIER_MODEL="deepseek-v4-flash" ;;
-esac
+# Every plan runs the same model (TASK-2261): the plan (line 3 of the answer
+# above) no longer chooses one.
+TIER_MODEL="deepseek-v4-flash"
 
 # Claude Code does not know these model names, so on a plain `deepseek-v4-flash`
 # it warns once and assumes a 200k window for auto-compact. That warning is left

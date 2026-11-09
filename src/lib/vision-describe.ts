@@ -1,19 +1,21 @@
 /**
  * Text eyes for agents that cannot see.
  *
- * The coding-agent runs execute on DeepSeek models whose vision the ClawBox AI
- * proxy does not serve yet — an image block in a tool result reaches them as
- * "[Unsupported Image]" (measured on this box, 2026-08-27). The box DOES have
- * a working vision model: whatever resolveVisionModelId() answers (today the
- * legacy gpt-5.6-luna, DeepSeek's own the day the proxy allows it). So instead
- * of handing an agent pixels it cannot read, the browser route hands it this
- * module's written description of the pixels.
+ * A coding-agent run's harness hands an image block in a tool result to its
+ * model as "[Unsupported Image]" (measured on this box, 2026-08-27), whatever
+ * the model could do with it. So instead of handing an agent pixels it cannot
+ * read, the browser route hands it this module's written description of them —
+ * asked of the model the vision check names (src/lib/clawbox-ai-vision.ts):
+ * ClawBox AI's one model, `deepseek-v4-flash`, while it can see (TASK-2261),
+ * the vision fallback while it cannot, and nobody — said in words — when
+ * neither can.
  *
  * Failure is an answer, never an exception: an offline box or an unlinked
  * account returns { text: null, error } and the caller degrades to titles.
  */
 import { get as configGet } from "@/lib/config-store";
-import { clawboxAiProxyUrl, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
+import { clawboxAiVisionModelFor, probeClawboxAiVision, readClawboxAiVision } from "@/lib/clawbox-ai-vision";
 
 /**
  * The whole call's wall-clock budget, retry included. 60 s, not 30: the
@@ -27,11 +29,11 @@ import { clawboxAiProxyUrl, resolveVisionModelId } from "@/lib/clawbox-ai-vision
  * then asks the same question again.
  */
 export const DESCRIBE_TIMEOUT_MS = 60_000;
-// The completion budget must cover hidden REASONING as well as the answer:
-// gpt-5.6-luna is a reasoning model, and on a busy screenshot (a game board)
-// it spent an entire 500-token budget thinking and emitted zero content —
-// finish_reason "length", reasoning_tokens 500, content "" (measured on
-// run-0nxtbhb1, 2026-08-27). max_tokens is a ceiling, not a spend, so the
+// The completion budget must cover hidden REASONING as well as the answer: on
+// a busy screenshot (a game board) a reasoning vision model spent an entire
+// 500-token budget thinking and emitted zero content — finish_reason
+// "length", reasoning_tokens 500, content "" (measured on run-0nxtbhb1,
+// 2026-08-27). max_tokens is a ceiling, not a spend, so the
 // budget is simply set high enough for thought AND answer on the busiest
 // screens — a retry-with-more would re-upload and re-infer the whole image
 // (the expensive part) exactly on the screens that need the room.
@@ -57,10 +59,6 @@ export const MIN_RETRY_MS = 10_000;
 // on the same model string).
 const PROXY_FLAP_RE = /failed to authenticate|attention required|cloudflare|unrecognized_model/i;
 
-/** Re-ask the proxy which vision model this box may use at most this often. */
-const RESOLVE_TTL_MS = 10 * 60_000;
-let cachedModel: { id: string; at: number } | null = null;
-
 const DEFAULT_PROMPT =
   "Describe this screenshot of a web page for a developer who cannot see it. "
   + "Cover the overall layout, all visible text (verbatim when short), the colors actually used, "
@@ -72,6 +70,31 @@ const DEFAULT_PROMPT =
  * extension map from this and the artifacts store's inline-image table, so
  * "can be described" and "is served as an image" cannot drift apart.
  */
+/** Re-ask which model may look at a picture at most this often. */
+const RESOLVE_TTL_MS = 10 * 60_000;
+let cachedModel: { id: string | null; at: number } | null = null;
+
+/** What the describe route says when no ClawBox AI model can look at a picture. */
+export const NO_VISION_MODEL_ERROR = "ClawBox AI cannot look at pictures right now";
+
+async function visionModelId(token: string): Promise<string | null> {
+  if (cachedModel && Date.now() - cachedModel.at < RESOLVE_TTL_MS) return cachedModel.id;
+  const probe = await probeClawboxAiVision({ token });
+  // What pictures went to before — this process's last answer, else the
+  // box's recorded check — is what a check that could not be asked keeps.
+  const record = cachedModel ? null : await readClawboxAiVision();
+  const previous = cachedModel ? cachedModel.id : record?.model ?? null;
+  const keptNone = cachedModel ? cachedModel.id === null : record !== null && record.model === null;
+  const id = clawboxAiVisionModelFor(probe, previous, { keptNone });
+  cachedModel = { id, at: Date.now() };
+  return id;
+}
+
+/** Forget the cached answer (tests, and a link that just re-checked). */
+export function _resetVisionModelCacheForTests(): void {
+  cachedModel = null;
+}
+
 export const VISION_IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp"] as const;
 export type VisionImageMime = (typeof VISION_IMAGE_MIMES)[number];
 
@@ -97,13 +120,6 @@ export interface VisionDescription {
 /** One attempt's answer, plus whether asking again could change it. */
 interface Attempt extends VisionDescription {
   transient: boolean;
-}
-
-async function visionModelId(token: string): Promise<string> {
-  if (cachedModel && Date.now() - cachedModel.at < RESOLVE_TTL_MS) return cachedModel.id;
-  const resolved = await resolveVisionModelId({ token });
-  cachedModel = { id: resolved.id, at: Date.now() };
-  return resolved.id;
 }
 
 async function ask(
@@ -178,19 +194,15 @@ async function ask(
   }
 }
 
-/** Describe a PNG through the box's vision model. */
+/** Describe a PNG through ClawBox AI's model. */
 export async function describeImage(imageBase64: string, prompt: string = DEFAULT_PROMPT, mime: VisionImageMime = "image/png"): Promise<VisionDescription> {
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || !token.trim()) {
     return { text: null, error: "ClawBox AI is not connected on this device" };
   }
   const deadline = Date.now() + DESCRIBE_TIMEOUT_MS;
-  let model: string;
-  try {
-    model = await visionModelId(token.trim());
-  } catch {
-    return { text: null, error: "could not resolve a vision model" };
-  }
+  const model = await visionModelId(token.trim());
+  if (!model) return { text: null, error: NO_VISION_MODEL_ERROR };
   const attempts: VisionAttempt[] = [];
   const first = await ask(token.trim(), model, prompt, imageBase64, mime, Math.max(1, deadline - Date.now()), attempts);
   if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {

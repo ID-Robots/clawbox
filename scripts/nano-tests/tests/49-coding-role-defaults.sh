@@ -5,8 +5,7 @@
 #
 # A coding team's role with nothing stored for it starts on its own default
 # model (TASK-2217): the planner on the provider's best model, a worker and a
-# reviewer on its middle one; ClawBox AI on its flash tier for all three,
-# never the pro tier.
+# reviewer on its middle one; ClawBox AI on its one model for all three.
 #
 #   * The running server's answer — GET /setup-api/coding-agent/settings, the
 #     route the coding_settings_get tool reads — names that model for every

@@ -4,7 +4,6 @@ import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PLAN_UNPAID,
-  CLAWBOX_AI_PRO_MODEL_ID,
   normalizeClawboxAiPlanTier,
   normalizeClawboxAiTier,
   type ClawboxAiPlanTier,
@@ -58,24 +57,12 @@ const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
  * Only the compatibility path uses this. A portal that publishes the real list
  * always wins, and a portal that could not be reached gets no list at all.
  *
- * It reaches the Max id when EITHER reading of the response does, and that
- * "either" is load-bearing in both directions. The device stamp alone is what
- * the old badge rule used, and deriving the list from it reproduced TASK-691
- * through this very door: a Max subscriber whose box is stamped
- * `deviceTier: "flash"` — a state `mapPortalTier` preserves on purpose — would
- * get `["deepseek-v4-flash"]`, which the boot guard reads as a positive refusal
- * and WRITES his primary model down on. The plan alone would be the mirror
- * mistake: a box the portal stamped `"pro"` used to be allowed to run the Max
- * model under the old rule, and a compatibility path must not start refusing
- * something that used to work. So: the more permissive of the two.
+ * The one model, on every plan (TASK-2261): ClawBox AI serves DeepSeek V4.1
+ * Flash to Free, Pro and Max alike, so neither the device stamp nor the plan
+ * can widen or narrow it.
  */
-function allowedModelsForCompat(
-  deviceTier: ClawboxAiTier | null,
-  planTier: ClawboxAiTier | null,
-): string[] {
-  return deviceTier === "pro" || planTier === "pro"
-    ? [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]
-    : [CLAWBOX_AI_FLASH_MODEL_ID];
+function allowedModelsForCompat(): string[] {
+  return [CLAWBOX_AI_FLASH_MODEL_ID];
 }
 
 function normalizeProvider(provider: string | null): string | null {
@@ -128,7 +115,7 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
   const profileKeys = Object.keys(profiles);
   // Normalize both sides through normalizeProvider so the deepseek/clawai
   // alias collapses correctly. Without this, a primary model of
-  // `clawai/deepseek-v4-pro` (canonical) would never match a profile
+  // `clawai/deepseek-v4-flash` (canonical) would never match a profile
   // recorded under the wire-format `deepseek` provider, and we'd silently
   // fall back to profileKeys[0].
   const primaryProviderHint = normalizeProvider(model ? model.split("/")[0] : null);
@@ -270,7 +257,7 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
         // portal-ANSWERED branch does this — an unreachable portal stays null,
         // which is the whole point of the change.
         clawaiAllowedModels = lookup.allowedModels
-          ?? allowedModelsForCompat(lookup.tier, lookup.planTier);
+          ?? allowedModelsForCompat();
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale

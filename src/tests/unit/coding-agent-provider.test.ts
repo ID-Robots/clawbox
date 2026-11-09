@@ -448,14 +448,14 @@ describe("the run environment", () => {
 
   it("passes the run's model, and drops an inherited one on a provider that would not honour it", () => {
     const prev = process.env.CLAUDE_DS_MODEL;
-    process.env.CLAUDE_DS_MODEL = "deepseek-v4-pro[1m]";
+    process.env.CLAUDE_DS_MODEL = "deepseek-v4-flash[1m]";
     try {
       expect(buildRunEnv({ provider: "anthropic", model: "claude-sonnet-5" }).CLAUDE_DS_MODEL).toBe("claude-sonnet-5");
       // An Anthropic run with no model named must not inherit a DeepSeek one:
       // the model name would reach real Anthropic, which has never heard of it.
       expect(buildRunEnv({ provider: "anthropic" }).CLAUDE_DS_MODEL).toBeUndefined();
       // The ClawBox AI branch keeps the owner's own documented override.
-      expect(buildRunEnv({ provider: "clawbox-ai" }).CLAUDE_DS_MODEL).toBe("deepseek-v4-pro[1m]");
+      expect(buildRunEnv({ provider: "clawbox-ai" }).CLAUDE_DS_MODEL).toBe("deepseek-v4-flash[1m]");
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_DS_MODEL;
       else process.env.CLAUDE_DS_MODEL = prev;
@@ -464,7 +464,7 @@ describe("the run environment", () => {
 
   it("gives an OpenAI run the coding agent's own Codex home and none of the wrapper's knobs", () => {
     const saved = Object.fromEntries(["CLAUDE_DS_MODEL", "CLAUDE_DS_CONFIG_DIR", "CLAWBOX_AI_PROXY_URL"].map((k) => [k, process.env[k]]));
-    Object.assign(process.env, { CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]", CLAUDE_DS_CONFIG_DIR: "/srv/elsewhere", CLAWBOX_AI_PROXY_URL: "https://proxy.example.invalid" });
+    Object.assign(process.env, { CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", CLAUDE_DS_CONFIG_DIR: "/srv/elsewhere", CLAWBOX_AI_PROXY_URL: "https://proxy.example.invalid" });
     try {
       const env = buildRunEnv({ effort: "max", provider: "openai", model: "gpt-5.6-sol" });
       // Never ~/.codex: that is the gateway's ChatGPT sign-in.
@@ -498,7 +498,7 @@ describe("the run environment", () => {
     const saved = Object.fromEntries(["CLAUDE_DS_PROVIDER", "CLAUDE_DS_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"].map((k) => [k, process.env[k]]));
     Object.assign(process.env, {
       CLAUDE_DS_PROVIDER: "anthropic",
-      CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]",
+      CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]",
       ANTHROPIC_API_KEY: "server-env-anthropic-key",
       ANTHROPIC_AUTH_TOKEN: "server-env-proxy-token",
       ANTHROPIC_BASE_URL: "https://proxy.example.invalid",
@@ -508,7 +508,7 @@ describe("the run environment", () => {
       const worker = buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: null });
       const economyWorker = buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: "deepseek-v4-flash" });
       expect(planner).toMatchObject({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_MODEL: "claude-fable-5-1", CLAUDE_DS_EFFORT: "xhigh" });
-      expect(worker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]", CLAUDE_DS_EFFORT: "ultracode" });
+      expect(worker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", CLAUDE_DS_EFFORT: "ultracode" });
       expect(economyWorker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-flash" });
       for (const env of [planner, worker, economyWorker]) {
         expect(env.ANTHROPIC_API_KEY).toBeUndefined();

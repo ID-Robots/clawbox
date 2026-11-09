@@ -149,8 +149,8 @@ export const HERMES_PANEL_PROVIDERS: readonly HermesProviderDef[] = [
 // gives resolve_provider a value it cannot resolve, so it falls through to the
 // env / credential-pool order and may end up running the previously-saved
 // model id against a provider from a different namespace (this device's bare
-// clawai `deepseek-v4-pro` against OpenRouter, which spells it
-// `deepseek/deepseek-v4-pro`). It also silently erases a ClawBox AI selection.
+// clawai `deepseek-v4-flash` against OpenRouter, which spells it
+// `deepseek/deepseek-v4-flash`). It also silently erases a ClawBox AI selection.
 // The chat route still ACCEPTS the slug — there it means "omit --provider",
 // which is exactly right — and HERMES_AUTO_PROVIDER stays exported so a device
 // already configured that way keeps being handled rather than rejected.

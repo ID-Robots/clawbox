@@ -1372,7 +1372,7 @@ export async function POST(request: Request) {
     // --provider WITHOUT -m makes hermes fall back to config.yaml's
     // model.default, which belongs to the CONFIGURED provider. Overriding one
     // half of the pair would run provider A against provider B's model id (on
-    // this device: clawai's bare `deepseek-v4-pro` against anthropic).
+    // this device: clawai's bare `deepseek-v4-flash` against anthropic).
     if (
       wantsProvider
       && !rawModel

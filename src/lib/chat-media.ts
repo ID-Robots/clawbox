@@ -506,8 +506,12 @@ export function extractAudioAttachments(msg: unknown): string[] {
 // together is TASK-436: vision answered correctly about a photo that appeared
 // nowhere in the conversation.
 
-/** `[Attached file: /path]` as the composer writes it, one per line. */
-const ATTACHED_FILE_LINE_RE = /^\[Attached file:\s*([^\]]+)\]$/;
+/**
+ * `[Attached file: /path]` as the composer writes it, one per line — or
+ * `[Attached image: /path — <how to look at it>]`, the line a text-only chat
+ * model gets for a picture (TASK-2261, `attachmentLine`).
+ */
+const ATTACHED_FILE_LINE_RE = /^\[Attached (?:file|image):\s*([^\]]+?)(?:\s+—[^\]]*)?\]$/;
 
 /**
  * The display name for an attachment, from the path it was stored under.
@@ -556,7 +560,7 @@ function displayName(source: string): string {
 export function splitUserAttachments(
   raw: string,
 ): { text: string; images: string[]; files: string[] } {
-  if (!raw.includes("[Attached file:")) return { text: raw, images: [], files: [] };
+  if (!raw.includes("[Attached file:") && !raw.includes("[Attached image:")) return { text: raw, images: [], files: [] };
   const images: string[] = [];
   const files: string[] = [];
   const kept: string[] = [];

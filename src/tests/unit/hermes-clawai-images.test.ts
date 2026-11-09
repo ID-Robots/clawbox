@@ -26,6 +26,12 @@ const installMock = vi.hoisted(() => vi.fn());
 const drawsMock = vi.hoisted(() => vi.fn());
 const refreshMock = vi.hoisted(() => vi.fn());
 
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 // The two halves of "and then tell the RUNNING agent". The fact is mocked so a
 // case can say what the writes ended up meaning; the refresh is mocked because

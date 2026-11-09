@@ -80,6 +80,12 @@ export interface HarnessCapabilities {
    */
   readonly reasoningScope: "session" | "per-turn";
   readonly canAttachImages: boolean;
+  /**
+   * The chat model cannot see an attached picture itself and must look at it
+   * through a tool (OpenClaw's `view_image`); the turn says so beside the
+   * picture. Absent is "it sees, or this harness routes pictures itself".
+   */
+  readonly picturesViaTool?: boolean;
   readonly canAttachDocuments: boolean;
   readonly maxAttachmentsPerTurn: number;
   /** The composer's microphone. */

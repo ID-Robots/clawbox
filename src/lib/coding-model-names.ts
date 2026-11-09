@@ -14,10 +14,10 @@
  *
  * PURE, like coding-provider.ts: the settings panel imports it.
  */
+import { isRetiredClawboxAiChatModel } from "@/lib/clawbox-ai-retired-models";
+
 const NAMES: Readonly<Record<string, string>> = {
   "deepseek-v4-flash": "DeepSeek Flash",
-  // The Max plan's id, served by the same Flash model.
-  "deepseek-v4-pro": "DeepSeek Flash",
   "claude-opus-5-5": "Opus 5.5",
   "claude-fable-5-1": "Fable 5.1",
   "claude-opus-5": "Opus 5",
@@ -57,12 +57,14 @@ function prettify(base: string): string | null {
 /**
  * The short name of a model id, or the id itself for one this build has no
  * name for — a run recorded on a model added later still says what it ran on.
- * A context-window suffix the harness appends ("deepseek-v4-pro[1m]") is not
- * part of the model's name.
+ * A context-window suffix the harness appends ("deepseek-v4-flash[1m]") is not
+ * part of the model's name. A run recorded on a retired ClawBox AI id (the
+ * former Max-plan one, served by the same Flash model) reads as Flash.
  */
 export function codingModelName(id: string): string {
   const base = id.replace(/\[[^\]]*\]$/, "");
   if (Object.prototype.hasOwnProperty.call(NAMES, base)) return NAMES[base];
+  if (isRetiredClawboxAiChatModel(base, { bare: true })) return NAMES["deepseek-v4-flash"];
   return prettify(base) ?? id;
 }
 

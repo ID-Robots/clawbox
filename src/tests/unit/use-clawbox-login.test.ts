@@ -294,13 +294,13 @@ describe("useClawboxLogin", () => {
       provider: "clawai",
       clawaiConfigured: true,
       clawaiAccountTier: "pro",
-      clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v5"],
     })) as unknown as typeof fetch;
 
     const { result } = renderHook(() => useClawboxLogin(10));
     await waitFor(() => expect(result.current.loading).toBe(false));
     const first = result.current.allowedModels;
-    expect(first).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    expect(first).toEqual(["deepseek-v4-flash", "deepseek-v5"]);
 
     await waitFor(() => expect(vi.mocked(globalThis.fetch).mock.calls.length).toBeGreaterThan(2));
     expect(result.current.allowedModels).toBe(first);

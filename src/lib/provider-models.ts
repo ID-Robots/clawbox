@@ -61,8 +61,8 @@ import {
 // `gpt-audio` — and produces ZERO false failures: no text-output row matches
 // it. The two it misses are `openrouter/auto` and `openrouter/auto-beta`, which
 // the field-based rule deliberately keeps too. `vision` is NOT a family here
-// for the same measured reason: `deepseek/deepseek-v4-flash-vision-exp` is a
-// text-output chat model.
+// for the same measured reason: DeepSeek's own `…-vision-…` models are
+// text-output chat models.
 const NON_CHAT_MODEL_RE = new RegExp([
   "^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation|sora",
   "|davinci|babbage|codex-mini|imagen|veo|lyria)",
@@ -363,16 +363,11 @@ export const XAI_MODELS: readonly ProviderModelOption[] = [
  */
 export const XAI_DEFAULT_MODEL_ID = newestModelId("xai", XAI_MODELS) ?? XAI_MODELS[0].id;
 
-// ClawBox AI tiers — surfaced via the secondary model picker after
-// consolidating Flash/Pro into one "ClawBox AI" provider row in the
-// chat dropdown. Model ids are the upstream DeepSeek slugs since
-// the gateway forwards via the deepseek provider; the UI labels
-// match the subscription plans (Flash → "Pro plan", Pro → "Max plan")
-// so users see the same word on the device that they paid for. Both ids
-// are served by DeepSeek V4 Flash, and the hints say so.
+// ClawBox AI's one model — DeepSeek V4.1 Flash on every plan, for chat and
+// pictures alike (TASK-2261). The id is the upstream DeepSeek slug since the
+// gateway forwards via the deepseek provider.
 export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
-  { id: "deepseek-v4-flash", label: "Free/Pro Tier", hint: "DeepSeek V4 Flash. Default." },
-  { id: "deepseek-v4-pro", label: "Max Tier", hint: "DeepSeek V4 Flash. Max plan only." },
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", hint: "Every plan." },
 ] as const;
 
 // Provider IDs the live-catalog route knows how to fetch from upstream

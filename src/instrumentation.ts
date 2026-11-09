@@ -345,7 +345,9 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration, dropRemovedProjectsMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, dropRemovedProjectsMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration, clawboxAiOneModelMigration } = require('./lib/boot-migrations')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { EXPLICIT_MODEL_PICKS_KEY } = require('./lib/explicit-model-pick')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { migrateLegacyWebappStorage } = require('./lib/webapp-legacy-storage-migration')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -401,6 +403,16 @@ export async function register() {
         // Before any webapp is served: the record it writes is what lets the
         // webapps route put the legacy-storage layer in front of an old app.
         legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() }),
+        // ClawBox AI is one model (TASK-2261): the owner's remembered pick and
+        // Hermes' config.yaml move off the retired ids. openclaw.json is moved
+        // by scripts/gateway-pre-start.sh on every gateway start.
+        clawboxAiOneModelMigration({
+          get,
+          set,
+          picksKey: EXPLICIT_MODEL_PICKS_KEY,
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          migrateHermes: () => require('./lib/hermes-clawai').migrateRetiredClawaiModelsInHermes(),
+        }),
         // One browser profile for the owner and the assistant. BEFORE the
         // keeper below starts the browser: which profile survives depends on
         // whether the desktop one exists yet, and starting the browser is
@@ -412,6 +424,18 @@ export async function register() {
     if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
   } catch (err) {
     console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Can ClawBox AI's model still look at a picture? (TASK-2261) Upstream can
+    // take vision away from Flash, so a Hermes box asks at every start and
+    // moves `auxiliary.vision` to Flash, the fallback, or nothing. NOT awaited:
+    // it is a network round trip, and nothing on the box waits for it. The
+    // OpenClaw side is asked by scripts/gateway-pre-start.sh at gateway start.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { refreshClawaiVisionOnHermes } = require('./lib/hermes-clawai')
+    void refreshClawaiVisionOnHermes()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the ClawBox AI vision check:', err instanceof Error ? err.message : err)
   }
   if (onDeviceAccount) {
     try {

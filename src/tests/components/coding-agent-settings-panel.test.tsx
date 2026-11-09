@@ -13,6 +13,10 @@ import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers
 import { translations } from "@/lib/translations";
 import CodingAgentSettingsPanel from "@/components/CodingAgentSettingsPanel";
 import { CODING_AGENT_CHANGED_EVENT } from "@/lib/ui-events";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 // One stable `t`, as the real hook provides (it is memoised on the locale
 // table) — a fresh function per render would be a different contract.
@@ -1064,7 +1068,7 @@ describe("a team's model and effort per role", () => {
     await waitFor(() => expect(provider("planner").value).toBe("anthropic"));
     // Pinned, the model select offers that account's models and no tier.
     expect(texts(model("planner"))).toEqual([t("codingAgent.roleModel.autoForProvider"), "Opus 5.5", "Fable 5.1", "Opus 5", "Sonnet 5"]);
-    expect(values(model("planner"))).not.toContain("deepseek-v4-pro");
+    expect(values(model("planner"))).not.toContain(RETIRED_CHAT_ID);
 
     fireEvent.change(model("planner"), { target: { value: "claude-fable-5-1" } });
     await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { planner: { model: "claude-fable-5-1" } } } }));

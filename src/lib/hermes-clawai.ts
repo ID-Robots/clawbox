@@ -1,3 +1,4 @@
+import fs from "fs/promises";
 import { getKnown, setMany } from "@/lib/config-store";
 import {
   EXPLICIT_MODEL_PICKS_KEY,
@@ -26,13 +27,23 @@ import {
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
+  CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_MODEL_ID,
-  CLAWBOX_AI_MODEL_ID_BY_TIER,
-  CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
-import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import {
+  hermesSlotFlashTarget,
+  isRetiredClawboxAiModel,
+} from "@/lib/clawbox-ai-retired-models";
+import {
+  clawboxAiVisionModelFor,
+  clawboxAiVisionWasNone,
+  isClawboxAiVisionSlotOurs,
+  probeClawboxAiVision,
+  recordClawboxAiVision,
+} from "@/lib/clawbox-ai-vision";
+import { hermesConfigPath, patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import { clawaiRefusalState } from "@/lib/clawai-credential-refusal";
@@ -74,14 +85,12 @@ export const CLAWBOX_AI_PROXY_URL = (
   process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai"
 ).replace(/\/+$/, "");
 
-/** BARE model id (no `deepseek/` vendor prefix) — the proxy returns
- *  "HTTP 400: Model not allowed" for a prefixed slug. */
-export function clawaiModelForTier(tier: ClawboxAiTier): string {
-  // Total, as the ternary it replaced was: every caller normalises the tier
-  // first, but this value goes straight into `config set model.default` argv and
-  // an `undefined` there would be a broken write rather than a wrong one.
-  return CLAWBOX_AI_MODEL_ID_BY_TIER[tier] ?? CLAWBOX_AI_MODEL_ID_BY_TIER.flash;
-}
+/**
+ * The model a ClawBox AI link writes when the owner has not picked one: the
+ * one model, BARE (no `deepseek/` vendor prefix — the proxy returns "HTTP 400:
+ * Model not allowed" for a prefixed slug). Every plan runs it (TASK-2261).
+ */
+export const CLAWAI_DEFAULT_MODEL = CLAWBOX_AI_FLASH_MODEL_ID;
 
 export class ClawaiApplyError extends Error {}
 
@@ -174,7 +183,8 @@ export interface ApplyClawaiOptions {
  * Point Hermes at ClawBox AI and persist the device state.
  *
  * @param token device token minted by the portal (never logged, never echoed)
- * @param tier  device tier — decides which bare deepseek id becomes model.default
+ * @param tier  device tier — the plan badge stored beside the token; every
+ *              plan runs the one model, so it no longer chooses `model.default`
  * @param options see `ApplyClawaiOptions`
  */
 /**
@@ -231,7 +241,7 @@ export async function applyClawaiToHermes(
     : null;
   const clawaiDecision = decideClawboxAiModelId({
     picks: accountChanged ? {} : storedPicks,
-    tierModelId: clawaiModelForTier(tier),
+    tierModelId: CLAWAI_DEFAULT_MODEL,
   });
   if (clawaiDecision.explicit) {
     console.log(
@@ -266,24 +276,34 @@ export async function applyClawaiToHermes(
   // its two neighbours.
   const providersBefore = await readUsableProviderIds();
 
-  const vision = await resolveVisionModelId({ token: trimmed });
-  let visionModelId: string | null = vision.id;
-  if (vision.reason === "probe-failed") {
-    // The QUESTION failed — not a refusal. If the box already runs one of
-    // OUR vision ids, keep it: a bad network moment must not downgrade a
-    // box the proxy already upgraded. And when the current value cannot even
-    // be READ (as opposed to being unset), write nothing at all — an
-    // unreadable config is not an empty one.
-    const current = await runHermesCli(["config", "get", "auxiliary.vision.model"], { timeoutMs: 15_000 });
-    const listing = `${current.stdout ?? ""}\n${current.stderr ?? ""}`;
-    if (current.code === 0) {
-      const currentId = (current.stdout ?? "").trim();
-      if (currentId && isClawboxAiVisionId(currentId)) visionModelId = currentId;
-    } else if (!/config key not set/i.test(listing)) {
-      visionModelId = null;
+  // What looks at a picture: decided only for a slot that is ours to write
+  // (`readHermesVisionSlot`), by the vision check (src/lib/clawbox-ai-vision.ts)
+  // — Flash while it sees, the fallback while it does not, and nothing at all
+  // when neither does, which the chat then says plainly instead of accepting a
+  // picture nobody can read.
+  const visionSlot = await readHermesVisionSlot();
+  let visionSteps: string[][] = [];
+  if (visionSlot.state === "empty" || visionSlot.state === "ours") {
+    const vision = await probeClawboxAiVision({ token: trimmed, baseUrl: CLAWBOX_AI_PROXY_URL });
+    const visionModel = clawboxAiVisionModelFor(vision, visionSlot.state === "ours" ? visionSlot.model : null, {
+      keptNone: visionSlot.state === "empty" && (await clawboxAiVisionWasNone()),
+    });
+    await recordClawboxAiVision(vision, visionModel);
+    if (visionModel) {
+      visionSteps = [
+        ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
+        ["config", "set", "auxiliary.vision.model", visionModel],
+      ];
+    } else if (visionSlot.state === "ours") {
+      visionSteps = [
+        ["config", "unset", "auxiliary.vision.model"],
+        ["config", "unset", "auxiliary.vision.provider"],
+      ];
     }
+    console.log(`[Hermes ClawAI] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"}; ${(vision.why ?? []).join("; ")})`);
+  } else {
+    console.log(`[Hermes ClawAI] Vision left untouched (${visionSlot.state === "owner" ? "the owner's own model" : "the config could not be read"})`);
   }
-  console.log(`[Hermes ClawAI] Vision model ${visionModelId === null ? "left untouched (probe and read both failed)" : `resolved to ${visionModelId} (${vision.reason})`}`);
 
   const steps: string[][] = [
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
@@ -327,10 +347,10 @@ export async function applyClawaiToHermes(
     // description of itself. `agent/image_routing.py` runs in `auto` mode: it
     // attaches the image natively when the ACTIVE model reports
     // `supports_vision`, and otherwise routes it through `vision_analyze` using
-    // whatever `auxiliary.vision` names. The chat model here is a bare DeepSeek
-    // id, which is not vision-capable — so with `auxiliary.vision` unset there
-    // is no second model to fall back to and the user gets an answer about an
-    // image nobody looked at.
+    // whatever `auxiliary.vision` names. Hermes does not know the bare
+    // DeepSeek id here can see — so with `auxiliary.vision` unset there is no
+    // model to route the picture to and the user gets an answer about an image
+    // nobody looked at.
     //
     // Verified on the live box (2026-08-22): `hermes config get auxiliary`
     // reports the block exists with `vision: { provider: auto, model: '',
@@ -347,13 +367,12 @@ export async function applyClawaiToHermes(
     // This is the Hermes spelling of what `agents.defaults.imageModel` does on
     // the OpenClaw side — one capability, two harnesses, no second provider to
     // credential.
-    // Resolved, not assumed: the DeepSeek vision model when the proxy serves
-    // it, the previous one until then (src/lib/clawbox-ai-vision.ts) — and
-    // written not at all when neither the proxy nor the config would answer.
-    ...(visionModelId === null ? [] : [
-      ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
-      ["config", "set", "auxiliary.vision.model", visionModelId],
-    ]),
+    //
+    // The model the vision check chose (TASK-2261) — written when the slot is
+    // empty or names a model ClawBox put there, cleared when it is ours and no
+    // model can see, and not touched at all when the owner pointed it
+    // elsewhere or the config would not answer.
+    ...visionSteps,
     // ── Naming the session titler, for the same reason ──────────────────────
     //
     // `auxiliary.title_generation` ships as `provider: auto`, and auto is not a
@@ -656,6 +675,155 @@ const REPAIR_RETRY_MS = 60_000;
 const REPAIR_MAX_UNVERIFIED_WRITES = 3;
 
 /**
+ * Hermes' `auxiliary.vision` slot, as the link and the start-up check see it.
+ *
+ *   empty       not set, or Hermes' shipped `provider: auto, model: ''`
+ *   ours        `provider: clawai` and a model ClawBox wrote there (Flash, the
+ *               vision fallback, or an id it used to write)
+ *   owner       anything else — the owner's own choice for looking at the
+ *               pictures they send, never touched
+ *   unreadable  the config could not be READ (as opposed to the key not being
+ *               set): not an empty one, so nothing is written
+ *
+ * One `--json` read of the block. Its stdout can carry an `api_key`, so nothing
+ * from it is logged.
+ */
+async function readHermesVisionSlot(): Promise<
+  | { state: "empty" | "owner" | "unreadable" }
+  | { state: "ours"; model: string }
+> {
+  let read: HermesCliResult;
+  try {
+    read = await runHermesCli(["config", "get", "auxiliary.vision", "--json"], { timeoutMs: 15_000 });
+  } catch {
+    return { state: "unreadable" };
+  }
+  if (read.code !== 0) {
+    return /config key not set/i.test(`${read.stdout ?? ""}\n${read.stderr ?? ""}`)
+      ? { state: "empty" }
+      : { state: "unreadable" };
+  }
+  const raw = (read.stdout ?? "").trim();
+  if (!raw) return { state: "empty" };
+  let block: unknown;
+  try {
+    block = JSON.parse(raw);
+  } catch {
+    return { state: "unreadable" };
+  }
+  if (block === null) return { state: "empty" };
+  if (typeof block !== "object" || Array.isArray(block)) return { state: "owner" };
+  const { provider, model } = block as { provider?: unknown; model?: unknown };
+  const modelId = typeof model === "string" ? model.trim() : "";
+  if (!modelId) return { state: "empty" };
+  if (typeof provider !== "string" || provider.trim().toLowerCase() !== CLAWAI_PROVIDER) return { state: "owner" };
+  return isClawboxAiVisionSlotOurs(modelId, { bare: true }) ? { state: "ours", model: modelId } : { state: "owner" };
+}
+
+/**
+ * The vision check at box start, for a Hermes box (TASK-2261): ask whether
+ * Flash can see, record the answer, and move `auxiliary.vision` onto the model
+ * that can — or clear it when none can — when that slot is ours. Upstream can
+ * take vision away from Flash between two links; this is what catches it at
+ * the next start. Never throws: a box that cannot be asked keeps its slot.
+ */
+export async function refreshClawaiVisionOnHermes(): Promise<void> {
+  try {
+    const token = await getStoredClawaiToken();
+    if (!token) return;
+    try {
+      await fs.stat(hermesConfigPath());
+    } catch {
+      return;
+    }
+    const slot = await readHermesVisionSlot();
+    if (slot.state !== "empty" && slot.state !== "ours") return;
+    const vision = await probeClawboxAiVision({ token, baseUrl: CLAWBOX_AI_PROXY_URL });
+    const current = slot.state === "ours" ? slot.model : null;
+    const model = clawboxAiVisionModelFor(vision, current, {
+      keptNone: slot.state === "empty" && (await clawboxAiVisionWasNone()),
+    });
+    await recordClawboxAiVision(vision, model);
+    const why = (vision.why ?? []).join("; ");
+    if (model && current !== model) {
+      await patchHermesConfig({ set: { "auxiliary.vision.provider": CLAWAI_PROVIDER, "auxiliary.vision.model": model } });
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: pictures go to ${model} (${why})`);
+    } else if (!model && slot.state === "ours") {
+      await patchHermesConfig({ unset: ["auxiliary.vision.model", "auxiliary.vision.provider"] });
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: no ClawBox AI model can look at pictures right now (${why})`);
+    } else {
+      console.log(`[hermes/clawai] vision check ${vision.verdict}: pictures stay on ${model ?? "nothing"} (${why})`);
+    }
+  } catch (err) {
+    console.warn("[hermes/clawai] vision check failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * The one-model migration for a Hermes box (TASK-2261), run once at the first
+ * boot that carries it (src/lib/boot-migrations.ts) — a box that is never
+ * re-linked still names the retired ids its last link wrote.
+ *
+ * Moves `model.default` and the `auxiliary.{title_generation,compression}`
+ * models that name the retired Max-plan id under `provider: clawai` to Flash
+ * (one comment-preserving patch of config.yaml), and the `providers.clawai.models`
+ * list through the same repair the picker route runs. Anything else in those
+ * slots is the owner's and stays (src/lib/clawbox-ai-retired-models.ts). The
+ * picture slot, `auxiliary.vision`, is the vision check's: it runs at every
+ * start (src/lib/clawbox-ai-vision.ts).
+ *
+ * Answers whether it changed anything. THROWS when the config cannot be read
+ * or written, so the boot register leaves the migration unmarked and the next
+ * boot tries again.
+ */
+export async function migrateRetiredClawaiModelsInHermes(): Promise<boolean> {
+  // No config.yaml: no Hermes on this box, and nothing to move.
+  try {
+    await fs.stat(hermesConfigPath());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+    throw err;
+  }
+  // Literal keys, every one of them: scripts/harness-contract checks each key
+  // ClawBox reads or writes against the pinned Hermes, which it can only do
+  // for a key it can read off the source.
+  const reads = await Promise.all([
+    resolveHermesConfigValue("model.provider"),
+    resolveHermesConfigValue("model.default"),
+    resolveHermesConfigValue("auxiliary.title_generation.provider"),
+    resolveHermesConfigValue("auxiliary.title_generation.model"),
+    resolveHermesConfigValue("auxiliary.compression.provider"),
+    resolveHermesConfigValue("auxiliary.compression.model"),
+  ]);
+  if (reads.some((read) => read.state === "unreadable")) throw new Error("Hermes config could not be read");
+  const [modelProvider, modelDefault, titleProvider, titleModel, compressionProvider, compressionModel] = reads;
+  const target = (provider: typeof reads[number], model: typeof reads[number]) =>
+    provider.state === "value" && model.state === "value" ? hermesSlotFlashTarget(provider.value, model.value) : null;
+  const moved: string[] = [];
+  const defaultTarget = target(modelProvider, modelDefault);
+  if (defaultTarget) {
+    await patchHermesConfig({ set: { "model.default": defaultTarget } });
+    moved.push("model.default");
+  }
+  const titleTarget = target(titleProvider, titleModel);
+  if (titleTarget) {
+    await patchHermesConfig({ set: { "auxiliary.title_generation.model": titleTarget } });
+    moved.push("auxiliary.title_generation.model");
+  }
+  const compressionTarget = target(compressionProvider, compressionModel);
+  if (compressionTarget) {
+    await patchHermesConfig({ set: { "auxiliary.compression.model": compressionTarget } });
+    moved.push("auxiliary.compression.model");
+  }
+  if (moved.length > 0) console.log(`[hermes/clawai] moved ${moved.join(", ")} to ${CLAWAI_DEFAULT_MODEL}`);
+  // The picker list rides the repair that owns it: it reads the block, writes
+  // and verifies it (see `clawaiCatalogueVerdict`, which now also treats a
+  // retired id in the list as something to write over).
+  await reconcileClawaiModelsWithHermes();
+  return moved.length > 0;
+}
+
+/**
  * Declare the ClawBox AI catalogue on a box that was linked before this code
  * existed — once per process, and a no-op on every other device.
  *
@@ -955,7 +1123,7 @@ function handClawaiRepairBack(): void {
  *     honored above" (model_switch.py:3777), read on the installed build. With
  *     discovery off no probe runs, so even a mapping is exactly what the
  *     keyboard shows: that owner has NO symptom, and overwriting their pin with
- *     our flat two-id list would destroy per-model metadata to fix nothing.
+ *     our flat id list would destroy per-model metadata to fix nothing.
  *   - `models_discovered: true` marks a catalogue Hermes persisted for itself,
  *     which `_models_config_is_allowlist` refuses WHATEVER the shape (:136). Our
  *     list would be refused with it, so writing there would latch "repaired"
@@ -1057,8 +1225,8 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
     return { action: "leave", reason: "Hermes persisted this catalogue itself (models_discovered)" };
   }
   // A LIST STORED AS TEXT IS NOT A CATALOGUE — and it is the one broken shape
-  // Hermes reads as a perfectly good one. Ran on the installed 0.20.5 over the
-  // string `["deepseek-v4-flash","deepseek-v4-pro"]`: `_declared_model_ids`
+  // Hermes reads as a perfectly good one. Ran on the installed 0.20.5 over a
+  // two-id JSON list stored as a string: `_declared_model_ids`
   // (:61) yields ONE id, the whole literal, and `_models_config_is_allowlist`
   // (:136) says True. So the keyboard offers a single unusable entry and BOTH
   // "already declared" branches below walk away from it.
@@ -1071,6 +1239,14 @@ async function clawaiCatalogueVerdict(): Promise<ClawaiVerdict> {
   // string we just wrote and calls it declared — the guard would defeat itself.
   if (typeof row.models === "string" && looksLikeStructuredText(row.models)) {
     return { action: "write", overwriting: "a list Hermes stored as text" };
+  }
+  // A LIST NAMING A RETIRED CLAWBOX AI ID IS OURS (TASK-2261): every link
+  // before the one model declared the former Max-plan id here, so a box that is
+  // never re-linked would go on offering it. Ahead of the pin below, because a
+  // `discover_models: false` beside OUR old list pins nothing the owner chose.
+  const declared = Array.isArray(row.models) ? row.models : typeof row.models === "string" ? [row.models] : [];
+  if (declared.some((id) => isRetiredClawboxAiModel(id, { bare: true }))) {
+    return { action: "write", overwriting: "a retired ClawBox AI model" };
   }
   // A PIN THAT PINS NOTHING IS NOT A PIN. `discover_models: false` only protects
   // something if there is something to protect: with discovery off Hermes runs

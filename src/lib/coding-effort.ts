@@ -28,7 +28,8 @@ export type CodingEffort = (typeof EFFORT_LEVELS)[number];
 /**
  * The levels the app offers, as opposed to the ones the CLI accepts.
  *
- * Measured on this box, same prompt, deepseek-v4-pro[1m], reasoning tokens:
+ * Measured on this box, same prompt, ClawBox AI's Flash model with the 1M
+ * window, reasoning tokens:
  *
  *     low 82   medium 94   high 102   xhigh 139   max 414
  *

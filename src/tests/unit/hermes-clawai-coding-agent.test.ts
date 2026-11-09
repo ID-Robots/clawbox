@@ -28,8 +28,13 @@ const drawsMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
 const rpcMock = vi.hoisted(() => vi.fn());
 const bounceMock = vi.hoisted(() => vi.fn());
-const resolveVisionMock = vi.hoisted(() => vi.fn());
 
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
 // `getKnown` too: the link reads the owner's explicit model picks before
@@ -52,10 +57,6 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: resolveVisionMock,
-}));
 // The coding-agent module owns a runs store keyed off DATA_DIR; only its verdict
 // is wanted here, and `checkReadiness` has its own suite.
 const clearFaultMock = vi.hoisted(() => vi.fn(async () => undefined));
@@ -69,7 +70,6 @@ vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: bounceMock }));
 
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
-import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 
 /** How many GLOBAL MCP respawns this link asked the agent for. */
 function reloadCount(): number {
@@ -98,14 +98,8 @@ beforeEach(() => {
   statusMock.mockReset();
   rpcMock.mockReset();
   bounceMock.mockReset();
-  resolveVisionMock.mockReset();
   clearFaultMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-  resolveVisionMock.mockResolvedValue({
-    id: CLAWBOX_AI_VISION_MODEL_ID,
-    verified: true,
-    reason: "proxy-allows",
-  });
   bounceMock.mockResolvedValue("restarted");
   // The running agent answers every probe happily, so nothing below is a bounce.
   rpcMock.mockImplementation(async (method: string) =>
