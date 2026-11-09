@@ -72,7 +72,7 @@ beforeEach(() => {
   fs.chmodSync(path.join(home, "fake-bun"), 0o755);
   fs.writeFileSync(path.join(home, "fake-hermes"), "#!/usr/bin/env bash\nexit 0\n");
   fs.chmodSync(path.join(home, "fake-hermes"), 0o755);
-  fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n  provider: clawai\n");
+  fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n  provider: clawai\n");
 });
 
 afterEach(() => {

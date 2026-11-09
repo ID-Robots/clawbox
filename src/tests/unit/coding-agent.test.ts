@@ -1938,7 +1938,7 @@ describe("counting sub-agents", () => {
     const A = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 1_000, output_tokens: 0 }, content: [{ type: "text", text: "hi" }] } });
     const RESULT_HIGH = JSON.stringify({
       type: "result", subtype: "success", num_turns: 1, result: "done",
-      modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 1_000, outputTokens: 50, cacheReadInputTokens: 20_000 }, "deepseek-v4-flash": { inputTokens: 3_000, outputTokens: 200, cacheReadInputTokens: 9_000 } },
+      modelUsage: { "deepseek-v4-flash[1m]": { inputTokens: 1_000, outputTokens: 50, cacheReadInputTokens: 20_000 }, "deepseek-v4-flash": { inputTokens: 3_000, outputTokens: 200, cacheReadInputTokens: 9_000 } },
     });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_HIGH}'`, "exit 0"].join("\n"));
     makeProject("site");
@@ -1946,9 +1946,9 @@ describe("counting sub-agents", () => {
     expect(run.tokensUsed).toBe(33_250);
     // Raised by category to the process's modelUsage, every model summed.
     expect(run.tokenBreakdown).toEqual({ input: 4_000, output: 250, cacheCreation: 0, cacheRead: 29_000 });
-    expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-pro[1m]"]);
+    expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-flash[1m]"]);
 
-    const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 10 } } });
+    const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-flash[1m]": { inputTokens: 10 } } });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_LOW}'`, "exit 0"].join("\n"));
     run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(1_000);

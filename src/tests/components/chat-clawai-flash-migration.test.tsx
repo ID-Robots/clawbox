@@ -5,6 +5,10 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { translations } from "@/lib/translations";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
 // the transcript — costs seconds under a full parallel run, and a case does it
@@ -42,7 +46,7 @@ const OPENAI_OPTION = {
   provider: "openai",
 };
 
-function modelState(activeModel = "deepseek/deepseek-v4-pro", needsFlashModelMigration = false) {
+function modelState(activeModel = `deepseek/${RETIRED_CHAT_ID}`, needsFlashModelMigration = false) {
   const activeOption = activeModel.startsWith("openai/") ? OPENAI_OPTION : FLASH_OPTION;
   return {
     activeOptionId: activeOption.id,
@@ -63,7 +67,7 @@ function installFetch({
   sessionUser = { username: "clawbox", isOwner: true, multiUser: false, openclawShared: false } as unknown,
   statusResponder = async () => ({ ok: true, json: async () => ({}) }),
   modelPostResponder = async () => ({ ok: true, json: async () => modelState(FLASH_MODEL) }),
-  activeModel = "deepseek/deepseek-v4-pro",
+  activeModel = `deepseek/${RETIRED_CHAT_ID}`,
   needsFlashModelMigration = false,
 }: {
   /** /setup-api/users/me's answer; null for one that could not be had. */
@@ -143,7 +147,7 @@ afterEach(() => {
 
 describe("ClawBox AI chat's automatic Flash migration", () => {
   it.each([
-    ["Max account", { clawaiTier: "pro", clawaiAccountTier: "pro", clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"] }],
+    ["Max account", { clawaiTier: "pro", clawaiAccountTier: "pro", clawaiAllowedModels: ["deepseek-v4-flash", RETIRED_CHAT_ID] }],
     ["Flash account", { clawaiTier: "flash", clawaiAccountTier: "flash", clawaiAllowedModels: ["deepseek-v4-flash"] }],
     ["unknown subscription", {}],
   ])("uses Flash for a %s without checking entitlement", async (_label, status) => {
@@ -164,7 +168,7 @@ describe("ClawBox AI chat's automatic Flash migration", () => {
   });
 
   it("migrates through the legacy clawai provider spelling", async () => {
-    const calls = installFetch({ activeModel: "clawai/deepseek-v4-pro" });
+    const calls = installFetch({ activeModel: `clawai/${RETIRED_CHAT_ID}` });
     render(<ChatPopup isOpen onClose={() => {}} />);
     await settle(calls);
 
@@ -192,7 +196,7 @@ describe("ClawBox AI chat's automatic Flash migration", () => {
 
   it("never moves the box's model from another user's chat — their first desktop load moved the owner's", async () => {
     const calls = installFetch({
-      activeModel: "deepseek/deepseek-v4-pro",
+      activeModel: `deepseek/${RETIRED_CHAT_ID}`,
       sessionUser: { username: "alice", isOwner: false, multiUser: true, openclawShared: false },
     });
     render(<ChatPopup isOpen onClose={() => {}} chatUser="alice" />);
@@ -205,7 +209,7 @@ describe("ClawBox AI chat's automatic Flash migration", () => {
   });
 
   it("does not move it either while nobody has said who is signed in", async () => {
-    const calls = installFetch({ activeModel: "deepseek/deepseek-v4-pro", sessionUser: null });
+    const calls = installFetch({ activeModel: `deepseek/${RETIRED_CHAT_ID}`, sessionUser: null });
     render(<ChatPopup isOpen onClose={() => {}} />);
     await settle(calls);
 

@@ -596,7 +596,7 @@ import {
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
-import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_CHAT_MODEL_LABEL, isClawboxAiProvider } from '@/lib/clawbox-ai-models'
+import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_CHAT_MODEL, CLAWBOX_AI_CHAT_MODEL_LABEL, isClawboxAiProvider } from '@/lib/clawbox-ai-models'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
@@ -2716,7 +2716,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (wireLevel === null) return
     // Reconcile legacy Pro session pins even when the device default is
     // already Flash. The gateway owns this write and preserves the transcript.
-    const model = isClawboxAiChat ? CLAWBOX_AI_MODEL_BY_TIER.flash : undefined
+    const model = isClawboxAiChat ? CLAWBOX_AI_CHAT_MODEL : undefined
     const wireValue = `${wireLevel}:${model ?? ''}`
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
@@ -7028,7 +7028,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (!ownerConfirmed) return
     if (!harnessLoaded || harnessId !== 'openclaw') return
     const active = chatModelState?.activeModel
-    if (!isClawboxAiChat || (active === CLAWBOX_AI_MODEL_BY_TIER.flash && !chatModelState?.needsFlashModelMigration)) {
+    if (!isClawboxAiChat || (active === CLAWBOX_AI_CHAT_MODEL && !chatModelState?.needsFlashModelMigration)) {
       flashModelAttemptRef.current = null
       return
     }
@@ -7036,7 +7036,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (switchingModel || flashModelAttemptRef.current === active) return
     flashModelAttemptRef.current = active
     void switchChatModel({
-      model: CLAWBOX_AI_MODEL_BY_TIER.flash,
+      model: CLAWBOX_AI_CHAT_MODEL,
       label: CLAWBOX_AI_CHAT_MODEL_LABEL,
       automatic: true,
     })

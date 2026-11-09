@@ -29,6 +29,10 @@ import {
 } from "@/lib/coding-role-models";
 import { ANTHROPIC_MODELS, CODING_PROVIDERS, DEFAULT_ANTHROPIC_MODEL, ECONOMY_MODELS, economyModelForProvider, isRecordableModel, OPENAI_MODELS } from "@/lib/coding-provider";
 import { EFFORT_LEVELS } from "@/lib/coding-agent";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 describe("the vocabulary", () => {
   it("restates the runner's effort levels, weakest first, exactly", () => {
@@ -45,7 +49,7 @@ describe("the vocabulary", () => {
 
   it("lets a ClawBox AI record carry its economy model and nothing else", () => {
     expect(isRecordableModel("clawbox-ai", "deepseek-v4-flash")).toBe(true);
-    expect(isRecordableModel("clawbox-ai", "deepseek-v4-pro[1m]")).toBe(false);
+    expect(isRecordableModel("clawbox-ai", `${RETIRED_CHAT_ID}[1m]`)).toBe(false);
     expect(isRecordableModel("clawbox-ai", "claude-opus-5-5")).toBe(false);
     expect(isRecordableModel("anthropic", "claude-opus-5")).toBe(true);
     expect(isRecordableModel("anthropic", "claude-fable-5-1")).toBe(true);
@@ -99,7 +103,7 @@ describe("the models a role may name", () => {
   it("never offers the Max-plan-only pro tier, under any spelling", () => {
     for (const provider of CODING_PROVIDERS) {
       expect(roleModelOptions(provider).some((m) => m.includes("pro"))).toBe(false);
-      expect(isRoleModelId(provider, "deepseek-v4-pro")).toBe(false);
+      expect(isRoleModelId(provider, RETIRED_CHAT_ID)).toBe(false);
     }
   });
 
@@ -387,7 +391,7 @@ describe("the owner's edits", () => {
       { planner: { provider: "anthropic", model: "deepseek-v4-flash" } },
       { planner: { provider: "openai", model: "claude-opus-5-5" } },
       { planner: { provider: "anthropic", model: "gpt-6-astra" } },
-      { reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      { reviewer: { provider: "clawbox-ai", model: RETIRED_CHAT_ID } },
       { planner: { provider: ROLE_AUTO, model: "claude-opus-5-5" } },
       // A model id with no provider anywhere.
       { worker: { model: "claude-fable-5-1" } },
@@ -421,7 +425,7 @@ describe("the owner's edits", () => {
     // the provider the owner chose stays.
     expect(roleModelsFrom({
       planner: { model: "claude-fable-5-1" },
-      reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro", effort: "high" },
+      reviewer: { provider: "clawbox-ai", model: RETIRED_CHAT_ID, effort: "high" },
       worker: { provider: "openai", model: "gpt-5" },
       // A role until 2026-10-30: a choice stored for it goes whole.
       bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },

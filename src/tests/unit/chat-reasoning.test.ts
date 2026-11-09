@@ -15,6 +15,10 @@ import {
   SAFE_THINKING_LEVEL,
   type ThinkingLevel,
 } from "@/lib/chat-reasoning";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 describe("chat-reasoning", () => {
   describe("getProviderReasoningConfig", () => {
@@ -74,7 +78,7 @@ describe("chat-reasoning", () => {
   });
 
   describe("ClawBox AI legacy aliases serving DeepSeek V4 Flash", () => {
-    const PRO = "deepseek/deepseek-v4-pro";
+    const PRO = `deepseek/${RETIRED_CHAT_ID}`;
     const FLASH = "deepseek/deepseek-v4-flash";
 
     afterEach(() => {
@@ -82,7 +86,7 @@ describe("chat-reasoning", () => {
     });
 
     it.each(["clawai", "deepseek"])("defaults both legacy aliases to medium under %s", (provider) => {
-      for (const model of [PRO, FLASH, "clawai/deepseek-v4-pro", "clawai/deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash"]) {
+      for (const model of [PRO, FLASH, `clawai/${RETIRED_CHAT_ID}`, "clawai/deepseek-v4-flash", RETIRED_CHAT_ID, "deepseek-v4-flash"]) {
         expect(getProviderReasoningConfig(provider, model).default).toBe("medium");
       }
     });

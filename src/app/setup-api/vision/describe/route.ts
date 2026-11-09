@@ -59,7 +59,7 @@ async function allowedRoots(request: Request, requestedRunId?: string): Promise<
 
 /**
  * POST { path, prompt? } → { description, error } — a written description of a
- * local image file, through the box's vision model.
+ * local image file, through ClawBox AI's model (it looks at pictures itself).
  *
  * Exists because the coding-agent run models are image-blind: the browser
  * tools describe what the BROWSER is showing, but a run that saved a frame of

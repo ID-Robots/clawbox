@@ -201,19 +201,19 @@ describe("the hero — what is answering right now", () => {
 
   it("names the model the BOX is paired with, not the one the tier implies", async () => {
     // Caught on a live box. ClawBox AI derives its model from the stored tier,
-    // so a Pro account reports `deepseek-v4-pro` — while the pairing a bare
+    // so an account could report a stale id — while the pairing a bare
     // "make default" had just written said `deepseek-v4-flash`. Both values are
     // real; only the pairing is what the box will actually run, and naming that
     // one is the hero's entire claim.
     pairing = { provider: "clawai", current: "deepseek-v4-flash" };
-    clawaiModel = "deepseek-v4-pro";
+    clawaiModel = "a-stale-model-id";
     render(<HermesProviderConfig embedded testId="hermes-ai" />);
 
     const card = await screen.findByTestId("provider-default-hero");
     await waitFor(() => {
       expect(within(card).getByText("deepseek-v4-flash")).toBeInTheDocument();
     });
-    expect(within(card).queryByText("deepseek-v4-pro")).toBeNull();
+    expect(within(card).queryByText("a-stale-model-id")).toBeNull();
   });
 
   it("stays away entirely until the box has a default at all", async () => {

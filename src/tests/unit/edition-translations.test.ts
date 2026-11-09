@@ -17,6 +17,7 @@ import { usersEn } from "@/lib/edition-translations/en-users";
 import { dbMaintenanceEn } from "@/lib/edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
+import { updateNoticeEn } from "@/lib/edition-translations/en-update-notice";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -93,6 +94,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // itself, which the server words in the box's language: an owner who cannot
   // read "failed 3 times in a row" has not been warned.
   { name: "Scheduled job alerts", matches: (k) => k.startsWith("jobAlerts.") },
+  // Settings → System Update → Weekly update check (TASK-2260), and the
+  // notice itself — the Telegram message, its button and the replies to
+  // /update — which the server words in the box's language.
+  { name: "Weekly update check", matches: (k) => k.startsWith("updateNotice.") },
 ];
 
 /**
@@ -179,6 +184,7 @@ describe("edition-translations (TASK-458)", () => {
       ["dbMaintenanceEn", dbMaintenanceEn, (k) => k.startsWith("dbMaintenance.")],
       ["modelAvailabilityEn", modelAvailabilityEn, (k) => k.startsWith("chat.modelUnavailable")],
       ["jobAlertsEn", jobAlertsEn, (k) => k.startsWith("jobAlerts.")],
+      ["updateNoticeEn", updateNoticeEn, (k) => k.startsWith("updateNotice.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

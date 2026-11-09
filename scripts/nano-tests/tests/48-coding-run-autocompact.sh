@@ -5,7 +5,7 @@
 #
 # A ClawBox AI coding session on a 1M-window model must COMPACT before the
 # provider's hard cap, not die on it (TASK-2203). The field failure: a run on
-# `deepseek-v4-pro[1m]` climbed to 1,016,260 tokens without one
+# a `[1m]` model id climbed to 1,016,260 tokens without one
 # compact_boundary, and the next request was refused with DeepSeek's own 400
 # ("This model's maximum context length is 1048576 tokens. However, you
 # requested …") — a wording Claude Code does not read as "prompt too long", so
@@ -17,14 +17,13 @@
 #   1. What the box runs: the Claude Code version, the plan tier, and the
 #      environment claude-ds hands Claude Code for a [1m] and a 200k model
 #      (a stand-in `claude` first on PATH records it).
-#   2. What the proxy really serves behind each model id, asked in 16 tokens.
-#      (Its window is in the refusal itself: 1,048,576 for both ids, measured on
-#      the first run of this test — a max_tokens past the window is clamped,
-#      not refused, so it cannot be asked for free.)
-#   3. A scripted claude-ds session on `deepseek-v4-flash[1m]` — the cheap id
-#      every plan may use, believed 1M by Claude Code exactly like the Max
-#      plan's pro[1m] — reading ~20k-token files until its context passes the
-#      cap. It must compact (compact_boundary, trigger auto, above 200k so the
+#   2. What the proxy really serves behind the model id, asked in 16 tokens.
+#      (Its window is in the refusal itself: 1,048,576, measured on the first
+#      run of this test — a max_tokens past the window is clamped, not refused,
+#      so it cannot be asked for free.)
+#   3. A scripted claude-ds session on `deepseek-v4-flash[1m]` — ClawBox AI's
+#      one model, every plan's (TASK-2261), believed 1M by Claude Code —
+#      reading ~20k-token files until its context passes the cap. It must compact (compact_boundary, trigger auto, above 200k so the
 #      climb went past where a 200k window compacts) and finish.
 #   4. The same climb as a delegated run through the assistant's routes, on
 #      whatever model the plan gives this box. It must complete; on a 1M model
@@ -114,7 +113,7 @@ PROBE=$(board '
   esac
   token=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"clawai_token\") or \"\")" "$REPO/data/config.json" 2>/dev/null)
   [ -n "$token" ] || { echo "no ClawBox AI token on this board"; exit 0; }
-  for m in deepseek-v4-flash deepseek-v4-pro; do
+  for m in deepseek-v4-flash; do
     body="{\"model\":\"$m\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}]}"
     out=$(printf "header = \"Authorization: Bearer %s\"\n" "$token" \
       | curl -sS --max-time 60 -K - -H "content-type: application/json" -H "anthropic-version: 2023-06-01" \
@@ -238,9 +237,10 @@ if [ "$API_STATUS" != 200 ] || [ "$(api_json '.ready')" != true ]; then
   PROJECT_DIR=
   cleanup_and_finish
 fi
-# On a 200k model a third of the files already means two compactions.
-RUN_FILES=$FILES
-[ "$TIER" = pro ] || RUN_FILES=24
+# Every plan's delegated runs are on `deepseek-v4-flash`, which Claude Code
+# treats as a 200k model; there a third of the files already means two
+# compactions.
+RUN_FILES=24
 PROJECT_DIR=
 if ! fresh_project_dir "-autocompact-run"; then
   not_ok "could not create $PROJECT_DIR on the board"
@@ -269,8 +269,8 @@ if [ -n "$SESSION" ]; then
   note "run transcript: $RUN"
   r_auto=$(printf '%s' "$RUN" | jq -r '[.compactions[]? | select(.trigger == "auto")] | length')
   r_peak=$(printf '%s' "$RUN" | jq -r '.peak // 0')
-  # On a 200k model (any plan below Max) the compactions are the old
-  # behaviour, kept; either way a run that read its files compacted.
+  # On a 200k model the compactions are the old behaviour, kept; either way a
+  # run that read its files compacted.
   if [ "${r_auto:-0}" -ge 1 ]; then ok "the delegated run compacted on plan tier ${TIER:-unknown} ($r_auto time(s), peak $r_peak tokens)"
   else not_ok "the delegated run never compacted on plan tier ${TIER:-unknown} (peak $r_peak tokens)"; fi
 else

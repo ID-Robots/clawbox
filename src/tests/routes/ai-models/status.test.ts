@@ -210,7 +210,7 @@ describe("/setup-api/ai-models/status", () => {
       // Local picker says Pro (flash) — portal will say Max (pro). Portal wins.
       mockGetConfigValue.mockResolvedValue("flash");
       fetchSpy.mockResolvedValue(new Response(
-        JSON.stringify({ tier: "max", deviceTier: "pro", allowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"] }),
+        JSON.stringify({ tier: "max", deviceTier: "pro", allowedModels: ["deepseek-v4-flash", "deepseek-v5"] }),
         { status: 200 },
       ));
 
@@ -782,7 +782,7 @@ describe("/setup-api/ai-models/status", () => {
         JSON.stringify({
           tier: "max",
           deviceTier: "flash",
-          allowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+          allowedModels: ["deepseek-v4-flash", "deepseek-v5"],
         }),
         { status: 200 },
       ));
@@ -790,7 +790,7 @@ describe("/setup-api/ai-models/status", () => {
       const body = await (await GET()).json();
 
       expect(body.clawaiAccountTier).toBe("flash");
-      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v5"]);
     });
 
     it("fills the list from the badge when the portal answered without one", async () => {
@@ -810,13 +810,10 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash"]);
     });
 
-    it("keeps the Max id in that fallback when the PLAN is Max and only the device stamp is Flash", async () => {
-      // TASK-691, reached through the compatibility door. `mapPortalTier`
-      // prefers `deviceTier` on purpose, so deriving the fallback list from the
-      // badge alone gave a Max subscriber `["deepseek-v4-flash"]` — which the
-      // boot guard reads as a POSITIVE refusal and writes his primary model
-      // down on, under a message telling him to buy the plan he already has.
-      // The plan is what an entitlement may be read from.
+    it("fills the one model into that fallback on every plan, Max included (TASK-2261)", async () => {
+      // `mapPortalTier` prefers `deviceTier` on purpose, so a Max subscriber's
+      // box can be badged Flash; the list it falls back to is the same either
+      // way, because every plan runs the one model.
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("flash");
       fetchSpy.mockResolvedValue(new Response(
@@ -828,7 +825,7 @@ describe("/setup-api/ai-models/status", () => {
 
       // The BADGE still follows the device stamp — that is its job.
       expect(body.clawaiAccountTier).toBe("flash");
-      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash"]);
     });
 
     it("says null — not an empty list — when the portal could not be asked", async () => {
@@ -1147,7 +1144,7 @@ describe("/setup-api/ai-models/status", () => {
             "deepseek:default": { provider: "deepseek", mode: "api_key" },
           },
         },
-        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
         models: { providers: { deepseek: { apiKey: "claw_test789" } } },
       } as never);
       mockGetConfigValue.mockResolvedValue("pro");

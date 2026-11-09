@@ -35,6 +35,7 @@ import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { createSerialLock } from "@/lib/serial-lock";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
+import { isRetiredClawboxAiModel } from "@/lib/clawbox-ai-retired-models";
 import { pickedClawboxAiModelIdAmong, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import {
   CLAWAI_PROVIDER,
@@ -58,9 +59,9 @@ export const MODEL_ID_RE = HERMES_MODEL_ID_RE;
 export const isSafeModelId = isSafeHermesModelId;
 
 /**
- * The ids we have *proven* route on this hardware — ClawBox AI's two tier
- * models (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the
- * proxy). Used twice:
+ * The ids we have *proven* route on this hardware — ClawBox AI's one model
+ * (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the proxy).
+ * Used twice:
  *   1. cold start — a factory device with no dashboard and no catalog on disk;
  *   2. to seed the ClawBox AI row (see normalizeRow), for a box whose Hermes
  *      config does not declare them yet.
@@ -552,6 +553,9 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
       ? entry.trim()
       : asString((entry as { id?: unknown })?.id);
     if (!isSafeModelId(modelId) || seen.has(modelId)) continue;
+    // A retired ClawBox AI id (TASK-2261) is never offered, whatever list
+    // Hermes still holds — a box not yet migrated, a stale catalogue cache.
+    if (id === CLAWAI_PROVIDER && isRetiredClawboxAiModel(modelId, { bare: true })) continue;
     seen.add(modelId);
     const pricing = normalizePricing(pricingMap[modelId]);
     models.push({
@@ -577,8 +581,8 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
   //
   // ONLY when the row is EMPTY, which is what "fallback" has to mean in code:
   // if Hermes ever reports a non-empty clawai list that differs from ours (a
-  // renamed tier id, or the proxy starting to speak the OpenAI envelope with a
-  // different set), topping it up would show the live ids PLUS two stale ones —
+  // renamed id, or the proxy starting to speak the OpenAI envelope with a
+  // different set), topping it up would show the live ids PLUS a stale one —
   // the provider/model mismatch this module exists to prevent.
   if (id === CLAWAI_PROVIDER && models.length === 0) {
     for (const known of COLD_START_MODELS[CLAWAI_PROVIDER] ?? []) {
@@ -708,6 +712,8 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
     for (const m of entry?.models ?? []) {
       const id = asString(m?.id);
       if (!isSafeModelId(id) || seen.has(id)) continue;
+      // Same rule as the live row: a retired ClawBox AI id is never offered.
+      if (slug === CLAWAI_PROVIDER && isRetiredClawboxAiModel(id, { bare: true })) continue;
       seen.add(id);
       models.push({ id, description: asString(m?.description) });
     }
@@ -1282,8 +1288,8 @@ function rowFor(payload: ModelOptionsPayload, provider: string): HermesProviderR
  * This used to union EVERY authenticated row's ids, which re-opened the exact
  * cross-vendor mismatch this module exists to close: on this device that union
  * is OpenRouter's vendor-prefixed slugs ("anthropic/claude-opus-5") next to
- * clawai's BARE "deepseek-v4-pro" and moa's literal "default". `isPairAllowed`
- * blessed any member, so `{provider:"auto", model:"deepseek-v4-pro"}` was
+ * clawai's BARE "deepseek-v4-flash" and moa's literal "default". `isPairAllowed`
+ * blessed any member, so `{provider:"auto", model:"deepseek-v4-flash"}` was
  * persistable — and whichever concrete provider hermes then resolved "auto" to
  * could not serve the other namespace's id.
  *

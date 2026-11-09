@@ -85,7 +85,7 @@ let binDir: string;
 let projectDir: string;
 let restore: () => void;
 
-const INIT = '{"type":"system","subtype":"init","session_id":"sess-reset-1","model":"deepseek-v4-pro","permissionMode":"acceptEdits"}';
+const INIT = '{"type":"system","subtype":"init","session_id":"sess-reset-1","model":"deepseek-v4-flash","permissionMode":"acceptEdits"}';
 
 function okResult(text = "Done."): string {
   return JSON.stringify({ type: "result", subtype: "success", is_error: false, result: text, num_turns: 1 });

@@ -245,7 +245,8 @@ EMAIL_HOOK_DST="$HERMES_PLUGINS_DIR/$EMAIL_HOOK_PLUGIN"
 EMAIL_HOOK_INSTALLED=0
 
 if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] \
-  && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ] && [ -f "$EMAIL_HOOK_SRC/approvals.py" ]; then
+  && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ] && [ -f "$EMAIL_HOOK_SRC/approvals.py" ] \
+  && [ -f "$EMAIL_HOOK_SRC/update_commands.py" ]; then
   # THE SOURCES ARE READ BEFORE ANYTHING ON DISK IS TOUCHED, exactly as the
   # OpenClaw twin does it (gateway-pre-start.sh). `cp` opens its source first
   # and leaves the destination alone when that open fails, so a source-side
@@ -254,13 +255,15 @@ if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] 
   # question here is what lets the failure branch below know which state the box
   # is in.
   if ! cat "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
-           "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_SRC/approvals.py" >/dev/null 2>&1; then
+           "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_SRC/approvals.py" \
+           "$EMAIL_HOOK_SRC/update_commands.py" >/dev/null 2>&1; then
     # The installed copy, if there is one, is untouched and still the last one
     # that worked. Leaving it alone is strictly better than removing it.
     log "WARNING: could not read the $EMAIL_HOOK_PLUGIN plugin sources in $EMAIL_HOOK_SRC — leaving whatever is already installed in place"
   elif mkdir -p "$EMAIL_HOOK_DST" 2>/dev/null \
     && cp -f "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
              "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_SRC/approvals.py" \
+             "$EMAIL_HOOK_SRC/update_commands.py" \
              "$EMAIL_HOOK_DST/" 2>/dev/null; then
     rm -rf "$EMAIL_HOOK_DST/__pycache__" 2>/dev/null || true
     EMAIL_HOOK_INSTALLED=1
@@ -1247,7 +1250,7 @@ esac
 # 30-second poll — the same pair `speechEntitledTier()` reads for the panel and
 # `_clawai_speech_entitled` / `_clawai_speech_withdrawable` read on the OpenClaw
 # side. `"pro"` is the tier of the MAX plan; the two names are off by one on
-# purpose (CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts).
+# purpose (ClawboxAiTier and CLAWBOX_AI_TIER_LABEL in src/lib/clawbox-ai-models.ts).
 #
 # NOT KNOWING IS NOT AN ANSWER, in either direction, and that is the whole
 # false-success/false-failure guard here. A device store that is absent,

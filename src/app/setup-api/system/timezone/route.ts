@@ -94,6 +94,7 @@ async function rearmDeviceLocalSchedules(): Promise<void> {
   const refreshes: Array<[label: string, run: () => Promise<void>]> = [
     ["ClawKeep backup", async () => (await import("@/lib/clawkeep-scheduler")).refresh()],
     ["memory index", async () => (await import("@/lib/clawkeep-memory-scheduler")).refresh()],
+    ["weekly update check", async () => (await import("@/lib/update-notice-scheduler")).refresh()],
   ];
   for (const [label, run] of refreshes) {
     try {

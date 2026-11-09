@@ -475,7 +475,7 @@ function shippedManifest(): string {
         deepseek: {
           models: [
             { id: "deepseek-v4-flash", compat: {} },
-            { id: "deepseek-v4-pro" },
+            { id: "deepseek-reasoner" },
             { id: "deepseek-chat" },
           ],
         },
@@ -511,7 +511,8 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh deepseek xhigh pa
   it("declares xhigh on a ClawHub payload, as before", () => {
     expect(efforts(patch("extensions"))).toEqual([
       ["deepseek-v4-flash", ["off", "high", "xhigh"]],
-      ["deepseek-v4-pro", ["off", "high", "xhigh"]],
+      // Only ClawBox AI's one model: the vendor's other rows are not ours to patch.
+      ["deepseek-reasoner", null],
       ["deepseek-chat", null],
     ]);
   });
@@ -519,7 +520,8 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh deepseek xhigh pa
   it("declares xhigh on an npm payload too (TASK-1302)", () => {
     expect(efforts(patch("npm"))).toEqual([
       ["deepseek-v4-flash", ["off", "high", "xhigh"]],
-      ["deepseek-v4-pro", ["off", "high", "xhigh"]],
+      // Only ClawBox AI's one model: the vendor's other rows are not ours to patch.
+      ["deepseek-reasoner", null],
       ["deepseek-chat", null],
     ]);
   });

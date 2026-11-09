@@ -568,7 +568,7 @@ export default function HermesProviderConfig({
    * The DEVICE PAIRING wins, for every provider including ClawBox AI.
    *
    * Caught on the live box: ClawBox AI's own read derives its model from the
-   * stored tier, so a Pro account reported `deepseek-v4-pro` while the pairing
+   * stored tier, so an account reported the former Max-plan id while the pairing
    * a bare "make default" had just written said `deepseek-v4-flash`. Both are
    * real values; only one of them is what the box will actually run, and the
    * hero's whole claim is to name that one. ClawBox AI's report is kept as a

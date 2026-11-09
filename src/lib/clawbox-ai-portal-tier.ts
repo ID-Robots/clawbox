@@ -62,7 +62,7 @@ export interface DeviceInfoResponse {
   deviceTier?: string | null;
   /**
    * Model ids this token may run, as the portal publishes them (bare ids,
-   * e.g. `["deepseek-v4-flash","deepseek-v4-pro",…]`). The portal's own
+   * e.g. `["deepseek-v4-flash",…]`). The portal's own
    * answer to "what is this account entitled to" — see
    * `portalDeniesClawboxAiModel`, which is the only thing allowed to read it
    * as a refusal. Absent on older portal builds.
@@ -193,9 +193,9 @@ export function mapPortalAllowedModels(body: DeviceInfoResponse): string[] | nul
  * enum the UI badges already understand. Prefers the device-pair stamp
  * (`deviceTier`) when present; otherwise translates the user's plan
  * name (`tier`) to its corresponding device-tier. The local enum is
- * `"flash"` (Pro plan / `deepseek-v4-flash` id) and `"pro"` (Max plan /
- * `deepseek-v4-pro` id, served by the same V4 Flash model); Free / unpaid
- * resolves to `null` (no paid badge rendered).
+ * `"flash"` (Pro plan) and `"pro"` (Max plan) — both run the one model,
+ * `deepseek-v4-flash`; Free / unpaid resolves to `null` (no paid badge
+ * rendered).
  *
  * @param body Parsed JSON from `/api/clawbox-ai/device-info`.
  * @returns The badge-facing tier, or `null` for Free.

@@ -11,7 +11,7 @@
 // and not switched off, the same rule the configure route's fallback writer
 // keeps.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CLAWBOX_AI_DEFAULT_TIER, CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_CHAT_MODEL } from "@/lib/clawbox-ai-models";
 
 const disk = vi.hoisted(() => ({
   config: {} as Record<string, unknown>,
@@ -53,7 +53,7 @@ vi.mock("@/lib/hermes-local-ai", () => ({
 }));
 
 const LOCAL = "llamacpp/gemma4-e2b-it-q4_0";
-const CLAWBOX_AI = CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
+const CLAWBOX_AI = CLAWBOX_AI_CHAT_MODEL;
 const PRIMARY = "anthropic/claude-sonnet-4-6";
 // What a ClawBox AI sign-in leaves in openclaw.json: its provider, keyed with
 // the portal token.

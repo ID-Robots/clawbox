@@ -136,9 +136,9 @@ describe("/setup-api/hermes/chat — reasoning levels reaching the CLI", () => {
     // clawai answered `ultra` with HTTP 400 "reasoning_effort: unknown", and
     // Hermes' own clamp_effort turns it into `max` for every OpenAI-compatible
     // wire anyway — so the turn a client asked for IS the max turn.
-    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-pro") as never);
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
 
-    const res = await post({ message: "hi", provider: "clawai", model: "deepseek-v4-pro", reasoning: "ultra" });
+    const res = await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash", reasoning: "ultra" });
 
     expect(res.status).toBe(200);
     expect(argvFlag("--reasoning")).toBe("max");
@@ -179,9 +179,9 @@ describe("/setup-api/hermes/chat — the slim profile for small local models", (
   });
 
   it("does not narrow anything for a cloud provider", async () => {
-    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-pro") as never);
+    mockGetModelOptions.mockResolvedValue(payload("clawai", "deepseek-v4-flash") as never);
 
-    const res = await post({ message: "hi", provider: "clawai", model: "deepseek-v4-pro" });
+    const res = await post({ message: "hi", provider: "clawai", model: "deepseek-v4-flash" });
 
     expect(res.status).toBe(200);
     expect(argvFlag("-t")).toBeNull();
