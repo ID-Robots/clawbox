@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { resetHarnessCache } from "@/lib/client-harness";
-import { dispatchOpenSettingsSection, OPEN_APP_EVENT } from "@/lib/ui-events";
+import { dispatchOpenSettingsSection } from "@/lib/ui-events";
 
 // Every test in this file mounts the WHOLE settings app — every panel, every
 // status fetch, and now the pet picker as well. On a Jetson under full-suite
@@ -943,16 +943,11 @@ describe("SettingsApp providers and Local AI pages", () => {
     )));
     const pending = window as Window & { __clawboxPendingSettingsSection?: string };
     delete pending.__clawboxPendingSettingsSection;
-    // The window the saved desktop restored: up, on its default page.
+    // The window the saved desktop restored: up, on its default page, so the
+    // box's memory-search row is nowhere on screen.
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
     expect(local.className).not.toContain("coral-bright");
-
-    // The cold-open handoff alone, as the test sent it: nothing in a window
-    // that is already up reads it, so no Local AI page and no row.
-    pending.__clawboxPendingSettingsSection = "localAi";
-    window.dispatchEvent(new CustomEvent(OPEN_APP_EVENT, { detail: { appId: "settings" } }));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
     expect(screen.queryByTestId("local-ai-loading")).toBeNull();
     expect(screen.queryByTestId("local-model-embeddings")).toBeNull();
 

@@ -88,13 +88,21 @@ describe("nano tests 66/99: opening Settings -> Local AI (TASK-2379)", () => {
     expect(DRIVER).toContain("Settings -> Local AI did not open within 30 s");
   });
 
-  it("puts the owner's saved desktop back after the browser has re-saved it", () => {
-    const read = BOARD_SCRIPT.indexOf("call GET /setup-api/desktop/state");
+  it("puts the owner's saved desktop back after the browser has re-saved it, also when the run is cut short", () => {
+    const read = BOARD_SCRIPT.indexOf("DESKTOP_BEFORE=$(call GET /setup-api/desktop/state)");
+    const trap = BOARD_SCRIPT.indexOf("trap 'put_desktop_back; hand_memory_back; switch_back' EXIT");
     const driverRun = BOARD_SCRIPT.indexOf('node "$DRIVER"');
-    const putBack = BOARD_SCRIPT.lastIndexOf("put_desktop_back");
+    const inline = BOARD_SCRIPT.indexOf("\nput_desktop_back\n", driverRun);
     expect(read).toBeGreaterThan(0);
-    expect(driverRun).toBeGreaterThan(read);
-    expect(putBack).toBeGreaterThan(driverRun);
-    expect(BOARD_SCRIPT).toContain('call PUT /setup-api/desktop/state "$DESKTOP_SAVED"');
+    // Armed before the browser runs, and the last trap set before it: one set
+    // later would replace it.
+    expect(trap).toBeGreaterThan(read);
+    expect(driverRun).toBeGreaterThan(trap);
+    expect(BOARD_SCRIPT.slice(trap + 1, driverRun)).not.toMatch(/^\s*trap /m);
+    expect(BOARD_SCRIPT.slice(driverRun)).not.toMatch(/^\s*trap /m);
+    // And at the end of a run that was not cut short, so its line comes in order.
+    expect(inline).toBeGreaterThan(0);
+    // The desktop as it was read, once: the function disarms itself.
+    expect(BOARD_SCRIPT).toMatch(/put_desktop_back\(\) \{\n\s+\[ -n "\$DESKTOP_SAVED" \] \|\| return 0\n\s+local r saved=\$DESKTOP_SAVED\n\s+DESKTOP_SAVED=""\n\s+r=\$\(call PUT \/setup-api\/desktop\/state "\$saved"\)/);
   });
 });
