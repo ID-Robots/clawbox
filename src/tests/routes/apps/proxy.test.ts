@@ -19,6 +19,13 @@ import { saveEnv } from "@/tests/helpers/env";
 
 type Handler = (req: http.IncomingMessage, res: http.ServerResponse, body: string) => void;
 
+// Whether the request's session is the owner's: the failure page is theirs alone.
+const ownerSession = vi.hoisted(() => ({ value: true }));
+vi.mock("@/lib/owner-session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/owner-session")>()),
+  hasOwnerSession: async () => ownerSession.value,
+}));
+
 let routes: typeof import("@/app/apps/[id]/[[...path]]/route");
 let server: http.Server;
 let port: number;
@@ -48,6 +55,7 @@ function ctx(id: string, rest: string[] = []) {
 
 beforeEach(async () => {
   restore = saveEnv("HOME", "CLAWBOX_ROOT");
+  ownerSession.value = true;
   base = fs.mkdtempSync(path.join(os.tmpdir(), "app-proxy-route-"));
   root = path.join(base, "clawbox");
   fs.mkdirSync(path.join(root, "data"), { recursive: true });
@@ -409,6 +417,13 @@ describe("the app proxy", () => {
     expect(opaque.status).toBe(503);
     expect(opaque.headers.get("content-type")).toContain("text/plain");
     expect(await opaque.text()).not.toContain("favicon");
+    // Another user of the box, signed in: the sentence, not the owner's page.
+    ownerSession.value = false;
+    const user = await routes.GET(req("/apps/books/", { headers: { "sec-fetch-dest": "iframe", accept: "text/html" } }), ctx("books"));
+    expect(user.status).toBe(503);
+    expect(user.headers.get("content-type")).toContain("text/plain");
+    expect(await user.text()).not.toContain("favicon");
+    ownerSession.value = true;
     const preflight = await routes.OPTIONS(req("/apps/books/", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "GET", "access-control-request-headers": "rsc,next-router-state-tree,next-url" } }), ctx("books"));
     expect(preflight.status).toBe(503);
 

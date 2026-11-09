@@ -13,6 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -152,6 +153,47 @@ describe("the favicon.ico it will not write", () => {
     const rgb = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#f97316" } }).png().toBuffer();
     expect(isRgbaPngOf(rgb, 64)).toBe(false);
     expect(isRgbaPngOf(PNG, 64)).toBe(false);
+  });
+});
+
+describe("the RGB favicons the box wrote before they were RGBA", () => {
+  /** The pair the box used to write for an opaque picture: an RGB PNG, and its ICO. */
+  async function oldBoxPair() {
+    const rgb = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#0ea5e9" } }).png().toBuffer();
+    fs.writeFileSync(path.join(directory, FAVICON_PNG), rgb);
+    fs.writeFileSync(path.join(directory, FAVICON_ICO), icoFromPng(rgb, 64));
+    fs.mkdirSync(path.dirname(webappIconPath("site")), { recursive: true });
+    fs.writeFileSync(webappIconPath("site"), PNG);
+    ensureIconFile.mockResolvedValue("kept");
+    return rgb;
+  }
+
+  it("are put right: both replaced with the RGBA pair, the ICO a Next build can read", async () => {
+    await oldBoxPair();
+    expect(await ensureProjectIcon({ id: "site", directory, name: "Site" })).toEqual({ icon: "kept", favicon: true });
+    expect(fs.readFileSync(path.join(directory, FAVICON_PNG)).equals(SMALL)).toBe(true);
+    expect(fs.readFileSync(path.join(directory, FAVICON_ICO)).subarray(22).equals(SMALL)).toBe(true);
+    expect(fs.readdirSync(directory).sort()).toEqual([...BOX_FAVICONS].sort());
+  });
+
+  it("stay as they are when the project tracks them: they are its own then", async () => {
+    const rgb = await oldBoxPair();
+    const git = (...args: string[]) => execFileSync("git", ["-C", directory, ...args], { stdio: "ignore" });
+    git("init", "-q");
+    git("add", FAVICON_PNG, FAVICON_ICO);
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "favicons");
+    await ensureProjectIcon({ id: "site", directory, name: "Site" });
+    expect(fs.readFileSync(path.join(directory, FAVICON_PNG)).equals(rgb)).toBe(true);
+    expect(fs.readFileSync(path.join(directory, FAVICON_ICO)).equals(icoFromPng(rgb, 64))).toBe(true);
+  });
+
+  it("never touches an ICO that is not the box's own wrapping of the PNG beside it", async () => {
+    const rgb = await oldBoxPair();
+    const theirs = Buffer.concat([icoFromPng(rgb, 64), Buffer.from([0])]);
+    fs.writeFileSync(path.join(directory, FAVICON_ICO), theirs);
+    await ensureProjectIcon({ id: "site", directory, name: "Site" });
+    expect(fs.readFileSync(path.join(directory, FAVICON_ICO)).equals(theirs)).toBe(true);
+    expect(fs.readFileSync(path.join(directory, FAVICON_PNG)).equals(rgb)).toBe(true);
   });
 });
 

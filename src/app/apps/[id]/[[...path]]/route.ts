@@ -16,6 +16,7 @@ import {
   type AppProxyResolution,
 } from "@/lib/app-proxy";
 import { appStartFailureHtml, appStartFailureText, readAppStartFailure } from "@/lib/app-start-failure";
+import { hasOwnerSession } from "@/lib/owner-session";
 import { APP_PROXY_NEXT_URL_HEADER } from "@/lib/app-window";
 
 export const dynamic = "force-dynamic";
@@ -56,11 +57,11 @@ function plain(text: string, status: number): NextResponse {
 }
 
 /**
- * The owner's window loading the app's page — a document the middleware let
- * through only with the owner's session — as opposed to one of the app's own
- * fetches, which reach this route with no session at all (src/middleware.ts,
- * step 2b): those, and anything from the sandbox's opaque origin, never get
- * the page, whose lines are the app's own output.
+ * A window loading the app's page — a document the middleware let through
+ * only with a session (the caller checks it is the OWNER's) — as opposed to
+ * one of the app's own fetches, which reach this route with no session at all
+ * (src/middleware.ts, step 2b): those, and anything from the sandbox's opaque
+ * origin, never get the page, whose lines are the app's own output.
  */
 function ownerWindow(request: NextRequest): boolean {
   const method = request.method.toUpperCase();
@@ -83,7 +84,9 @@ async function unreachable(request: NextRequest, id: string, resolved: Exclude<A
   if (resolved.reason === "unregistered" || resolved.reason === "not_listening") {
     const failure = await readAppStartFailure(id);
     if (failure) {
-      if (!ownerWindow(request)) return plain(appStartFailureText(failure), 503);
+      // The page is the app's own output: the owner's alone. A signed-in
+      // user of the box who is not the owner gets the sentence.
+      if (!ownerWindow(request) || !(await hasOwnerSession(request))) return plain(appStartFailureText(failure), 503);
       const html = await appStartFailureHtml(failure);
       return new NextResponse(request.method.toUpperCase() === "HEAD" ? null : html, {
         status: 503,
