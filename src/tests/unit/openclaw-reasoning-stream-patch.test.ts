@@ -3,6 +3,8 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { PATCH_MARKER, VERIFIED_VERSIONS, patchOpenClawRoot, patchTransportSource } from "../../../scripts/openclaw-reasoning-stream-patch.mjs";
 
 // The CLI and installer cases start real node and bash processes, which a
@@ -70,7 +72,12 @@ interface Turn { visible: string[]; stamped: boolean; strict: boolean }
  * Drive the transport's own lines over a ClawBox AI turn's chunks. The
  * partitioner stands in for the real one, which in strict mode releases
  * nothing before the stream ends (measured on 2026.10.9's own partitioner:
- * 0 of 44 chunks released strict, 44 of 44 not).
+ * 0 of 44 chunks released strict, 44 of 44 not). Checked against that
+ * partitioner over TURN's text below as well: strict, `push` and `pushVisible`
+ * release none of the four chunks live and all of it at `flush`; not strict,
+ * `pushVisible` releases each chunk as it comes; a fresh one has nothing
+ * pending. That partitioner bundles a markdown parser (~290 KB), so it is not
+ * carried here; the transport it serves is, verbatim (VERBATIM_10_9).
  */
 function runTurn(transport: string, chunks: Chunk[]): Turn {
   const body = `
@@ -245,6 +252,88 @@ describe("patchOpenClawRoot — the installed core", () => {
   });
 });
 
+/**
+ * The transport exactly as the pinned core ships it: dist/
+ * openai-completions-transport-DGXeWM4f.mjs out of the @openclaw/ai 2026.10.9
+ * npm tarball (integrity sha512-Zy7xHYMS…G21xo9oWKWIA==), gzipped, MIT (its
+ * LICENSE sits beside it). The excerpts above are cut from it; this is the
+ * whole file, so a hold that changed shape or a second match anywhere in its
+ * 155 KB fails here rather than on a box.
+ */
+const VERBATIM_10_9 = gunzipSync(
+  readFileSync(path.resolve("src/tests/fixtures/openclaw-ai-2026.10.9/openai-completions-transport-DGXeWM4f.mjs.gz")),
+).toString("utf8");
+
+/** What the two holds read as once patched, the lines around them untouched. */
+const BEGIN_REASONING_PATCHED = [
+  "\tconst beginReasoning = (hasFollowingVisibleText, forceStrict = false) => {",
+  `\t\t${PATCH_MARKER}`,
+  "\t\tif (!hasFollowingVisibleText || !reasoningTagTextPartitioner.hasPendingSyntax()) sealTextBeforeReasoning();",
+  "\t};",
+].join("\n");
+const CHUNK_ROUTING_PATCHED = CHUNK_ROUTING_10_9.replace(
+  "hasReasoningThinking ? reasoningTagTextPartitioner.push(part.text) : reasoningTagTextPartitioner.pushVisible(part.text)",
+  "reasoningTagTextPartitioner.pushVisible(part.text)",
+);
+
+const occurrences = (text: string, part: string) => text.split(part).length - 1;
+
+describe("the pinned 2026.10.9 transport, verbatim", () => {
+  it("is the file the pinned core ships, and the excerpts above are its own lines, once each", () => {
+    expect(createHash("sha256").update(VERBATIM_10_9).digest("hex"))
+      .toBe("02509f0d8552314e38688376aea4cb905e4b14171aebcb541e23a2ad1183c184");
+    expect(occurrences(VERBATIM_10_9, BEGIN_REASONING_10_9)).toBe(1);
+    expect(occurrences(VERBATIM_10_9, CHUNK_ROUTING_10_9)).toBe(1);
+  });
+
+  it("is patched in exactly those two places, and nowhere else in the file", () => {
+    const { verdict, source } = patchTransportSource(VERBATIM_10_9);
+    expect(verdict).toBe("patch");
+    expect(source).toBe(
+      VERBATIM_10_9.replace(BEGIN_REASONING_10_9, BEGIN_REASONING_PATCHED).replace(CHUNK_ROUTING_10_9, CHUNK_ROUTING_PATCHED),
+    );
+    expect(occurrences(source, PATCH_MARKER)).toBe(1);
+    // Upstream's 2026.10.10 code: no stamp left, and no forced strict mode.
+    expect(source).not.toContain("textPhaseRequiresTerminal: true");
+    expect(source).not.toContain("reasoningTagTextPartitioner.markStrict();\n\t\tif (!hasFollowingVisibleText");
+  });
+
+  it("still parses once patched, and streams the turn the shipped lines held", () => {
+    const { source } = patchTransportSource(VERBATIM_10_9);
+    const dir = mkdtempSync(path.join(tmpdir(), "clawbox-oc-verbatim-"));
+    roots.push(dir);
+    writeFileSync(path.join(dir, "transport.mjs"), source);
+    const check = spawnSync(process.execPath, ["--check", path.join(dir, "transport.mjs")], { encoding: "utf8" });
+    expect(check.stderr).toBe("");
+    expect(check.status).toBe(0);
+
+    expect(runTurn(`${BEGIN_REASONING_10_9}\n${CHUNK_ROUTING_10_9}\n`, TURN).visible).toEqual([]);
+    expect(runTurn(`${BEGIN_REASONING_PATCHED}\n${CHUNK_ROUTING_PATCHED}\n`, TURN).visible)
+      .toEqual(["**Морето**", "\n\nМорето", " не е просто", " вода."]);
+  });
+
+  it("is patched once by the installer's call, and known as patched after", () => {
+    const root = openclawRoot("2026.10.9", { "openai-completions-transport-DGXeWM4f.mjs": VERBATIM_10_9 });
+    const first = patchOpenClawRoot(root);
+    expect(first).toEqual({
+      result: "patched",
+      version: "2026.10.9",
+      files: [path.join("node_modules", "@openclaw", "ai", "dist", "openai-completions-transport-DGXeWM4f.mjs")],
+    });
+    const patched = readFileSync(transportFile(root), "utf8");
+    expect(patched).toBe(patchTransportSource(VERBATIM_10_9).source);
+    expect(patchTransportSource(patched).verdict).toBe("patched");
+    expect(patchOpenClawRoot(root).result).toBe("already");
+    expect(readFileSync(transportFile(root), "utf8")).toBe(patched);
+  });
+
+  it("refuses the file with a second copy of either hold in it", () => {
+    for (const extra of [BEGIN_REASONING_10_9, CHUNK_ROUTING_10_9]) {
+      expect(patchTransportSource(`${VERBATIM_10_9}\n${extra}\n`).verdict).toBe("mismatch");
+    }
+  });
+});
+
 const SCRIPT = path.resolve("scripts/openclaw-reasoning-stream-patch.mjs");
 
 describe("the script as the installer runs it", () => {
@@ -323,9 +412,9 @@ describe("install.sh's openclaw_patch step runs it", () => {
     expect(out.trim().endsWith("rc=0")).toBe(true);
   });
 
-  it("says so and carries on when the script is not in the checkout", () => {
+  it("warns and carries on when the script is not in the checkout", () => {
     const out = runStep({ withScript: false });
-    expect(out).toContain("Reasoning stream patch: <project>/scripts/openclaw-reasoning-stream-patch.mjs not found, skipping");
+    expect(out).toContain("WARNING: reasoning stream patch not applied: <project>/scripts/openclaw-reasoning-stream-patch.mjs not found; answers of reasoning models reach the chat in one piece");
     expect(out).not.toContain("as_clawbox node");
     expect(out.trim().endsWith("rc=0")).toBe(true);
   });
@@ -338,24 +427,38 @@ describe("install.sh's openclaw_patch step runs it", () => {
 describe("install-x64.sh's openclaw_patch step runs it", () => {
   const source = readFileSync("install-x64.sh", "utf8");
 
-  it("as the owner, before the OpenClaw 2 early return, and never fails on it", () => {
-    for (const fails of [false, true]) {
-      const project = mkdtempSync(path.join(tmpdir(), "clawbox-oc-x64-"));
-      roots.push(project);
+  function runStep(opts: { scriptFails?: boolean; withScript?: boolean } = {}) {
+    const project = mkdtempSync(path.join(tmpdir(), "clawbox-oc-x64-"));
+    roots.push(project);
+    if (opts.withScript !== false) {
       mkdirSync(path.join(project, "scripts"));
       writeFileSync(path.join(project, "scripts", "openclaw-reasoning-stream-patch.mjs"), "");
-      const out = execFileSync("bash", ["-c", [
-        "openclaw_is_v2() { return 0; }",
-        `as_user_runtime() { echo "as_user_runtime $*"; return ${fails ? 1 : 0}; }`,
-        shellFunction(source, "step_openclaw_patch"),
-        "step_openclaw_patch; echo \"rc=$?\"",
-      ].join("\n")], {
-        encoding: "utf8",
-        env: { ...process.env, PROJECT_DIR: project, OPENCLAW_BIN: "/bin/true", GATEWAY_DIST: "/opt/npm/lib/node_modules/openclaw/dist" },
-      }).replaceAll(project, "<project>");
+    }
+    return execFileSync("bash", ["-c", [
+      "openclaw_is_v2() { return 0; }",
+      `as_user_runtime() { echo "as_user_runtime $*"; return ${opts.scriptFails ? 1 : 0}; }`,
+      shellFunction(source, "step_openclaw_patch"),
+      "step_openclaw_patch; echo \"rc=$?\"",
+    ].join("\n")], {
+      encoding: "utf8",
+      env: { ...process.env, PROJECT_DIR: project, OPENCLAW_BIN: "/bin/true", GATEWAY_DIST: "/opt/npm/lib/node_modules/openclaw/dist" },
+    }).replaceAll(project, "<project>");
+  }
+
+  it("as the owner, before the OpenClaw 2 early return, and never fails on it", () => {
+    for (const fails of [false, true]) {
+      const out = runStep({ scriptFails: fails });
       expect(out).toContain("as_user_runtime node <project>/scripts/openclaw-reasoning-stream-patch.mjs /opt/npm/lib/node_modules/openclaw\n");
       expect(out).toContain(fails ? "WARNING: reasoning stream patch not applied" : "not needed on OpenClaw 2");
       expect(out.trim().endsWith("rc=0")).toBe(true);
     }
+  });
+
+  it("warns, as install.sh does, and carries on when the script is not in the checkout", () => {
+    const out = runStep({ withScript: false });
+    expect(out).toContain("WARNING: reasoning stream patch not applied: <project>/scripts/openclaw-reasoning-stream-patch.mjs not found; answers of reasoning models reach the chat in one piece");
+    expect(out).not.toContain("as_user_runtime node");
+    expect(out).toContain("not needed on OpenClaw 2");
+    expect(out.trim().endsWith("rc=0")).toBe(true);
   });
 });

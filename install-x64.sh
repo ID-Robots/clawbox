@@ -653,6 +653,8 @@ step_openclaw_patch() {
   if [ -f "$stream_patch" ]; then
     as_user_runtime node "$stream_patch" "${GATEWAY_DIST%/dist}" \
       || echo "  WARNING: reasoning stream patch not applied; answers of reasoning models reach the chat in one piece"
+  else
+    echo "  WARNING: reasoning stream patch not applied: $stream_patch not found; answers of reasoning models reach the chat in one piece"
   fi
 
   if openclaw_is_v2; then
