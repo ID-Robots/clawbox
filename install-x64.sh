@@ -1256,6 +1256,43 @@ llamacpp_cmake_args() {
   echo "$args"
 }
 
+# The launch specs (src/lib/llamacpp-server.ts, src/lib/embed-server.ts) look
+# for `hf` on the UI unit's PATH and then in the user's ~/.local/bin, unless
+# HF_BIN names one. The step below accepts an `hf` anywhere on the owner's LOGIN
+# PATH (a conda env, a pyenv shim, ~/bin), which the unit's PATH does not carry,
+# and installs nothing then: a model fetched later named a CLI that did not
+# exist. With none in ~/.local/bin, .env names the one the step accepted; the UI
+# unit loads .env, and every launcher reads HF_BIN first. An HF_BIN that runs is
+# kept, whoever set it; one that no longer runs (the CLI it named was removed,
+# and this step installed one) is moved to the CLI the step found. A .env that
+# does not exist yet is not created here.
+record_hf_bin() {
+  local env_file="$1" pinned hf_path
+  [ -f "$env_file" ] || return 0
+  pinned="$(get_env_setting_or_default "$env_file" "HF_BIN" "")"
+  if [ -n "$pinned" ] && as_user test -x "$pinned"; then
+    return 0
+  fi
+  if as_user test -x "$CLAWBOX_HOME/.local/bin/hf"; then
+    # The default runs: only a pin that does not needs moving.
+    grep -q '^HF_BIN=' "$env_file" 2>/dev/null || return 0
+    hf_path="$CLAWBOX_HOME/.local/bin/hf"
+  else
+    # The last line: a login profile may print before the command runs.
+    hf_path="$(as_user_login "command -v hf" 2>/dev/null | tail -n 1 || true)"
+    case "$hf_path" in
+      /*) ;;
+      *) return 0 ;;
+    esac
+    as_user test -x "$hf_path" || return 0
+  fi
+  if grep -q '^HF_BIN=' "$env_file" 2>/dev/null; then
+    migrate_env_setting "$env_file" "HF_BIN" "$pinned" "$hf_path"
+  else
+    ensure_env_setting "$env_file" "HF_BIN" "$hf_path"
+  fi
+}
+
 step_llamacpp_install() {
   # A directory of ClawBox's own: on a PC this home is the owner's, and
   # ~/llama.cpp is where NVIDIA's DGX Spark playbook builds the owner's OWN
@@ -1313,6 +1350,7 @@ step_llamacpp_install() {
   else
     echo "  Hugging Face CLI already installed"
   fi
+  record_hf_bin "$PROJECT_DIR/.env"
 
   if [ ! -x /usr/local/bin/llama-server ]; then
     echo "  Installing llama.cpp server..."

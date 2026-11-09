@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { spawnSync } from "child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -168,5 +169,121 @@ describe("the shell launchers' Hugging Face CLI default", () => {
       'HF_BIN="${HF_BIN:-$(command -v hf 2>/dev/null || true)}"',
       'HF_BIN="${HF_BIN:-${HOME:-/home/clawbox}/.local/bin/hf}"',
     ]);
+  });
+});
+
+// Runs bash: vitest's 5 s default is not enough on a loaded CI runner
+// (src/tests/unit/test-timeout-hygiene.test.ts).
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+describe("install-x64.sh names in .env an hf it accepted off the unit's PATH", () => {
+  // Its llama.cpp step installs no CLI when `hf` is already on the owner's
+  // LOGIN PATH (a conda env, a pyenv shim, ~/bin). The launch specs search the
+  // UI unit's PATH, which carries none of those, and then ~/.local/bin: without
+  // HF_BIN in .env, a model fetched later named a CLI that did not exist.
+  const INSTALLER = readFileSync(path.join(process.cwd(), "install-x64.sh"), "utf8");
+  function sliceFunction(name: string): string {
+    const start = INSTALLER.indexOf(`\n${name}() {`);
+    if (start < 0) throw new Error(`${name}() not found in install-x64.sh`);
+    const end = INSTALLER.indexOf("\n}\n", start + 1);
+    return INSTALLER.slice(start + 1, end + 3);
+  }
+
+  let dir: string;
+  let home: string;
+  let envFile: string;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "clawbox-hf-bin-"));
+    home = path.join(dir, "home");
+    mkdirSync(path.join(home, ".local", "bin"), { recursive: true });
+    mkdirSync(path.join(dir, "opt", "bin"), { recursive: true });
+    envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "LLAMACPP_BIN=/usr/local/bin/llama-server\n");
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function executable(file: string) {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "#!/bin/sh\nexit 0\n");
+    chmodSync(file, 0o755);
+  }
+
+  /** record_hf_bin with the owner's login PATH holding `opt/bin`; the profile prints a banner first. */
+  function recordHfBin() {
+    const r = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      `CLAWBOX_HOME="${home}"`,
+      'as_user() { "$@"; }',
+      `as_user_login() { PATH="${dir}/opt/bin:/usr/bin:/bin" bash -c "echo 'Welcome to the workstation'; $1"; }`,
+      sliceFunction("ensure_env_setting"),
+      sliceFunction("get_env_setting_or_default"),
+      sliceFunction("migrate_env_setting"),
+      sliceFunction("record_hf_bin"),
+      `record_hf_bin "${envFile}"`,
+      'echo "step continues"',
+    ].join("\n")], { encoding: "utf8", env: { ...process.env, PATH: "/usr/bin:/bin" } });
+    expect(`${r.stdout}${r.stderr}`).toContain("step continues");
+    return r.status;
+  }
+
+  it("records the hf the step accepted when ~/.local/bin has none", () => {
+    executable(path.join(dir, "opt", "bin", "hf"));
+    expect(recordHfBin()).toBe(0);
+    expect(readFileSync(envFile, "utf8")).toBe(
+      `LLAMACPP_BIN=/usr/local/bin/llama-server\nHF_BIN=${path.join(dir, "opt", "bin", "hf")}\n`,
+    );
+  });
+
+  it("leaves .env alone when ~/.local/bin/hf exists, as pipx and pip --user put it", () => {
+    executable(path.join(home, ".local", "bin", "hf"));
+    executable(path.join(dir, "opt", "bin", "hf"));
+    expect(recordHfBin()).toBe(0);
+    expect(readFileSync(envFile, "utf8")).toBe("LLAMACPP_BIN=/usr/local/bin/llama-server\n");
+  });
+
+  it("keeps an HF_BIN that runs, whoever set it", () => {
+    const pinned = path.join(dir, "tools", "hf");
+    executable(pinned);
+    executable(path.join(dir, "opt", "bin", "hf"));
+    writeFileSync(envFile, `HF_BIN=${pinned}\n`);
+    expect(recordHfBin()).toBe(0);
+    expect(readFileSync(envFile, "utf8")).toBe(`HF_BIN=${pinned}\n`);
+  });
+
+  it("moves an HF_BIN that no longer runs to the CLI the step found", () => {
+    // An hf recorded once and then removed: the step installs one in
+    // ~/.local/bin, and the dead pin must not keep shadowing it.
+    writeFileSync(envFile, `LLAMACPP_BIN=/usr/local/bin/llama-server\nHF_BIN=${path.join(dir, "gone", "hf")}\n`);
+    executable(path.join(home, ".local", "bin", "hf"));
+    expect(recordHfBin()).toBe(0);
+    expect(readFileSync(envFile, "utf8")).toBe(
+      `LLAMACPP_BIN=/usr/local/bin/llama-server\nHF_BIN=${path.join(home, ".local", "bin", "hf")}\n`,
+    );
+
+    // With no ~/.local/bin/hf, to the one on the login PATH.
+    rmSync(path.join(home, ".local", "bin", "hf"));
+    writeFileSync(envFile, `HF_BIN=${path.join(dir, "gone", "hf")}\n`);
+    executable(path.join(dir, "opt", "bin", "hf"));
+    expect(recordHfBin()).toBe(0);
+    expect(readFileSync(envFile, "utf8")).toBe(`HF_BIN=${path.join(dir, "opt", "bin", "hf")}\n`);
+  });
+
+  it("records nothing when no hf is found, and creates no .env", () => {
+    expect(recordHfBin()).toBe(0);
+    expect(readFileSync(envFile, "utf8")).toBe("LLAMACPP_BIN=/usr/local/bin/llama-server\n");
+    rmSync(envFile);
+    executable(path.join(dir, "opt", "bin", "hf"));
+    expect(recordHfBin()).toBe(0);
+    expect(existsSync(envFile)).toBe(false);
+  });
+
+  it("runs in the llama.cpp step after the CLI check, whichever branch it took", () => {
+    // Right after the check's closing `fi`: on a host whose hf was found, and
+    // on one where the step installed it.
+    const step = sliceFunction("step_llamacpp_install");
+    expect(step).toContain('    echo "  Hugging Face CLI already installed"\n  fi\n  record_hf_bin "$PROJECT_DIR/.env"\n');
+    expect(step.split('record_hf_bin "$PROJECT_DIR/.env"')).toHaveLength(2);
   });
 });
