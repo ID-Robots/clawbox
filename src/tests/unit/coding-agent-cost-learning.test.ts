@@ -526,7 +526,7 @@ describe("a run asked for its own effort", () => {
 
   it("refuses a level the app does not offer before the run exists", async () => {
     makePlainProject("plain");
-    await expect(lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
+    await expect(lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "turbo" as never })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, medium, high, xhigh, max, ultracode/) });
     const saved = fs.existsSync(runsFile()) ? fs.readFileSync(runsFile(), "utf8") : "";
     expect(saved).not.toContain("build it");
   });

@@ -52,7 +52,7 @@ function harness(edition: "openclaw" | "hermes" = "openclaw") {
 
 const SETTINGS = {
   effort: "xhigh",
-  effortLevels: ["low", "xhigh", "max", "ultracode"],
+  effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
   roleModels: {
     planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "auto" },
     worker: { provider: "auto", model: "standard", effort: "auto" },
@@ -132,7 +132,7 @@ describe("registration", () => {
     expect(set.description).toMatch(/owner's preferences/);
     expect(set.description).toMatch(/confirm before changing effort, a model or runs at once/i);
     // The schema names the choices the route takes.
-    expect(z.object(set.shape).safeParse({ effort: "medium" }).success).toBe(false);
+    expect(z.object(set.shape).safeParse({ effort: "turbo" }).success).toBe(false);
     expect(z.object(set.shape).safeParse({ effort: "max", planner_provider: "default", worker_effort: "auto", history_retention: "everything" }).success).toBe(true);
     expect(z.object(set.shape).safeParse({ planner_provider: "nobody" }).success).toBe(false);
   });
@@ -158,7 +158,7 @@ describe("coding_settings_get", () => {
     expect(out.isError).toBe(false);
     expect(apiGet).toHaveBeenCalledWith("/setup-api/coding-agent/settings", expect.objectContaining({ timeoutMs: 15_000 }));
     const text = (out as { text: string }).text;
-    expect(text).toContain("effort: xhigh — choices: low, xhigh, max, ultracode");
+    expect(text).toContain("effort: xhigh — choices: low, medium, high, xhigh, max, ultracode");
     expect(text).toContain("planner: provider anthropic, model claude-sonnet-5, effort auto → runs on anthropic claude-sonnet-5 at xhigh");
     expect(text).toContain("worker: provider auto, model standard, effort auto → runs on clawbox-ai at xhigh");
     expect(text).toContain("reviewer: provider auto, model auto, effort auto → runs on clawbox-ai deepseek-v4-flash at xhigh (NOT READY: ClawBox AI is not connected.)");

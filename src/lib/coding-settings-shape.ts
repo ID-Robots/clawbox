@@ -55,7 +55,7 @@ export const OWNER_SETTING_KIND = "owner_setting";
  * can name them without importing the runner; `coding-settings-shape.test.ts`
  * pins the two lists equal, the way coding-role-models.ts pins its copy.
  */
-export const AGENT_EFFORT_LEVELS = ["low", "xhigh", "max", "ultracode"] as const;
+export const AGENT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
 
 /** coding-run-history.ts's HISTORY_RETENTION_MODES, restated for the same reason and pinned by the same test. */
 export const AGENT_HISTORY_RETENTION_MODES = ["standard", "everything"] as const;

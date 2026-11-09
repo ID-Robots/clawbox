@@ -110,7 +110,7 @@ function stubBox() {
       return json({
         enabled: true, ready: true, readiness: { ready: true, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: true, problems: [] },
         running: 1, harnessCommand: "claude-ds", maxTaskChars: 4000, defaultDirectory: "/srv/projects", setupComplete: true,
-        effort: "max", effortLevels: ["low", "xhigh", "max", "ultracode"], reviewPass: false, historyRetention: "standard",
+        effort: "max", effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"], reviewPass: false, historyRetention: "standard",
       });
     }
     if (url === "/setup-api/ai-models/status") return json({ clawaiConfigured: true, clawaiAccountTier: "flash" });

@@ -1049,19 +1049,20 @@ describe("coding_agent_run effort", () => {
     const { z } = await import("zod");
     const shape = harness().get("coding_agent_run").shape;
     const schema = z.object(shape);
-    expect(schema.safeParse({ task: "x", project_id: "site", effort: "medium" }).success).toBe(false);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "turbo" }).success).toBe(false);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "medium" }).success).toBe(true);
     expect(schema.safeParse({ task: "x", project_id: "site", effort: "ultracode" }).success).toBe(true);
     expect(schema.safeParse({ task: "x", project_id: "site" }).success).toBe(true);
   });
 
   it("turns the route's effort refusal into advice on the effort, not the folder", async () => {
-    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "medium". Use one of: low, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
+    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "turbo". Use one of: low, medium, high, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
     const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", effort: "max" });
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).toBe("BAD_ARGUMENT");
     expect(out.error.message).toMatch(/Unknown effort/);
-    expect(out.error.next).toMatch(/low, xhigh, max, ultracode/);
+    expect(out.error.next).toMatch(/low, medium, high, xhigh, max, ultracode/);
     expect(out.error.next).not.toMatch(/folder/);
   });
 });

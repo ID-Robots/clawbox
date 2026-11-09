@@ -44,8 +44,19 @@ export type CodingEffort = (typeof EFFORT_LEVELS)[number];
  * team routes' `effort`, the MCP tools' `effort` parameter (2026-10-30, the
  * Create card's Ultracode toggle): what the owner can pick in the app is what
  * the assistant can ask for on one run.
+ *
+ * ALL SIX SINCE 2026-11-10. The three-that-differ rule above was measured on
+ * ClawBox AI's model and holds there. On Claude models the levels are not
+ * within noise of each other, and `medium` and `high` are the ones Anthropic
+ * names as the starting points for Opus 5.5, Sonnet 5.5 and Fable 5.2 — the
+ * two this list used to hide. Measured on this box, one task (a calculator's
+ * expression engine, 111 hidden cases), Opus 5.5 as a single run: `low`
+ * $1.27 and 17 minutes, `xhigh` $4.72 and 18 minutes, both 111 of 111 before
+ * any review; the owner's `ultracode` setting costs more again. Hiding the
+ * middle left an Anthropic run a choice between the floor and the three most
+ * expensive levels.
  */
-export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max", "ultracode"];
+export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 export const DEFAULT_EFFORT: CodingEffort = "xhigh";
 /** The one level the wrapper cannot pin through the environment — see EFFORT_LEVELS. */
 export const ULTRACODE_EFFORT: CodingEffort = "ultracode";

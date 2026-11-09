@@ -73,6 +73,12 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
   return { ...actual, ...plumbing };
 });
+// The path heal before a merge is git too (coding-worktree-heal.ts): faked
+// like the rest of the plumbing — a real `git` spawned for a worktree that is
+// not on disk answers after a process's worth of time, and the order two
+// workers settle in must not hang on that.
+const heal = vi.hoisted(() => ({ healWorktreePaths: vi.fn(async (): Promise<{ ok: true; files: string[]; commit: string | null }> => ({ ok: true, files: [], commit: null })) }));
+vi.mock("@/lib/coding-worktree-heal", () => heal);
 // GitHub, faked where the orchestrator reaches it: a team whose goal asks for
 // a pull request opens, reads, pushes and merges through these. A team whose
 // goal asks for none never calls them.
@@ -195,6 +201,7 @@ beforeEach(async () => {
     return { ok: false, conflict: next.conflict === true, detail: next.conflict ? "CONFLICT (content): Merge conflict in index.html" : "Merging failed." };
   });
   plumbing.removeWorktree.mockResolvedValue(undefined);
+  heal.healWorktreePaths.mockImplementation(async () => ({ ok: true, files: [], commit: null }));
   // The normal path: the runner committed the worker's work on its branch. A
   // case that stages an empty branch says so.
   plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => committedOn(branch));
@@ -699,6 +706,23 @@ describe("a worker the owner PAUSED", () => {
     expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]).filter((b: string) => /-t1-1$/.test(b))).toHaveLength(1);
     // …and t2, which depends on t1, ran.
     expect(done.tasks.find((t) => t.task_id === "t2")).toMatchObject({ status: "complete" });
+  });
+});
+
+describe("a worker's temporary folder in the files it wrote", () => {
+  it("is rewritten before its branch is merged, and said on the board", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
+    heal.healWorktreePaths.mockImplementationOnce(async () => ({ ok: true, files: ["mcp/README.md", "config.json"], commit: "abc1234" }));
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Asked of each worker's own worktree, before that worker's merge.
+    expect(heal.healWorktreePaths.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", "/home/clawbox/Projects/site/.clawbox/worktrees/t2-1"]);
+    expect(heal.healWorktreePaths.mock.invocationCallOrder[0]).toBeLessThan(plumbing.mergeWorkerBranch.mock.invocationCallOrder[0]);
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes.filter((m) => /temporary folder/.test(m))).toEqual([
+      "Worker run-00000002 wrote its temporary folder's path into 2 files (mcp/README.md, config.json); each mention now names the project's own folder.",
+    ]);
   });
 });
 
@@ -3897,8 +3921,8 @@ describe("the team's effort", () => {
 
   it("refuses a level the app does not offer before anything is made", async () => {
     const { CodingAgentError } = await import("@/lib/coding-agent");
-    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
-    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toBeInstanceOf(CodingAgentError);
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "turbo" as never })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, medium, high, xhigh, max, ultracode/) });
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "turbo" as never })).rejects.toBeInstanceOf(CodingAgentError);
     expect(runner.startRun).not.toHaveBeenCalled();
     expect(team.listTeams()).toEqual([]);
   });

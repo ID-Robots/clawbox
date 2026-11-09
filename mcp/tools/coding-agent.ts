@@ -176,9 +176,9 @@ const PROVIDER_CHOICE_NEXT =
  * tools say the same thing; the route validates the value and answers
  * `code: "effort"` when it refuses one.
  */
-const EFFORT_PARAM_DESCRIPTION = "This run's effort: low, xhigh, max or ultracode (the highest, far more tokens: only when asked). Omit: owner's setting.";
+const EFFORT_PARAM_DESCRIPTION = "This run's effort: low, medium, high, xhigh, max or ultracode (the highest, far more tokens: only when asked). Omit: owner's setting.";
 /** The team's: every member run gets the level, and a planner or reviewer is still capped at xhigh. */
-const TEAM_EFFORT_PARAM_DESCRIPTION = "Every run's effort: low, xhigh, max or ultracode (highest, far more tokens; readers stay at xhigh). Omit: owner's.";
+const TEAM_EFFORT_PARAM_DESCRIPTION = "Every run's effort: low, medium, high, xhigh, max or ultracode (highest, far more tokens; readers stay at xhigh). Omit: owner's.";
 const EFFORT_CHOICE_NEXT = `Pass one of ${OFFERED_EFFORT_LEVELS.join(", ")} as effort, or omit it to use the owner's setting.`;
 
 const SWITCH_NEXT =
