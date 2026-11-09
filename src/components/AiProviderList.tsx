@@ -672,8 +672,9 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
               || (row.state === "needs-reauth" && (row.credentialHeld ?? !row.isDefault));
             const signOutLocked = row.isDefault && (row.id !== "clawai" || summary?.harness === "hermes");
             const armed = signOutArmed === row.id;
-            // The button shows the bare verb; its name and tooltip say whose
-            // sign-in it removes, armed or not.
+            // The button shows a word or two; its name and tooltip say whose
+            // sign-in it removes, armed or not, and carry the words on it so a
+            // voice user can say what they see.
             const signOutName = armed
               ? t("settings.providers.signOutConfirmNamed", { name: row.label })
               : t("settings.providers.signOut", { name: row.label });
@@ -843,11 +844,12 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
 
                   {/* The sign-out and the switch travel as one, the sign-out
                       always just left of the switch: the same place on every
-                      row, the default's included, at every width. Its label is
-                      the bare verb — "Sign out of Anthropic Claude" wrapped
-                      onto two lines in a tall button here, and inline under
-                      the status it ran into "Connected" — and the provider it
-                      signs out of is in its name and tooltip instead. */}
+                      row, the default's included, at every width. Its words
+                      are short — "Sign out", then "Tap again" — where "Sign
+                      out of Anthropic Claude" wrapped onto two lines in a tall
+                      button and, inline under the status, ran into
+                      "Connected"; the provider it signs out of is in its name
+                      and tooltip instead. */}
                   <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 max-w-full" data-testid={tid(`ai-provider-sign-out-slot-${row.id}`)}>
                     {canSignOut && (
                       <button
@@ -887,7 +889,23 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
                             </span>
                             {t("settings.providers.signingOut")}
                           </>
-                        ) : armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOutShort")}
+                        ) : (
+                          // Both words in one grid cell: the one not shown is
+                          // the `::after` sizer, so the button is as wide as the
+                          // wider of the two from the start and arming it never
+                          // reflows the row — the second tap lands where the
+                          // first one did. As text, the button holds only the
+                          // word on it.
+                          <span
+                            className="grid justify-items-center after:invisible after:[grid-area:1/1] after:content-[attr(data-sizer)]"
+                            data-sizer={armed ? t("settings.providers.signOutShort") : t("settings.providers.signOutConfirm")}
+                            data-testid={tid(`ai-provider-sign-out-label-${row.id}`)}
+                          >
+                            <span className="[grid-area:1/1]">
+                              {armed ? t("settings.providers.signOutConfirm") : t("settings.providers.signOutShort")}
+                            </span>
+                          </span>
+                        )}
                       </button>
                     )}
 

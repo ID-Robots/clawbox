@@ -149,7 +149,7 @@ const renderList = () => render(<I18nProvider><AiProviderList /></I18nProvider>)
 async function signOut(label: string): Promise<HTMLElement> {
   const button = await screen.findByRole("button", { name: `Sign out of ${label}` }, { timeout: 5_000 });
   fireEvent.click(button);
-  expect(button).toHaveTextContent("Sign out — tap again");
+  expect(button).toHaveTextContent(/^Tap again$/);
   fireEvent.click(button);
   return button;
 }

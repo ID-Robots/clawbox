@@ -144,10 +144,11 @@ describe("AiProviderList — signing out of a provider", () => {
       renderList();
       const button = await signOutButton("openai", "OpenAI GPT");
       fireEvent.click(button);
-      expect(button).toHaveTextContent("Sign out — tap again");
-      // Armed, it still says whose sign-in it is about to remove.
-      expect(button).toHaveAccessibleName("Sign out of OpenAI GPT — tap again");
-      expect(button).toHaveAttribute("title", "Sign out of OpenAI GPT — tap again");
+      expect(button).toHaveTextContent(/^Tap again$/);
+      // Armed, it still says whose sign-in it is about to remove — after the
+      // words on it, so a voice user can say what they see.
+      expect(button).toHaveAccessibleName("Tap again to sign out of OpenAI GPT");
+      expect(button).toHaveAttribute("title", "Tap again to sign out of OpenAI GPT");
       // Only the tapped row is armed.
       expectAtRest(screen.getByTestId("ai-provider-sign-out-xai"), "xAI Grok");
       expect(box.posts).toEqual([]);
@@ -225,7 +226,7 @@ describe("AiProviderList — signing out of a provider", () => {
     const button = await signOutButton("xai", "xAI Grok");
     vi.useFakeTimers();
     fireEvent.click(button);
-    expect(button).toHaveTextContent("Sign out — tap again");
+    expect(button).toHaveTextContent(/^Tap again$/);
     act(() => { vi.advanceTimersByTime(5_100); });
     expectAtRest(button, "xAI Grok");
     expect(box.posts).toEqual([]);
@@ -240,7 +241,7 @@ describe("AiProviderList — signing out of a provider", () => {
     fireEvent.blur(openai);
     fireEvent.click(xai);
     expectAtRest(openai, "OpenAI GPT");
-    expect(xai).toHaveTextContent("Sign out — tap again");
+    expect(xai).toHaveTextContent(/^Tap again$/);
     expect(box.posts).toEqual([]);
   });
 
@@ -366,6 +367,7 @@ describe("AiProviderList — the sign-out among the row's controls", () => {
       expect(classes(button), cls).toContain(cls);
       expect(classes(makeDefault), cls).toContain(cls);
     }
+    expect(screen.getByTestId("ai-provider-sign-out-label-openai")).toHaveAttribute("data-sizer", "Tap again");
     for (const cls of ["items-center", "text-[11px]", "px-2.5", "py-1", "rounded-lg", "border"]) {
       expect(classes(usage), cls).toContain(cls);
     }
@@ -375,8 +377,16 @@ describe("AiProviderList — the sign-out among the row's controls", () => {
     expect(classes(button).filter((c) => /^-?m[trblxy]?-/.test(c))).toEqual([]);
 
     fireEvent.click(button);
-    expect(button).toHaveTextContent("Sign out — tap again");
+    expect(button).toHaveTextContent(/^Tap again$/);
     expect(classes(button)).toContain("whitespace-nowrap");
+    // The two words share one grid cell, the hidden one as the `::after`
+    // sizer: the button is as wide as the wider word at rest and armed alike,
+    // so arming it never reflows the row out from under the second tap.
+    const label = screen.getByTestId("ai-provider-sign-out-label-openai");
+    expect(label).toHaveAttribute("data-sizer", "Sign out");
+    for (const cls of ["grid", "after:invisible", "after:[grid-area:1/1]", "after:content-[attr(data-sizer)]"]) {
+      expect(classes(label), cls).toContain(cls);
+    }
     fireEvent.click(button);
     await waitFor(() => expect(box.posts).toEqual([{ provider: "openai" }]));
     expect(button).toHaveTextContent("Signing out…");
@@ -419,7 +429,7 @@ describe("AiProviderList — the sign-out among the row's controls", () => {
     expect(button).toHaveTextContent(/^Abmelden$/);
     expect(button).toHaveAttribute("title", "Von OpenAI GPT abmelden");
     fireEvent.click(button);
-    expect(button).toHaveTextContent("Abmelden — nochmal tippen");
-    expect(button).toHaveAccessibleName("Von OpenAI GPT abmelden — nochmal tippen");
+    expect(button).toHaveTextContent(/^Nochmal tippen$/);
+    expect(button).toHaveAccessibleName("Nochmal tippen, um sich von OpenAI GPT abzumelden");
   });
 });

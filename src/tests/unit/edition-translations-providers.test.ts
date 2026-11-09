@@ -90,6 +90,17 @@ describe("the cloud-provider list is translated everywhere", () => {
     expect(KEYS.sort()).toEqual([...RENDERED].sort());
   });
 
+  // The sign-out shows a word or two and names the provider only for
+  // assistive tech and in its tooltip (TASK-2246). That name must carry the
+  // words on the button — WCAG's label-in-name — or a voice user saying what
+  // they see does not reach it.
+  it("the sign-out's names carry the words on the button, in every language", () => {
+    for (const table of [editionEn, ...NON_EN.map((locale) => OVERRIDES[locale])]) {
+      expect(table["settings.providers.signOutConfirmNamed"].startsWith(table["settings.providers.signOutConfirm"])).toBe(true);
+      expect(table["settings.providers.signOut"].toLowerCase()).toContain(table["settings.providers.signOutShort"].toLowerCase());
+    }
+  });
+
   it("the switch's name carries the provider's own label", () => {
     expect(editionEn["settings.providers.enable"]).toContain("{name}");
   });
