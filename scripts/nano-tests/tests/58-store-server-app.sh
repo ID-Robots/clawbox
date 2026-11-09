@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # timeout: 900
 # covers: src/lib/project-folder.ts src/lib/store-install.ts src/lib/store-install-receipt.ts src/lib/store-search.ts
-# covers: src/lib/app-proxy.ts src/lib/app-server-start.ts src/lib/webapp-icon.ts scripts/app-port.js
+# covers: src/lib/app-proxy.ts src/lib/app-server-start.ts src/lib/app-start-failure.ts src/lib/webapp-icon.ts scripts/app-port.js
 # covers: src/app/setup-api/apps/* src/app/setup-api/webapps/* src/app/apps/*
 # covers: src/lib/app-window.ts src/components/WebappFrame.tsx
 #
@@ -25,6 +25,23 @@
 #      visitor's top-level navigation still gets the login. The App Router's
 #      own fetches are answered for the sandbox's opaque origin, and the box's
 #      API answers that origin 401.
+#   7. When the app's server does NOT come up (TASK-2323: Audiobook Player
+#      1.2.1's own `next build` stopped on its app/favicon.ico, and every
+#      window, reopen and App Router fetch of it was the proxy's bare 404),
+#      the box says so: the install answer says why, the app's window is a 503
+#      page naming what failed (src/lib/app-start-failure.ts), its App Router
+#      fetches a 503 sentence, and an uninstall forgets it. Then the app's own
+#      start command is run OUTSIDE the box — `env -i`, a plain PATH with bun,
+#      no scope — to say whose failure it is: one that stops there too is the
+#      Store package's, a SKIP naming its error, and the checks that need the
+#      app running are skipped; one that serves there (the box's environment
+#      is what broke it) or cannot run at all (exit 126/127) is not ok. A
+#      toolchain the box ships that breaks every build in and out of the box
+#      alike reads as the package's: the skip's error line is there to tell.
+#
+# On a Hermes box the Store is not there (it is OpenClaw-only, and its routes
+# answer 404 not_openclaw): the Store flow is skipped and says so; the window
+# click-through still runs.
 #
 # First, a multi-page Next.js app of the test's own (WINDOW_FLOW), built on the
 # board with the box's own Next and React versions and put on the desktop from
@@ -163,7 +180,70 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# window_says — what the window of the owner gets at /apps/<id>/: "<status> page"
+# when it is the page of the box saying why the app did not start, else
+# "<status> <the start of the body>".
+window_says() {
+  local out code
+  out=$(mktemp)
+  code=$(printf "%s\n" "header = \"Cookie: clawbox_session=$COOKIE\"" | curl -sS -o "$out" -w "%{http_code}" --max-time 30 -K - \
+    -H "Sec-Fetch-Dest: iframe" -H "Sec-Fetch-Mode: navigate" -H "Sec-Fetch-Site: same-origin" -H "Accept: text/html" \
+    "$DASHBOARD/apps/$APP/" 2>/dev/null)
+  if grep -q "data-clawbox-app-start-failed=\"$APP\"" "$out"; then printf "%s page" "${code:-000}"
+  else printf "%s %s" "${code:-000}" "$(tr -d "\n" < "$out" | head -c 160)"; fi
+  rm -f "$out"
+}
+
+# own_start — the start command of the app itself, run in its folder OUTSIDE the box:
+# env -i (HOME, a plain PATH with bun and npm on it, LANG), no scope, no box
+# variable. "served" (and stopped again), "stopped <exit code>", "silent" when
+# it neither served nor stopped within 300 s, or "unreadable" when
+# clawbox.json names no start and port. What it printed goes to $OWN_LOG,
+# which the caller makes: this runs in a command substitution.
+own_start() {
+  local start port pid rc end
+  start=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"start\") or \"\")" "$FOLDER/clawbox.json" 2>/dev/null)
+  port=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"port\") or \"\")" "$FOLDER/clawbox.json" 2>/dev/null)
+  if [ -z "$start" ] || [ -z "$port" ]; then echo unreadable; return; fi
+  # Not a job-control shell, so setsid needs no fork: $! leads its own group.
+  ( cd "$FOLDER" && exec env -i HOME="$HOME" PATH="$HOME/.bun/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 setsid sh -c "$start" ) > "$OWN_LOG" 2>&1 < /dev/null &
+  pid=$!
+  end=$(( $(date +%s) + 300 ))
+  while :; do
+    if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$port/"; then
+      kill -- "-$pid" 2>/dev/null; sleep 3; kill -9 -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+      echo served; return
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; rc=$?; echo "stopped $rc"; return; fi
+    if [ "$(date +%s)" -ge "$end" ]; then kill -9 -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo silent; return; fi
+    sleep 1
+  done
+}
+
+# The first line of a log that reads like an error, and the innermost cause
+# after it when there is one (Turbopack prints a "Caused by:" list).
+first_error() {
+  python3 -c "
+import re, sys
+lines = [l.strip() for l in open(sys.argv[1], errors=\"replace\").read().splitlines() if l.strip()]
+at = next((i for i, l in enumerate(lines) if re.search(r\"error|failed|not found|cannot\", l, re.I)), None)
+if at is None: print(lines[-1] if lines else \"(no output)\"); sys.exit()
+said = lines[at:at + 4]
+cause = [l[2:] for l in lines[at:at + 12] if l.startswith(\"- \")]
+print(\" \".join(said)[:240] + ((\" (\" + cause[-1] + \")\") if cause else \"\"))
+" "$1" 2>/dev/null
+}
+
+# What the install round decided about the start of the app: "" while it has
+# not failed, "package" once its own start failed outside the box too; and
+# the file of the app its own start stopped on, when it named one.
+FAILED_BY=""
+PLACE=""
+
 r=$(call GET "/setup-api/apps/store?limit=200&q=audiobook%20player")
+if [ "$(status_of "$r")" = 404 ] && [ "$(body_of "$r" | py "j.get(\"code\")")" = not_openclaw ]; then
+  say "skip the App Store is OpenClaw-only and this box runs the Hermes agent runtime: there is no Store app to install here"; exit 0
+fi
 if [ "$(status_of "$r")" != 200 ] || [ "$(body_of "$r" | py "any(a.get(\"slug\") == sys.argv[2] for a in j.get(\"apps\", []))" "$APP")" != True ]; then
   say "skip the Store does not list $APP here: HTTP $(status_of "$r")"; exit 0
 fi
@@ -187,23 +267,83 @@ for round in install reinstall; do
   else
     say "not ok - $round: the install answered HTTP $(status_of "$r") $(body_of "$r" | py "j.get(\"error\")" | head -c 300)"; exit 0
   fi
+  VERSION=$(body_of "$r" | py "j.get(\"version\") or \"\"")
   [ -f "$FOLDER/clawbox.json" ] && [ -f "$FOLDER/.clawbox/store-app.json" ] \
     && say "ok - $round: it is in ~/Projects/$APP with the Store receipt, owned by $(stat -c %U "$FOLDER")" \
     || say "not ok - $round: ~/Projects/$APP has no clawbox.json or no Store receipt"
-  if [ "$round" = install ]; then
-    OPEN=$(wait_open 640)
-    case "$OPEN" in
-      "302 "*"/apps/$APP/ | 200 "*) say "ok - $round: the desktop address redirects to /apps/$APP/, which opens with the owner session" ;;
-      *"/login"*) say "not ok - $round: the app window lands on the login page: $OPEN" ;;
-      *) say "not ok - $round: the app window did not open: $OPEN" ;;
+
+  # Its server did not come up (TASK-2323: the app is in place, and every
+  # window of it used to be the 404 of the proxy). The box has to say so where
+  # the owner looks — the install answer, and the app window as a 503 page with
+  # what failed — and the start command of the app itself, run outside the box,
+  # decides whose failure it is: one that stops there too is the fault of the
+  # Store package (a skip that names it; the checks that need the app running
+  # are skipped), one that serves there, or cannot even run, is the fault of
+  # the box.
+  RUNNING=yes
+  if [ "$(body_of "$r" | py "j.get(\"registered\")")" = False ]; then
+    RUNNING=no
+    DETAIL=$(body_of "$r" | py "j.get(\"detail\") or \"\"")
+    say "$round: the install put $APP $VERSION in place, and its server did not start: $DETAIL"
+    if [ "$round" = install ]; then
+      OWN_LOG=$(mktemp)
+      OWN=$(own_start)
+      # Where its own start stopped, when its output names a file of the
+      # app (a build error: ./app/favicon.ico): the install answer has to
+      # name it too.
+      PLACE=$(grep -m 1 -E "^\./[^[:space:]]+$" "$OWN_LOG" | tr -d "\r")
+      case "$OWN" in
+        "stopped 126" | "stopped 127")
+          say "not ok - its start command cannot run on this box at all, in or outside the box ($OWN): $(first_error "$OWN_LOG")" ;;
+        stopped*)
+          FAILED_BY=package
+          say "skip $APP $VERSION from the Store does not start on its own either: its own start command, run outside the box with a clean environment, ${OWN/stopped/stops with exit code} too — $(first_error "$OWN_LOG"). The Store package has to be fixed; the checks that need the app running are skipped" ;;
+        served) say "not ok - the box could not start $APP, yet its own start command serves it outside the box: the box is at fault" ;;
+        *) say "not ok - the start command of the app itself, run outside the box, neither served nor stopped: $OWN" ;;
+      esac
+      tail -n 12 "$OWN_LOG" | sed "s/^/own start: /" | while IFS= read -r line; do say "$line"; done
+      rm -f "$OWN_LOG"
+    elif [ "$FAILED_BY" != package ]; then
+      say "not ok - reinstall: the box could not start $APP again, and the install round did not find its package at fault"
+    else
+      say "skip reinstall: the app needs running for its window; its package is at fault (see the install round)"
+    fi
+    if [ -n "${PLACE:-}" ]; then
+      case "$DETAIL" in
+        *"$PLACE"*) say "ok - $round: the install answer says the app server did not start, and where it stopped ($PLACE)" ;;
+        *) say "not ok - $round: the install answer does not say where the start stopped ($PLACE): \"$DETAIL\"" ;;
+      esac
+    else
+      case "$DETAIL" in
+        *"did not start"* | *"stopped"* | *"could not"* | *"was not started"* | *"failed"*) say "ok - $round: the install answer says the app server did not start, and why" ;;
+        *) say "not ok - $round: the install answer does not say why the app is not running: \"$DETAIL\"" ;;
+      esac
+    fi
+    WIN=$(window_says)
+    case "$WIN" in
+      "503 page") say "ok - $round: the app window says why its start failed (503), not the 404 of the proxy" ;;
+      *) say "not ok - $round: the app window answers $WIN instead of saying why the app did not start" ;;
     esac
-  else
-    OPEN="$(doc "/setup-api/webapps?app=$APP") | $(doc "/apps/$APP/")"
-    case "$OPEN" in
-      "302 "*"/apps/$APP/ | "*"/login"*) say "not ok - $round: the app window lands on the login page: $OPEN" ;;
-      "302 "*"/apps/$APP/ | "*) say "ok - $round: the desktop address redirects to /apps/$APP/ again ($OPEN)" ;;
-      *) say "not ok - $round: the desktop address did not redirect to /apps/$APP/: $OPEN" ;;
-    esac
+  elif [ "$FAILED_BY" = package ]; then
+    say "reinstall: the server came up this time, though the install round found the package at fault"
+  fi
+
+  if [ "$RUNNING" = yes ]; then
+    if [ "$round" = install ]; then
+      OPEN=$(wait_open 640)
+      case "$OPEN" in
+        "302 "*"/apps/$APP/ | 200 "*) say "ok - $round: the desktop address redirects to /apps/$APP/, which opens with the owner session" ;;
+        *"/login"*) say "not ok - $round: the app window lands on the login page: $OPEN" ;;
+        *) say "not ok - $round: the app window did not open: $OPEN" ;;
+      esac
+    else
+      OPEN="$(doc "/setup-api/webapps?app=$APP") | $(doc "/apps/$APP/")"
+      case "$OPEN" in
+        "302 "*"/apps/$APP/ | "*"/login"*) say "not ok - $round: the app window lands on the login page: $OPEN" ;;
+        "302 "*"/apps/$APP/ | "*) say "ok - $round: the desktop address redirects to /apps/$APP/ again ($OPEN)" ;;
+        *) say "not ok - $round: the desktop address did not redirect to /apps/$APP/: $OPEN" ;;
+      esac
+    fi
   fi
   ANON=$(top "/apps/$APP/")
   case "$ANON" in 307*"/login"*) say "ok - $round: a visitor opening /apps/$APP/ without a session is sent to log in" ;; *) say "not ok - $round: a visitor opening /apps/$APP/ without a session got $ANON" ;; esac
@@ -214,20 +354,28 @@ for round in install reinstall; do
       "401 "*clawboxAppReopen*) say "ok - a page the app frame opens itself gets the reopen page, not the login redirect" ;;
       *) say "not ok - a page the app frame opens itself answered: $(printf "%s" "$REOPEN" | head -c 160)" ;;
     esac
-    case "$(doc "/apps/$APP/?nano=1")" in
-      200*) say "ok - the window reopening that page with the owner session opens it" ;;
-      *) say "not ok - the window reopening that page answered $(doc "/apps/$APP/?nano=1")" ;;
-    esac
-    PRE=$(opaque -X OPTIONS -H "Access-Control-Request-Method: GET" -H "Access-Control-Request-Headers: next-router-state-tree,next-url,rsc" "/apps/$APP/")
-    case "$PRE" in
-      "204 null"*) say "ok - the App Router preflight from the app frame is answered for its opaque origin" ;;
-      *) say "not ok - the App Router preflight from the app frame answered: $PRE" ;;
-    esac
-    RSC=$(opaque -H "RSC: 1" "/apps/$APP/?_rsc=")
-    case "$RSC" in
-      "200 null text/x-component"*) say "ok - an App Router fetch from the app frame is readable by it" ;;
-      *) say "not ok - an App Router fetch from the app frame answered: $RSC" ;;
-    esac
+    if [ "$RUNNING" = yes ]; then
+      case "$(doc "/apps/$APP/?nano=1")" in
+        200*) say "ok - the window reopening that page with the owner session opens it" ;;
+        *) say "not ok - the window reopening that page answered $(doc "/apps/$APP/?nano=1")" ;;
+      esac
+      PRE=$(opaque -X OPTIONS -H "Access-Control-Request-Method: GET" -H "Access-Control-Request-Headers: next-router-state-tree,next-url,rsc" "/apps/$APP/")
+      case "$PRE" in
+        "204 null"*) say "ok - the App Router preflight from the app frame is answered for its opaque origin" ;;
+        *) say "not ok - the App Router preflight from the app frame answered: $PRE" ;;
+      esac
+      RSC=$(opaque -H "RSC: 1" "/apps/$APP/?_rsc=")
+      case "$RSC" in
+        "200 null text/x-component"*) say "ok - an App Router fetch from the app frame is readable by it" ;;
+        *) say "not ok - an App Router fetch from the app frame answered: $RSC" ;;
+      esac
+    else
+      RSC=$(opaque -H "RSC: 1" "/apps/$APP/?_rsc=")
+      case "$RSC" in
+        "503 "*"text/plain"*) say "ok - an App Router fetch of the app that did not start is told so (503), not 404" ;;
+        *) say "not ok - an App Router fetch of the app that did not start answered: $RSC" ;;
+      esac
+    fi
     BOX=$(opaque "/setup-api/system/version")
     case "$BOX" in 401*) say "ok - the box API answers the app frame 401" ;; *) say "not ok - the box API answered the app frame: $BOX" ;; esac
   fi
@@ -235,6 +383,12 @@ for round in install reinstall; do
     r=$(uninstall)
     [ "$(status_of "$r")" = 200 ] && [ ! -e "$FOLDER" ] && say "ok - uninstall removed $APP and its folder" \
       || say "not ok - uninstall answered HTTP $(status_of "$r"), folder $( [ -e "$FOLDER" ] && echo still there || echo gone)"
+    if [ "$RUNNING" = no ]; then
+      case "$(window_says)" in
+        404*) say "ok - once uninstalled, its window no longer speaks of the failed start" ;;
+        *) say "not ok - once uninstalled, its window still answers $(window_says)" ;;
+      esac
+    fi
   fi
 done
 '

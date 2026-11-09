@@ -67,6 +67,7 @@ import { type ClawboxManifest, isProxyablePort } from "@/lib/clawbox-manifest";
 import { findSystemdTool, probeSystemdRun, scopeEnv } from "@/lib/coding-run-unit";
 import { isInside } from "@/lib/file-guard";
 import { appMemoryLimits } from "@/lib/box-memory-policy";
+import { clearAppStartFailure, recordAppStartFailure } from "@/lib/app-start-failure";
 
 /** Every unit this module is ever allowed to name. */
 export const APP_UNIT_PREFIX = "clawbox-app-";
@@ -528,6 +529,32 @@ const CONTROL_RE = /[\u0000-\u001f\u007f]/g;
 const SHELL_SAYS_RE = /^(?:\/(?:usr\/)?bin\/)?(?:sh|dash|bash):(?: line)? \d+: /;
 /** A line that reads like the reason a start stopped. */
 const TROUBLE_RE = /error|not found|cannot|can't|could not|couldn't|failed|denied|no such|missing|EADDRINUSE|EACCES|ENOENT/i;
+/** A build's own word that it failed, with the reason on the lines after it: Next.js's "> Build error occurred", webpack's "Failed to compile." */
+const BUILD_FAILED_RE = /^(?:>\s*)?(?:build error occurred|failed to compile\.?)$/i;
+/** A line that is only the place of an error — `./app/favicon.ico`, `./app/page.tsx:12:3` — with the error itself on the next line. */
+const ERROR_PLACE_RE = /^\.{0,2}\/\S+$/;
+/** How many lines after the first a reason may take with it. */
+const REASON_LINES_MAX = 4;
+/** How far past the reason a "Caused by:" is looked for. */
+const CAUSE_LOOKAHEAD = 8;
+
+/** Does this line only introduce the next one? */
+function introducesNext(line: string): boolean {
+  return line.endsWith(":") || BUILD_FAILED_RE.test(line) || ERROR_PLACE_RE.test(line);
+}
+
+/**
+ * The innermost cause of a Rust tool's error (Turbopack's): the last item of
+ * the "Caused by:" list that follows the error, when there is one.
+ */
+function innermostCause(lines: string[], from: number): string | null {
+  const end = Math.min(lines.length, from + CAUSE_LOOKAHEAD);
+  const at = lines.slice(from, end).findIndex((line) => /^caused by:$/i.test(line));
+  if (at < 0) return null;
+  let cause: string | null = null;
+  for (let i = from + at + 1; i < lines.length && lines[i].startsWith("- "); i++) cause = lines[i].slice(2).trim();
+  return cause || null;
+}
 
 /**
  * The one line of a failed start's output that says why. Exported for its test.
@@ -535,9 +562,13 @@ const TROUBLE_RE = /error|not found|cannot|can't|could not|couldn't|failed|denie
  * The FIRST line that reads like an error, not the last: node prints its stack
  * and then its version banner after the error, and npm repeats the exit code
  * after the shell's "node: not found". An error line that only introduces the
- * next one ("error when starting preview server:") takes that line with it.
- * The last line when nothing reads like an error; null when there was no
- * output at all.
+ * next one ("error when starting preview server:") takes that line with it —
+ * and so does a build's "Build error occurred" and the file an error is about,
+ * so a `next build && next start` that stops on the app's own file says which
+ * file and what is wrong with it (TASK-2323: "Build error occurred" alone was
+ * the whole answer), with Turbopack's innermost "Caused by:" after it. The
+ * last line when nothing reads like an error; null when there was no output
+ * at all.
  */
 export function startOutputLine(output: string): string | null {
   const lines = output
@@ -548,8 +579,12 @@ export function startOutputLine(output: string): string | null {
   if (lines.length === 0) return null;
   let at = lines.findIndex((line) => TROUBLE_RE.test(line));
   if (at < 0) at = lines.length - 1;
-  let said = lines[at].replace(SHELL_SAYS_RE, "");
-  if (said.endsWith(":") && at + 1 < lines.length) said = `${said} ${lines[at + 1]}`;
+  const parts = [lines[at].replace(SHELL_SAYS_RE, "").replace(/^>\s*(?=build error occurred$)/i, "")];
+  let next = at + 1;
+  while (next < lines.length && parts.length <= REASON_LINES_MAX && introducesNext(parts[parts.length - 1])) parts.push(lines[next++]);
+  let said = parts.join(" ");
+  const cause = parts.length > 1 ? innermostCause(lines, next) : null;
+  if (cause && !said.includes(cause)) said = `${said} (${cause})`;
   return said.length > OUTPUT_LINE_MAX ? `${said.slice(0, OUTPUT_LINE_MAX - 1)}…` : said;
 }
 
@@ -617,11 +652,17 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
   if (!APP_ID_RE.test(id) || !isProxyablePort(port) || !command) return { ok: false, detail: "The manifest names no start command." };
   const stat = await fs.promises.stat(directory).catch(() => null);
   if (!stat?.isDirectory()) return { ok: false, detail: "The project folder is gone." };
+  // From here on a start that does not come up is written down, so the app's
+  // window can say why instead of the proxy's 404 (src/lib/app-start-failure.ts).
+  const failed = async (detail: string, how: { stage?: "dependencies" | "start"; exitCode?: number | null; output?: string } = {}): Promise<StartOutcome> => {
+    await recordAppStartFailure({ id, name: manifest.name || id, command, port, directory, stage: how.stage ?? "start", exitCode: how.exitCode ?? null, detail, output: how.output });
+    return { ok: false, detail };
+  };
 
   // Before anything is spawned: a start without its dependencies only ever
   // exits 127, and this is what lets a retry recover from that.
   const deps = await installAppDependencies({ directory, searchPath });
-  if (!deps.ok) return { ok: false, detail: deps.detail };
+  if (!deps.ok) return failed(deps.detail, { stage: "dependencies" });
 
   const logFile = appServerLogPath(id);
   await fs.promises.mkdir(path.dirname(logFile), { recursive: true });
@@ -667,7 +708,10 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
 
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
-      if ((await listenerOwnedBy(port, directory, { fresh: true })) === "owned") return { ok: true };
+      if ((await listenerOwnedBy(port, directory, { fresh: true })) === "owned") {
+        await clearAppStartFailure(id);
+        return { ok: true };
+      }
       if (gone) break;
       await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
@@ -675,16 +719,17 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
       // Still running and still silent: end what we started, by its own
       // process group, rather than leave a half-started server behind.
       if (typeof child.pid === "number") await endProcessGroup(child.pid);
-      return { ok: false, detail: `the box started it (${command}) and nothing of the project's answered on port ${port} within ${Math.round(waitMs / 1000)} seconds.` };
+      return failed(`the box started it (${command}) and nothing of the project's answered on port ${port} within ${Math.round(waitMs / 1000)} seconds.`, { output: await readOutputTail(logFile) });
     }
   }
   const code = exited === null ? "" : ` with exit code ${exited}`;
   // What it printed takes the command's place (the owner can read that in
   // clawbox.json): the feed keeps 160 characters of a step, and a long start
   // command in front would leave none of them for "bun: not found".
-  const said = startOutputLine(await readOutputTail(logFile));
-  if (said) return { ok: false, detail: `its start command stopped${code} before listening: ${said}` };
-  return { ok: false, detail: `the box started it (${command}) and it stopped${code} before anything listened on port ${port}.` };
+  const output = await readOutputTail(logFile);
+  const said = startOutputLine(output);
+  if (said) return failed(`its start command stopped${code} before listening: ${said}`, { exitCode: exited, output });
+  return failed(`the box started it (${command}) and it stopped${code} before anything listened on port ${port}.`, { exitCode: exited, output });
 }
 
 /** How long a start that is being ended gets to go quietly before it is killed. */

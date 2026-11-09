@@ -63,6 +63,9 @@ describe("ensureProjectIcon", () => {
     generates();
     const outcome = await ensureProjectIcon({ id: "site", directory, name: "Site" });
     expect(outcome).toEqual({ icon: "generated", favicon: true });
+    // RGBA whatever the picture: an ICO's PNG must be, or a Next app's build
+    // stops on it (TASK-2323).
+    expect(shrinkIcon).toHaveBeenCalledWith(PNG, 64, { alpha: true });
     expect(fs.readFileSync(path.join(directory, FAVICON_PNG)).equals(SMALL)).toBe(true);
     const ico = fs.readFileSync(path.join(directory, FAVICON_ICO));
     expect(ico.subarray(22).equals(SMALL)).toBe(true);

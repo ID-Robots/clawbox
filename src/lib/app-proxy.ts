@@ -56,6 +56,7 @@
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { runChild } from "@/lib/child-run";
+import { clearAppStartFailure } from "@/lib/app-start-failure";
 import { APP_ID_RE, projectPath, webappPath, writeWebappIndex } from "@/lib/code-projects";
 import { get as configGet } from "@/lib/config-store";
 import { isInside } from "@/lib/file-guard";
@@ -522,6 +523,9 @@ export async function registerServerApp(input: { id: string; directory: string; 
       description: manifest.description ?? undefined,
     });
     await pushPendingAction({ type: "register_webapp", appId: id, name: manifest.name, color: "#f97316", url: appProxyPath(id) }).catch(() => undefined);
+    // Its server answers now, however it came up: a start that failed before
+    // has nothing left to say in its window.
+    await clearAppStartFailure(id);
     return { ok: true };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

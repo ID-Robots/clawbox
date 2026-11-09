@@ -381,4 +381,49 @@ describe("the app proxy", () => {
     server = http.createServer(() => undefined);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   });
+
+  it("answers an app whose start failed with what failed, as a 503 — a page for its window, a sentence for its fetches — not the 404 (TASK-2323)", async () => {
+    const failures = await import("@/lib/app-start-failure");
+    const detail = "its start command stopped with exit code 1 before listening: Build error occurred ./app/favicon.ico Error: Processing image failed (The PNG is not in RGBA format!)";
+    // Never registered: a Store install whose own build failed.
+    await failures.recordAppStartFailure({ id: "books", name: "Books", command: "bun run serve", port: 4240, directory: process.cwd(), stage: "start", exitCode: 1, detail, output: "> Build error occurred\n./app/favicon.ico\n" });
+
+    const page = await routes.GET(req("/apps/books/", { headers: { "sec-fetch-dest": "iframe", accept: "text/html" } }), ctx("books"));
+    expect(page.status).toBe(503);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(page.headers.get("content-security-policy")).toContain("sandbox");
+    const html = await page.text();
+    expect(html).toContain('data-clawbox-app-start-failed="books"');
+    expect(html).toContain("The PNG is not in RGBA format!");
+    expect(html).toContain("<code>bun run serve</code>");
+
+    // The App Router's own fetch and its preflight: the sentence, not a page.
+    const rsc = await routes.GET(req("/apps/books/?_rsc=1", { headers: { rsc: "1", accept: "*/*" } }), ctx("books"));
+    expect(rsc.status).toBe(503);
+    expect(rsc.headers.get("content-type")).toContain("text/plain");
+    expect(await rsc.text()).toBe(`Books is not running: its server did not start. ${detail}`);
+    const preflight = await routes.OPTIONS(req("/apps/books/", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "GET", "access-control-request-headers": "rsc,next-router-state-tree,next-url" } }), ctx("books"));
+    expect(preflight.status).toBe(503);
+
+    // Registered, and nothing listens (the boot pass could not bring it back): the same.
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    meta("books");
+    const down = await routes.GET(req("/apps/books/", { headers: { "sec-fetch-dest": "document" } }), ctx("books"));
+    expect(down.status).toBe(503);
+    expect(await down.text()).toContain("did not start");
+
+    // Forgotten (an uninstall, a start that came up): the listener's own answer again.
+    await failures.clearAppStartFailure("books");
+    const plain = await routes.GET(req("/apps/books/", { headers: { "sec-fetch-dest": "document" } }), ctx("books"));
+    expect(plain.status).toBe(502);
+    expect(await plain.text()).toContain(`port ${port}`);
+    server = http.createServer(() => undefined);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  });
+
+  it("keeps the 404 for a name nothing registers and no start ever failed for", async () => {
+    const missing = await routes.GET(req("/apps/nothing/", { headers: { "sec-fetch-dest": "iframe" } }), ctx("nothing"));
+    expect(missing.status).toBe(404);
+    expect(await missing.text()).toContain("No app is served under this name");
+  });
 });

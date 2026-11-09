@@ -12,6 +12,7 @@ import { disablePublicLink } from "@/lib/public-app-links";
 import { removeStoreInstalledFolder } from "@/lib/store-install-receipt";
 import { registeredServer } from "@/lib/app-proxy";
 import { disableUserUnits, stopServerApp } from "@/lib/app-server-start";
+import { clearAppStartFailure } from "@/lib/app-start-failure";
 
 export const dynamic = "force-dynamic";
 
@@ -285,6 +286,8 @@ export async function POST(req: Request) {
     // Its folder is gone: a unit of its own left enabled would start a server
     // from nowhere at the next boot.
     if (projectRemoved) await disableUserUnits(serverUnits);
+    // A failed start of the app is not news once the app is gone (src/lib/app-start-failure.ts).
+    await clearAppStartFailure(appId);
 
     // Remove the deployed webapp, if this app is one. `webapp_create`,
     // `webapp_update` and `code_project_build` all deploy to
