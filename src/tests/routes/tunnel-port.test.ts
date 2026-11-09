@@ -19,6 +19,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-tunnel-port-${process.pid}-${Date.now()}`);
 const PUBLIC_URL = "https://port-route-check.trycloudflare.com";
+const BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id";
+/** cloudflared's argv: an isolated empty config ahead of --url, as run-tunnel.sh runs it. */
+const argvFor = (target: string) => [
+  "tunnel",
+  "--no-autoupdate",
+  "--config",
+  path.join(TEST_ROOT, "tunnel-isolated-config.yml"),
+  "--url",
+  target,
+];
 
 const spawnMock = vi.fn();
 vi.mock("child_process", () => ({
@@ -82,7 +92,7 @@ let killed: Array<[number, string | number | undefined]> = [];
 let killSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(async () => {
-  for (const f of ["tunnel-state.json", "tunnel.pid", "tunnel-url.txt"]) {
+  for (const f of ["tunnel-state.json", "tunnel.pid", "tunnel-url.txt", "tunnel-isolated-config.yml"]) {
     await fs.rm(path.join(TEST_ROOT, f), { force: true });
   }
   spawnMock.mockReset();
@@ -126,7 +136,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
     expect(enabled.status).toBe(200);
     expect(await enabled.json()).toEqual({ success: true, tunnelUrl: PUBLIC_URL });
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock.mock.calls[0][1]).toEqual(["tunnel", "--url", target]);
+    expect(spawnMock.mock.calls[0][1]).toEqual(argvFor(target));
 
     // The URL the caller shows is the one status keeps answering with.
     const up = await (await status.GET!()).json();
@@ -166,10 +176,11 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it.skipIf(!existsSync("/proc/sys/kernel/random/boot_id"))(
+  it.skipIf(!existsSync(BOOT_ID_FILE))(
     "after a reboot, enable starts a fresh tunnel on the same port instead of trusting the old pid",
     async () => {
-      await fs.writeFile(path.join(TEST_ROOT, "tunnel.pid"), String(process.pid));
+      // A pid recorded under the previous boot, now some other process's number.
+      await fs.writeFile(path.join(TEST_ROOT, "tunnel.pid"), `${process.pid}\n00000000-0000-0000-0000-000000000000\n`);
       await fs.writeFile(path.join(TEST_ROOT, "tunnel-url.txt"), "https://died-with-the-boot.trycloudflare.com");
       await fs.writeFile(
         path.join(TEST_ROOT, "tunnel-state.json"),
@@ -178,7 +189,6 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
           tunnelUrl: "https://died-with-the-boot.trycloudflare.com",
           startedAt: "2026-11-01T00:00:00.000Z",
           target,
-          bootId: "00000000-0000-0000-0000-000000000000",
         }),
       );
 
@@ -186,7 +196,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
 
       const enabled = await (await enable.POST!()).json();
       expect(enabled).toEqual({ success: true, tunnelUrl: PUBLIC_URL });
-      expect(spawnMock.mock.calls[0][1]).toEqual(["tunnel", "--url", target]);
+      expect(spawnMock.mock.calls[0][1]).toEqual(argvFor(target));
       expect(killed).toEqual([]);
     },
   );

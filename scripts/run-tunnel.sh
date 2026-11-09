@@ -92,9 +92,11 @@ ISOLATED_CONFIG="$TUNNEL_DIR/isolated-config.yml"
 # Nothing inherited may pose as the credential; the named run sets its own.
 unset TUNNEL_TOKEN
 
-# An integer in 1-65535, printed without leading zeros — the rule envPort()
-# applies in src/lib/port-probe.ts. Five digits at most before any arithmetic,
-# so a long string can neither overflow nor wrap into range.
+# An integer in 1-65535, printed without leading zeros: the range envPort() in
+# src/lib/port-probe.ts accepts, as plain decimal digits only (Number() there
+# also takes `0x…`, `1e3` and padding, which no unit writes). Five digits at
+# most before any arithmetic, so a long string can neither overflow nor wrap
+# into range.
 valid_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] && [ "${#port}" -le 5 ] || return 1
@@ -104,18 +106,21 @@ valid_port() {
 }
 
 # The PORT the web UI's unit hands the server. `systemctl show` prints the
-# unit's Environment= assignments on one line, space-separated.
+# unit's Environment= assignments on one line, space-separated; as in systemd,
+# the last PORT= wins. An EnvironmentFile= is not in that line, which is safe
+# because install-x64.sh refuses a project .env that sets PORT
+# (validate_reserved_port_env) and the appliance's unit has none.
 web_ui_unit_port() {
-  local line pair
+  local line pair port=""
   local -a pairs
   line="$(timeout 5 "$SYSTEMCTL_BIN" show -p Environment --value "$WEB_UI_UNIT" 2>/dev/null)" || return 1
   read -r -a pairs <<< "$line"
   for pair in "${pairs[@]}"; do
     case "$pair" in
-      PORT=*) valid_port "${pair#PORT=}" && return 0 ;;
+      PORT=*) port="${pair#PORT=}" ;;
     esac
   done
-  return 1
+  valid_port "$port"
 }
 
 # The port the web UI serves on, from the sources the server and the installers

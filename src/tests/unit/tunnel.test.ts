@@ -8,6 +8,12 @@ const TEST_ROOT = path.join(os.tmpdir(), `clawbox-tunnel-tests-${process.pid}-${
 const STATE_FILE = path.join(TEST_ROOT, "tunnel-state.json");
 const PID_FILE = path.join(TEST_ROOT, "tunnel.pid");
 const URL_FILE = path.join(TEST_ROOT, "tunnel-url.txt");
+const ISOLATED_CONFIG = path.join(TEST_ROOT, "tunnel-isolated-config.yml");
+// tunnel.pid is `<pid>\n<boot id>\n`. Off Linux there is no boot id to compare.
+const BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id";
+const thisBoot = () => (existsSync(BOOT_ID_FILE) ? readFileSync(BOOT_ID_FILE, "utf-8").trim() : "");
+/** A pid record for this test process, written under this boot: a live tunnel. */
+const livePid = () => `${process.pid}\n${thisBoot()}\n`;
 
 // child_process is mocked so isCloudflaredInstalled and startTunnel don't shell out.
 const execMock = vi.fn();
@@ -125,7 +131,7 @@ describe("tunnel — pid tracking", () => {
   });
 
   it("isTunnelRunning returns true for the current process pid", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+    await fs.writeFile(PID_FILE, livePid(), "utf-8");
     expect(await tunnel.isTunnelRunning()).toBe(true);
   });
 
@@ -221,7 +227,7 @@ describe("tunnel — getTunnelStatus", () => {
   });
 
   it("reports running+url when pid + url + state are present", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+    await fs.writeFile(PID_FILE, livePid(), "utf-8");
     await fs.writeFile(URL_FILE, "https://xyz.trycloudflare.com", "utf-8");
     await tunnel.writeState({
       enabled: true,
@@ -305,7 +311,7 @@ describe("tunnel — getTunnelStatus", () => {
   });
 
   it("still describes a tunnel this module spawned itself", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+    await fs.writeFile(PID_FILE, livePid(), "utf-8");
     await fs.writeFile(URL_FILE, "https://spawned.trycloudflare.com", "utf-8");
     await tunnel.writeState({
       enabled: true,
@@ -376,7 +382,7 @@ describe("tunnel — startTunnel", () => {
 
   it("returns existing url when tunnel is already running", async () => {
     execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+    await fs.writeFile(PID_FILE, livePid(), "utf-8");
     await fs.writeFile(URL_FILE, "https://existing.trycloudflare.com", "utf-8");
     const result = await tunnel.startTunnel();
     expect(result.success).toBe(true);
@@ -447,12 +453,22 @@ describe.each([
     expect(result).toEqual({ success: true, tunnelUrl: "https://port-check.trycloudflare.com" });
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(spawnMock.mock.calls[0][0]).toBe("cloudflared");
-    expect(spawnMock.mock.calls[0][1]).toEqual(["tunnel", "--url", target]);
+    // `--config` an empty map, ahead of --url, as scripts/run-tunnel.sh runs it:
+    // an owner's ~/.cloudflared/config.yml must not reroute the public URL.
+    expect(spawnMock.mock.calls[0][1]).toEqual([
+      "tunnel",
+      "--no-autoupdate",
+      "--config",
+      ISOLATED_CONFIG,
+      "--url",
+      target,
+    ]);
+    expect(await fs.readFile(ISOLATED_CONFIG, "utf-8")).toBe("{}\n");
     expect((await tunnel.readState()).target).toBe(target);
   });
 
   it("reports the target of a tunnel it spawned, and forgets it on disable", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+    await fs.writeFile(PID_FILE, livePid(), "utf-8");
     await fs.writeFile(URL_FILE, "https://spawned.trycloudflare.com", "utf-8");
     await tunnel.writeState({
       enabled: true,
@@ -497,19 +513,20 @@ describe("tunnel — status reports no target when nothing runs", () => {
  * tunnel.pid survives it, and the number is reused — often by another process
  * of the same user, which `kill(pid, 0)` reports as alive.
  */
-const BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id";
 describe.skipIf(!existsSync(BOOT_ID_FILE))("tunnel — a pid from an earlier boot is not ours", () => {
-  const thisBoot = () => readFileSync(BOOT_ID_FILE, "utf-8").trim();
-
-  it("is not reported running, and its pid file is dropped", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+  it.each([
+    ["an earlier boot", `${process.pid}\n00000000-0000-0000-0000-000000000000\n`],
+    // Written before boot ids were recorded: by a server that has stopped since,
+    // and the child went with it (the UI unit's control group).
+    ["no boot id (written before this change)", `${process.pid}\n`],
+  ])("a pid recorded under %s is not reported running, and its file is dropped", async (_label, record) => {
+    await fs.writeFile(PID_FILE, record, "utf-8");
     await fs.writeFile(URL_FILE, "https://died-with-the-boot.trycloudflare.com", "utf-8");
     await tunnel.writeState({
       enabled: true,
       tunnelUrl: "https://died-with-the-boot.trycloudflare.com",
       startedAt: new Date().toISOString(),
       target: "http://localhost:3005",
-      bootId: "00000000-0000-0000-0000-000000000000",
     });
 
     expect(await tunnel.isTunnelRunning()).toBe(false);
@@ -518,8 +535,7 @@ describe.skipIf(!existsSync(BOOT_ID_FILE))("tunnel — a pid from an earlier boo
   });
 
   it("is never signalled by disable", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
-    await tunnel.writeState({ enabled: true, tunnelUrl: null, startedAt: null, bootId: "an-earlier-boot" });
+    await fs.writeFile(PID_FILE, `${process.pid}\nan-earlier-boot\n`, "utf-8");
     const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
     try {
       expect(await tunnel.stopTunnel()).toEqual({ success: true });
@@ -530,16 +546,16 @@ describe.skipIf(!existsSync(BOOT_ID_FILE))("tunnel — a pid from an earlier boo
   });
 
   it("still counts a tunnel spawned under this boot", async () => {
-    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
-    await tunnel.writeState({ enabled: true, tunnelUrl: null, startedAt: null, bootId: thisBoot() });
+    await fs.writeFile(PID_FILE, livePid(), "utf-8");
     expect(await tunnel.isTunnelRunning()).toBe(true);
+    expect(await tunnel.getTunnelPid()).toBe(process.pid);
   });
 
-  it("records this boot's id when it spawns", async () => {
+  it("records this boot's id beside the pid when it spawns", async () => {
     execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
     spawnMock.mockImplementation(() => makeFakeProc("https://boot-stamp.trycloudflare.com"));
     await tunnel.startTunnel();
-    expect((await tunnel.readState()).bootId).toBe(thisBoot());
+    expect(await fs.readFile(PID_FILE, "utf-8")).toBe(`999999\n${thisBoot()}\n`);
   });
 });
 

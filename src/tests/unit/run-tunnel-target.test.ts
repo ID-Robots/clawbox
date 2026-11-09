@@ -192,6 +192,11 @@ describe("run-tunnel.sh — the port the unit forwards to (TASK-2359)", () => {
       expect(calls()).toContain("systemctl:show -p Environment --value clawbox-setup.service");
     });
 
+    it("reads the unit's PORT the way systemd applies it: the last assignment wins", async () => {
+      writeFileSync(path.join(root, "ui-unit.env"), "PORT=80 NODE_ENV=production PORT=3005\n");
+      expect(await forwardedTo({})).toBe("http://localhost:3005");
+    });
+
     it("gets 80 from the appliance's UI unit", async () => {
       writeFileSync(path.join(root, "ui-unit.env"), "PORT=80 HTTPS_PORT=443\n");
       expect(await forwardedTo({})).toBe("http://localhost:80");

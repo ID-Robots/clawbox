@@ -33,6 +33,11 @@ const DATA_DIR =
 const TUNNEL_STATE_FILE = join(DATA_DIR, "tunnel-state.json");
 const TUNNEL_PID_FILE = join(DATA_DIR, "tunnel.pid");
 const TUNNEL_URL_FILE = join(DATA_DIR, "tunnel-url.txt");
+// The only config the spawned cloudflared may read — see ISOLATED_CONFIG in
+// scripts/run-tunnel.sh: without --config it loads ~/.cloudflared/config.yml,
+// whose ingress rules win over --url. On a PC install the tunnel runs as the
+// owner's own account, where such a file is ordinary.
+const ISOLATED_CONFIG_FILE = join(DATA_DIR, "tunnel-isolated-config.yml");
 // Changes on every boot. A pid recorded under another boot id names nothing of ours.
 const BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id";
 
@@ -42,8 +47,6 @@ export interface TunnelState {
   startedAt: string | null;
   /** Local origin the spawned cloudflared forwards to (absent in older state files). */
   target?: string | null;
-  /** Kernel boot id it was spawned under (absent in older state files). */
-  bootId?: string | null;
 }
 
 export interface TunnelStatus {
@@ -92,13 +95,23 @@ export async function writeState(state: TunnelState) {
   await writeFile(TUNNEL_STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-export async function getTunnelPid(): Promise<number | null> {
+/**
+ * tunnel.pid is `<pid>\n<boot id>\n`: the boot id travels in the same file, so
+ * one read answers both and no status poll can pair a fresh pid with a stale
+ * boot id. A file written before boot ids were recorded holds the pid alone.
+ */
+async function readPidRecord(): Promise<{ pid: number; bootId: string | null } | null> {
   try {
-    const pid = await readFile(TUNNEL_PID_FILE, "utf-8");
-    return parseInt(pid.trim(), 10);
+    const [pidLine = "", bootLine = ""] = (await readFile(TUNNEL_PID_FILE, "utf-8")).split("\n");
+    const pid = parseInt(pidLine.trim(), 10);
+    return pid > 0 ? { pid, bootId: bootLine.trim() || null } : null;
   } catch {
     return null;
   }
+}
+
+export async function getTunnelPid(): Promise<number | null> {
+  return (await readPidRecord())?.pid ?? null;
 }
 
 async function readBootId(): Promise<string | null> {
@@ -116,16 +129,19 @@ async function forgetPid(): Promise<void> {
 }
 
 export async function isTunnelRunning(): Promise<boolean> {
-  const pid = await getTunnelPid();
-  if (!pid) return false;
+  const record = await readPidRecord();
+  if (!record) return false;
+  const { pid } = record;
 
   // A reboot ends the spawned cloudflared but leaves tunnel.pid behind, and the
   // number is handed out again on the next boot — often to another process of
   // this same user, which signal 0 then reports as alive. Status would show a
   // URL that died with the old boot, and stopTunnel would kill whatever owns
-  // the number now.
-  const [state, bootId] = await Promise.all([readState(), readBootId()]);
-  if (state.bootId && bootId && state.bootId !== bootId) {
+  // the number now. A record with no boot id was written by a server that has
+  // since stopped, and the child went with it: it runs in the UI unit's
+  // control group, which systemd kills on every stop.
+  const bootId = await readBootId();
+  if (bootId && record.bootId !== bootId) {
     await forgetPid();
     return false;
   }
@@ -246,11 +262,19 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
   // that answered 502 on every PC install (TASK-2359).
   const target = webUiLoopbackUrl();
   const bootId = await readBootId();
+  // Rewritten on every start, so nothing left in it can steer the tunnel; if
+  // the write fails, /dev/null isolates just as well (with one ERR log line).
+  const isolatedConfig = await writeFile(ISOLATED_CONFIG_FILE, "{}\n").then(
+    () => ISOLATED_CONFIG_FILE,
+    () => "/dev/null",
+  );
 
   return new Promise((resolve) => {
     // Start cloudflared with quick tunnel (no account needed), exposing the
     // ClawBox web UI.
-    const proc = spawn("cloudflared", ["tunnel", "--url", target], {
+    // `--config` goes before `--url`, exactly as scripts/run-tunnel.sh runs it.
+    const args = ["tunnel", "--no-autoupdate", "--config", isolatedConfig, "--url", target];
+    const proc = spawn("cloudflared", args, {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -269,9 +293,9 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
 
         // Save state
         Promise.all([
-          writeFile(TUNNEL_PID_FILE, proc.pid!.toString()),
+          writeFile(TUNNEL_PID_FILE, `${proc.pid}\n${bootId ?? ""}\n`),
           writeFile(TUNNEL_URL_FILE, tunnelUrl),
-          writeState({ enabled: true, tunnelUrl, startedAt: new Date().toISOString(), target, bootId }),
+          writeState({ enabled: true, tunnelUrl, startedAt: new Date().toISOString(), target }),
         ]).then(() => {
           resolve({ success: true, tunnelUrl: tunnelUrl! });
         });
