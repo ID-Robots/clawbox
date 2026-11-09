@@ -40,7 +40,7 @@ import {
   DOCTOR_SERVICE_OWNERSHIP_RE,
   withExternalGatewaySupervisor,
 } from "@/lib/openclaw-doctor-ownership";
-import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_CHAT_MODEL } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { isConfigMutationConflict } from "@/lib/config-conflict";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
@@ -1533,7 +1533,7 @@ export type OpenclawConfigSetArgs = string[];
  *    parse failure is an error;
  *  - without it the CLI tries to parse the text and silently falls back to the
  *    raw string, which is how `"24000"` becomes the number 24000 and
- *    `"deepseek/deepseek-v4-pro"` stays a string.
+ *    `"deepseek/deepseek-v4-flash"` stays a string.
  *
  * (The CLI reaches for JSON5 rather than JSON on the lenient path. Every value
  * this repo writes without `--json` is a plain model id, a mode word, a token
@@ -3059,7 +3059,7 @@ export async function repairClawboxAiFlashModelPolicy(): Promise<boolean> {
     const config = await readConfigStrict();
     const allow = config.agents?.defaults?.modelPolicy?.allow;
     if (!allow || !needsClawboxAiFlashPolicyRepair(config)) return false;
-    allow.push(CLAWBOX_AI_MODEL_BY_TIER.flash);
+    allow.push(CLAWBOX_AI_CHAT_MODEL);
     await writeConfigFile(config);
     return true;
   });

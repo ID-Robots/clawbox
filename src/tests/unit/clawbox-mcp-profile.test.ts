@@ -40,7 +40,7 @@ describe("which tool profile a device registers", () => {
   });
 
   it("keeps every tool for a cloud provider, whatever its model is called", () => {
-    expect(profileForActiveModel({ provider: "clawai", current: "deepseek-v4-pro" }, AUTO)).toBe("full");
+    expect(profileForActiveModel({ provider: "clawai", current: "deepseek-v4-flash" }, AUTO)).toBe("full");
     // The trap: a hosted model whose id carries a small parameter count.
     expect(profileForActiveModel({ provider: "openrouter", current: "qwen2.5:3b" }, AUTO)).toBe("full");
     expect(profileForActiveModel({ provider: "anthropic", current: "claude-sonnet-4-5" }, AUTO)).toBe("full");
@@ -71,7 +71,7 @@ describe("which tool profile a device registers", () => {
   it("lets an explicit env pin win in either direction", () => {
     expect(profileForActiveModel(local("qwen2.5:3b"), { CLAWBOX_MCP_PROFILE: "full" } as unknown as NodeJS.ProcessEnv))
       .toBe("full");
-    expect(profileForActiveModel({ provider: "clawai", current: "deepseek-v4-pro" },
+    expect(profileForActiveModel({ provider: "clawai", current: "deepseek-v4-flash" },
       { CLAWBOX_MCP_PROFILE: "core" } as unknown as NodeJS.ProcessEnv)).toBe("core");
   });
 

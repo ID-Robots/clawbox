@@ -101,6 +101,8 @@ async function fetchFacts(signal?: AbortSignal): Promise<ProbedFacts | null> {
         hasClawaiToken: data.facts?.hasClawaiToken === true,
         hermesSupportsImages: data.facts?.hermesSupportsImages === true,
         hermesHasVisionRoute: data.facts?.hermesHasVisionRoute === true,
+        openclawCannotSeePictures: data.facts?.openclawCannotSeePictures === true,
+        openclawPicturesViaTool: data.facts?.openclawPicturesViaTool === true,
         hermesStreamsTurns: data.facts?.hermesStreamsTurns === true,
         hasClawaiImageRoute: data.facts?.hasClawaiImageRoute === true,
         hermesAgentDrawsImages: data.facts?.hermesAgentDrawsImages === true,

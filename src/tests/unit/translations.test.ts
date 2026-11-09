@@ -101,6 +101,8 @@ describe("translations", () => {
         "dbMaintenance",
         // Settings → Harness → Scheduled job alerts, and the alert's own words.
         "jobAlerts",
+        // Settings → System Update → Weekly update check, and the notice's own words.
+        "updateNotice",
         // The desktop's corner card for long work Settings started (background tasks).
         "backgroundTasks",
         "clawaiUsage",

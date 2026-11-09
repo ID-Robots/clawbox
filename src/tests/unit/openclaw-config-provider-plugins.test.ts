@@ -89,7 +89,7 @@ describe("enableProviderPluginOps — the ops that ride in the primary batch, ah
   });
 
   it("emits nothing for any other provider, and never a switch-off", () => {
-    expect(enableProviderPluginOps(["deepseek/deepseek-v4-pro", "openai/gpt-5.5", "llamacpp/gemma"])).toEqual([]);
+    expect(enableProviderPluginOps(["deepseek/deepseek-v4-flash", "openai/gpt-5.5", "llamacpp/gemma"])).toEqual([]);
     expect(enableProviderPluginOps([])).toEqual([]);
     expect(enableProviderPluginOps([null, undefined, "no-slash"])).toEqual([]);
   });

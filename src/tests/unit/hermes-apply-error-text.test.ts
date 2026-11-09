@@ -32,6 +32,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const cliMock = vi.hoisted(() => vi.fn());
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
@@ -57,11 +63,6 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
-const resolveVisionMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: resolveVisionMock,
-}));
 vi.mock("@/lib/hermes-model-options", () => ({
   invalidateModelOptions: vi.fn(),
   getModelOptions: vi.fn(async () => null),
@@ -71,7 +72,6 @@ vi.mock("@/lib/hermes-model-options", () => ({
 
 import { HermesCloudApplyError, applyCloudProviderKeyToHermes } from "@/lib/hermes-cloud-provider";
 import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
-import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 
 const TRACEBACK = [
   "Traceback (most recent call last):",
@@ -104,12 +104,6 @@ function expectCustomerSafe(message: string): void {
 
 beforeEach(() => {
   cliMock.mockReset();
-  resolveVisionMock.mockReset();
-  resolveVisionMock.mockResolvedValue({
-    id: CLAWBOX_AI_VISION_MODEL_ID,
-    verified: true,
-    reason: "proxy-allows",
-  });
 });
 
 describe("saving a cloud provider key on Hermes", () => {

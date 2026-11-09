@@ -192,7 +192,7 @@ function installKokoroStamp() {
   fs.writeFileSync(stamp, "");
 }
 
-const BASE_CONFIG = "model:\n  default: deepseek-v4-pro\n";
+const BASE_CONFIG = "model:\n  default: deepseek-v4-flash\n";
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-voice-home-"));

@@ -166,13 +166,13 @@ describe("configSetBatchLabelArgs", () => {
   it("names every path and carries no value at all", () => {
     const label = openclawConfig.configSetBatchLabelArgs([
       ["models.providers.openai.apiKey", TOKEN],
-      ["agents.defaults.model.primary", "deepseek/deepseek-v4-pro"],
+      ["agents.defaults.model.primary", "deepseek/deepseek-v4-flash"],
       ["models.providers.openai.models", '[{"id":"x"}]', "--json"],
     ]);
 
     expect(label.slice(0, 3)).toEqual(["config", "set", "--batch-json"]);
     expect(label.join(" ")).not.toContain(TOKEN);
-    expect(label.join(" ")).not.toContain("deepseek/deepseek-v4-pro");
+    expect(label.join(" ")).not.toContain("deepseek/deepseek-v4-flash");
     expect(label[3]).toContain("models.providers.openai.apiKey=<redacted>");
     expect(label[3]).toContain("agents.defaults.model.primary=<redacted>");
     expect(label[3]).toContain("models.providers.openai.models=<redacted>");
@@ -310,8 +310,8 @@ describe("parseConfigSetArgs", () => {
   });
 
   it("falls back to the raw string when a bare value is not JSON", () => {
-    expect(openclawConfig.parseConfigSetArgs(["agents.defaults.model.primary", "deepseek/deepseek-v4-pro"]))
-      .toEqual({ path: "agents.defaults.model.primary", value: "deepseek/deepseek-v4-pro" });
+    expect(openclawConfig.parseConfigSetArgs(["agents.defaults.model.primary", "deepseek/deepseek-v4-flash"]))
+      .toEqual({ path: "agents.defaults.model.primary", value: "deepseek/deepseek-v4-flash" });
     expect(openclawConfig.parseConfigSetArgs(["gateway.auth.mode", "token"]))
       .toEqual({ path: "gateway.auth.mode", value: "token" });
   });

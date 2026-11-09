@@ -192,3 +192,36 @@ describe("projectGatewayHistory", () => {
     expect(projectGatewayHistory([], null)).toEqual({ messages: [], imageGenerationFailed: false });
   });
 });
+
+describe("a provider's refusal stored as the assistant's row (TASK-2261)", () => {
+  it("reads back as the chat's own failure line, tagged with its run — never the gateway's copy of the error", async () => {
+    const { projectGatewayHistory: project } = await import("@/lib/harness/openclaw-gateway-adapter");
+    const page = project([
+      { role: "user", content: "[Attached file: /home/clawbox/.openclaw/media/chat-attachments/abc-shot.png]\nwhat is this?", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "LLM request rejected: Failed to deserialize … unknown variant \\`image\\_url\\`" }],
+        stopReason: "error",
+        errorMessage: "400 Failed to deserialize the JSON body into the target type: messages[0]: unknown variant `image_url`, expected `text`",
+        timestamp: 2,
+        __openclaw: { runId: "run-7" },
+      },
+    ], null);
+    const failure = page.messages.find((m) => m.role !== "user");
+    expect(failure).toMatchObject({ role: "system", failedRun: "run-7" });
+    expect(failure?.text).toMatch(/cannot look at pictures right now/);
+    expect(JSON.stringify(page.messages)).not.toContain("image_url");
+  });
+
+  it("reads the gateway's escaped copy the same way when the row carries no errorMessage", async () => {
+    const { projectGatewayHistory: project } = await import("@/lib/harness/openclaw-gateway-adapter");
+    const page = project([{
+      role: "assistant",
+      content: [{ type: "text", text: "LLM request rejected: messages\\[0\\]\\: unknown variant \\`image\\_url\\`, expected \\`text\\`" }],
+      stopReason: "error",
+      timestamp: 3,
+    }], null);
+    expect(page.messages).toEqual([expect.objectContaining({ role: "system" })]);
+    expect(page.messages[0].text).toMatch(/cannot look at pictures right now/);
+  });
+});

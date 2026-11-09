@@ -36,7 +36,7 @@ describe("isPatchableSession", () => {
 
 describe("sessionModelRef", () => {
   it("reads the override pair, then the legacy pair, else nothing", () => {
-    expect(sessionModelRef({ providerOverride: "deepseek", modelOverride: "deepseek-v4-pro" })).toBe("deepseek/deepseek-v4-pro");
+    expect(sessionModelRef({ providerOverride: "deepseek", modelOverride: "deepseek-v4-flash" })).toBe("deepseek/deepseek-v4-flash");
     expect(sessionModelRef({ modelProvider: "anthropic", model: "claude-sonnet-4-6" })).toBe("anthropic/claude-sonnet-4-6");
     expect(sessionModelRef({ providerOverride: "deepseek" })).toBeNull();
     expect(sessionModelRef({ providerOverride: null, modelOverride: "x", modelProvider: "p", model: "m" })).toBe("p/m");

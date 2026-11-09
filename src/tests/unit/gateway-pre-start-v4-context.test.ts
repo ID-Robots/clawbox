@@ -78,13 +78,15 @@ function migrateChanged(models: Record<string, unknown>[]): boolean {
   return JSON.parse(execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim()).changed;
 }
 
-const V4_IDS = ["deepseek-v4-flash", "deepseek-v4-pro"] as const;
+const V4_IDS = ["deepseek-v4-flash"] as const;
 
 describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => {
   it.each(V4_IDS)("fills an absent contextWindow with 1M on %s", (id) => {
     const [m] = migrate([{ id, name: "ClawBox AI" }]);
     expect(m.contextWindow).toBe(1_000_000);
     expect(m.maxTokens).toBe(393_216);
+    // Text only: whether Flash also takes pictures is the vision check's to
+    // say (TASK-2261), never this backfill's.
     expect(m.input).toEqual(["text"]);
   });
 
@@ -106,12 +108,12 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
     expect(m.contextWindow).toBe(1_000_000);
   });
 
-  it("migrates Flash and Pro in the same pass", () => {
+  it("repairs only ClawBox AI's one model, never another id beside it", () => {
     const models = migrate([
       { id: "deepseek-v4-flash", contextWindow: 128000 },
-      { id: "deepseek-v4-pro" },
+      { id: "deepseek-reasoner" },
     ]);
-    expect(models.map((m) => m.contextWindow)).toEqual([1_000_000, 1_000_000]);
+    expect(models.map((m) => m.contextWindow)).toEqual([1_000_000, undefined]);
   });
 
   it("is idempotent — a second run reports no change", () => {
@@ -136,12 +138,12 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
 
   it("preserves unrelated fields it did not come to change", () => {
     const [m] = migrate([{
-      id: "deepseek-v4-pro",
-      name: "ClawBox AI Pro",
+      id: "deepseek-v4-flash",
+      name: "ClawBox AI Flash",
       reasoning: true,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     }]);
-    expect(m.name).toBe("ClawBox AI Pro");
+    expect(m.name).toBe("ClawBox AI Flash");
     expect(m.reasoning).toBe(true);
     expect(m.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
@@ -164,17 +166,16 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
   });
 
   it("adds the cap in the same pass that repairs an old 128K window", () => {
-    const [m] = migrate([{ id: "deepseek-v4-pro", contextWindow: 128000 }]);
+    const [m] = migrate([{ id: "deepseek-v4-flash", contextWindow: 128000 }]);
     expect(m.contextWindow).toBe(1_000_000);
     expect(m.contextTokens).toBe(131_072);
   });
 
   it("keeps a cap the owner set, larger or smaller", () => {
-    const models = migrate([
-      { id: "deepseek-v4-flash", contextWindow: 1_000_000, contextTokens: 400_000 },
-      { id: "deepseek-v4-pro", contextWindow: 1_000_000, contextTokens: 64_000 },
-    ]);
-    expect(models.map((m) => m.contextTokens)).toEqual([400_000, 64_000]);
+    for (const contextTokens of [400_000, 64_000]) {
+      const [m] = migrate([{ id: "deepseek-v4-flash", contextWindow: 1_000_000, contextTokens }]);
+      expect(m.contextTokens).toBe(contextTokens);
+    }
   });
 
   it("reports no change once the cap is in place", () => {
@@ -191,9 +192,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
     expect(m.contextWindow).toBe(1_000_000);
   });
 
-  it("never caps the vision entry or another deepseek id", () => {
+  it("never caps another deepseek id", () => {
     const models = migrate([
-      { id: "deepseek-v4-flash-vision-exp", contextWindow: 128000 },
+      { id: "deepseek-reasoner", contextWindow: 128000 },
       { id: "deepseek-chat", contextWindow: 65536 },
     ]);
     expect(models.map((m) => m.contextTokens)).toEqual([undefined, undefined]);

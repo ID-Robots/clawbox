@@ -16,6 +16,7 @@ import {
   type VersionInfo,
 } from "@/components/UpdateRunView";
 import UpdateHandover from "@/components/UpdateHandover";
+import WeeklyUpdateCheckCard from "@/components/WeeklyUpdateCheckCard";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
 import {
   HARNESS_DOWNGRADE_CODE,
@@ -546,6 +547,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           {versions && <AgentVersions versions={versions} />}
           </>
           )}
+
+          {/* The weekly check's switch: on by default, and a notice the owner
+              gets without opening this screen — so it sits in plain view,
+              not behind Advanced. */}
+          {status !== "updating" && <WeeklyUpdateCheckCard />}
 
           {/* ADVANCED */}
           {status !== "updating" && (

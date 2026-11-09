@@ -2,7 +2,7 @@
  * A ClawBox AI run whose provider refuses a request past the model's context
  * window (TASK-2203) — end to end, through the real runner and a fake harness.
  *
- * The field failure: a run on `deepseek-v4-pro[1m]` died 1,697 turns in on
+ * The field failure: a run on `deepseek-v4-flash[1m]` died 1,697 turns in on
  * DeepSeek's own 400 — "This model's maximum context length is 1048576 tokens.
  * However, you requested 1049351 tokens (1017351 in the messages, 32000 in the
  * completion)" — with its session intact and full. What must hold now:
@@ -59,11 +59,11 @@ function sq(text: string): string {
   return `'${text.replace(/'/g, "'\\''")}'`;
 }
 
-const INIT = JSON.stringify({ type: "system", subtype: "init", session_id: SESSION, model: "deepseek-v4-pro[1m]" });
+const INIT = JSON.stringify({ type: "system", subtype: "init", session_id: SESSION, model: "deepseek-v4-flash[1m]" });
 /** A model's own answer, billed — what a million-token stretch of work leaves behind. */
-const ANSWER = JSON.stringify({ type: "assistant", message: { model: "deepseek-v4-pro", content: [{ type: "text", text: "Reading the next files." }], usage: { input_tokens: 1_000_000, output_tokens: 40 } } });
+const ANSWER = JSON.stringify({ type: "assistant", message: { model: "deepseek-v4-flash", content: [{ type: "text", text: "Reading the next files." }], usage: { input_tokens: 1_000_000, output_tokens: 40 } } });
 /** The CLI's own line when the model id is refused before any answer — a harness-fault shape. */
-const UNRECOGNIZED = '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}';
+const UNRECOGNIZED = '[claude-code:unrecognized_model] {"model":"deepseek-v4-flash[1m]","query_source":"sdk"}';
 const result = (text: string, isError: boolean) => JSON.stringify({ type: "result", subtype: "success", is_error: isError, result: text, num_turns: 3 });
 
 function callsLog(): string {

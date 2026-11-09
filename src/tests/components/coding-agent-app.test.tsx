@@ -697,7 +697,7 @@ describe("CodingAgentApp", () => {
         summary: null,
         failureKind: "harness_not_ready",
         error: "The coding harness on this ClawBox is not ready: it could not get a model to answer."
-          + "\n\nWhat the harness reported: [claude-code:unrecognized_model] {\"model\":\"deepseek-v4-pro[1m]\"}",
+          + "\n\nWhat the harness reported: [claude-code:unrecognized_model] {\"model\":\"deepseek-v4-flash[1m]\"}",
       };
       stubFetch({ enabled: true, readiness: READY }, [dead], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
@@ -709,7 +709,7 @@ describe("CodingAgentApp", () => {
         .toHaveTextContent("could not get a model to answer");
       // ...and the model that was refused still there for whoever has to
       // look into it.
-      expect(within(page).getByTestId("coding-agent-run-error")).toHaveTextContent("deepseek-v4-pro[1m]");
+      expect(within(page).getByTestId("coding-agent-run-error")).toHaveTextContent("deepseek-v4-flash[1m]");
     });
 
     it("adds nothing to an ordinary failure of the work", async () => {
@@ -1478,7 +1478,7 @@ describe("CodingAgentApp", () => {
       const run = {
         ...RUN,
         tokensUsed: 1_317_787, thinkingTokens: 658, subagentsTotal: 3, subagentsByType: { explorer: 2, reviewer: 1 },
-        modelsUsed: ["deepseek-v4-pro[1m]", "deepseek-v4-flash"], commit: "caea00d",
+        modelsUsed: ["deepseek-v4-flash[1m]", "deepseek-v4-flash"], commit: "caea00d",
         deniedActions: ["Bash: curl http://example"],
         todos: [{ content: "Wire the toggle", status: "completed" }, { content: "Test it", status: "in_progress", activeForm: "Testing it" }],
         artifacts: [
@@ -1501,7 +1501,7 @@ describe("CodingAgentApp", () => {
       expect(figures).not.toContain("deepseek");
       const details = screen.getByTestId("coding-agent-run-more").textContent ?? "";
       expect(details).toContain("caea00d");
-      expect(details).toContain("deepseek-v4-pro[1m] + deepseek-v4-flash");
+      expect(details).toContain("deepseek-v4-flash[1m] + deepseek-v4-flash");
       // The helpers are nodes of the chart, so nothing repeats them as a
       // breakdown nobody could act on.
       expect(details).not.toContain("2× explorer");
@@ -2567,7 +2567,7 @@ describe("CodingAgentApp — the run page's honesty", () => {
   });
 
   it("lets a figure wrap rather than clipping the model name and the thinking hint", async () => {
-    const rich = { ...RUN, modelsUsed: ["deepseek-v4-pro[1m]"], tokensUsed: 120_000, thinkingTokens: 28_854 };
+    const rich = { ...RUN, modelsUsed: ["deepseek-v4-flash[1m]"], tokensUsed: 120_000, thinkingTokens: 28_854 };
     stubFetch({ enabled: true, readiness: READY }, [rich], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     await openRuns();
@@ -2577,7 +2577,7 @@ describe("CodingAgentApp — the run page's honesty", () => {
     expect(figures.querySelectorAll(".truncate")).toHaveLength(0);
     const details = screen.getByTestId("coding-agent-run-more");
     expect(details.querySelectorAll(".truncate")).toHaveLength(0);
-    const model = within(details).getByText("deepseek-v4-pro[1m]");
+    const model = within(details).getByText("deepseek-v4-flash[1m]");
     expect(model.className).toContain("break-words");
     // …and the hint line, which never had one, carries the whole text on hover.
     const hint = within(figures).getByText(t("codingAgent.thinking", { n: 28_854 }));

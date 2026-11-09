@@ -2732,14 +2732,10 @@ if not is_strong_gateway_token(auth.get("token")):
 # maps OpenClaw xhigh → DeepSeek reasoning_effort: "max" correctly. New
 # configurations get the field from configure/route.ts; this branch handles
 # devices that were configured before that landed.
-ds_models = (
-    cfg.get("models", {}).get("providers", {}).get("deepseek", {}).get("models")
-    if isinstance(cfg.get("models"), dict) else None
-)
-deepseek_provider = (
-    cfg.get("models", {}).get("providers", {}).get("deepseek")
-    if isinstance(cfg.get("models"), dict) else None
-)
+# Each level checked: a null or non-object one must not raise here, under set -e.
+_ds_providers = cfg["models"].get("providers") if isinstance(cfg.get("models"), dict) else None
+deepseek_provider = _ds_providers.get("deepseek") if isinstance(_ds_providers, dict) else None
+ds_models = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
 # These two are LEGACY values on purpose: they are what a box paired before the
 # clawbox.com move still has written in its config, and matching them is the
 # whole point of the branch. Do not "update" them to the current domain — that
@@ -2752,215 +2748,364 @@ if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
     deepseek_provider["baseUrl"] = "https://clawbox.com/api/ai"
     changed = True
 
-# Migration: ClawBox AI vision (image understanding).
+# Migration: ClawBox AI is ONE model (TASK-2261).
 #
-# A ClawBox accepts an image attachment in chat and then cannot look at it.
-# Both ClawBox AI chat models are `input: ["text"]`, so OpenClaw does not
-# inline image parts; it hands the turn a media path and expects the `image`
-# tool to describe it. That tool resolves its model from
-# `agents.defaults.imageModel`, which ClawBox provisioning never wrote, so
-# runWithImageModelFallback throws "No image model configured"
-# (dist/model-fallback-CvSRhgYr.js on 2026.7.1). Reproduced on a real box on
-# 2026-08-21; see TASK-417.
+# The proxy answers every ClawBox AI id with the same upstream model, DeepSeek
+# V4.1 Flash, on every plan, so `deepseek-v4-flash` is the only ClawBox AI chat
+# model a box names. On 2026-11-07 it also read pictures (text, photos,
+# screenshots, two pictures in one turn, 2048-pixel images, streamed or not,
+# with tools or without) — but upstream can take that away without telling the
+# box, so whether Flash SEES is asked here at every gateway start, never
+# assumed: Flash is shown a tiny red square and asked its colour.
 #
-# Boxes already in the field never re-run the configure route, so the repair
-# has to happen here. Mirrors buildClawboxAiProviderDefinition() and the
-# imageModel write in src/app/setup-api/ai-models/configure/route.ts; the two
-# must stay in step, and src/tests/unit/gateway-pre-start-clawai-vision.test.ts
-# runs these exact bytes out of the shipped .sh.
+#   Flash sees      the Flash row takes `image` (a picture reaches the chat
+#                   model directly) and `agents.defaults.imageModel` — the slot
+#                   OpenClaw's `image` tool resolves when a turn's own chat
+#                   model cannot see (TASK-417) — names Flash.
+#   it does not     Flash is text-only, and pictures go to the vision fallback
+#                   (`gpt-5.6-luna`, a describe-only row) if THAT sees.
+#   neither does    no picture slot of ours is armed; the chat refuses an
+#                   attached picture with a plain sentence
+#                   (src/lib/clawbox-ai-vision-route.ts).
+#   no answer       (network, 5xx, refused credential) the box keeps what it has.
 #
-# Registered under the `deepseek` provider even though the id is an OpenAI one:
-# that entry IS the ClawBox AI proxy, already carrying api=openai-completions,
-# the proxy baseUrl and the claw_ token. OpenClaw's `openai` provider defaults
-# to openai-responses, which the proxy does not speak. It cannot show up in the
-# chat model picker — the clawai catalogue is the hardcoded CLAWAI_STATIC_MODELS
-# list, not a read of this array.
+# Boxes in the field never re-run the configure route, so the repair happens
+# here, on every gateway start — and every update ends with one. Mirrors
+# buildClawboxAiProviderDefinition() and the imageModel write in
+# src/app/setup-api/ai-models/configure/route.ts, probeClawboxAiVision() in
+# src/lib/clawbox-ai-vision.ts and migrateRetiredClawboxAiOpenclawAgents() in
+# src/lib/clawbox-ai-retired-models.ts; src/tests/unit/gateway-pre-start-clawai-one-model.test.ts
+# runs these exact bytes out of the shipped .sh and pins the ids below to the
+# TypeScript ones (a shell migration cannot import them).
 #
-# The model id and the ceiling are duplicated from CLAWBOX_AI_VISION_* in
-# src/lib/clawbox-ai-models.ts because a shell migration cannot import them.
-# 128000 is measured, not guessed: against the live proxy on 2026-08-21,
-# max_tokens 128000 is accepted and 200000 (the generic default an entry falls
-# through to when the field is absent) comes back 400 "supports at most 128000
-# completion tokens".
-# Honour the same env override CLAWBOX_AI_VISION_MODEL_ID gives the route, so a
-# box provisioned against a staging proxy with a different alias map is not
-# dragged back to the production slug at the next boot. Unset (the normal case)
-# means the shipped PREFERRED default — DeepSeek's own multimodal model — but
-# nothing writes it unverified: the proxy allowlists bare ids and answers 400
-# model_not_allowed for anything it does not serve yet, so the block below
-# probes first and stays on the previous vision model until the proxy says
-# yes. Boots re-resolve, so a box upgrades itself the first boot after the
-# proxy starts serving the new id — and heals back the same way. This mirrors
-# resolveVisionModelId() in src/lib/clawbox-ai-vision.ts; the two must stay
-# in step. CLAWBOX_VISION_PROBE=allowed|not-allowed|unknown forces the
-# verdict (the unit test runs these bytes without a network).
-CLAWBOX_VISION_PREFERRED_ID = "deepseek-v4-flash-vision-exp"
-CLAWBOX_VISION_LEGACY_ID = "gpt-5.6-luna"
-CLAWBOX_VISION_OVERRIDE_ID = (os.environ.get("CLAWBOX_AI_VISION_MODEL_ID") or "").strip()
-CLAWBOX_VISION_MODEL_NAME = "ClawBox AI Vision"
-CLAWBOX_VISION_MAX_TOKENS = 128000
+# Beside the picture slot, every string under `agents` that is exactly a
+# retired ref under ClawBox AI's own provider becomes the Flash ref in the same
+# shape: the primary and its fallbacks, per-agent models, `compaction.model`,
+# `modelPolicy.allow`, a key of `agents.defaults.models`. A list that ends up
+# naming Flash twice keeps the first; a map key yields to a Flash key already
+# there. The retired provider rows go.
+#
+# `deepseek/…` counts as ClawBox AI's only while that provider IS the proxy (a
+# `claw_` token, or the proxy's address): install.sh's raw-key branch points it
+# at api.deepseek.com, where `deepseek/deepseek-v4-pro` is DeepSeek's own model
+# and the owner's. `clawai/…` is ClawBox AI's spelling and always ours.
+#
+# CLAWBOX_VISION_PROBE=flash|fallback|none|unknown forces the verdict (the unit
+# test runs these bytes without a network). A lab board can point the question
+# at a stub with `clawai_vision_probe_url` in data/config.json — never written
+# by the product.
+CLAWBOX_AI_FLASH_ID = "deepseek-v4-flash"
+CLAWBOX_AI_RETIRED_CHAT_IDS = ("deepseek-v4-pro",)
+CLAWBOX_AI_RETIRED_VISION_IDS = ("deepseek-v4-flash-vision-exp",)
+CLAWBOX_AI_VISION_FALLBACK_ID = (os.environ.get("CLAWBOX_AI_VISION_FALLBACK_MODEL_ID") or "").strip() or "gpt-5.6-luna"
+CLAWBOX_AI_VISION_FALLBACK_NAME = "ClawBox AI Vision"
+CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS = 128000
+CLAWBOX_AI_VISION_PROBE_PNG = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR42mO4ICBAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAGFgwC4HDqGmAAAAAElFTkSuQmCC"
+_one_model_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
+_one_model_base = deepseek_provider.get("baseUrl") if isinstance(deepseek_provider, dict) else None
+_deepseek_is_clawai = isinstance(deepseek_provider, dict) and (
+    (isinstance(_one_model_token, str) and _one_model_token.startswith("claw_"))
+    or (isinstance(_one_model_base, str) and _one_model_base.strip().rstrip("/") == "https://clawbox.com/api/ai")
+)
 
-def _clawbox_vision_probe(token):
-    forced = (os.environ.get("CLAWBOX_VISION_PROBE") or "").strip()
-    if forced in ("allowed", "not-allowed", "unknown"):
-        return forced
+
+def _one_model_parse(value):
+    # (provider, id, suffix) of a ClawBox AI ref, or None for anything else.
+    if not isinstance(value, str):
+        return None
+    ref = value.strip()
+    suffix_match = re.search(r"\[[^\]]*\]$", ref)
+    suffix = suffix_match.group(0) if suffix_match else ""
+    if suffix:
+        ref = ref[: -len(suffix)]
+    provider, slash, model_id = ref.partition("/")
+    if not slash:
+        return None
+    provider = provider.lower()
+    if provider != "clawai" and not (provider == "deepseek" and _deepseek_is_clawai):
+        return None
+    return provider, model_id, suffix
+
+
+def _one_model_target(value):
+    # The Flash ref for a retired ClawBox AI ref, in the shape it came in
+    # (provider prefix and a `[1m]`-style context suffix kept), or None.
+    parsed = _one_model_parse(value)
+    if parsed is None:
+        return None
+    provider, model_id, suffix = parsed
+    if model_id in CLAWBOX_AI_RETIRED_CHAT_IDS:
+        return provider + "/" + CLAWBOX_AI_FLASH_ID + suffix
+    if not suffix and model_id in CLAWBOX_AI_RETIRED_VISION_IDS:
+        return provider + "/" + CLAWBOX_AI_FLASH_ID
+    return None
+
+
+_one_model_moved = []
+
+
+def _one_model_walk(node, path):
+    # In place: later blocks hold references into this tree.
+    if path == "agents.defaults.imageModel":
+        # The picture slot is the vision check's, below.
+        return
+    if isinstance(node, list):
+        kept = []
+        moved_to = set()
+        for index, item in enumerate(node):
+            if isinstance(item, str):
+                target = _one_model_target(item)
+                if target is not None:
+                    _one_model_moved.append(path)
+                    moved_to.add(target)
+                    item = target
+                if item in moved_to and item in kept:
+                    continue
+                kept.append(item)
+                continue
+            _one_model_walk(item, path + "." + str(index))
+            kept.append(item)
+        if kept != node:
+            node[:] = kept
+    elif isinstance(node, dict):
+        for key in list(node.keys()):
+            child = node[key]
+            if isinstance(child, str):
+                target = _one_model_target(child)
+                if target is not None and path + "." + key != "agents.defaults.imageModel":
+                    node[key] = target
+                    _one_model_moved.append(path + "." + key)
+            else:
+                _one_model_walk(child, path + "." + key)
+            key_target = _one_model_target(key)
+            if key_target is not None:
+                _one_model_moved.append(path + "." + key)
+                value = node.pop(key)
+                if key_target not in node:
+                    node[key_target] = value
+
+
+_one_model_walk(_agents_block, "agents")
+if _one_model_moved:
+    changed = True
+    print(
+        "  Moved retired ClawBox AI models to " + CLAWBOX_AI_FLASH_ID + " in "
+        + ", ".join(sorted(set(_one_model_moved)))
+    )
+
+
+def _clawai_vision_ask(model, token, base):
+    # One showing of the probe picture: ("sees" | "blind" | "unknown" | "empty", why).
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({
+        "model": model,
+        # Room for the thought AND the word: Flash reasons before it answers
+        # (25-94 tokens measured), and a 64-token budget came back empty.
+        "max_tokens": 1024,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What colour is this square? Answer with one word."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + CLAWBOX_AI_VISION_PROBE_PNG}},
+            ],
+        }],
+    }).encode()
+    req = urllib.request.Request(
+        base.rstrip("/") + "/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+        method="POST",
+    )
     try:
-        import json as _vp_json
-        import urllib.request as _vp_rq
-        base = ((os.environ.get("CLAWBOX_AI_PROXY_URL") or "").strip() or "https://clawbox.com/api/ai").rstrip("/")
-        req = _vp_rq.Request(
-            base + "/chat/completions",
-            data=_vp_json.dumps({
-                "model": CLAWBOX_VISION_PREFERRED_ID,
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "ok"}],
-            }).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
-            method="POST",
-        )
-        with _vp_rq.urlopen(req, timeout=6) as resp:
-            resp.read(64)
-        return "allowed"
-    except Exception as err:  # noqa: BLE001 - any failure below is a verdict, not a crash
-        body = ""
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as err:
+        return ("blind" if err.code in (400, 404, 415, 422) else "unknown"), "HTTP " + str(err.code)
+    except Exception as err:
+        return "unknown", type(err).__name__
+    try:
+        text = body["choices"][0]["message"]["content"]
+    except Exception:
+        text = None
+    if not isinstance(text, str) or not text.strip():
+        return "empty", "empty answer"
+    said = "said " + json.dumps(text.strip()[:24])
+    # Naming the colour is a sighting unless it says it could not look ("not red").
+    sees = re.search(r"\b(red|crimson|scarlet|maroon)\b", text, re.I) and not re.search(
+        r"\b(not|no|cannot|unable|can[\u2019']t|don[\u2019']t|doesn[\u2019']t)\b", text, re.I
+    )
+    return ("sees" if sees else "blind"), said
+
+
+_clawai_vision_why = []
+
+
+def _clawai_vision_look(model, token, base):
+    # "sees" | "blind" | "unknown". Asked again past an EMPTY answer (a
+    # reasoning model can spend its budget thinking and say nothing) and past a
+    # "blind" one: a single refusal can be the proxy's moment, and moving every
+    # picture on the box is not something one answer should decide: two blinds
+    # in a row are an answer, a blind and an empty one are not.
+    blind = False
+    for _attempt in range(2):
+        look, why = _clawai_vision_ask(model, token, base)
+        _clawai_vision_why.append(model + ": " + why)
+        if look in ("sees", "unknown"):
+            return look
+        if look == "blind":
+            if blind:
+                return "blind"
+            blind = True
+    return "unknown"
+
+
+def _clawai_vision_probe_url():
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if _store_path:
         try:
-            body = err.read().decode("utf-8", "replace") if hasattr(err, "read") else str(err)
-        except Exception:  # noqa: BLE001
-            body = str(err)
-        if "model_not_allowed" in body or "Model not allowed" in body:
-            return "not-allowed"
-        return "unknown"
+            with open(_store_path) as _fh:
+                _store = json.load(_fh)
+            _override = _store.get("clawai_vision_probe_url") if isinstance(_store, dict) else None
+            if isinstance(_override, str) and re.match(r"^https?://", _override.strip(), re.I):
+                return _override.strip()
+        except Exception:
+            pass
+    return _one_model_base if isinstance(_one_model_base, str) and _one_model_base.strip() else "https://clawbox.com/api/ai"
 
-# The token is the entitlement, exactly as for images: only a box that actually
-# has ClawBox AI gets a vision model pointed at the ClawBox AI proxy. Read here
-# rather than borrowing the image migration's `_clawai_token`, so this block
-# stays a self-contained slice its unit test can run out of the shipped .sh.
-_vision_models = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
-_vision_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
-if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _vision_token.startswith("claw_"):
-    # Resolve which of OUR ids this box may name. An operator override wins
-    # unprobed; otherwise the proxy's own answer decides, and an unanswered
-    # question keeps whatever the config already says rather than flapping.
-    if CLAWBOX_VISION_OVERRIDE_ID:
-        CLAWBOX_VISION_MODEL_ID = CLAWBOX_VISION_OVERRIDE_ID
-    else:
-        _vision_verdict = _clawbox_vision_probe(_vision_token)
-        if _vision_verdict == "allowed":
-            CLAWBOX_VISION_MODEL_ID = CLAWBOX_VISION_PREFERRED_ID
-        elif _vision_verdict == "not-allowed":
-            CLAWBOX_VISION_MODEL_ID = CLAWBOX_VISION_LEGACY_ID
-        else:
-            _vision_has_preferred = any(
-                isinstance(m, dict) and m.get("id") == CLAWBOX_VISION_PREFERRED_ID
-                for m in _vision_models
-            )
-            CLAWBOX_VISION_MODEL_ID = (
-                CLAWBOX_VISION_PREFERRED_ID if _vision_has_preferred else CLAWBOX_VISION_LEGACY_ID
-            )
-    CLAWBOX_VISION_MODEL_REF = "deepseek/" + CLAWBOX_VISION_MODEL_ID
-    _vision_our_ids = {CLAWBOX_VISION_PREFERRED_ID, CLAWBOX_VISION_LEGACY_ID, CLAWBOX_VISION_OVERRIDE_ID} - {""}
 
-    _vision_entry = next(
-        (m for m in _vision_models if isinstance(m, dict) and m.get("id") == CLAWBOX_VISION_MODEL_ID),
-        None,
-    )
-    if _vision_entry is None:
-        # A box carrying the OTHER of our ids is mid-migration: retarget that
-        # entry in place instead of stacking a second vision model beside it.
-        _vision_entry = next(
-            (m for m in _vision_models if isinstance(m, dict) and m.get("id") in _vision_our_ids),
-            None,
-        )
-        if _vision_entry is not None:
-            _vision_entry["id"] = CLAWBOX_VISION_MODEL_ID
-            changed = True
-    if _vision_entry is None:
-        _vision_models.append({
-            "id": CLAWBOX_VISION_MODEL_ID,
-            "name": CLAWBOX_VISION_MODEL_NAME,
-            "input": ["text", "image"],
-            "maxTokens": CLAWBOX_VISION_MAX_TOKENS,
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-        })
+_one_model_rows = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
+_flash_row = next(
+    (row for row in _one_model_rows if isinstance(row, dict) and row.get("id") == CLAWBOX_AI_FLASH_ID),
+    None,
+) if isinstance(_one_model_rows, list) else None
+if _deepseek_is_clawai and isinstance(_one_model_rows, list):
+    _retired_ids = CLAWBOX_AI_RETIRED_CHAT_IDS + CLAWBOX_AI_RETIRED_VISION_IDS
+    _kept_rows = [
+        row for row in _one_model_rows
+        if not (isinstance(row, dict) and row.get("id") in _retired_ids)
+    ]
+    if len(_kept_rows) != len(_one_model_rows):
+        # In place: `ds_models` above is this same list.
+        _one_model_rows[:] = _kept_rows
         changed = True
-    else:
-        # Repair only what makes the entry unusable, in the same order the
-        # route builds it. `name` first: OpenClaw's schema rejects a models[]
-        # row without one and the gateway then refuses to start.
-        if not isinstance(_vision_entry.get("name"), str) or not _vision_entry.get("name").strip():
-            _vision_entry["name"] = CLAWBOX_VISION_MODEL_NAME
-            changed = True
-        # Without "image" in `input`, resolveImageRuntime refuses the model
-        # outright ("Model does not support images"), which is the whole
-        # failure this migration exists to fix.
-        _vision_input = _vision_entry.get("input")
-        if not isinstance(_vision_input, list) or "image" not in _vision_input:
-            _vision_entry["input"] = ["text", "image"]
-            changed = True
-        # Only fill an absent ceiling. A number someone else chose is theirs.
-        if _vision_entry.get("maxTokens") is None:
-            _vision_entry["maxTokens"] = CLAWBOX_VISION_MAX_TOKENS
-            changed = True
+        print("  Removed the retired ClawBox AI models from the deepseek provider")
 
-    # Claim agents.defaults.imageModel only when it is empty, where "empty"
-    # means what OpenClaw's hasToolModelConfig means: neither a primary nor a
-    # usable fallback. A fallbacks-only entry is a working, deliberate
-    # configuration, and the write below replaces the whole object.
-    _vision_model_cfg = agents_defaults.get("imageModel")
-    _vision_fallbacks = (
-        _vision_model_cfg.get("fallbacks") if isinstance(_vision_model_cfg, dict) else None
+if _deepseek_is_clawai and _flash_row is not None and isinstance(_one_model_token, str) and _one_model_token.startswith("claw_"):
+    # The picture slot as it stands, coerced the way the core coerces it (a bare
+    # string IS a model there, TASK-755).
+    _image_slot = agents_defaults.get("imageModel")
+    _image_primary = (
+        _image_slot if isinstance(_image_slot, str)
+        else _image_slot.get("primary") if isinstance(_image_slot, dict) else None
     )
-    # A BARE STRING IS A MODEL HERE TOO (TASK-755) — the sibling of the image
-    # slot below, read by the same core helper: `hasExplicitToolModelConfig`
-    # coerces the value (`resolvePrimaryStringValue` answers a string with
-    # itself) before the primary/fallbacks test. Measured on 2026.8.1:
-    # `{"agents":{"defaults":{"imageModel":"openai/gpt-4o"}}}` is `valid:true`.
-    # Reading it as empty replaces the model the owner chose for LOOKING at the
-    # pictures he sends.
-    _has_vision_model = bool(
-        (isinstance(_vision_model_cfg, str) and _vision_model_cfg.strip())
-        or (
-            isinstance(_vision_model_cfg, dict)
-            and (
-                (isinstance(_vision_model_cfg.get("primary"), str) and _vision_model_cfg.get("primary").strip())
-                or (
-                    isinstance(_vision_fallbacks, list)
-                    and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
-                )
-            )
-        )
+    _image_primary = _image_primary.strip() if isinstance(_image_primary, str) else ""
+    _image_fallbacks = _image_slot.get("fallbacks") if isinstance(_image_slot, dict) else None
+    _has_image_model = bool(_image_primary) or (
+        isinstance(_image_fallbacks, list) and any(isinstance(ref, str) and ref.strip() for ref in _image_fallbacks)
     )
-    # COERCED the way the core coerces it, so the MOVE arm below can see a bare
-    # string. Leaving a string alone is right when it names the OWNER's model;
-    # it is wrong when it names one of OURS, because that arm exists to carry
-    # our own previous vision id to the resolved one in both directions, and a
-    # slot it cannot read keeps pointing at an id this block's provider entry no
-    # longer defines. The move itself is written per shape below: a dict is
-    # mutated in place so the owner's fallbacks ride along, a string has none to
-    # carry and is replaced outright.
-    _vision_primary = (
-        _vision_model_cfg
-        if isinstance(_vision_model_cfg, str)
-        else _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
+    _image_parsed = _one_model_parse(_image_primary)
+    _image_ours = _image_parsed is not None and not _image_parsed[2] and _image_parsed[1] in (
+        (CLAWBOX_AI_FLASH_ID, CLAWBOX_AI_VISION_FALLBACK_ID) + CLAWBOX_AI_RETIRED_CHAT_IDS + CLAWBOX_AI_RETIRED_VISION_IDS
     )
-    _vision_primary = _vision_primary.strip() if isinstance(_vision_primary, str) else ""
-    if not _has_vision_model:
-        agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
-        changed = True
-    elif (
-        _vision_primary in {"deepseek/" + i for i in _vision_our_ids}
-        and _vision_primary != CLAWBOX_VISION_MODEL_REF
-    ):
-        # The slot names one of OUR vision ids — the previous default is ours
-        # to move to the resolved one, both directions. Anything else in the
-        # slot is the owner's choice and stays — and over a dict the move
-        # changes ONLY `primary`, so fallbacks the owner added ride along. A
-        # bare string carries none, so it is replaced with the shape this block
-        # writes everywhere else.
-        if isinstance(_vision_model_cfg, dict):
-            _vision_model_cfg["primary"] = CLAWBOX_VISION_MODEL_REF
+
+    _forced = (os.environ.get("CLAWBOX_VISION_PROBE") or "").strip()
+    if _forced in ("flash", "fallback", "none", "unknown"):
+        _vision_verdict = _forced
+        _flash_look = "blind" if _forced in ("fallback", "none") else ("sees" if _forced == "flash" else "unknown")
+    else:
+        _probe_base = _clawai_vision_probe_url()
+        _flash_look = _clawai_vision_look(CLAWBOX_AI_FLASH_ID, _one_model_token, _probe_base)
+        if _flash_look == "sees":
+            _vision_verdict = "flash"
+        elif _flash_look == "unknown":
+            # Not asked is not blind: only a definite "blind" moves pictures.
+            _vision_verdict = "unknown"
         else:
-            agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
+            _fallback_look = _clawai_vision_look(CLAWBOX_AI_VISION_FALLBACK_ID, _one_model_token, _probe_base)
+            if _fallback_look == "sees":
+                _vision_verdict = "fallback"
+            elif _fallback_look == "blind":
+                _vision_verdict = "none"
+            else:
+                _vision_verdict = "unknown"
+
+    if _vision_verdict == "flash":
+        _vision_model = CLAWBOX_AI_FLASH_ID
+    elif _vision_verdict == "fallback":
+        _vision_model = CLAWBOX_AI_VISION_FALLBACK_ID
+    elif _vision_verdict == "none":
+        _vision_model = None
+    elif _flash_look == "blind":
+        _vision_model = CLAWBOX_AI_VISION_FALLBACK_ID
+    elif _image_ours and _image_parsed[1] in (CLAWBOX_AI_FLASH_ID, CLAWBOX_AI_VISION_FALLBACK_ID):
+        _vision_model = _image_parsed[1]
+    elif _image_ours or not _has_image_model:
+        # A check that could not be asked keeps the box as it is: Flash
+        # declared text-only is the fallback while its row is there, and NO
+        # picture model while there is neither a row nor a slot of ours — what
+        # a "none" verdict left, kept through a boot before the network is up.
+        _flash_input = _flash_row.get("input")
+        _flash_text_only = isinstance(_flash_input, list) and "image" not in _flash_input
+        if _flash_text_only and any(
+            isinstance(row, dict) and row.get("id") == CLAWBOX_AI_VISION_FALLBACK_ID for row in _one_model_rows
+        ):
+            _vision_model = CLAWBOX_AI_VISION_FALLBACK_ID
+        elif _flash_text_only and not _image_ours:
+            _vision_model = None
+        else:
+            _vision_model = CLAWBOX_AI_FLASH_ID
+    else:
+        # The owner's own picture model; Flash keeps whatever it declared.
+        _flash_input = _flash_row.get("input")
+        _vision_model = CLAWBOX_AI_FLASH_ID if isinstance(_flash_input, list) and "image" in _flash_input else None
+    print(
+        "  ClawBox AI vision check: " + _vision_verdict + " (pictures go to " + (_vision_model or "nothing")
+        + ("; " + "; ".join(_clawai_vision_why) if _clawai_vision_why else "") + ")"
+    )
+
+    _want_input = ["text", "image"] if _vision_model == CLAWBOX_AI_FLASH_ID else ["text"]
+    if _flash_row.get("input") != _want_input:
+        _flash_row["input"] = _want_input
+        changed = True
+    _fallback_rows = [row for row in _one_model_rows if isinstance(row, dict) and row.get("id") == CLAWBOX_AI_VISION_FALLBACK_ID]
+    if _vision_model == CLAWBOX_AI_VISION_FALLBACK_ID:
+        if not _fallback_rows:
+            _one_model_rows.append({
+                "id": CLAWBOX_AI_VISION_FALLBACK_ID,
+                "name": CLAWBOX_AI_VISION_FALLBACK_NAME,
+                "input": ["text", "image"],
+                "maxTokens": CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            })
+            changed = True
+        else:
+            for row in _fallback_rows:
+                if not isinstance(row.get("input"), list) or "image" not in row.get("input"):
+                    row["input"] = ["text", "image"]
+                    changed = True
+    elif _fallback_rows:
+        _one_model_rows[:] = [row for row in _one_model_rows if not (isinstance(row, dict) and row.get("id") == CLAWBOX_AI_VISION_FALLBACK_ID)]
+        changed = True
+
+    _vision_ref = "deepseek/" + _vision_model if _vision_model else None
+    if not _has_image_model:
+        if _vision_ref:
+            agents_defaults["imageModel"] = {"primary": _vision_ref}
+            changed = True
+    elif _image_ours and _image_primary != _vision_ref:
+        # Ours to move — and over a dict ONLY `primary` changes, so fallbacks
+        # the owner added ride along. With no model that can see, our primary
+        # goes, and an emptied slot goes with it.
+        _rest = dict(_image_slot) if isinstance(_image_slot, dict) else {}
+        _rest.pop("primary", None)
+        if _vision_ref:
+            _rest["primary"] = _vision_ref
+        if _rest:
+            agents_defaults["imageModel"] = _rest
+        else:
+            agents_defaults.pop("imageModel", None)
         changed = True
 
 # Set by the image-generation migration below, on the one path where it decides
@@ -2994,7 +3139,7 @@ _clawai_proxy_base_url = ""
 # core, the legacy `agents.defaults.imageGenerationModel` on a v1 one, and on a
 # box still carrying the legacy key under v2 neither, because the block stands
 # down there (see the guard's own note). `imageModel` is a different key again
-# and selects the vision model.
+# and selects the model that looks at a picture.
 #
 # The model id is duplicated from CLAWBOX_AI_IMAGE_MODEL_ID in
 # src/lib/clawbox-ai-models.ts because a shell migration cannot import it. It
@@ -4228,7 +4373,7 @@ if _clawai_openai_route_is_ours:
 # has not answered for yet, and the PLAN alone for the delete below (see
 # `_clawai_speech_entitled` and `_clawai_speech_withdrawable`). "pro" is the
 # tier of the MAX plan; the two names are off by one on purpose (see
-# CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts). Anything else means
+# ClawboxAiTier and CLAWBOX_AI_TIER_LABEL in src/lib/clawbox-ai-models.ts). Anything else means
 # we have not been told this box is entitled, and an unentitled box is left
 # exactly as it was. A customer who upgrades gets the cloud voice at the next
 # gateway start, once the status route has refreshed the stamp.
@@ -4810,7 +4955,7 @@ if isinstance(ds_models, list):
     for model in ds_models:
         if not isinstance(model, dict):
             continue
-        if model.get("id") not in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        if model.get("id") != "deepseek-v4-flash":
             continue
         compat = model.setdefault("compat", {}) if isinstance(model.get("compat"), dict) or "compat" not in model else None
         if compat is None:
@@ -4865,6 +5010,8 @@ if isinstance(ds_models, list):
         if model.get("maxTokens") in (None, 384000):
             model["maxTokens"] = 393216
             changed = True
+        # Text when absent: whether Flash also takes pictures is the vision
+        # check's to say (the ONE-model block above), never assumed here.
         if not isinstance(model.get("input"), list) or not model.get("input"):
             model["input"] = ["text"]
             changed = True
@@ -5000,10 +5147,11 @@ clawbox_deepseek_plugin_on_disk() {
 }
 
 # Patch the installed openclaw deepseek plugin JSON to declare that the
-# DeepSeek V4 models accept `off` and `xhigh` reasoning efforts. The shipped plugin
+# DeepSeek V4 Flash model ClawBox AI serves accepts `off` and `xhigh`
+# reasoning efforts. The shipped plugin
 # only sets `supportsReasoningEffort: true`, but `catalogSupportsXHigh()`
 # in openclaw's thinking.ts reads the optional `supportedReasoningEfforts`
-# array — without it, sessions.patch rejects `xhigh` for deepseek-v4-pro
+# array — without it, sessions.patch rejects `xhigh` for deepseek-v4-flash
 # and the chat popup's effort picker errors with "use off|minimal|low|
 # medium|high". The provider-stream-shared translation layer already maps
 # OpenClaw `xhigh` → DeepSeek's upstream `reasoning_effort: "max"`, so the
@@ -5046,7 +5194,7 @@ changed = False
 for model in models:
     if not isinstance(model, dict):
         continue
-    if model.get("id") not in ("deepseek-v4-flash", "deepseek-v4-pro"):
+    if model.get("id") != "deepseek-v4-flash":
         continue
     compat = model.setdefault("compat", {})
     if compat.get("supportedReasoningEfforts") != target:
@@ -8346,14 +8494,15 @@ fi
 CLAWBOX_HOOK_PLUGIN_ID="clawbox-email-directives"
 CLAWBOX_HOOK_PLUGIN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_HOOK_PLUGIN_ID"
 CLAWBOX_HOOK_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_HOOK_PLUGIN_ID"
-CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs email-approvals.mjs"
+CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs email-approvals.mjs update-commands.mjs"
 install_clawbox_hook_plugin "$CLAWBOX_HOOK_PLUGIN_ID" "$CLAWBOX_HOOK_PLUGIN_DST" \
-  "EMAIL: directives will reach channels and approving a queued email from Telegram will not work" \
+  "EMAIL: directives will reach channels, and approving a queued email or using /update and the update notice's button from Telegram will not work" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/openclaw.plugin.json" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/package.json" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/index.mjs" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/email-directives.mjs" \
-  "$CLAWBOX_HOOK_PLUGIN_SRC/email-approvals.mjs"
+  "$CLAWBOX_HOOK_PLUGIN_SRC/email-approvals.mjs" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/update-commands.mjs"
 
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
 

@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still runs (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 import type { Mock } from "vitest";
 
 vi.mock("child_process", () => ({
@@ -173,7 +177,7 @@ describe("/setup-api/chat/model", () => {
           deepseek: {
             models: [
               { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
-              { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+              { id: RETIRED_CHAT_ID, name: "ClawBox AI Pro" },
             ],
           },
         },
@@ -181,7 +185,7 @@ describe("/setup-api/chat/model", () => {
       agents: {
         defaults: {
           model: {
-            primary: "deepseek/deepseek-v4-pro",
+            primary: `deepseek/${RETIRED_CHAT_ID}`,
           },
         },
       },
@@ -203,7 +207,7 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     // Keep the actual primary visible to the caller so it can migrate it,
     // while the provider row and restore target always name Flash.
-    expect(body.activeModel).toBe("deepseek/deepseek-v4-pro");
+    expect(body.activeModel).toBe(`deepseek/${RETIRED_CHAT_ID}`);
     expect(body.activeOptionId).toBe("deepseek/deepseek-v4-flash");
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
@@ -253,7 +257,7 @@ describe("/setup-api/chat/model", () => {
           deepseek: {
             models: [
               { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
-              { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+              { id: RETIRED_CHAT_ID, name: "ClawBox AI Pro" },
             ],
           },
         },
@@ -619,8 +623,8 @@ describe("/setup-api/chat/model", () => {
   });
 
   it.each([
-    "deepseek/deepseek-v4-pro",
-    "clawai/deepseek-v4-pro",
+    `deepseek/${RETIRED_CHAT_ID}`,
+    `clawai/${RETIRED_CHAT_ID}`,
     "deepseek/deepseek-v4-flash",
     "clawai/deepseek-v4-flash",
   ])("normalizes %s to Flash without sweeping unrelated sessions", async (model) => {
@@ -643,7 +647,7 @@ describe("/setup-api/chat/model", () => {
       auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
       agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
     } as never);
-    vi.mocked(sqliteGet).mockResolvedValue("deepseek/deepseek-v4-pro");
+    vi.mocked(sqliteGet).mockResolvedValue(`deepseek/${RETIRED_CHAT_ID}`);
 
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
@@ -724,7 +728,7 @@ describe("/setup-api/chat/model", () => {
 
   describe("migrating an explicit former-Pro model policy", () => {
     const FLASH = "deepseek/deepseek-v4-flash";
-    const PRO = "deepseek/deepseek-v4-pro";
+    const PRO = `deepseek/${RETIRED_CHAT_ID}`;
 
     function withPolicy(primary: string, allow?: string[]) {
       const config = {
@@ -747,7 +751,7 @@ describe("/setup-api/chat/model", () => {
       }));
     }
 
-    it.each([PRO, "clawai/deepseek-v4-pro"])("flags an already-Flash primary with only %s explicitly allowed", async (allowedPro) => {
+    it.each([PRO, `clawai/${RETIRED_CHAT_ID}`])("flags an already-Flash primary with only %s explicitly allowed", async (allowedPro) => {
       withPolicy(FLASH, [allowedPro, "anthropic/claude-opus-5"]);
 
       const body = await (await GET()).json();
@@ -760,7 +764,7 @@ describe("/setup-api/chat/model", () => {
     it.each([
       ["absent allowlist", undefined],
       ["empty allowlist", []],
-      ["another provider only", ["openrouter/deepseek/deepseek-v4-pro"]],
+      ["another provider only", [`openrouter/deepseek/${RETIRED_CHAT_ID}`]],
       ["wildcard only", ["deepseek/*"]],
       ["Flash already allowed", [PRO, FLASH, "anthropic/*"]],
     ])("does not broaden a policy with %s", async (_label, allow) => {
@@ -901,7 +905,7 @@ describe("/setup-api/chat/model", () => {
         },
         models: { providers: { deepseek: { models: [
           { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
-          { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+          { id: RETIRED_CHAT_ID, name: "ClawBox AI Pro" },
         ] } } },
         agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
       } as never);
@@ -918,7 +922,7 @@ describe("/setup-api/chat/model", () => {
     it("records Flash when an older client posts the former Pro choice", async () => {
       boxWithClawaiAndAnthropic();
 
-      expect((await post({ model: "deepseek/deepseek-v4-pro" })).status).toBe(200);
+      expect((await post({ model: `deepseek/${RETIRED_CHAT_ID}` })).status).toBe(200);
 
       expect(setMany).toHaveBeenCalledWith({
         ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
@@ -939,15 +943,14 @@ describe("/setup-api/chat/model", () => {
       });
     });
 
-    it("retires a ClawBox AI pick the box automatically moved OFF", async () => {
-      // The entitlement guard drops a refused Max model to Flash with
-      // `automatic: true`. Recording that as a choice would pin the box to
-      // Flash; leaving the refused Max pick on record makes the row this card
-      // teaches to honour a pick offer a model every click is refused for, so
-      // it is retired instead (TASK-769).
+    it("retires a ClawBox AI pick of a retired id when the box automatically moves onto Flash", async () => {
+      // The one-model switch (TASK-2261) moves a session on the former
+      // Max-plan id to Flash with `automatic: true`. Recording that as a choice
+      // would mint one; leaving the retired pick on record names a model the
+      // box no longer offers, so it is retired instead (TASK-769's rule).
       boxWithClawaiAndAnthropic();
       vi.mocked(getKnown).mockResolvedValue({
-        value: { clawai: "deepseek/deepseek-v4-pro", anthropic: "anthropic/claude-opus-5" },
+        value: { clawai: `deepseek/${RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0]}`, anthropic: "anthropic/claude-opus-5" },
         known: true,
       });
 
@@ -975,7 +978,7 @@ describe("/setup-api/chat/model", () => {
     it("records NOTHING for a switch the box made for itself", async () => {
       boxWithClawaiAndAnthropic();
 
-      expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
+      expect((await post({ model: `deepseek/${RETIRED_CHAT_ID}`, automatic: true })).status).toBe(200);
 
       expect(setMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
@@ -1005,7 +1008,7 @@ describe("/setup-api/chat/model", () => {
         },
         models: { providers: { deepseek: { models: [
           { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
-          { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+          { id: RETIRED_CHAT_ID, name: "ClawBox AI Pro" },
         ] } } },
         agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } },
       } as never);
@@ -1020,7 +1023,7 @@ describe("/setup-api/chat/model", () => {
 
     it("offers Flash over a remembered Pro pick while another provider is active", async () => {
       boxOnAnthropicAfterPickingMax({
-        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+        ai_model_explicit_picks: { clawai: `deepseek/${RETIRED_CHAT_ID}` },
       });
 
       expect(await clawaiRow()).toMatchObject({
@@ -1041,7 +1044,7 @@ describe("/setup-api/chat/model", () => {
 
     it("offers Flash on a legacy install that declares no models at all", async () => {
       vi.mocked(getAll).mockResolvedValue({
-        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+        ai_model_explicit_picks: { clawai: `deepseek/${RETIRED_CHAT_ID}` },
       });
       vi.mocked(readConfig).mockResolvedValue({
         auth: {
@@ -1079,7 +1082,7 @@ describe("/setup-api/chat/model", () => {
           { id: "claude-opus-5" },
           { id: "claude-haiku-4.5" },
         ] } } },
-        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+        agents: { defaults: { model: { primary: `deepseek/${RETIRED_CHAT_ID}` } } },
       } as never);
 
       const body = await (await GET()).json();
@@ -1095,7 +1098,7 @@ describe("/setup-api/chat/model", () => {
         vi.mocked(getAll).mockResolvedValue(patch);
       });
 
-      await recordExplicitModelPick("deepseek/deepseek-v4-pro");
+      await recordExplicitModelPick(`deepseek/${RETIRED_CHAT_ID}`);
 
       expect(await clawaiRow()).toMatchObject({ model: "deepseek/deepseek-v4-flash" });
     });
@@ -1977,7 +1980,7 @@ describe("/setup-api/chat/model", () => {
           },
         },
       },
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      agents: { defaults: { model: { primary: `deepseek/${RETIRED_CHAT_ID}` } } },
     });
 
     const pick = (model: string) => POST(new Request("http://localhost/test", {

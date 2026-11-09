@@ -66,7 +66,13 @@ import {
   noteClawaiCredentialReplaced,
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
-import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import { migrateRetiredClawboxAiOpenclawAgents } from "@/lib/clawbox-ai-retired-models";
+import {
+  clawboxAiVisionModelFor,
+  isClawboxAiVisionSlotOurs,
+  probeClawboxAiVision,
+  recordClawboxAiVision,
+} from "@/lib/clawbox-ai-vision";
 import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
   getDefaultLlamaCppModel,
@@ -85,10 +91,13 @@ import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
 import {
   CLAWBOX_AI_PROVIDER,
   CLAWBOX_AI_FLASH_MODEL_ID,
-  CLAWBOX_AI_PRO_MODEL_ID,
-  CLAWBOX_AI_MODEL_BY_TIER,
-  CLAWBOX_AI_MODEL_ID_BY_TIER,
+  CLAWBOX_AI_CHAT_MODEL,
   CLAWBOX_AI_DEFAULT_TIER,
+  CLAWBOX_AI_INPUT_MODALITIES,
+  CLAWBOX_AI_TEXT_ONLY_MODALITIES,
+  CLAWBOX_AI_VISION_FALLBACK_LABEL,
+  CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS,
+  CLAWBOX_AI_VISION_FALLBACK_MODEL_ID,
   CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_PROVIDER,
   CLAWBOX_AI_LEGACY_IMAGE_PROVIDER,
@@ -97,11 +106,6 @@ import {
   clawboxAiNonChatModelReason,
   isClawboxAiImageModelRef,
   isClawboxAiNonChatModelRef,
-  CLAWBOX_AI_VISION_MODEL_ID,
-  clawboxAiVisionModelRef,
-  CLAWBOX_AI_VISION_MODEL_LABEL,
-  CLAWBOX_AI_VISION_INPUT_MODALITIES,
-  CLAWBOX_AI_VISION_MAX_TOKENS,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -206,7 +210,7 @@ const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
  * spent against a store that has no order — see `applyOpenAiAuthOrder`.
  */
 const OPENAI_AUTH_ORDER_KEY = "openai_auth_order_written";
-const CLAWBOX_AI_MODEL = CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
+const CLAWBOX_AI_MODEL = CLAWBOX_AI_CHAT_MODEL;
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
 // context would need ~12.5 GB, exceeding the Jetson's 8 GB RAM.
@@ -1082,7 +1086,7 @@ async function getConfiguredClawboxAiToken(preferredToken?: string) {
   return storedClawboxAiToken();
 }
 
-// Canonical DeepSeek V4 limits. Declared explicitly on every model entry
+// Canonical DeepSeek V4 limits. Declared explicitly on the model entry
 // rather than left to OpenClaw's bundled catalog: a configured provider in
 // openclaw.json overrides the plugin catalog entirely, so an omitted
 // contextWindow does NOT inherit the canonical spec — it falls through to the
@@ -1106,46 +1110,51 @@ const CLAWBOX_AI_CONTEXT_TOKENS = 131_072;
 // 384,000 was a round number that left 9,216 tokens of output unusable for no
 // reason.
 const CLAWBOX_AI_MAX_TOKENS = 393_216;
-// V4 is text-in/text-out upstream. Stated rather than inferred so the picker
-// never offers image attachments the proxy would reject.
-const CLAWBOX_AI_INPUT_MODALITIES = ["text"] as const;
 
 function buildClawboxAiProviderDefinition(
   apiKey: string,
-  visionModelId: string = CLAWBOX_AI_VISION_MODEL_ID,
   capContext = true,
+  visionModel: string | null = CLAWBOX_AI_FLASH_MODEL_ID,
 ) {
   const contextCap = capContext ? { contextTokens: CLAWBOX_AI_CONTEXT_TOKENS } : {};
-  // Emit the proxy URL, our auth, per-tier identity/branding/reasoning, and
-  // the context/output/modality limits above.
-  // `cost` stays zero to mark these as included-in-subscription so the
-  // gateway doesn't surface DeepSeek's real per-token prices in the UI.
+  // Emit the proxy URL, our auth, the one model's identity/branding/reasoning,
+  // and the context/output/modality limits above.
+  // `cost` stays zero to mark it as included-in-subscription so the gateway
+  // doesn't surface DeepSeek's real per-token prices in the UI.
   return JSON.stringify({
     baseUrl: CLAWBOX_AI_PROXY_URL,
     api: "openai-completions",
     apiKey,
-    // `reasoning: true` on both entries is what tells the OpenClaw
-    // gateway to forward explicit thinking controls to DeepSeek. The
-    // cloud proxy disables thinking by default, so `off` must remain
-    // available in the model catalog; users opt into reasoning with
-    // High/X-High from the chat header.
+    // `reasoning: true` is what tells the OpenClaw gateway to forward explicit
+    // thinking controls to DeepSeek. The cloud proxy disables thinking by
+    // default, so `off` must remain available in the model catalog; users opt
+    // into reasoning with High/X-High from the chat header.
     //
     // `compat.supportedReasoningEfforts: ["off", "high", "xhigh"]` is what
-    // tells the gateway's `catalogSupportsXHigh()` to append xhigh to
-    // each model's allowed-level profile. Without it, sessions.patch
-    // rejects xhigh ("use off|minimal|low|medium|high") and the chat
-    // popup's "X-High" effort silently fails — even though the provider
-    // stream layer maps OpenClaw xhigh → DeepSeek upstream
-    // `reasoning_effort: "max"` perfectly. The plugin-extension JSON
-    // does NOT cover this case because configured providers in
-    // openclaw.json override the plugin's modelCatalog entirely; the
-    // compat must live on the configured entry.
+    // tells the gateway's `catalogSupportsXHigh()` to append xhigh to the
+    // model's allowed-level profile. Without it, sessions.patch rejects xhigh
+    // ("use off|minimal|low|medium|high") and the chat popup's "X-High"
+    // effort silently fails — even though the provider stream layer maps
+    // OpenClaw xhigh → DeepSeek upstream `reasoning_effort: "max"` perfectly.
+    // The plugin-extension JSON does NOT cover this case because configured
+    // providers in openclaw.json override the plugin's modelCatalog entirely;
+    // the compat must live on the configured entry.
+    //
+    // ONE CHAT ROW (TASK-2261). The former Max-plan id and the separate vision
+    // row are gone: this write replaces the whole provider, so a re-link drops
+    // them, and the boot script drops them from a box that is never re-linked.
+    // `input` carries `image` while the vision check says Flash sees — which
+    // lets an attached picture reach the chat model directly and gives
+    // `agents.defaults.imageModel` (below) a row OpenClaw will resolve — and
+    // `text` alone when it does not, so OpenClaw never hands it a picture.
     models: [
       {
         id: CLAWBOX_AI_FLASH_MODEL_ID,
         name: "ClawBox AI Flash",
         reasoning: true,
-        input: [...CLAWBOX_AI_INPUT_MODALITIES],
+        input: visionModel === CLAWBOX_AI_FLASH_MODEL_ID
+          ? [...CLAWBOX_AI_INPUT_MODALITIES]
+          : [...CLAWBOX_AI_TEXT_ONLY_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
         ...contextCap,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
@@ -1155,36 +1164,19 @@ function buildClawboxAiProviderDefinition(
           supportedReasoningEfforts: ["off", "high", "xhigh"],
         },
       },
-      {
-        id: CLAWBOX_AI_PRO_MODEL_ID,
-        name: "ClawBox AI Pro",
-        reasoning: true,
-        input: [...CLAWBOX_AI_INPUT_MODALITIES],
-        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
-        ...contextCap,
-        maxTokens: CLAWBOX_AI_MAX_TOKENS,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        compat: {
-          supportsReasoningEffort: true,
-          supportedReasoningEfforts: ["off", "high", "xhigh"],
-        },
-      },
-      // Image understanding. Not a chat tier and never selectable as one —
-      // the device model picker reads CLAWAI_STATIC_MODELS, not this array —
-      // it exists so `agents.defaults.imageModel` has something to resolve to
-      // when the user attaches a picture and the text-only session model
-      // cannot look at it. See the CLAWBOX_AI_VISION_* block in
-      // src/lib/clawbox-ai-models.ts for why it lives under this provider.
-      //
-      // No `reasoning`/`compat`: the media-understanding path issues a
-      // one-shot describe and never negotiates a thinking level.
-      {
-        id: visionModelId,
-        name: CLAWBOX_AI_VISION_MODEL_LABEL,
-        input: [...CLAWBOX_AI_VISION_INPUT_MODALITIES],
-        maxTokens: CLAWBOX_AI_VISION_MAX_TOKENS,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      },
+      // The vision fallback, only while Flash cannot see: a picture-only row
+      // `agents.defaults.imageModel` resolves to. Never a chat model — no
+      // `reasoning`/`compat`, and the device picker reads CLAWAI_STATIC_MODELS,
+      // not this array.
+      ...(visionModel === CLAWBOX_AI_VISION_FALLBACK_MODEL_ID
+        ? [{
+            id: CLAWBOX_AI_VISION_FALLBACK_MODEL_ID,
+            name: CLAWBOX_AI_VISION_FALLBACK_LABEL,
+            input: [...CLAWBOX_AI_INPUT_MODALITIES],
+            maxTokens: CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          }]
+        : []),
     ],
   });
 }
@@ -1255,6 +1247,36 @@ function clawboxProxyHosts(deepseekProvider: OpenAiProviderConfig | undefined): 
       .map((url) => (typeof url === "string" && url.trim() ? hostOfUrl(url.trim()) : null))
       .filter((host): host is string => host !== null),
   );
+}
+
+/**
+ * Is openclaw.json's `deepseek` provider the ClawBox AI proxy? It carries a
+ * `claw_` portal token on every box ClawBox linked; `install.sh`'s
+ * `CLAWBOX_AI_API_KEY` branch instead provisions a RAW DeepSeek key at
+ * api.deepseek.com, where a `deepseek/…` ref is DeepSeek's own model and the
+ * owner's — the retired-model move must not claim those. An absent entry is a
+ * box about to be linked: the refs it holds can only be ours.
+ */
+function deepseekProviderIsClawboxAi(deepseekProvider: OpenAiProviderConfig | undefined): boolean {
+  // No provider yet: the link this runs in writes it as the proxy, so a
+  // `deepseek/…` ref is ClawBox AI's from here on. (The boot script, which
+  // writes no provider, reads an absent one as not ours.)
+  if (!deepseekProvider) return true;
+  const apiKey = deepseekProvider.apiKey;
+  if (typeof apiKey === "string" && apiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)) return true;
+  const baseUrl = typeof deepseekProvider.baseUrl === "string" ? deepseekProvider.baseUrl.trim() : "";
+  const host = baseUrl ? hostOfUrl(baseUrl) : null;
+  return host !== null && clawboxProxyHosts(undefined).has(host);
+}
+
+/** The value at a dotted `agents.…` path of a migrated `agents` block. */
+function valueAtAgentsPath(agents: unknown, path: string): unknown {
+  let node: unknown = agents;
+  for (const segment of path.split(".").slice(1)) {
+    if (!node || typeof node !== "object") return undefined;
+    node = (node as Record<string, unknown>)[segment];
+  }
+  return node;
 }
 
 /**
@@ -1816,38 +1838,60 @@ async function configureClawboxAi(
     snapshot = null;
   }
 
-  // Which vision id may this box name? The DeepSeek model when the proxy
-  // serves it, the previous one until then — asked live, never assumed. When
-  // the QUESTION failed (timeout, 5xx — not a refusal), keep whichever of
-  // OUR ids the box already runs: a bad network moment must not downgrade a
-  // box the proxy already upgraded.
-  const vision = await resolveVisionModelId({ token: clawboxAiToken });
+  // EVERY SLOT UNDER `agents` THAT STILL NAMES A RETIRED CLAWBOX AI ID
+  // (TASK-2261). The provider write below drops the former Max-plan row and
+  // the separate vision row, so a primary, a fallback or a per-agent model
+  // left naming one would point at a model this box no longer defines. Moved
+  // here, on the link that drops them, and again by
+  // scripts/gateway-pre-start.sh on every gateway start for a box that is never
+  // re-linked. Only refs under ClawBox AI's own provider move; see
+  // src/lib/clawbox-ai-retired-models.ts. The picture slot is the vision
+  // check's, below.
+  const deepseekIsClawboxAi = deepseekProviderIsClawboxAi(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]);
+  const retired = migrateRetiredClawboxAiOpenclawAgents(snapshot?.agents, { deepseekIsClawboxAi });
   // NARROWED, not cast (TASK-755). The slot can hold a bare string — the core
-  // coerces one — and the MOVE arm below spreads this value into a new object,
-  // which over a string would build `{0:"o",1:"p",…}` and hand the gateway
-  // nonsense. The `typeof` here is what keeps that arm unreachable for a
-  // string, and it is stated rather than left two derivations away.
+  // coerces one — and the move below spreads an object, never a string.
   const currentImageModelSlot = snapshot?.agents?.defaults?.imageModel;
   const currentImageModel = typeof currentImageModelSlot === "object" && currentImageModelSlot !== null
     ? currentImageModelSlot
     : undefined;
-  // COERCED the way the core coerces it, so the managed-slot move below can see
-  // a bare string. Leaving a string alone is right when it names the OWNER's
-  // model; it is wrong when it names one of OURS, because that arm exists to
-  // carry our own previous vision id to the resolved one in both directions,
-  // and a slot it cannot read keeps pointing at an id the provider block no
-  // longer defines. `currentImageModel` stays object-only: the move spreads it.
-  const currentPrimary = typeof currentImageModelSlot === "string"
+  const currentImagePrimary = typeof currentImageModelSlot === "string"
     ? currentImageModelSlot.trim()
     : typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
-  const currentBareId = currentPrimary.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
-    ? currentPrimary.slice(CLAWBOX_AI_PROVIDER.length + 1)
-    : currentPrimary;
-  const visionId = vision.reason === "probe-failed" && currentPrimary && isClawboxAiVisionId(currentPrimary)
-    ? currentBareId
-    : vision.id;
-  const visionRef = clawboxAiVisionModelRef(visionId);
-  console.log(`[AI Config] Vision model resolved to ${visionId} (${vision.reason})`);
+  const imageSlotIsOurs = isClawboxAiVisionSlotOurs(currentImagePrimary, { deepseekIsClawboxAi });
+
+  // CAN FLASH SEE? Asked, not assumed (src/lib/clawbox-ai-vision.ts): Flash,
+  // else the vision fallback, else no picture slot at all. A question that
+  // could not be answered keeps what the box has — no picture model included,
+  // which ClawBox AI's rows say the way scripts/gateway-pre-start.sh reads
+  // them: Flash declared text-only, no fallback row, and no slot of ours.
+  const vision = await probeClawboxAiVision({ token: clawboxAiToken, baseUrl: CLAWBOX_AI_PROXY_URL });
+  const clawaiRows = deepseekIsClawboxAi ? snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]?.models : undefined;
+  const flashRowInput = Array.isArray(clawaiRows)
+    ? clawaiRows.find((row) => row?.id === CLAWBOX_AI_FLASH_MODEL_ID)?.input
+    : undefined;
+  const keptNone = !imageSlotIsOurs
+    && Array.isArray(flashRowInput)
+    && !flashRowInput.includes("image")
+    && !(clawaiRows ?? []).some((row) => row?.id === CLAWBOX_AI_VISION_FALLBACK_MODEL_ID);
+  const visionModel = clawboxAiVisionModelFor(vision, imageSlotIsOurs ? currentImagePrimary : null, { keptNone });
+  await recordClawboxAiVision(vision, visionModel);
+  console.log(`[AI Config] Vision check: ${vision.verdict} (pictures go to ${visionModel ?? "nothing"}; ${(vision.why ?? []).join("; ")})`);
+  const visionRef = visionModel ? `${CLAWBOX_AI_PROVIDER}/${visionModel}` : null;
+
+  // `agents.defaults.models` is a map the CLI will not shrink without
+  // `--replace`, which this group passes.
+  const retiredOps: OpenclawConfigSetArgs[] = retired.changedPaths
+    .flatMap((path): OpenclawConfigSetArgs[] => {
+      const value = valueAtAgentsPath(retired.agents, path);
+      if (value === undefined) return [];
+      return [path === "agents.defaults.models"
+        ? [path, JSON.stringify(value), "--json", "--replace"]
+        : [path, JSON.stringify(value), "--json"]];
+    });
+  if (retiredOps.length > 0) {
+    console.log(`[AI Config] Moving retired ClawBox AI models to ${CLAWBOX_AI_CHAT_MODEL} in ${retiredOps.map((op) => op[0]).join(", ")}`);
+  }
 
   const requiredOps: OpenclawConfigSetArgs[] = [
     [
@@ -1857,52 +1901,53 @@ async function configureClawboxAi(
     ],
     [
       `models.providers.${CLAWBOX_AI_PROVIDER}`,
-      buildClawboxAiProviderDefinition(clawboxAiToken, visionId, await installedOpenclawCoreAtLeast(2026, 10)),
+      buildClawboxAiProviderDefinition(clawboxAiToken, await installedOpenclawCoreAtLeast(2026, 10), visionModel),
       "--json",
     ],
     ...(extra?.requiredOps ?? []),
   ];
 
-  // Point image *understanding* at the vision entry the provider definition
-  // above just wrote. Without this the device accepts an attached picture and
-  // then cannot look at it: the ClawBox AI chat models are `input: ["text"]`,
-  // so OpenClaw hands the turn a media path instead of inline image parts, and
-  // the `image` tool that would read that path resolves its model through
-  // `agents.defaults.imageModel` — which ClawBox provisioning never set, making
-  // `runWithImageModelFallback` throw "No image model configured"
-  // (`dist/model-fallback-CvSRhgYr.js` on 2026.7.1). Reproduced on a real box
-  // on 2026-08-21; see TASK-417.
+  // Point image *understanding* at the model the vision check chose, whose
+  // row the provider definition above just wrote with `image` in its input.
+  // Without this a turn whose chat model cannot see (another provider's, a
+  // local one, or Flash while it cannot) accepts an attached picture and then
+  // cannot look at it: the `image` tool that would read the media path
+  // resolves its model through `agents.defaults.imageModel` — which ClawBox
+  // provisioning never set, making `runWithImageModelFallback` throw "No image
+  // model configured" (`dist/model-fallback-CvSRhgYr.js` on 2026.7.1).
+  // Reproduced on a real box on 2026-08-21; see TASK-417.
   //
   // Same don't-clobber rule as image generation, for the same reason: this
   // function also runs when ClawBox AI is merely being added as a *fallback*
   // for some other provider, and a slot the owner filled is their choice.
   // Non-fatal for the same reason too.
   const visionOps: OpenclawConfigSetArgs[] = [];
-  if (!hasToolModelConfig(snapshot?.agents?.defaults?.imageModel)) {
-    visionOps.push([
-      "agents.defaults.imageModel",
-      JSON.stringify({ primary: visionRef }),
-      "--json",
-    ]);
-  } else if (currentPrimary && isClawboxAiVisionId(currentPrimary) && currentPrimary !== visionRef) {
-    // The slot names one of OUR vision ids — the previous default is ours to
-    // move to the resolved one (both directions: the DeepSeek upgrade when
-    // the proxy starts serving it, and the fall-back if it stops). A value
-    // the owner set themselves never matches and is never touched — and the
-    // move changes ONLY `primary`: fallbacks the owner added ride along.
-    console.log(`[AI Config] Moving agents.defaults.imageModel ${currentPrimary} -> ${visionRef}`);
-    visionOps.push([
-      "agents.defaults.imageModel",
-      // `...currentImageModel` is `undefined` for a bare string, which spreads
-      // nothing — the fallbacks a string cannot carry are not lost, because
-      // there were none. Never `...currentImageModelSlot`: spreading a string
-      // builds `{0:"d",1:"e",…}`.
-      JSON.stringify({ ...currentImageModel, primary: visionRef }),
-      "--json",
-    ]);
+  let visionUnset = false;
+  if (!hasToolModelConfig(currentImageModelSlot)) {
+    if (visionRef) {
+      visionOps.push(["agents.defaults.imageModel", JSON.stringify({ primary: visionRef }), "--json"]);
+    }
+  } else if (imageSlotIsOurs && currentImagePrimary !== visionRef) {
+    // The slot names a model ClawBox wrote there — Flash, the fallback, or an
+    // id it used to write — so it is ours to move to the one that answers, and
+    // the move keeps everything else in the slot: fallbacks the owner added
+    // ride along. A bare string is written back in the object shape this block
+    // writes everywhere else. With no model that can see, OUR primary goes.
+    const rest = currentImageModel ? { ...currentImageModel } : {};
+    delete (rest as { primary?: unknown }).primary;
+    if (visionRef) {
+      console.log(`[AI Config] Moving agents.defaults.imageModel ${currentImagePrimary} -> ${visionRef}`);
+      visionOps.push(["agents.defaults.imageModel", JSON.stringify({ ...rest, primary: visionRef }), "--json"]);
+    } else if (Object.keys(rest).length > 0) {
+      console.log(`[AI Config] No ClawBox AI model can look at pictures: dropping ${currentImagePrimary} from agents.defaults.imageModel`);
+      visionOps.push(["agents.defaults.imageModel", JSON.stringify(rest), "--json"]);
+    } else {
+      console.log(`[AI Config] No ClawBox AI model can look at pictures: removing agents.defaults.imageModel`);
+      visionUnset = true;
+    }
   } else {
     console.log(
-      "[AI Config] Left agents.defaults.imageModel alone: it already names a vision model",
+      "[AI Config] Left agents.defaults.imageModel alone: it already names a model that looks at pictures",
     );
   }
 
@@ -1944,19 +1989,32 @@ async function configureClawboxAi(
   }
 
   await applyConfigSetGroups([
+    // FIRST among this call's writes, so every one after it wins: the move is
+    // computed from the config read above (writes the caller already staged
+    // included), and a primary or fallbacks this call's own ops set
+    // (`extra.requiredOps`, `setFallback`) must not be put back by it.
+    {
+      ops: retiredOps,
+      onError: (err) =>
+        console.warn(
+          "[AI Config] Failed to move retired ClawBox AI models:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+    },
     { ops: requiredOps },
     {
       ops: visionOps,
       onApplied: () =>
         console.log(
-          `[AI Config] Set ClawBox AI vision model ${visionRef} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+          `[AI Config] Set ClawBox AI image understanding to ${visionRef} via proxy ${CLAWBOX_AI_PROXY_URL}`,
         ),
       onError: (err) =>
         console.warn(
-          "[AI Config] Failed to configure ClawBox AI vision model:",
+          "[AI Config] Failed to point image understanding at ClawBox AI:",
           err instanceof Error ? logSafe(err.message) : err,
         ),
     },
+
     {
       ops: imageOps,
       onApplied: () =>
@@ -2009,6 +2067,17 @@ async function configureClawboxAi(
         ),
       },
       () => runOpenclawConfigSet(op, { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
+    );
+  }
+  if (visionUnset) {
+    await configWriteBoundary(
+      {
+        onError: (err) => console.warn(
+          "[AI Config] Failed to remove agents.defaults.imageModel:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+      },
+      () => runOpenclawConfigUnset("agents.defaults.imageModel", { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
     );
   }
   for (const path of legacyImageCleanup.unsets) {
@@ -3139,7 +3208,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
       const clawaiDecision = decideClawboxAiModelId({
         picks: clawaiAccountChanged ? {} : storedPicks,
-        tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
+        // Every plan runs the one model: the badge no longer picks one.
+        tierModelId: CLAWBOX_AI_FLASH_MODEL_ID,
       });
       explicitPickKept = clawaiDecision.explicit;
       if (clawaiDecision.explicit) {

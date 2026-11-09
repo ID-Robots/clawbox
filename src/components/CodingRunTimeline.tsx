@@ -29,7 +29,7 @@ import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
  * strings so the two surfaces cannot disagree about what "Screenshot" is
  * called. The rest are the runner's OWN sentences (RUNNER_STEP in
  * coding-agent-progress.ts), which used to reach this list as the English the
- * runner wrote: a German run page read "Started with deepseek-v4-pro[1m]" and
+ * runner wrote: a German run page read "Started with deepseek-v4-flash[1m]" and
  * "Automatic review pass of run-xyz" between properly translated chips.
  */
 const STEP_KEY: Record<ProgressLabelKey, string> = {

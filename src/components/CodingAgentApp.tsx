@@ -502,7 +502,7 @@ function StatTile({ label, value, hint, testId }: { label: string; value: ReactN
  * A row across the full width rather than a tile: the longest value on the
  * whole page is a model identifier, and in a ~118 px tile it had nowhere to
  * go. Here it has the column's width and wraps at its own hyphens, which is
- * where a name like `deepseek-v4-pro[1m]` wants to break.
+ * where a name like `deepseek-v4-flash[1m]` wants to break.
  */
 function StatLine({ label, value, hint, note, mono = false, testId }: { label: string; value: string; hint?: string; note?: string; mono?: boolean; testId?: string }) {
   return (

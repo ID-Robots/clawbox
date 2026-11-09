@@ -51,7 +51,7 @@ export const CHOICE_SOURCE_KEYS: Readonly<Record<CloudCapability, string>> = {
 /**
  * The tier the proxy serves cloud SPEECH to — internal `pro`, which is the MAX
  * plan; the marketed and internal names are off by one on purpose (see
- * `CLAWBOX_AI_MODEL_BY_TIER` in clawbox-ai-models.ts). The gate itself lives in
+ * `ClawboxAiTier` and `CLAWBOX_AI_TIER_LABEL` in clawbox-ai-models.ts). The gate itself lives in
  * `scripts/gateway-pre-start.sh` as `CLAWBOX_SPEECH_DEVICE_TIER`; this is the
  * TypeScript half of the same constant and the suite pins the two.
  */

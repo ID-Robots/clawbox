@@ -28,11 +28,11 @@ describe("serialized unvalidated primary-model fallback", () => {
     vi.resetModules();
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
 
     const configPath = path.join(root, "openclaw.json");
     const written = JSON.parse(await fs.readFile(configPath, "utf8"));
-    expect(written.agents.defaults.model.primary).toBe("deepseek/deepseek-v4-pro");
+    expect(written.agents.defaults.model.primary).toBe("deepseek/deepseek-v4-flash");
     expect(existsSync(`${configPath}.lock`)).toBe(false);
   });
 
@@ -52,7 +52,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     await fs.writeFile(lockPath, JSON.stringify({ pid: process.pid, createdAt: "2000-01-01T00:00:00.000Z" }));
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    const pending = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    const pending = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
 
     try {
       // Give the fallback enough time to observe EEXIST. It must not read and
@@ -74,7 +74,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     const written = JSON.parse(await fs.readFile(configPath, "utf8"));
     expect(written.gateway).toEqual({ port: 18789 });
     expect(written.models.providers.anthropic).toEqual({ api: "anthropic-messages" });
-    expect(written.agents.defaults.model.primary).toBe("deepseek/deepseek-v4-pro");
+    expect(written.agents.defaults.model.primary).toBe("deepseek/deepseek-v4-flash");
     expect(existsSync(lockPath)).toBe(false);
   });
 
@@ -94,10 +94,10 @@ describe("serialized unvalidated primary-model fallback", () => {
     }));
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
 
     const written = JSON.parse(await fs.readFile(configPath, "utf8"));
-    expect(written.agents.defaults.model.primary).toBe("deepseek/deepseek-v4-pro");
+    expect(written.agents.defaults.model.primary).toBe("deepseek/deepseek-v4-flash");
     expect(existsSync(lockPath)).toBe(false);
     expect(existsSync(`${lockPath}.reclaim`)).toBe(false);
   });
@@ -115,7 +115,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     await fs.writeFile(lockPath, JSON.stringify({ createdAt: "2000-01-01T00:00:00.000Z" }));
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
 
     expect(existsSync(lockPath)).toBe(false);
     expect(existsSync(`${lockPath}.reclaim`)).toBe(false);
@@ -136,7 +136,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     await fs.utimes(lockPath, old, old);
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
 
     expect(existsSync(lockPath)).toBe(false);
   });
@@ -156,7 +156,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     await fs.utimes(guardPath, old, old);
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
     expect(existsSync(guardPath)).toBe(false);
 
     await fs.mkdir(guardPath);
@@ -164,7 +164,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(existsSync(guardPath)).toBe(true);
     expect(JSON.parse(await fs.readFile(configPath, "utf8")).agents.defaults.model.primary)
-      .toBe("deepseek/deepseek-v4-pro");
+      .toBe("deepseek/deepseek-v4-flash");
     await fs.rmdir(guardPath);
     await pending;
     expect(JSON.parse(await fs.readFile(configPath, "utf8")).agents.defaults.model.primary)
@@ -197,7 +197,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     });
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    const pending = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+    const pending = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
 
     let quarantinePath = "";
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -237,7 +237,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     vi.spyOn(fileHandlePrototype, "stat").mockRejectedValueOnce(new Error("simulated fstat failure"));
 
     const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-    await expect(setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro"))
+    await expect(setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash"))
       .rejects.toThrow("simulated fstat failure");
 
     const lockPath = path.join(root, "openclaw.json.lock");
@@ -266,7 +266,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     }));
     try {
       const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-      const writing = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+      const writing = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-flash");
       await vi.waitFor(() => expect(held).toHaveBeenCalledTimes(1));
       const lock = await fs.open(path.join(root, "openclaw.json.lock"), "wx");
       await lock.close();
