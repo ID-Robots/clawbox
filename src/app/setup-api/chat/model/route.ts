@@ -34,6 +34,7 @@ import {
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { DEFAULT_LLAMACPP_CONTEXT_WINDOW, getLlamaCppContextWindow } from "@/lib/llamacpp";
+import { friendlyModelName } from "@/lib/local-models";
 import { CLAWBOX_AI_CHAT_MODEL } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
@@ -269,6 +270,21 @@ function normalizeProvider(provider: unknown): string | null {
 function labelForProvider(provider: string | null, fallback: string): string {
   if (!provider) return fallback;
   return PROVIDER_LABELS[provider] ?? fallback;
+}
+
+/**
+ * The Local AI row's label. A llama.cpp row is named for the model the box
+ * runs ("Qwen 3.6 Local" on a DGX Spark, "Gemma 4 Local" on a Jetson), named
+ * by the same `friendlyModelName` the Local AI settings card uses, so the chat
+ * header and Settings cannot disagree about which model answers. The provider
+ * table's "Gemma 4 Local" stays as the fallback for an alias with no name.
+ */
+function localModelLabel(provider: string | null, model: string): string {
+  if (provider === "llamacpp") {
+    const name = friendlyModelName(model.slice(model.indexOf("/") + 1));
+    if (name) return `${name} Local`;
+  }
+  return labelForProvider(provider, "Local AI");
 }
 
 function normalizeProviderFromModel(model: string | null | undefined): string | null {
@@ -751,7 +767,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
     ? null
     : configuredLocalModel;
   const localLabel = localModel
-    ? labelForProvider(localProvider, "Local AI")
+    ? localModelLabel(localProvider, localModel)
     : null;
 
   let primaryModel = typeof storedPrimaryModel === "string" && storedPrimaryModel.trim()

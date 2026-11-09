@@ -505,30 +505,11 @@ function thinkingSnapDue(state: ChatModelState, current: ThinkingLevel): boolean
   return readPersistedThinkingLevel(provider, cfg) !== current
 }
 
-// Compact provider labels for the chat header pill. The chat panel
-// can be docked at ~370px wide where "OpenAI Codex" + "GPT-5.4 Mini"
-// + "Medium" combined exceeds the available width and pills truncate
-// to "OpenAI Co...". Drop the brand prefix on the provider pill so
-// users see the distinctive part ("Codex" vs "GPT" — both still
-// clearly OpenAI) without overflow. Settings page and notification
-// messages still use the full PROVIDER_LABELS values from the chat
-// model route.
-const PROVIDER_PILL_LABEL: Record<string, string> = {
-  'ClawBox AI': 'ClawBox',
-  'Anthropic Claude': 'Claude',
-  'OpenAI GPT': 'GPT',
-  'OpenAI Codex': 'Codex',
-  'Google Gemini': 'Gemini',
-  'OpenRouter': 'OpenRouter',
-  'xAI Grok': 'Grok',
-  'Ollama Local': 'Ollama',
-  'Gemma 4 Local': 'Gemma 4',
-}
 
 function getProviderPillText(option: ChatModelState['options'][number]): string {
   const full = getChatModelOptionText(option)
   if (!option.available) return full
-  return PROVIDER_PILL_LABEL[option.label ?? ''] ?? full
+  return chatProviderPillLabel(option.label ?? '') ?? full
 }
 
 import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
@@ -601,7 +582,7 @@ import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import VoiceSecureNotice from '@/components/VoiceSecureNotice'
-import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { chatProviderPillLabel, shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 import {
   chatKeepsEarlierModel,
   conversationModelFor,

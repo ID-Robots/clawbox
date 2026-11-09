@@ -407,6 +407,25 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(rowFor(body, "anthropic")!.section).toBe("ai");
   });
 
+  it("names the local engine's row after the model the box runs", async () => {
+    // A DGX Spark runs Qwen through llama.cpp; the row said "Gemma 4", the
+    // model every Jetson ships, while the Local AI card beside it said Qwen.
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "llamacpp/qwen3.6-35b-a3b-mtp" } } } });
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/qwen3.6-35b-a3b-mtp",
+    } as Record<string, string>)[key] ?? null);
+    const body = await (await GET()).json();
+    expect(rowFor(body, "llamacpp")!.label).toBe("Qwen 3.6 (on-device)");
+
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    } as Record<string, string>)[key] ?? null);
+    const jetson = await (await GET()).json();
+    expect(rowFor(jetson, "llamacpp")!.label).toBe("Gemma 4 (on-device)");
+  });
+
   // TASK-663, the OpenClaw leg. This path reads `openclaw.json` off disk and
   // performs NO probe at all, so it has no window in which an answer is owed:
   // it must never emit `checking`, and it must never degrade over a cold box.
