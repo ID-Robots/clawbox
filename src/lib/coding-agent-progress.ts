@@ -314,6 +314,9 @@ export const RUNNER_STEP = {
   committed: (sha: string, newRepository: boolean) => `Committed as ${sha}${newRepository ? " (new repository)" : ""}`,
   committedByRun: (sha: string) => `Committed by the run itself as ${sha}`,
   notCommitted: (reason: string) => `Not committed: ${reason}`,
+  /** A run in a worktree wrote that temporary folder's path into its files; the box said it in the project's folder (coding-worktree-heal.ts). */
+  pathsRewritten: (files: readonly string[]) =>
+    `Rewrote the run's temporary folder path to the project's own in ${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""}`,
   faviconCommitted: (sha: string) => `Added the generated favicon, committed as ${sha}`,
   // `base` is the run record's, which the type allows to be null; rendered the
   // way the template literal it replaced rendered it, so a record already on

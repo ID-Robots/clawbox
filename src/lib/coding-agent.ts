@@ -370,6 +370,7 @@ import {
 } from "@/lib/coding-deliverable";
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
 import { commitRunWork, headCommitShort, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
+import { healWorktreePaths } from "@/lib/coding-worktree-heal";
 import {
   CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
   CODING_AGENT_GIT_NAME_CONFIG_KEY,
@@ -9407,6 +9408,39 @@ async function recordRunWork(run: CodingRun): Promise<void> {
   // A read-only run changed nothing and commits nothing: the only commit the
   // folder's log could answer with is somebody else's.
   if (run.readOnly) return;
+  await commitRunChanges(run);
+  await healRunPaths(run);
+}
+
+/**
+ * A run in a worktree wrote THAT folder's path into its files — the command a
+ * README documents, a config's path — and the folder is removed once the work
+ * is merged (coding-worktree-heal.ts): each mention is said in the project's
+ * own folder instead, as one more commit on the run's branch. After the run's
+ * own commit, before a team merges the branch or a pull request is pushed.
+ * Never throws; a rewrite that could not be made leaves the branch as it is.
+ */
+async function healRunPaths(run: CodingRun): Promise<void> {
+  if (run.commitError) return;
+  try {
+    const healed = await healWorktreePaths(run.directory);
+    if (!healed) return;
+    if (!healed.ok) {
+      console.error(`[coding-agent] ${run.id} paths not rewritten: ${healed.detail}`);
+      return;
+    }
+    if (!healed.files.length) return;
+    if (healed.commit) run.commit = healed.commit;
+    pushProgress(run, RUNNER_STEP.pathsRewritten(healed.files));
+    persist(true);
+    console.error(`[coding-agent] ${run.id} rewrote its worktree's path in ${healed.files.length} file(s)`);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} paths not rewritten:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** The commit itself — `recordRunWork`'s first half. */
+async function commitRunChanges(run: CodingRun): Promise<void> {
   // No file the tools confirmed — but a run that wrote through its shell and
   // committed there has a commit of its own to record all the same. In a run's
   // OWN worktree the shell's files are the run's too (a background job's

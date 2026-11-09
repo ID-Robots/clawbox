@@ -281,6 +281,14 @@ export interface TeamTask {
    * before the field reads as 0.
    */
   budgetReoffers: number;
+  /**
+   * How many of its `attempts` the team's FINAL REVIEW sent it back for
+   * (`reopenForFinalReview`): the merged result was rejected and the task the
+   * findings point at fixes them. Bounded by the team's own fix rounds
+   * (MAX_FINAL_FIX_ROUNDS), never against the task's two tries; a board from
+   * before the field reads as 0.
+   */
+  reviewReoffers: number;
   created_at: number;
   updated_at: number;
 }
@@ -297,8 +305,8 @@ export interface TaskHold {
 }
 
 /** A task's attempts that count toward its two tries — its holds are not its own failures. */
-export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number; budgetReoffers?: number }): number {
-  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0) - (task.budgetReoffers ?? 0));
+export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number; budgetReoffers?: number; reviewReoffers?: number }): number {
+  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0) - (task.budgetReoffers ?? 0) - (task.reviewReoffers ?? 0));
 }
 
 /**
@@ -497,8 +505,19 @@ export interface TeamBoard {
    * and on a board from before the lead had an inbox.
    */
   lastLeadAt: number;
-  /** The one review over the merged result (review mode `final`), once it ruled. */
+  /**
+   * The review over the merged result (review mode `final`), once it ruled —
+   * null again while a fix round it sent back is at work (`reopenForFinalReview`),
+   * until the review of the fixed result rules.
+   */
   finalReview: FinalReview | null;
+  /**
+   * How many times a REJECTING final review sent tasks back for a fix instead
+   * of ending the team (`reopenForFinalReview`, at most MAX_FINAL_FIX_ROUNDS).
+   * Absent on a team whose final review never rejected, and on every board
+   * from before 2026-11-09.
+   */
+  finalFixRounds?: number;
   /** The pull request the goal asked for, once the orchestrator opened it; null for a team whose goal asked for none. */
   pr: TeamPr | null;
   /** The figures, kept current on every save (`teamMetrics`). */
@@ -697,6 +716,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
       ? { verdict: finalReview.verdict, notes: finalReview.notes, at: typeof finalReview.at === "number" ? finalReview.at : 0 }
       : null,
+    ...(typeof b.finalFixRounds === "number" && Number.isInteger(b.finalFixRounds) && b.finalFixRounds > 0 ? { finalFixRounds: b.finalFixRounds } : {}),
     pr: normalizeTeamPr(b.pr),
     metrics: EMPTY_METRICS,
     ...(slotWaits.length ? { slotWaits } : {}),
@@ -834,6 +854,7 @@ function normalizeTask(raw: unknown): TeamTask | null {
     hold: normalizeHold(t.hold),
     ciReoffers: typeof t.ciReoffers === "number" && Number.isInteger(t.ciReoffers) && t.ciReoffers >= 0 ? t.ciReoffers : 0,
     budgetReoffers: typeof t.budgetReoffers === "number" && Number.isInteger(t.budgetReoffers) && t.budgetReoffers >= 0 ? t.budgetReoffers : 0,
+    reviewReoffers: typeof t.reviewReoffers === "number" && Number.isInteger(t.reviewReoffers) && t.reviewReoffers >= 0 ? t.reviewReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
     // A task's `role` (`bulk`, until 2026-10-30) is not read back: every task is a worker's.
@@ -1012,6 +1033,7 @@ export function postTask(
     hold: null,
     ciReoffers: 0,
     budgetReoffers: 0,
+    reviewReoffers: 0,
     created_at: now,
     updated_at: now,
   };
@@ -1210,6 +1232,50 @@ export function reopenForCi(board: TeamBoard, actor: Actor, taskId: string, note
   task.assigned_to = null;
   task.updated_at = now;
   append(board, { ts: now, actor, type: "ci", task_id: taskId, message: `Task ${taskId} re-offered for the pull request's failing checks: ${firstLine(notes)}` });
+  return task;
+}
+
+/**
+ * How many fix rounds a rejecting final review may open (`reopenForFinalReview`).
+ * One: two teams in a row did every task, merged, and then FAILED on a final
+ * review whose findings were four wrong paths in one README (2026-11-08) —
+ * minutes of work for one worker, thrown away with the whole team's. A second
+ * rejection ends the team as the first one used to.
+ */
+export const MAX_FINAL_FIX_ROUNDS = 1;
+
+/**
+ * The team's FINAL REVIEW rejected the merged result: a task its findings
+ * point at goes back to pending with the findings as its notes — the
+ * system's re-offer, never against the task's two tries (`reviewReoffers`; the
+ * team's fix rounds are the bound). The first re-offer of a round takes the
+ * rejected verdict off the board (it stays in the log) and counts the round,
+ * so the review of the fixed result can rule in its place. Its next worker
+ * reads the findings as "a previous attempt was rejected"; what started on it
+ * is held, as for any reopening.
+ */
+export function reopenForFinalReview(board: TeamBoard, actor: Actor, taskId: string, notes: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "final_reopen", `Only the system re-offers a task for the final review's findings; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "complete") throw new Error(`Task ${taskId} is ${task.status}; only a complete task is re-offered for the final review's findings.`);
+  const rounds = board.finalFixRounds ?? 0;
+  if (board.finalReview?.verdict === "rejected") {
+    if (rounds >= MAX_FINAL_FIX_ROUNDS) throw new Error(`A team fixes a rejected final review at most ${MAX_FINAL_FIX_ROUNDS === 1 ? "once" : `${MAX_FINAL_FIX_ROUNDS} times`}.`);
+    board.finalFixRounds = rounds + 1;
+    board.finalReview = null;
+  } else if (board.finalReview || rounds === 0) {
+    // Accepted, or never rejected: there is nothing to fix.
+    throw new Error("Only a rejected final review sends a task back.");
+  }
+  const now = Date.now();
+  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.rejections += 1;
+  task.reviewReoffers += 1;
+  task.status = "pending";
+  task.assigned_to = null;
+  task.updated_at = now;
+  board.updatedAt = now;
+  append(board, { ts: now, actor, type: "final_review", task_id: taskId, message: `Task ${taskId} re-offered for the final review's findings: ${firstLine(notes)}` });
   return task;
 }
 

@@ -3028,14 +3028,46 @@ describe("the planner's shape", () => {
     expect(done.runs.filter((r) => r.role === "reviewer")).toEqual([{ id: "run-00000004", role: "reviewer", taskId: null }]);
   });
 
-  it("fails the team with the final reviewer's words when it rejects the merged work", async () => {
-    outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
-    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "app.js never loads the form in index.html." }) }];
+  it("sends a rejected final review's findings back to ONE task, once, and ends done when the review of the fix accepts", async () => {
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) },
+      { summary: "index", filesTouched: ["index.html"] },
+      { summary: "app", filesTouched: ["app.js"] },
+      { summary: "app.js now loads the form.", filesTouched: ["app.js"] },
+    ];
+    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "app.js never loads the form in index.html." }) }, { summary: JSON.stringify({ verdict: "accepted", notes: "The form loads." }) }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The plan's two workers, the review, ONE fixer, the review of the fix.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "worker", "reviewer"]);
+    // t2: the task nothing else stands on — t1, which the notes also name, is not reopened under it.
+    expect(starts[4]).toMatchObject({ team: { id: board.id, role: "worker", taskId: "t2" } });
+    expect(String(starts[4].task)).toContain("A previous attempt was rejected: The team's final review of the MERGED result rejected it.");
+    expect(String(starts[4].task)).toContain("app.js never loads the form in index.html.");
+    expect(done.finalFixRounds).toBe(1);
+    expect(done.finalReview).toMatchObject({ verdict: "accepted", notes: "The form loads." });
+    const t2 = done.tasks.find((t) => t.task_id === "t2")!;
+    expect(t2).toMatchObject({ status: "complete", attempts: 2, reviewReoffers: 1 });
+    expect(done.tasks.find((t) => t.task_id === "t1")).toMatchObject({ status: "complete", attempts: 1, holds: 0 });
+    const said = done.log.map((e) => e.message);
+    expect(said).toContain("Final review rejected: app.js never loads the form in index.html.");
+    expect(said.some((m) => m.startsWith("Task t2 re-offered for the final review's findings:"))).toBe(true);
+    expect(said).toContain("Final review accepted: The form loads.");
+    expect(done.error).toBeNull();
+  });
+
+  it("fails the team with the final reviewer's words when the review of the fix rejects too", async () => {
+    outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }, { summary: "tried", filesTouched: ["app.js"] }];
+    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "app.js never loads the form in index.html." }) }, { summary: JSON.stringify({ verdict: "rejected", notes: "The form still never loads." }) }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toBe("The final review rejected the merged work: app.js never loads the form in index.html.");
-    expect(done.finalReview).toMatchObject({ verdict: "rejected" });
+    expect(done.error).toBe("The final review rejected the merged work: The form still never loads.");
+    expect(done.finalReview).toMatchObject({ verdict: "rejected", notes: "The form still never loads." });
+    expect(done.finalFixRounds).toBe(1);
+    // One fix round, never a second.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "worker", "reviewer"]);
   });
 
   it("accepts by rule, with an alert, when the final reviewer gives no verdict", async () => {
@@ -3055,10 +3087,13 @@ describe("the planner's shape", () => {
     reviews = [{ summary: "The goal is met: index.html and app.js work together." }, { summary: 'Sorry.\n{"verdict": "rejected", "notes": "app.js never loads the form."}' }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "reviewer"]);
+    // The re-asked verdict is the review's: its rejection opens the one fix
+    // round (a worker, then the review of the fix, which accepts here).
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "reviewer", "worker", "reviewer"]);
     expect(starts[4]).toEqual({ task: REVIEWER_NUDGE, resumeRunId: "run-00000004", source: "owner", team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: FINAL_REVIEWER_BRIEF });
-    expect(done.finalReview).toMatchObject({ verdict: "rejected", notes: "app.js never loads the form." });
-    expect(done.status).toBe("failed");
+    expect(done.log.map((e) => e.message)).toContain("Final review rejected: app.js never loads the form.");
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+    expect(done.status).toBe("done");
     expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
     expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
       'The final reviewer answered without a JSON verdict; asking it once more for the verdict alone. It answered: "The goal is met: index.html and app.js work together."',

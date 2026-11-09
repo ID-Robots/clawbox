@@ -36,6 +36,7 @@ import {
   recordTeamPr,
   reopenAfterStop,
   reopenForCi,
+  reopenForFinalReview,
   retireTask,
   reviewTask,
   saveBoard,
@@ -61,6 +62,8 @@ export type TeamMessage =
   | { type: "hold"; task_id: string; dependency: string; reason: string }
   /** The team's pull request came back red: the system re-offers a task its failure points at (reopenForCi). */
   | { type: "ci_reopen"; task_id: string; notes: string }
+  /** The team's final review rejected the merged result: the system re-offers a task its findings point at (reopenForFinalReview). */
+  | { type: "final_reopen"; task_id: string; notes: string }
   /** The team stopped a worker held past its budget: the system re-offers the task once (reopenAfterStop). */
   | { type: "budget_reopen"; task_id: string; notes: string }
   /** The system records where the team's pull request stands (recordTeamPr). */
@@ -119,6 +122,10 @@ export function validateMessage(m: unknown): string | null {
     case "ci_reopen":
       if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A CI re-offer needs a task_id.";
       if (typeof msg.notes !== "string" || !msg.notes.trim()) return "A CI re-offer needs the failure as its notes.";
+      return null;
+    case "final_reopen":
+      if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A re-offer after the final review needs a task_id.";
+      if (typeof msg.notes !== "string" || !msg.notes.trim()) return "A re-offer after the final review needs the findings as its notes.";
       return null;
     case "budget_reopen":
       if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A re-offer after a stop needs a task_id.";
@@ -217,6 +224,7 @@ export class TeamBus {
         case "retire": task = retireTask(this.board, actor, message.task_id, message.reason); break;
         case "hold": task = holdTask(this.board, actor, message.task_id, message.dependency, message.reason); break;
         case "ci_reopen": task = reopenForCi(this.board, actor, message.task_id, message.notes); break;
+        case "final_reopen": task = reopenForFinalReview(this.board, actor, message.task_id, message.notes); break;
         case "budget_reopen": task = reopenAfterStop(this.board, actor, message.task_id, message.notes); break;
         case "pr": recordTeamPr(this.board, actor, message.pr, message.note); break;
         case "final_review": recordFinalReview(this.board, actor, message.verdict, message.notes); break;
