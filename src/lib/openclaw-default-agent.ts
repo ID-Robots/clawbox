@@ -60,6 +60,7 @@ export function normalizeAgentId(value: unknown): string {
   return id || FALLBACK_AGENT_ID;
 }
 
+/** A plain JSON object: not null, not an array. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -149,6 +150,12 @@ export async function openclawDefaultAgentId(configPath?: string): Promise<strin
   }
 }
 
+/**
+ * {@link openclawDefaultAgentId}'s read of `configPath`: the cached id while
+ * the file's identity is unchanged, else the id its content names. A missing
+ * file is {@link FALLBACK_AGENT_ID}; one that cannot be opened or parsed keeps
+ * the last id read from it.
+ */
 async function readDefaultAgentId(configPath: string): Promise<string> {
   const last = cached?.path === configPath ? cached : null;
   // ONE handle for the identity and the content, so the id cached under a key

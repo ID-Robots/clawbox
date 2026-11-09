@@ -2040,4 +2040,39 @@ describe("a box whose default agent is not called main", () => {
     expect(await calls(argv, "memory status")).toEqual(["memory status --agent default --deep --json"]);
     expect(status).toMatchObject({ available: false, errorCode: "status_unavailable", agentId: "default" });
   });
+
+  it("plans a pass on a reading about the agent it indexes, not the one the box was renamed from", async () => {
+    // Read while the agent was `main`, whose index is empty; then renamed to
+    // `default`, whose index is populated. Planned on the cached reading about
+    // `main`, that zero sent `--force` to `default`'s index unasked.
+    const row: Record<string, unknown> = realRow("default");
+    const populated = { ...row, status: { ...(row.status as Record<string, unknown>), files: 7, chunks: 512 } };
+    const argv = await boxWithAgents({ entries: { main: {}, default: {} } }, [realRow("main"), populated]);
+    const config = path.join(process.env.CLAWBOX_OPENCLAW_HOME as string, "openclaw.json");
+    await fs.writeFile(config, JSON.stringify({ agents: { entries: { main: {} } } }));
+    const { getMemoryStatus, resolveIndexMode, startMemoryIndex } = await lib();
+    expect(await getMemoryStatus()).toMatchObject({ agentId: "main", chunks: 0 });
+    await fs.writeFile(config, JSON.stringify({ agents: { entries: { default: {} } } }));
+    expect(await resolveIndexMode("incremental", "manual")).toBe("incremental");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect((await settledMemoryRun(tmpDir)).mode).toBe("incremental");
+    expect(await calls(argv, "memory index")).toEqual(["memory index --agent default"]);
+    expect(await calls(argv, "memory status")).toContain("memory status --agent default --deep --json");
+  });
+
+  it("does not force the default agent's index over a keyword-only reading about another agent", async () => {
+    const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("default")]);
+    const { parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const aboutMain = await parseMemoryStatus(
+      KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, null, "main",
+    );
+    expect(aboutMain).toMatchObject({ agentId: "main", errorCode: "index_keyword_only" });
+    expect(await rebuildKeywordOnlyIndex(aboutMain)).toBe(false);
+    expect(await calls(argv, "memory index")).toEqual([]);
+    // The same verdict about the agent the box means is rebuilt, at once: the
+    // decline above left no retry time on this agent's setting.
+    expect(await rebuildKeywordOnlyIndex({ ...aboutMain, agentId: "default" })).toBe(true);
+    await settledMemoryRun(tmpDir);
+    expect(await calls(argv, "memory index")).toEqual(["memory index --agent default --force"]);
+  });
 });
