@@ -1,0 +1,29 @@
+$ next build && next start -H 127.0.0.1 -p 4240
+▲ Next.js 16.4.2 (Turbopack)
+✓ Running next.config.ts took 46ms
+- Cache Components enabled
+- Partial Prefetching enabled
+- Experiments (use with caution):
+  · cpus: 2
+
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead.
+
+  To migrate automatically, run:
+  npx @next/codemod@canary middleware-to-proxy .
+
+  Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+  Creating an optimized production build ...
+
+> Build error occurred
+Error: Turbopack build failed with 1 error:
+./app/favicon.ico
+Error: Processing image failed
+unable to decode image data
+
+Caused by:
+- Format error decoding Ico: The PNG is not in RGBA format!
+- The PNG is not in RGBA format!
+
+
+    at ignore-listed frames
+error: script "serve" exited with code 1

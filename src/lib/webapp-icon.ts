@@ -606,11 +606,15 @@ const ICON_PX = 256;
  * over the tunnel. `sharp` is already a dependency (Next's image optimiser),
  * loaded lazily so a box where its native binding will not load keeps the
  * full-size picture rather than no icon at all.
+ *
+ * `alpha` keeps an alpha channel in the PNG even when the picture is opaque
+ * (the image model's are): an ICO's PNG image has to be RGBA (project-icon.ts).
  */
-export async function shrinkIcon(bytes: Buffer, size: number = ICON_PX): Promise<Buffer> {
+export async function shrinkIcon(bytes: Buffer, size: number = ICON_PX, opts: { alpha?: boolean } = {}): Promise<Buffer> {
   try {
     const { default: sharp } = await import("sharp");
-    return await sharp(bytes).resize(size, size, { fit: "cover" }).png({ compressionLevel: 9 }).toBuffer();
+    const resized = sharp(bytes).resize(size, size, { fit: "cover" });
+    return await (opts.alpha ? resized.ensureAlpha() : resized).png({ compressionLevel: 9 }).toBuffer();
   } catch {
     return bytes;
   }

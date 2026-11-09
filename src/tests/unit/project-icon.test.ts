@@ -12,6 +12,7 @@
  * one — a wrong offset would ship silently and only fail in someone's browser.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import sharp from "sharp";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -25,10 +26,11 @@ vi.mock("@/lib/webapp-icon", async (importOriginal) => {
 });
 
 import { webappIconPath } from "@/lib/webapp-icon";
-import { BOX_FAVICONS, ensureProjectIcon, FAVICON_ICO, FAVICON_PNG, icoFromPng } from "@/lib/project-icon";
+import { BOX_FAVICONS, ensureProjectIcon, FAVICON_ICO, FAVICON_PNG, icoFromPng, isRgbaPngOf } from "@/lib/project-icon";
 
 const PNG = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(120, 5)]);
-const SMALL = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(30, 9)]);
+/** What shrinkIcon hands back: the 64 px RGBA PNG an ICO may carry. */
+const SMALL: Buffer = await sharp({ create: { width: 64, height: 64, channels: 4, background: { r: 249, g: 115, b: 22, alpha: 1 } } }).png().toBuffer();
 
 let base: string;
 let directory: string;
@@ -63,6 +65,9 @@ describe("ensureProjectIcon", () => {
     generates();
     const outcome = await ensureProjectIcon({ id: "site", directory, name: "Site" });
     expect(outcome).toEqual({ icon: "generated", favicon: true });
+    // RGBA whatever the picture: an ICO's PNG must be, or a Next app's build
+    // stops on it (TASK-2323).
+    expect(shrinkIcon).toHaveBeenCalledWith(PNG, 64, { alpha: true });
     expect(fs.readFileSync(path.join(directory, FAVICON_PNG)).equals(SMALL)).toBe(true);
     const ico = fs.readFileSync(path.join(directory, FAVICON_ICO));
     expect(ico.subarray(22).equals(SMALL)).toBe(true);
@@ -128,6 +133,25 @@ describe("ensureProjectIcon", () => {
     expect(await hooks.stillWanted()).toBe(true);
     fs.rmSync(directory, { recursive: true, force: true });
     expect(await hooks.stillWanted()).toBe(false);
+  });
+});
+
+describe("the favicon.ico it will not write", () => {
+  it("leaves out the ICO when sharp could not make the 64 px RGBA picture, and still writes the PNG", async () => {
+    // sharp's binding would not load: shrinkIcon hands the original back.
+    shrinkIcon.mockResolvedValue(PNG);
+    generates();
+    expect(await ensureProjectIcon({ id: "site", directory, name: "Site" })).toEqual({ icon: "generated", favicon: true });
+    expect(fs.existsSync(path.join(directory, FAVICON_PNG))).toBe(true);
+    expect(fs.existsSync(path.join(directory, FAVICON_ICO))).toBe(false);
+  });
+
+  it("reads RGBA and the size off the PNG's own header", async () => {
+    expect(isRgbaPngOf(SMALL, 64)).toBe(true);
+    expect(isRgbaPngOf(SMALL, 32)).toBe(false);
+    const rgb = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#f97316" } }).png().toBuffer();
+    expect(isRgbaPngOf(rgb, 64)).toBe(false);
+    expect(isRgbaPngOf(PNG, 64)).toBe(false);
   });
 });
 

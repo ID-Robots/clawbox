@@ -12,6 +12,7 @@ import { disablePublicLink } from "@/lib/public-app-links";
 import { removeStoreInstalledFolder } from "@/lib/store-install-receipt";
 import { registeredServer } from "@/lib/app-proxy";
 import { disableUserUnits, stopServerApp } from "@/lib/app-server-start";
+import { clearAppStartFailure } from "@/lib/app-start-failure";
 
 export const dynamic = "force-dynamic";
 
@@ -409,6 +410,11 @@ export async function POST(req: Request) {
     // watched skill root, so the agent drops the skill on its next turn. The
     // skill-info cache rescans behind this reply.
     refreshSkillsCache();
+    // A failed start of the app is not news once the app is gone
+    // (src/lib/app-start-failure.ts). Here, once nothing above can refuse:
+    // an uninstall stopped part-way leaves the app, and its window keeps
+    // saying why it is not running.
+    await clearAppStartFailure(appId);
     // The field is present only when it is false, so an older MCP or desktop
     // reading `undefined` degrades to exactly today's answer.
     return NextResponse.json({

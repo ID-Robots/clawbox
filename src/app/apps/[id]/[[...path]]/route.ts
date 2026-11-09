@@ -8,11 +8,15 @@ import {
   appUpstreamOrigin,
   exposeAllHeaders,
   isAppApiPath,
+  isDocumentRequest,
   isNextRouterPreflight,
   isNextRouterRequest,
   mergeExposedHeaders,
   resolveAppProxyTarget,
+  type AppProxyResolution,
 } from "@/lib/app-proxy";
+import { appStartFailureHtml, appStartFailureText, readAppStartFailure } from "@/lib/app-start-failure";
+import { hasOwnerSession } from "@/lib/owner-session";
 import { APP_PROXY_NEXT_URL_HEADER } from "@/lib/app-window";
 
 export const dynamic = "force-dynamic";
@@ -52,10 +56,51 @@ function plain(text: string, status: number): NextResponse {
   return new NextResponse(text, { status, headers: { "content-type": "text/plain; charset=utf-8", "content-security-policy": APP_PROXY_CSP } });
 }
 
+/**
+ * A window loading the app's page — a document the middleware let through
+ * only with a session (the caller checks it is the OWNER's) — as opposed to
+ * one of the app's own fetches, which reach this route with no session at all
+ * (src/middleware.ts, step 2b): those, and anything from the sandbox's opaque
+ * origin, never get the page, whose lines are the app's own output.
+ */
+function ownerWindow(request: NextRequest): boolean {
+  const method = request.method.toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return false;
+  if (isNextRouterRequest(request.headers) || request.headers.get("origin") === "null") return false;
+  return isDocumentRequest(request.headers);
+}
+
+/**
+ * An app the proxy cannot reach. When its last start failed (it was never
+ * registered, or it is registered and nothing listens), the answer says so as
+ * a 503: the owner's window gets a page with what failed and the end of what
+ * it printed (src/lib/app-start-failure.ts), anything else one sentence that
+ * names nothing of it. That
+ * used to be the 404 "No app is served under this name" for every window,
+ * reopen and App Router fetch of a Store app whose own build failed
+ * (TASK-2323). Otherwise the listener's own refusal, as before.
+ */
+async function unreachable(request: NextRequest, id: string, resolved: Exclude<AppProxyResolution, { ok: true }>): Promise<Response> {
+  if (resolved.reason === "unregistered" || resolved.reason === "not_listening") {
+    const failure = await readAppStartFailure(id);
+    if (failure) {
+      // The page is the app's own output: the owner's alone. A signed-in
+      // user of the box who is not the owner gets the sentence.
+      if (!ownerWindow(request) || !(await hasOwnerSession(request))) return plain(appStartFailureText(failure), 503);
+      const html = await appStartFailureHtml(failure);
+      return new NextResponse(request.method.toUpperCase() === "HEAD" ? null : html, {
+        status: 503,
+        headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": APP_PROXY_CSP, "cache-control": "no-store" },
+      });
+    }
+  }
+  return plain(resolved.detail, resolved.reason === "unregistered" ? 404 : 502);
+}
+
 async function proxy(request: NextRequest, params: Promise<{ id: string; path?: string[] }>): Promise<Response> {
   const { id } = await params;
   const resolved = await resolveAppProxyTarget(id);
-  if (!resolved.ok) return plain(resolved.detail, resolved.reason === "unregistered" ? 404 : 502);
+  if (!resolved.ok) return unreachable(request, id, resolved);
   const { target } = resolved;
   const incoming = request.nextUrl;
   const prefix = `/apps/${id}`;

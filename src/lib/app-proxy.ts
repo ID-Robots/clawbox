@@ -56,6 +56,7 @@
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { runChild } from "@/lib/child-run";
+import { clearAppStartFailure } from "@/lib/app-start-failure";
 import { APP_ID_RE, projectPath, webappPath, writeWebappIndex } from "@/lib/code-projects";
 import { get as configGet } from "@/lib/config-store";
 import { isInside } from "@/lib/file-guard";
@@ -517,6 +518,9 @@ export async function registerServerApp(input: { id: string; directory: string; 
       }),
       "utf-8",
     );
+    // Registered, and its server answers, however it came up: a start that
+    // failed before has nothing left to say in its window.
+    await clearAppStartFailure(id);
     await registerWebappInPreferences(id, manifest.name, {
       webappUrl: appProxyPath(id),
       description: manifest.description ?? undefined,
