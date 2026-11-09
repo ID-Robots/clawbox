@@ -64,10 +64,10 @@ afterEach(() => {
  * exit code has to be read off the pipeline without the shell leaving the
  * function first, and nothing in here may fail the step that calls it.
  */
-function record(status: string, defaultCheck = 7, projectDir?: string) {
+function record(status: string, defaultCheck = 7, projectDir?: string, fn?: OwnerFunction) {
   stubPasswd(status);
   stubChkpwd(defaultCheck);
-  return run(projectDir ?? dir);
+  return run(projectDir ?? dir, [], fn);
 }
 
 /**
@@ -82,22 +82,35 @@ function stubPasswd(status: string) {
   chmodSync(passwd, 0o755);
 }
 
-/** unix_chkpwd, keeping what it was handed on stdin for the assertions below. */
-function stubChkpwd(exitCode: number) {
-  const chk = path.join(bin, "unix_chkpwd");
-  writeFileSync(chk, `#!/usr/bin/env bash\ncat > "${dir}/chkpwd-stdin"\nexit ${exitCode}\n`);
-  chmodSync(chk, 0o755);
+/**
+ * Where the installer is pointed for unix_chkpwd (UNIX_CHKPWD_BIN). Outside
+ * $PATH on purpose: the installer names the helper by absolute path, as the
+ * app does, so a lookup by name must find nothing here.
+ */
+function chkpwdPath(): string {
+  return path.join(dir, "sbin", "unix_chkpwd");
 }
 
+/** unix_chkpwd, keeping what it was handed on stdin for the assertions below. */
+function stubChkpwd(exitCode: number, at = chkpwdPath()) {
+  mkdirSync(path.dirname(at), { recursive: true });
+  writeFileSync(at, `#!/usr/bin/env bash\ncat > "${dir}/chkpwd-stdin"\nexit ${exitCode}\n`);
+  chmodSync(at, 0o755);
+}
+
+type OwnerFunction = "record_owner_password" | "reconcile_owner_password_flag";
+
 /** The function under the shell mode and $PATH the installer gives it. */
-function run(projectDir: string, after: string[] = []) {
+function run(projectDir: string, after: string[] = [], fn: OwnerFunction = "record_owner_password") {
   const r = spawnSync("bash", ["-c", [
     "set -euo pipefail",
     'as_user() { "$@"; }',
     `PROJECT_DIR="${projectDir}"`,
     'CLAWBOX_USER="owner"',
+    `UNIX_CHKPWD_BIN="${chkpwdPath()}"`,
     sliceFunction("record_owner_password"),
-    "record_owner_password",
+    ...(fn === "record_owner_password" ? [] : [sliceFunction(fn)]),
+    fn,
     ...after,
   ].join("\n")], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` } });
   return { status: r.status, out: `${r.stdout}${r.stderr}` };
@@ -143,8 +156,26 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     expect(readFileSync(path.join(dir, "chkpwd-stdin"), "utf8")).toBe("clawbox\0");
   });
 
-  it("checks the default against the app's own constant", () => {
-    expect(SOURCE).toContain(`printf '${FACTORY_DEFAULT_PASSWORD}\\0' | as_user unix_chkpwd`);
+  it("checks the default against the app's own constant, with the app's own helper", () => {
+    expect(SOURCE).toContain(`printf '${FACTORY_DEFAULT_PASSWORD}\\0' | as_user "$UNIX_CHKPWD_BIN"`);
+    // By absolute path, the file src/lib/system-password.ts runs: never a PATH lookup.
+    const app = /const UNIX_CHKPWD_BIN = "([^"]+)";/.exec(
+      readFileSync(path.resolve(process.cwd(), "src/lib/system-password.ts"), "utf8"),
+    );
+    expect(app?.[1]).toBe("/usr/sbin/unix_chkpwd");
+    expect(SOURCE).toContain(`\nUNIX_CHKPWD_BIN="${app?.[1]}"\n`);
+  });
+
+  it("never asks a unix_chkpwd found by name on PATH", () => {
+    // One on PATH that would answer "not the default", none at the helper's
+    // path: the check did not run, so nothing is recorded.
+    stubPasswd("P");
+    stubChkpwd(7, path.join(bin, "unix_chkpwd"));
+    const r = run(dir);
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(dir, "chkpwd-stdin"))).toBe(false);
+    expect(existsSync(config)).toBe(false);
+    expect(r.out).toMatch(/WARN.*unix_chkpwd exit 127/);
   });
 
   it("reads the flag before checking any password, so a re-run logs no failed check", () => {
@@ -176,12 +207,13 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     expect(r.status).toBe(0);
     expect(existsSync(config)).toBe(false);
     expect(r.out).toMatch(/WARN.*unix_chkpwd exit 9/);
+    expect(r.out).toContain("--step directories_permissions");
   });
 
   it("records nothing when unix_chkpwd is not installed at all", () => {
-    // No unix_chkpwd anywhere in $PATH (the real one lives in /usr/sbin, which
-    // is not on it here): bash answers 127 for the right-hand side of the
-    // pipeline, which must read as "could not run", never as "not the default".
+    // Nothing at the helper's path: bash answers 127 for the right-hand side of
+    // the pipeline, which must read as "could not run", never as "not the
+    // default".
     stubPasswd("P");
     const r = run(dir);
     expect(r.status).toBe(0);
@@ -231,5 +263,36 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
 
   it("runs in the install, after .env is seeded and before the UI starts", () => {
     expect(sliceFunction("step_directories_permissions")).toContain("record_owner_password");
+  });
+});
+
+describe.skipIf(!hasPython3)("install-x64.sh's root-step reconcile records through the same check", () => {
+  // reconcile_owner_password_flag runs later in every install, and on its own
+  // as --step root_step_contract. It recorded any usable password once
+  // config.json existed, with no default check, so a re-run undid the above.
+  it("does not record an account still on the factory default", () => {
+    writeFileSync(config, JSON.stringify({ setup_progress_step: 1 }));
+    const r = record("P", 0, undefined, "reconcile_owner_password_flag");
+    expect(r.status).toBe(0);
+    expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ setup_progress_step: 1 });
+  });
+
+  it("does not record when the check cannot run", () => {
+    writeFileSync(config, JSON.stringify({ setup_progress_step: 1 }));
+    const r = record("P", 9, undefined, "reconcile_owner_password_flag");
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/WARN.*unix_chkpwd exit 9/);
+    expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ setup_progress_step: 1 });
+  });
+
+  it("records an owner's own password", () => {
+    writeFileSync(config, JSON.stringify({ setup_progress_step: 1 }));
+    record("P", 7, undefined, "reconcile_owner_password_flag");
+    expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ setup_progress_step: 1, password_configured: true });
+  });
+
+  it("is what the root-step contract calls", () => {
+    expect(sliceFunction("step_root_step_contract")).toContain("reconcile_owner_password_flag");
+    expect(sliceFunction("reconcile_owner_password_flag")).toBe("reconcile_owner_password_flag() {\n  record_owner_password\n}\n");
   });
 });

@@ -1043,6 +1043,12 @@ seed_network_interface() {
 # has for an owned box: /setup asks for the password, the owner signs in with
 # the computer's own, and the wizard skips the steps a PC does not need. An
 # account with no usable password is left to the wizard, which sets the first.
+#
+# The helper is run from the absolute path the app runs it from
+# (src/lib/system-password.ts UNIX_CHKPWD_BIN), never looked up on PATH: the
+# installer's PATH is whatever the admin's sudo kept, and the answer must come
+# from the same file the app's own check asks.
+UNIX_CHKPWD_BIN="/usr/sbin/unix_chkpwd"
 record_owner_password() {
   local config="$PROJECT_DIR/data/config.json" status
   # Already recorded: nothing to ask. Read before any password check, as the
@@ -1070,12 +1076,12 @@ record_owner_password() {
   # SIGPIPE when the helper exits before reading its stdin (set -o pipefail
   # would otherwise report 141 for a helper that exited 0).
   local chk_rc=0
-  printf 'clawbox\0' | as_user unix_chkpwd "$CLAWBOX_USER" nullok >/dev/null 2>&1 || chk_rc=${PIPESTATUS[1]:-1}
+  printf 'clawbox\0' | as_user "$UNIX_CHKPWD_BIN" "$CLAWBOX_USER" nullok >/dev/null 2>&1 || chk_rc=${PIPESTATUS[1]:-1}
   if [ "$chk_rc" -eq 0 ]; then
     return 0
   fi
   if [ "$chk_rc" -ne 7 ]; then
-    echo "  WARN: could not check whether $CLAWBOX_USER still carries the factory default password (unix_chkpwd exit $chk_rc); not recording the owner password — the wizard will ask for one" >&2
+    echo "  WARN: could not check whether $CLAWBOX_USER still carries the factory default password ($UNIX_CHKPWD_BIN exit $chk_rc); not recording the owner password — the wizard will ask for one. Once the check works, run: sudo bash install-x64.sh --step directories_permissions" >&2
     return 0
   fi
   # As the install user, written the way src/lib/config-store.ts writes it: a
@@ -1791,40 +1797,14 @@ ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"
 # /etc/shadow is the authority and it already says "an owner password is set",
 # so record exactly that and let the wizard move on to the AI Provider step
 # instead of asking for a password it will refuse to set.
+#
+# Recorded by record_owner_password, the check step_directories_permissions
+# makes: a usable password is the owner's only when it is not the published
+# factory default, and a check that could not run records nothing. Recording
+# every usable password here undid that on any re-run whose config.json
+# existed, and let /login take the default on an account still carrying it.
 reconcile_owner_password_flag() {
-  local cfg="$PROJECT_DIR/data/config.json" status
-  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk '{print $2}')"
-  # NP/L: no usable password yet, so first boot applies and WILL set one.
-  [ "$status" = "P" ] || return 0
-  [ -f "$cfg" ] || return 0
-  if ! as_user_runtime python3 - "$cfg" <<'PY'
-import json, os, sys, tempfile
-path = sys.argv[1]
-try:
-    with open(path) as fh:
-        data = json.load(fh)
-except Exception:
-    sys.exit(0)
-if not isinstance(data, dict) or data.get("password_configured") is True:
-    sys.exit(0)
-data["password_configured"] = True
-directory = os.path.dirname(path)
-fd, tmp = tempfile.mkstemp(dir=directory)
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
-    os.replace(tmp, path)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except Exception:
-        pass
-    sys.exit(1)
-PY
-  then
-    echo "  Warning: could not record password_configured in data/config.json" >&2
-  fi
+  record_owner_password
 }
 
 step_root_step_contract() {
