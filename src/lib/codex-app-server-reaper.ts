@@ -268,6 +268,19 @@ export function agentOfSessionKey(key: string): string | null {
   return /^agent:([^:]+):/.exec(key)?.[1]?.toLowerCase() ?? null;
 }
 
+/**
+ * The agent whose Codex home a process environment (`/proc/<pid>/environ`,
+ * NUL-separated) names: the plugin's `CODEX_HOME=…/agents/<id>/agent/codex-home`.
+ * Null for any other home, or none.
+ */
+export function agentOfEnviron(environ: string): string | null {
+  const home = environ.split("\0").find((entry) => entry.startsWith("CODEX_HOME="));
+  return /\/agents\/([^/]+)\/agent\/codex-home\/?$/.exec(home ?? "")?.[1] ?? null;
+}
+
+/** How long the reaper waits for the gateway's answer, over and above the call's own deadlines. */
+export const GATEWAY_ANSWER_TIMEOUT_MS = 30_000;
+
 const realDeps: ReaperDeps = {
   async listUnitProcesses() {
     const pids = new Set<number>();
@@ -293,9 +306,7 @@ const realDeps: ReaperDeps = {
     return Number.parseInt(/^VmRSS:\s+(\d+)/m.exec(status)?.[1] ?? "0", 10);
   },
   async agentOf(pid) {
-    const environ = await fs.readFile(procFile(pid, "environ"), "utf8").catch(() => "");
-    const home = environ.split("\0").find((entry) => entry.startsWith("CODEX_HOME="));
-    return /\/agents\/([^/]+)\/agent\/codex-home\/?$/.exec(home ?? "")?.[1] ?? null;
+    return agentOfEnviron(await fs.readFile(procFile(pid, "environ"), "utf8").catch(() => ""));
   },
   // Monotonic: timesyncd steps the clock forward after a cold boot, and a
   // wall-clock jump would read as half a day of quiet.
@@ -392,10 +403,19 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
   }
 
   async function askGateway(): Promise<GatewayAnswer> {
+    // A backstop over the call's own deadlines: an answer that never came
+    // would hold `sweeping` for good and end every later sweep unseen.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`no answer within ${GATEWAY_ANSWER_TIMEOUT_MS / 1000} s`)), GATEWAY_ANSWER_TIMEOUT_MS);
+      timer.unref?.();
+    });
     try {
-      return { keys: await deps.activeSessionKeys() };
+      return { keys: await Promise.race([deps.activeSessionKeys(), late]) };
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -427,18 +447,22 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
         const before = watched.get(key);
         const quietSince = before && stayedQuiet(before, state, now) ? before.quietSince : now;
         // The plugin starts every app-server with the agent's own Codex home;
-        // one without it is not the plugin's, whoever started it, and is never stopped.
-        const agent = before ? before.agent : await deps.agentOf(tree.root.pid);
+        // one without it is not the plugin's, whoever started it, and is never
+        // stopped. Read again until it answers: a read can fail once.
+        const agent = before?.agent ?? (await deps.agentOf(tree.root.pid));
         watched.set(key, { members: state.members, cpuTicks: state.cpuTicks, lookedAt: now, quietSince, agent });
       }
       for (const key of [...watched.keys()]) if (!seen.has(key)) watched.delete(key);
-      if (trees.length === 0) return [];
+      if (trees.length === 0) {
+        lastHold = "";
+        return [];
+      }
 
       // Asked at every look while an app-server runs, not only once one is
       // idle: a turn can wait on the model for minutes with no CPU to show for
       // it, so an agent the gateway reports work for is not quiet, and its
-      // clock starts over. The window is then the time since the agent's last
-      // turn, as upstream's own retirement counts it.
+      // clock starts over. The window then counts from the last look that saw
+      // the agent's work (at least idleMs minus one sweep after the turn ends).
       let answer = await askGateway();
       if ("keys" in answer) {
         const working = new Set(answer.keys.map(agentOfSessionKey));
@@ -448,6 +472,7 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
         const w = watched.get(identity(tree.root));
         return w !== undefined && w.agent !== null && now - w.quietSince >= idleMs;
       });
+      if (idle.length === 0) lastHold = "";
 
       // One at a time, each on a fresh answer and a fresh look: a stop takes
       // up to STOP_GRACE_MS, and a turn may start on the next one meanwhile.
@@ -460,7 +485,13 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
         // Looked at again after the gateway answered: only a tree that is still
         // what was judged idle, and has stayed quiet meanwhile, is stopped.
         const latest = gatewayAppServers(await deps.listUnitProcesses()).find((t) => identity(t.root) === key);
-        if (!latest || !before?.agent || !stayedQuiet(before, treeState(latest), deps.now())) continue;
+        const at = deps.now();
+        const state = latest ? treeState(latest) : null;
+        if (!latest || !state || !before?.agent || !stayedQuiet(before, state, at)) {
+          // What moved just now is not forgotten: its clock starts over from it.
+          if (state && before) watched.set(key, { ...before, members: state.members, cpuTicks: state.cpuTicks, lookedAt: at, quietSince: at });
+          continue;
+        }
         watched.delete(key);
         const result = await stop(latest, now - before.quietSince, before.agent);
         if (result) stopped.push(result);

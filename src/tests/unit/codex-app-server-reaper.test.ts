@@ -13,8 +13,10 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({ gatewayWsCall: (...args: unknown[]
 
 import {
   CODEX_APP_SERVER_IDLE_MS,
+  GATEWAY_ANSWER_TIMEOUT_MS,
   QUIET_CPU_SHARE,
   STOP_GRACE_MS,
+  agentOfEnviron,
   agentOfSessionKey,
   createCodexAppServerReaper,
   gatewayAppServers,
@@ -388,6 +390,171 @@ describe("createCodexAppServerReaper", () => {
     expect(agentOfSessionKey("agent:R1:telegram:direct:42")).toBe("r1");
     expect(agentOfSessionKey("global")).toBeNull();
     expect(agentOfSessionKey("")).toBeNull();
+  });
+
+  it("reads the agent from the plugin's Codex home in a process environment, and nothing else", () => {
+    const env = (...entries: string[]) => [...entries, ""].join("\0");
+    expect(agentOfEnviron(env("PATH=/usr/bin", "CODEX_HOME=/home/clawbox/.openclaw/agents/main/agent/codex-home"))).toBe("main");
+    expect(agentOfEnviron(env("CODEX_HOME=/home/clawbox/.openclaw/agents/r1/agent/codex-home/"))).toBe("r1");
+    expect(agentOfEnviron(env("CODEX_HOME=/home/clawbox/.codex"))).toBeNull();
+    expect(agentOfEnviron(env("CODEX_HOME=/home/clawbox/.openclaw/agents/main/agent/codex-home-old"))).toBeNull();
+    expect(agentOfEnviron(env("CODEX_HOME=/tmp/openclaw/codex-bounded-turn-1/codex-home"))).toBeNull();
+    expect(agentOfEnviron(env("HOME=/home/clawbox", "XCODEX_HOME=/x/agents/main/agent/codex-home"))).toBeNull();
+    expect(agentOfEnviron("")).toBeNull();
+  });
+
+  it("matches an agent's work to its app-server whatever the case of its id", async () => {
+    let procs = [gateway(), ...appServer(2000)];
+    let clock = 0;
+    const signals: number[] = [];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => (clock < CODEX_APP_SERVER_IDLE_MS ? ["agent:research:main"] : []),
+      isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+      signal: (pid) => {
+        signals.push(pid);
+        procs = [gateway()];
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "Research",
+      now: () => clock,
+      log: () => {},
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS - MIN;
+    await reaper.sweep(); // its work is still listed: the clock starts over here
+    clock = CODEX_APP_SERVER_IDLE_MS + MIN;
+    expect(await reaper.sweep()).toEqual([]);
+    clock = 2 * CODEX_APP_SERVER_IDLE_MS - MIN;
+    expect((await reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+    expect(signals).toEqual([2000]);
+  });
+
+  it("starts the clock over for a tree that moved between the look and the stop", async () => {
+    let procs = [gateway(), ...appServer(2000)];
+    let clock = 0;
+    let asked = 0;
+    const signals: number[] = [];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => {
+        asked += 1;
+        // Three ticks while the gateway answered: too much for the instant re-look,
+        // little enough to vanish in the next look's five-minute budget.
+        if (asked === 2) procs = [gateway(), ...appServer(2000, { cpuTicks: 5 }).map((p, i) => (i === 1 ? { ...p, cpuTicks: 8 } : p))];
+        return [];
+      },
+      isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+      signal: (pid) => {
+        signals.push(pid);
+        procs = [gateway()];
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "main",
+      now: () => clock,
+      log: () => {},
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    expect(await reaper.sweep()).toEqual([]);
+    clock += 5 * MIN;
+    expect(await reaper.sweep()).toEqual([]);
+    expect(signals).toEqual([]);
+    clock = 2 * CODEX_APP_SERVER_IDLE_MS;
+    expect((await reaper.sweep()).map((s) => [s.pid, s.idleMs])).toEqual([[2000, CODEX_APP_SERVER_IDLE_MS]]);
+  });
+
+  it("says so again when agent work holds stops back a second time", async () => {
+    let active = 1;
+    const box = fakeBox([gateway(), ...appServer(2000)], { active: () => active });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    await box.reaper.sweep();
+    // The app-server goes (a gateway restart, say), and a new one runs into busy work later.
+    box.setProcs([gateway()]);
+    box.advance(5 * MIN);
+    await box.reaper.sweep();
+    box.setProcs([gateway(), ...appServer(2100)]);
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    await box.reaper.sweep();
+    active = 0;
+    expect(box.logs).toEqual([
+      "[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued",
+      "[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued",
+    ]);
+  });
+
+  it("logs a stop the kernel refused, and does not count it", async () => {
+    const procs = [gateway(), ...appServer(2000)];
+    const logs: string[] = [];
+    let clock = 0;
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => [],
+      signal: () => {
+        throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "main",
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    expect(await reaper.sweep()).toEqual([]);
+    expect(logs).toEqual(["[codex-reaper] could not stop codex app-server pid 2000: kill EPERM"]);
+  });
+
+  it("is ready for the next sweep after one that threw", async () => {
+    let fail = true;
+    let asked = 0;
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => {
+        if (fail) throw new Error("cgroup.procs vanished");
+        return [gateway(), ...appServer(2000)];
+      },
+      activeSessionKeys: async () => {
+        asked += 1;
+        return [];
+      },
+      agentOf: async () => "main",
+      log: () => {},
+    });
+    await expect(reaper.sweep()).rejects.toThrow("cgroup.procs vanished");
+    fail = false;
+    await reaper.sweep();
+    expect(asked).toBe(1);
+  });
+
+  it("does not wait for ever on a gateway that never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      let asked = 0;
+      const logs: string[] = [];
+      let clock = 0;
+      const reaper = createCodexAppServerReaper({
+        listUnitProcesses: async () => [gateway(), ...appServer(2000)],
+        activeSessionKeys: () => {
+          asked += 1;
+          return new Promise<string[]>(() => {}); // a call that never settles
+        },
+        agentOf: async () => "main",
+        now: () => clock,
+        log: (line) => logs.push(line),
+      });
+      const first = reaper.sweep();
+      await vi.advanceTimersByTimeAsync(GATEWAY_ANSWER_TIMEOUT_MS);
+      expect(await first).toEqual([]);
+      clock = CODEX_APP_SERVER_IDLE_MS;
+      const second = reaper.sweep(); // not shut out by a sweep still in flight
+      await vi.advanceTimersByTimeAsync(GATEWAY_ANSWER_TIMEOUT_MS);
+      expect(await second).toEqual([]);
+      expect(asked).toBe(2);
+      expect(logs).toEqual(["[codex-reaper] left 1 idle codex app-server(s) running: the gateway did not say whether it is busy (no answer within 30 s)"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
