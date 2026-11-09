@@ -151,6 +151,63 @@ OpenClaw gateway unit is not running and no `codex app-server` exists. A
 and 11:24 found no gateway cgroup and logged nothing, no errors either. The swap
 back to OpenClaw succeeded, with gateway and dashboard healthy.
 
+### 3b. Second board run: real Codex turns, the reaper as merged with beta
+
+The same kind of lab board (Jetson Orin Nano 8 GB, OpenClaw 2026.10.9,
+`@openclaw/codex` 2026.10.9 with `@openai/codex` 0.160.0), rebuilt to this
+branch at `cc2440b5b` (`nano-board sha`). This time Codex turns completed end
+to end through the gateway's plugin and its app-servers:
+
+- the ChatGPT sign-in was made through the product's own route
+  (`POST /setup-api/ai-models/configure`, `authMode: subscription`) with
+  unsigned lab tokens. The gateway armed `openai/gpt-5.5` for the Codex
+  runtime, and the boot script installed the pinned plugin the normal way;
+- each agent's `codex-home/config.toml` pointed `openai_base_url` and
+  `chatgpt_base_url` at a small Responses-API stand-in on the board's loopback,
+  which answers at once, or holds a turn open for N seconds with a text delta
+  every 30 s when the prompt says `HOLD N`;
+- lab-only quirk: OpenClaw refreshed the lab tokens against the real auth
+  server at once and kept the profile as a failed refresh fence. With no usable
+  profile, the plugin refuses an agent-scoped run while the box's auth mirror
+  file `<agentDir>/codex-home/auth.json` exists ("A Codex auth file exists…"),
+  so that file was removed right before each turn. The app-server then ran
+  unauthenticated against the stand-in, and the process lifecycle under test is
+  the same.
+
+Run on OpenClaw (times EET; the gateway is the same process, `NRestarts=0`,
+throughout):
+
+| time | what happened | per-agent app-servers | MemAvailable |
+|---|---|---|---|
+| 17:15 | fresh gateway, before any turn | 0 | 4,451 MB |
+| 17:16-17:17 | one Codex turn on each of `main`, `r1`, `r2`, `r3`; each answered by the stand-in | 4 (node launcher + native binary each, ~305 MB RSS per agent) | 2,558 MB |
+| 17:17:40-17:49:40 | a 32-min Codex turn on `r3` (CPU-quiet, ~0.1 % of a core) completes intact, "HELD 1920 s OK" | 4 | 3,390 MB |
+| 17:59:10-11 | `[codex-reaper] stopped the idle codex app-server of agent main (pid 118646, idle 30 min, 267 MB)`, then r1 266 MB, r2 267 MB. SIGTERM only. `r3` stays: its clock counts from the last look that saw its turn | 1 | 3,407 → 3,985 MB (+578 MB) |
+| 18:03:31 | `main`'s next turn starts a fresh app-server; the request carries the earlier conversation | 2 | 3,291 MB |
+| 18:19:10 | `[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued`: `r3` idle 30 min, `main`'s 21-min Codex turn in flight | 2 | 3,607 MB |
+| 18:24:31 | `main`'s turn completes intact, "HELD 1260 s OK" | 2 | |
+| 18:29:10 | `stopped the idle codex app-server of agent r3 (pid 119410, idle 40 min, 319 MB)`; `main`'s stays, its turn ended 5 min earlier | 1 | 3,784 MB |
+| 18:29:40 | `r3`'s next turn: fresh app-server, answered | 2 | |
+
+After the stops, the gateway's log was silent about the exits, `/healthz` 200,
+no zombie. A decoy app-server with the plugin's exact argv and an
+`agents/<id>/agent/codex-home` home, started outside the gateway unit (the way
+a shell or a coding run would), was never touched in 2 h. The first attempt at
+this run was cut at 17:12 by the box's network failover, which restarts the
+gateway when NetworkManager's connectivity goes LIMITED → full. That was not
+the reaper, and the run was repeated.
+
+The stop came 30-45 min after an agent's last turn, not 30. The window counts
+from the first look at which a tree is quiet, and a tree keeps moving for some
+minutes after a turn (here main, r1 and r2 settled at the 17:29 look). Sweeps
+are also 5 min apart.
+
+Then the board went back to Hermes through `POST /setup-api/harness/swap`. The
+gateway unit is not running there, and the only `codex app-server` left was
+the decoy. `hermes chat -q` answered in 18 s, and the desktop chat's own
+`/setup-api/hermes/chat` in 6 s. The same web-server process kept sweeping
+across both swaps, with nothing to stop and no errors.
+
 Does the problem apply to Hermes? Hermes has a Codex app-server client of its
 own (`run_agent.py`, hermes-agent `bf0203a794`). It closes that child when an
 agent is closed or evicted from its cache (`release_clients` →
@@ -198,11 +255,24 @@ of the gap is the gateway itself: 3.45 GB there against ~1.6 GB here.
 
 ## 5. Recommendations
 
-1. Move the OpenClaw pin to ≥ 2026.10.10 (latest 2026.11.1) in the next pin
-   bump. That fixes the app-servers at the source; then remove
-   `codex-app-server-reaper.ts`.
+1. Move the OpenClaw pin to ≥ 2026.10.10 (latest stable 2026.11.2) in a pin
+   bump of its own. That fixes the app-servers at the source; then remove
+   `codex-app-server-reaper.ts`. It is not a one-line change:
+   - 2026.10.10 and later raise the core's schemas (`openclaw.schemaVersions`:
+     state 20 → 22, agent 25 → 27). The migration is one-way, so once a box
+     has started the new core, the updater's downgrade guard refuses to go
+     back to 2026.10.9. It needs the update and rollback board tests;
+   - `OPENCLAW_STATE_SCHEMA_BY_VERSION` / `OPENCLAW_AGENT_SCHEMA_BY_VERSION`
+     need the new rows (`harness-pins.test.ts`, the harness-contract job);
+   - the Node engine range changes (`>=24.16.0 <25 || >=26.1.0` against
+     2026.10.9's `>=24.22.1 <25 || >=26.12.1`), and the harness contract
+     checks `install.sh`'s copy against upstream;
+   - `@openclaw/codex` 2026.10.10 moves `@openai/codex` from 0.160.0 to
+     0.164.0, and every box reinstalls the plugin at its next gateway start;
+   - `openclaw-reasoning-stream-patch.mjs` is verified for 2026.10.9 only. It
+     should report "not needed" on the newer core, but that is untested.
 2. For the customer now: update to the release with this change, after which
-   the four app-servers go 30-35 min after each agent's last turn (~630 MB).
+   the four app-servers go 30-45 min after each agent's last turn (~630 MB).
    On their numbers that alone does not reach the embedder's 2,300 MB, so also
    restart the gateway once to give back its 15-hour growth
    (`sudo systemctl restart clawbox-gateway`; on the lab board a fresh gateway
