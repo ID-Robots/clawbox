@@ -114,6 +114,7 @@ export async function getTunnelPid(): Promise<number | null> {
   return (await readPidRecord())?.pid ?? null;
 }
 
+/** This boot's kernel boot id, or null where /proc does not provide one. */
 async function readBootId(): Promise<string | null> {
   try {
     return (await readFile(BOOT_ID_FILE, "utf-8")).trim() || null;
@@ -122,12 +123,14 @@ async function readBootId(): Promise<string | null> {
   }
 }
 
+/** Drop tunnel.pid; a missing file is already the wanted state. */
 async function forgetPid(): Promise<void> {
   try {
     await unlink(TUNNEL_PID_FILE);
   } catch {}
 }
 
+/** True while the cloudflared this module spawned, in this boot, is alive. */
 export async function isTunnelRunning(): Promise<boolean> {
   const record = await readPidRecord();
   if (!record) return false;

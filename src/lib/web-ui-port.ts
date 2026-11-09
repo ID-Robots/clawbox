@@ -21,6 +21,7 @@ export const APPLIANCE_WEB_UI_PORT = 80;
 /** Where PORT and CLAWBOX_PORT are read — `process.env` unless a caller passes its own. */
 export type WebUiPortEnv = Readonly<Record<string, string | undefined>>;
 
+/** The port the web UI serves on: PORT, else CLAWBOX_PORT, else 80. */
 export function webUiPort(env: WebUiPortEnv = process.env): number {
   return envPort(env.PORT, envPort(env.CLAWBOX_PORT, APPLIANCE_WEB_UI_PORT));
 }

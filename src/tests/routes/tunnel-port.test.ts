@@ -202,6 +202,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
   );
 });
 
+/** A spawned cloudflared that prints its quick-tunnel URL on stderr, as the real one does. */
 function fakeCloudflared(url: string) {
   const listeners: Array<(data: Buffer) => void> = [];
   queueMicrotask(() => listeners.forEach((cb) => cb(Buffer.from(`INF |  ${url}  |`))));

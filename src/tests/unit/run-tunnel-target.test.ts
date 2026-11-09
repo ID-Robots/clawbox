@@ -117,6 +117,7 @@ function start(unitEnv: Record<string, string>): Run {
   return { child, exited };
 }
 
+/** Poll for up to 15 s, then assert the condition holds. */
 async function waitFor(pred: () => boolean) {
   for (let i = 0; i < 600 && !pred(); i++) await new Promise((r) => setTimeout(r, 25));
   expect(pred()).toBe(true);
