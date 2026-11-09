@@ -202,6 +202,20 @@ from the first look at which a tree is quiet, and a tree keeps moving for some
 minutes after a turn (here main, r1 and r2 settled at the 17:29 look). Sweeps
 are also 5 min apart.
 
+**Re-check on the final code (`15c1f1c69`, the review fixes on top).** This
+used the same set-up, with agents `main`, `r1` and `q1`. The gateway's startup
+catalog look and the first turns left two idle app-servers each for `main`
+and `r1`, four trees in all.
+
+- 19:59:58: `left 4 idle codex app-server(s) running: 1 session(s) have agent
+  work running or queued`, while a 50-min Codex turn ran on `q1`.
+- The turn completed intact (`HELD 3000 s OK`).
+- 20:24:58-20:25:00: the four were stopped (232, 206, 152 and 122 MB RSS,
+  "idle 55 min"). `q1`'s app-server was kept. MemAvailable went 3,797 →
+  4,179 MB.
+- `main`'s next turn started a fresh app-server and was answered on Codex.
+- Afterwards: the same gateway process, `/healthz` 200, no zombie.
+
 Then the board went back to Hermes through `POST /setup-api/harness/swap`. The
 gateway unit is not running there, and the only `codex app-server` left was
 the decoy. `hermes chat -q` answered in 18 s, and the desktop chat's own
