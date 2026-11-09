@@ -18,7 +18,7 @@ describe("the Hugging Face CLI default", () => {
     vi.resetModules();
   });
 
-  const OWNER_HOME = "/home/someone-else";
+  const OWNER_HOME = "/srv/owner-home";
 
   it("is the running user's own, for the local model", async () => {
     vi.resetModules();

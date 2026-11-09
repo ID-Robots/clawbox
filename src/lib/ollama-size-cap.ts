@@ -30,7 +30,14 @@ export function ollamaMaxModelParamB(
 ): number {
   // A Jetson keeps its figure even when the drop-in is missing (a skipped or
   // failed resource-limits step): its memory is shared with the local model.
-  if (fs.existsSync(dropin) || fs.existsSync(tegraRelease)) return OLLAMA_MAX_MODEL_PARAM_B;
+  // Both paths are parameters (the tests pass their own), which Turbopack
+  // cannot resolve: without the opt-out it traced the whole project, data/
+  // included, and the build failed on a coding run's venv symlink
+  // (scripts/check-build-isolation.sh).
+  if (
+    fs.existsSync(/* turbopackIgnore: true */ dropin)
+    || fs.existsSync(/* turbopackIgnore: true */ tegraRelease)
+  ) return OLLAMA_MAX_MODEL_PARAM_B;
   const derived = Math.floor((totalBytes * WEIGHT_SHARE) / BYTES_PER_BILLION_PARAMS_Q4);
   return Math.max(OLLAMA_MAX_MODEL_PARAM_B, derived);
 }
