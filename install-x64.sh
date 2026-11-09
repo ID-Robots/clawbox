@@ -1071,7 +1071,12 @@ record_owner_password() {
   #                the check never ran. That is unknown, not "the owner's":
   #                src/lib/system-password.ts answers null there, and recording
   #                the flag on a guess would let the wizard hand setup to
-  #                whoever can still log in with the published default.
+  #                whoever can still log in with the published default. The
+  #                install stops there instead of starting the UI: with the
+  #                app's own check down too, its gates read the account as
+  #                owned, and /login can then record the flag for an account
+  #                that may still carry the default. The operator repairs the
+  #                helper and runs the installer again.
   # PIPESTATUS, so the answer is unix_chkpwd's own status and not printf's
   # SIGPIPE when the helper exits before reading its stdin (set -o pipefail
   # would otherwise report 141 for a helper that exited 0).
@@ -1081,8 +1086,8 @@ record_owner_password() {
     return 0
   fi
   if [ "$chk_rc" -ne 7 ]; then
-    echo "  WARN: could not check whether $CLAWBOX_USER still carries the factory default password ($UNIX_CHKPWD_BIN exit $chk_rc); not recording the owner password — the wizard will ask for one. Once the check works, run: sudo bash install-x64.sh --step directories_permissions" >&2
-    return 0
+    echo "Error: could not check whether $CLAWBOX_USER still carries the factory default password ($UNIX_CHKPWD_BIN exit $chk_rc). The app checks sign-in with the same helper; repair it, then run this installer again." >&2
+    return 1
   fi
   # As the install user, written the way src/lib/config-store.ts writes it: a
   # 0600 temp file renamed into place. A file that does not parse is left alone.
@@ -1838,7 +1843,7 @@ ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"
 #
 # Recorded by record_owner_password, the check step_directories_permissions
 # makes: a usable password is the owner's only when it is not the published
-# factory default, and a check that could not run records nothing. Recording
+# factory default, and a check that could not run stops the install. Recording
 # every usable password here undid that on any re-run whose config.json
 # existed, and let /login take the default on an account still carrying it.
 reconcile_owner_password_flag() {

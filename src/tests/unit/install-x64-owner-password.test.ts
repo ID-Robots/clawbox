@@ -172,10 +172,10 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     stubPasswd("P");
     stubChkpwd(7, path.join(bin, "unix_chkpwd"));
     const r = run(dir);
-    expect(r.status).toBe(0);
+    expect(r.status).not.toBe(0);
     expect(existsSync(path.join(dir, "chkpwd-stdin"))).toBe(false);
     expect(existsSync(config)).toBe(false);
-    expect(r.out).toMatch(/WARN.*unix_chkpwd exit 127/);
+    expect(r.out).toMatch(/Error.*unix_chkpwd exit 127/);
   });
 
   it("reads the flag before checking any password, so a re-run logs no failed check", () => {
@@ -194,7 +194,7 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ password_configured: true });
   });
 
-  it("records nothing when the default check could not run, and says so", () => {
+  it("records nothing and stops the install when the default check could not run", () => {
     // Any exit that is neither 0 nor 7 — helper missing (127), PAM_USER_UNKNOWN,
     // PAM_SYSTEM_ERR, a signal — means the check never ran, so whether this
     // account still carries the published default is UNKNOWN.
@@ -203,11 +203,37 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     // cannot be undone from the UI: middleware and /login would treat an
     // as-flashed box as owned, and setup would ask for a password that is
     // public knowledge instead of making the owner choose one.
-    const r = record("P", 9);
-    expect(r.status).toBe(0);
+    //
+    // Nor does the install go on to start the UI: with the app's own check
+    // down too, hasOwnerPassword() reads the account as owned and /login can
+    // record the flag itself for an account that may still carry the default.
+    for (const code of [9, 4, 1]) {
+      stubPasswd("P");
+      stubChkpwd(code);
+      const r = run(dir, ['echo "step continued"']);
+      expect(r.status).not.toBe(0);
+      expect(r.out).not.toContain("step continued");
+      expect(existsSync(config)).toBe(false);
+      expect(r.out).toMatch(new RegExp(`Error.*unix_chkpwd exit ${code}`));
+      expect(r.out).toContain("run this installer again");
+    }
+  });
+
+  it("records nothing when the helper comes back and the account is still on the factory default", () => {
+    // The run that stopped on a broken helper, then the run after its repair:
+    // the account still carries the published default, so it stays the
+    // wizard's, flag unset, and /login keeps refusing the default.
+    stubPasswd("P");
+    stubChkpwd(9);
+    expect(run(dir).status).not.toBe(0);
     expect(existsSync(config)).toBe(false);
-    expect(r.out).toMatch(/WARN.*unix_chkpwd exit 9/);
-    expect(r.out).toContain("--step directories_permissions");
+
+    stubChkpwd(0);
+    const again = run(dir, ['echo "step continued"']);
+    expect(again.status).toBe(0);
+    expect(again.out).toContain("step continued");
+    expect(existsSync(config)).toBe(false);
+    expect(readFileSync(path.join(dir, "chkpwd-stdin"), "utf8")).toBe("clawbox\0");
   });
 
   it("records nothing when unix_chkpwd is not installed at all", () => {
@@ -216,9 +242,9 @@ describe.skipIf(!hasPython3)("install-x64.sh records a PC account's existing pas
     // default".
     stubPasswd("P");
     const r = run(dir);
-    expect(r.status).toBe(0);
+    expect(r.status).not.toBe(0);
     expect(existsSync(config)).toBe(false);
-    expect(r.out).toMatch(/WARN.*unix_chkpwd exit 127/);
+    expect(r.out).toMatch(/Error.*unix_chkpwd exit 127/);
   });
 
   it("never rewrites a config.json it cannot read", () => {
@@ -277,11 +303,11 @@ describe.skipIf(!hasPython3)("install-x64.sh's root-step reconcile records throu
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ setup_progress_step: 1 });
   });
 
-  it("does not record when the check cannot run", () => {
+  it("does not record, and stops the install, when the check cannot run", () => {
     writeFileSync(config, JSON.stringify({ setup_progress_step: 1 }));
     const r = record("P", 9, undefined, "reconcile_owner_password_flag");
-    expect(r.status).toBe(0);
-    expect(r.out).toMatch(/WARN.*unix_chkpwd exit 9/);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toMatch(/Error.*unix_chkpwd exit 9/);
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ setup_progress_step: 1 });
   });
 
