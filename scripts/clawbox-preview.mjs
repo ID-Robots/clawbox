@@ -33,6 +33,16 @@
  *     however it likes and this DISCOVERS it by reading the listening sockets of
  *     the command's own descendants, which is the only approach that works for
  *     every dev server without knowing its flags.
+ *     ONE CASE IT DOES NOT LEAVE TO THE COMMAND: a manifest that names a fixed
+ *     `port` which is already taken. That is every INSTALLED app — its live
+ *     server holds the port, and the copy a run works in names the same one,
+ *     so the start died on EADDRINUSE and the pass had no preview (seen on
+ *     every app of an owner's Store; one run's lesson for the next was "stop
+ *     that app PID first", which is the owner's running app). The copy is
+ *     moved instead: the port is rewritten to a spare one in the command, or
+ *     in the package script it runs (`bun run serve` → the `serve` script),
+ *     and PORT is set for a server that reads it. A command that names the
+ *     port nowhere this can see fails at once with `port_in_use`, saying so.
  *   static mode — no start command. An existing build script is run once
  *     (bounded), and the first build output folder that exists, or the project
  *     itself, is served by the tiny static server below.
@@ -53,6 +63,7 @@ import { spawn, execFile } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -151,7 +162,8 @@ function decidePlan(dir) {
   const scripts = pkg && typeof pkg.scripts === "object" && pkg.scripts ? pkg.scripts : {};
 
   if (manifest && typeof manifest.start === "string" && manifest.start.trim()) {
-    return { mode: "command", command: manifest.start.trim(), source: "clawbox.json start" };
+    const port = Number.isInteger(manifest.port) && manifest.port >= 1024 && manifest.port <= 65535 ? manifest.port : null;
+    return { mode: "command", command: manifest.start.trim(), source: "clawbox.json start", port };
   }
   if (typeof scripts.dev === "string") {
     return { mode: "command", command: "npm run dev", source: "package.json dev script" };
@@ -171,6 +183,63 @@ function decidePlan(dir) {
     build: typeof scripts.build === "string" ? "npm run build" : null,
     source: typeof scripts.build === "string" ? "package.json build script" : "the folder as it is",
   };
+}
+
+/** Is something already listening on this loopback port? */
+function portBusy(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const done = (busy) => { socket.destroy(); resolve(busy); };
+    socket.setTimeout(800, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** A spare loopback port, the OS's to choose. */
+function sparePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+/** `from` as a whole number in a command line: `-p 4401`, `:4401`, `PORT=4401` — never part of `14401` or `4401.5`. */
+function portToken(from) {
+  return new RegExp(`(?<![\\d.])${from}(?![\\d.]\\d|\\d)`, "g");
+}
+
+/**
+ * The start command moved from port `from` to port `to`: in the command's own
+ * text when it names the port, else in the package script it runs (`bun run
+ * serve`, `npm start`, `yarn dev`, `pnpm serve`). Null when the port is named
+ * in neither — the copy then cannot be moved by rewriting.
+ */
+function retargetCommand(dir, command, from, to) {
+  if (portToken(from).test(command)) return { command: command.replace(portToken(from), String(to)), via: "the start command" };
+  const run = /^(?:bun|npm|pnpm|yarn)(?:\s+run)?\s+([A-Za-z0-9:._-]+)\s*$/.exec(command.trim());
+  if (!run) return null;
+  const pkg = readJson(path.join(dir, "package.json"));
+  const script = pkg && typeof pkg.scripts === "object" && pkg.scripts ? pkg.scripts[run[1]] : null;
+  if (typeof script !== "string" || !portToken(from).test(script)) return null;
+  return { command: script.replace(portToken(from), String(to)), via: `package.json's "${run[1]}" script` };
+}
+
+/** `node_modules/.bin` of the folder and of the folders above it, nearest first: what a package runner puts on PATH. */
+function binDirs(dir) {
+  const out = [];
+  let at = dir;
+  for (let i = 0; i < 8; i += 1) {
+    out.push(path.join(at, "node_modules", ".bin"));
+    const up = path.dirname(at);
+    if (up === at) break;
+    at = up;
+  }
+  return out;
 }
 
 /** Run one shell command in the folder, bounded. Output goes to stderr. */
@@ -384,8 +453,25 @@ async function main() {
   }
 
   if (plan.mode === "command") {
-    log(`starting: ${plan.command}`);
-    child = spawn("sh", ["-c", plan.command], { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+    let command = plan.command;
+    let env = process.env;
+    // The manifest's fixed port, already taken: the installed app's own
+    // server, almost always. This copy goes on a spare port (see the header).
+    if (plan.port && await portBusy(plan.port)) {
+      const spare = await sparePort();
+      const moved = retargetCommand(dir, plan.command, plan.port, spare);
+      if (!moved) {
+        return fail(
+          "port_in_use",
+          `port ${plan.port} from clawbox.json is already in use — most likely by the installed app itself, which is the owner's and must stay up — and "${plan.command}" does not name the port, so this copy cannot be moved off it. Start your copy on a spare port yourself, and never stop the process that holds ${plan.port}.`,
+        );
+      }
+      log(`port ${plan.port} is in use (the installed app's own server stays up); this copy starts on ${spare}, moved in ${moved.via}`);
+      command = moved.command;
+      env = { ...process.env, PORT: String(spare), PATH: [...binDirs(dir), process.env.PATH ?? ""].join(path.delimiter) };
+    }
+    log(`starting: ${command}`);
+    child = spawn("sh", ["-c", command], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
     const relay = (chunk) => process.stderr.write(chunk);
     child.stdout.on("data", relay);
     child.stderr.on("data", relay);
