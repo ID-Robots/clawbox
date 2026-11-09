@@ -1220,9 +1220,12 @@ step_llamacpp_install() {
   # Spark). start-llamacpp.sh still asks the binary before using either.
   local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-29c720eaf72fcf8e4e61a56a88b994d92668261d}"
   # Both reach the `bash -lc` strings below, run as the owner: the pin may only
-  # be a commit hash, and the directory goes in as one quoted word.
-  if ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
-    echo "Error: LLAMACPP_COMMIT must be a hexadecimal commit hash (got '$LLAMACPP_COMMIT')" >&2
+  # be a full commit hash (a shallow fetch by SHA needs all 40 characters), and
+  # the directory goes in as one quoted word. The length is checked apart from
+  # the pattern, as install.sh does: a bounded repeat inside `[[ =~ ]]` costs
+  # memory (src/tests/unit/shell-regex-hygiene.test.ts).
+  if [ "${#LLAMACPP_COMMIT}" -ne 40 ] || ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]+$ ]]; then
+    echo "Error: LLAMACPP_COMMIT must be a full 40-character commit hash (got '$LLAMACPP_COMMIT')" >&2
     return 1
   fi
   local LLAMA_DIR_Q

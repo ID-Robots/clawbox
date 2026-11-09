@@ -195,10 +195,13 @@ describe("install-x64.sh on an arm64 workstation (DGX Spark)", () => {
       // Both reach a `bash -lc` string run as the owner: an override with a
       // space or a `;` in it would be split, or run, instead of reaching git.
       const step = sliceFunction("step_llamacpp_install");
-      const check = /if ! \[\[ "\$LLAMACPP_COMMIT" =~ (\^\[0-9a-f\]\{7,40\}\$) \]\]/.exec(step);
-      expect(check, "a hex-only check on LLAMACPP_COMMIT").not.toBeNull();
-      const valid = (v: string) => runBash(`[[ "${v}" =~ ^[0-9a-f]{7,40}$ ]] && echo yes || echo no`).out.trim();
+      const check = /if (\[ "\$\{#LLAMACPP_COMMIT\}" -ne 40 \] \|\| ! \[\[ "\$LLAMACPP_COMMIT" =~ \^\[0-9a-f\]\+\$ \]\]); then/
+        .exec(step);
+      expect(check, "a full-SHA check on LLAMACPP_COMMIT").not.toBeNull();
+      const valid = (v: string) =>
+        runBash(`LLAMACPP_COMMIT='${v}'; if ${check![1]}; then echo no; else echo yes; fi`).out.trim();
       expect(valid("29c720eaf72fcf8e4e61a56a88b994d92668261d")).toBe("yes");
+      expect(valid("29c720e")).toBe("no");
       expect(valid("main; touch /tmp/x")).toBe("no");
       for (const line of step.split("\n").filter((l) => l.includes("as_user_login"))) {
         expect(line).not.toMatch(/\$LLAMA_DIR\b/);
