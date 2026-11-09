@@ -319,7 +319,7 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
-import { adoptOwnBranchWork, ownBranchWork, readCheckout } from "@/lib/coding-team-worktree";
+import { adoptOwnBranchWork, gitIn, ownBranchWork, readCheckout } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
@@ -9437,6 +9437,39 @@ async function recordRunWork(run: CodingRun): Promise<void> {
   if (run.readOnly) return;
   await commitRunChanges(run);
   await healRunPaths(run);
+  await noteCommittedFiles(run);
+}
+
+/** No run's commits are read past this many paths: the list is for the owner's page and the review's brief, not an index. */
+const MAX_COMMITTED_FILES = 500;
+
+/**
+ * The files the run's OWN COMMITS changed, added to what its tools confirmed.
+ *
+ * `filesTouched` is read off the Edit, Write and NotebookEdit calls. A run that
+ * writes through its shell — `python3 - <<EOF … open(p, "w")`, `cat > file`,
+ * `sed -i` — leaves the list short or EMPTY, and an empty list says "this run
+ * changed nothing" to everything that reads it: the automatic review pass was
+ * skipped for a run that committed twelve files (run-8lmn0l4c, Opus 5.5 at low
+ * effort, 2026-11-10), and a review judged whether a change had a face from a
+ * list without the screen's own file in it. Once the work is committed git
+ * knows better: the paths that differ between where the folder stood when the
+ * run began (`headAtStart`) and its HEAD, relative to the run's folder.
+ *
+ * Bounded, and never throws: a folder that had no commit to start from, or a
+ * run with no commit of its own, adds nothing.
+ */
+async function noteCommittedFiles(run: CodingRun): Promise<void> {
+  if (!run.commit || !run.headAtStart) return;
+  try {
+    const diff = await gitIn(run.directory, ["diff", "--name-only", "--relative", "-z", `${run.headAtStart}..HEAD`]);
+    if (diff.code !== 0) return;
+    const before = run.filesTouched.length;
+    for (const file of diff.stdout.split("\0").filter(Boolean).slice(0, MAX_COMMITTED_FILES)) noteFile(run, file);
+    if (run.filesTouched.length !== before) persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} committed files not read:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**

@@ -895,6 +895,34 @@ describe("a run", () => {
       await vi.waitFor(() => { expect(lib.getRun(done.id)?.worktree?.removed).toBe(true); }, { timeout: 10_000 });
     });
 
+    it("counts the files a run's own commit changed when no tool confirmed them — and reviews that run", async () => {
+      // run-8lmn0l4c (Opus 5.5 at low effort, 2026-11-10) wrote twelve files
+      // through `python3 - <<EOF` and committed them itself: no Edit or Write
+      // call, so the record said it changed nothing and the automatic review
+      // pass was skipped for a 578-line change.
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      const dir = makeProject("site");
+      const g = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=T", "-c", "user.email=t@example.com", ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
+      g("init", "--quiet"); g("add", "-A"); g("commit", "--quiet", "-m", "before");
+      installFakeWrapper([
+        `echo '${INIT}'`,
+        // Written through the shell: no tool_use event names either file.
+        'if [ ! -f "$PWD/lib/calc.ts" ]; then mkdir -p "$PWD/lib" && echo "export const a = 1;" > "$PWD/lib/calc.ts" && echo "# docs" > "$PWD/NOTES.md"',
+        '  git -C "$PWD" -c user.name=Run -c user.email=run@example.com add -A && git -C "$PWD" -c user.name=Run -c user.email=run@example.com commit -q -m "written through the shell"',
+        "fi",
+        `echo '{"type":"result","subtype":"success","num_turns":2,"result":"Done."}'`,
+        "exit 0",
+      ].join("\n"));
+      const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      expect(done.status).toBe("completed");
+      await vi.waitFor(() => { expect([...(lib.getRun(done.id)?.filesTouched ?? [])].sort()).toEqual(["NOTES.md", "lib/calc.ts"]); }, { timeout: 10_000 });
+      // A run that changed files is a run to review.
+      await vi.waitFor(() => { expect(allRuns().some((r) => r.reviewOf === done.id)).toBe(true); }, { timeout: 10_000 });
+      const pass = allRuns().find((r) => r.reviewOf === done.id)!;
+      await finished(pass.id);
+      expect(await lib.waitForRunSettled(pass.id, 10_000)).toBe(true);
+    });
+
     it("does nothing while the owner's review switch is off", async () => {
       readyDevice();
       makeProject("site");
