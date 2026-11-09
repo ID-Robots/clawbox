@@ -37,7 +37,8 @@
  *
  * WHAT HAPPENS NEXT. SIGTERM goes to the wrapper, which forwards it to the
  * binary and exits with it. If the tree is still there after
- * {@link STOP_GRACE_MS}, SIGKILL. The plugin sees its child exit, closes the
+ * {@link STOP_GRACE_MS}, SIGKILL; a tree that outlives that too is logged as
+ * not stopped, and a later sweep tries again. The plugin sees its child exit, closes the
  * client, and drops it from the pool (`markClosed`, then the shared entry's
  * close handler), so the agent's next turn starts a fresh app-server and
  * resumes its thread from the rollout on disk. That is the same path
@@ -78,6 +79,9 @@ const USER_HZ = 100;
 
 /** How long a SIGTERM gets before SIGKILL. */
 export const STOP_GRACE_MS = 10_000;
+
+/** How long a SIGKILL gets to take effect before the stop is reported as failed. */
+export const KILL_WAIT_MS = 5_000;
 
 /** One process in the gateway unit, as /proc describes it. */
 export interface UnitProcess {
@@ -321,7 +325,7 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
   const deps: ReaperDeps = { ...realDeps, ...overrides };
   const watched = new Map<string, Watched>();
   let sweeping = false;
-  let lastRefusal = "";
+  let lastHold = "";
 
   async function stop(tree: AppServerTree, idleFor: number, agent: string): Promise<StoppedAppServer | null> {
     const members = [tree.root, ...tree.descendants];
@@ -348,6 +352,19 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
         /* gone in between */
       }
     }
+    // Stopped means gone, not signalled: a process stuck in the kernel outlives
+    // a SIGKILL. Its clock was dropped above, so a later sweep tries it again.
+    let survivors = left;
+    for (let waited = 0; survivors.length && waited < KILL_WAIT_MS; waited += 500) {
+      await deps.sleep(500);
+      survivors = await alive();
+    }
+    if (survivors.length) {
+      deps.log(
+        `[codex-reaper] could not stop the idle codex app-server of agent ${logSafe(agent, 64)}: pid ${survivors.map((p) => p.pid).join(", ")} still running after SIGKILL`,
+      );
+      return null;
+    }
     const stopped = { pid: tree.root.pid, agent, idleMs: idleFor, rssKb: rss.reduce((a, b) => a + b, 0), killed: left.length > 0 };
     deps.log(
       `[codex-reaper] stopped the idle codex app-server of agent ${logSafe(agent, 64)} (pid ${stopped.pid}, idle ${Math.round(idleFor / 60_000)} min, ${Math.round(stopped.rssKb / 1024)} MB${stopped.killed ? ", SIGKILL after SIGTERM" : ""})`,
@@ -355,18 +372,25 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
     return stopped;
   }
 
-  /** The gateway's answer, or null (logged once per distinct reason) when it gave none. */
+  /** Says why idle app-servers were left running, once per distinct reason, so a box that stays busy says it once. */
+  function hold(reason: string, line: string) {
+    if (reason !== lastHold) deps.log(`[codex-reaper] ${line}`);
+    lastHold = reason;
+  }
+
+  /** The gateway's answer, or null when it gave none. Either way, a reason to wait is logged. */
   async function activeSessions(waiting: number): Promise<number | null> {
+    let active: number;
     try {
-      const active = await deps.activeSessionCount();
-      lastRefusal = "";
-      return active;
+      active = await deps.activeSessionCount();
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
-      if (why !== lastRefusal) deps.log(`[codex-reaper] left ${waiting} idle codex app-server(s) running: the gateway did not say whether it is busy (${logSafe(why)})`);
-      lastRefusal = why;
+      hold(`no answer: ${why}`, `left ${waiting} idle codex app-server(s) running: the gateway did not say whether it is busy (${logSafe(why)})`);
       return null;
     }
+    if (active > 0) hold("busy", `left ${waiting} idle codex app-server(s) running: ${active} session(s) have agent work running or queued`);
+    else lastHold = "";
+    return active;
   }
 
   async function sweep(): Promise<StoppedAppServer[]> {

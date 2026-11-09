@@ -53,7 +53,7 @@ const appServer = (wrapper: number, extra: Partial<UnitProcess> = {}) => [
 /** A fake box: what /proc lists on each look, what the gateway answers, and every signal sent. */
 function fakeBox(
   initial: UnitProcess[],
-  options: { active?: number | Error | ((asked: number) => number); survivesTerm?: boolean; homeless?: number[] } = {},
+  options: { active?: number | Error | ((asked: number) => number); survivesTerm?: boolean; unkillable?: boolean; homeless?: number[] } = {},
 ) {
   let procs = initial;
   let clock = 0;
@@ -73,7 +73,7 @@ function fakeBox(
     signal: (pid, signal) => {
       signals.push([pid, signal]);
       signalledAt.push(clock);
-      if (signal === "SIGKILL" || !options.survivesTerm) {
+      if (!options.unkillable && (signal === "SIGKILL" || !options.survivesTerm)) {
         // The launcher forwards SIGTERM to the binary and exits with it.
         const gone = new Set([pid, ...procs.filter((p) => p.ppid === pid).map((p) => p.pid)]);
         procs = procs.filter((p) => !gone.has(p.pid));
@@ -223,13 +223,16 @@ describe("createCodexAppServerReaper", () => {
     expect(box.signals).toEqual([]);
   });
 
-  it("stops nothing while any session has agent work running or queued", async () => {
+  it("stops nothing while any session has agent work running or queued, and says so once", async () => {
     const box = fakeBox([gateway(), ...appServer(2000)], { active: 1 });
     await box.reaper.sweep();
     box.advance(CODEX_APP_SERVER_IDLE_MS);
     expect(await box.reaper.sweep()).toEqual([]);
     expect(box.gatewayAsked()).toBe(1);
+    box.advance(5 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
     expect(box.signals).toEqual([]);
+    expect(box.logs).toEqual(["[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued"]);
   });
 
   it("stops nothing when the gateway does not answer, and says so once", async () => {
@@ -290,6 +293,21 @@ describe("createCodexAppServerReaper", () => {
     expect(box.signals).toEqual([[2000, "SIGTERM"], [2000, "SIGKILL"], [2001, "SIGKILL"]]);
     expect(box.signalledAt[1] - box.signalledAt[0]).toBeGreaterThanOrEqual(STOP_GRACE_MS);
     expect(box.logs[0]).toMatch(/SIGKILL after SIGTERM/);
+  });
+
+  it("does not count a tree that outlives SIGKILL as stopped, and tries it again later", async () => {
+    // Stuck in the kernel: still listed after every signal.
+    const box = fakeBox([gateway(), ...appServer(2000)], { unkillable: true });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toEqual([[2000, "SIGTERM"], [2000, "SIGKILL"], [2001, "SIGKILL"]]);
+    expect(box.signalledAt[1] - box.signalledAt[0]).toBeGreaterThanOrEqual(STOP_GRACE_MS);
+    expect(box.logs).toEqual(["[codex-reaper] could not stop the idle codex app-server of agent agent-2000: pid 2000, 2001 still running after SIGKILL"]);
+    // Its clock starts over: not tried again before another idle window.
+    box.advance(5 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toHaveLength(3);
   });
 
   it("still sees to the binary when the launcher is gone by the time of the SIGTERM", async () => {
