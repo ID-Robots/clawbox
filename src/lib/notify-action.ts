@@ -35,7 +35,7 @@
  * screen reader still heard in English (UI sweep 2026-09-07, shell-7).
  */
 export const NOTIFY_ACTION_TARGETS = {
-  settings: { email: "settings.email", ai: "settings.providers", harness: "settings.harness" },
+  settings: { email: "settings.email", ai: "settings.providers", harness: "settings.harness", update: "settings.systemUpdate" },
 } as const;
 
 type NotifyActionApp = keyof typeof NOTIFY_ACTION_TARGETS;
@@ -94,6 +94,9 @@ export const OPEN_JOB_ALERTS_SETTINGS: NotifyAction = { open: "settings", sectio
  * owner on a list with the one thing the notice is about folded away.
  */
 export const OPEN_ANTHROPIC_ACCOUNTS_SETTINGS: NotifyAction = { open: "settings", section: "ai", focus: "anthropicAccounts" };
+
+/** Settings → Update — for the weekly "a newer ClawBox is available" notice (TASK-2260). */
+export const OPEN_UPDATE_SETTINGS: NotifyAction = { open: "settings", section: "update" };
 
 /**
  * The allowlisted pair this value names, or null.

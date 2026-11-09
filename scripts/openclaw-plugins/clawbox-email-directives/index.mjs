@@ -38,6 +38,7 @@
 
 import { stripEmailDirectives } from "./email-directives.mjs";
 import { onBeforeDispatch } from "./email-approvals.mjs";
+import { onUpdateCommand } from "./update-commands.mjs";
 
 /** The plugin id, which must match `openclaw.plugin.json` and the config key. */
 const PLUGIN_ID = "clawbox-email-directives";
@@ -186,17 +187,27 @@ export function onReplyPayloadSending(event, ctx) {
   return next ? { payload: next } : undefined;
 }
 
+/**
+ * The one inbound claim hook, two disjoint shapes: /update and the weekly
+ * notice's Update button (update-commands.mjs), then the owner's emailed-draft
+ * reply (email-approvals.mjs). Neither can match what the other claims, so the
+ * order only decides which shape test runs first — the cheap regex either way.
+ */
+export async function onInboundBeforeDispatch(event, ctx) {
+  return (await onUpdateCommand(event, ctx)) ?? (await onBeforeDispatch(event, ctx));
+}
+
 const clawboxEmailDirectivesPlugin = {
   id: PLUGIN_ID,
   name: "ClawBox email hooks",
   description:
-    "Removes EMAIL: card directives from replies leaving the box for a channel, and takes the owner's emailed-draft approval off the inbound stream.",
+    "Removes EMAIL: card directives from replies leaving the box for a channel, and takes the owner's emailed-draft approval, /update and the update notice's Update button off the inbound stream.",
   register(api) {
     api.on("reply_payload_sending", onReplyPayloadSending);
-    // The inbound half. See email-approvals.mjs: it claims ONLY a message that
-    // is exactly a verb and a code, so every other message reaches the agent
-    // untouched, and it fails open on anything unexpected.
-    api.on("before_dispatch", onBeforeDispatch);
+    // The inbound half. See email-approvals.mjs and update-commands.mjs: it
+    // claims ONLY a message that is exactly a verb and a code, /update, or the
+    // Update button's tap, so every other message reaches the agent untouched.
+    api.on("before_dispatch", onInboundBeforeDispatch);
   },
 };
 
