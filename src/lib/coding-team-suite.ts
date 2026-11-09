@@ -17,7 +17,15 @@
  *     find nothing there;
  *   - a `package.json` whose `test` script is a real one (npm's placeholder
  *     that only says "no test specified" is not) → that script, through bun
- *     when the project is locked with bun and through npm otherwise.
+ *     when the project is locked with bun and through npm otherwise;
+ *   - a project locked with bun that has NO test script but does have test
+ *     files written for bun's own runner (`import … from "bun:test"`, found
+ *     in a small walk) → `bun test`, which needs no script to find them. Four
+ *     of six of an owner's apps were shaped like that, and their teams went
+ *     to a read-only final review with nobody having run a test
+ *     (team-0pwzmnjs: "I could not run the tests", 2026-11-09). Not when the
+ *     project depends on another runner (vitest, jest, mocha): `bun test`
+ *     would pick up that runner's files and fail them.
  * Each command found runs, in that order, in the harness's own sandbox and
  * inside its time box (the gate's SUITE_GATE_TIMEOUT_MS); the first red one is
  * the verdict.
@@ -35,7 +43,7 @@
  */
 
 import type { Dirent } from "fs";
-import fs from "fs/promises";
+import fs, { type FileHandle } from "fs/promises";
 import path from "@/lib/runtime-path";
 import { DELIVERABLE_COMMAND_TIMEOUT_MS, runSandboxed, type DeliverableSandbox, type SandboxedOutcome } from "@/lib/coding-deliverable-check";
 
@@ -81,7 +89,7 @@ const NPM_PLACEHOLDER = /no test specified/i;
 export async function detectSuites(directory: string): Promise<string[]> {
   const top = await entries(directory);
   const commands = await pythonSuites(directory, top);
-  const node = await packageSuite(directory, top);
+  const node = (await packageSuite(directory, top)) ?? (await bunTestSuite(directory, top));
   if (node) commands.push(node);
   return commands;
 }
@@ -127,6 +135,59 @@ async function packageSuite(directory: string, top: Dirent[]): Promise<string | 
   if (typeof test !== "string" || !test.trim() || NPM_PLACEHOLDER.test(test)) return null;
   const bun = top.some((e) => e.isFile() && (e.name === "bun.lock" || e.name === "bun.lockb"));
   return bun ? "bun run test" : "npm test";
+}
+
+/** A test file by name, the way bun's runner finds one. */
+const JS_TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+/** Folders a small walk never enters: dependencies, build output, the box's own worktrees. */
+const WALK_SKIP = new Set(["node_modules", ".git", ".next", ".clawbox", ".claude", "dist", "build", "out", "coverage", "data"]);
+/** Another runner in the project's dependencies: its test files are not bun's to run. */
+const OTHER_RUNNERS = ["vitest", "jest", "@jest/globals", "mocha", "ava", "@playwright/test"];
+const BUN_WALK_DEPTH = 3;
+const BUN_WALK_FILES = 40;
+
+/**
+ * `bun test` for a project locked with bun whose test files import
+ * `bun:test` and that has no `test` script to say so (the caller asks only
+ * then). A small walk — three folders deep, the first forty test files, the
+ * head of each — never a crawl of the project.
+ */
+async function bunTestSuite(directory: string, top: Dirent[]): Promise<string | null> {
+  if (!top.some((e) => e.isFile() && (e.name === "bun.lock" || e.name === "bun.lockb"))) return null;
+  try {
+    const pkg = JSON.parse(await fs.readFile(path.join(directory, "package.json"), "utf8")) as { dependencies?: unknown; devDependencies?: unknown };
+    const deps = { ...(pkg.dependencies && typeof pkg.dependencies === "object" ? pkg.dependencies : {}), ...(pkg.devDependencies && typeof pkg.devDependencies === "object" ? pkg.devDependencies : {}) };
+    if (OTHER_RUNNERS.some((name) => name in deps)) return null;
+  } catch {
+    // No readable package.json: the lock alone says bun, and the files decide.
+  }
+  const found: string[] = [];
+  const walk = async (dir: string, list: Dirent[], depth: number): Promise<void> => {
+    for (const e of list) {
+      if (found.length >= BUN_WALK_FILES) return;
+      if (e.isFile() && JS_TEST_FILE.test(e.name)) found.push(path.join(dir, e.name));
+    }
+    if (depth >= BUN_WALK_DEPTH) return;
+    for (const e of list) {
+      if (found.length >= BUN_WALK_FILES) return;
+      if (e.isDirectory() && !WALK_SKIP.has(e.name) && !e.name.startsWith(".")) await walk(path.join(dir, e.name), await entries(path.join(dir, e.name)), depth + 1);
+    }
+  };
+  await walk(directory, top, 0);
+  for (const file of found) {
+    let handle: FileHandle | null = null;
+    try {
+      handle = await fs.open(file, "r");
+      const head = Buffer.alloc(4096);
+      const { bytesRead } = await handle.read(head, 0, head.length, 0);
+      if (/["']bun:test["']/.test(head.toString("utf8", 0, bytesRead))) return "bun test";
+    } catch {
+      // Unreadable: not the file that decides.
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+  return null;
 }
 
 async function entries(directory: string): Promise<Dirent[]> {
@@ -236,7 +297,8 @@ const UNITTEST_FAILURE = /^(?:FAIL|ERROR): (\S+) \(([^)\s]+)\)/;
  * unittest id as `python3 -m unittest <id>` takes it (the 3.10 and the 3.11+
  * headers alike; a subtest counts as its test; a module that could not be
  * imported is named as such), or a JavaScript runner's failing test — vitest's
- * `FAIL file > name`, a `×`/`✗`/`✕`/`✖` line, jest's `●`, TAP's `not ok`.
+ * `FAIL file > name`, a `×`/`✗`/`✕`/`✖` line, jest's `●`, TAP's `not ok`,
+ * bun's `(fail) name`.
  */
 export function failingTests(output: string): string[] {
   const names: string[] = [];
@@ -262,7 +324,10 @@ export function failingTests(output: string): string[] {
     const jest = /^●\s+(.+)$/.exec(line);
     if (jest && !/^Test suite failed to run/.test(jest[1])) { add(jest[1]); continue; }
     const tap = /^not ok \d+\s+-?\s*(.+?)(?:\s+#.*)?$/.exec(line);
-    if (tap) add(tap[1]);
+    if (tap) { add(tap[1]); continue; }
+    // bun's own runner: `(fail) calc > power is right associative [0.24ms]`.
+    const bun = /^\(fail\)\s+(.+?)(?:\s+\[\d+(?:\.\d+)?\s?m?s\])?$/.exec(line);
+    if (bun) add(bun[1]);
   }
   // A crossed-out name vitest also gave with its file is not said twice.
   for (const name of marked) {
