@@ -506,6 +506,22 @@ describe("a run asked for its own effort", () => {
     await finished(next.id);
   });
 
+  it("asks a run for lessons only while the project's notes have room for one", async () => {
+    const dir = makePlainProject("plain");
+    fs.mkdirSync(path.join(dir, ".clawbox"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".clawbox", "run-notes.md"), "- Tests: bun run test\n");
+    const roomy = await lib.startRun({ task: "build it", directory: "plain", source: "owner" });
+    await finished(roomy.id);
+    expect(handed(roomy.id, "argv")).toMatch(/To leave a lesson for the next run/);
+    // At the cap every lesson is refused as `full`: the run is not asked for any.
+    fs.writeFileSync(path.join(dir, ".clawbox", "run-notes.md"), `- ${"x".repeat(3_960)}\n`);
+    const full = await lib.startRun({ task: "build it again", directory: "plain", source: "owner" });
+    await finished(full.id);
+    expect(handed(full.id, "argv")).not.toMatch(/To leave a lesson for the next run/);
+    // The notes themselves still reach it.
+    expect(handed(full.id, "argv")).toMatch(/<run-notes>/);
+  });
+
   it("still caps a planner and a reviewer at xhigh, and never runs a read-only run on ultracode", async () => {
     makePlainProject("plain");
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, effort: "ultracode", team: { id: TEAM, role: "planner", taskId: null } });

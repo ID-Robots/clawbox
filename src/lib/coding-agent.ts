@@ -410,7 +410,7 @@ import {
   RUN_NICE,
 } from "@/lib/coding-run-unit";
 import { cpuBudgetBrief, hostCpuCount, MAX_CPU_BUDGET, onBatteryPower, RUN_CPU_BUDGET_ENV, runCpuBudget } from "@/lib/coding-run-cpu";
-import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } from "@/lib/coding-run-notes";
+import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, runNotesHaveRoom, settleRunNotes } from "@/lib/coding-run-notes";
 import { looksVisual, mentionsPullRequest } from "@/lib/coding-diet";
 import {
   applyRoleModelsPatch,
@@ -12968,7 +12968,8 @@ function spawnRun(
   const cpuBudget = run.cpuBudget ?? runCpuBudget({ cpus: hostCpuCount() });
   // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
   // a resume sees a lesson the owner added meanwhile.
-  const runNotes = runNotesBlock(readRunNotes(run.directory));
+  const projectNotes = readRunNotes(run.directory);
+  const runNotes = runNotesBlock(projectNotes);
   // The visual decision, made ONCE — at this record's first spawn — and kept
   // for every respawn, so the run's tools and its prompt prefix never move
   // under it (CodingRun.visual).
@@ -12986,7 +12987,7 @@ function spawnRun(
         readOnlyTools: mcpPlan.readOnlyTools,
       }
     : null;
-  const runArgs: RunArgsOptions = { resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp };
+  const runArgs: RunArgsOptions = { resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly && runNotesHaveRoom(projectNotes), run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp };
   if (codex) writeCodexRules(run.id);
   const dropped = codex
     ? buildCodexSpawnArgv(tools.setprivPath, buildCodexRunArgs({ ...runArgs, model: run.requestedModel ?? defaultModelForProvider(run.provider) ?? DEFAULT_OPENAI_MODEL, readOnlyTools: mcpPlan?.readOnlyTools === true }))
