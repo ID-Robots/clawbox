@@ -15,6 +15,7 @@ import {
   CODEX_APP_SERVER_IDLE_MS,
   QUIET_CPU_SHARE,
   STOP_GRACE_MS,
+  agentOfSessionKey,
   createCodexAppServerReaper,
   gatewayAppServers,
   isCodexAppServerArgv,
@@ -50,10 +51,14 @@ const appServer = (wrapper: number, extra: Partial<UnitProcess> = {}) => [
   proc(wrapper + 1, wrapper, [NATIVE, ...APP_SERVER_ARGS], extra),
 ];
 
+/** Sessions with agent work, as the gateway lists them: a count is that many sessions of an agent with no app-server here. */
+type Active = number | string[];
+const sessionKeys = (active: Active) => (typeof active === "number" ? Array.from({ length: active }, (_, i) => `agent:other-${i}:main`) : active);
+
 /** A fake box: what /proc lists on each look, what the gateway answers, and every signal sent. */
 function fakeBox(
   initial: UnitProcess[],
-  options: { active?: number | Error | ((asked: number) => number); survivesTerm?: boolean; unkillable?: boolean; homeless?: number[] } = {},
+  options: { active?: Active | Error | ((asked: number) => Active); survivesTerm?: boolean; unkillable?: boolean; homeless?: number[] } = {},
 ) {
   let procs = initial;
   let clock = 0;
@@ -63,11 +68,11 @@ function fakeBox(
   let gatewayAsked = 0;
   const reaper = createCodexAppServerReaper({
     listUnitProcesses: async () => procs,
-    activeSessionCount: async () => {
+    activeSessionKeys: async () => {
       gatewayAsked += 1;
       if (options.active instanceof Error) throw options.active;
-      if (typeof options.active === "function") return options.active(gatewayAsked);
-      return options.active ?? 0;
+      if (typeof options.active === "function") return sessionKeys(options.active(gatewayAsked));
+      return sessionKeys(options.active ?? 0);
     },
     isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
     signal: (pid, signal) => {
@@ -164,13 +169,13 @@ describe("createCodexAppServerReaper", () => {
     expect(await box.reaper.sweep()).toEqual([]); // first look: the clock starts
     box.advance(CODEX_APP_SERVER_IDLE_MS - MIN);
     expect(await box.reaper.sweep()).toEqual([]);
-    expect(box.gatewayAsked()).toBe(0);
+    expect(box.gatewayAsked()).toBe(2); // once at each look while an app-server runs
     box.advance(MIN);
     const stopped = await box.reaper.sweep();
     expect(stopped.map((s) => s.pid)).toEqual([2000, 2100]);
     expect(stopped[0]).toMatchObject({ agent: "agent-2000", idleMs: CODEX_APP_SERVER_IDLE_MS, rssKb: 170_000, killed: false });
     expect(box.signals).toEqual([[2000, "SIGTERM"], [2100, "SIGTERM"]]);
-    expect(box.gatewayAsked()).toBe(2); // once before each stop
+    expect(box.gatewayAsked()).toBe(4); // the look's answer serves the first stop; asked again before the second
     expect(box.procs().map((p) => p.pid)).toEqual([GATEWAY]);
     expect(box.logs[0]).toMatch(/stopped the idle codex app-server of agent agent-2000 \(pid 2000, idle 30 min, 166 MB\)/);
   });
@@ -228,7 +233,8 @@ describe("createCodexAppServerReaper", () => {
     await box.reaper.sweep();
     box.advance(CODEX_APP_SERVER_IDLE_MS);
     expect(await box.reaper.sweep()).toEqual([]);
-    expect(box.gatewayAsked()).toBe(1);
+    // Once per look while an app-server runs.
+    expect(box.gatewayAsked()).toBe(2);
     box.advance(5 * MIN);
     expect(await box.reaper.sweep()).toEqual([]);
     expect(box.signals).toEqual([]);
@@ -255,12 +261,14 @@ describe("createCodexAppServerReaper", () => {
   ])("does not stop a tree that %s while the gateway answered", async (_what, meanwhile) => {
     let procs = [gateway(), ...appServer(2000)];
     let clock = 0;
+    let asked = 0;
     const signals: string[] = [];
     const reaper = createCodexAppServerReaper({
       listUnitProcesses: async () => procs,
-      activeSessionCount: async () => {
-        procs = meanwhile(); // a turn started meanwhile, or the process changed
-        return 0;
+      activeSessionKeys: async () => {
+        asked += 1;
+        if (asked === 2) procs = meanwhile(); // the answer before the stop: a turn started meanwhile, or the process changed
+        return [];
       },
       signal: (_pid, signal) => signals.push(signal),
       agentOf: async () => "main",
@@ -316,7 +324,7 @@ describe("createCodexAppServerReaper", () => {
     const signals: [number, string][] = [];
     const reaper = createCodexAppServerReaper({
       listUnitProcesses: async () => procs,
-      activeSessionCount: async () => 0,
+      activeSessionKeys: async () => [],
       isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
       signal: (pid, signal) => {
         signals.push([pid, signal]);
@@ -349,11 +357,37 @@ describe("createCodexAppServerReaper", () => {
   });
 
   it("asks the gateway again before each stop, and stops no more once a turn has started", async () => {
-    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)], { active: (asked) => (asked === 1 ? 0 : 1) });
+    // Asked once at each look, then again before every stop after the first.
+    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)], { active: (asked) => (asked <= 2 ? 0 : 1) });
     await box.reaper.sweep();
     box.advance(CODEX_APP_SERVER_IDLE_MS);
     expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+    expect(box.gatewayAsked()).toBe(3);
     expect(box.signals).toEqual([[2000, "SIGTERM"]]);
+  });
+
+  it("starts an agent's clock over while the gateway reports work for that agent, whatever its CPU says", async () => {
+    // A turn waiting on the model: no CPU, but the gateway lists the agent's session.
+    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)], { active: (asked) => (asked <= 2 ? ["agent:agent-2000:main"] : []) });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    // Another agent's work holds every stop back; it does not restart agent-2100's clock.
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.logs).toEqual(["[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued"]);
+    box.advance(MIN);
+    // The turn is over: agent-2100's app-server goes, agent-2000's counts from the last look that saw its work.
+    expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2100]);
+    box.advance(CODEX_APP_SERVER_IDLE_MS - 2 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    box.advance(MIN);
+    expect((await box.reaper.sweep()).map((s) => [s.pid, s.idleMs])).toEqual([[2000, CODEX_APP_SERVER_IDLE_MS]]);
+  });
+
+  it("reads the agent of a session key", () => {
+    expect(agentOfSessionKey("agent:main:main")).toBe("main");
+    expect(agentOfSessionKey("agent:R1:telegram:direct:42")).toBe("r1");
+    expect(agentOfSessionKey("global")).toBeNull();
+    expect(agentOfSessionKey("")).toBeNull();
   });
 
   it.each([

@@ -28,8 +28,10 @@
  *  - the wrapper and binary together have stayed under
  *    {@link QUIET_CPU_SHARE} of a core at every look for
  *    {@link CODEX_APP_SERVER_IDLE_MS}, the plugin's own idle window for a
- *    retained thread. The clock starts when this process first sees the
- *    app-server, so a web-server restart starts it over;
+ *    retained thread, and the gateway, asked at every look, has reported no
+ *    work for its agent in that time (a turn waiting on the model uses no
+ *    CPU). The clock starts when this process first sees the app-server, so
+ *    a web-server restart starts it over;
  *  - the gateway, asked right before each stop, says no session has agent work
  *    running or queued (`sessions.list` with `activeOnly`, read-only). When the
  *    gateway does not answer, or answers without a session list, nothing is
@@ -99,8 +101,8 @@ export interface UnitProcess {
 export interface ReaperDeps {
   /** Every process in the gateway unit's cgroup(s). Empty when the unit is not running. */
   listUnitProcesses(): Promise<UnitProcess[]>;
-  /** How many sessions have agent work running or queued. Rejects when the gateway does not answer. */
-  activeSessionCount(): Promise<number>;
+  /** The keys of the sessions that have agent work running or queued ("" for a row without one). Rejects when the gateway does not answer. */
+  activeSessionKeys(): Promise<string[]>;
   /** Still the same process: the pid exists and carries this start time. */
   isAlive(pid: number, startTicks: number): Promise<boolean>;
   signal(pid: number, signal: NodeJS.Signals): void;
@@ -249,15 +251,21 @@ async function readUnitProcess(pid: number): Promise<UnitProcess | null> {
 }
 
 /**
- * How many sessions have agent work running or queued: `sessions.list` with
+ * The sessions that have agent work running or queued: `sessions.list` with
  * `activeOnly`, as `gatewayWsActiveSessions` asks it. An answer without a
  * `sessions` list is not taken as "none", because a stop rests on this answer.
  */
-async function countActiveSessions(): Promise<number> {
+async function activeSessionKeys(): Promise<string[]> {
   const payload = await gatewayWsCall("sessions.list", { activeOnly: true, rowMode: "compact", limit: 50 }, { timeoutMs: 5_000 });
   if (!Array.isArray(payload.sessions)) throw new Error("sessions.list answered without a sessions list");
+  const rows = payload.sessions.map((row) => (row && typeof row === "object" ? (row as Record<string, unknown>) : {}));
   // A row that says it has no active run is not counted; anything else is.
-  return payload.sessions.filter((row) => !(row && typeof row === "object" && (row as Record<string, unknown>).hasActiveRun === false)).length;
+  return rows.filter((row) => row.hasActiveRun !== false).map((row) => (typeof row.key === "string" ? row.key : ""));
+}
+
+/** The agent a session key belongs to (`agent:<id>:…`), or null for any other shape. */
+export function agentOfSessionKey(key: string): string | null {
+  return /^agent:([^:]+):/.exec(key)?.[1]?.toLowerCase() ?? null;
 }
 
 const realDeps: ReaperDeps = {
@@ -272,7 +280,7 @@ const realDeps: ReaperDeps = {
     const found = await Promise.all([...pids].map(readUnitProcess));
     return found.filter((p): p is UnitProcess => p !== null);
   },
-  activeSessionCount: countActiveSessions,
+  activeSessionKeys,
   async isAlive(pid, startTicks) {
     const stat = parseProcStat(await fs.readFile(procFile(pid, "stat"), "utf8").catch(() => ""));
     return stat !== null && stat.state !== "Z" && stat.startTicks === startTicks;
@@ -301,13 +309,18 @@ function quietBudget(elapsedMs: number): number {
   return Math.max(2, (elapsedMs / 1000) * USER_HZ * QUIET_CPU_SHARE);
 }
 
-/** One app-server as last seen: who was in its tree, its CPU then, and since when it has been quiet. */
+/** One app-server as last seen: who was in its tree, its CPU then, since when it has been quiet, and whose it is. */
 interface Watched {
   members: string;
   cpuTicks: number;
   lookedAt: number;
   quietSince: number;
+  /** From its `CODEX_HOME`, read when it is first seen; null for one that is not the plugin's. */
+  agent: string | null;
 }
+
+/** What the gateway said: the keys of the sessions with agent work, or why it said nothing. */
+type GatewayAnswer = { keys: string[] } | { error: string };
 
 /** Still quiet since `before`: same members, no work under it, CPU within the budget for the time that passed. */
 function stayedQuiet(before: Watched, state: ReturnType<typeof treeState>, now: number): boolean {
@@ -378,19 +391,26 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
     lastHold = reason;
   }
 
-  /** The gateway's answer, or null when it gave none. Either way, a reason to wait is logged. */
-  async function activeSessions(waiting: number): Promise<number | null> {
-    let active: number;
+  async function askGateway(): Promise<GatewayAnswer> {
     try {
-      active = await deps.activeSessionCount();
+      return { keys: await deps.activeSessionKeys() };
     } catch (err) {
-      const why = err instanceof Error ? err.message : String(err);
-      hold(`no answer: ${why}`, `left ${waiting} idle codex app-server(s) running: the gateway did not say whether it is busy (${logSafe(why)})`);
-      return null;
+      return { error: err instanceof Error ? err.message : String(err) };
     }
-    if (active > 0) hold("busy", `left ${waiting} idle codex app-server(s) running: ${active} session(s) have agent work running or queued`);
-    else lastHold = "";
-    return active;
+  }
+
+  /** Whether `answer` lets an idle app-server be stopped; when it does not, says why. */
+  function mayStop(answer: GatewayAnswer, waiting: number): boolean {
+    if ("error" in answer) {
+      hold(`no answer: ${answer.error}`, `left ${waiting} idle codex app-server(s) running: the gateway did not say whether it is busy (${logSafe(answer.error)})`);
+      return false;
+    }
+    if (answer.keys.length > 0) {
+      hold("busy", `left ${waiting} idle codex app-server(s) running: ${answer.keys.length} session(s) have agent work running or queued`);
+      return false;
+    }
+    lastHold = "";
+    return true;
   }
 
   async function sweep(): Promise<StoppedAppServer[]> {
@@ -398,37 +418,51 @@ export function createCodexAppServerReaper(overrides: Partial<ReaperDeps> = {}, 
     sweeping = true;
     try {
       const now = deps.now();
+      const trees = gatewayAppServers(await deps.listUnitProcesses());
       const seen = new Set<string>();
-      const idle: { tree: AppServerTree; idleFor: number }[] = [];
-      for (const tree of gatewayAppServers(await deps.listUnitProcesses())) {
+      for (const tree of trees) {
         const key = identity(tree.root);
         seen.add(key);
         const state = treeState(tree);
         const before = watched.get(key);
         const quietSince = before && stayedQuiet(before, state, now) ? before.quietSince : now;
-        watched.set(key, { members: state.members, cpuTicks: state.cpuTicks, lookedAt: now, quietSince });
-        if (now - quietSince >= idleMs) idle.push({ tree, idleFor: now - quietSince });
+        // The plugin starts every app-server with the agent's own Codex home;
+        // one without it is not the plugin's, whoever started it, and is never stopped.
+        const agent = before ? before.agent : await deps.agentOf(tree.root.pid);
+        watched.set(key, { members: state.members, cpuTicks: state.cpuTicks, lookedAt: now, quietSince, agent });
       }
       for (const key of [...watched.keys()]) if (!seen.has(key)) watched.delete(key);
+      if (trees.length === 0) return [];
+
+      // Asked at every look while an app-server runs, not only once one is
+      // idle: a turn can wait on the model for minutes with no CPU to show for
+      // it, so an agent the gateway reports work for is not quiet, and its
+      // clock starts over. The window is then the time since the agent's last
+      // turn, as upstream's own retirement counts it.
+      let answer = await askGateway();
+      if ("keys" in answer) {
+        const working = new Set(answer.keys.map(agentOfSessionKey));
+        for (const w of watched.values()) if (w.agent && working.has(w.agent.toLowerCase())) w.quietSince = now;
+      }
+      const idle = trees.filter((tree) => {
+        const w = watched.get(identity(tree.root));
+        return w !== undefined && w.agent !== null && now - w.quietSince >= idleMs;
+      });
 
       // One at a time, each on a fresh answer and a fresh look: a stop takes
       // up to STOP_GRACE_MS, and a turn may start on the next one meanwhile.
       const stopped: StoppedAppServer[] = [];
-      for (const [index, { tree, idleFor }] of idle.entries()) {
+      for (const [index, tree] of idle.entries()) {
+        if (index > 0) answer = await askGateway();
+        if (!mayStop(answer, idle.length - index)) break;
         const key = identity(tree.root);
-        // The plugin starts every app-server with the agent's own Codex home;
-        // one without it is not the plugin's, whoever started it.
-        const agent = await deps.agentOf(tree.root.pid);
-        if (!agent) continue;
-        const active = await activeSessions(idle.length - index);
-        if (active === null || active > 0) break;
+        const before = watched.get(key);
         // Looked at again after the gateway answered: only a tree that is still
         // what was judged idle, and has stayed quiet meanwhile, is stopped.
         const latest = gatewayAppServers(await deps.listUnitProcesses()).find((t) => identity(t.root) === key);
-        const before = watched.get(key);
-        if (!latest || !before || !stayedQuiet(before, treeState(latest), deps.now())) continue;
+        if (!latest || !before?.agent || !stayedQuiet(before, treeState(latest), deps.now())) continue;
         watched.delete(key);
-        const result = await stop(latest, idleFor, agent);
+        const result = await stop(latest, now - before.quietSince, before.agent);
         if (result) stopped.push(result);
       }
       return stopped;

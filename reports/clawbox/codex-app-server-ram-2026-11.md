@@ -88,7 +88,10 @@ and only stops a process that meets every one of these:
 - the tree has stayed **quiet for 30 min**, under 0.5 % of a core between
   looks. An idle app-server is not completely still: on the lab board each one
   gained 3-4 clock ticks a minute over 35 idle minutes (≈ 0.06 %), so the bar
-  sits ~8× above that;
+  sits ~8× above that. CPU alone is not enough, because a turn waiting on the
+  model uses none: the gateway is asked at every look while an app-server
+  runs, and an agent it reports work for starts its 30 min over, so the
+  window counts from the agent's last turn, as upstream's retirement does;
 - right before **each** stop, the gateway says **no session has agent work
   running or queued** (`sessions.list` with `activeOnly`, read-only, the call
   `gatewayWsActiveSessions` makes). No answer, or an answer without a session
@@ -97,7 +100,8 @@ and only stops a process that meets every one of these:
 The clock is monotonic, because the box has no RTC and timesyncd steps the
 clock forward after a cold boot. A web-server restart starts the clock over.
 The stop is SIGTERM to the launcher, which forwards it to the binary, then
-SIGKILL after 10 s. The plugin sees its child exit
+SIGKILL after 10 s; a tree still there 5 s after that is logged as not
+stopped and tried again a window later. The plugin sees its child exit
 (`markClosed` → the shared entry's close handler drops it from the pool), and
 the agent's next turn starts a fresh app-server and resumes the thread from
 its rollout. That is the same path upstream's idle retirement and every gateway
