@@ -12,10 +12,12 @@ import { join } from "@/lib/runtime-path";
 import {
   type TunnelUnitState,
   getTunnelServiceState,
+  readTunnelTarget,
   readTunnelUrl,
   readTunnelUrlFromJournal,
 } from "@/lib/cloudflared";
 import { type TunnelMode, readNamedTunnelCredential, readTunnelMode } from "@/lib/named-tunnel";
+import { webUiLoopbackUrl } from "@/lib/web-ui-port";
 
 const execAsync = promisify(exec);
 
@@ -31,11 +33,17 @@ const DATA_DIR =
 const TUNNEL_STATE_FILE = join(DATA_DIR, "tunnel-state.json");
 const TUNNEL_PID_FILE = join(DATA_DIR, "tunnel.pid");
 const TUNNEL_URL_FILE = join(DATA_DIR, "tunnel-url.txt");
+// Changes on every boot. A pid recorded under another boot id names nothing of ours.
+const BOOT_ID_FILE = "/proc/sys/kernel/random/boot_id";
 
 export interface TunnelState {
   enabled: boolean;
   tunnelUrl: string | null;
   startedAt: string | null;
+  /** Local origin the spawned cloudflared forwards to (absent in older state files). */
+  target?: string | null;
+  /** Kernel boot id it was spawned under (absent in older state files). */
+  bootId?: string | null;
 }
 
 export interface TunnelStatus {
@@ -54,6 +62,12 @@ export interface TunnelStatus {
   mode: TunnelMode | null;
   /** `<boxHandle>.clawbox.tech` in named mode, else null. Never the token. */
   hostname: string | null;
+  /**
+   * The local origin the running tunnel forwards to — `http://localhost:80` on
+   * the appliance, the web UI's own port on a PC install. Null when nothing
+   * runs or the tunnel did not record it.
+   */
+  target: string | null;
 }
 
 async function ensureDataDir() {
@@ -87,9 +101,34 @@ export async function getTunnelPid(): Promise<number | null> {
   }
 }
 
+async function readBootId(): Promise<string | null> {
+  try {
+    return (await readFile(BOOT_ID_FILE, "utf-8")).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function forgetPid(): Promise<void> {
+  try {
+    await unlink(TUNNEL_PID_FILE);
+  } catch {}
+}
+
 export async function isTunnelRunning(): Promise<boolean> {
   const pid = await getTunnelPid();
   if (!pid) return false;
+
+  // A reboot ends the spawned cloudflared but leaves tunnel.pid behind, and the
+  // number is handed out again on the next boot — often to another process of
+  // this same user, which signal 0 then reports as alive. Status would show a
+  // URL that died with the old boot, and stopTunnel would kill whatever owns
+  // the number now.
+  const [state, bootId] = await Promise.all([readState(), readBootId()]);
+  if (state.bootId && bootId && state.bootId !== bootId) {
+    await forgetPid();
+    return false;
+  }
 
   try {
     // Check if process exists
@@ -97,9 +136,7 @@ export async function isTunnelRunning(): Promise<boolean> {
     return true;
   } catch {
     // Process doesn't exist, clean up stale PID file
-    try {
-      await unlink(TUNNEL_PID_FILE);
-    } catch {}
+    await forgetPid();
     return false;
   }
 }
@@ -152,10 +189,14 @@ export async function getTunnelStatus(): Promise<TunnelStatus> {
   let tunnelUrl: string | null = null;
   let mode: TunnelMode | null = null;
   let hostname: string | null = null;
+  let target: string | null = null;
   if (serviceRunning) {
     tunnelUrl = (await readTunnelUrl()) ?? (await readTunnelUrlFromJournal());
     mode = await readTunnelMode();
     if (mode === "named") hostname = (await readNamedTunnelCredential())?.hostname ?? null;
+    target = await readTunnelTarget();
+  } else if (spawnedRunning) {
+    target = state.target ?? null;
   }
   if (!tunnelUrl && spawnedRunning) tunnelUrl = await getTunnelUrl();
 
@@ -171,6 +212,7 @@ export async function getTunnelStatus(): Promise<TunnelStatus> {
     managedBy: serviceRunning ? "systemd" : spawnedRunning ? "spawned" : null,
     mode,
     hostname,
+    target,
   };
 }
 
@@ -199,11 +241,16 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
   }
 
   await ensureDataDir();
+  // The port this install's web UI really serves on: 80 on the appliance, the
+  // installer's CLAWBOX_PORT on a PC. A hard-coded :80 here published a URL
+  // that answered 502 on every PC install (TASK-2359).
+  const target = webUiLoopbackUrl();
+  const bootId = await readBootId();
 
   return new Promise((resolve) => {
-    // Start cloudflared with quick tunnel (no account needed)
-    // It will expose localhost:80 (the ClawBox web UI)
-    const proc = spawn("cloudflared", ["tunnel", "--url", "http://localhost:80"], {
+    // Start cloudflared with quick tunnel (no account needed), exposing the
+    // ClawBox web UI.
+    const proc = spawn("cloudflared", ["tunnel", "--url", target], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -224,7 +271,7 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
         Promise.all([
           writeFile(TUNNEL_PID_FILE, proc.pid!.toString()),
           writeFile(TUNNEL_URL_FILE, tunnelUrl),
-          writeState({ enabled: true, tunnelUrl, startedAt: new Date().toISOString() }),
+          writeState({ enabled: true, tunnelUrl, startedAt: new Date().toISOString(), target, bootId }),
         ]).then(() => {
           resolve({ success: true, tunnelUrl: tunnelUrl! });
         });
@@ -277,7 +324,9 @@ export async function stopTunnel(): Promise<{ success: boolean; error?: string }
     };
   }
 
-  const pid = await getTunnelPid();
+  // Only a pid that is still ours: after a reboot the recorded number may
+  // belong to an unrelated process (see isTunnelRunning).
+  const pid = (await isTunnelRunning()) ? await getTunnelPid() : null;
 
   if (pid) {
     try {

@@ -19,6 +19,14 @@ export const TUNNEL_URL_FILE = path.join(CLOUDFLARED_DIR, "tunnel.url");
  * volatile and there was no HTTP access log. This file is that record.
  */
 export const TUNNEL_URL_LOG_FILE = path.join(CLOUDFLARED_DIR, "tunnel-url.log");
+/**
+ * The local origin the running unit forwards to, as scripts/run-tunnel.sh
+ * resolved it: the unit's LOCAL_SERVICE_URL, else the web UI's port. Written on
+ * every start and erased on every stop, like `tunnel.url`. A tunnel aimed at a
+ * port the UI does not serve on publishes a URL that answers 502 (TASK-2359),
+ * and before this file nothing short of the journal said where it pointed.
+ */
+export const TUNNEL_TARGET_FILE = path.join(CLOUDFLARED_DIR, "tunnel.target");
 export const TUNNEL_SERVICE = "clawbox-tunnel.service";
 
 /**
@@ -50,6 +58,18 @@ export async function readTunnelUrl(): Promise<string | null> {
     // Sanity-check the shape so we never return garbage.
     if (!TUNNEL_URL_PATTERN.test(raw)) return null;
     return raw.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/** Where the running unit forwards to (`http://localhost:<port>`), if it said. */
+export async function readTunnelTarget(): Promise<string | null> {
+  try {
+    const raw = (await fs.readFile(TUNNEL_TARGET_FILE, "utf-8")).trim();
+    if (!raw) return null;
+    const { protocol } = new URL(raw);
+    return protocol === "http:" || protocol === "https:" ? raw : null;
   } catch {
     return null;
   }

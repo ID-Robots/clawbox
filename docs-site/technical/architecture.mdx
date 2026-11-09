@@ -54,7 +54,7 @@ Everything runs under systemd. The two you will interact with most are **clawbox
 | `clawbox-vnc` / `clawbox-websockify` | Xvfb virtual display `:99` + x11vnc + noVNC proxy | 5900 / 6080 | on-failure |
 | `clawbox-browser` | The box's one Chromium, shared by the owner (remote desktop) and the assistant (CDP); kept running by `clawbox-setup` | 18800 (CDP) | no |
 | `clawbox-heartbeat.timer` + `clawbox-heartbeat.service` | Every 5 min the timer runs the oneshot, which curls `/setup-api/portal/heartbeat-tick` on loopback. The web app then POSTs to the portal — but only when a ClawBox AI token *and* a tunnel URL both exist ([details](/technical/networking#portal-heartbeat)) | — | timer + oneshot |
-| `clawbox-tunnel` | Optional Cloudflare tunnel → port 80: the box's **named** tunnel (`<name>.clawbox.tech`) when the portal issued one, else a quick tunnel; `data/cloudflared/tunnel.mode` says which | — | always |
+| `clawbox-tunnel` | Optional Cloudflare tunnel → the web UI's port (80 on the appliance, `CLAWBOX_PORT` on a PC install): the box's **named** tunnel (`<name>.clawbox.tech`) when the portal issued one, else a quick tunnel; `data/cloudflared/tunnel.mode` says which | — | always |
 | `clawbox-embed` | The memory-search embedder (Qwen3-Embedding-0.6B on llama.cpp) when Memory Shard indexes on the box; woken on demand, stopped after 10 minutes idle | 8081 (loopback) | no |
 | `clawbox-wifi-failover` / `clawbox-ap-watchdog.timer` | Supervised Wi-Fi failover to the hotspot, and the watchdog that re-raises the hotspot until setup completes (every 20 s) | — | oneshot / timer |
 | `clawbox-build-heal` | At every boot, heals a web build an interrupted update left behind | — | oneshot |

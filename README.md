@@ -256,7 +256,8 @@ with them. Run it alone with `--preflight` to see what it would do.
 The web, gateway and terminal ports are selectable with `CLAWBOX_PORT`,
 `CLAWBOX_GATEWAY_PORT` and `CLAWBOX_TERMINAL_WS_PORT`, and
 `CLAWBOX_SKIP_DESKTOP_SERVICES=1` leaves existing VNC, websockify and browser
-services untouched.
+services untouched. Settings → Remote Control's Cloudflare tunnel forwards to
+the web port you chose (3005 by default), not the appliance's port 80.
 
 ### Update
 
