@@ -80,7 +80,7 @@ import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { hasRunningJobs } from "./lib/jobs";
 import { resolveProfile } from "./lib/profile";
-import { runBrowserAllowed, soloRunContext, teamRunContext } from "./lib/run-context";
+import { runBrowserAllowed, runSeesImages, soloRunContext, teamRunContext } from "./lib/run-context";
 import { createRegistrar, hasActiveToolCalls, type Profile, type Registrar } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
@@ -141,7 +141,7 @@ function instructionsFor(edition: Ed, profile: Profile): string {
     return [
       ...(browser
         ? [
-          "These tools drive the Chromium on the ClawBox this run executes on. Use browser_view_local to check a page you built in your working folder: screenshots are archived to the run's evidence folder and come back to you as a written description, because your model cannot see images.",
+          `These tools drive the Chromium on the ClawBox this run executes on. Use browser_view_local to check a page you built in your working folder: screenshots are archived to the run's evidence folder and come back to you as a written description${runSeesImages() ? " by a small vision model; you can see images yourself, so Read the PNG in the evidence folder wherever the detail matters" : ", because your model cannot see images"}.`,
           // The capture is of the run's own tab only (mcp/tools/browser.ts), so a
           // browser_screenshot before anything is open is refused: said up front,
           // that is a step the run does not spend finding out.

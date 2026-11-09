@@ -396,7 +396,7 @@ describe("a team's roles on their own providers", () => {
     await lib.setRoleModels({ worker: { model: "auto" }, planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
     const map = await lib.teamRoleModelMap();
     expect(map).toEqual((await lib.getCodingAgentStatus()).roleModelMap);
-    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 40 });
+    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 50 });
     expect(map.planner.problems.join(" ")).toMatch(/Anthropic account is not connected/);
     expect(map.reviewer).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 1 });
     expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", auto: true });

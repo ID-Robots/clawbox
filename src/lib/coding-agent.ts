@@ -6360,7 +6360,7 @@ export const NO_HELPERS_BRIEF =
  * auto-merge sentence only for a run that can open a pull request or was
  * asked about one.
  */
-export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; visual?: boolean; pullRequest?: boolean; noHelpers?: boolean }): string {
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; visual?: boolean; pullRequest?: boolean; noHelpers?: boolean; seesImages?: boolean }): string {
   const helpers = opts.noHelpers ? NO_HELPERS_BRIEF : leanHelpersBrief(opts.reviewedSeparately);
   // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
   // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
@@ -6370,7 +6370,7 @@ export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolea
     ...LEAN_BRIEF_HEAD,
     helpers,
     ...LEAN_BRIEF_MIDDLE,
-    ...(opts.visual !== false ? [LEAN_VISUAL_BRIEF] : []),
+    ...(opts.visual !== false ? [opts.seesImages ? LEAN_VISUAL_BRIEF_SIGHTED : LEAN_VISUAL_BRIEF] : []),
     ...LEAN_BRIEF_TAIL,
     ...(merge ? [merge] : []),
     LEAN_FINAL_MESSAGE,
@@ -6484,12 +6484,32 @@ const LEAN_BRIEF_MIDDLE = [
 ];
 
 /** The lean brief's browser and visual-verification block — a visual run's only. */
+const VISUAL_BRIEF_SERVE =
+  "To check a web app, start it as a background child in this folder and browser_open http://127.0.0.1:PORT (an unprivileged port; only your own listener is reachable) — or run `node \"$CLAWBOX_PREVIEW\" --ttl 900`, which builds, serves and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim; stop test servers when done.";
+const VISUAL_BRIEF_DRIVE =
+  "Set fields with browser_fill and use browser_click; never drive a page key by key — prove logic with a small node script, and spend the browser on ONE pass, one screenshot per state that matters.";
+
 export const LEAN_VISUAL_BRIEF = [
-  "To check a web app, start it as a background child in this folder and browser_open http://127.0.0.1:PORT (an unprivileged port; only your own listener is reachable) — or run `node \"$CLAWBOX_PREVIEW\" --ttl 900`, which builds, serves and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim; stop test servers when done.",
+  VISUAL_BRIEF_SERVE,
   "You cannot see images: browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with its description — read it before you report done.",
-  // Measured: one run spent 103 steps on single keypresses and was cut off;
-  // each reply is a step, however many tool calls it carries.
-  "Set fields with browser_fill and use browser_click; never drive a page key by key — prove logic with a small node script, and spend the browser on ONE pass, one screenshot per state that matters.",
+  VISUAL_BRIEF_DRIVE,
+].join(" ");
+
+/**
+ * The same block for a run on a model that SEES (an `anthropic` run: every
+ * Claude model reads a PNG through its own Read tool — checked on the box,
+ * 2026-11-09). "You cannot see images" was written for the plan's image-blind
+ * model, and a Claude run that believed it judged its own interface by a
+ * small vision model's paragraph, which names what is on a screen and misses
+ * what is wrong with it: a clipped label, two overlapping controls, a colour
+ * that is off. The description still comes back with every screenshot — it is
+ * the cheap first look — and the picture itself is one Read away, in the
+ * evidence folder the run may already read.
+ */
+export const LEAN_VISUAL_BRIEF_SIGHTED = [
+  VISUAL_BRIEF_SERVE,
+  "browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with a short description of it written by a small vision model. You can see images yourself: Read the saved PNG wherever layout, spacing, colour or exact text matters, and always before you report an interface done — the description names what is on the screen and misses what is wrong with it.",
+  VISUAL_BRIEF_DRIVE,
 ].join(" ");
 
 const LEAN_BRIEF_TAIL = [
@@ -6894,7 +6914,7 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual?: boolean } = {}): string {
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean; seesImages?: boolean }, opts: { visual?: boolean } = {}): string {
   return JSON.stringify({ mcpServers: { clawbox: runClawboxServer(run, { visual: opts.visual !== false, readOnlyTools: false }) } });
 }
 
@@ -6905,7 +6925,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
  * to register — beside the harness servers exactly as the plan carries them.
  * Exported for the contract test.
  */
-export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean; solo?: boolean }): string {
+export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean; seesImages?: boolean }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean; solo?: boolean }): string {
   const clawbox = opts.visual || run.team || plan.readOnlyTools || opts.solo
     ? { clawbox: runClawboxServer(run, { visual: opts.visual, readOnlyTools: plan.readOnlyTools }) }
     : {};
@@ -6913,7 +6933,7 @@ export function buildRunMcpFileConfig(run: { id: string; directory: string; medi
 }
 
 /** The run's own clawbox server entry. */
-function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual: boolean; readOnlyTools: boolean }) {
+function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean; seesImages?: boolean }, opts: { visual: boolean; readOnlyTools: boolean }) {
   // A run judged NOT visual (`looksVisual`) holds neither the browser family
   // nor the media tools: its server is told so, and registers only what is
   // left (a team run's `team_message`). Omitted, today's server.
@@ -6939,6 +6959,10 @@ function runClawboxServer(run: { id: string; directory: string; media?: RunMedia
       // Absent means the browser family registers, as it always has; "0"
       // is a run that holds none of it (mcp/lib/run-context.ts).
       ...(visual ? {} : { CLAWBOX_RUN_BROWSER: "0" }),
+      // A run on a model that reads pictures itself (an `anthropic` run):
+      // the server's own words then say where the PNG is instead of "your
+      // model cannot see images" (LEAN_VISUAL_BRIEF_SIGHTED).
+      ...(visual && run.seesImages ? { CLAWBOX_RUN_SEES_IMAGES: "1" } : {}),
       // Only for a run of a coding team, and all four or none: the server
       // registers `team_message` from them (mcp/lib/run-context.ts), and
       // the tool speaks as THIS run — the route then checks the claim
@@ -7016,6 +7040,9 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
     visual,
     pullRequest: opts.draftPullRequests === true || opts.pullRequestMentioned === true,
     noHelpers: opts.noHelpers === true,
+    // Every Claude model reads a picture; the plan's own model and a Codex
+    // run keep the description alone (LEAN_VISUAL_BRIEF_SIGHTED).
+    seesImages: opts.provider === "anthropic",
   });
   // The media the run actually holds: none for a run without the tools.
   const media = visual ? opts.run?.media : undefined;
@@ -7151,7 +7178,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // registers only what is left (a team's `team_message`), so no browser
     // profile starts and no media allowance is handed to a run that reads.
     // A single writing run always gets it: its server registers `assistant_message`.
-    else if (visual || opts.run.team || !opts.readOnly) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual: visual && !opts.readOnly }));
+    else if (visual || opts.run.team || !opts.readOnly) args.push("--mcp-config", buildRunMcpConfig({ ...opts.run, ...(opts.provider === "anthropic" ? { seesImages: true } : {}) }, { visual: visual && !opts.readOnly }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
@@ -12920,7 +12947,7 @@ function spawnRun(
   const mcpPlan = run.readOnly ? undefined : runMcpPlan.get(run.id);
   const runMcp: RunMcpArgs | null = mcpPlan && !codex
     ? {
-        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team, readOnly: run.readOnly }, mcpPlan, { visual: runHoldsVisualTools(run.visual), solo: !run.team && !run.readOnly })),
+        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team, readOnly: run.readOnly, ...(run.provider === "anthropic" ? { seesImages: true } : {}) }, mcpPlan, { visual: runHoldsVisualTools(run.visual), solo: !run.team && !run.readOnly })),
         allowedTools: mcpPlan.allowedTools,
         disallowedTools: mcpPlan.disallowedTools,
         readOnlyTools: mcpPlan.readOnlyTools,

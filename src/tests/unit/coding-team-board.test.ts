@@ -1026,6 +1026,34 @@ describe("the team's pull request on the board", () => {
     expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
   });
 
+  it("re-offers a finished task for a REJECTED final review — once per team, the verdict off the board, never against its two tries", () => {
+    const b = accepted();
+    // Nothing to fix before a final review rejected, and an accepted one sends nothing back.
+    expect(() => lib.reopenForFinalReview(b, SYSTEM, "t1", "findings")).toThrow(/Only a rejected final review/);
+    lib.recordFinalReview(b, REVIEWER, "rejected", "mcp/README.md names a folder that is gone.");
+    expect(() => lib.reopenForFinalReview(b, REVIEWER, "t1", "findings")).toThrow(lib.BoardAccessError);
+    const t = lib.reopenForFinalReview(b, SYSTEM, "t1", "The team's final review rejected it: mcp/README.md names a folder that is gone.");
+    expect(t).toMatchObject({ status: "pending", assigned_to: null, reviewReoffers: 1, rejections: 1, review: { verdict: "rejected", notes: expect.stringMatching(/names a folder that is gone/) } });
+    expect(lib.countedAttempts(t)).toBe(0);
+    // The round is counted and the rejected verdict gives way to the review of the fix; the log keeps it.
+    expect(b.finalReview).toBeNull();
+    expect(b.finalFixRounds).toBe(1);
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "final_review", actor: { kind: "system" }, task_id: "t1", message: expect.stringMatching(/^Task t1 re-offered for the final review's findings: /) });
+    expect(b.log.some((e) => e.type === "final_review" && e.actor.kind === "reviewer" && /^Final review rejected/.test(e.message))).toBe(true);
+    expect(() => lib.reopenForFinalReview(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
+    // Round trip: both counts survive the file.
+    lib.saveBoard(b);
+    const back = lib.loadBoard(b.id)!;
+    expect(back.finalFixRounds).toBe(1);
+    expect(back.tasks[0].reviewReoffers).toBe(1);
+    expect(back.finalReview).toBeNull();
+    // The review of the fix rules in its place — and a second rejection opens no second round.
+    back.tasks[0].status = "complete";
+    lib.recordFinalReview(back, REVIEWER, "rejected", "Still wrong.");
+    expect(() => lib.reopenForFinalReview(back, SYSTEM, "t1", "Still wrong.")).toThrow(/at most once/);
+    expect(back.finalReview).toMatchObject({ verdict: "rejected", notes: "Still wrong." });
+  });
+
   it("re-offers a task whose worker the team stopped itself (held past its budget) — the system's, the why as its notes, never against its two tries", () => {
     const b = board();
     lib.postTask(b, PLANNER, { task_description: "Wire app.js", files_hint: ["app.js"] });
