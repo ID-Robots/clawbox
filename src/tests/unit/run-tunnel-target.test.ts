@@ -193,7 +193,7 @@ describe("run-tunnel.sh — the port the unit forwards to (TASK-2359)", () => {
     });
 
     it("asks the web UI's own unit for the PORT it serves on", async () => {
-      writeFileSync(path.join(root, "ui-unit.env"), "HOME=/home/owner NODE_ENV=production PORT=3005 HOSTNAME=0.0.0.0\n");
+      writeFileSync(path.join(root, "ui-unit.env"), `HOME=${root} NODE_ENV=production PORT=3005 HOSTNAME=0.0.0.0\n`);
       expect(await forwardedTo({})).toBe("http://localhost:3005");
       expect(calls()).toContain("systemctl:show -p Environment --value clawbox-setup.service");
     });

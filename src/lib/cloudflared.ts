@@ -127,8 +127,14 @@ export async function readTunnelUrlHistory(limit = 10): Promise<TunnelUrlRecord[
  * "remote access is off" in that state is the worst thing this API can do.
  *
  * Newest line wins: the unit restarts on failure and every restart publishes a
- * new hostname.
+ * new hostname. And only within the current attempt: scripts/run-tunnel.sh
+ * opens every attempt with a `[run-tunnel] … tunnel ->` line, and a hostname
+ * printed before the newest one belongs to a cloudflared that has exited — when
+ * the newest request failed (no DNS yet at boot), that is no URL at all. A
+ * journal without those lines (a unit started by hand) is read whole.
  */
+const ATTEMPT_START = /^\[run-tunnel\] (?:forwarding tunnel|named tunnel) ->/;
+
 export async function readTunnelUrlFromJournal(lines = 200): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -136,7 +142,9 @@ export async function readTunnelUrlFromJournal(lines = 200): Promise<string | nu
       ["-u", TUNNEL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
       { maxBuffer: 4 * 1024 * 1024 },
     );
-    const found = stdout.match(TUNNEL_URL_IN_TEXT);
+    const journal = stdout.split("\n");
+    const attempt = journal.findLastIndex((line) => ATTEMPT_START.test(line));
+    const found = journal.slice(Math.max(attempt, 0)).join("\n").match(TUNNEL_URL_IN_TEXT);
     return found?.length ? found[found.length - 1].replace(/\/+$/, "") : null;
   } catch {
     return null;

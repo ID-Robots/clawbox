@@ -317,17 +317,38 @@ describe("readTunnelUrlFromJournal", () => {
     expect(await cloudflared.readTunnelUrlFromJournal()).toBeNull();
   });
 
-  it("skips the quick-tunnel API endpoint named in a failed request (boot before DNS)", async () => {
+  // TASK-2359: at boot, before DNS answers, the newest quick-tunnel request
+  // fails and cloudflared names the API endpoint in its error. Neither that
+  // endpoint nor the hostname of the attempt before it is the box's URL now.
+  const FAILED_REQUEST =
+    'failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: lookup api.trycloudflare.com: server misbehaving';
+
+  it("returns nothing when the newest attempt's quick-tunnel request failed", async () => {
     execFileMock.mockReturnValue({
       stdout: [
-        "https://stat-door-tournament-resorts.trycloudflare.com",
         "[run-tunnel] forwarding tunnel -> http://localhost:80",
-        "failed to request quick Tunnel: Post \"https://api.trycloudflare.com/tunnel\": dial tcp: lookup api.trycloudflare.com: server misbehaving",
+        "https://stat-door-tournament-resorts.trycloudflare.com",
+        "[run-tunnel] stopped by signal — exiting cleanly",
+        "[run-tunnel] forwarding tunnel -> http://localhost:80",
+        FAILED_REQUEST,
       ].join("\n"),
     });
-    expect(await cloudflared.readTunnelUrlFromJournal()).toBe(
-      "https://stat-door-tournament-resorts.trycloudflare.com",
-    );
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBeNull();
+  });
+
+  it("returns the hostname of the current attempt, never an earlier one", async () => {
+    execFileMock.mockReturnValue({
+      stdout: [
+        "[run-tunnel] forwarding tunnel -> http://localhost:80",
+        "https://from-the-attempt-before.trycloudflare.com",
+        "[run-tunnel] named tunnel -> http://localhost:3005 (credential on file, token not shown)",
+        "[run-tunnel] named tunnel exited after 1s (status 1); falling back to the quick tunnel",
+        "[run-tunnel] forwarding tunnel -> http://localhost:3005",
+        FAILED_REQUEST,
+        "INF |  https://current-attempt.trycloudflare.com  |",
+      ].join("\n"),
+    });
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBe("https://current-attempt.trycloudflare.com");
   });
 
   it("never returns a hostname that is not a quick tunnel", async () => {
