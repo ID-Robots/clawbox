@@ -100,6 +100,14 @@ describe("cloudflared — readTunnelUrl", () => {
     await fs.writeFile(TUNNEL_URL_FILE, "   \n");
     expect(await cloudflared.readTunnelUrl()).toBeNull();
   });
+
+  // TASK-2359: cloudflared's quick-tunnel API endpoint, which an older
+  // run-tunnel.sh published at boot from the error cloudflared logs before DNS
+  // answers. It is never this box's address.
+  it("rejects https://api.trycloudflare.com", async () => {
+    await fs.writeFile(TUNNEL_URL_FILE, "https://api.trycloudflare.com\n");
+    expect(await cloudflared.readTunnelUrl()).toBeNull();
+  });
 });
 
 describe("cloudflared — startTunnelService", () => {
@@ -307,6 +315,19 @@ describe("readTunnelUrlFromJournal", () => {
   it("returns null instead of throwing when journalctl is unavailable", async () => {
     execFileMock.mockReturnValue({ error: new Error("journalctl: command not found") });
     expect(await cloudflared.readTunnelUrlFromJournal()).toBeNull();
+  });
+
+  it("skips the quick-tunnel API endpoint named in a failed request (boot before DNS)", async () => {
+    execFileMock.mockReturnValue({
+      stdout: [
+        "https://stat-door-tournament-resorts.trycloudflare.com",
+        "[run-tunnel] forwarding tunnel -> http://localhost:80",
+        "failed to request quick Tunnel: Post \"https://api.trycloudflare.com/tunnel\": dial tcp: lookup api.trycloudflare.com: server misbehaving",
+      ].join("\n"),
+    });
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBe(
+      "https://stat-door-tournament-resorts.trycloudflare.com",
+    );
   });
 
   it("never returns a hostname that is not a quick tunnel", async () => {

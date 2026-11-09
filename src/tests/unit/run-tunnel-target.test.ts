@@ -54,6 +54,12 @@ for arg in "$@"; do
     while true; do sleep 0.2; done
   fi
 done
+# FAKE_QUICK_ERROR: what cloudflared logs when it cannot reach the quick-tunnel
+# API (a box at boot, DNS not answering yet); "exit" then fails like it does.
+if [ -n "\${FAKE_QUICK_ERROR:-}" ]; then
+  echo 'failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp: lookup api.trycloudflare.com: server misbehaving' >&2
+  [ "\${FAKE_QUICK_ERROR}" = exit ] && exit 1
+fi
 echo "INF |  ${QUICK_URL}  |" >&2
 while true; do sleep 0.2; done
 `,
@@ -237,6 +243,25 @@ describe("run-tunnel.sh — the port the unit forwards to (TASK-2359)", () => {
     expect(argvLines().every((argv) => argv.endsWith(" --url http://localhost:3005"))).toBe(true);
     process.kill(-second.child.pid!, "SIGTERM");
     expect(await second.exited).toBe(0);
+  });
+
+  describe("restart at boot, before DNS answers", () => {
+    it("never publishes the quick-tunnel API endpoint from cloudflared's error as the box's URL", async () => {
+      const run = start({ LOCAL_SERVICE_URL: "http://localhost:80", FAKE_QUICK_ERROR: "exit" });
+      expect(await run.exited).toBe(1);
+      expect(existsSync(cf("tunnel-url.log")) ? readFileSync(cf("tunnel-url.log"), "utf-8") : "").not.toContain(
+        "api.trycloudflare.com",
+      );
+      expect(existsSync(cf("tunnel.url"))).toBe(false);
+    });
+
+    it("publishes the real URL that follows the error", async () => {
+      const run = start({ LOCAL_SERVICE_URL: "http://localhost:80", FAKE_QUICK_ERROR: "continue" });
+      await waitFor(published);
+      expect(readFileSync(cf("tunnel.url"), "utf-8").trim()).toBe(QUICK_URL);
+      process.kill(-run.child.pid!, "SIGTERM");
+      expect(await run.exited).toBe(0);
+    });
   });
 
   it("the named tunnel forwards to the same port as the quick one", async () => {

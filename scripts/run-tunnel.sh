@@ -279,7 +279,11 @@ while IFS= read -r line; do
   # Forward to stdout so systemd journals it.
   printf '%s\n' "$line"
   if [ ! -s "$TUNNEL_URL_FILE" ]; then
-    url=$(printf '%s\n' "$line" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -n 1 || true)
+    # Never api.trycloudflare.com: that is the endpoint cloudflared asks for a
+    # quick tunnel, named in the error it logs when that fails — at boot,
+    # before DNS answers, it was published as the box's URL until the restart.
+    url=$(printf '%s\n' "$line" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' |
+      grep -vx 'https://api\.trycloudflare\.com' | head -n 1 || true)
     if [ -n "${url:-}" ]; then
       record_url "$url"
     fi

@@ -412,6 +412,18 @@ describe("tunnel — startTunnel", () => {
     expect(result.tunnelUrl).toBe("https://stderr-route.trycloudflare.com");
   });
 
+  it("never takes the quick-tunnel API endpoint from a failed request for the tunnel's URL", async () => {
+    execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
+    spawnMock.mockImplementation(() =>
+      makeFakeProc(
+        "failed to request quick Tunnel: Post \"https://api.trycloudflare.com/tunnel\": dial tcp: lookup api.trycloudflare.com: server misbehaving",
+        "INF |  https://the-real-one.trycloudflare.com  |",
+      ),
+    );
+    const result = await tunnel.startTunnel();
+    expect(result).toEqual({ success: true, tunnelUrl: "https://the-real-one.trycloudflare.com" });
+  });
+
   it("reports spawn errors", async () => {
     execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
     spawnMock.mockImplementation(() => makeErroringProc(new Error("ENOENT")));

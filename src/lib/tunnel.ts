@@ -286,7 +286,9 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
       const output = data.toString();
       // Look for the tunnel URL in output
       // cloudflared outputs: "Your quick Tunnel has been created! Visit it at (it may take some time to be reachable): https://xxx.trycloudflare.com"
-      const urlMatch = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+      // Never api.trycloudflare.com: cloudflared names that endpoint in the
+      // error it logs when it cannot get a quick tunnel (no DNS yet, say).
+      const urlMatch = output.match(/https:\/\/(?!api\.trycloudflare\.com)[a-z0-9-]+\.trycloudflare\.com/i);
       if (urlMatch && !resolved) {
         tunnelUrl = urlMatch[0];
         resolved = true;

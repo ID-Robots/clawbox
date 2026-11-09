@@ -34,12 +34,17 @@ export const TUNNEL_SERVICE = "clawbox-tunnel.service";
  * Cloudflare Quick Tunnel hostname, or this box's own named-tunnel hostname
  * (`<boxHandle>.clawbox.tech`, one label, see src/lib/named-tunnel.ts), which
  * scripts/run-tunnel.sh writes when it runs the named tunnel.
+ *
+ * `api.trycloudflare.com` is never one: it is the endpoint cloudflared asks
+ * for a quick tunnel, and it names it in the error it logs when that fails —
+ * `failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel"`,
+ * which is what a box logs at boot before its DNS answers (TASK-2359).
  */
 const TUNNEL_URL_PATTERN =
-  /^https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)\/?$/i;
+  /^https:\/\/(?:(?!api\.trycloudflare\.com)[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)\/?$/i;
 /** The same two shapes, unanchored, for the journal. */
 const TUNNEL_URL_IN_TEXT =
-  /https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)(?![a-z0-9.-])/gi;
+  /https:\/\/(?:(?!api\.trycloudflare\.com)[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)(?![a-z0-9.-])/gi;
 
 export async function isInstalled(): Promise<boolean> {
   try {
