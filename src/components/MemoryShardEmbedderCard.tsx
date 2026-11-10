@@ -13,6 +13,7 @@ import {
 import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import type { LocalEmbeddingModelId } from "@/lib/embed-runtime-ids";
 import { unavailableReasonKey } from "@/lib/local-embedding-client";
+import { formatBytes } from "@/lib/format-bytes";
 import StatusMessage from "./StatusMessage";
 import { CARD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
@@ -41,7 +42,7 @@ async function refusal(res: Response): Promise<string> {
 }
 
 export default function MemoryShardEmbedderCard() {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [status, setStatus] = useState<EmbedderChoiceStatus | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [detail, setDetail] = useState<string | null>(null);
@@ -160,7 +161,7 @@ export default function MemoryShardEmbedderCard() {
           </label>
           <select
             id="memory-shard-embedder-model-select"
-            className="mt-1 w-full rounded-lg border border-white/10 bg-[var(--surface-card)] px-2 py-1.5 text-xs text-[var(--text-secondary)] disabled:opacity-50"
+            className="mt-1 w-full rounded-lg border border-white/10 bg-[var(--surface-card)] px-2 py-1.5 text-base sm:text-xs text-[var(--text-secondary)] disabled:opacity-50"
             value={status.localModel}
             disabled={busy}
             onChange={(e) => void choose("local", e.target.value as LocalEmbeddingModelId)}
@@ -168,10 +169,16 @@ export default function MemoryShardEmbedderCard() {
           >
             {status.localModels.map((m) => (
               <option key={m.id} value={m.id} disabled={!m.available && !m.active}>
+                {/* What picking it costs, before it is picked: a model not on
+                    the box yet is a download of this size first. */}
                 {m.label}
+                {!m.installed && m.available && m.bytes ? ` · ${t("localModels.install.download")} ${formatBytes(m.bytes, locale) ?? ""}` : ""}
               </option>
             ))}
           </select>
+          <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-model-hint">
+            {t("localModels.embed.switchHint")}
+          </p>
           {status.localModels.filter((m) => !m.available && !m.active).map((m) => (
             <p key={m.id} className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid={`memory-shard-embedder-model-${m.id}-unavailable`}>
               {m.label}: {t(unavailableReasonKey(m.reason))}

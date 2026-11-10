@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "Inte nedladdad",
   "localModels.embed.present": "{model} finns på den här lådan ({size}).",
   "localModels.embed.remove": "Ta bort",
+  "localModels.embed.sourceUnknown": "Det gick ännu inte att läsa var minnessökningen körs, så bytet väntar; boxen tillfrågas igen om en stund.",
   "localModels.embed.switchHint": "Att byta modell bäddar in varje fil på nytt; den andra modellens fil finns kvar tills du tar bort den.",
   "localModels.embed.title": "Modell för minnessökning",
   "localModels.embed.unavailable.gpuMemory": "Kräver 6 GB ledigt grafikminne, och just nu är det mindre. Stoppa andra lokala modeller och försök igen.",

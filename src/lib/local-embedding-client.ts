@@ -1,8 +1,10 @@
 /**
- * The browser's half of switching the model on this box (TASK-2411), shared by
- * Settings → Local AI's memory-search card and Memory Shard's embedder card so
- * the two cannot drift: the switch, then the FULL pass every change of
- * embedder needs — the index belongs to the model that wrote it.
+ * The browser's half of switching the model on this box (TASK-2411), for
+ * Settings → Local AI's memory-search card: the switch, then the FULL pass
+ * every change of embedder needs — the index belongs to the model that wrote
+ * it. Memory Shard's embedder card keeps its own `choose`, because there the
+ * same steps are one flow with the cloud/local switch (a download first, its
+ * phases on the card); both cards share the reason sentences below.
  *
  * Client-safe: fetch only.
  */

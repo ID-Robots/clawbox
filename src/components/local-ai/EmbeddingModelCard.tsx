@@ -110,16 +110,31 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
   // BOX, so over an index in the cloud it would quietly move it off the cloud
   // too; that move is Memory Shard's switch, which says what it costs.
   const [indexSource, setIndexSource] = useState<"cloud" | "local" | null>(null);
+  // A read that failed (an unreadable config answers 503) is asked again
+  // every few seconds, with a line saying why "Use" waits meanwhile.
+  const [sourceFailed, setSourceFailed] = useState(false);
+  const [sourceTick, setSourceTick] = useState(0);
   useEffect(() => {
     let alive = true;
+    let retry: ReturnType<typeof setTimeout> | null = null;
     void fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
+      .catch(() => null)
       .then((body: { source?: unknown } | null) => {
-        if (alive && (body?.source === "cloud" || body?.source === "local")) setIndexSource(body.source);
-      })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, [status?.model]);
+        if (!alive) return;
+        if (body?.source === "cloud" || body?.source === "local") {
+          setIndexSource(body.source);
+          setSourceFailed(false);
+        } else {
+          setSourceFailed(true);
+          retry = setTimeout(() => setSourceTick((n) => n + 1), 5_000);
+        }
+      });
+    return () => {
+      alive = false;
+      if (retry) clearTimeout(retry);
+    };
+  }, [status?.model, sourceTick]);
   const [rowError, setRowError] = useState<string | null>(null);
 
   const fetchModel = async (model: LocalEmbeddingModelOption) => {
@@ -240,6 +255,11 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
           {indexSource === "cloud" && (
             <li className="text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="local-ai-embed-models-cloud">
               {t("localModels.embed.cloudInUse")}
+            </li>
+          )}
+          {indexSource === null && sourceFailed && status.models.some((m) => m.available && m.installed && !m.active) && (
+            <li className="text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="local-ai-embed-models-source-unknown">
+              {t("localModels.embed.sourceUnknown")}
             </li>
           )}
           {rowError && (
