@@ -80,6 +80,10 @@ export async function healWorktreePaths(worktreePath: string): Promise<HealOutco
       const stat = await handle.stat();
       if (!stat.isFile() || stat.size > MAX_HEAL_BYTES) continue;
       const before = await handle.readFile("utf8");
+      // Not UTF-8 (git's -I only skips a file with a NUL in it): decoding has
+      // already replaced every byte it could not read, and writing that back
+      // would damage the file in a commit that says it only rewrote a path.
+      if (before.includes("\uFFFD")) continue;
       const after = toFolderPaths(before, project, project);
       if (after === before) continue;
       await handle.truncate(0);

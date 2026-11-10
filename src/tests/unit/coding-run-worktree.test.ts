@@ -585,6 +585,24 @@ describe("merging a run's branch home", () => {
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("release");
   });
 
+  it("never moves the checkout of a team that is STILL working: its workers merge into whatever the checkout is on", async () => {
+    // A single run can settle while a team's worker is out in its own
+    // worktree. Put back on the base, the checkout would take that worker's
+    // merge on the base — past the team's review and its pull request.
+    git(dir, "checkout", "-q", "-b", "clawbox/team-live0001");
+    const made = await withWork("run-teamlive01");
+    const asked: string[] = [];
+    const out = await mergeRunBranch({ projectDir: dir, branch: made.branch, base: made.base, message: "Coding agent: test", teamLive: async (branch) => { asked.push(branch); return true; } });
+    expect(asked).toEqual(["clawbox/team-live0001"]);
+    expect(out).toMatchObject({ ok: false, reason: "not_on_base" });
+    if (out.ok) return;
+    expect(out.detail).toBe("the project is on clawbox/team-live0001, the branch of a coding team that is still working");
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-live0001");
+    // The same folder once that team has settled: put back, as for any finished team's.
+    const later = await mergeRunBranch({ projectDir: dir, branch: made.branch, base: made.base, message: "Coding agent: test", teamLive: async () => false });
+    expect(later).toMatchObject({ ok: true, merged: true, returnedFrom: "clawbox/team-live0001" });
+  });
+
   it("puts a CLEAN checkout a coding team left on its branch back on the base, and lands the run's work there", async () => {
     // A team leaves the checkout on its branch; a run started there forks from
     // the base (forkBase), so its merge home was refused before it began.

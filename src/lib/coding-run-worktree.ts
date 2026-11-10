@@ -379,7 +379,9 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
  *     (`forkBase`), so its merge home was refused before it began. Runs worked
  *     for hours and then "did not land" (team-yykapje9, 95M tokens,
  *     2026-11-07). A CLEAN checkout on a team's branch is put back on the
- *     base first; the team's branch stays, with everything on it;
+ *     base first; the team's branch stays, with everything on it. Only a
+ *     FINISHED team's (`teamLive`): a team still working merges its workers
+ *     into whatever the checkout is on, so its checkout is never moved;
  *   - only when the checkout is clean. The team's merge commits what it finds
  *     lying there first; that is right for a tree only the team uses and
  *     wrong for the owner's own folder, where uncommitted work is theirs.
@@ -396,6 +398,14 @@ export function mergeRunBranch(input: {
   branch: string;
   base: string;
   message: string;
+  /**
+   * Is this coding team's branch one a team is STILL working on? Asked before
+   * the checkout is put back on the base from it: a live team merges its
+   * workers into whatever the checkout is on, so moving it would land their
+   * work on the base, past the team's own review and pull request. Without it
+   * every team's branch is taken for a finished team's.
+   */
+  teamLive?: (branch: string) => Promise<boolean>;
 }): Promise<
   /** `returnedFrom`: the coding team's branch the checkout was on, when it was put back on the base for this merge. */
   | { ok: true; merged: boolean; commit: string | null; returnedFrom?: string }
@@ -409,6 +419,10 @@ export function mergeRunBranch(input: {
       // On a coding team's branch, clean, with work to land: back to the base.
       // With nothing to land the checkout is left where the team left it.
       if (TEAM_BRANCH_RE.test(on) && ((await commitsAhead(dir, input.branch, input.base)) ?? 0) > 0) {
+        // A team that is still working owns the checkout: left exactly where it is.
+        if (input.teamLive && (await input.teamLive(on))) {
+          return { ok: false, reason: "not_on_base", detail: `the project is on ${on}, the branch of a coding team that is still working` };
+        }
         const seen = await readCheckout(dir, "normal");
         if (seen.ok && !seen.changed && ok(await gitIn(dir, ["checkout", "-q", input.base]))) {
           returnedFrom = on;

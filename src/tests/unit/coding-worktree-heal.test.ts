@@ -112,6 +112,22 @@ describe("healWorktreePaths", () => {
     expect(fs.readFileSync(path.join(wt.path, "blob.bin")).equals(blob)).toBe(true);
   });
 
+  it("leaves a text file that is not UTF-8 exactly as it is", async () => {
+    // git's -I only skips a file with a NUL in it; a Latin-1 note passes, and
+    // decoding it as UTF-8 swaps each byte it cannot read for U+FFFD. Written
+    // back, that is a damaged file inside a commit that says "paths".
+    const wt = await worker();
+    const latin1 = Buffer.concat([Buffer.from("caf"), Buffer.from([0xe9]), Buffer.from(`\nrun: node ${wt.path}/mcp/server.mjs\n`)]);
+    fs.writeFileSync(path.join(wt.path, "notes-latin1.txt"), latin1);
+    fs.writeFileSync(path.join(wt.path, "README.md"), `Run node ${wt.path}/mcp/server.mjs\n`);
+    git(wt.path, "add", "-A");
+    git(wt.path, "commit", "-q", "-m", "work");
+    const out = await healWorktreePaths(wt.path);
+    expect(out).toMatchObject({ ok: true, files: ["README.md"] });
+    expect(fs.readFileSync(path.join(wt.path, "notes-latin1.txt")).equals(latin1)).toBe(true);
+    expect(fs.readFileSync(path.join(wt.path, "README.md"), "utf8")).toBe(`Run node ${dir}/mcp/server.mjs\n`);
+  });
+
   it("touches only tracked files: what the run left untracked is not its commit to make", async () => {
     const wt = await worker();
     fs.writeFileSync(path.join(wt.path, "scratch.log"), `ran in ${wt.path}\n`);

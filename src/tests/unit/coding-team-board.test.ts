@@ -1026,6 +1026,24 @@ describe("the team's pull request on the board", () => {
     expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
   });
 
+  it("hands the fix worker the WHOLE of a final review's findings, with the instruction before them", () => {
+    // The reviewer's notes run to 2,000 characters (MAX_NOTES_CHARS) and
+    // finalFixNotes puts an instruction before them. Cut at 2,000 again, the
+    // instruction took the room of the findings' tail — the worker never read
+    // the last of them, and a second rejection ends the team.
+    const b = accepted();
+    const findings = `${"A wrong path in README.md. ".repeat(72)}LAST: mcp/README.md still names the old folder.`;
+    expect(findings.length).toBeGreaterThan(1_900);
+    expect(findings.length).toBeLessThanOrEqual(2_000);
+    lib.recordFinalReview(b, REVIEWER, "rejected", findings);
+    const handed = `The team's final review of the MERGED result rejected it. Every task's work is already merged into your folder: fix exactly what the review names below, in the files as they are now, run the checks it names, and change nothing else — do not redo the task.\n\n${findings}`;
+    expect(handed.length).toBeGreaterThan(2_000);
+    expect(handed.length).toBeLessThanOrEqual(lib.MAX_FINAL_FIX_NOTES_CHARS);
+    const t = lib.reopenForFinalReview(b, SYSTEM, "t1", handed);
+    expect(t.review?.notes).toBe(handed);
+    expect(t.review?.notes.endsWith("LAST: mcp/README.md still names the old folder.")).toBe(true);
+  });
+
   it("re-offers a finished task for a REJECTED final review — once per team, the verdict off the board, never against its two tries", () => {
     const b = accepted();
     // Nothing to fix before a final review rejected, and an accepted one sends nothing back.

@@ -196,6 +196,7 @@ import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME
 import { chosenProjectFolderFrom, defaultProjectFolder, ensureDefaultProjectFolder, PROJECT_FOLDER_CONFIG_KEY, projectFolderFrom } from "@/lib/project-folder";
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
+import { isSettledTeamStatus } from "@/lib/coding-team-status";
 import { registerServerApp } from "@/lib/app-proxy";
 import { registerOrStartServerApp } from "@/lib/app-server-start";
 import { APP_ID_RE } from "@/lib/code-projects";
@@ -13644,6 +13645,24 @@ async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> 
 const STOPPED_UNMERGED = "the run was stopped before it finished, so its work stays on its branch, unmerged; the owner decides whether to merge it";
 
 /** Every live run working in this exact folder — the question "is anybody still in there?". */
+/**
+ * Is a coding team that has not settled the owner of this branch
+ * (`mergeRunBranch`'s `teamLive`)? Read off the boards, which say so whether
+ * or not one of the team's runs is going this second — between a worker and
+ * its reviewer, or waiting for a seat, a team has no live run and is still
+ * working. Loaded on the call: the board module imports this one. A read that
+ * fails answers YES — the checkout is then left alone, which is the safe way
+ * to be wrong.
+ */
+async function teamStillWorkingOn(branch: string): Promise<boolean> {
+  try {
+    const { listBoards } = await import("@/lib/coding-team-board");
+    return listBoards().some((board) => board.branch === branch && !isSettledTeamStatus(board.status));
+  } catch {
+    return true;
+  }
+}
+
 function liveRunsIn(directory: string): CodingRun[] {
   return loadRuns().filter((r) => isLive(r.status) && r.directory === directory);
 }
@@ -13805,6 +13824,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       branch: wt.branch,
       base: wt.base,
       message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
+      teamLive: teamStillWorkingOn,
     });
     if (!merged.ok) {
       // Recorded, not just logged: this is the state the run's page reads to

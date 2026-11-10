@@ -2434,10 +2434,15 @@ async function finishWork(team: LiveTeam, task: TeamTask, source: CodingRunSourc
           // is said in the project's own folder first (coding-worktree-heal.ts;
           // the run's settle did this for what it committed, this covers what
           // the harvest above committed after it).
-          const healed = await healWorktreePaths(worktree.path).catch(() => null);
+          const healed = await healWorktreePaths(worktree.path)
+            .catch((err: unknown): { ok: false; detail: string } => ({ ok: false, detail: err instanceof Error ? err.message : String(err) }));
           if (healed?.ok && healed.files.length) {
             const n = healed.files.length;
             bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} wrote its temporary folder's path into ${n} file${n === 1 ? "" : "s"} (${clipList(healed.files)}); each mention now names the project's own folder.` });
+          } else if (healed && !healed.ok) {
+            // Said, not swallowed: the branch is merged next and the folder
+            // removed, so a path this left in a file is dead from then on.
+            bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id}'s files could not be checked for its temporary folder's path (${firstLine(healed.detail, 200)}); a path it wrote into a file may still name that folder, which is removed once its work is merged.` });
           }
           const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
           if (!merged.ok) {

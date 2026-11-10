@@ -26,7 +26,7 @@ import { recordShotNote } from "../../src/lib/coding-shot-notes";
 import { runBrowserAllowed, runContext, runSeesImages } from "../lib/run-context";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
-import { text, type Registrar, type ToolResult } from "../lib/register";
+import { MAX_IMAGE_BASE64, text, type Registrar, type ToolResult } from "../lib/register";
 import { zEnumOf, zInt, zText } from "../lib/schema";
 
 interface BrowserReply {
@@ -414,14 +414,26 @@ function pageResult(message: string, reply: BrowserReply): ToolResult {
     lines.push("Screenshot not archived: this run's evidence folder is full or cannot be written.");
   }
   if (reply.vision) lines.push(`Vision inference: ${JSON.stringify(reply.vision)}`);
+  // The picture rides along only when it FITS: the gate every tool result
+  // passes (capResult) swaps an image over MAX_IMAGE_BASE64 for a line saying
+  // it was left out, and a tall page's PNG is over it. A run told "judge by
+  // the picture itself" beside that line was judging nothing — so the words
+  // follow what is really returned, and say where the picture is instead.
+  const shown = runSeesImages() && !!reply.screenshot && reply.screenshot.length <= MAX_IMAGE_BASE64;
+  const tooLarge = runSeesImages() && !!reply.screenshot && !shown;
+  if (tooLarge) {
+    lines.push(saved
+      ? `The picture is too large to return here: read ${saved} from your evidence folder ($CLAWBOX_RUN_ARTIFACTS_DIR), or capture a smaller region.`
+      : "The picture is too large to return here: capture a smaller region.");
+  }
   if (reply.description) {
     lines.push(`What the page shows: ${reply.description}`);
   } else {
     const reason = reply.descriptionError ? ` (${reply.descriptionError})` : "";
-    lines.push(`No vision description is available${reason}. ${runSeesImages() && reply.screenshot ? "Judge by the picture itself." : "Rely on the URL, the title and your knowledge of the code."}`);
+    lines.push(`No vision description is available${reason}. ${shown ? "Judge by the picture itself." : "Rely on the URL, the title and your knowledge of the code."}`);
   }
   const content: ToolResult["content"] = [{ type: "text", text: lines.join("\n") }];
-  if (runSeesImages() && reply.screenshot) content.push({ type: "image", data: reply.screenshot, mimeType: "image/png" });
+  if (shown && reply.screenshot) content.push({ type: "image", data: reply.screenshot, mimeType: "image/png" });
   return { content };
 }
 

@@ -42,7 +42,8 @@
  *     moved instead: the port is rewritten to a spare one in the command, or
  *     in the package script it runs (`bun run serve` → the `serve` script),
  *     and PORT is set for a server that reads it. A command that names the
- *     port nowhere this can see fails at once with `port_in_use`, saying so.
+ *     port nowhere this can see fails at once with `port_in_use`, saying so;
+ *     and when no spare port can be had at all, with `no_spare_port`.
  *   static mode — no start command. An existing build script is run once
  *     (bounded), and the first build output folder that exists, or the project
  *     itself, is served by the tiny static server below.
@@ -458,7 +459,15 @@ async function main() {
     // The manifest's fixed port, already taken: the installed app's own
     // server, almost always. This copy goes on a spare port (see the header).
     if (plan.port && await portBusy(plan.port)) {
-      const spare = await sparePort();
+      let spare;
+      try {
+        spare = await sparePort();
+      } catch (err) {
+        // Said as a PREVIEW_FAILED line like every other way this ends: an
+        // unhandled rejection printed neither a URL nor a failure, and the
+        // run waiting on one of them saw nothing.
+        return fail("no_spare_port", `port ${plan.port} from clawbox.json is already in use and no spare port could be had (${err instanceof Error ? err.message : String(err)})`);
+      }
       const moved = retargetCommand(dir, plan.command, plan.port, spare);
       if (!moved) {
         return fail(

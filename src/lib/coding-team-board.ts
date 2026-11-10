@@ -1243,6 +1243,14 @@ export function reopenForCi(board: TeamBoard, actor: Actor, taskId: string, note
  * rejection ends the team as the first one used to.
  */
 export const MAX_FINAL_FIX_ROUNDS = 1;
+/**
+ * The room a re-offered task's notes get: a final review's findings at their
+ * own cap (`MAX_NOTES_CHARS`, coding-team-reviewer.ts — 2,000) AND the
+ * instruction `finalFixNotes` puts before them. Cut at the reviewer's 2,000,
+ * the instruction took the room of the findings' tail: the fix worker never
+ * read the last of them, and a second rejection ends the team.
+ */
+export const MAX_FINAL_FIX_NOTES_CHARS = 2_600;
 
 /**
  * The team's FINAL REVIEW rejected the merged result: a task its findings
@@ -1268,7 +1276,7 @@ export function reopenForFinalReview(board: TeamBoard, actor: Actor, taskId: str
     throw new Error("Only a rejected final review sends a task back.");
   }
   const now = Date.now();
-  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.review = { verdict: "rejected", notes: notes.slice(0, MAX_FINAL_FIX_NOTES_CHARS), at: now };
   task.rejections += 1;
   task.reviewReoffers += 1;
   task.status = "pending";
