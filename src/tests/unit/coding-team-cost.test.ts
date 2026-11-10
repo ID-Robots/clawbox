@@ -95,6 +95,10 @@ describe("the planner's repo map", () => {
     // ("any chain where each step builds on the last, runs serially").
     expect(planner.PLANNER_BRIEF).toMatch(/steps that each build on the last .* are ONE task/);
     expect(planner.PLANNER_BRIEF).toMatch(/Only a chain too long for one session/);
+    // And a yardstick, because "what one session can hold" was the planner's
+    // guess: told only the rule above, it planned the same release as four
+    // tasks — backend, then MCP beside UI, then release (team-iogwx6jt).
+    expect(planner.PLANNER_BRIEF).toMatch(/one session does a whole feature release of a small app in one go/);
     expect(planner.PLANNER_BRIEF).not.toMatch(/any chain where each step builds on the last, runs serially/);
     // The other lever of before — a task marked bulk for a cheaper model — went on 2026-10-30.
     expect(planner.PLANNER_BRIEF).not.toMatch(/bulk/);
