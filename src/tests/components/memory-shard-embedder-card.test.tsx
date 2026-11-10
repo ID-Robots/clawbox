@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/tes
 import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 import MemoryShardEmbedderCard from "@/components/MemoryShardEmbedderCard";
 import { I18nProvider } from "@/lib/i18n";
+import { formatBytes } from "@/lib/format-bytes";
 
 type Choice = {
   source: "cloud" | "local";
@@ -184,10 +185,84 @@ describe("MemoryShardEmbedderCard — which model on this box (TASK-2411)", () =
     expect(urls()).not.toContain("/setup-api/embed/install");
   });
 
-  it("has no model picker while the index is in the cloud", async () => {
-    choice = { ...choice, source: "cloud", localModel: "qwen3-embedding-0.6b", localModels: rows({}) } as Choice;
+});
+
+/**
+ * Picking the model BEFORE leaving the cloud (TASK-2418). The picker used to
+ * appear only once the index was already on this box, so an owner on the cloud
+ * who wanted the 4B had to download the 0.6B, be re-indexed with it, and then
+ * switch and re-index again.
+ */
+describe("MemoryShardEmbedderCard — which model, chosen before the switch (TASK-2418)", () => {
+  type Row = { id: string; label: string; active: boolean; installed: boolean; available: boolean; reason: string | null; bytes?: number | null };
+  const rows = (fourB: Partial<Row>, small: Partial<Row> = {}): Row[] => [
+    { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", active: true, installed: false, available: true, reason: null, ...small },
+    { id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", active: false, installed: false, available: true, reason: null, bytes: 4_280_000_000, ...fourB },
+  ];
+  const onCloud = (localModels: Row[]) => {
+    choice = { ...choice, source: "cloud", localInstalled: false, localModel: "qwen3-embedding-0.6b", localModels } as Choice;
+  };
+
+  it("offers the picker on the cloud where more than one model runs here, and choosing only remembers it", async () => {
+    onCloud(rows({}));
+    render(<I18nProvider><MemoryShardEmbedderCard /></I18nProvider>);
+    const select = await screen.findByTestId("memory-shard-embedder-model-select") as HTMLSelectElement;
+    expect(select.value).toBe("qwen3-embedding-0.6b");
+    // Says what the pick is for, in words — not the switch hint of a box already on it.
+    await waitFor(() => expect(screen.getByTestId("memory-shard-embedder-model-hint").textContent)
+      .toBe(clawkeepTranslations.en["clawkeep.memory.embedder.pickBeforeSwitch"]));
+    for (const table of Object.values(clawkeepTranslations)) expect(table["clawkeep.memory.embedder.pickBeforeSwitch"]).toBeTruthy();
+    // What picking costs is on the option itself.
+    expect((select.querySelector('option[value="qwen3-embedding-4b"]') as HTMLOptionElement).textContent)
+      .toContain(formatBytes(4_280_000_000, "en") as string);
+
+    fireEvent.change(select, { target: { value: "qwen3-embedding-4b" } });
+    expect(select.value).toBe("qwen3-embedding-4b");
+    // Nothing downloaded, nothing switched: the index stays in the cloud until "On this box".
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toEqual([]);
+    expect(screen.getByTestId("memory-shard-embedder-cloud")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("\"On this box\" then downloads the picked model, switches onto it by name and asks for a full pass", async () => {
+    onCloud(rows({}));
+    render(<MemoryShardEmbedderCard />);
+    fireEvent.change(await screen.findByTestId("memory-shard-embedder-model-select"), { target: { value: "qwen3-embedding-4b" } });
+    fireEvent.click(screen.getByTestId("memory-shard-embedder-local"));
+    await waitFor(() => expect(urls()).toContain("/setup-api/clawkeep/memory/index"));
+    expect(urls()).toEqual(["/setup-api/embed/install", "/setup-api/clawkeep/memory/provider", "/setup-api/clawkeep/memory/index"]);
+    expect(calls[0].body).toEqual({ model: "qwen3-embedding-4b" });
+    expect(calls[1].body).toEqual({ source: "local", localModel: "qwen3-embedding-4b" });
+    expect(calls[2].body).toEqual({ mode: "full" });
+  });
+
+  it("goes onto a picked model that is already here without downloading it", async () => {
+    onCloud(rows({ installed: true }));
+    render(<MemoryShardEmbedderCard />);
+    fireEvent.change(await screen.findByTestId("memory-shard-embedder-model-select"), { target: { value: "qwen3-embedding-4b" } });
+    fireEvent.click(screen.getByTestId("memory-shard-embedder-local"));
+    await waitFor(() => expect(urls()).toContain("/setup-api/clawkeep/memory/index"));
+    expect(urls()).not.toContain("/setup-api/embed/install");
+    expect(calls.find((c) => c.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "local", localModel: "qwen3-embedding-4b" });
+  });
+
+  it("keeps the plain switch when the owner leaves the pick on the model the box is set to", async () => {
+    onCloud(rows({}));
+    render(<MemoryShardEmbedderCard />);
+    await screen.findByTestId("memory-shard-embedder-model-select");
+    fireEvent.click(screen.getByTestId("memory-shard-embedder-local"));
+    await waitFor(() => expect(urls()).toContain("/setup-api/clawkeep/memory/index"));
+    expect(calls.find((c) => c.url === "/setup-api/embed/install")?.body).toBeNull();
+    expect(calls.find((c) => c.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "local" });
+  });
+
+  it("has no picker on the cloud where only one model runs on this box (a Jetson)", async () => {
+    onCloud(rows({ available: false, reason: "jetson" }));
     render(<MemoryShardEmbedderCard />);
     await screen.findByTestId("memory-shard-embedder-card");
     expect(screen.queryByTestId("memory-shard-embedder-model")).toBeNull();
+    fireEvent.click(screen.getByTestId("memory-shard-embedder-local"));
+    await waitFor(() => expect(urls()).toContain("/setup-api/clawkeep/memory/index"));
+    expect(calls.find((c) => c.url === "/setup-api/clawkeep/memory/provider")?.body).toEqual({ source: "local" });
   });
 });

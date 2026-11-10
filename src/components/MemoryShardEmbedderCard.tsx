@@ -32,6 +32,12 @@ import { CARD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-u
  * the box offers, the ones it cannot run disabled with the reason beside
  * them. A change of model is a change of embedder like a change of place —
  * downloaded first when it is not here, then the same switch and full pass.
+ *
+ * And BEFORE the switch (TASK-2418): on the cloud, where more than one model
+ * runs on this box, the same picker chooses which one "On this box" moves to —
+ * so an owner can go straight to the 4B instead of downloading the 0.6B, being
+ * indexed with it, and switching again. Choosing there only remembers the
+ * pick; pressing "On this box" downloads it when it is not here and switches.
  */
 
 type Phase = "idle" | "downloading" | "switching" | "switched";
@@ -47,6 +53,8 @@ export default function MemoryShardEmbedderCard() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [detail, setDetail] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The model picked for "On this box" while the index is in the cloud. */
+  const [pick, setPick] = useState<LocalEmbeddingModelId | null>(null);
   const live = useRef(true);
   useEffect(() => {
     live.current = true;
@@ -70,6 +78,14 @@ export default function MemoryShardEmbedderCard() {
   // An older server, or a read that failed: there is no choice to draw.
   if (!status) return null;
   const busy = phase === "downloading" || phase === "switching";
+  // On the cloud the picker is a choice made ahead of the switch, so it is
+  // drawn only where there IS a choice: a Jetson runs one model, and its
+  // owner has nothing to pick. A pick that is no longer on offer (the GPU
+  // filled up meanwhile) falls back to the model the box is set to.
+  const runnable = status.localModels.filter((m) => m.available || m.active);
+  const pickAhead = status.source === "cloud" && runnable.length > 1;
+  const picked = pick !== null && runnable.some((m) => m.id === pick) ? pick : status.localModel;
+  const showPicker = status.localModels.length > 1 && (status.source === "local" || pickAhead);
 
   const choose = async (next: EmbeddingSource, model?: LocalEmbeddingModelId) => {
     const modelChange = next === "local" && model !== undefined && model !== status.localModel;
@@ -110,7 +126,10 @@ export default function MemoryShardEmbedderCard() {
       });
       if (!index.ok && index.status !== 409) throw new Error(t("clawkeep.memory.startFailed"));
       notifyMemoryShardChanged();
-      if (live.current) setPhase("switched");
+      if (live.current) {
+        setPhase("switched");
+        setPick(null);
+      }
     } catch (err) {
       if (live.current) {
         setPhase("idle");
@@ -120,6 +139,46 @@ export default function MemoryShardEmbedderCard() {
       await load();
     }
   };
+
+  // On this box the picker sits under the switch it drives; on the cloud it
+  // is a choice for "On this box", read after the line about the cloud.
+  const picker = showPicker ? (
+    <div className="mt-3" data-testid="memory-shard-embedder-model">
+      <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest" htmlFor="memory-shard-embedder-model-select">
+        {t("clawkeep.memory.embedder.localModel")}
+      </label>
+      <select
+        id="memory-shard-embedder-model-select"
+        className="mt-1 w-full rounded-lg border border-white/10 bg-[var(--surface-card)] px-2 py-1.5 text-base sm:text-xs text-[var(--text-secondary)] disabled:opacity-50"
+        value={pickAhead ? picked : status.localModel}
+        disabled={busy}
+        onChange={(e) => {
+          const id = e.target.value as LocalEmbeddingModelId;
+          // On the cloud: remembered for "On this box". On this box: the switch.
+          if (pickAhead) setPick(id);
+          else void choose("local", id);
+        }}
+        data-testid="memory-shard-embedder-model-select"
+      >
+        {status.localModels.map((m) => (
+          <option key={m.id} value={m.id} disabled={!m.available && !m.active}>
+            {/* What picking it costs, before it is picked: a model not on
+                the box yet is a download of this size first. */}
+            {m.label}
+            {!m.installed && m.available && m.bytes ? ` · ${t("localModels.install.download")} ${formatBytes(m.bytes, locale) ?? ""}` : ""}
+          </option>
+        ))}
+      </select>
+      <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-model-hint">
+        {t(pickAhead ? "clawkeep.memory.embedder.pickBeforeSwitch" : "localModels.embed.switchHint")}
+      </p>
+      {status.localModels.filter((m) => !m.available && !m.active).map((m) => (
+        <p key={m.id} className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid={`memory-shard-embedder-model-${m.id}-unavailable`}>
+          {m.label}: {t(unavailableReasonKey(m.reason))}
+        </p>
+      ))}
+    </div>
+  ) : null;
 
   return (
     <div className={CARD} data-testid="memory-shard-embedder-card">
@@ -144,7 +203,7 @@ export default function MemoryShardEmbedderCard() {
               role="radio"
               aria-checked={status.source === option}
               disabled={busy || blocked}
-              onClick={() => void choose(option)}
+              onClick={() => void choose(option, option === "local" && pickAhead ? picked : undefined)}
               data-testid={`memory-shard-embedder-${option}`}
               className={`${status.source === option ? SEGMENT_ON : SEGMENT_OFF} disabled:opacity-50 disabled:cursor-not-allowed`}
             >
@@ -154,42 +213,12 @@ export default function MemoryShardEmbedderCard() {
         })}
       </div>
 
-      {status.source === "local" && status.localModels.length > 1 && (
-        <div className="mt-3" data-testid="memory-shard-embedder-model">
-          <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest" htmlFor="memory-shard-embedder-model-select">
-            {t("clawkeep.memory.embedder.localModel")}
-          </label>
-          <select
-            id="memory-shard-embedder-model-select"
-            className="mt-1 w-full rounded-lg border border-white/10 bg-[var(--surface-card)] px-2 py-1.5 text-base sm:text-xs text-[var(--text-secondary)] disabled:opacity-50"
-            value={status.localModel}
-            disabled={busy}
-            onChange={(e) => void choose("local", e.target.value as LocalEmbeddingModelId)}
-            data-testid="memory-shard-embedder-model-select"
-          >
-            {status.localModels.map((m) => (
-              <option key={m.id} value={m.id} disabled={!m.available && !m.active}>
-                {/* What picking it costs, before it is picked: a model not on
-                    the box yet is a download of this size first. */}
-                {m.label}
-                {!m.installed && m.available && m.bytes ? ` · ${t("localModels.install.download")} ${formatBytes(m.bytes, locale) ?? ""}` : ""}
-              </option>
-            ))}
-          </select>
-          <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-model-hint">
-            {t("localModels.embed.switchHint")}
-          </p>
-          {status.localModels.filter((m) => !m.available && !m.active).map((m) => (
-            <p key={m.id} className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid={`memory-shard-embedder-model-${m.id}-unavailable`}>
-              {m.label}: {t(unavailableReasonKey(m.reason))}
-            </p>
-          ))}
-        </div>
-      )}
+      {!pickAhead && picker}
 
       <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-hint">
         {t(status.source === "cloud" ? "clawkeep.memory.embedder.cloudHint" : "clawkeep.memory.embedder.localHint")}
       </p>
+      {pickAhead && picker}
       {/* This branch is unreachable against any server on this branch — the
           route hard-codes `cloudSupported: true` since 2026-09-18 — and is kept
           for the two cases that can still produce a false: an OLDER server this

@@ -758,6 +758,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.embedder.local": "このボックス",
   "clawkeep.memory.embedder.localHint": "このボックス自身の llama.cpp で動く Qwen3。何もボックスの外に出ません。モデルは約 640 MB の初回ダウンロードです。",
   "clawkeep.memory.embedder.localModel": "このボックスのモデル",
+  "clawkeep.memory.embedder.pickBeforeSwitch": "「このボックス」を選んだときに使うモデルです。まだこのボックスにない場合は先にダウンロードされ、そのモデルでインデックスが再構築されます。",
   "clawkeep.memory.embedder.switched": "切り替えました。インデックスを再構築しています。",
   "clawkeep.memory.embedder.switching": "モデルを切り替えてインデックスを再構築中…",
   "clawkeep.memory.embedder.title": "埋め込みモデル",

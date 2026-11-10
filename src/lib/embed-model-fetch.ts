@@ -11,12 +11,14 @@ import type { LocalEmbeddingVariant } from "./embed-runtime-ids";
  * disk first, and verified against the Hub's sha256 before it is put where the
  * embedder looks (TASK-2411).
  *
- * WHY NOT THE ROOT STEP. The 0.6B still arrives through install.sh's
- * `embed_model`, exactly as before. The 4B is offered only on an x86 PC, and
- * neither x86 install has that step (install-x64.sh does not dispatch it and
- * the desktop integration refuses it), while data/embed/models is the web
- * server's own directory on every install — so fetching it needs no privilege
- * at all, and asks for none.
+ * WHY NOT THE ROOT STEP. On the appliance the 0.6B still arrives through
+ * install.sh's `embed_model`, exactly as before. The 4B is offered only on an
+ * x86 PC, and neither x86 install has that step (install-x64.sh does not
+ * dispatch it and the desktop integration refuses it), while
+ * data/embed/models is the web server's own directory on every install — so
+ * fetching it needs no privilege at all, and asks for none. The same holds for
+ * the 0.6B on an x86 PC, which comes this way too (TASK-2418,
+ * embed-install-task.ts).
  *
  *  - RESUMABLE: the bytes go to `<file>.part`, and a later attempt — after a
  *    dropped link, a cancelled task or a restarted server — asks the Hub for

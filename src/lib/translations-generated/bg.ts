@@ -758,6 +758,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.embedder.local": "На тази кутия",
   "clawkeep.memory.embedder.localHint": "Qwen3 на собствения llama.cpp на тази кутия. Нищо не напуска кутията; моделът е еднократно изтегляне от около 640 MB.",
   "clawkeep.memory.embedder.localModel": "Модел на тази кутия",
+  "clawkeep.memory.embedder.pickBeforeSwitch": "Към кой модел превключва „На тази кутия“. Модел, който още не е тук, първо се изтегля, след което индексът се изгражда наново с него.",
   "clawkeep.memory.embedder.switched": "Сменено. Индексът се изгражда наново.",
   "clawkeep.memory.embedder.switching": "Смяна на модела и изграждане на индекса наново…",
   "clawkeep.memory.embedder.title": "Модел за embedding",

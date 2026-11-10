@@ -758,6 +758,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.embedder.local": "本设备",
   "clawkeep.memory.embedder.localHint": "在本设备自己的 llama.cpp 上运行 Qwen3。数据不会离开设备；模型需一次性下载约 640 MB。",
   "clawkeep.memory.embedder.localModel": "本机模型",
+  "clawkeep.memory.embedder.pickBeforeSwitch": "选择“本设备”时使用的模型。若它还不在本设备上，会先下载，然后用它重建索引。",
   "clawkeep.memory.embedder.switched": "已切换。正在重建索引。",
   "clawkeep.memory.embedder.switching": "正在切换模型并重建索引…",
   "clawkeep.memory.embedder.title": "嵌入模型",

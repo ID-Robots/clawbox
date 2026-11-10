@@ -20,7 +20,9 @@ vi.mock("child_process", async (importOriginal) => {
 
 import {
   ROOT_STEP_LAUNCHER,
+  RootStepNotImplementedError,
   RootStepUnavailableError,
+  rootStepImplementedHere,
   rootStepRepairCommand,
   startRootStep,
 } from "@/lib/root-step-runner";
@@ -117,6 +119,72 @@ describe("startRootStep", () => {
     failWith("Job failed. See 'journalctl -xe': No such file or directory\n");
     const err = await startRootStep("post_update").catch((e: unknown) => e);
     expect(err).not.toBeInstanceOf(RootStepUnavailableError);
+  });
+});
+
+/**
+ * A step this PC's install does not implement at all is not an update cut
+ * short, and must not be dressed as one (TASK-2418): Memory Shard's "On this
+ * box" told an x86 owner to run install-x64.sh's root_step_contract for
+ * `embed_model`, which neither x86 install has ever had.
+ */
+describe("a step this PC's install does not implement", () => {
+  const NOT_PERMITTED = "clawbox-run-root-step: step not permitted from the web server: embed_model\n";
+
+  it.each([
+    ["the desktop integration", true, /the ClawBox desktop integration does not implement it/],
+    ["install-x64.sh", ["/etc/clawbox/x64.env"], /the x86 install \(install-x64\.sh\) does not implement it/],
+  ] as const)("says so on %s, and names no repair command", async (_name, files, said) => {
+    x64Install(files as boolean | string[]);
+    failWith(NOT_PERMITTED);
+    const err = await startRootStep("embed_model", { noBlock: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RootStepNotImplementedError);
+    const e = err as RootStepNotImplementedError;
+    expect(e.message).toMatch(said);
+    expect(e.message).toContain('"embed_model"');
+    expect(e.message).toMatch(/only on the ClawBox appliance \(Jetson\) install/);
+    expect(e.message).not.toMatch(/root_step_contract|older than this build|sudo bash/);
+    expect("repairCommand" in e).toBe(false);
+    // Still "the launcher could not be asked": no journal of an earlier run is read as this one's.
+    expect(e.rootStepUnavailable).toBe(true);
+    expect(e.rootStepNotImplemented).toBe(true);
+    expect(e.code).toBe(1);
+    expect(e.stderr).toBe(NOT_PERMITTED);
+  });
+
+  it("keeps the repair for a step the x86 install DOES implement — that launcher really is out of step", async () => {
+    x64Install(["/etc/clawbox/x64.env"]);
+    failWith("clawbox-run-root-step: step not permitted from the web server: user_add\n");
+    const err = await startRootStep("user_add").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RootStepUnavailableError);
+    expect((err as Error).message).toContain("install-x64.sh --step root_step_contract");
+  });
+
+  it("changes nothing on the appliance, where install.sh has every step", async () => {
+    failWith(NOT_PERMITTED);
+    const err = await startRootStep("embed_model").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RootStepUnavailableError);
+    expect((err as Error).message).toContain(REPAIR);
+  });
+
+  it("does not touch a step that ran — its own failure is the step's", async () => {
+    x64Install(true);
+    failWith("Job for clawbox-root-update@embed_model.service failed because the control process exited with error code.\n");
+    const err = await startRootStep("embed_model").catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(RootStepNotImplementedError);
+    expect(err).not.toBeInstanceOf(RootStepUnavailableError);
+  });
+
+  it("answers per install: null on the appliance, the install's own list on a PC", () => {
+    expect(rootStepImplementedHere("embed_model")).toBeNull();
+    x64Install(true);
+    expect(rootStepImplementedHere("embed_model")).toBe(false);
+    expect(rootStepImplementedHere("bootstrap_updater")).toBe(true);
+    vi.restoreAllMocks();
+    x64Install(["/etc/clawbox/x64.env"]);
+    expect(rootStepImplementedHere("embed_model")).toBe(false);
+    expect(rootStepImplementedHere("bootstrap_updater")).toBe(false);
+    expect(rootStepImplementedHere("set_hostname")).toBe(true);
   });
 });
 
