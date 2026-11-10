@@ -157,13 +157,15 @@ describe("the vocabulary", () => {
     expect(CODING_PROVIDERS.filter(runsOnCodex)).toEqual(["openai"]);
   });
 
-  it("offers Opus 5.5 first and defaults to it, with the plain id spelled out", () => {
+  it("offers Opus 5.5 first and defaults to Sonnet 5.5, with the plain id spelled out", () => {
     // The literal is the point. An unnamed run's model reaches Claude Code as
     // a string, so a typo here ("claude-opus-5.5", an alias) is not a type
     // error — it is a run that fails several minutes in, on the owner's bill.
     expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]);
-    expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-opus-5-5");
-    expect(defaultModelForProvider("anthropic")).toBe("claude-opus-5-5");
+    // Sonnet 5.5 since 2026-11-10 — the model a team's worker gets, so a plan
+    // of one task run as a single run is written by the same model.
+    expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-sonnet-5-5");
+    expect(defaultModelForProvider("anthropic")).toBe("claude-sonnet-5-5");
     expect(defaultModelForProvider("clawbox-ai")).toBeNull();
   });
 

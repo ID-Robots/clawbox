@@ -116,9 +116,31 @@ export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { effortCap: RoleEffort |
  * stored keeps exactly that, a stored `standard`/`economy` included.
  */
 export const ROLE_DEFAULT_MODELS: Readonly<Record<CodingProvider, Readonly<Record<ModelRole, string>>>> = {
-  anthropic: { planner: "claude-fable-5-2", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+  // Anthropic, measured on this box (2026-11-10, docs/benchmarks/coding-anthropic-models-2026-11.md):
+  // Sonnet 5.5 wrote both benchmark tasks to the same hidden-test score as
+  // Opus 5.5 for a quarter to a half of the cost, so it is the worker; Opus
+  // 5.5 stays the reviewer, a stronger reader than the writer it judges;
+  // Fable 5.2 plans.
+  anthropic: { planner: "claude-fable-5-2", worker: "claude-sonnet-5-5", reviewer: "claude-opus-5-5" },
   openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
   "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
+};
+
+/**
+ * Where a READING role starts with NO effort stored for it, on a provider
+ * whose models repay a lower level — below `ROLE_DEFAULTS`' cap, which stays
+ * the ceiling for an effort the owner did store.
+ *
+ * Anthropic: `high` for the planner and the reviewer. It is the level
+ * Anthropic names as the starting point for Fable 5.2 ("gains above it are
+ * uneven"), and on this box the planner wrote the same four-task plan at
+ * `high` as at `xhigh` in 4 minutes instead of 9, for $2.47 instead of $4.39
+ * (2026-11-10) — the planner was the most expensive run of the team it
+ * planned. An owner who stores `xhigh` for the role still gets `xhigh`.
+ * ClawBox AI and OpenAI are not listed: nothing was measured there.
+ */
+export const ROLE_AUTO_EFFORT: Readonly<Partial<Record<CodingProvider, Readonly<Partial<Record<ModelRole, RoleEffort>>>>>> = {
+  anthropic: { planner: "high", reviewer: "high" },
 };
 
 /** The steps a role's run gets: the owner's ceiling, or the role's cap where it has one. */
@@ -388,7 +410,11 @@ export function resolveRoleRun(
   // owner's choice can lower a planner or a reviewer, never lift it past xhigh.
   const cap = ROLE_DEFAULTS[role].effortCap;
   const chosen = own.effort ?? ownerEffort;
-  const effort = cap ? weakerEffort(chosen, cap) : chosen;
+  let effort = cap ? weakerEffort(chosen, cap) : chosen;
+  // Nothing stored for the role's effort: a reading role starts where its
+  // provider's models are best value (ROLE_AUTO_EFFORT), never above it.
+  const start = own.effort === undefined ? ROLE_AUTO_EFFORT[provider]?.[role] : undefined;
+  if (start) effort = weakerEffort(effort, start);
   return { provider, model, effort, tier, auto };
 }
 

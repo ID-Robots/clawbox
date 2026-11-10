@@ -99,8 +99,16 @@ export const ANTHROPIC_MODELS = [
 
 export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 
-/** The model an `anthropic` run gets when the caller named none. */
-export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
+/**
+ * The model an `anthropic` run gets when the caller named none — the same one
+ * a team's worker gets (`ROLE_DEFAULT_MODELS` in coding-role-models.ts), so a
+ * one-task plan run as a single run is written by the model its tasks would
+ * have been. Sonnet 5.5 since 2026-11-10: on this box it reached the same
+ * hidden-test score as Opus 5.5 on both benchmark tasks for a quarter to a
+ * half of the cost (docs/benchmarks/coding-anthropic-models-2026-11.md). A
+ * caller that names a model still gets that model.
+ */
+export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-sonnet-5-5";
 
 /**
  * The models offered for an `openai` run — the Codex CLI's own picker list.
@@ -150,7 +158,10 @@ export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
  */
 export const ECONOMY_MODELS: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "deepseek-v4-flash",
-  anthropic: "claude-sonnet-5",
+  // Haiku 5.5 since 2026-11-10: Sonnet 5.5 became a worker's default, so the
+  // cheaper tier is the model under it — it scored 111 of 111 on the same
+  // hidden cases for a fraction of Sonnet's cost.
+  anthropic: "claude-haiku-5-5",
   openai: "gpt-5.6-luna",
 };
 

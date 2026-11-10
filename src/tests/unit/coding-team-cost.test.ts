@@ -88,6 +88,14 @@ describe("the planner's repo map", () => {
     expect(planner.PLANNER_BRIEF).toMatch(/test_commands/);
     expect(planner.PLANNER_BRIEF).toMatch(/ONE task runs as a single ordinary run/);
     expect(planner.PLANNER_BRIEF).toMatch(/edit mostly the same files/);
+    // Steps that build on each other are one task too (2026-11-10): Todo 1.3.0
+    // planned as a chain of five (backend → MCP ∥ UI → undo → release) cost
+    // $17.33 and 74 minutes where one run of the same goal cost $1.68 and 13,
+    // both to 48 of 48 hidden checks — and the brief used to ASK for the chain
+    // ("any chain where each step builds on the last, runs serially").
+    expect(planner.PLANNER_BRIEF).toMatch(/steps that each build on the last .* are ONE task/);
+    expect(planner.PLANNER_BRIEF).toMatch(/Only a chain too long for one session/);
+    expect(planner.PLANNER_BRIEF).not.toMatch(/any chain where each step builds on the last, runs serially/);
     // The other lever of before — a task marked bulk for a cheaper model — went on 2026-10-30.
     expect(planner.PLANNER_BRIEF).not.toMatch(/bulk/);
   });

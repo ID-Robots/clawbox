@@ -264,7 +264,8 @@ describe("a team's roles on their own providers", () => {
     await connectAnthropic();
 
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
-    expect(planner).toMatchObject({ provider: "anthropic", requestedModel: "claude-fable-5-1", effort: "xhigh", modelRole: "planner" });
+    // An Anthropic reader with no effort stored for it starts at `high` (ROLE_AUTO_EFFORT).
+    expect(planner).toMatchObject({ provider: "anthropic", requestedModel: "claude-fable-5-1", effort: "high", modelRole: "planner" });
     await finished(planner.id);
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     // The team's own provider: nothing moved the workers.
@@ -350,10 +351,10 @@ describe("a team's roles on their own providers", () => {
     await expect(refused).rejects.toMatchObject({ kind: "not_ready", message: expect.stringMatching(/ClawBox AI is not connected/) });
     await expect(refused).rejects.toMatchObject({ message: expect.not.stringMatching(/Anthropic/) });
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
-    expect(worker).toMatchObject({ provider: "anthropic", requestedModel: "claude-opus-5-5", modelRole: "worker" });
+    expect(worker).toMatchObject({ provider: "anthropic", requestedModel: "claude-sonnet-5-5", modelRole: "worker" });
     await finished(worker.id);
     expect(handed(worker.id, "provider")).toBe("anthropic");
-    expect(handed(worker.id, "model")).toBe("claude-opus-5-5");
+    expect(handed(worker.id, "model")).toBe("claude-sonnet-5-5");
   });
 
   it("keeps a resumed run on the provider and model its session was opened on, whatever the role says now", async () => {
@@ -396,7 +397,7 @@ describe("a team's roles on their own providers", () => {
     await lib.setRoleModels({ worker: { model: "auto" }, planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
     const map = await lib.teamRoleModelMap();
     expect(map).toEqual((await lib.getCodingAgentStatus()).roleModelMap);
-    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 50 });
+    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "high", auto: false, ready: false, relativeCost: 50 });
     expect(map.planner.problems.join(" ")).toMatch(/Anthropic account is not connected/);
     expect(map.reviewer).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 1 });
     expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", auto: true });

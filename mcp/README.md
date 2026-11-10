@@ -1167,10 +1167,11 @@ STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 What a team COSTS is on its answer too. By default the planner (and the lead)
 runs on the provider's best model and the workers and reviewers on its middle
-one — `claude-fable-5-2` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
-`gpt-5.6-sol` on OpenAI, the plan's `deepseek-v4-flash` for every role on
-ClawBox AI; the planner and reviewers at no more than `xhigh` effort, workers
-at the owner's effort; the owner may pick
+one — on Anthropic `claude-fable-5-2` plans, `claude-sonnet-5-5` writes and
+`claude-opus-5-5` reviews; `gpt-6-astra` / `gpt-5.6-sol` on OpenAI; the plan's
+`deepseek-v4-flash` for every role on ClawBox AI. The planner and reviewers run
+at no more than `xhigh` effort (on Anthropic they start at `high` unless the
+owner stored a level for the role), workers at the owner's effort; the owner may pick
 the provider, the model and the effort per role
 in the Coding Agent settings (`coding_agent_role_models`,
 `src/lib/coding-role-models.ts`). The planner's

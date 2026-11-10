@@ -20,7 +20,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 # provider role model — what a role gets with nothing stored.
 EXPECTED='anthropic planner claude-fable-5-2
-anthropic worker claude-opus-5-5
+anthropic worker claude-sonnet-5-5
 anthropic reviewer claude-opus-5-5
 openai planner gpt-6-astra
 openai worker gpt-5.6-sol
