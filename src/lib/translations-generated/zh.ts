@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "无法连接到引擎。请检查地址，并确认服务器正在运行且这台设备可以访问。",
   "localModels.external.hermesNote": "在 Hermes 上，上下文窗口必须至少为 {min} 个 token。回复长度和图像处理由 Hermes 自行决定。",
   "localModels.external.hint": "使用您自己运行的 OpenAI 兼容服务器（推理集群，或您网络中某台计算机上的 vLLM、SGLang、llama.cpp）作为本地 AI，代替这台设备上的模型。",
+  "localModels.external.httpKeyConfirm": "通过此未加密连接发送密钥",
   "localModels.external.httpKeyWarning": "此地址是未加密的 HTTP：API 密钥将以明文发送到引擎。除非引擎位于您信任的网络中，否则请使用 https://。",
   "localModels.external.imageInput": "该模型接受图像",
   "localModels.external.inUse": "本地 AI 使用 {model} 回答。",

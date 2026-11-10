@@ -125,6 +125,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   const [busy, setBusy] = useState<null | "test" | "save" | "remove">(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [httpConfirmed, setHttpConfirmed] = useState(false);
   const alive = useRef(true);
   // Set on every mount, not only at creation: React's Strict Mode runs the
   // cleanup and the effect again, and a ref left false would drop every answer.
@@ -162,7 +163,11 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
     void load(false).then(() => load(true));
   }, [load]);
 
-  const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
+  const set = <K extends keyof Form>(key: K, value: Form[K]) => {
+    // A yes is for the address and key it was given for; changing either asks again.
+    if (key === "baseUrl" || key === "apiKey" || key === "clearApiKey") setHttpConfirmed(false);
+    setForm((f) => ({ ...f, [key]: value }));
+  };
 
   const runTest = async () => {
     setBusy("test");
@@ -244,6 +249,10 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   };
 
   const configured = view?.configured === true;
+  // A key that would go unencrypted to another machine waits for the owner's
+  // explicit yes; Test and Save stay disabled until then.
+  const inClear = sendsKeyInClear(form, view?.apiKeySet === true);
+  const sendBlocked = inClear && !httpConfirmed;
   const onHermes = view?.activeHarness === "hermes";
   const localOnly = view?.localOnlyMode === true;
 
@@ -329,7 +338,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
         <form
           className="px-4 pb-4 space-y-3"
           data-testid="local-ai-external-form"
-          onSubmit={(e) => { e.preventDefault(); if (busy === null && !localOnly) void runSave(); }}
+          onSubmit={(e) => { e.preventDefault(); if (busy === null && !localOnly && !sendBlocked) void runSave(); }}
         >
           {localOnly && (
             <p role="note" className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200">
@@ -342,11 +351,17 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               autoComplete="off" spellCheck={false} placeholder="http://192.0.2.10:8000/v1"
               value={form.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} />
             <p className="text-[11px] text-[var(--text-muted)] mt-1">{t("localModels.external.baseUrlHint")}</p>
-            {sendsKeyInClear(form, view?.apiKeySet === true) && (
-              <p role="note" data-testid="local-ai-external-http-warning"
+            {inClear && (
+              <div role="note" data-testid="local-ai-external-http-warning"
                 className="mt-1.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200">
-                {t("localModels.external.httpKeyWarning")}
-              </p>
+                <p>{t("localModels.external.httpKeyWarning")}</p>
+                {/* An explicit yes, before Test or Save may send the key. */}
+                <label className="mt-1.5 flex items-center gap-2">
+                  <input type="checkbox" data-testid="local-ai-external-http-confirm" checked={httpConfirmed}
+                    onChange={(e) => setHttpConfirmed(e.target.checked)} />
+                  {t("localModels.external.httpKeyConfirm")}
+                </label>
+              </div>
             )}
           </div>
           <div>
@@ -392,11 +407,11 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
             </p>
           )}
           <div className="flex flex-wrap gap-2 pt-1">
-            <button type="button" className={BUTTON} data-testid="local-ai-external-test" disabled={busy !== null}
+            <button type="button" className={BUTTON} data-testid="local-ai-external-test" disabled={busy !== null || sendBlocked}
               onClick={() => void runTest()}>
               {busy === "test" ? t("localModels.external.testing") : t("localModels.external.test")}
             </button>
-            <button type="submit" className={PRIMARY_BUTTON} data-testid="local-ai-external-save" disabled={busy !== null || localOnly}>
+            <button type="submit" className={PRIMARY_BUTTON} data-testid="local-ai-external-save" disabled={busy !== null || localOnly || sendBlocked}>
               {busy === "save" ? t("localModels.external.saving") : t("localModels.external.save")}
             </button>
             <button type="button" className={BUTTON} disabled={busy !== null}

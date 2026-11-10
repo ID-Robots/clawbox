@@ -226,7 +226,7 @@ ui=$(board '
   cookie=$(node -e "const fs=require(\"fs\"),c=require(\"crypto\");const s=fs.readFileSync(process.argv[1],\"utf8\").trim();let g=0;try{const j=JSON.parse(fs.readFileSync(process.argv[2],\"utf8\"));if(Number.isFinite(j.session_generation))g=j.session_generation}catch{};const p=Buffer.from(JSON.stringify({exp:Math.floor(Date.now()/1000)+1200,gen:g})).toString(\"base64url\");process.stdout.write(p+\".\"+c.createHmac(\"sha256\",s).update(p).digest(\"hex\"))" "$REPO/data/.session-secret" "$REPO/data/config.json")
   mkdir -p "$1/profile" "${3:-$1}"
   OWNER_COOKIE=$cookie CHROME=$CHROME PROFILE_DIR="$1/profile" MODEL_NAME="$2" SHOTS_DIR="${3:-}" \
-    timeout 600 node "$REPO/scripts/nano-tests/board/external-engine-ui.mjs" 2>&1 | grep -E "^(RESULT|NOTE) " || true
+    timeout -k 10 600 node "$REPO/scripts/nano-tests/board/external-engine-ui.mjs" 2>&1 | grep -E "^(RESULT|NOTE) " || true
 ' "$DIR" "$NAME" "${NANO_SHOTS_DIR:-}")
 while IFS= read -r line; do
   case "$line" in

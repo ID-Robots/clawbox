@@ -56,12 +56,14 @@ function renderCard(onChanged = vi.fn()) {
   return onChanged;
 }
 
-async function fillForm() {
+/** The form filled in for BASE — plain HTTP to another machine with a key — and, unless told not to, the owner's yes to sending it. */
+async function fillForm({ confirmHttp = true } = {}) {
   fireEvent.click(await screen.findByTestId("local-ai-external-setup"));
   fireEvent.change(screen.getByTestId("local-ai-external-base-url"), { target: { value: BASE } });
   fireEvent.change(screen.getByTestId("local-ai-external-api-key"), { target: { value: KEY } });
   fireEvent.change(screen.getByTestId("local-ai-external-model"), { target: { value: MODEL } });
   fireEvent.change(screen.getByTestId("local-ai-external-context"), { target: { value: "131072" } });
+  if (confirmHttp) fireEvent.click(screen.getByTestId("local-ai-external-http-confirm"));
 }
 
 afterEach(() => {
@@ -146,13 +148,32 @@ describe("ExternalEngineCard", () => {
     expect((screen.getByTestId("local-ai-external-image") as HTMLInputElement).disabled).toBe(true);
   });
 
-  it("warns before a key would travel unencrypted to another machine", async () => {
+  it("sends no key over plain HTTP to another machine before the owner says yes", async () => {
     stub({});
     renderCard();
-    await fillForm();
+    await fillForm({ confirmHttp: false });
     expect(screen.getByTestId("local-ai-external-http-warning").textContent).toContain("unencrypted");
+    const test = screen.getByTestId("local-ai-external-test") as HTMLButtonElement;
+    const save = screen.getByTestId("local-ai-external-save") as HTMLButtonElement;
+    expect(test.disabled).toBe(true);
+    expect(save.disabled).toBe(true);
+    fireEvent.click(test);
+    fireEvent.submit(screen.getByTestId("local-ai-external-form"));
+    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+
+    fireEvent.click(screen.getByTestId("local-ai-external-http-confirm"));
+    expect(test.disabled).toBe(false);
+    fireEvent.click(test);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/test"))).toBe(true));
+
+    // A new address asks again.
+    fireEvent.change(screen.getByTestId("local-ai-external-base-url"), { target: { value: "http://198.51.100.7:8000/v1" } });
+    expect((screen.getByTestId("local-ai-external-http-confirm") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId("local-ai-external-test") as HTMLButtonElement).disabled).toBe(true);
+    // HTTPS needs no yes at all.
     fireEvent.change(screen.getByTestId("local-ai-external-base-url"), { target: { value: "https://engine.example.com/v1" } });
     expect(screen.queryByTestId("local-ai-external-http-warning")).toBeNull();
+    expect((screen.getByTestId("local-ai-external-test") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("knows when HTTP carries a key off the box", () => {

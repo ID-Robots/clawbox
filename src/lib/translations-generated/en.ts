@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "Could not reach the engine. Check the address and that the server is running and reachable from this box.",
   "localModels.external.hermesNote": "On Hermes the context window must be at least {min} tokens. Hermes decides the reply length and image handling itself.",
   "localModels.external.hint": "Use an OpenAI-compatible server you run — an inference cluster, or vLLM, SGLang or llama.cpp on a computer on your network — as Local AI instead of the model on this box.",
+  "localModels.external.httpKeyConfirm": "Send the key over this unencrypted connection",
   "localModels.external.httpKeyWarning": "This address is plain HTTP: the API key will travel unencrypted to the engine. Use https:// unless the engine is on a network you trust.",
   "localModels.external.imageInput": "The model accepts images",
   "localModels.external.inUse": "Local AI answers with {model}.",

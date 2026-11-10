@@ -2000,6 +2000,7 @@ export const it: Record<string, string> = {
   "localModels.external.baseUrl": "URL di base",
   "localModels.external.baseUrlHint": "L'indirizzo dell'API compatibile con OpenAI, di solito termina con /v1.",
   "localModels.external.httpKeyWarning": "Questo indirizzo è HTTP semplice: la chiave API viaggerà in chiaro fino al motore. Usa https:// a meno che il motore non sia su una rete di cui ti fidi.",
+  "localModels.external.httpKeyConfirm": "Invia la chiave su questa connessione non cifrata",
   "localModels.external.apiKey": "Chiave API",
   "localModels.external.apiKeyHint": "Lascia vuoto se il motore non ne ha bisogno",
   "localModels.external.apiKeyKeep": "C'è una chiave salvata — lascia vuoto per mantenerla",

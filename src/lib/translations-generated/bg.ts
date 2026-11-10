@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "Двигателят не е достъпен. Проверете адреса и дали сървърът работи и е достъпен от тази кутия.",
   "localModels.external.hermesNote": "При Hermes контекстният прозорец трябва да е поне {min} токена. Hermes сам решава дължината на отговорите и работата с изображения.",
   "localModels.external.hint": "Използвайте съвместим с OpenAI сървър, който поддържате — клъстер за изводи или vLLM, SGLang или llama.cpp на компютър във вашата мрежа — като локален AI вместо модела на тази кутия.",
+  "localModels.external.httpKeyConfirm": "Изпращай ключа по тази некриптирана връзка",
   "localModels.external.httpKeyWarning": "Този адрес е обикновен HTTP: API ключът ще пътува до двигателя некриптиран. Използвайте https://, освен ако двигателят е в мрежа, на която имате доверие.",
   "localModels.external.imageInput": "Моделът приема изображения",
   "localModels.external.inUse": "Локалният AI отговаря с {model}.",

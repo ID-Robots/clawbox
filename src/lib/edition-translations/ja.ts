@@ -1989,6 +1989,7 @@ export const ja: Record<string, string> = {
   "localModels.external.baseUrl": "ベース URL",
   "localModels.external.baseUrlHint": "OpenAI 互換 API のアドレスです。通常は /v1 で終わります。",
   "localModels.external.httpKeyWarning": "このアドレスは暗号化されていない HTTP です。API キーは暗号化されずにエンジンへ送られます。信頼できるネットワーク上のエンジンでない限り、https:// を使ってください。",
+  "localModels.external.httpKeyConfirm": "この暗号化されていない接続でキーを送信する",
   "localModels.external.apiKey": "API キー",
   "localModels.external.apiKeyHint": "エンジンが不要なら空欄のままにします",
   "localModels.external.apiKeyKeep": "キーは保存済みです — 変えない場合は空欄のままにします",

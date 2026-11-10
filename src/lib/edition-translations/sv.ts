@@ -1985,6 +1985,7 @@ export const sv: Record<string, string> = {
   "localModels.external.baseUrl": "Bas-URL",
   "localModels.external.baseUrlHint": "Adressen till det OpenAI-kompatibla API:et, slutar oftast med /v1.",
   "localModels.external.httpKeyWarning": "Adressen är vanlig HTTP: API-nyckeln skickas okrypterad till motorn. Använd https:// om inte motorn finns i ett nätverk du litar på.",
+  "localModels.external.httpKeyConfirm": "Skicka nyckeln över den här okrypterade anslutningen",
   "localModels.external.apiKey": "API-nyckel",
   "localModels.external.apiKeyHint": "Lämna tomt om motorn inte behöver någon",
   "localModels.external.apiKeyKeep": "En nyckel är sparad — lämna tomt för att behålla den",

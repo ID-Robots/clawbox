@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "De engine is niet bereikbaar. Controleer het adres en of de server draait en bereikbaar is vanaf deze box.",
   "localModels.external.hermesNote": "Bij Hermes moet het contextvenster minstens {min} tokens zijn. Hermes bepaalt zelf de lengte van antwoorden en de omgang met afbeeldingen.",
   "localModels.external.hint": "Gebruik een OpenAI-compatibele server die u zelf beheert — een inferentiecluster, of vLLM, SGLang of llama.cpp op een computer in uw netwerk — als lokale AI in plaats van het model op deze box.",
+  "localModels.external.httpKeyConfirm": "De sleutel via deze onversleutelde verbinding versturen",
   "localModels.external.httpKeyWarning": "Dit adres is gewoon HTTP: de API-sleutel gaat onversleuteld naar de engine. Gebruik https://, tenzij de engine in een netwerk staat dat u vertrouwt.",
   "localModels.external.imageInput": "Het model accepteert afbeeldingen",
   "localModels.external.inUse": "De lokale AI antwoordt met {model}.",

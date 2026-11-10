@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "Impossibile raggiungere il motore. Controlla l'indirizzo e che il server sia attivo e raggiungibile da questo box.",
   "localModels.external.hermesNote": "Con Hermes la finestra di contesto deve essere di almeno {min} token. Hermes decide da solo la lunghezza delle risposte e la gestione delle immagini.",
   "localModels.external.hint": "Usa un server compatibile con OpenAI che gestisci tu — un cluster di inferenza, oppure vLLM, SGLang o llama.cpp su un computer della tua rete — come IA locale al posto del modello di questo box.",
+  "localModels.external.httpKeyConfirm": "Invia la chiave su questa connessione non cifrata",
   "localModels.external.httpKeyWarning": "Questo indirizzo è HTTP semplice: la chiave API viaggerà in chiaro fino al motore. Usa https:// a meno che il motore non sia su una rete di cui ti fidi.",
   "localModels.external.imageInput": "Il modello accetta immagini",
   "localModels.external.inUse": "L'IA locale risponde con {model}.",

@@ -1975,6 +1975,7 @@ export const bg: Record<string, string> = {
   "localModels.external.baseUrl": "Базов адрес (URL)",
   "localModels.external.baseUrlHint": "Адресът на съвместимия с OpenAI API, обикновено завършва на /v1.",
   "localModels.external.httpKeyWarning": "Този адрес е обикновен HTTP: API ключът ще пътува до двигателя некриптиран. Използвайте https://, освен ако двигателят е в мрежа, на която имате доверие.",
+  "localModels.external.httpKeyConfirm": "Изпращай ключа по тази некриптирана връзка",
   "localModels.external.apiKey": "API ключ",
   "localModels.external.apiKeyHint": "Оставете празно, ако двигателят не изисква ключ",
   "localModels.external.apiKeyKeep": "Има запазен ключ — оставете празно, за да остане",

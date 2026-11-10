@@ -1997,6 +1997,7 @@ export const zh: Record<string, string> = {
   "localModels.external.baseUrl": "基础 URL",
   "localModels.external.baseUrlHint": "OpenAI 兼容 API 的地址，通常以 /v1 结尾。",
   "localModels.external.httpKeyWarning": "此地址是未加密的 HTTP：API 密钥将以明文发送到引擎。除非引擎位于您信任的网络中，否则请使用 https://。",
+  "localModels.external.httpKeyConfirm": "通过此未加密连接发送密钥",
   "localModels.external.apiKey": "API 密钥",
   "localModels.external.apiKeyHint": "如果引擎不需要，请留空",
   "localModels.external.apiKeyKeep": "已保存密钥 — 留空即可保留",

@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "エンジンに接続できません。アドレスと、サーバーが起動していてこの本体から到達できるかを確認してください。",
   "localModels.external.hermesNote": "Hermes ではコンテキストウィンドウが {min} トークン以上必要です。応答の長さと画像の扱いは Hermes が自分で決めます。",
   "localModels.external.hint": "ご自身で運用している OpenAI 互換サーバー（推論クラスター、またはネットワーク上のコンピューターで動く vLLM・SGLang・llama.cpp）を、この本体のモデルの代わりにローカルAIとして使います。",
+  "localModels.external.httpKeyConfirm": "この暗号化されていない接続でキーを送信する",
   "localModels.external.httpKeyWarning": "このアドレスは暗号化されていない HTTP です。API キーは暗号化されずにエンジンへ送られます。信頼できるネットワーク上のエンジンでない限り、https:// を使ってください。",
   "localModels.external.imageInput": "このモデルは画像を受け付ける",
   "localModels.external.inUse": "ローカルAIは {model} で応答します。",

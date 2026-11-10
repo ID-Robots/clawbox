@@ -171,6 +171,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.external.baseUrl": "Base URL",
   "localModels.external.baseUrlHint": "The address of the OpenAI-compatible API, usually ending in /v1.",
   "localModels.external.httpKeyWarning": "This address is plain HTTP: the API key will travel unencrypted to the engine. Use https:// unless the engine is on a network you trust.",
+  "localModels.external.httpKeyConfirm": "Send the key over this unencrypted connection",
   "localModels.external.apiKey": "API key",
   "localModels.external.apiKeyHint": "Leave empty if the engine needs none",
   "localModels.external.apiKeyKeep": "A key is saved — leave empty to keep it",

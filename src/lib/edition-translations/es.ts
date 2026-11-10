@@ -1984,6 +1984,7 @@ export const es: Record<string, string> = {
   "localModels.external.baseUrl": "URL base",
   "localModels.external.baseUrlHint": "La dirección de la API compatible con OpenAI; suele terminar en /v1.",
   "localModels.external.httpKeyWarning": "Esta dirección es HTTP sin cifrar: la clave de API viajará sin cifrar hasta el motor. Usa https:// salvo que el motor esté en una red de confianza.",
+  "localModels.external.httpKeyConfirm": "Enviar la clave por esta conexión sin cifrar",
   "localModels.external.apiKey": "Clave de API",
   "localModels.external.apiKeyHint": "Déjalo vacío si el motor no la necesita",
   "localModels.external.apiKeyKeep": "Hay una clave guardada — déjalo vacío para conservarla",

@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "Die Engine ist nicht erreichbar. Prüfen Sie die Adresse und ob der Server läuft und von dieser Box aus erreichbar ist.",
   "localModels.external.hermesNote": "Unter Hermes muss das Kontextfenster mindestens {min} Tokens groß sein. Antwortlänge und Bildverarbeitung bestimmt Hermes selbst.",
   "localModels.external.hint": "Nutzen Sie einen OpenAI-kompatiblen Server, den Sie selbst betreiben — einen Inferenz-Cluster oder vLLM, SGLang oder llama.cpp auf einem Rechner in Ihrem Netzwerk — als lokale KI statt des Modells auf dieser Box.",
+  "localModels.external.httpKeyConfirm": "Schlüssel über diese unverschlüsselte Verbindung senden",
   "localModels.external.httpKeyWarning": "Diese Adresse ist reines HTTP: Der API-Schlüssel geht unverschlüsselt an die Engine. Nutzen Sie https://, außer die Engine steht in einem Netzwerk, dem Sie vertrauen.",
   "localModels.external.imageInput": "Das Modell akzeptiert Bilder",
   "localModels.external.inUse": "Die lokale KI antwortet mit {model}.",

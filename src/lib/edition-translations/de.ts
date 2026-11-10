@@ -1988,6 +1988,7 @@ export const de: Record<string, string> = {
   "localModels.external.baseUrl": "Basis-URL",
   "localModels.external.baseUrlHint": "Die Adresse der OpenAI-kompatiblen API, meist mit /v1 am Ende.",
   "localModels.external.httpKeyWarning": "Diese Adresse ist reines HTTP: Der API-Schlüssel geht unverschlüsselt an die Engine. Nutzen Sie https://, außer die Engine steht in einem Netzwerk, dem Sie vertrauen.",
+  "localModels.external.httpKeyConfirm": "Schlüssel über diese unverschlüsselte Verbindung senden",
   "localModels.external.apiKey": "API-Schlüssel",
   "localModels.external.apiKeyHint": "Leer lassen, wenn die Engine keinen braucht",
   "localModels.external.apiKeyKeep": "Ein Schlüssel ist gespeichert — leer lassen, um ihn zu behalten",

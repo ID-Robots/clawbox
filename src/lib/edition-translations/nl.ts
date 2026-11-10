@@ -1989,6 +1989,7 @@ export const nl: Record<string, string> = {
   "localModels.external.baseUrl": "Basis-URL",
   "localModels.external.baseUrlHint": "Het adres van de OpenAI-compatibele API, meestal eindigend op /v1.",
   "localModels.external.httpKeyWarning": "Dit adres is gewoon HTTP: de API-sleutel gaat onversleuteld naar de engine. Gebruik https://, tenzij de engine in een netwerk staat dat u vertrouwt.",
+  "localModels.external.httpKeyConfirm": "De sleutel via deze onversleutelde verbinding versturen",
   "localModels.external.apiKey": "API-sleutel",
   "localModels.external.apiKeyHint": "Leeg laten als de engine er geen nodig heeft",
   "localModels.external.apiKeyKeep": "Er is een sleutel opgeslagen — leeg laten om hem te behouden",

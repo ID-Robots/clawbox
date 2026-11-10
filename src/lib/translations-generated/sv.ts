@@ -2395,6 +2395,7 @@ const table: Record<string, string> = {
   "localModels.external.error.unreachable": "Det gick inte att nå motorn. Kontrollera adressen och att servern körs och nås från den här boxen.",
   "localModels.external.hermesNote": "Med Hermes måste kontextfönstret vara minst {min} tokens. Hermes bestämmer själv svarslängden och hanteringen av bilder.",
   "localModels.external.hint": "Använd en OpenAI-kompatibel server som du själv driver — ett inferenskluster, eller vLLM, SGLang eller llama.cpp på en dator i ditt nätverk — som lokal AI i stället för modellen på den här boxen.",
+  "localModels.external.httpKeyConfirm": "Skicka nyckeln över den här okrypterade anslutningen",
   "localModels.external.httpKeyWarning": "Adressen är vanlig HTTP: API-nyckeln skickas okrypterad till motorn. Använd https:// om inte motorn finns i ett nätverk du litar på.",
   "localModels.external.imageInput": "Modellen tar emot bilder",
   "localModels.external.inUse": "Lokal AI svarar med {model}.",
