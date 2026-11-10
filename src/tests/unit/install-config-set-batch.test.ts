@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -31,13 +31,22 @@ afterEach(() => {
 
 const source = (file: string): string => fs.readFileSync(path.join(REPO, file), "utf-8");
 
-/** A top-level shell function, from `name() {` to the `}` in column 0; "" when the file has none. */
+/**
+ * A top-level shell function, from `name() {` or `name() (` to its closer in
+ * column 0; "" when the file has none.
+ */
 function shellFunction(text: string, name: string): string {
-  const start = text.indexOf(`\n${name}() {\n`);
-  if (start < 0) return "";
-  const end = text.indexOf("\n}\n", start);
-  if (end < 0) throw new Error(`${name} never closes`);
-  return text.slice(start + 1, end + 3);
+  for (const [open, close] of [
+    ["{", "}"],
+    ["(", ")"],
+  ]) {
+    const start = text.indexOf(`\n${name}() ${open}\n`);
+    if (start < 0) continue;
+    const end = text.indexOf(`\n${close}\n`, start);
+    if (end < 0) throw new Error(`${name} never closes`);
+    return text.slice(start + 1, end + 3);
+  }
+  return "";
 }
 
 /** From the line `open` to the first two-space-indented `fi` after it. */
@@ -67,10 +76,14 @@ interface Run {
   batchDirs: string[];
 }
 
-function run(script: string, env: Record<string, string>): Run {
+const log = (name: string): string => path.join(dir, name);
+const lines = (name: string): string[] =>
+  fs.existsSync(log(name)) ? fs.readFileSync(log(name), "utf-8").split("\n").filter(Boolean) : [];
+
+/** The shims and the fake CLI in a fresh bin/, and the environment that points at them. */
+function harness(env: Record<string, string>): NodeJS.ProcessEnv {
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin, { recursive: true });
-  const log = (name: string): string => path.join(dir, name);
   executable(path.join(bin, "node"), `#!/bin/bash\nprintf '%s\\0' node "$@" >> "$ARGV_LOG"\nprintf '\\n' >> "$ARGV_LOG"\nexec "${process.execPath}" "$@"\n`);
   executable(path.join(bin, "openssl"), `#!/bin/bash\nprintf '%s\\0' openssl "$@" >> "$ARGV_LOG"\nprintf '\\n' >> "$ARGV_LOG"\necho "${TOKEN_MARKER}"\n`);
   executable(
@@ -84,6 +97,7 @@ function run(script: string, env: Record<string, string>): Run {
       '  f="$4"; cat "$f" >> "$BATCHES"; printf "\\n" >> "$BATCHES"',
       '  printf "%s %s\\n" "$(stat -c %a "$f")" "$(stat -c %a "$(dirname "$f")")" >> "$MODES"',
       '  dirname "$f" >> "$BATCH_DIRS"',
+      '  [ -n "${HANG:-}" ] && sleep 30',
       '  grep -q "\\"path\\":\\"${FAIL_PATH:-none}\\"" "$f" && exit 1',
       "  exit 0",
       "fi",
@@ -92,21 +106,20 @@ function run(script: string, env: Record<string, string>): Run {
       "",
     ].join("\n"),
   );
-  const res = spawnSync("bash", ["-c", script], {
-    env: {
-      ...process.env,
-      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
-      OPENCLAW_BIN: path.join(bin, "openclaw"),
-      ARGV_LOG: log("argv"),
-      BATCHES: log("batches"),
-      MODES: log("modes"),
-      BATCH_DIRS: log("batch-dirs"),
-      ...env,
-    },
-    encoding: "utf-8",
-  });
-  const lines = (name: string): string[] =>
-    fs.existsSync(log(name)) ? fs.readFileSync(log(name), "utf-8").split("\n").filter(Boolean) : [];
+  return {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    OPENCLAW_BIN: path.join(bin, "openclaw"),
+    ARGV_LOG: log("argv"),
+    BATCHES: log("batches"),
+    MODES: log("modes"),
+    BATCH_DIRS: log("batch-dirs"),
+    ...env,
+  };
+}
+
+function run(script: string, env: Record<string, string>): Run {
+  const res = spawnSync("bash", ["-c", script], { env: harness(env), encoding: "utf-8" });
   return {
     status: res.status,
     stdout: res.stdout,
@@ -116,6 +129,30 @@ function run(script: string, env: Record<string, string>): Run {
     modes: lines("modes"),
     batchDirs: lines("batch-dirs"),
   };
+}
+
+const until = async (done: () => boolean, ms: number): Promise<boolean> => {
+  for (const end = Date.now() + ms; Date.now() < end; ) {
+    if (done()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return done();
+};
+
+/**
+ * Run `script` while the CLI holds its batch file, then SIGTERM the whole
+ * process group, as systemd stops a unit or Ctrl-C stops a terminal, and
+ * return the batch directories left once the dust settles.
+ */
+async function runKilled(script: string): Promise<{ seen: string[]; left: string[] }> {
+  const child = spawn("bash", ["-c", script], { env: harness({ HANG: "1" }), detached: true, stdio: "ignore" });
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  if (!(await until(() => lines("batch-dirs").length > 0, 10_000))) throw new Error("the batch file never reached the CLI");
+  process.kill(-(child.pid as number), "SIGTERM");
+  await exited;
+  await until(() => lines("batch-dirs").every((d) => !fs.existsSync(d)), 5_000);
+  const seen = lines("batch-dirs");
+  return { seen, left: seen.filter((d) => fs.existsSync(d)) };
 }
 
 function expectNoMarker(r: Run, marker: string): void {
@@ -142,9 +179,9 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
     ],
   };
 
-  function runProvider(env: Record<string, string> = {}): Run {
+  function providerScript(): string {
     const text = source("install.sh");
-    const script = [
+    return [
       "set -euo pipefail",
       'as_clawbox() { printf \'%s\\0\' as_clawbox "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; [ "$1" = "-H" ] && shift; "$@"; }',
       "sleep() { :; }",
@@ -157,8 +194,9 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
       "}",
       "provider",
     ].join("\n");
-    return run(script, env);
   }
+
+  const runProvider = (env: Record<string, string> = {}): Run => run(providerScript(), env);
 
   it("hands the CLI a 0600 batch file in a private directory, and no argument holds the key", () => {
     const r = runProvider();
@@ -181,12 +219,27 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
     expect(r.batchDirs.filter((d) => fs.existsSync(d))).toEqual([]);
     expectNoMarker(r, KEY_MARKER);
   });
+
+  it("removes the batch directory when the install is stopped by a signal mid-write", async () => {
+    const { seen, left } = await runKilled(providerScript());
+
+    expect(seen).toHaveLength(1);
+    expect(left).toEqual([]);
+  });
+
+  // The helper's traps live in its own subshell; the installer's stay its own.
+  it("leaves the caller's EXIT trap in place", () => {
+    const r = run(`trap 'echo caller-exit-trap' EXIT\n${providerScript()}`, {});
+
+    expect(r.status).toBe(0);
+    expect(r.stdout.trimEnd().endsWith("caller-exit-trap")).toBe(true);
+  });
 });
 
 describe("install-x64.sh seeds the gateway token without it on a command line", () => {
-  function runSeed(env: Record<string, string> = {}): Run {
+  function seedScript(): string {
     const text = source("install-x64.sh");
-    const script = [
+    return [
       "set -euo pipefail",
       'as_user() { printf \'%s\\0\' as_user "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; "$@"; }',
       shellFunction(text, "as_user_config_set_batch"),
@@ -196,8 +249,9 @@ describe("install-x64.sh seeds the gateway token without it on a command line", 
       "}",
       "seed",
     ].join("\n");
-    return run(script, env);
   }
+
+  const runSeed = (env: Record<string, string> = {}): Run => run(seedScript(), env);
 
   it("hands the CLI a 0600 batch file in a private directory, and no argument holds the token", () => {
     const r = runSeed();
@@ -216,5 +270,12 @@ describe("install-x64.sh seeds the gateway token without it on a command line", 
     expect(r.batchDirs).toHaveLength(1);
     expect(r.batchDirs.filter((d) => fs.existsSync(d))).toEqual([]);
     expectNoMarker(r, TOKEN_MARKER);
+  });
+
+  it("removes the batch directory when the install is stopped by a signal mid-write", async () => {
+    const { seen, left } = await runKilled(seedScript());
+
+    expect(seen).toHaveLength(1);
+    expect(left).toEqual([]);
   });
 });

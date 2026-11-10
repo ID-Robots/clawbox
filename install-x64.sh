@@ -124,18 +124,22 @@ as_user() { sudo -u "$CLAWBOX_USER" "$@"; }
 # because sudo records its command line. Reads a `--batch-file` batch (a JSON
 # array of {"path", "value"}) on stdin, writes it as the service user to a 0600
 # file in a private directory, applies it, and removes the directory on every
-# path. Returns the CLI's status.
-as_user_config_set_batch() {
+# exit, a stopping signal included. Returns the CLI's status. The body is a
+# subshell, so its traps are its own and the caller's stay as they were.
+as_user_config_set_batch() (
   local dir rc=0
-  dir=$(as_user mktemp -d) || return 1
+  dir=$(as_user mktemp -d) || exit 1
+  trap 'rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   if as_user sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
     as_user "$OPENCLAW_BIN" config set --batch-file "$dir/batch.json" || rc=$?
   else
     rc=1
   fi
-  rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2
-  return "$rc"
-}
+  exit "$rc"
+)
 
 as_user_runtime() {
   sudo -u "$CLAWBOX_USER" -H env \

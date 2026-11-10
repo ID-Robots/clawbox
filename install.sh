@@ -7936,22 +7936,27 @@ oc_config_set() {
 # sudo records its command line. Reads a `config set --batch-file` batch (a
 # JSON array of {"path", "value"}) on stdin, writes it as the service user to a
 # 0600 file in a private directory, applies it with oc_config_set's retries and
-# messages, and removes the directory on every path. $1 names the change.
-oc_config_set_batch() {
+# messages, and removes the directory on every exit, a stopping signal
+# included. $1 names the change. The body is a subshell, so its traps are its
+# own and the caller's stay as they were.
+oc_config_set_batch() (
   local label="$1" dir rc=0
   if ! dir=$(as_clawbox mktemp -d); then
     echo "  ERROR: config set $label failed: no private directory for its batch file" >&2
-    return 1
+    exit 1
   fi
+  trap 'rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   if as_clawbox sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
     OC_CONFIG_LABEL="$label" oc_config_set --batch-file "$dir/batch.json" || rc=$?
   else
     echo "  ERROR: config set $label failed: its batch file could not be written" >&2
     rc=1
   fi
-  rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2
-  return "$rc"
-}
+  exit "$rc"
+)
 
 step_openclaw_config() {
   is_hermes_edition && return 0
@@ -8100,10 +8105,10 @@ try {
   }
 }
 const original = JSON.stringify(cfg);
-if (!cfg.channels) cfg.channels = {};
-// An array, or a value that is not an object at all, holds no channel this
-// block could add to: say so and write nothing.
+// null, an array, or a value that is not an object at all holds no channel
+// this block could add to: say so and write nothing.
 const plainObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+if (plainObject(cfg) && !cfg.channels) cfg.channels = {};
 if (!plainObject(cfg) || !plainObject(cfg.channels)) {
   process.stderr.write("  Telegram registration skipped: openclaw.json holds no channels object\n");
   process.exit(0);

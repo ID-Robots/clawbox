@@ -308,6 +308,7 @@ describe("install.sh registers the Telegram channel without clobbering the harne
     ["an array of channels", JSON.stringify({ channels: [] })],
     ["a string of channels", JSON.stringify({ channels: "x" })],
     ["a number", "5"],
+    ["JSON null", "null"],
   ])("reports a skip, and writes nothing, for a config that is %s", (_name, text) => {
     const cfg = path.join(dir, "openclaw.json");
     fs.writeFileSync(cfg, text, "utf-8");
