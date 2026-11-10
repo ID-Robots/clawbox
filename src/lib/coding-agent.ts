@@ -7043,12 +7043,19 @@ export interface RunArgsOptions { resumeSessionId?: string | null; maxTurns?: nu
  * from before either existed, still say "run the gates from a copy in a
  * folder named like the app" and "install again first", and a run believes
  * its project's notes: with the variable already set, a run made a throwaway
- * copy named `calculator` to run a smoke test that would have passed where it
- * stood, and left the screenshots it refreshed there (run-w263ek7z,
- * 2026-11-10). The last sentence is for exactly those notes.
+ * copy named `calculator` to run its gates and left the screenshots it
+ * refreshed there (run-w263ek7z, 2026-11-10).
+ *
+ * It does NOT say every check passes here. The variable only helps code that
+ * reads it: Calculator's `next.config.ts` did and its `mcp/server.mjs` took
+ * the path from its own folder's name, so in a copy the app mounted at
+ * `/apps/calculator` while the MCP server called `/apps/run-…` — 85 of 396
+ * smoke checks answered 404 (run-smi688vg). So the sentence names the rule
+ * and says what such a failure IS: the project's defect, to be fixed where
+ * it is, not walked round by copying the project.
  */
 export function worktreeCopyBrief(appId: string): string {
-  return `This folder is a temporary copy of the project "${appId}" (a git worktree). CLAWBOX_APP_ID=${appId} is set, so an app that mounts itself by its folder's name still mounts at /apps/${appId}/ here, and node_modules holds the project's own packages as real files: build and run the project's checks in THIS folder. An earlier run's note that says to copy the project elsewhere, rename the folder or install again first is out of date.`;
+  return `This folder is a temporary copy of the project "${appId}" (a git worktree). CLAWBOX_APP_ID=${appId} is set for everything you run here, and node_modules holds the project's own packages as real files, so the project's checks run in THIS folder without installing again. Code that takes the app's /apps/${appId}/ path from a folder's name must read CLAWBOX_APP_ID first: where a check fails here only because of this folder's name, that line is the defect — fix it rather than copying the project into another folder, whatever an earlier run's note says.`;
 }
 
 export function buildRunSystemPrompt(opts: RunArgsOptions): string {
