@@ -7916,19 +7916,41 @@ step_openclaw_patch() {
 # devices half-updated: rebuild_reboot never reached the rebuild, while the
 # updater still reported success (see fix in src/lib/updater.ts). Each retry
 # reloads the config fresh, so a transient conflict resolves itself.
+# OC_CONFIG_LABEL names the change in the messages when $1 is an option.
 oc_config_set() {
-  local attempt
+  local attempt label="${OC_CONFIG_LABEL:-$1}"
   for attempt in 1 2 3; do
     if as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$@"; then
       return 0
     fi
     if [ "$attempt" -lt 3 ]; then
-      echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+      echo "  config set $label failed (attempt $attempt/3) — retrying..."
       sleep 2
     fi
   done
-  echo "  ERROR: config set $1 failed after 3 attempts" >&2
+  echo "  ERROR: config set $label failed after 3 attempts" >&2
   return 1
+}
+
+# oc_config_set for a value that must stay off every argument list, because
+# sudo records its command line. Reads a `config set --batch-file` batch (a
+# JSON array of {"path", "value"}) on stdin, writes it as the service user to a
+# 0600 file in a private directory, applies it with oc_config_set's retries and
+# messages, and removes the directory on every path. $1 names the change.
+oc_config_set_batch() {
+  local label="$1" dir rc=0
+  if ! dir=$(as_clawbox mktemp -d); then
+    echo "  ERROR: config set $label failed: no private directory for its batch file" >&2
+    return 1
+  fi
+  if as_clawbox sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
+    OC_CONFIG_LABEL="$label" oc_config_set --batch-file "$dir/batch.json" || rc=$?
+  else
+    echo "  ERROR: config set $label failed: its batch file could not be written" >&2
+    rc=1
+  fi
+  rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2
+  return "$rc"
 }
 
 step_openclaw_config() {
@@ -7972,8 +7994,6 @@ step_openclaw_config() {
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   fi
   if [ -n "$CLAWBOX_AI_KEY" ]; then
-    local CLAWBOX_AI_PROVIDER_JSON
-    CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
     if openclaw_is_v2; then
       # OpenClaw 2 keeps credentials in its sqlite auth store, and recreating
       # the legacy auth-profiles.json poisons it (the gateway refuses with
@@ -7987,7 +8007,11 @@ step_openclaw_config() {
       CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
     fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
-    oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
+    # The provider block holds the key, so the key travels on stdin and the
+    # block reaches the CLI as a batch file, never as an argument.
+    printf '%s' "$CLAWBOX_AI_KEY" \
+      | node -e 'const key=require("fs").readFileSync(0,"utf8"); process.stdout.write(JSON.stringify([{path:"models.providers.deepseek",value:{baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}}]));' \
+      | oc_config_set_batch models.providers.deepseek
     # `fallbacks`, a LIST: the core has no singular `fallback` key and refused
     # this write with "Unrecognized key" on every core since the line was added,
     # which ended the step here under errexit (the harness-contract CI job now
@@ -8030,21 +8054,37 @@ step_openclaw_config() {
 
   # Register Telegram channel (if token exists)
   if [ -f "$CLAWBOX_CONFIG" ]; then
-    local TG_TOKEN
-    TG_TOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
-    if [ -n "$TG_TOKEN" ]; then
-      # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
-      # setTelegramToken for the security rationale. `openclaw config set`
-      # may deep-merge instead of replace, which would leave legacy
-      # `dmPolicy:"open"` / `allowFrom:["*"]` values alive. Do the
-      # read-modify-write ourselves with a destructure-strip so the
-      # installer can't leave insecure values behind, matching what
-      # install-x64.sh and src/lib/openclaw-config.ts:setTelegramToken
-      # do on their paths.
-      as_clawbox env TG_TOKEN="$TG_TOKEN" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
+    # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
+    # setTelegramToken for the security rationale. The read-modify-write is
+    # done here, in one write, with a destructure-strip so the installer can't
+    # leave legacy `dmPolicy:"open"` / `allowFrom:["*"]` values behind,
+    # matching src/lib/openclaw-config.ts:setTelegramToken. OpenClaw's own
+    # `config patch --file|--stdin` (where null deletes a key) is the native
+    # writer for it; moving there needs a device run first, because a CLI
+    # write validates the whole config under errexit and can meet the live
+    # gateway's ConfigMutationConflictError (see oc_config_set).
+    # sudo records its command line, so only paths go on it: the script reads
+    # the token itself, as the service user, which owns data/config.json.
+    as_clawbox env CLAWBOX_CFG="$CLAWBOX_CONFIG" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
 const fs = require("fs");
 const path = require("path");
-const botToken = process.env.TG_TOKEN;
+// Errors are named by class only (code or name), never by message.
+const errorClass = (err) => (err && (err.code || err.name)) || "error";
+// A missing, unreadable or corrupt ClawBox config, or one without a token,
+// skips the step before OpenClaw's file is touched: throwing here would abort
+// the whole step mid-update under errexit.
+let botToken = "";
+let skipped = "ClawBox holds no saved bot token";
+try {
+  const saved = JSON.parse(fs.readFileSync(process.env.CLAWBOX_CFG, "utf8"));
+  if (saved && typeof saved.telegram_bot_token === "string") botToken = saved.telegram_bot_token;
+} catch (err) {
+  skipped = `could not read ClawBox's config (${errorClass(err)})`;
+}
+if (!botToken) {
+  process.stderr.write(`  Telegram registration skipped: ${skipped}\n`);
+  process.exit(0);
+}
 const cfgPath = process.env.CFG;
 let cfg = {};
 try {
@@ -8054,9 +8094,20 @@ try {
   // corrupt JSON, transient IO) must abort, otherwise we'd silently
   // overwrite a real-but-unreadable config with only the Telegram channel,
   // wiping auth profiles, gateway settings, AI provider config, etc.
-  if (!err || err.code !== "ENOENT") throw err;
+  if (!err || err.code !== "ENOENT") {
+    process.stderr.write(`  ERROR: Telegram registration stopped: could not read ${cfgPath} (${errorClass(err)})\n`);
+    process.exit(1);
+  }
 }
+const original = JSON.stringify(cfg);
 if (!cfg.channels) cfg.channels = {};
+// An array, or a value that is not an object at all, holds no channel this
+// block could add to: say so and write nothing.
+const plainObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+if (!plainObject(cfg) || !plainObject(cfg.channels)) {
+  process.stderr.write("  Telegram registration skipped: openclaw.json holds no channels object\n");
+  process.exit(0);
+}
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
 // OpenClaw's OWN value wins. This block exists to re-register the channel on a
 // fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
@@ -8092,6 +8143,25 @@ const openclawHasBot =
   holdsBot(rest) ||
   (!!rest.accounts && typeof rest.accounts === "object" && Object.values(rest.accounts).some(holdsBot));
 cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
+// Every update re-runs this step while the gateway is live. A rewrite that
+// changes nothing still replaces the inode, bumps the mtime and drops the
+// trailing newline OpenClaw writes, so an unchanged config is left as it is
+// once it is 0600 (the repair explained below). A file this user cannot
+// chmod takes the rewrite path as before.
+const secured = () => {
+  try {
+    fs.chmodSync(cfgPath, 0o600);
+    return (fs.statSync(cfgPath).mode & 0o777) === 0o600;
+  } catch {
+    return false;
+  }
+};
+if (JSON.stringify(cfg) === original && secured()) {
+  // The rewrite path removes a temp a crashed run left; it may hold a whole config.
+  fs.rmSync(`${cfgPath}.tmp`, { force: true });
+  process.stderr.write("  Telegram channel already registered; openclaw.json unchanged\n");
+  process.exit(0);
+}
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 // `rename` replaces the INODE, so the temp file's mode is the one that
 // survives. openclaw.json holds channels.telegram.botToken and the gateway's
@@ -8118,7 +8188,6 @@ process.stderr.write(
     : "  Telegram channel registered from ClawBox's saved token\n",
 );
 NODE
-    fi
   fi
 
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
