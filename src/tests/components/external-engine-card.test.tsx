@@ -58,12 +58,14 @@ function renderCard(onChanged = vi.fn()) {
 
 /** The form filled in for BASE — plain HTTP to another machine with a key — and, unless told not to, the owner's yes to sending it. */
 async function fillForm({ confirmHttp = true } = {}) {
-  fireEvent.click(await screen.findByTestId("local-ai-external-setup"));
-  fireEvent.change(screen.getByTestId("local-ai-external-base-url"), { target: { value: BASE } });
-  fireEvent.change(screen.getByTestId("local-ai-external-api-key"), { target: { value: KEY } });
-  fireEvent.change(screen.getByTestId("local-ai-external-model"), { target: { value: MODEL } });
-  fireEvent.change(screen.getByTestId("local-ai-external-context"), { target: { value: "131072" } });
-  if (confirmHttp) fireEvent.click(screen.getByTestId("local-ai-external-http-confirm"));
+  // By role and label, as the owner finds them: a broken label association
+  // fails here as surely as a broken value.
+  fireEvent.click(await screen.findByRole("button", { name: "Set up" }));
+  fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: BASE } });
+  fireEvent.change(screen.getByLabelText("API key"), { target: { value: KEY } });
+  fireEvent.change(screen.getByLabelText("Model id"), { target: { value: MODEL } });
+  fireEvent.change(screen.getByLabelText("Context window (tokens)"), { target: { value: "131072" } });
+  if (confirmHttp) fireEvent.click(screen.getByRole("checkbox", { name: "Send the key over this unencrypted connection" }));
 }
 
 afterEach(() => {
