@@ -226,6 +226,40 @@ describe("Settings → System → Users", () => {
     }
   });
 
+  /**
+   * The x64 laptop test (2026-11-10): Settings' content column centres only
+   * its DIRECT child divs (`[&>div]:mx-auto [&>div]:w-full`), so each one
+   * carries its own max-width. The switch and the Device panel are
+   * `max-w-xl`; the Users tab's container had none, so it spanned the whole
+   * column and the Users panel inside it sat ~90 px left of the switch. jsdom
+   * draws nothing, so what is pinned is the cause: the three column children
+   * carry one and the same max-width.
+   */
+  it("puts Users in the same centred column as the switch and the Device cards", async () => {
+    await mount();
+    fireEvent.click(navRow("System")!);
+    const tabs = await screen.findByRole("tablist", { name: "System" });
+    const device = await screen.findByRole("tabpanel", { name: "Device" });
+    const maxWidth = (el: Element) => Array.from(el.classList).filter((c) => /^max-w-/.test(c));
+    expect(maxWidth(tabs)).toEqual(["max-w-xl"]);
+    expect(device.parentElement).toBe(tabs.parentElement);
+    expect(maxWidth(device)).toEqual(maxWidth(tabs));
+
+    fireEvent.click(systemTab("Users"));
+    const users = await screen.findByRole("tabpanel", { name: "Users" });
+    // The column's own child, not something nested deeper…
+    expect(users.parentElement).toBe(tabs.parentElement);
+    expect(users.tagName).toBe("DIV");
+    // …held to the switch's width, so it shares its left and right edges.
+    expect(maxWidth(users)).toEqual(maxWidth(tabs));
+    // Nor do the panel and its cards narrow or shift the column again.
+    const section = within(users).getByTestId("settings-users-section");
+    await within(section).findByTestId("users-add-form");
+    for (const el of [section, ...Array.from(section.children)]) {
+      expect(Array.from(el.classList).filter((c) => /^(-?m[lrx]-|max-w-(?!xl$))/.test(c)), el.outerHTML.slice(0, 80)).toEqual([]);
+    }
+  });
+
   it("moves between the tabs with the arrow keys, Home and End", async () => {
     await mount();
     fireEvent.click(navRow("System")!);

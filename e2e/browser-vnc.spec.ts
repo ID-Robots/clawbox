@@ -40,7 +40,11 @@ test("browser app walks its setup once, then shows the device's screen", async (
 
   // Opening it IS finishing: the wizard hands the owner straight to the screen.
   await browserWindow.getByTestId("browser-wizard-open").click();
-  await expect(browserWindow.getByTestId("browser-state")).toContainText("4242");
+  // Running shows the Close control and a green dot; the header no longer
+  // prints "Running · PID n" (x64 laptop test, 2026-11-10).
+  await expect(browserWindow.getByTestId("browser-close")).toBeVisible();
+  await expect(browserWindow.getByTestId("browser-state").locator(".bg-green-400")).toBeVisible();
+  await expect(browserWindow.getByTestId("browser-state")).not.toContainText("4242");
   await expect(browserWindow.getByTestId("browser-wizard")).toBeHidden();
 
   // The screen also has a window of its own, for a second monitor.
