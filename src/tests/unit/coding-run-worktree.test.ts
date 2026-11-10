@@ -334,13 +334,33 @@ describe("bringing a merged pull request home", () => {
     expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: false, commit: merged, checkedOut: true });
   });
 
-  it("leaves a folder with uncommitted work of the owner's alone, and names why", async () => {
+  it("moves nothing when the merge would write over uncommitted work, and names why", async () => {
+    // GitHub's merge changes index.html; so has the owner, without committing.
+    fs.writeFileSync(path.join(elsewhere, "index.html"), "<h1>Merged</h1>\n");
     mergeOnGitHub();
     const before = git(dir, "rev-parse", "HEAD");
     fs.writeFileSync(path.join(dir, "index.html"), "<h1>Mine, not saved yet</h1>\n");
-    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" });
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: false, reason: "dirty", detail: "uncommitted changes there are in files the merge also changes" });
     expect(git(dir, "rev-parse", "HEAD")).toBe(before);
     expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>Mine, not saved yet</h1>\n");
+    expect(fs.existsSync(path.join(dir, "feature.txt"))).toBe(false);
+  });
+
+  it("is not stopped by a changed file the merge does not touch — the box's own notes in a project that tracks them", async () => {
+    // Five of the owner's projects track .clawbox/run-notes.md, and the box
+    // writes a run's lessons there: Timer's folder was "dirty" by that one
+    // file when its pull request merged (2026-11-10). The change stays.
+    fs.mkdirSync(path.join(dir, ".clawbox"));
+    fs.writeFileSync(path.join(dir, ".clawbox", "run-notes.md"), "- an old lesson\n");
+    git(dir, "add", "-f", ".clawbox/run-notes.md");
+    git(dir, "commit", "-q", "-m", "notes, tracked");
+    git(dir, "push", "-q", "origin", "master");
+    git(elsewhere, "pull", "-q", "origin", "master");
+    const merged = mergeOnGitHub();
+    fs.appendFileSync(path.join(dir, ".clawbox", "run-notes.md"), "- a lesson the box just wrote\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: true });
+    expect(fs.readFileSync(path.join(dir, "feature.txt"), "utf8")).toBe("merged work\n");
+    expect(fs.readFileSync(path.join(dir, ".clawbox", "run-notes.md"), "utf8")).toBe("- an old lesson\n- a lesson the box just wrote\n");
   });
 
   it("moves only the base's ref when the folder is on another branch, and never touches the tree", async () => {

@@ -389,10 +389,15 @@ export type BaseHomeBlocker = "fetch" | "dirty" | "diverged" | "failed";
  *   - `origin`'s base is fetched; a fetch that fails (no remote, offline, a
  *     sign-in that expired) is said and nothing else happens;
  *   - already there: nothing moves, and the caller says nothing;
- *   - checked out and clean (`readCheckout`, the merge home's own rule — the
- *     box's favicons do not count, and one the base brings its own of is
- *     moved aside): `merge --ff-only`. Uncommitted work of the owner's is
- *     theirs: the folder is left and the reason named;
+ *   - checked out: `merge --ff-only`, and GIT decides whether uncommitted
+ *     work is in the way — it refuses to write over a changed file and moves
+ *     nothing then (`dirty`), and takes no notice of one the merge does not
+ *     touch. NOT the merge home's "only when clean": five of the owner's
+ *     projects track `.clawbox/run-notes.md` (a team's merge committed it
+ *     once), the box itself writes a run's lessons there, and a rule that
+ *     asked for a clean folder would never have moved one of them. A favicon
+ *     the box drew that the base brings its own of is moved aside first
+ *     (`setAsideFavicons`), as for the merge home;
  *   - the folder is on ANOTHER branch (a coding team's, the owner's own):
  *     only the base's ref moves, by a fetch into it, which git refuses unless
  *     it is a fast-forward. The tree is not touched (`checkedOut: false`);
@@ -425,12 +430,14 @@ export function bringBaseHome(input: { projectDir: string; base: string }): Prom
     }
     const seen = await readCheckout(dir, "normal");
     if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project folder") };
-    if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
     const aside = await setAsideFavicons(dir, commit, seen.favicons);
     const forward = await gitIn(dir, ["merge", "--ff-only", "--quiet", commit]);
     putBackFavicons(aside);
-    if (!ok(forward)) return { ok: false, reason: "failed", detail: failureDetail(forward, `Moving ${base} forward`) };
-    return { ok: true, moved: true, commit, checkedOut: true };
+    if (ok(forward)) return { ok: true, moved: true, commit, checkedOut: true };
+    // Git's own refusal to write over a file the folder has changed or added: nothing moved.
+    return /would be overwritten/i.test(forward.stdout + forward.stderr)
+      ? { ok: false, reason: "dirty", detail: "uncommitted changes there are in files the merge also changes" }
+      : { ok: false, reason: "failed", detail: failureDetail(forward, `Moving ${base} forward`) };
   });
 }
 

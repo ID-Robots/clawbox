@@ -218,12 +218,13 @@ describe("a pull request the box merged", () => {
   });
 
   it("says why the folder was left, with what to do, when it could not follow", async () => {
-    bringBaseHome.mockResolvedValue({ ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" });
+    bringBaseHome.mockResolvedValue({ ok: false, reason: "dirty", detail: "uncommitted changes there are in files the merge also changes" });
     await mergeNow();
     const run = lib.getRun(RUN_ID);
     // Still a merge: where the folder is does not change what GitHub did.
     expect(run?.pr?.phase).toBe("merged");
-    expect(run?.progress.join("\n")).toMatch(/The project folder was not moved to the merged main: the project folder has uncommitted changes of its own\. Run git pull there when it is ready/);
+    // Whole, inside the feed's 160-character line: what to do is said before why.
+    expect(run?.progress).toContain("The merged main is not in the project folder yet — run git pull there: uncommitted changes there are in files the merge also changes");
   });
 
   it("says nothing more when the folder already has the merge", async () => {

@@ -30,27 +30,43 @@ The planner alone, same goal: Fable 5.2 at xhigh $4.39 in 9 minutes, Fable 5.2 a
 | One run + review pass | Sonnet 5.5 at medium | $1.68 | 13 min | 48 | all green |
 | One run + review pass | Opus 5.5 at medium | $6.56 | 25 min | 48 | all green |
 | Team, the new defaults | Fable 5.2 planner at high ($6.29), five Sonnet 5.5 workers at ultracode ($9.07), five Opus 5.5 reviewers at high ($1.98) | $17.33 | 74 min | 48 | all green |
+| Team, the new defaults and the planner told that dependent steps are one task | Fable 5.2 planner at high ($6.17), four Sonnet 5.5 workers at ultracode ($6.57), one Opus 5.5 final review at high ($0.51) | $13.25 | 44 min | 48 | all green |
 
 Both single-run interfaces were looked at as screenshots at 390 and 320 pixels: no overflow, no page errors, the three new features usable in each.
+
+### Four real releases, through the box's own flow
+
+After the defaults changed, four more of the owner's apps were given a 1.3.0 release each as ONE ordinary run on the real project — the run's own worktree, the automatic review pass, the pull request the box opens and merges itself. No model was named, so each ran on the new default (Sonnet 5.5). Each result was then checked out in a throwaway clone: the app's own gates, and a probe of the goal's stated rules against the built app.
+
+| Release | Effort | Cost | Wall | App's gates | Rules probed | Outcome |
+|---|---|---|---|---|---|---|
+| Habit Tracker 1.3.0 — weekly targets, CSV export | medium | $1.18 | 10 min | all green | 17 of 17 | merged by the box |
+| Notes 1.3.0 — pin, archive, export and import | medium | $1.75 | 16 min | all green | 15 of 15 | merged by the box; the review pass fixed one real interface defect |
+| Pomodoro 1.3.0 — daily goal, statistics | medium | $1.72 | 13 min | all green | 12 of 12 | merged by the box |
+| Timer 1.3.0 — labels, preset editing, export | ultracode (the owner's setting) | $7.82 | 47 min | all green | 11 of 11 | pull request open; the review pass fixed one real defect |
+
+The three `medium` runs cost $1.18 to $1.75 and took 10 to 16 minutes. The one run left on the owner's `ultracode` setting cost $7.82 and took 47 — four to six times the cost and three to four times the wait for a release of the same size, with more tests written (71 against 22 to 30) and no difference the gates or the probes could see.
 
 ## What the figures say
 
 1. **Sonnet 5.5 writes these tasks as well as Opus 5.5 for a quarter to a half of the cost.** Same hidden score on both tasks, same robustness score after the review pass on T1, and on T2 half the wall time. It is now what a team's worker and an unnamed single run get. Opus 5.5 stays the reviewer.
-2. **The shape costs more than the model.** T2 as a five-task team cost ten times what one run of the same goal did and took almost six times as long, for the same 48 of 48. Every task is a fresh session that learns the project again (about 130,000 tokens of cache written per worker) and, under review "each", a reviewer run. The planner's brief used to ask for exactly that plan — "any chain where each step builds on the last, runs serially" — and now says such steps are one task; a one-task plan already runs as one ordinary run.
+2. **The shape costs more than the model.** T2 as a five-task team cost ten times what one run of the same goal did and took almost six times as long, for the same 48 of 48. Every task is a fresh session that learns the project again (about 130,000 tokens of cache written per worker) and, under review "each", a reviewer run. The planner's brief used to ask for exactly that plan — "any chain where each step builds on the last, runs serially" — and now says such steps are one task; a one-task plan already runs as one ordinary run. Told that, the planner dropped one task and chose a single final review: a quarter cheaper and 40% faster, and still eight times the single run. So the brief now also carries a yardstick — a whole feature release of a small app is one session's work.
 3. **The planner was the dearest run of every team it planned** ($4.39 of $12.34, $6.29 of $17.33). At `high` Fable 5.2 wrote the same plan as at `xhigh` for 56% of the cost in under half the time, so `high` is where a planner and a reviewer with no effort stored now start on Anthropic. Opus 5.5 planned comparably for a third of that again; it is the choice to store for the planner when cost matters more than the plan's detail.
-4. **Effort is the other large lever, and the review pass earns its cost.** One Opus 5.5 run at `low` cost $1.27 against $4.72 at `xhigh` for the same hidden score — but it left two robustness defects, and the review pass found six real defects in the `xhigh` run's work. `medium` with the review pass on was the best value measured ($1.68 on T2). `ultracode` adds a sub-agent fan-out to a pass over a diff the run has just verified: $2.29 of the $7.01 run.
+4. **Effort is the other large lever, and the review pass earns its cost.** On four real releases of one size, `ultracode` cost four to six times what `medium` did (above). One Opus 5.5 run at `low` cost $1.27 against $4.72 at `xhigh` for the same hidden score — but it left two robustness defects, and the review pass found six real defects in the `xhigh` run's work. `medium` with the review pass on was the best value measured ($1.68 on T2). `ultracode` adds a sub-agent fan-out to a pass over a diff the run has just verified: $2.29 of the $7.01 run.
 5. **Haiku 5.5 is a usable economy tier**: every hidden case, one robustness miss, for a small fraction of Sonnet's cost — at more turns and no saving in time. It replaces Sonnet 5 as the provider's economy model.
 
 ## What changed in the product
 
 - `ROLE_DEFAULT_MODELS.anthropic`: planner `claude-fable-5-2`, worker `claude-sonnet-5-5`, reviewer `claude-opus-5-5`. `DEFAULT_ANTHROPIC_MODEL` (an unnamed single run): `claude-sonnet-5-5`. `ECONOMY_MODELS.anthropic`: `claude-haiku-5-5`.
 - `ROLE_AUTO_EFFORT.anthropic`: a planner and a reviewer with no effort stored start at `high`; an effort the owner stores for the role is still honoured up to the `xhigh` cap.
-- The planner's brief: steps that each build on the last are one task; only a chain too long for one session is split into serial tasks.
+- The planner's brief: steps that each build on the last are one task; only a chain too long for one session is split into serial tasks; and a yardstick for what one session does.
+- Found by the four real releases and fixed: a pull request the box merged never reached the project folder (the next run would have forked from the old base); a run's worktree mounted an app under the run's id instead of the app's (`CLAWBOX_APP_ID`); a plan naming a path outside the project failed its single-run team.
 - Found and fixed on the way (each has its paragraph in `docs/agents/coding-agent.md`): the review pass inheriting the owner's effort instead of its run's, a run that wrote through its shell recorded as changing nothing (so no review pass), the final reviewer shown only the first 1,200 characters of the goal, a rejected final review ending the team with all its work done, worktree paths left inside committed files, `bun test` projects treated as having no suite, the preview dying on an installed app's port, and screenshots a Claude run could not see.
 
 ## Limits of this benchmark
 
 - One run per configuration, two tasks, one kind of project (a small Next.js app). A 10% difference here is noise.
 - Both tasks fit in one session. Nothing here measures a goal too large for one — the case teams are for.
+- The planner's cost was measured on its default model only as part of a team. Alone, on T1, Opus 5.5 planned for a third of Fable 5.2's cost; no team was run from an Opus plan.
 - Haiku 5.5's cost assumes the short-context list price throughout; its runs were long, so its real figure may be higher.
 - Prices are those in force on 2026-11-10.

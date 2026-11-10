@@ -334,7 +334,8 @@ export const RUNNER_STEP = {
   /** ...the folder is on another branch: only the base's own ref moved. */
   baseRefHome: (base: string) => `${base} in the project folder is on the merged work now; the folder is on another branch and was left as it is`,
   /** ...or could not be: the reason is git's, or the box's own (uncommitted changes, a base that went its own way). */
-  baseNotHome: (base: string, reason: string) => `The project folder was not moved to the merged ${base}: ${reason}. Run git pull there when it is ready`,
+  /** What to do comes BEFORE the reason: a feed line is cut at 160 characters, and git's own words can be long. */
+  baseNotHome: (base: string, reason: string) => `The merged ${base} is not in the project folder yet — run git pull there: ${reason}`,
   /** The box handed the merge to GitHub's auto-merge (reconcileAutoMerge). */
   autoMergeOn: (num: number) => `Turned on GitHub's auto-merge for pull request #${num}: it merges the moment its required checks pass`,
   /** ...and took it back; `reason` is the box's own words (decideAutoMerge). */
