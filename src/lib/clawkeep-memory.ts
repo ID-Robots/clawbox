@@ -534,6 +534,27 @@ function supervisedPass(): { current: SupervisedPass | null } {
   return processStore("clawkeep-memory.supervised-pass", () => ({ current: null as SupervisedPass | null }));
 }
 
+/**
+ * The end of the last pass this process started, through everything its
+ * `finish` does: the settled record, the freed lock and the status refresh
+ * behind it. Process-wide for the same reason as `supervisedPass`.
+ */
+function passSettling(): { current: Promise<void> | null } {
+  return processStore("clawkeep-memory.pass-settling", () => ({ current: null as Promise<void> | null }));
+}
+
+/**
+ * Resolves once the last pass this process started has settled completely,
+ * the status refresh its `finish` starts included. The run-state file reads
+ * "succeeded" before that refresh has even begun, so a caller that must know
+ * nothing the pass set off is still running (a test about to remove the
+ * directory the refresh reads) waits on this, not on the file. Never rejects;
+ * resolves at once when this process started no pass.
+ */
+export function memoryPassSettled(): Promise<void> {
+  return (passSettling().current ?? Promise.resolve()).catch(() => { /* settled either way */ });
+}
+
 function runIsAlive(pid: number): boolean {
   return processIsAlive(pid) || (pid > 0 && settlingPasses().has(pid));
 }
@@ -2375,9 +2396,11 @@ export async function startMemoryIndex(
     invalidateMemoryStatusCache();
     // Refresh behind the finished run rather than on the next read, so the new
     // counts are there by the time the owner looks, not ten seconds after.
-    reloadMemoryStatus().catch(() => { /* the next read tries again */ });
+    // Awaited only so that `memoryPassSettled` resolves after it: nothing
+    // waits on `finish` itself, and the probe starts at this same moment.
+    await reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  void pass.ended.then(finish);
+  passSettling().current = pass.ended.then(finish);
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }

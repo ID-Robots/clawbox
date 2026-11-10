@@ -2013,24 +2013,27 @@ describe("a box whose default agent is not called main", () => {
 
   it("indexes that agent", async () => {
     const argv = await boxWithAgents(customer, [realRow("default")]);
-    const { startMemoryIndex, getMemoryStatus } = await lib();
+    const { startMemoryIndex, memoryPassSettled } = await lib();
     expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
     expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
-    // Join the status refresh the finished run starts, so no process the
-    // module spawned is still running when the directory is removed.
-    await getMemoryStatus();
+    // The record settles before the pass's status refresh even starts: wait
+    // for that refresh too, so no process the module spawned is still running
+    // when the directory is removed.
+    await memoryPassSettled();
+    // That wait covers the refresh: the probe behind the pass has been made.
+    expect((await calls(argv, "memory")).at(-1)).toBe("memory status --agent default --deep --json");
     // The fixture's index is empty, so the planner may promote the pass to a full one.
     expect(await calls(argv, "memory index")).toEqual([expect.stringMatching(/^memory index --agent default( --force)?$/)]);
   });
 
   it("still asks about main on a box whose agent is main", async () => {
     const argv = await boxWithAgents({ entries: { main: {}, travel: {} } }, [realRow("main")]);
-    const { getMemoryStatus, startMemoryIndex } = await lib();
+    const { getMemoryStatus, memoryPassSettled, startMemoryIndex } = await lib();
     expect((await getMemoryStatus()).agentId).toBe("main");
     expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
     await settledMemoryRun(tmpDir);
-    // Join the status refresh the finished run starts (see above).
-    await getMemoryStatus();
+    // Wait for the pass's status refresh too (see above).
+    await memoryPassSettled();
     expect(await calls(argv, "memory status")).toContain("memory status --agent main --deep --json");
     expect(await calls(argv, "memory index")).toEqual([expect.stringMatching(/^memory index --agent main( --force)?$/)]);
   });
@@ -2055,21 +2058,21 @@ describe("a box whose default agent is not called main", () => {
     const argv = await boxWithAgents({ entries: { main: {}, default: {} } }, [realRow("main"), populated]);
     const config = path.join(process.env.CLAWBOX_OPENCLAW_HOME as string, "openclaw.json");
     await fs.writeFile(config, JSON.stringify({ agents: { entries: { main: {} } } }));
-    const { getMemoryStatus, resolveIndexMode, startMemoryIndex } = await lib();
+    const { getMemoryStatus, memoryPassSettled, resolveIndexMode, startMemoryIndex } = await lib();
     expect(await getMemoryStatus()).toMatchObject({ agentId: "main", chunks: 0 });
     await fs.writeFile(config, JSON.stringify({ agents: { entries: { default: {} } } }));
     expect(await resolveIndexMode("incremental", "manual")).toBe("incremental");
     expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
     expect((await settledMemoryRun(tmpDir)).mode).toBe("incremental");
-    // Join the status refresh the finished run starts (see above).
-    await getMemoryStatus();
+    // Wait for the pass's status refresh too (see above).
+    await memoryPassSettled();
     expect(await calls(argv, "memory index")).toEqual(["memory index --agent default"]);
     expect(await calls(argv, "memory status")).toContain("memory status --agent default --deep --json");
   });
 
   it("does not force the default agent's index over a keyword-only reading about another agent", async () => {
     const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("default")]);
-    const { getMemoryStatus, parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const { memoryPassSettled, parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
     const aboutMain = await parseMemoryStatus(
       KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, null, "main",
     );
@@ -2081,8 +2084,8 @@ describe("a box whose default agent is not called main", () => {
     const aboutDefault = { ...aboutMain, agentId: "default" };
     expect(await rebuildKeywordOnlyIndex(aboutDefault)).toBe(true);
     await settledMemoryRun(tmpDir);
-    // Join the status refresh the finished run starts (see above).
-    await getMemoryStatus();
+    // Wait for the pass's status refresh too (see above).
+    await memoryPassSettled();
     expect(await calls(argv, "memory index")).toEqual(["memory index --agent default --force"]);
     // A late reading about the other agent claims nothing, so it cannot wipe
     // that agent's once-per-setting record: the next reading about it, still
