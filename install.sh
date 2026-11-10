@@ -11378,7 +11378,69 @@ ensure_local_embeddings() {
   # verdict, not just the bytes: assignment in if-condition position, so a
   # non-zero exit discards output that describes nothing anyone should vouch
   # for, and errexit stays suppressed.
-  local EMBED_JSON EMBED_STATE
+  local EMBED_JSON EMBED_STATE MEMORY_AGENT
+  # About the box's DEFAULT agent, which is not always called `main`: asked
+  # about `main` on a box whose agent was renamed, the core refuses (or reads
+  # a stale `agents/main/` left behind) and this said it could not read an
+  # embedder. The same rule as src/lib/openclaw-default-agent.ts, over the
+  # openclaw.json this block reads (the web server's own on a stock box):
+  # `agents.defaults.systemAgent.agentId` when it is a
+  # configured agent, else the one entry marked `default: true` (not under
+  # explicit ownership), else the sole agent; with several and none named,
+  # `main` if it is one of them, else the first. `main` with no roster, no
+  # readable config or no python3.
+  # `-I` on both parsers here: this runs as root, and a full install reaches it
+  # from inside the clawbox-writable project directory, where a plain
+  # `python3 -` would put the cwd first on sys.path and import a planted
+  # `json.py`/`re.py` as root. Isolated mode drops the cwd, PYTHONPATH and the
+  # user site; the snippets import nothing but the standard library.
+  MEMORY_AGENT="$(python3 -I - "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+import json, re, sys
+def norm(value):
+    s = value.strip() if isinstance(value, str) else ""
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", s, re.I | re.A):
+        return s.lower()
+    return re.sub(r"[^a-z0-9_-]+", "-", s.lower()).lstrip("-").rstrip("-")[:64] or "main"
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except Exception:
+    cfg = None
+agents = cfg.get("agents") if isinstance(cfg, dict) else None
+roster = None
+if isinstance(agents, dict) and "entries" in agents:
+    entries = agents["entries"]
+    # In the order JavaScript walks the object, as the core and the web
+    # server do: integer-like keys first, ascending, then the rest as written.
+    keys = list(entries) if isinstance(entries, dict) else []
+    first = sorted((k for k in keys if re.fullmatch(r"0|[1-9][0-9]*", k) and int(k) < 4294967295), key=int)
+    keys = first + [k for k in keys if k not in first]
+    roster = [(norm(k), entries[k]) for k in keys if isinstance(entries[k], dict)] if isinstance(entries, dict) else []
+elif isinstance(agents, dict) and "list" in agents:
+    listed = agents["list"]
+    roster = [(norm(v.get("id") if isinstance(v, dict) else None), v) for v in listed if isinstance(v, (dict, list))] if isinstance(listed, list) else []
+if roster is None:
+    print("main")
+    raise SystemExit(0)
+ids = list(dict.fromkeys(i for i, _ in roster))
+defaults = agents.get("defaults") if isinstance(agents.get("defaults"), dict) else {}
+system = defaults.get("systemAgent") if isinstance(defaults.get("systemAgent"), dict) else {}
+named = system.get("agentId")
+named = norm(named) if isinstance(named, str) and named.strip() else ""
+marked = [i for i, e in roster if isinstance(e, dict) and e.get("default") is True]
+if named and named in ids:
+    print(named)
+elif agents.get("ownership") != "explicit" and len(marked) == 1:
+    print(marked[0])
+elif len(ids) == 1:
+    print(ids[0])
+elif not ids:
+    print("main")
+else:
+    print("main" if "main" in ids else ids[0])
+PY
+)"
+  case "$MEMORY_AGENT" in ''|*[!a-z0-9_-]*) MEMORY_AGENT=main ;; esac
   # `</dev/null`, and no clock. The CLI is what decides how long this takes —
   # `--deep` walks the whole index, so the 60 s cap this used to carry reported
   # "could not read an embedder" about a healthy one on a box whose index was
@@ -11386,7 +11448,7 @@ ensure_local_embeddings() {
   # invent. What IS closed off is the one way a non-interactive CLI hangs
   # without doing anything: a prompt on stdin, which it would otherwise inherit
   # from the root step and wait on for ever.
-  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
+  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent "$MEMORY_AGENT" --deep --json 2>/dev/null </dev/null)"; then
     EMBED_JSON=""
   fi
   # `command -v` first, and a state of its own: without the interpreter the
@@ -11395,7 +11457,7 @@ ensure_local_embeddings() {
   if ! command -v python3 >/dev/null 2>&1; then
     EMBED_STATE="noparser"
   else
-    EMBED_STATE="$(python3 - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+    EMBED_STATE="$(python3 -I - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" "$MEMORY_AGENT" <<'PY' 2>/dev/null || true
 import json, sys
 from urllib.parse import urlparse
 try:
@@ -11405,7 +11467,7 @@ except Exception:
 rows = doc if isinstance(doc, list) else [doc]
 row = {}
 for entry in rows:
-    if isinstance(entry, dict) and entry.get("agentId") == "main":
+    if isinstance(entry, dict) and entry.get("agentId") == sys.argv[3]:
         row = entry
         break
 if not row and rows and isinstance(rows[0], dict):
@@ -11701,9 +11763,13 @@ LLAMACPP_BUILD_LOCK="/run/lock/clawbox-llamacpp-build.lock"
 LLAMACPP_REPO_URL="https://github.com/ggml-org/llama.cpp.git"
 
 # The commit an installed llama-server says it was built from — the short hash
-# in its own `--version` ("version: 6970 (db7d8b24b)") — or nothing when it
-# cannot say: it does not start, or it was built outside a git checkout and
-# answers "unknown".
+# in its own `--version`, in either form llama.cpp prints:
+#   version: <build> (<hash>)                         (older builds)
+#   version: <semver> (build <build>, commit <hash>)  (newer builds)
+# — or nothing when it cannot say: it does not start, or it was built outside
+# a git checkout and answers "unknown". Reading only the older form would
+# rebuild a box on every update once the pin moves to a newer build, and then
+# refuse the build it made.
 #
 # $1 = the binary, $2 = a directory to load its libraries from instead of the
 # tree its RUNPATH names (a staged build that is not in place yet).
@@ -11718,7 +11784,10 @@ llamacpp_binary_commit() {
   else
     out="$(as_clawbox "$bin" --version 2>&1)" || return 0
   fi
-  printf '%s\n' "$out" | sed -n 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' | head -n 1
+  printf '%s\n' "$out" | sed -n \
+    -e 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    -e 's/^version: [^ ][^ ]* (build [0-9][0-9]*, commit \([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    | head -n 1
 }
 
 # Does the short hash a binary reports ($1) name the pinned commit ($2, the

@@ -66,7 +66,7 @@ const ALICE = { username: "alice", createdAt: "2026-09-27T10:00:00.000Z", sv: "a
 
 const STATUS = {
   effort: "xhigh",
-  effortLevels: ["low", "xhigh", "max", "ultracode"],
+  effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
   roleModels: {
     planner: { provider: "auto", model: "auto", effort: "auto" },
     worker: { provider: "auto", model: "auto", effort: "auto" },
@@ -231,14 +231,14 @@ describe("GET", () => {
     const body = await (await GET(get(agent()))).json();
     expect(body).toMatchObject({
       effort: "xhigh",
-      effortLevels: ["low", "xhigh", "max", "ultracode"],
+      effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
       roleModels: STATUS.roleModels,
       roleModelMap: STATUS.roleModelMap,
       roleModelTiers: ["standard", "economy"],
       connectedProviders: ["clawbox-ai", "anthropic"],
       providerModels: {
         "clawbox-ai": ["deepseek-v4-flash"],
-        anthropic: ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+        anthropic: ["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
       },
       reviewPass: false,
       autoPr: false,
@@ -379,7 +379,7 @@ describe("the history setting", () => {
 
 describe("a bad value is refused whole, before any setter runs, in the enable route's words", () => {
   it.each([
-    [{ effort: "medium" }, /Effort must be one of: low, xhigh, max, ultracode/],
+    [{ effort: "turbo" }, /Effort must be one of: low, medium, high, xhigh, max, ultracode/],
     [{ effort: 3 }, /Effort must be one of/],
     [{ reviewPass: "yes" }, /review pass switch must be true or false/],
     [{ autoPr: 1 }, /pull-request switch must be true or false/],

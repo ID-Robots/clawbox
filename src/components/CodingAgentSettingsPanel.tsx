@@ -854,7 +854,8 @@ export default function CodingAgentSettingsPanel() {
           <label className="text-xs font-medium text-[var(--text-secondary)]">
             {t("codingAgent.effortLabel")}
           </label>
-          <div className={`${SEGMENTED_TRACK} mt-1.5`} data-testid="coding-agent-effort">
+          {/* Six levels: on a phone-width panel they wrap onto a second row rather than push the card sideways. */}
+          <div className={`${SEGMENTED_TRACK} flex-wrap mt-1.5`} data-testid="coding-agent-effort">
             {(status?.effortLevels ?? []).map((level) => {
               const active = status?.effort === level;
               return (

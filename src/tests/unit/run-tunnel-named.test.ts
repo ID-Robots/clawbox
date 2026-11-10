@@ -131,7 +131,19 @@ interface Run {
 function start(env: Record<string, string> = {}): Run {
   let out = "";
   const child = spawn("bash", [RUN_TUNNEL], {
-    env: { ...process.env, CLAWBOX_ROOT: root, CLOUDFLARED_BIN: fakeBin, ...env },
+    // No port from the host running the tests: with LOCAL_SERVICE_URL, PORT and
+    // CLAWBOX_PORT empty and the UI unit unknown, the script forwards to the
+    // appliance's :80 (src/tests/unit/run-tunnel-target.test.ts covers the rest).
+    env: {
+      ...process.env,
+      LOCAL_SERVICE_URL: "",
+      PORT: "",
+      CLAWBOX_PORT: "",
+      SYSTEMCTL_BIN: "false",
+      CLAWBOX_ROOT: root,
+      CLOUDFLARED_BIN: fakeBin,
+      ...env,
+    },
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });

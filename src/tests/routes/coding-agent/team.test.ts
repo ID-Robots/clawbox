@@ -261,7 +261,7 @@ describe("POST effort", () => {
   });
 
   it("refuses a level the app does not offer with 400 and a code, before startTeam", async () => {
-    for (const effort of ["medium", "Max", "", 7]) {
+    for (const effort of ["turbo", "Max", "", 7]) {
       team.startTeam.mockClear();
       const res = await POST(req("team", { goal: "Build it", directory: "site", effort }));
       expect(res.status, String(effort)).toBe(400);

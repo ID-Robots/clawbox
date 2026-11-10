@@ -74,6 +74,17 @@ describe("buildRunEnv and the owner's secrets", () => {
     expect(withSecrets.CLAWBOX_RUN_ARTIFACTS_DIR).toBe("/tmp/evidence");
   });
 
+  it("names the app a worktree run is a copy of, and lets no stored secret name it", () => {
+    // Set for a run in `<project>/.clawbox/worktrees/<name>` (worktreeAppId),
+    // absent for any other run — and a CLAWBOX_ name, so the owner's secret
+    // store can neither set it nor change it.
+    expect(buildRunEnv({ effort: "high", appId: "notes" }).CLAWBOX_APP_ID).toBe("notes");
+    expect(buildRunEnv({ effort: "high" })).not.toHaveProperty("CLAWBOX_APP_ID");
+    expect(buildRunEnv({ effort: "high", appId: null })).not.toHaveProperty("CLAWBOX_APP_ID");
+    expect(buildRunEnv({ effort: "high", appId: "notes", secrets: { CLAWBOX_APP_ID: "other" } }).CLAWBOX_APP_ID).toBe("notes");
+    expect(buildRunEnv({ effort: "high", secrets: { CLAWBOX_APP_ID: "other" } })).not.toHaveProperty("CLAWBOX_APP_ID");
+  });
+
   it("drops a reserved name the device does not happen to be writing on this run", () => {
     // `LD_PRELOAD` is in no run's environment, so `name in env` would let it
     // through: the reserved-name check is what refuses it.

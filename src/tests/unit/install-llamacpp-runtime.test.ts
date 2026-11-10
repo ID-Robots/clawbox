@@ -29,6 +29,12 @@ const INSTALL_SH = path.join(process.cwd(), "install.sh");
 const SRC = fs.readFileSync(INSTALL_SH, "utf8");
 const PIN = "db7d8b24b5197ca39435cf47b3c1ba039b53605b";
 const OLD = "f08f20a";
+// llama.cpp's newer --version line (upstream common/build-info.cpp.in from
+// 5f490d7 on): the semver, build number and hash length all vary by build.
+const NEW_PIN = "5f490d7bfe78844e6390c869454c149fd7e003a8";
+const NEW_FORM = "version: 0.9.0-dev (build 12233, commit 5f490d7bf)";
+// What a --depth 1 build of that commit printed on an Orin Nano.
+const CAPTURED_FORM = "version: 0.9.0-dev (build 1, commit 5f490d7)";
 
 const FUNCTIONS = [
   "llamacpp_binary_commit",
@@ -85,8 +91,8 @@ exit 0
 }
 
 /** The old binary as the box has it: a copy in /usr/local/bin, loading from its tree. */
-function installLive(tree: string, commit: string): void {
-  fs.copyFileSync(makeTree(tree, commit), liveBin);
+function installLive(tree: string, commit: string, version?: string): void {
+  fs.copyFileSync(makeTree(tree, commit, version), liveBin);
   fs.chmodSync(liveBin, 0o755);
 }
 
@@ -153,6 +159,26 @@ describe("which llama.cpp a llama-server was built from", () => {
     expect(run(`llamacpp_binary_commit "${broken}"`).out.trim()).toBe("");
   });
 
+  it("reads the newer form too: version: <semver> (build <N>, commit <hash>)", () => {
+    const full = makeTree(path.join(tmp, "n"), "", NEW_FORM);
+    expect(run(`llamacpp_binary_commit "${full}"`).out.trim()).toBe("5f490d7bf");
+    const captured = makeTree(path.join(tmp, "c"), "", CAPTURED_FORM);
+    expect(run(`llamacpp_binary_commit "${captured}"`).out.trim()).toBe("5f490d7");
+  });
+
+  it("is nothing for a newer-form build that cannot name its commit, or a binary that says nothing", () => {
+    for (const [i, line] of [
+      "version: 0.9.0-dev (build 1, commit unknown)",
+      "version: 0.9.0-dev (build 1, commit 5f490dz)",
+      "version: 0.9.0-dev (build 1, commit 5f490d)",
+      `version: 0.9.0-dev (build 1, commit ${NEW_PIN}0)`,
+      "",
+    ].entries()) {
+      const bin = makeTree(path.join(tmp, `x${i}`), "", line);
+      expect(run(`llamacpp_binary_commit "${bin}"`).out.trim()).toBe("");
+    }
+  });
+
   it("can load a staged build's own libraries instead of the tree its RUNPATH names", () => {
     const staged = makeTree(path.join(tmp, "staged"), "db7d8b24b");
     fs.rmSync(path.join(tmp, "staged", "bin", "libllama.sh"));
@@ -183,6 +209,16 @@ describe("when llama-server has to be rebuilt", () => {
   it("leaves the pinned CUDA build alone", () => {
     installLive(path.join(tmp, "llama.cpp", "build"), "db7d8b24b");
     expect(run(`llamacpp_rebuild_reason "${liveBin}" ON ${PIN}`, { LDD_OUT: CUDA_LDD }).out.trim()).toBe("");
+  });
+
+  it("leaves a newer-form CUDA build of the pin alone, whatever its build number or hash length", () => {
+    for (const line of [NEW_FORM, CAPTURED_FORM]) {
+      installLive(path.join(tmp, "llama.cpp", "build"), "", line);
+      expect(run(`llamacpp_rebuild_reason "${liveBin}" ON ${NEW_PIN}`, { LDD_OUT: CUDA_LDD }).out.trim()).toBe("");
+    }
+    // Off the pin it is named by its commit, not taken for a binary that does not start.
+    expect(run(`llamacpp_rebuild_reason "${liveBin}" ON ${PIN}`, { LDD_OUT: CUDA_LDD }).out.trim())
+      .toBe("the installed llama-server is llama.cpp 5f490d7, and this release pins db7d8b24b");
   });
 
   it("rebuilds when it is missing, does not start, or lost CUDA — as before", () => {
@@ -270,6 +306,16 @@ describe("the swap", () => {
     expect(fs.readdirSync(path.dirname(liveBin))).toEqual(["llama-server"]);
   });
 
+  it("swaps in a build of the pin that prints the newer form", () => {
+    installLive(path.join(tmp, "llama.cpp", "build"), OLD);
+    const fresh = makeTree(path.join(tmp, "llama.cpp", "build-new"), "", NEW_FORM);
+    const r = run(`activate_llamacpp_server "${fresh}" ${NEW_PIN}`);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("llama-server is now llama.cpp 5f490d7bf (pinned 5f490d7bf).");
+    expect(liveVersion()).toBe(NEW_FORM);
+    expect(fs.readdirSync(path.dirname(liveBin))).toEqual(["llama-server"]);
+  });
+
   it("keeps the installed one when the new build is not the pin", () => {
     installLive(path.join(tmp, "llama.cpp", "build"), OLD);
     const wrong = makeTree(path.join(tmp, "llama.cpp", "build-new"), "a1b2c3d4e");
@@ -306,11 +352,11 @@ describe("the swap", () => {
 
 describe("a prebuilt archive is staged beside the live tree, never over it", () => {
   /** A prebuilt as a build host makes it: build/bin, RUNPATH = <llama>/build/bin. */
-  function archive(commit: string): string {
+  function archive(commit: string, version = `version: 9 (${commit})`): string {
     const llama = path.join(tmp, "llama.cpp");
     const stage = path.join(tmp, "host");
     fs.mkdirSync(stage, { recursive: true });
-    fs.writeFileSync(path.join(stage, "libllama.sh"), `LINE='version: 9 (${commit})'\n`);
+    fs.writeFileSync(path.join(stage, "libllama.sh"), `LINE='${version}'\n`);
     fs.writeFileSync(path.join(stage, "libggml-cuda.so.0"), "x");
     fs.writeFileSync(
       path.join(stage, "llama-server"),
@@ -345,6 +391,16 @@ exit 0
       install_prebuilt_llamacpp "${archive("db7d8b24b")}" ON "${llama}" ${PIN}`);
     expect(r.code).toBe(0);
     expect(liveVersion()).toBe("version: 9 (db7d8b24b)");
+    expect(fs.readdirSync(llama)).toEqual(["build"]);
+  });
+
+  it("takes a pinned prebuilt that prints the newer form", () => {
+    const llama = path.join(tmp, "llama.cpp");
+    installLive(path.join(llama, "build"), OLD);
+    const r = run(`${AARCH64}
+      install_prebuilt_llamacpp "${archive("5f490d7bf", NEW_FORM)}" ON "${llama}" ${NEW_PIN}`);
+    expect(r.code).toBe(0);
+    expect(liveVersion()).toBe(NEW_FORM);
     expect(fs.readdirSync(llama)).toEqual(["build"]);
   });
 
@@ -396,6 +452,15 @@ describe("the step's verdict", () => {
     expect(calls()).not.toMatch(/PRUNE|reset-failed/);
   });
 
+  it("keeps a working newer-form binary when the rebuild fails: a warning, not a failure", () => {
+    installLive(path.join(tmp, "llama.cpp", "build"), "", NEW_FORM);
+    const r = step({ LDD_OUT: CUDA_LDD, INSTALL_RESULT: "1" });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[llamacpp-not-rebuilt\]: /m);
+    expect(r.out).not.toMatch(/No llama-server that starts/);
+    expect(liveVersion()).toBe(NEW_FORM);
+  });
+
   it("fails only when the box is left with no llama-server that starts", () => {
     const r = step({ INSTALL_RESULT: "1" });
     expect(r.code).not.toBe(0);
@@ -414,6 +479,9 @@ describe("the step around it", () => {
     // A binary that is there but does not start is not "working".
     fs.rmSync(path.join(tmp, "llama.cpp", "build"), { recursive: true });
     expect(run("LLAMACPP_COMMIT=db7d8b2 step_llamacpp_runtime").code).not.toBe(0);
+    // A working binary that prints the newer form is a working binary too.
+    installLive(path.join(tmp, "llama.cpp", "build"), "", NEW_FORM);
+    expect(run("LLAMACPP_COMMIT=db7d8b2 step_llamacpp_runtime").code).toBe(0);
   });
 
   it("waits for a build already running, says so, and then has nothing to do", () => {

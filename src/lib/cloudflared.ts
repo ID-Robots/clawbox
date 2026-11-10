@@ -19,6 +19,14 @@ export const TUNNEL_URL_FILE = path.join(CLOUDFLARED_DIR, "tunnel.url");
  * volatile and there was no HTTP access log. This file is that record.
  */
 export const TUNNEL_URL_LOG_FILE = path.join(CLOUDFLARED_DIR, "tunnel-url.log");
+/**
+ * The local origin the running unit forwards to, as scripts/run-tunnel.sh
+ * resolved it: the unit's LOCAL_SERVICE_URL, else the web UI's port. Written on
+ * every start and erased on every stop, like `tunnel.url`. A tunnel aimed at a
+ * port the UI does not serve on publishes a URL that answers 502 (TASK-2359),
+ * and before this file nothing short of the journal said where it pointed.
+ */
+export const TUNNEL_TARGET_FILE = path.join(CLOUDFLARED_DIR, "tunnel.target");
 export const TUNNEL_SERVICE = "clawbox-tunnel.service";
 
 /**
@@ -26,12 +34,17 @@ export const TUNNEL_SERVICE = "clawbox-tunnel.service";
  * Cloudflare Quick Tunnel hostname, or this box's own named-tunnel hostname
  * (`<boxHandle>.clawbox.tech`, one label, see src/lib/named-tunnel.ts), which
  * scripts/run-tunnel.sh writes when it runs the named tunnel.
+ *
+ * `api.trycloudflare.com` is never one: it is the endpoint cloudflared asks
+ * for a quick tunnel, and it names it in the error it logs when that fails —
+ * `failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel"`,
+ * which is what a box logs at boot before its DNS answers (TASK-2359).
  */
 const TUNNEL_URL_PATTERN =
-  /^https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)\/?$/i;
+  /^https:\/\/(?:(?!api\.trycloudflare\.com)[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)\/?$/i;
 /** The same two shapes, unanchored, for the journal. */
 const TUNNEL_URL_IN_TEXT =
-  /https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)(?![a-z0-9.-])/gi;
+  /https:\/\/(?:(?!api\.trycloudflare\.com)[a-z0-9-]+\.trycloudflare\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech)(?![a-z0-9.-])/gi;
 
 export async function isInstalled(): Promise<boolean> {
   try {
@@ -50,6 +63,18 @@ export async function readTunnelUrl(): Promise<string | null> {
     // Sanity-check the shape so we never return garbage.
     if (!TUNNEL_URL_PATTERN.test(raw)) return null;
     return raw.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/** Where the running unit forwards to (`http://localhost:<port>`), if it said. */
+export async function readTunnelTarget(): Promise<string | null> {
+  try {
+    const raw = (await fs.readFile(TUNNEL_TARGET_FILE, "utf-8")).trim();
+    if (!raw) return null;
+    const { protocol } = new URL(raw);
+    return protocol === "http:" || protocol === "https:" ? raw : null;
   } catch {
     return null;
   }
@@ -102,8 +127,14 @@ export async function readTunnelUrlHistory(limit = 10): Promise<TunnelUrlRecord[
  * "remote access is off" in that state is the worst thing this API can do.
  *
  * Newest line wins: the unit restarts on failure and every restart publishes a
- * new hostname.
+ * new hostname. And only within the current attempt: scripts/run-tunnel.sh
+ * opens every attempt with a `[run-tunnel] … tunnel ->` line, and a hostname
+ * printed before the newest one belongs to a cloudflared that has exited — when
+ * the newest request failed (no DNS yet at boot), that is no URL at all. A
+ * journal without those lines (a unit started by hand) is read whole.
  */
+const ATTEMPT_START = /^\[run-tunnel\] (?:forwarding tunnel|named tunnel) ->/;
+
 export async function readTunnelUrlFromJournal(lines = 200): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -111,7 +142,9 @@ export async function readTunnelUrlFromJournal(lines = 200): Promise<string | nu
       ["-u", TUNNEL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
       { maxBuffer: 4 * 1024 * 1024 },
     );
-    const found = stdout.match(TUNNEL_URL_IN_TEXT);
+    const journal = stdout.split("\n");
+    const attempt = journal.findLastIndex((line) => ATTEMPT_START.test(line));
+    const found = journal.slice(Math.max(attempt, 0)).join("\n").match(TUNNEL_URL_IN_TEXT);
     return found?.length ? found[found.length - 1].replace(/\/+$/, "") : null;
   } catch {
     return null;

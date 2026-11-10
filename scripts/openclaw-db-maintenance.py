@@ -1569,7 +1569,10 @@ def cmd_start_guard(args):
         guard = {}
     starts = [s for s in (guard.get("starts") or []) if isinstance(s, dict) and isinstance(s.get("at"), (int, float))]
     restarts = max(0, args.restarts)
-    starts.append({"at": now, "restarts": restarts})
+    record = {"at": now, "restarts": restarts}
+    if args.outside_unit:
+        record["outsideUnit"] = True
+    starts.append(record)
     guard["starts"] = starts[-STARTS_KEPT:]
     sweep_restoring(discover(args.state_dir, args.config))
     episode = guard.get("episode") if isinstance(guard.get("episode"), dict) else None
@@ -1598,6 +1601,13 @@ def cmd_start_guard(args):
     if episode and not episode.get("settledAt") and (guard.get("provenAt") or 0) > (episode.get("actedTo") or now):
         episode["settledAt"] = guard["provenAt"]
         log("the gateway has started since its start-loop recovery (%s)" % episode.get("stage"))
+
+    # The updater's own run, with the gateway stopped and outside its unit, is
+    # no start and never acts on a loop. Its record can sit in no loop window
+    # either: it repeats the count of the start before it, and the updater
+    # restarts the unit by hand after it, so the next start counts from 0.
+    if args.outside_unit:
+        return save()
 
     # A loop: the last few starts were each an automatic restart of the one
     # before, all within the window.
@@ -2703,6 +2713,8 @@ def main(argv=None):
     p.add_argument("--budget-seconds", type=int, default=420)
     # Where the core's rolling log files are, instead of its default places.
     p.add_argument("--log-dir", action="append", default=[])
+    # Run by the updater, outside the unit: no gateway starts from this run.
+    p.add_argument("--outside-unit", action="store_true")
 
     p = sub.add_parser("preflight")
     common(p)

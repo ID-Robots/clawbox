@@ -35,8 +35,12 @@ answer?" — and say yes only when all of these hold:
      after a failure (systemd's NRestarts is 0) and that the PREVIOUS start
      reached `gateway ready` after it began. A reused answer that turned out
      wrong would have kept the gateway from becoming ready, and the very next
-     start then runs the full checks. On a core without the start-guard
-     (before 2026.10) there is no such proof, and nothing is ever reused;
+     start then runs the full checks. A run the updater makes itself, with
+     the gateway stopped and outside its unit, is recorded as `outsideUnit`
+     and is never that previous start: no gateway starts from it. For the
+     same reason it may take a recorded answer but never records one. On a core
+     without the start-guard (before 2026.10) there is no such proof, and
+     nothing is ever reused;
   4. the operator did not ask for a full run (CLAWBOX_PRESTART_FULL=1 makes
      the script pass --no-reuse).
 
@@ -199,9 +203,12 @@ def previous_start_proven(guard_path, now):
         return "no start record to prove the last start reached gateway ready"
     starts = [s for s in (guard.get("starts") or [])
               if isinstance(s, dict) and isinstance(s.get("at"), (int, float))]
-    if len(starts) < 2:
+    # A run the updater makes outside the unit starts no gateway, so it is
+    # never the previous start; when this run is one, it is still judged.
+    earlier = [s for s in starts[:-1] if not s.get("outsideUnit")]
+    if not earlier:
         return "no earlier start on record"
-    current, previous = starts[-1], starts[-2]
+    current, previous = starts[-1], earlier[-1]
     if not (0 <= now - current["at"] <= CURRENT_START_MAX_AGE_S):
         return "this start was not recorded"
     if current.get("restarts") != 0:

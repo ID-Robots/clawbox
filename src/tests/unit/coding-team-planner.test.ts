@@ -323,7 +323,9 @@ describe("parsePlan — the shape", () => {
     expect(PLANNER_BRIEF).toContain('"shape"');
     expect(PLANNER_BRIEF).toMatch(/one-file fix is ONE task with parallelism 1 and review "final"/);
     expect(PLANNER_BRIEF).toMatch(/independent files may run in parallel/);
-    expect(PLANNER_BRIEF).toMatch(/migration.*serially/);
+    // A migration still runs as serial tasks — as the one chain too long for
+    // a session, no longer as the model for every chain of dependent steps.
+    expect(PLANNER_BRIEF).toMatch(/migration across many modules — is split into serial tasks: parallelism 1/);
     expect(PLANNER_BRIEF).toContain(`1 to ${MAX_TEAM_WORKERS}`);
   });
 });
