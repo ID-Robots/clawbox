@@ -317,6 +317,22 @@ describe("the index identity", () => {
   });
 });
 
+describe("when the wake path restarts a running embedder", () => {
+  it("only for another catalog model, never for a drifted default-slot alias", async () => {
+    const { embedServesOtherModel } = await import("@/lib/local-ai-runtime");
+    const small = { alias: "qwen3-embedding-0.6b", modelId: "qwen3-embedding-0.6b" as const };
+    const custom = { alias: "custom", modelId: "qwen3-embedding-0.6b" as const };
+    const large = { alias: "qwen3-embedding-4b", modelId: "qwen3-embedding-4b" as const };
+    expect(embedServesOtherModel(null, large)).toBe(false);
+    expect(embedServesOtherModel("qwen3-embedding-4b", large)).toBe(false);
+    expect(embedServesOtherModel("qwen3-embedding-0.6b", large)).toBe(true);
+    expect(embedServesOtherModel("custom", large)).toBe(true);
+    expect(embedServesOtherModel("qwen3-embedding-4b", small)).toBe(true);
+    expect(embedServesOtherModel("custom", small)).toBe(false);
+    expect(embedServesOtherModel("qwen3-embedding-0.6b", custom)).toBe(false);
+  });
+});
+
 describe("the re-embed estimate for a change of model", () => {
   it("does not reuse the 0.6B's timing for the 4B", () => {
     const status = { files: 100, chunks: 2000, location: "local", model: "qwen3-embedding-0.6b", run: { status: "succeeded", mode: "full", durationMs: 120_000 } };

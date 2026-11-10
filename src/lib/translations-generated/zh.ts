@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "未下载",
   "localModels.embed.present": "{model} 在这台盒子上（{size}）。",
   "localModels.embed.remove": "移除",
+  "localModels.embed.sourceUnknown": "暂时无法读取记忆搜索在何处运行，因此切换需等待；稍后会再次查询。",
   "localModels.embed.switchHint": "切换模型会重新嵌入所有文件；另一个模型的文件会保留，直到你将其移除。",
   "localModels.embed.title": "记忆搜索模型",
   "localModels.embed.unavailable.gpuMemory": "需要 6 GB 空闲显存，目前不足。请停止其他本地模型后重试。",

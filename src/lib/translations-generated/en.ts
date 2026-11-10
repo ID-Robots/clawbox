@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "Not downloaded",
   "localModels.embed.present": "{model} is on this box ({size}).",
   "localModels.embed.remove": "Remove",
+  "localModels.embed.sourceUnknown": "Where memory search runs could not be read yet, so switching waits; the box is asked again in a moment.",
   "localModels.embed.switchHint": "Switching models embeds every file again; the other model's file stays until you remove it.",
   "localModels.embed.title": "Memory search model",
   "localModels.embed.unavailable.gpuMemory": "Needs 6 GB of free GPU memory, and less is free right now. Stop other local models and try again.",

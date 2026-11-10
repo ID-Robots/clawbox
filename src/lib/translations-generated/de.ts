@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "Nicht heruntergeladen",
   "localModels.embed.present": "{model} ist auf dieser Box ({size}).",
   "localModels.embed.remove": "Entfernen",
+  "localModels.embed.sourceUnknown": "Wo die Gedächtnissuche läuft, ließ sich noch nicht lesen, daher wartet der Wechsel; die Box wird gleich erneut gefragt.",
   "localModels.embed.switchHint": "Ein Modellwechsel bettet jede Datei neu ein; die Datei des anderen Modells bleibt, bis du sie entfernst.",
   "localModels.embed.title": "Modell für die Gedächtnissuche",
   "localModels.embed.unavailable.gpuMemory": "Braucht 6 GB freien Grafikspeicher, und gerade ist weniger frei. Beende andere lokale Modelle und versuche es erneut.",

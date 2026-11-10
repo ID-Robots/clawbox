@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "Non scaricato",
   "localModels.embed.present": "{model} è su questa scatola ({size}).",
   "localModels.embed.remove": "Rimuovi",
+  "localModels.embed.sourceUnknown": "Non è stato ancora possibile leggere dove gira la ricerca nella memoria, quindi il cambio attende; la box viene interrogata di nuovo tra poco.",
   "localModels.embed.switchHint": "Cambiare modello rielabora ogni file; il file dell'altro modello resta finché non lo rimuovi.",
   "localModels.embed.title": "Modello di ricerca nella memoria",
   "localModels.embed.unavailable.gpuMemory": "Richiede 6 GB di memoria GPU libera e ora ce n'è meno. Ferma gli altri modelli locali e riprova.",
