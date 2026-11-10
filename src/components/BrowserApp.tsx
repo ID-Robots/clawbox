@@ -38,7 +38,7 @@ import AgentBrowserIcon from "./AgentBrowserIcon";
 import VNCApp, { type VNCHandle } from "./VNCApp";
 import BrowserSetupWizard from "./BrowserSetupWizard";
 import BrowserSettingsPanel, { type BrowserStatus } from "./BrowserSettingsPanel";
-import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY } from "./coding-agent-ui";
+import { BTN_SECONDARY } from "./coding-agent-ui";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -52,6 +52,34 @@ const POLL_BUSY_MS = 1500;
  *  ten readiness probes, and short enough that a Chromium which came up but
  *  never bound its port drops back to the idle rate instead of holding it. */
 const POLL_BUSY_WINDOW_MS = 45_000;
+
+/**
+ * The header's buttons: 32 px tall at EVERY width. The shared BTN_* geometry
+ * is 44 px until its container is `@md`, and nothing above this app is a
+ * container, so on the desktop they were a phone's touch size on a 1150 px
+ * window (x64 laptop test, 2026-11-10). Same roles and colours as
+ * coding-agent-ui's PRIMARY, SECONDARY and QUIET; only the geometry differs.
+ */
+const HEADER_BTN =
+  "inline-flex items-center justify-center gap-1.5 shrink-0 select-none no-underline cursor-pointer whitespace-nowrap"
+  + " rounded-lg h-8 text-xs font-medium"
+  + " transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+  + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)]"
+  + " disabled:opacity-50 disabled:cursor-not-allowed";
+const HEADER_BTN_PRIMARY = `${HEADER_BTN} btn-gradient text-white font-semibold`;
+const HEADER_BTN_SECONDARY =
+  `${HEADER_BTN} border border-white/[0.08] bg-white/[0.06] text-[var(--text-secondary)]`
+  + " hover:bg-white/[0.12] hover:text-[var(--text-primary)]";
+const HEADER_BTN_QUIET =
+  `${HEADER_BTN} border border-transparent bg-transparent text-[var(--text-muted)]`
+  + " hover:bg-white/[0.06] hover:text-[var(--text-primary)]";
+/** A button that always shows its label. */
+const HEADER_BTN_TEXT = "px-3";
+/** A button whose label shows only once the header is `@xl` (576 px) wide —
+ *  the header is the container: a 32 px square on a phone, the icon and the
+ *  label on a desktop window. It is named by aria-label and title either way. */
+const HEADER_BTN_ICON = "w-8 @xl:w-auto @xl:px-3";
+const HEADER_LABEL = "hidden @xl:inline";
 
 interface BrowserAppProps {
   onOpenApp?: (appId: string) => void;
@@ -237,12 +265,16 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
     );
   }
 
+  // A browser that simply runs says nothing: the green dot, the Close button
+  // and the screen below say it, and the "Running · PID n" this used to print
+  // was nothing an owner acts on (x64 laptop test, 2026-11-10). Only the
+  // states that say MORE than "running" keep their words.
   const stateLabel = starting
     ? t("browser.startingChromium")
     : noRemoteDebugging
       ? t("browser.runningNoDebugging")
       : browserRunning
-        ? t("browser.settings.runningPid", { pid: status?.browser?.pid ?? "?" })
+        ? null
         : agentBrowsing
           ? t("browser.agentBrowsingShort", { harness: harnessLabel })
           : t("browser.settings.notRunning");
@@ -261,15 +293,21 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           Open in VNC was cut in half, Settings was off-screen entirely, the
           state label was squeezed to nothing and no ancestor scrolled — so the
           settings this app keeps precisely so a phone that landed on
-          /app/browser can reach them were unreachable from one. */}
-      <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/10" data-testid="browser-header">
+          /app/browser can reach them were unreachable from one.
+
+          And it is COMPACT (x64 laptop test, 2026-11-10): 32 px buttons at
+          every width, and the header is its own container, so below 576 px
+          Paste to VNC, Open in VNC and Settings drop their labels and are a
+          32 px square icon each — named by aria-label and title. On a 390 px
+          phone the whole row then fits on one line. */}
+      <div className="@container shrink-0 flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/10" data-testid="browser-header">
         <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: BRAND_ORANGE }} aria-hidden="true">
           {/* The app's own desktop icon, so the mark in the header is the one
               the owner clicked. */}
           <AgentBrowserIcon className="w-4 h-4 text-white" />
         </div>
         {face === "home" ? (
-          <>
+          <span className="flex items-center gap-2 min-w-0" data-testid="browser-state">
             <span
               aria-hidden="true"
               className={`w-2 h-2 rounded-full shrink-0 ${
@@ -278,8 +316,8 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                     : agentBrowsing ? "bg-amber-400" : "bg-white/25"
               }`}
             />
-            <span className="text-[11px] text-white/60 truncate" data-testid="browser-state">{stateLabel}</span>
-          </>
+            {stateLabel && <span className="text-[11px] text-white/60 truncate">{stateLabel}</span>}
+          </span>
         ) : (
           <span className="text-[12px] font-semibold truncate">{face === "settings" ? t("browser.openSettings") : t("browser.title")}</span>
         )}
@@ -292,7 +330,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 onClick={() => void doAction("close-browser")}
                 disabled={actionLoading !== null}
                 data-testid="browser-close"
-                className={BTN_QUIET}
+                className={`${HEADER_BTN_QUIET} ${HEADER_BTN_TEXT}`}
               >
                 {actionLoading === "close-browser" ? t("browser.closing") : t("browser.closeBrowser")}
               </button>
@@ -302,7 +340,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
                 onClick={() => void doAction("open-browser")}
                 disabled={actionLoading !== null || !canRunBrowser}
                 data-testid="browser-open"
-                className={BTN_PRIMARY}
+                className={`${HEADER_BTN_PRIMARY} ${HEADER_BTN_TEXT}`}
               >
                 {actionLoading === "open-browser" ? t("browser.opening") : t("browser.openBrowser")}
               </button>
@@ -314,15 +352,23 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               type="button"
               onClick={() => vncRef.current?.openPaste()}
               data-testid="browser-paste"
+              aria-label={t("vnc.pasteToRemote")}
               title={t("vnc.pasteToRemote")}
-              className={BTN_SECONDARY}
+              className={`${HEADER_BTN_SECONDARY} ${HEADER_BTN_ICON}`}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">content_paste</span>
-              {t("vnc.pasteToRemote")}
+              <span className={HEADER_LABEL}>{t("vnc.pasteToRemote")}</span>
             </button>
-            <button type="button" onClick={openVncApp} data-testid="browser-open-vnc" className={BTN_SECONDARY}>
+            <button
+              type="button"
+              onClick={openVncApp}
+              data-testid="browser-open-vnc"
+              aria-label={t("browser.openInVNC")}
+              title={t("browser.openInVNC")}
+              className={`${HEADER_BTN_SECONDARY} ${HEADER_BTN_ICON}`}
+            >
               <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">desktop_windows</span>
-              {t("browser.openInVNC")}
+              <span className={HEADER_LABEL}>{t("browser.openInVNC")}</span>
             </button>
           </>
         )}
@@ -334,12 +380,14 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           onClick={() => setPage(face === "settings" ? "home" : "settings")}
           data-testid={face === "settings" ? "browser-settings-back" : "browser-open-settings"}
           aria-expanded={face === "settings"}
-          className={BTN_SECONDARY}
+          aria-label={face === "settings" ? t("browser.back") : t("browser.openSettings")}
+          title={face === "settings" ? t("browser.back") : t("browser.openSettings")}
+          className={`${HEADER_BTN_SECONDARY} ${HEADER_BTN_ICON}`}
         >
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
             {face === "settings" ? "arrow_back" : "settings"}
           </span>
-          {face === "settings" ? t("browser.back") : t("browser.openSettings")}
+          <span className={HEADER_LABEL}>{face === "settings" ? t("browser.back") : t("browser.openSettings")}</span>
         </button>
       </div>
 
