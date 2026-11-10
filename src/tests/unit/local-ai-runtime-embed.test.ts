@@ -57,6 +57,7 @@ vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
   getActiveEmbedLaunchSpec: async () => ({
     alias: embed.alias,
+    modelId: embed.alias === "qwen3-embedding-4b" ? "qwen3-embedding-4b" : "qwen3-embedding-0.6b",
     baseUrl: "http://127.0.0.1:8081/v1",
     healthUrl: "http://127.0.0.1:8081/health",
     logPath: "/nonexistent/embed/server.log",
@@ -140,6 +141,32 @@ describe("waking the memory embedder for a proxied request", () => {
       "/usr/bin/sudo -n /usr/bin/systemctl stop clawbox-embed.service",
       "/usr/bin/sudo -n /usr/bin/systemctl start clawbox-embed.service",
     ]);
+  });
+
+  it("does not restart a default-slot server whose .env alias drifted from the web server's (no restart loop)", async () => {
+    // .env edited between the web server's start and the unit's: same model,
+    // two names. Not a reason to restart under every request.
+    embed.isEmbedHealthy.mockResolvedValue(true);
+    embed.embedServedAlias.mockResolvedValue("my-own-alias");
+    execSucceeds();
+    const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
+
+    await ensureLocalAiReady("embed");
+
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("restarts at most once a minute when the unit keeps coming back as the other model", async () => {
+    embed.alias = "qwen3-embedding-4b";
+    embed.embedServedAlias.mockResolvedValue("qwen3-embedding-0.6b");
+    embed.isEmbedHealthy.mockResolvedValue(true);
+    execSucceeds(/sudo -n \/usr\/bin\/systemctl (stop|start) clawbox-embed\.service/);
+    const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
+
+    await ensureLocalAiReady("embed");
+    await ensureLocalAiReady("embed");
+
+    expect(argvLines().filter((l) => l.includes(" stop "))).toHaveLength(1);
   });
 
   it("leaves a healthy server alone when it cannot say which model it runs", async () => {

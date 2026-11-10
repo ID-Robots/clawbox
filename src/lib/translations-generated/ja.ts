@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "未ダウンロード",
   "localModels.embed.present": "{model} はこの本体にあります（{size}）。",
   "localModels.embed.remove": "削除",
+  "localModels.embed.sourceUnknown": "メモリ検索の実行場所をまだ読み取れないため、切り替えは待機中です。まもなく再確認します。",
   "localModels.embed.switchHint": "モデルを切り替えると全ファイルを埋め込み直します。もう一方のモデルのファイルは削除するまで残ります。",
   "localModels.embed.title": "記憶検索のモデル",
   "localModels.embed.unavailable.gpuMemory": "GPU の空きメモリが 6 GB 必要ですが、現在は不足しています。他のローカルモデルを停止してから再試行してください。",

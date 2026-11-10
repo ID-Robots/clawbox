@@ -162,6 +162,17 @@ restore() {
       not_ok "could not remove the test's folder from Memory Shard: $(api_error)"
     fi
   fi
+  # On the box with another model (an x86 board on the 4B): that model back,
+  # and the full pass its index needs.
+  if [ "$SWITCHED" = 1 ] && [ "$BEFORE_SOURCE" = local ] && [ -n "$BEFORE_MODEL" ] && [ "$BEFORE_MODEL" != "$SMALL" ]; then
+    board_owner_api POST /setup-api/clawkeep/memory/provider "{\"source\":\"local\",\"localModel\":\"$BEFORE_MODEL\"}"
+    if [ "$API_STATUS" = 200 ]; then
+      board_owner_api POST /setup-api/clawkeep/memory/index '{"mode":"full"}'
+      note "the index is back on $BEFORE_MODEL; full pass asked for: $API_STATUS"
+    else
+      not_ok "could not put the index back on $BEFORE_MODEL: $(api_error)"
+    fi
+  fi
   if [ "$SWITCHED" = 1 ] && [ "$BEFORE_SOURCE" = cloud ]; then
     board_owner_api POST /setup-api/clawkeep/memory/provider '{"source":"cloud"}'
     if [ "$API_STATUS" = 200 ]; then
@@ -238,6 +249,13 @@ fi
 
 board_owner_api POST /setup-api/clawkeep/memory/index '{"mode":"full"}'
 note "full pass asked for: $API_STATUS $(api_json '.run.status // .kind // empty')"
+# 409 `running` is a pass already under way, which the poll below follows;
+# any other refusal means no run will ever appear, so say so now rather than
+# after the whole poll.
+if [ "$API_STATUS" != 200 ] && [ "$API_STATUS" != 202 ] && ! { [ "$API_STATUS" = 409 ] && [ "$(api_json '.kind')" = running ]; }; then
+  not_ok "the full pass on $SMALL was not started: $API_STATUS $(printf '%s' "$API_BODY" | head -c 300)"
+  finish
+fi
 DONE="" STATUS_LINE=""
 for _ in $(seq 1 120); do
   sleep 10
