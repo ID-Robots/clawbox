@@ -220,7 +220,9 @@ describe("start-llamacpp.sh load mode", () => {
 
   it("refuses auto, an empty value and anything else: one line, nothing passed", () => {
     // db7d8b2 has no `auto`, and llama-server exits on a LLAMA_ARG_* value it
-    // does not know: .env alone must never cost the box its local model.
+    // does not know: .env alone must never make llama-server exit. On a newer
+    // build "nothing passed" means its own default, auto, which on an 8 GB
+    // Orin is the mode that ran out of memory: the log line is the trace.
     for (const bad of ["auto", "bogus", ""]) {
       const r = start({ LLAMACPP_LOAD_MODE: bad });
       expect(r.env, bad).not.toHaveProperty("LLAMA_ARG_LOAD_MODE");
