@@ -11701,9 +11701,13 @@ LLAMACPP_BUILD_LOCK="/run/lock/clawbox-llamacpp-build.lock"
 LLAMACPP_REPO_URL="https://github.com/ggml-org/llama.cpp.git"
 
 # The commit an installed llama-server says it was built from — the short hash
-# in its own `--version` ("version: 6970 (db7d8b24b)") — or nothing when it
-# cannot say: it does not start, or it was built outside a git checkout and
-# answers "unknown".
+# in its own `--version`, in either form llama.cpp prints:
+#   version: <build> (<hash>)                         (older builds)
+#   version: <semver> (build <build>, commit <hash>)  (newer builds)
+# — or nothing when it cannot say: it does not start, or it was built outside
+# a git checkout and answers "unknown". Reading only the older form would
+# rebuild a box on every update once the pin moves to a newer build, and then
+# refuse the build it made.
 #
 # $1 = the binary, $2 = a directory to load its libraries from instead of the
 # tree its RUNPATH names (a staged build that is not in place yet).
@@ -11718,7 +11722,10 @@ llamacpp_binary_commit() {
   else
     out="$(as_clawbox "$bin" --version 2>&1)" || return 0
   fi
-  printf '%s\n' "$out" | sed -n 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' | head -n 1
+  printf '%s\n' "$out" | sed -n \
+    -e 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    -e 's/^version: [^ ][^ ]* (build [0-9][0-9]*, commit \([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    | head -n 1
 }
 
 # Does the short hash a binary reports ($1) name the pinned commit ($2, the

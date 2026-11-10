@@ -2886,6 +2886,12 @@ async function runCurrentGatewayPreStart(): Promise<string> {
     CLAWBOX_OPENCLAW_HOME: openclawHome,
     OPENCLAW_STATE_DIR: openclawHome,
     OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
+    // This run starts no gateway (the unit's next start runs the pre-start
+    // again), so its start-guard record must not become the "previous start"
+    // that start proves itself against: it would re-run every full check
+    // behind a false "did not reach gateway ready". An explicit marker, since
+    // INVOCATION_ID here is the web server's own unit's.
+    CLAWBOX_PRESTART_OUTSIDE_UNIT: "1",
   };
   delete env.OPENCLAW_HOME;
   const { stdout } = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {

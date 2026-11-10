@@ -13,10 +13,14 @@ export async function run({ host, hostStart, log }) {
   const web = d.web, gw = d.gateway;
   const webRssMb = web.rssKb != null ? web.rssKb / 1024 : null;
   const gwRssMb = gw.rssKb != null ? gw.rssKb / 1024 : null;
-  const writeMbPerMin = (web.writeBytesPerSec ?? 0) * 60 / 1048576 + (gw.writeBytesPerSec ?? 0) * 60 / 1048576;
+  // null = not measured (no /proc/<pid>/io on the Jetson L4T kernel, or a
+  // service restarted mid-bench): scoring it as 0 MB/min faked a perfect score.
+  const writeMbPerMin = web.writeBytesPerSec != null && gw.writeBytesPerSec != null
+    ? web.writeBytesPerSec * 60 / 1048576 + gw.writeBytesPerSec * 60 / 1048576
+    : null;
   const memAvailMb = d.system.memAvailableKb / 1024;
   const memTotalMb = now.system.memTotalKb / 1024;
-  log(`web ${web.cpuPct ?? "?"}% CPU / ${webRssMb?.toFixed(0)} MB, gateway ${gw.cpuPct ?? "?"}% / ${gwRssMb?.toFixed(0)} MB, writes ${writeMbPerMin.toFixed(1)} MB/min, free ${memAvailMb.toFixed(0)} MB`);
+  log(`web ${web.cpuPct ?? "?"}% CPU / ${webRssMb?.toFixed(0)} MB, gateway ${gw.cpuPct ?? "?"}% / ${gwRssMb?.toFixed(0)} MB, writes ${writeMbPerMin === null ? "?" : writeMbPerMin.toFixed(1)} MB/min, free ${memAvailMb.toFixed(0)} MB`);
   return {
     metrics: {
       web_cpu_pct: { value: web.cpuPct, unit: "%", dir: "lower", good: 3, bad: 40, label: "web server CPU over the bench (of one core)" },
