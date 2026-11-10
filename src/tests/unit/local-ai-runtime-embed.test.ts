@@ -19,6 +19,9 @@ const readFileMock = vi.hoisted(() => vi.fn(async (): Promise<string> => { throw
 vi.mock("fs/promises", () => ({ default: { readFile: readFileMock } }));
 const embed = vi.hoisted(() => ({
   isEmbedHealthy: vi.fn(),
+  /** The model the box is set to, and the one the running server answers as. */
+  alias: "qwen3-embedding-0.6b",
+  embedServedAlias: vi.fn(async (): Promise<string | null> => "qwen3-embedding-0.6b"),
   getEmbedProvisioningStatus: vi.fn(async () => ({
     binPath: "/usr/local/bin/llama-server",
     modelPath: "/data/embed/models/x.gguf",
@@ -52,13 +55,14 @@ vi.mock("@/lib/embed-server", () => ({
   EMBED_UNIT: "clawbox-embed.service",
   getEmbedBaseUrl: () => "http://127.0.0.1:8081/v1",
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
-  getEmbedLaunchSpec: () => ({
-    alias: "qwen3-embedding-0.6b",
+  getActiveEmbedLaunchSpec: async () => ({
+    alias: embed.alias,
     baseUrl: "http://127.0.0.1:8081/v1",
     healthUrl: "http://127.0.0.1:8081/health",
     logPath: "/nonexistent/embed/server.log",
     startupTimeoutMs: 1_200_000,
   }),
+  embedServedAlias: embed.embedServedAlias,
   getEmbedProvisioningStatus: embed.getEmbedProvisioningStatus,
   isEmbedHealthy: embed.isEmbedHealthy,
   isLlamaServerExecutable: (argv0: string) => /(^|\/)llama-server$/.test(argv0),
@@ -83,6 +87,8 @@ beforeEach(() => {
   vi.resetModules();
   execFileMock.mockReset();
   embed.isEmbedHealthy.mockReset();
+  embed.alias = "qwen3-embedding-0.6b";
+  embed.embedServedAlias.mockReset().mockResolvedValue("qwen3-embedding-0.6b");
   // The guard reads the real /proc/meminfo; a CI runner's free memory must not
   // decide these tests. The guard has its own case below.
   process.env.EMBED_WAKE_MIN_AVAILABLE_MB = "0";
@@ -111,6 +117,34 @@ describe("waking the memory embedder for a proxied request", () => {
 
   it("touches nothing when the server is already healthy", async () => {
     embed.isEmbedHealthy.mockResolvedValue(true);
+    execSucceeds();
+    const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
+
+    await ensureLocalAiReady("embed");
+
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("restarts a healthy server that still answers as the model the owner switched away from (TASK-2411)", async () => {
+    // The box is set to the 4B; the running server is the 0.6B. It must not
+    // embed one more passage: stopped, then woken with the model it is set to.
+    embed.alias = "qwen3-embedding-4b";
+    embed.embedServedAlias.mockResolvedValue("qwen3-embedding-0.6b");
+    embed.isEmbedHealthy.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValue(true);
+    execSucceeds(/sudo -n \/usr\/bin\/systemctl (stop|start) clawbox-embed\.service/);
+    const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
+
+    await ensureLocalAiReady("embed");
+
+    expect(argvLines()).toEqual([
+      "/usr/bin/sudo -n /usr/bin/systemctl stop clawbox-embed.service",
+      "/usr/bin/sudo -n /usr/bin/systemctl start clawbox-embed.service",
+    ]);
+  });
+
+  it("leaves a healthy server alone when it cannot say which model it runs", async () => {
+    embed.isEmbedHealthy.mockResolvedValue(true);
+    embed.embedServedAlias.mockResolvedValue(null);
     execSucceeds();
     const { ensureLocalAiReady } = await import("@/lib/local-ai-runtime");
 

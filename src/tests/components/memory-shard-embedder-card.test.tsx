@@ -141,3 +141,51 @@ describe("MemoryShardEmbedderCard", () => {
     expect(container.querySelector('[data-testid="memory-shard-embedder-card"]')).toBeNull();
   });
 });
+
+describe("MemoryShardEmbedderCard — which model on this box (TASK-2411)", () => {
+  type Row = { id: string; label: string; active: boolean; installed: boolean; available: boolean; reason: string | null };
+  const rows = (fourB: Partial<Row>): Row[] => [
+    { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", active: true, installed: true, available: true, reason: null },
+    { id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", active: false, installed: false, available: true, reason: null, ...fourB },
+  ];
+
+  it("shows the 4B disabled with the plain reason on a Jetson", async () => {
+    choice = { ...choice, localModel: "qwen3-embedding-0.6b", localModels: rows({ available: false, reason: "jetson" }) } as Choice;
+    render(<MemoryShardEmbedderCard />);
+    const select = await screen.findByTestId("memory-shard-embedder-model-select");
+    expect((select as HTMLSelectElement).value).toBe("qwen3-embedding-0.6b");
+    const option = select.querySelector('option[value="qwen3-embedding-4b"]') as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    expect(screen.getByTestId("memory-shard-embedder-model-qwen3-embedding-4b-unavailable").textContent)
+      .toContain("localModels.embed.unavailable.jetson");
+    // …which is a real sentence in every locale.
+    for (const table of Object.values(clawkeepTranslations)) expect(table["localModels.embed.unavailable.jetson"]).toMatch(/Jetson/);
+  });
+
+  it("downloads the 4B first, then switches onto it by name and asks for a full pass", async () => {
+    choice = { ...choice, localModel: "qwen3-embedding-0.6b", localModels: rows({}) } as Choice;
+    render(<MemoryShardEmbedderCard />);
+    const select = await screen.findByTestId("memory-shard-embedder-model-select");
+    fireEvent.change(select, { target: { value: "qwen3-embedding-4b" } });
+    await waitFor(() => expect(urls()).toContain("/setup-api/clawkeep/memory/index"));
+    expect(calls.find((c) => c.url === "/setup-api/embed/install")?.body).toEqual({ model: "qwen3-embedding-4b" });
+    expect(calls.find((c) => c.url === "/setup-api/clawkeep/memory/provider")?.body)
+      .toEqual({ source: "local", localModel: "qwen3-embedding-4b" });
+    expect(calls.find((c) => c.url === "/setup-api/clawkeep/memory/index")?.body).toEqual({ mode: "full" });
+  });
+
+  it("switches onto a 4B already on disk without downloading it", async () => {
+    choice = { ...choice, localModel: "qwen3-embedding-0.6b", localModels: rows({ installed: true }) } as Choice;
+    render(<MemoryShardEmbedderCard />);
+    fireEvent.change(await screen.findByTestId("memory-shard-embedder-model-select"), { target: { value: "qwen3-embedding-4b" } });
+    await waitFor(() => expect(urls()).toContain("/setup-api/clawkeep/memory/index"));
+    expect(urls()).not.toContain("/setup-api/embed/install");
+  });
+
+  it("has no model picker while the index is in the cloud", async () => {
+    choice = { ...choice, source: "cloud", localModel: "qwen3-embedding-0.6b", localModels: rows({}) } as Choice;
+    render(<MemoryShardEmbedderCard />);
+    await screen.findByTestId("memory-shard-embedder-card");
+    expect(screen.queryByTestId("memory-shard-embedder-model")).toBeNull();
+  });
+});

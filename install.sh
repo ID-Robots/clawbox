@@ -5633,6 +5633,24 @@ ensure_embed_model_cached() {
     echo "  Memory-search model already cached (${HF_FILE})"
     return 0
   fi
+  # The shipped file is the one whose size and sha256 the catalog knows
+  # (LOCAL_EMBEDDING_MODELS in src/lib/embed-runtime-ids.ts;
+  # local-embedding-models.test.ts pins these literals to it). A file .env
+  # names instead is fetched as before, unverified.
+  local KNOWN_BYTES="" KNOWN_SHA="" free_kb got
+  if [ "$HF_REPO" = "Qwen/Qwen3-Embedding-0.6B-GGUF" ] && [ "$HF_FILE" = "Qwen3-Embedding-0.6B-Q8_0.gguf" ]; then
+    KNOWN_BYTES=639150592
+    KNOWN_SHA=06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439
+  fi
+  # Disk first (TASK-2411): the file plus half a gigabyte, so a full disk is
+  # never what the download leaves behind. The Hub CLI resumes a partial file.
+  if [ -n "$KNOWN_BYTES" ]; then
+    free_kb="$(df -Pk "$MODEL_DIR" 2>/dev/null | awk 'NR == 2 {print $4}')"
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt $(( (KNOWN_BYTES + 536870912) / 1024 )) ]; then
+      echo "Error: not enough disk space for the memory-search model: it needs $(( (KNOWN_BYTES + 536870912) / 1000000 )) MB free, $(( free_kb * 1024 / 1000000 )) MB free" >&2
+      return 1
+    fi
+  fi
   echo "  Downloading the memory-search model (${HF_FILE}, ~639 MB)..."
   if ! as_clawbox_login "hf download \"$HF_REPO\" \"$HF_FILE\" --local-dir \"$MODEL_DIR\""; then
     echo "Error: failed to download the memory-search model" >&2
@@ -5641,6 +5659,17 @@ ensure_embed_model_cached() {
   if [ ! -f "$MODEL_PATH" ]; then
     echo "Error: download completed but ${MODEL_PATH} was not found" >&2
     return 1
+  fi
+  # Verified before anything uses it: a mismatch is deleted, so the next
+  # attempt starts clean instead of "already cached" over a bad file.
+  if [ -n "$KNOWN_SHA" ]; then
+    got="$(sha256sum "$MODEL_PATH" 2>/dev/null | awk '{print $1}')"
+    if [ "$got" != "$KNOWN_SHA" ]; then
+      rm -f "$MODEL_PATH"
+      echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); deleted it" >&2
+      return 1
+    fi
+    echo "  Memory-search model verified (sha256)"
   fi
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
   echo "  Memory-search model cached for offline use"

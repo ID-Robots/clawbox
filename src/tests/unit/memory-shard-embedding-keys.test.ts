@@ -49,6 +49,8 @@ vi.mock("@/lib/memory-index-local", () => ({
 }));
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => PROXY_URL,
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
+  writeActiveLocalEmbeddingModel: async () => {},
 }));
 vi.mock("@/lib/local-ai-token", () => ({
   getLocalAiToken: () => TOKEN,

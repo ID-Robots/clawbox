@@ -84,6 +84,21 @@ beforeEach(() => {
     ].join("\n"),
   );
 
+  // sha256sum: the verify step (scripts/embed-model-select.sh) hashes what hf
+  // wrote. The stub file is not the real GGUF, so this answers the catalog's
+  // own sha256 for it — or a wrong one when a case asks for a bad download.
+  writeStub(
+    "sha256sum",
+    [
+      'if [ "${SHA_BAD:-0}" = "1" ]; then echo "0000000000000000000000000000000000000000000000000000000000000000  $1"; exit 0; fi',
+      'case "$1" in',
+      '  *Qwen3-Embedding-0.6B-Q8_0.gguf) echo "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439  $1" ;;',
+      '  *Qwen3-Embedding-4B-Q8_0.gguf) echo "b60ae5ce2dd6a0b77f82cadf21def1f310a3e10cde380ad0081b07a9d416949d  $1" ;;',
+      '  *) echo "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  $1" ;;',
+      'esac',
+    ].join("\n"),
+  );
+
   // hf: record the download and honour a scripted exit code; on success put the
   // file where the script then looks, exactly like the real one.
   writeStub(
@@ -164,6 +179,8 @@ type RunOpts = {
   present?: boolean;
   hfRc?: number;
   hfNoFile?: boolean;
+  /** The downloaded file does not hash to the catalog's sha256. */
+  shaBad?: boolean;
   openclawRc?: number;
   state?: string;
   proxyDown?: boolean;
@@ -260,6 +277,7 @@ function run(opts: RunOpts = {}) {
       CALLS_LOG: callsPath,
       HF_RC: String(opts.hfRc ?? 0),
       HF_NO_FILE: opts.hfNoFile ? "1" : "0",
+      SHA_BAD: opts.shaBad ? "1" : "0",
       OPENCLAW_RC: String(opts.openclawRc ?? 0),
       FAIL_ON: opts.failOn ?? "",
       FLOCK_BIN: opts.flockBin ?? "flock",
@@ -461,6 +479,15 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(r.status).toBe(0);
     expect(downloads(r.calls)).toHaveLength(1);
     expect(r.state).toContain("failures=0");
+  });
+
+  it("deletes a download that does not verify, earns the backoff and leaves memory search untouched (TASK-2411)", () => {
+    const r = run({ present: false, shaBad: true });
+    expect(r.status).toBe(0);
+    expect(downloads(r.calls)).toHaveLength(1);
+    expect(r.stdout).toContain("did not verify");
+    expect(r.state).toContain("failures=1");
+    expect(configSets(r.calls)).toEqual([]);
   });
 
   it("leaves memory search untouched when a download says it succeeded and left no file", () => {

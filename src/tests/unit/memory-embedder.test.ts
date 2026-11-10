@@ -25,6 +25,7 @@ vi.mock("@/lib/harness/credentials", () => ({
 
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
 }));
 
 const facts = vi.fn(async () => ({

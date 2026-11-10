@@ -29,6 +29,8 @@ const h = vi.hoisted(() => ({
   placement: "local" as "local" | "cloud",
   cloudAvailable: true,
   localInstalled: true,
+  /** The 4B on this box (TASK-2411): not downloaded, downloaded, or one the box cannot run. */
+  fourB: "absent" as "absent" | "downloaded" | "unavailable",
   resolvedMode: "incremental" as "incremental" | "full",
   stopped: true,
 }));
@@ -87,7 +89,20 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
 }));
 vi.mock("@/lib/prime-radiant/shard-index", () => ({ reindexPrimeRadiantVault: async () => {} }));
 vi.mock("@/lib/clawai-cloud-choice", () => ({ noteOwnerChoice: vi.fn(async () => {}) }));
-vi.mock("@/lib/embed-server", () => ({ getEmbedProvisioningStatus: async () => ({ installed: h.localInstalled }) }));
+vi.mock("@/lib/embed-server", () => ({
+  getEmbedProvisioningStatus: async () => ({ installed: h.localInstalled }),
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
+}));
+vi.mock("@/lib/local-embedding-model", () => ({
+  localEmbeddingModelOptions: async () => [
+    { id: "qwen3-embedding-0.6b", active: true, installed: h.localInstalled, available: true },
+    { id: "qwen3-embedding-4b", active: false, installed: h.fourB === "downloaded", available: h.fourB !== "unavailable" },
+  ],
+  gateLocalModel: async (id: string) => (id === "qwen3-embedding-4b" && h.fourB === "unavailable"
+    ? { available: false, quant: null, reason: "jetson", detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." }
+    : { available: true, quant: "Q8_0", reason: null, detail: null }),
+  selectionForSwitch: async (id: string) => (h.fourB === "downloaded" ? { id, quant: "Q8_0" } : null),
+}));
 vi.mock("@/lib/clawai-cloud-defaults", () => ({ readCloudDefaultsFacts: async () => ({ embeddingsRouteReady: h.cloudAvailable }) }));
 vi.mock("@/lib/clawai-cloud-defaults-state", () => ({
   resolveClawaiCloudDefaults: () => ({ embeddings: { source: h.cloudAvailable ? "cloud" : "local", reason: h.cloudAvailable ? null : "plan" } }),
@@ -133,7 +148,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  Object.assign(h, { person: false, enabled: true, extraPaths: [], placement: "local", cloudAvailable: true, localInstalled: true, resolvedMode: "incremental", stopped: true });
+  Object.assign(h, { person: false, enabled: true, extraPaths: [], placement: "local", cloudAvailable: true, localInstalled: true, fourB: "absent", resolvedMode: "incremental", stopped: true });
   for (const fn of [...Object.values(lib), ...Object.values(shard), refreshScheduler]) fn.mockClear();
 });
 
@@ -378,6 +393,51 @@ describe("the provider", () => {
     expect((await res.json()).kind).toBe("local_not_installed");
     expect(shard.switchToLocalEmbeddings).not.toHaveBeenCalled();
     expect(shard.switchToCloudEmbeddings).not.toHaveBeenCalled();
+  });
+});
+
+describe("the provider — which model on this box (TASK-2411)", () => {
+  it("answers a change of model without confirm with the estimate, and changes nothing", async () => {
+    h.fourB = "downloaded";
+    const { provider } = await routes();
+    const res = await provider.POST(req("POST", "/provider", { source: "local", localModel: "qwen3-embedding-4b" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      kind: "confirm_required", from: "local", to: "local", fromModel: "qwen3-embedding-0.6b", model: "qwen3-embedding-4b",
+      estimate: { embedder: "local" },
+    });
+    expect(shard.switchToLocalEmbeddings).not.toHaveBeenCalled();
+  });
+
+  it("changes the model with confirm: true", async () => {
+    h.fourB = "downloaded";
+    const { provider } = await routes();
+    const res = await provider.POST(req("POST", "/provider", { source: "local", localModel: "qwen3-embedding-4b", confirm: true }));
+    expect(res.status).toBe(200);
+    expect(shard.switchToLocalEmbeddings).toHaveBeenCalledWith({ id: "qwen3-embedding-4b", quant: "Q8_0" });
+  });
+
+  it("refuses a model this box cannot run, confirm or not", async () => {
+    h.fourB = "unavailable";
+    const { provider } = await routes();
+    const res = await provider.POST(req("POST", "/provider", { source: "local", localModel: "qwen3-embedding-4b", confirm: true }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ kind: "local_model_unavailable", reason: "jetson" });
+    expect(shard.switchToLocalEmbeddings).not.toHaveBeenCalled();
+  });
+
+  it("refuses a model that is not downloaded: the download is the owner's", async () => {
+    const { provider } = await routes();
+    const res = await provider.POST(req("POST", "/provider", { source: "local", localModel: "qwen3-embedding-4b", confirm: true }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).kind).toBe("local_not_installed");
+    expect(shard.switchToLocalEmbeddings).not.toHaveBeenCalled();
+  });
+
+  it("needs no confirm to name the model the box already runs", async () => {
+    const { provider } = await routes();
+    const res = await provider.POST(req("POST", "/provider", { source: "local", localModel: "qwen3-embedding-0.6b" }));
+    expect(res.status).toBe(200);
   });
 });
 
