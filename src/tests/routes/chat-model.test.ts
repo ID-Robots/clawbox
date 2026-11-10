@@ -295,6 +295,39 @@ describe("/setup-api/chat/model", () => {
     ]);
   });
 
+  it("names the Local AI row after the model the box actually runs", async () => {
+    // A workstation runs Qwen through llama.cpp (install-x64.sh seeds it on a
+    // 128 GB DGX Spark). Settings named it "Qwen 3.6" from the model; the chat
+    // header said "Gemma 4", the one model every Jetson ships, because the row
+    // was labelled by provider alone.
+    vi.mocked(getAll).mockResolvedValue({
+      ai_model_provider: "clawai",
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/qwen3.6-35b-a3b-mtp",
+    });
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    const local = body.options.find((option: { isLocal: boolean }) => option.isLocal);
+    expect(local.label).toBe("Qwen 3.6 Local");
+    expect(body.local.label).toBe("Qwen 3.6 Local");
+  });
+
+  it("reads a doubled llamacpp/ prefix as the model, not as the Llama family", async () => {
+    // A Jetson that saved Local AI before TASK-1076 can hold
+    // `llamacpp/llamacpp/<id>` in its store; its row said "Gemma 4 Local".
+    vi.mocked(getAll).mockResolvedValue({
+      ai_model_provider: "clawai",
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    const body = await (await GET()).json();
+    expect(body.local.label).toBe("Gemma 4 Local");
+  });
+
   describe("a provider the box can run no model from", () => {
     /** The three-profile box of the test above: ClawBox AI, OpenAI, Anthropic. */
     function threeProviderBox(primary: string) {

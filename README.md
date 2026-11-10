@@ -242,9 +242,13 @@ password) and navigate to:
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
-### Install on x86_64
+### Install on x86_64 or an arm64 workstation
 
-`install-x64.sh` installs the same web OS on an x86_64 Linux host. It runs a
+`install-x64.sh` installs the same web OS on an x86_64 Linux host, or on an
+arm64 workstation that is not a Jetson: NVIDIA DGX Spark and its partner builds
+(such as Gigabyte's AI TOP Atom), where the local model is built for the GB10
+GPU and a fresh install seeds one sized for its 128 GB. A Jetson keeps
+`install.sh`. It runs a
 read-only `preflight_host` check first — ports already in use, services it would
 replace, desktop services it would take over — and refuses rather than colliding
 with them. Run it alone with `--preflight` to see what it would do.
@@ -447,7 +451,7 @@ Full runtime topology in the [Architecture reference](https://docs.clawbox.com/t
 │   ├── tests/              Unit, component and API route tests
 │   └── middleware.ts       Captive portal detection + session auth
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
-├── install-x64.sh          x86_64 installer (host preflight, configurable ports)
+├── install-x64.sh          PC installer: x86_64 and arm64 workstations (host preflight, configurable ports)
 └── install.sh              Full system installer (idempotent)
 ```
 

@@ -7,7 +7,7 @@ const DEFAULT_LLAMACPP_BASE_URL = "http://127.0.0.1:8080/v1";
 // it is what the OpenClaw gateway config, the Hermes model options and every
 // saved user model selection already refer to. Changing the GGUF changes the
 // two constants below it, never this one.
-const DEFAULT_LLAMACPP_MODEL = "gemma4-e2b-it-q4_0";
+export const DEFAULT_LLAMACPP_MODEL = "gemma4-e2b-it-q4_0";
 
 // Google's own QAT release. Chosen by measurement on Jetson Orin Nano 8GB
 // against llama-server (the runtime we ship), not from model cards:

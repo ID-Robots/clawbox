@@ -39,10 +39,28 @@ fi
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
 REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
-if [ "$(uname -m)" != "x86_64" ]; then
-  echo "Error: install-x64.sh only supports x86_64 hosts (found $(uname -m))." >&2
-  exit 1
-fi
+# This installer serves PCs: an Ubuntu host with its own login user. That is any
+# x86_64 desktop, and the arm64 workstations NVIDIA ships (DGX Spark and its
+# partner builds, such as Gigabyte's AI TOP Atom). A Jetson is arm64 too, but it
+# is an appliance and install.sh owns it.
+host_arch_or_refuse() {
+  local machine="$1" tegra_release="$2"
+  case "$machine" in
+    x86_64|amd64) echo x86_64 ;;
+    aarch64|arm64)
+      if [ -e "$tegra_release" ]; then
+        echo "Error: this is a Jetson; install it with install.sh, not install-x64.sh." >&2
+        return 1
+      fi
+      echo aarch64
+      ;;
+    *)
+      echo "Error: install-x64.sh supports x86_64 hosts and arm64 hosts that are not a Jetson (found $machine)." >&2
+      return 1
+      ;;
+  esac
+}
+HOST_ARCH="$(host_arch_or_refuse "$(uname -m)" /etc/nv_tegra_release)" || exit 1
 
 # `logname` fails in containers and remote shells, while SUDO_USER is unset
 # when root invokes the installer directly. Resolve without tripping `set -u`.
@@ -163,6 +181,14 @@ activate_node_runtime() {
   hash -r
 }
 
+# nodejs.org's name for a Linux tarball's architecture.
+node_dist_arch() {
+  case "$1" in
+    aarch64) echo arm64 ;;
+    *) echo x64 ;;
+  esac
+}
+
 ensure_openclaw_node_engine() {
   if node_satisfies_openclaw_engine; then
     activate_node_runtime
@@ -194,8 +220,10 @@ ensure_openclaw_node_engine() {
   # Some Ubuntu desktops pin the distro nodejs package above NodeSource, and
   # /usr/local/bin may hold an unrelated older manual install. Keep ClawBox's
   # runtime isolated instead of replacing either machine-wide installation.
-  echo "  APT still exposes $(node --version 2>/dev/null || echo no-node); installing verified Node $NODE_DIST_VERSION x64 under /opt/clawbox..."
-  local archive="node-v${NODE_DIST_VERSION}-linux-x64.tar.xz"
+  local node_arch
+  node_arch="$(node_dist_arch "$HOST_ARCH")"
+  echo "  APT still exposes $(node --version 2>/dev/null || echo no-node); installing verified Node $NODE_DIST_VERSION $node_arch under /opt/clawbox..."
+  local archive="node-v${NODE_DIST_VERSION}-linux-${node_arch}.tar.xz"
   local tmp_dir
   tmp_dir=$(mktemp -d)
   curl -fsSLO --output-dir "$tmp_dir" "https://nodejs.org/dist/v${NODE_DIST_VERSION}/$archive"
@@ -207,9 +235,9 @@ ensure_openclaw_node_engine() {
     echo "Error: $NODE_DIST_ROOT exists and is not a symlink; move it aside and rerun." >&2
     exit 1
   fi
-  rm -rf "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64"
+  rm -rf "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-${node_arch}"
   tar -xJf "$tmp_dir/$archive" -C /opt/clawbox
-  ln -sfn "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64" "$NODE_DIST_ROOT"
+  ln -sfn "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-${node_arch}" "$NODE_DIST_ROOT"
   rm -rf "$tmp_dir"
   hash -r
   if ! node_satisfies_openclaw_engine; then
@@ -949,6 +977,170 @@ NODE
   echo "  OpenClaw configured for local access"
 }
 
+# The Local AI (llama.cpp) settings .env carries. Every line only fills a
+# missing key or moves a superseded shipped value, so a rerun changes nothing
+# the owner set.
+seed_llamacpp_env() {
+  local ENV_FILE="$1"
+  # A fresh install on a workstation seeds the model its memory is for. A .env
+  # that already names a model keeps it: an update must never swap the owner's
+  # local model (a 23 GB download, a different model) out from under them.
+  if ! grep -q '^LLAMACPP_MODEL=' "$ENV_FILE" 2>/dev/null \
+    && llamacpp_workstation_host "${LLAMACPP_WORKSTATION_MEMINFO:-/proc/meminfo}"; then
+    echo "  Workstation-class host: seeding $LLAMACPP_WORKSTATION_MODEL as the local model"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "$LLAMACPP_WORKSTATION_MODEL"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "$LLAMACPP_WORKSTATION_HF_REPO"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "$LLAMACPP_WORKSTATION_HF_FILE"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "$LLAMACPP_WORKSTATION_CONTEXT_WINDOW"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_TYPE" "draft-mtp"
+    ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_DRAFT_N_MAX" "$LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX"
+  fi
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
+  # Keep these four lines in step with src/lib/llamacpp.ts - the model id is
+  # deliberately unchanged, only the GGUF moved. src/tests/unit/llamacpp-gguf-pin.test.ts
+  # fails if this file and that one ever disagree.
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf" "gemma-4-E2B_q4_0-it.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
+  # Same values and migration as install.sh (src/lib/llamacpp.ts says why).
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
+  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
+}
+
+# The Wi-Fi device the app's network code is pointed at. src/lib/network.ts
+# defaults NETWORK_INTERFACE to the Jetson's wlP1p1s0, which names nothing on a
+# PC, so every Wi-Fi reading there (Settings, the agent's wifi_status tool) was
+# an interface_mismatch. Seed the machine's own device, the first nmcli lists as
+# `wifi`; leave a machine with none, and an operator's own choice, alone.
+seed_network_interface() {
+  local env_file="$1" dev
+  if grep -q '^NETWORK_INTERFACE=' "$env_file" 2>/dev/null; then
+    return 0
+  fi
+  dev="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }' || true)"
+  if [ -z "$dev" ]; then
+    return 0
+  fi
+  ensure_env_setting "$env_file" "NETWORK_INTERFACE" "$dev"
+}
+
+# A PC's install user is a real desktop account that already has the password
+# its owner chose for this computer: an owner by /etc/shadow from the first
+# second, which is what the routes behind the wizard check (deviceHasOwner).
+# Middleware, the wizard and /login read `password_configured` in
+# data/config.json instead, and nothing wrote it, so the wizard ran open while
+# every save behind it was refused for want of a session, and /login sent the
+# owner straight back to it. Recording the fact gives the flow the app already
+# has for an owned box: /setup asks for the password, the owner signs in with
+# the computer's own, and the wizard skips the steps a PC does not need. An
+# account with no usable password is left to the wizard, which sets the first.
+#
+# The helper is run from the absolute path the app runs it from
+# (src/lib/system-password.ts UNIX_CHKPWD_BIN), never looked up on PATH: the
+# installer's PATH is whatever the admin's sudo kept, and the answer must come
+# from the same file the app's own check asks.
+UNIX_CHKPWD_BIN="/usr/sbin/unix_chkpwd"
+record_owner_password() {
+  local config="$PROJECT_DIR/data/config.json" status
+  # Already recorded: nothing to ask. Read before any password check, as the
+  # app reads it, so a re-run leaves no failed check in the owner's auth.log.
+  if grep -Eq '"password_configured": *true' "$config" 2>/dev/null; then
+    return 0
+  fi
+  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk '{ print $2 }' || true)"
+  if [ "$status" != "P" ]; then
+    return 0
+  fi
+  # The published factory default is nobody's password (src/lib/system-password.ts
+  # FACTORY_DEFAULT_PASSWORD): the wizard may claim such an account and makes its
+  # owner choose a real one. Checked the way the app checks it, as the account
+  # itself through unix_chkpwd, and read by exit code, not by "did the pipeline
+  # succeed" — the three answers are not two:
+  #   0            the account IS on the factory default: nobody's yet, leave it
+  #   7            PAM_AUTH_ERR, the password is the owner's own: record it
+  #   anything else (helper missing, PAM_USER_UNKNOWN, PAM_SYSTEM_ERR, a signal)
+  #                the check never ran. That is unknown, not "the owner's":
+  #                src/lib/system-password.ts answers null there, and recording
+  #                the flag on a guess would let the wizard hand setup to
+  #                whoever can still log in with the published default. The
+  #                install stops there instead of starting the UI: with the
+  #                app's own check down too, its gates read the account as
+  #                owned, and /login can then record the flag for an account
+  #                that may still carry the default. The operator repairs the
+  #                helper and runs the installer again.
+  # PIPESTATUS, so the answer is unix_chkpwd's own status and not printf's
+  # SIGPIPE when the helper exits before reading its stdin (set -o pipefail
+  # would otherwise report 141 for a helper that exited 0).
+  local chk_rc=0
+  printf 'clawbox\0' | as_user "$UNIX_CHKPWD_BIN" "$CLAWBOX_USER" nullok >/dev/null 2>&1 || chk_rc=${PIPESTATUS[1]:-1}
+  if [ "$chk_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$chk_rc" -ne 7 ]; then
+    echo "Error: could not check whether $CLAWBOX_USER still carries the factory default password ($UNIX_CHKPWD_BIN exit $chk_rc). The app checks sign-in with the same helper; repair it, then run this installer again." >&2
+    return 1
+  fi
+  # As the install user, written the way src/lib/config-store.ts writes it: a
+  # 0600 temp file renamed into place. A file that does not parse is left alone.
+  # The whole writer is non-fatal: the flag only saves the owner a wizard step,
+  # so a data/ that cannot be written must not fail step_directories_permissions
+  # and take the install down with it (set -e would, python3 missing or not).
+  # -I (as the migration helper below runs it): a script read from stdin puts
+  # the CWD on sys.path, and the installer's CWD is wherever the admin typed
+  # `sudo bash install-x64.sh` — a planted json.py there would otherwise run as
+  # the install user on `import json`.
+  if ! as_user python3 -I - "$config" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    data = {}
+except (OSError, ValueError) as err:
+    print(f"  WARN: {path} could not be read ({err}); not recording the owner password", file=sys.stderr)
+    sys.exit(0)
+if data.get("password_configured") is True:
+    sys.exit(0)
+data["password_configured"] = True
+# A write that fails leaves no .config.json.* behind for the next install to
+# trip over, and is reported rather than raised: `tmp = None` after the rename
+# marks the temp as gone, so `finally` only unlinks one that still exists.
+tmp = None
+try:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".config.json.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    tmp = None
+except OSError as err:
+    print(f"  WARN: {path} could not be written ({err}); not recording the owner password", file=sys.stderr)
+    sys.exit(0)
+finally:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+print("  Recorded this account's existing password as the owner's sign-in")
+PY
+  then
+    echo "  WARN: could not record this account's password as the owner's sign-in; the wizard will ask for one" >&2
+  fi
+}
+
 step_directories_permissions() {
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
@@ -979,25 +1171,9 @@ step_directories_permissions() {
     printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
-  # Keep these four lines in step with src/lib/llamacpp.ts - the model id is
-  # deliberately unchanged, only the GGUF moved. src/tests/unit/llamacpp-gguf-pin.test.ts
-  # fails if this file and that one ever disagree.
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "gguf-org/gemma-4-e2b-it-gguf" "google/gemma-4-E2B-it-qat-q4_0-gguf"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-e2b-it-edited-q4_0.gguf" "gemma-4-E2B_q4_0-it.gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_BIN" "/usr/local/bin/llama-server"
-  # Same values and migration as install.sh (src/lib/llamacpp.ts says why).
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "131072" "32768"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0" "q8_0"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0" "q8_0"
-  migrate_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072" "8192"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "32768"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q8_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q8_0"
-  ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "8192"
+  seed_llamacpp_env "$ENV_FILE"
+  seed_network_interface "$ENV_FILE"
+  record_owner_password
   echo "  Done"
 }
 
@@ -1016,13 +1192,136 @@ step_ollama_install() {
   echo "  Ollama installed and running"
 }
 
-step_llamacpp_install() {
-  local LLAMA_DIR="$CLAWBOX_HOME/llama.cpp"
-  local CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
+# ── Local AI on a workstation ───────────────────────────────────────────────
+# The shipped local model is Gemma 4 E2B, sized for an 8 GB Jetson: 3 GB on a
+# host whose GPU can hold forty times that. A host with at least 96 GiB of
+# memory and a GPU that can hold the model (a DGX Spark has 128 GB, 121 GiB
+# usable, shared with its GPU) is seeded with
+# Qwen3.6-35B-A3B instead: a mixture-of-experts with 3B active parameters, from
+# unsloth's MTP GGUF, so its own multi-token-prediction head drafts for it
+# (start-llamacpp.sh, LLAMACPP_SPEC_TYPE). NVIDIA's DGX Spark llama.cpp
+# playbook runs this exact file. Measured on a Spark (llama.cpp 29c720e, 512
+# tokens): 66.9 tok/s plain, 94.4 with draft-mtp at a draft length of 2.
+# 65536, not 131072: seed_llamacpp_env migrates a 131072 window away.
+LLAMACPP_WORKSTATION_MIN_MEM_KIB=$((96 * 1024 * 1024))
+LLAMACPP_WORKSTATION_MODEL="qwen3.6-35b-a3b-mtp"
+LLAMACPP_WORKSTATION_HF_REPO="unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+LLAMACPP_WORKSTATION_HF_FILE="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+LLAMACPP_WORKSTATION_CONTEXT_WINDOW=65536
+LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX=2
 
-  if command -v nvcc &>/dev/null; then
-    CMAKE_ARGS="$CMAKE_ARGS -DGGML_CUDA=ON"
+# The GPU must hold the model too, not only the machine: the launcher passes
+# --n-gpu-layers 99, and a 22 GB model on a 12 GB card never loads. GB10 shares
+# the machine's memory with its GPU and reports memory.total as [N/A]; a card
+# with its own memory needs 30 GiB, the model and its 64K-token cache.
+LLAMACPP_WORKSTATION_MIN_GPU_MIB=30720
+
+llamacpp_workstation_host() {
+  local meminfo="${1:-/proc/meminfo}" mem_kib gpu_mib
+  mem_kib="$(awk '/^MemTotal:/ { print $2; exit }' "$meminfo" 2>/dev/null || true)"
+  [[ "$mem_kib" =~ ^[0-9]+$ ]] || return 1
+  [ "$mem_kib" -ge "$LLAMACPP_WORKSTATION_MIN_MEM_KIB" ] || return 1
+  gpu_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d ' \r' || true)"
+  case "$gpu_mib" in
+    "[N/A]") return 0 ;;
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  [ "$gpu_mib" -ge "$LLAMACPP_WORKSTATION_MIN_GPU_MIB" ] || return 1
+}
+
+# Where NVIDIA's CUDA packages (and DGX OS) put the compiler. It is on no PATH a
+# root shell or a systemd unit gets, so `command -v nvcc` alone built a CPU-only
+# llama-server on a GPU machine — install.sh::step_llamacpp_install learned the
+# same thing on Jetson.
+LLAMACPP_NVCC_CANDIDATES=(/usr/local/cuda/bin/nvcc)
+
+# The cmake arguments for this host's llama.cpp: CUDA when a compiler exists,
+# named by path so the build does not depend on the install user's PATH either.
+# GB10 (DGX Spark, compute capability 12.1) is built for its own arch-specific
+# target, as NVIDIA's DGX Spark llama.cpp playbook does; every other GPU keeps
+# llama.cpp's own architecture list.
+llamacpp_cmake_args() {
+  local args="-DCMAKE_BUILD_TYPE=Release" nvcc="" candidate cap
+  nvcc="$(command -v nvcc 2>/dev/null || true)"
+  if [ -z "$nvcc" ]; then
+    for candidate in "${LLAMACPP_NVCC_CANDIDATES[@]}"; do
+      if [ -x "$candidate" ]; then
+        nvcc="$candidate"
+        break
+      fi
+    done
   fi
+  if [ -n "$nvcc" ]; then
+    args="$args -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=$nvcc"
+    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' \r' || true)"
+    if [ "$cap" = "12.1" ]; then
+      args="$args -DCMAKE_CUDA_ARCHITECTURES=121a-real"
+    fi
+  fi
+  echo "$args"
+}
+
+# The launch specs (src/lib/llamacpp-server.ts, src/lib/embed-server.ts) look
+# for `hf` on the UI unit's PATH and then in the user's ~/.local/bin, unless
+# HF_BIN names one. The step below accepts an `hf` anywhere on the owner's LOGIN
+# PATH (a conda env, a pyenv shim, ~/bin), which the unit's PATH does not carry,
+# and installs nothing then: a model fetched later named a CLI that did not
+# exist. With none in ~/.local/bin, .env names the one the step accepted; the UI
+# unit loads .env, and every launcher reads HF_BIN first. An HF_BIN that runs is
+# kept, whoever set it; one that no longer runs (the CLI it named was removed,
+# and this step installed one) is moved to the CLI the step found. A .env that
+# does not exist yet is not created here.
+record_hf_bin() {
+  local env_file="$1" pinned hf_path
+  [ -f "$env_file" ] || return 0
+  pinned="$(get_env_setting_or_default "$env_file" "HF_BIN" "")"
+  if [ -n "$pinned" ] && as_user test -x "$pinned"; then
+    return 0
+  fi
+  if as_user test -x "$CLAWBOX_HOME/.local/bin/hf"; then
+    # The default runs: only a pin that does not needs moving.
+    grep -q '^HF_BIN=' "$env_file" 2>/dev/null || return 0
+    hf_path="$CLAWBOX_HOME/.local/bin/hf"
+  else
+    # The last line: a login profile may print before the command runs.
+    hf_path="$(as_user_login "command -v hf" 2>/dev/null | tail -n 1 || true)"
+    case "$hf_path" in
+      /*) ;;
+      *) return 0 ;;
+    esac
+    as_user test -x "$hf_path" || return 0
+  fi
+  if grep -q '^HF_BIN=' "$env_file" 2>/dev/null; then
+    migrate_env_setting "$env_file" "HF_BIN" "$pinned" "$hf_path"
+  else
+    ensure_env_setting "$env_file" "HF_BIN" "$hf_path"
+  fi
+}
+
+step_llamacpp_install() {
+  # A directory of ClawBox's own: on a PC this home is the owner's, and
+  # ~/llama.cpp is where NVIDIA's DGX Spark playbook builds the owner's OWN
+  # llama.cpp, which the configure below (it deletes the CMake cache) must never
+  # touch. An existing install keeps its binary, whose libraries stay put.
+  local LLAMA_DIR="$CLAWBOX_HOME/.local/share/clawbox/llama.cpp"
+  # Pinned, as install.sh pins its own: the build the .env this installer seeds
+  # was proven against (draft-mtp, --spec-draft-n-max; 2026-11-02 on a DGX
+  # Spark). start-llamacpp.sh still asks the binary before using either.
+  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-29c720eaf72fcf8e4e61a56a88b994d92668261d}"
+  # Both reach the `bash -lc` strings below, run as the owner: the pin may only
+  # be a full commit hash (a shallow fetch by SHA needs all 40 characters), and
+  # the directory goes in as one quoted word. The length is checked apart from
+  # the pattern, as install.sh does: a bounded repeat inside `[[ =~ ]]` costs
+  # memory (src/tests/unit/shell-regex-hygiene.test.ts).
+  if [ "${#LLAMACPP_COMMIT}" -ne 40 ] || ! [[ "$LLAMACPP_COMMIT" =~ ^[0-9a-f]+$ ]]; then
+    echo "Error: LLAMACPP_COMMIT must be a full 40-character commit hash (got '$LLAMACPP_COMMIT')" >&2
+    return 1
+  fi
+  local LLAMA_DIR_Q
+  LLAMA_DIR_Q="$(printf '%q' "$LLAMA_DIR")"
+  local CMAKE_ARGS
+  CMAKE_ARGS="$(llamacpp_cmake_args)"
+  echo "  llama.cpp build: $CMAKE_ARGS"
 
   if ! command -v cmake &>/dev/null || ! command -v git &>/dev/null || ! command -v python3 &>/dev/null; then
     echo "  Installing llama.cpp build prerequisites..."
@@ -1056,20 +1355,25 @@ step_llamacpp_install() {
   else
     echo "  Hugging Face CLI already installed"
   fi
+  record_hf_bin "$PROJECT_DIR/.env"
 
   if [ ! -x /usr/local/bin/llama-server ]; then
     echo "  Installing llama.cpp server..."
     if [ ! -d "$LLAMA_DIR/.git" ]; then
+      as_user mkdir -p "$(dirname "$LLAMA_DIR")"
       if ! as_user git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"; then
         echo "Error: failed to clone llama.cpp into $LLAMA_DIR" >&2
         return 1
       fi
     fi
-    if ! as_user_login "rm -f $LLAMA_DIR/build/CMakeCache.txt && rm -rf $LLAMA_DIR/build/CMakeFiles && cd $LLAMA_DIR && cmake -S . -B build $CMAKE_ARGS"; then
+    if ! as_user_login "cd $LLAMA_DIR_Q && git fetch --quiet --depth 1 origin $LLAMACPP_COMMIT && git checkout --quiet $LLAMACPP_COMMIT"; then
+      echo "  Warning: could not check out llama.cpp $LLAMACPP_COMMIT; building $(as_user git -C "$LLAMA_DIR" rev-parse --short HEAD 2>/dev/null || echo 'the checkout as it is')" >&2
+    fi
+    if ! as_user_login "rm -f $LLAMA_DIR_Q/build/CMakeCache.txt && rm -rf $LLAMA_DIR_Q/build/CMakeFiles && cd $LLAMA_DIR_Q && cmake -S . -B build $CMAKE_ARGS"; then
       echo "Error: failed to configure llama.cpp build in $LLAMA_DIR" >&2
       return 1
     fi
-    if ! as_user_login "cd $LLAMA_DIR && cmake --build build --config Release -j$(nproc) --target llama-server"; then
+    if ! as_user_login "cd $LLAMA_DIR_Q && cmake --build build --config Release -j$(nproc) --target llama-server"; then
       echo "Error: failed to build llama-server in $LLAMA_DIR" >&2
       return 1
     fi
@@ -1109,9 +1413,9 @@ step_chromium_install() {
 # Google Chrome stable — the real thing, not Chromium — for Monitor Mode's
 # "Google Chrome" desktop icon (src/lib/desktop-chrome.ts). The device
 # installer's twin, kept line for line with install.sh::step_google_chrome_install;
-# read the reasons there. What differs: no architecture check, because this
-# installer refuses anything but x86_64 before it does anything else, and no
-# test mode, because it has none.
+# read the reasons there, including the architecture check: Google builds Chrome
+# for Linux on amd64 only, and this installer also serves arm64 workstations
+# (DGX Spark). What differs: no test mode, because this installer has none.
 #
 # From Google's own apt repo, trusted through a keyring of its own under
 # /etc/apt/keyrings that the one source line names with `signed-by`. The
@@ -1137,6 +1441,13 @@ google_chrome_installed() {
 }
 
 step_google_chrome_install() {
+  case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *)
+      echo "  Google Chrome has no Linux build for $(uname -m) — skipping (amd64 only)"
+      return 0
+      ;;
+  esac
   if google_chrome_installed; then
     echo "  Google Chrome already installed"
     return 0
@@ -1198,8 +1509,8 @@ step_google_chrome_install() {
 # host and the fleet cannot end up on two different builds — same vendor
 # installer, the same refusal to run a script whose digest is not the pinned
 # one, and the same order: install the native binary, prove it, and only then
-# take the npm copy away. The installer resolves x86_64-unknown-linux-musl here
-# on its own.
+# take the npm copy away. The vendor installer picks the host's own musl build
+# (x86_64 or aarch64) by itself.
 CODEX_NATIVE_BIN="$CLAWBOX_HOME/.local/bin/codex"
 # NOT the installer's default package root ($CODEX_HOME, ~/.codex): that
 # directory is the CLI's auth and state. Kept identical to install.sh, where a
@@ -1529,40 +1840,14 @@ ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"
 # /etc/shadow is the authority and it already says "an owner password is set",
 # so record exactly that and let the wizard move on to the AI Provider step
 # instead of asking for a password it will refuse to set.
+#
+# Recorded by record_owner_password, the check step_directories_permissions
+# makes: a usable password is the owner's only when it is not the published
+# factory default, and a check that could not run stops the install. Recording
+# every usable password here undid that on any re-run whose config.json
+# existed, and let /login take the default on an account still carrying it.
 reconcile_owner_password_flag() {
-  local cfg="$PROJECT_DIR/data/config.json" status
-  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk '{print $2}')"
-  # NP/L: no usable password yet, so first boot applies and WILL set one.
-  [ "$status" = "P" ] || return 0
-  [ -f "$cfg" ] || return 0
-  if ! as_user_runtime python3 - "$cfg" <<'PY'
-import json, os, sys, tempfile
-path = sys.argv[1]
-try:
-    with open(path) as fh:
-        data = json.load(fh)
-except Exception:
-    sys.exit(0)
-if not isinstance(data, dict) or data.get("password_configured") is True:
-    sys.exit(0)
-data["password_configured"] = True
-directory = os.path.dirname(path)
-fd, tmp = tempfile.mkstemp(dir=directory)
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
-    os.replace(tmp, path)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except Exception:
-        pass
-    sys.exit(1)
-PY
-  then
-    echo "  Warning: could not record password_configured in data/config.json" >&2
-  fi
+  record_owner_password
 }
 
 step_root_step_contract() {

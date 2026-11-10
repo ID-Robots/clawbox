@@ -448,6 +448,17 @@ export function friendlyModelName(raw: string | null | undefined): string | null
 }
 
 /**
+ * The family name of a llama.cpp model reference: "llamacpp/qwen3.6-35b-a3b-mtp"
+ * → "Qwen 3.6". Every leading `llamacpp/` goes, not just one: configure could
+ * save `llamacpp/llamacpp/<id>` before TASK-1076 and nothing rewrites the
+ * config store, and the inner "llamacpp" would otherwise read as the Llama
+ * family. Shared by the chat picker's Local AI row and the providers strip.
+ */
+export function llamaCppModelName(ref: string | null | undefined): string | null {
+  return friendlyModelName((ref ?? "").trim().replace(/^(?:llamacpp\/)+/i, ""));
+}
+
+/**
  * THE rule: does this box have an on-device speech engine?
  *
  * BOTH the stamp and the unit. The weights alone are not an installation: on

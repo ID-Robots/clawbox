@@ -69,6 +69,38 @@ export function shortModelPillLabel(
   return parts.slice(start, end + 1).join("") || base;
 }
 
+// Compact provider labels for the chat header pill. The chat panel can be
+// docked at ~370px wide where "OpenAI Codex" + "GPT-5.4 Mini" + "Medium"
+// combined exceeds the available width and pills truncate to "OpenAI Co...".
+// Drop the brand prefix on the provider pill so users see the distinctive part
+// ("Codex" vs "GPT" — both still clearly OpenAI) without overflow. Settings and
+// notification messages still use the full labels from the chat model route.
+const PROVIDER_PILL_LABEL: Record<string, string> = {
+  "ClawBox AI": "ClawBox",
+  "Anthropic Claude": "Claude",
+  "OpenAI GPT": "GPT",
+  "OpenAI Codex": "Codex",
+  "Google Gemini": "Gemini",
+  "OpenRouter": "OpenRouter",
+  "xAI Grok": "Grok",
+};
+
+/**
+ * The provider pill's text for a chat model row's `label`, or null when the
+ * full label is already the pill (the caller keeps it).
+ *
+ * The Local AI row is labelled after the model the box runs ("Qwen 3.6 Local",
+ * "Gemma 4 Local", "Ollama Local" — see the chat model route), so its pill is
+ * that label without " Local": a table keyed on one model's label printed
+ * "Gemma 4" on a box running Qwen.
+ */
+export function chatProviderPillLabel(label: string): string | null {
+  const fixed = PROVIDER_PILL_LABEL[label];
+  if (fixed) return fixed;
+  const local = /^(.+) Local$/.exec(label);
+  return local ? local[1] : null;
+}
+
 /**
  * Material Symbols ligature for the reasoning-effort pill.
  *
