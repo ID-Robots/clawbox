@@ -319,7 +319,7 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
-import { adoptOwnBranchWork, gitIn, ownBranchWork, readCheckout } from "@/lib/coding-team-worktree";
+import { adoptOwnBranchWork, gitIn, ownBranchWork, readCheckout, worktreeAppId } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
@@ -7657,7 +7657,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null; appId?: string | null } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -7714,6 +7714,11 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // it is a CLAWBOX_ name, which setSecret refuses, so the owner's secret store
   // cannot point a run's preview at something else. See previewScriptPath.
   env.CLAWBOX_PREVIEW = previewScriptPath();
+  // Which app a run in a worktree is a copy of (`worktreeAppId`): the project
+  // folder's name, so an app that mounts itself by its folder's name still
+  // mounts at `/apps/<the app>` and not at `/apps/<the run's id>`. A CLAWBOX_
+  // name, so no stored secret can rename the app under a run.
+  if (opts.appId) env.CLAWBOX_APP_ID = opts.appId;
   // How many parallel jobs the run's builds and tests may start
   // (src/lib/coding-run-cpu.ts) — the number its brief tells it to pass to
   // `--maxWorkers` and `-j`. A CLAWBOX_ name, so no stored secret can raise it.
@@ -11069,7 +11074,7 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
     args: CAPABILITY_DROP_ARGS,
     // The run's own provider, like its harness's: never the default's wiring
     // under a run that is paid from the other account.
-    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel }),
+    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, appId: worktreeAppId(run.directory) }),
   };
 }
 
@@ -13025,7 +13030,7 @@ function spawnRun(
   // window asks for less than Claude Code's own reply.
   const maxReplyTokens = runContextReply.get(run.id) ?? null;
   runContextReply.delete(run.id);
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id), maxReplyTokens });
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id), maxReplyTokens, appId: worktreeAppId(run.directory) });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
