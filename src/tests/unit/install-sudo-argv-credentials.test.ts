@@ -12,8 +12,11 @@ import path from "node:path";
  *
  * The rule reads NAMES: a variable or `NAME=` assignment whose name says token,
  * secret, password, key, auth, cookie and the like, unless the name ends in
- * _FILE, _PATH or _DIR. A value under a name that says nothing is out of its
- * reach, so review still matters. systemd units are not shell and are not read.
+ * _FILE, _PATH or _DIR and only the path goes on the line: a credential path
+ * whose contents are read in place (`"$(cat "$TOKEN_FILE")"`) still counts.
+ * Every sudo call on a line is read, chained ones included. A value under a
+ * name that says nothing is out of its reach, so review still matters. systemd
+ * units are not shell and are not read.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -25,12 +28,17 @@ const WEAK_PARTS = new Set(["KEY", "AUTH", "PASS", "PSK", "CRED", "CREDS"]);
 /** A name for where a credential lives, which is what belongs on a command line. */
 const PATH_NAME = /_(?:FILE|PATH|DIR)$|[a-z0-9](?:File|Path|Dir)$/i;
 
-function credentialName(name: string): boolean {
-  if (PATH_NAME.test(name)) return false;
+/** A name that speaks of a credential, a path to one included. */
+function credentialWords(name: string): boolean {
   if (STRONG_FRAGMENT.test(name)) return true;
   const parts = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase().split("_");
   return parts.some((part) => WEAK_PARTS.has(part));
 }
+
+const credentialName = (name: string): boolean => !PATH_NAME.test(name) && credentialWords(name);
+
+/** `$(cat …)`, `$(< …)` and the like: a file's contents expanded in place, path names included. */
+const CONTENT_READ = /\$\(\s*(?:<|(?:cat|head|tail|jq|base64|sed|awk|grep|cut|tr|xxd|od)\s)[^)]*\)/g;
 
 /** `$NAME` and `${NAME…}`; `$(…)` and positional `$1` are not names. */
 const VAR_REF = /\$\{?([A-Za-z_][A-Za-z0-9_]*)/g;
@@ -328,14 +336,32 @@ function ownWords(rest: string): { text: string; literal: boolean }[] {
   return words;
 }
 
-/** The credential names a stretch of command text carries: `NAME=` words of its own command, and `$NAME` references. */
+/**
+ * The credential names a stretch of command text carries: `NAME=` words of its
+ * own command, `$NAME` references, and a credential path whose contents are
+ * read in place (`"$(cat "$TOKEN_FILE")"`), which puts the credential itself
+ * on the line where a bare `"$TOKEN_FILE"` would put only its path.
+ */
 function credentialsIn(rest: string): string[] {
   const assigned = ownWords(rest)
     .filter((w) => !w.literal)
     .map((w) => ASSIGNMENT_WORD.exec(w.text)?.[1])
     .filter((n): n is string => !!n);
-  const referenced = [...blankSingleQuoted(rest).matchAll(VAR_REF)].map((m) => m[1]);
-  return [...assigned, ...referenced].filter(credentialName);
+  const expanded = blankSingleQuoted(rest);
+  const referenced = [...expanded.matchAll(VAR_REF)].map((m) => m[1]);
+  const readInPlace = [...expanded.matchAll(CONTENT_READ)]
+    .flatMap((m) => [...m[0].matchAll(VAR_REF)].map((v) => v[1]))
+    .filter(credentialWords);
+  return [...[...assigned, ...referenced].filter(credentialName), ...readInPlace];
+}
+
+/** Every call through `wrapper` on a line, each with its own text: up to the next call. */
+function wrapperCalls(text: string, wrapper: RegExp): { name: string; rest: string }[] {
+  const found = [...text.matchAll(new RegExp(wrapper.source, "g"))];
+  return found.map((m, n) => ({
+    name: m[1],
+    rest: text.slice((m.index ?? 0) + m[0].length, found[n + 1]?.index ?? text.length),
+  }));
 }
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -425,12 +451,11 @@ function sudoWrappers(defs: FunctionDef[]): Set<string> {
       const argArrays = new Set(
         body.flatMap((text) => [...text.matchAll(ARRAY_FILL)].filter((a) => CALLER_ARGS.test(a[2])).map((a) => a[1])),
       );
-      const forwards = body.some((text) => {
-        const call = wrapper.exec(text);
-        if (!call) return false;
-        const rest = text.slice(call.index + call[0].length);
-        return CALLER_ARGS.test(rest) || [...rest.matchAll(ARRAY_EXPANSION)].some((a) => argArrays.has(a[1]));
-      });
+      const forwards = body.some((text) =>
+        wrapperCalls(text, wrapper).some(
+          ({ rest }) => CALLER_ARGS.test(rest) || [...rest.matchAll(ARRAY_EXPANSION)].some((a) => argArrays.has(a[1])),
+        ),
+      );
       if (forwards) {
         names.add(name);
         grew = true;
@@ -460,13 +485,14 @@ function scan(sources: { file: string; text: string }[]): { wrappers: Set<string
   let calls = 0;
   for (const { file, lines } of read) {
     for (const { lineNo, text } of lines) {
-      const call = wrapper.exec(text);
-      if (!call) continue;
-      calls += 1;
-      const rest = text.slice(call.index + call[0].length);
-      const fromArrays = [...rest.matchAll(ARRAY_EXPANSION)].flatMap((m) => credentialArrays.get(m[1]) ?? []);
-      const names = [...new Set([...credentialsIn(rest), ...fromArrays])];
-      if (names.length) hits.push({ file, lineNo, wrapper: call[1], names, text: text.trim() });
+      // Every call on the line, each judged on its own words: a second call
+      // chained with `&&`, `;`, `||` or a pipe is a sudo command line too.
+      for (const call of wrapperCalls(text, wrapper)) {
+        calls += 1;
+        const fromArrays = [...call.rest.matchAll(ARRAY_EXPANSION)].flatMap((m) => credentialArrays.get(m[1]) ?? []);
+        const names = [...new Set([...credentialsIn(call.rest), ...fromArrays])];
+        if (names.length) hits.push({ file, lineNo, wrapper: call.name, names, text: text.trim() });
+      }
     }
   }
   return { wrappers, calls, hits };
@@ -602,6 +628,14 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       "it's a body with an apostrophe",
       "END-SCRIPT",
       'as_clawbox tool "$AFTER_DASHED_SECRET"',
+      'as_clawbox mkdir -p "$d" && as_clawbox env AND_TOKEN="$(cat "$f")" tool',
+      'as_clawbox true; as_clawbox env SEMI_TOKEN="$v" tool',
+      'as_clawbox true || as_clawbox env OR_TOKEN="$v" tool',
+      'as_clawbox cat "$f" | as_clawbox env PIPE_TOKEN="$v" tool',
+      'two_calls() { as_clawbox true && as_clawbox tool "$@"; }',
+      'two_calls "$CHAINED_SECRET"',
+      'as_clawbox tool --token "$(cat "$TOKEN_FILE")"',
+      'as_clawbox tool "$(< "$KEY_FILE")"',
       // Clean: a comment, paths only, a key on stdin, an option name, a
       // separate command, an array of the function's own, a function that only
       // defines a forwarder inside itself, names for where a credential lives,
@@ -629,7 +663,7 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       "as_clawbox python3 -c 'KEY=1; print($KEY)'",
     ].join("\n");
     const { wrappers, hits } = scan([{ file: "sample.sh", text: sample }]);
-    for (const name of ["pass_on", "one_line", "braced", "through_array", "first_arg", "next_line_brace", "subshell_body", "inner"]) {
+    for (const name of ["pass_on", "one_line", "braced", "through_array", "first_arg", "next_line_brace", "subshell_body", "inner", "two_calls"]) {
       expect(wrappers.has(name), name).toBe(true);
     }
     expect(wrappers.has("own_array")).toBe(false);
@@ -664,6 +698,13 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       [58, "sudo", ["HEREDOC_SECRET"]],
       [61, "as_clawbox", ["AFTER_SHIFT_SECRET"]],
       [66, "as_clawbox", ["AFTER_DASHED_SECRET"]],
+      [67, "as_clawbox", ["AND_TOKEN"]],
+      [68, "as_clawbox", ["SEMI_TOKEN"]],
+      [69, "as_clawbox", ["OR_TOKEN"]],
+      [70, "as_clawbox", ["PIPE_TOKEN"]],
+      [72, "two_calls", ["CHAINED_SECRET"]],
+      [73, "as_clawbox", ["TOKEN_FILE"]],
+      [74, "as_clawbox", ["KEY_FILE"]],
     ]);
   });
 
