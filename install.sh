@@ -11389,7 +11389,12 @@ ensure_local_embeddings() {
   # explicit ownership), else the sole agent; with several and none named,
   # `main` if it is one of them, else the first. `main` with no roster, no
   # readable config or no python3.
-  MEMORY_AGENT="$(python3 - "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+  # `-I` on both parsers here: this runs as root, and a full install reaches it
+  # from inside the clawbox-writable project directory, where a plain
+  # `python3 -` would put the cwd first on sys.path and import a planted
+  # `json.py`/`re.py` as root. Isolated mode drops the cwd, PYTHONPATH and the
+  # user site; the snippets import nothing but the standard library.
+  MEMORY_AGENT="$(python3 -I - "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
 import json, re, sys
 def norm(value):
     s = value.strip() if isinstance(value, str) else ""
@@ -11452,7 +11457,7 @@ PY
   if ! command -v python3 >/dev/null 2>&1; then
     EMBED_STATE="noparser"
   else
-    EMBED_STATE="$(python3 - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" "$MEMORY_AGENT" <<'PY' 2>/dev/null || true
+    EMBED_STATE="$(python3 -I - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" "$MEMORY_AGENT" <<'PY' 2>/dev/null || true
 import json, sys
 from urllib.parse import urlparse
 try:

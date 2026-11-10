@@ -988,6 +988,8 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     withoutPython?: boolean;
     /** Whether the GGUF is on disk (default yes). */
     model?: boolean;
+    /** The working directory the block runs from (default: the test runner's). */
+    cwd?: string;
   }): Report {
     if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
     const home = path.join(dir, "device", "home", "clawbox");
@@ -1072,7 +1074,7 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     const file = path.join(dir, "post-run-check.sh");
     writeFileSync(file, program);
     chmodSync(file, 0o755);
-    const run = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000 });
+    const run = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000, cwd: opts.cwd });
     // Best-effort by contract: the block must never abort the install, whatever
     // it finds — a core that hangs, is absent, or answers nonsense included.
     expect(run.status).toBe(0);
@@ -1187,6 +1189,27 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     it("asks about main where there is no python3 to read the config with", () => {
       const run = report({ cli: status(PROVIDER), config: { memory: { search }, agents: { entries: { default: {} } } }, withoutPython: true });
       expect(run.cliCalls.trim()).toBe("memory status --agent main --deep --json");
+    });
+
+    // The block runs as root, and a full install reaches it from inside the
+    // clawbox-writable project directory. A plain `python3 -` puts the cwd
+    // first on sys.path, so a `json.py` planted there would run as root; the
+    // parsers run isolated (`python3 -I`) and import only the standard library.
+    it("imports nothing from the directory it runs in", () => {
+      const planted = path.join(dir, "device", "project-cwd");
+      const marker = path.join(dir, "device", "planted-module-ran");
+      mkdirSync(planted, { recursive: true });
+      for (const mod of ["json", "re", "sys", "urllib"]) {
+        writeFileSync(path.join(planted, `${mod}.py`), `open(${JSON.stringify(marker)}, "a").write(${JSON.stringify(`${mod}\n`)})\n`);
+      }
+      const run = report({
+        cli: JSON.stringify([{ agentId: "default", status: { provider: PROVIDER, model: MODEL } }]),
+        config: { memory: { search }, agents: { entries: { default: {} } } },
+        cwd: planted,
+      });
+      expect(existsSync(marker) ? readFileSync(marker, "utf-8") : "").toBe("");
+      expect(run.cliCalls.trim()).toBe("memory status --agent default --deep --json");
+      expect(run.out).toContain(READY);
     });
   });
 
