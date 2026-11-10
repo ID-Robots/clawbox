@@ -202,7 +202,10 @@ describe("EmbeddingModelCard", () => {
         ? json({ ok: true })
         : url === "/setup-api/clawkeep/memory/provider" ? json({ source: "local" }) : json(withModels({ installed: true }))));
       render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
-      fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use"));
+      const use = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use");
+      // Enabled only once the provider read says the index is on the box.
+      await waitFor(() => expect(use).toBeEnabled());
+      fireEvent.click(use);
       await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(2));
       const posts = calls.filter((c) => c.method === "POST");
       expect(screen.queryByTestId("local-ai-embed-models-cloud")).toBeNull();
@@ -218,12 +221,31 @@ describe("EmbeddingModelCard", () => {
     });
 
     it("removes a downloaded model that is not in use by its own id, never the one in use", async () => {
-      stub((url, init) => (init?.method === "DELETE" ? json({ ok: true }) : json(withModels({ installed: true }))));
+      let removed = false;
+      stub((url, init) => {
+        if (init?.method === "DELETE") {
+          removed = true;
+          return json({ ok: true });
+        }
+        return json(withModels({ installed: !removed }));
+      });
       render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-0.6b-remove")).toBeNull();
       fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-remove"));
       await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
       expect(calls.find((c) => c.method === "DELETE")?.url).toBe("/setup-api/embed/install?model=qwen3-embedding-4b");
-      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-0.6b-remove")).toBeNull();
+      // The card reads the box again: the row offers Download, not Remove.
+      expect(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-download")).toBeTruthy();
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-4b-remove")).toBeNull();
+    });
+
+    it("says why Use waits while where the index lives cannot be read", async () => {
+      stub((url) => (url === "/setup-api/clawkeep/memory/provider"
+        ? json({ error: "unreadable", kind: "unreadable" }, 503)
+        : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      expect(await screen.findByTestId("local-ai-embed-models-source-unknown")).toBeTruthy();
+      expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled();
     });
   });
 

@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "Niet gedownload",
   "localModels.embed.present": "{model} staat op deze box ({size}).",
   "localModels.embed.remove": "Verwijderen",
+  "localModels.embed.sourceUnknown": "Waar geheugenzoeken draait kon nog niet worden gelezen, dus het wisselen wacht; de box wordt zo opnieuw gevraagd.",
   "localModels.embed.switchHint": "Van model wisselen embedt elk bestand opnieuw; het bestand van het andere model blijft tot je het verwijdert.",
   "localModels.embed.title": "Model voor geheugenzoeken",
   "localModels.embed.unavailable.gpuMemory": "Heeft 6 GB vrij gpu-geheugen nodig en er is nu minder vrij. Stop andere lokale modellen en probeer het opnieuw.",
