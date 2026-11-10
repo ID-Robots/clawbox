@@ -324,6 +324,7 @@ import {
   addRunWorktree,
   commitsAhead,
   deleteRunBranch,
+  bringBaseHome,
   mergeRunBranch,
   removeRunWorktree,
   restoreRunWorktree,
@@ -10140,6 +10141,45 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
   run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
   pushProgress(run, phase === "merged" ? RUNNER_STEP.merged : RUNNER_STEP.notMerged(detail ?? phase));
   persist(true);
+  // Merged — on GITHUB. The project folder follows (bringMergeHome), on the
+  // settle path so a reset or a shutdown waits for it like any other step.
+  if (phase === "merged") trackSettleWork(bringMergeHome(run.id), run.id);
+}
+
+/**
+ * A pull request the box watched ended MERGED: bring the project folder up to
+ * the base it was merged into (`bringBaseHome`, fast-forward only), and say on
+ * the run's feed what became of it.
+ *
+ * Without this the merge existed on GitHub alone. The run's own tree had been
+ * parked when the pull request opened ("its work is kept on clawbox/run-… — it
+ * is open as a pull request"), so after "Merged into the base branch" the
+ * project folder still held the base from BEFORE the run: the next run in that
+ * project forked from it and never saw the merged work, and the app the box
+ * serves from that folder was the old one (run-deyse3g9, 2026-11-10).
+ *
+ * Nothing is said when the folder already has the merge (a `gh pr merge` that
+ * pulled, an owner who did). An app's SERVER is not restarted here: five of
+ * the owner's eight apps build only when no build is there, so a restart alone
+ * would serve the old build under a line saying otherwise — docs/agents/coding-agent.md.
+ * Never throws.
+ */
+async function bringMergeHome(runId: string): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    const base = run?.pr?.phase === "merged" ? run.pr.base : null;
+    if (!run || !base) return;
+    const home = await bringBaseHome({ projectDir: projectDirectoryOf(run), base });
+    if (home.ok && !home.moved) return;
+    const current = loadRuns().find((r) => r.id === runId);
+    if (!current) return;
+    pushProgress(current, !home.ok
+      ? RUNNER_STEP.baseNotHome(base, home.detail)
+      : home.checkedOut ? RUNNER_STEP.baseHome(base, (home.commit ?? "").slice(0, 7)) : RUNNER_STEP.baseRefHome(base));
+    persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: bringing the merged pull request home failed:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**

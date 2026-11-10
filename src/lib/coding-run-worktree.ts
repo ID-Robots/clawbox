@@ -368,6 +368,72 @@ export function mergeRunBranch(input: {
   });
 }
 
+/** Why the project folder could not be brought up to its base as GitHub has it (`bringBaseHome`). */
+export type BaseHomeBlocker = "fetch" | "dirty" | "diverged" | "failed";
+
+/**
+ * Bring the project folder up to its BASE BRANCH AS GITHUB HAS IT — the step
+ * after a pull request into that base was merged there.
+ *
+ * `mergeRunBranch` brings a run's work home when there is no pull request.
+ * With one, the merge happens on GitHub, and nothing brought it back: the
+ * project folder stayed on the base as it was before the run, so the app the
+ * box serves from that folder was still the old one under a run that said
+ * "Merged into the base branch", and the NEXT run forked from the old base
+ * and never saw the work (Habit Tracker 1.3.0, run-deyse3g9, 2026-11-10:
+ * merged on GitHub, 1.2.1 in the folder and on the desktop).
+ *
+ * FAST-FORWARD ONLY, and that is the whole safety argument: nothing is ever
+ * merged, rebased or overwritten here, so there is nothing to resolve and
+ * nothing to lose.
+ *   - `origin`'s base is fetched; a fetch that fails (no remote, offline, a
+ *     sign-in that expired) is said and nothing else happens;
+ *   - already there: nothing moves, and the caller says nothing;
+ *   - checked out and clean (`readCheckout`, the merge home's own rule — the
+ *     box's favicons do not count, and one the base brings its own of is
+ *     moved aside): `merge --ff-only`. Uncommitted work of the owner's is
+ *     theirs: the folder is left and the reason named;
+ *   - the folder is on ANOTHER branch (a coding team's, the owner's own):
+ *     only the base's ref moves, by a fetch into it, which git refuses unless
+ *     it is a fast-forward. The tree is not touched (`checkedOut: false`);
+ *   - a base that has commits GitHub's has not is `diverged`: the owner's to
+ *     sort out, never the box's.
+ */
+export function bringBaseHome(input: { projectDir: string; base: string }): Promise<
+  | { ok: true; moved: boolean; commit: string | null; checkedOut: boolean }
+  | { ok: false; reason: BaseHomeBlocker; detail: string }
+> {
+  return withDirLock(input.projectDir, async () => {
+    const dir = path.resolve(input.projectDir);
+    const { base } = input;
+    const fetched = await gitIn(dir, ["fetch", "--quiet", "origin", base]);
+    if (!ok(fetched)) return { ok: false, reason: "fetch", detail: failureDetail(fetched, `Fetching ${base} from GitHub`) };
+    const theirs = await gitIn(dir, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]);
+    if (!ok(theirs) || !out(theirs)) return { ok: false, reason: "failed", detail: failureDetail(theirs, `Reading ${base} as GitHub has it`) };
+    const commit = out(theirs);
+    const on = await currentBranch(dir);
+    const mine = await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${base}^{commit}`]);
+    if (ok(mine) && out(mine) === commit) return { ok: true, moved: false, commit, checkedOut: on === base };
+    // Ahead of GitHub, or beside it: not a fast-forward, whichever way it is looked at.
+    if (ok(mine) && out(mine) && !ok(await gitIn(dir, ["merge-base", "--is-ancestor", out(mine), commit]))) {
+      return { ok: false, reason: "diverged", detail: `${base} in the project folder has commits that GitHub's ${base} does not` };
+    }
+    if (on !== base) {
+      const moved = await gitIn(dir, ["fetch", "--quiet", "origin", `${base}:${base}`]);
+      if (!ok(moved)) return { ok: false, reason: "failed", detail: failureDetail(moved, `Moving ${base} forward`) };
+      return { ok: true, moved: true, commit, checkedOut: false };
+    }
+    const seen = await readCheckout(dir, "normal");
+    if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project folder") };
+    if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
+    const aside = await setAsideFavicons(dir, commit, seen.favicons);
+    const forward = await gitIn(dir, ["merge", "--ff-only", "--quiet", commit]);
+    putBackFavicons(aside);
+    if (!ok(forward)) return { ok: false, reason: "failed", detail: failureDetail(forward, `Moving ${base} forward`) };
+    return { ok: true, moved: true, commit, checkedOut: true };
+  });
+}
+
 /**
  * The worktree's files go; the branch stays as history unless the caller asks
  * otherwise.

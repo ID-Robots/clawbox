@@ -329,6 +329,12 @@ export const RUNNER_STEP = {
   notMerged: (reason: string) => `Not merged: ${reason}`,
   /** The project folder sat on a finished coding team's branch; the box put it back on the base to bring the run's work home (mergeRunBranch). */
   checkoutReturned: (from: string, base: string) => `The project folder was on ${from}, a coding team's branch; it is back on ${base} so this run's work could be merged`,
+  /** A pull request merged on GitHub was brought into the project folder, fast-forward only (bringBaseHome). */
+  baseHome: (base: string, sha: string) => `The project folder is on the merged ${base} now (${sha})`,
+  /** ...the folder is on another branch: only the base's own ref moved. */
+  baseRefHome: (base: string) => `${base} in the project folder is on the merged work now; the folder is on another branch and was left as it is`,
+  /** ...or could not be: the reason is git's, or the box's own (uncommitted changes, a base that went its own way). */
+  baseNotHome: (base: string, reason: string) => `The project folder was not moved to the merged ${base}: ${reason}. Run git pull there when it is ready`,
   /** The box handed the merge to GitHub's auto-merge (reconcileAutoMerge). */
   autoMergeOn: (num: number) => `Turned on GitHub's auto-merge for pull request #${num}: it merges the moment its required checks pass`,
   /** ...and took it back; `reason` is the box's own words (decideAutoMerge). */

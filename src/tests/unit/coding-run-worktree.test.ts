@@ -13,6 +13,7 @@ import {
   addRunWorktree,
   branchExists,
   branchIsMerged,
+  bringBaseHome,
   commitsAhead,
   deleteRunBranch,
   linkSharedNodeModules,
@@ -294,6 +295,96 @@ describe("a run's worktree", () => {
  * is that the reason comes back named — the card words a different next step
  * for each — and that nothing of the owner's is touched on the way out.
  */
+describe("bringing a merged pull request home", () => {
+  let origin: string;
+  let elsewhere: string;
+
+  /** `dir` gets a GitHub of its own (a bare repository), and a second clone stands in for the merge made there. */
+  beforeEach(() => {
+    origin = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-origin-"));
+    elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-elsewhere-"));
+    git(origin, "init", "-q", "--bare", "-b", "master");
+    git(dir, "remote", "add", "origin", origin);
+    git(dir, "push", "-q", "-u", "origin", "master");
+    git(elsewhere, "clone", "-q", origin, ".");
+    git(elsewhere, "config", "user.email", "t@x");
+    git(elsewhere, "config", "user.name", "t");
+  });
+  afterEach(() => {
+    fs.rmSync(origin, { recursive: true, force: true });
+    fs.rmSync(elsewhere, { recursive: true, force: true });
+  });
+  /** What a merged pull request leaves on GitHub: a commit on the base the project folder does not have. */
+  const mergeOnGitHub = (file = "feature.txt"): string => {
+    fs.writeFileSync(path.join(elsewhere, file), "merged work\n");
+    git(elsewhere, "add", "-A");
+    git(elsewhere, "commit", "-q", "-m", "Merge pull request #1");
+    git(elsewhere, "push", "-q", "origin", "master");
+    return git(elsewhere, "rev-parse", "HEAD");
+  };
+
+  it("fast-forwards a clean folder on the base to what GitHub has, and says nothing moved the second time", async () => {
+    // run-deyse3g9 (2026-11-10): merged on GitHub, and the project folder — and
+    // the app served from it — stayed on the base from before the run.
+    const merged = mergeOnGitHub();
+    expect(fs.existsSync(path.join(dir, "feature.txt"))).toBe(false);
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: true });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(merged);
+    expect(fs.readFileSync(path.join(dir, "feature.txt"), "utf8")).toBe("merged work\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: false, commit: merged, checkedOut: true });
+  });
+
+  it("leaves a folder with uncommitted work of the owner's alone, and names why", async () => {
+    mergeOnGitHub();
+    const before = git(dir, "rev-parse", "HEAD");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>Mine, not saved yet</h1>\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>Mine, not saved yet</h1>\n");
+  });
+
+  it("moves only the base's ref when the folder is on another branch, and never touches the tree", async () => {
+    const merged = mergeOnGitHub();
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    fs.writeFileSync(path.join(dir, "notes.txt"), "the team's, uncommitted\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: false });
+    expect(git(dir, "rev-parse", "master")).toBe(merged);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+    expect(fs.existsSync(path.join(dir, "feature.txt"))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, "notes.txt"), "utf8")).toBe("the team's, uncommitted\n");
+  });
+
+  it("refuses a base that went its own way: never a merge, never a rebase", async () => {
+    mergeOnGitHub();
+    fs.writeFileSync(path.join(dir, "local.txt"), "committed here only\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "local work");
+    const before = git(dir, "rev-parse", "HEAD");
+    const home = await bringBaseHome({ projectDir: dir, base: "master" });
+    expect(home).toMatchObject({ ok: false, reason: "diverged" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(git(dir, "log", "--oneline", "--merges")).toBe("");
+  });
+
+  it("says a fetch that failed, and moves nothing", async () => {
+    const before = git(dir, "rev-parse", "HEAD");
+    git(dir, "remote", "set-url", "origin", path.join(origin, "gone"));
+    const home = await bringBaseHome({ projectDir: dir, base: "master" });
+    expect(home).toMatchObject({ ok: false, reason: "fetch" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(before);
+    // And a project with no remote at all.
+    git(dir, "remote", "remove", "origin");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toMatchObject({ ok: false, reason: "fetch" });
+  });
+
+  it("takes the box's own untracked favicon out of the way of one the merge brings", async () => {
+    const merged = mergeOnGitHub("favicon.ico");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "drawn by the box\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: true });
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("merged work\n");
+  });
+});
+
 describe("merging a run's branch home", () => {
   /** A run's worktree with one commit on its branch. */
   async function withWork(runId: string) {
