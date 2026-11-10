@@ -10,9 +10,10 @@
  * So each role has a model of its own by default (`ROLE_DEFAULT_MODELS`): the
  * planner (and the lead, which is the planner back for a moment) the
  * provider's BEST model, because a bad plan wastes every run after it; a
- * worker and a reviewer the provider's middle one. A planner and a reviewer
- * also run at most at `xhigh` effort — never MORE than the owner's own.
- * Workers keep the owner's effort.
+ * worker and a reviewer a cheaper one (on Anthropic a model each, as
+ * measured). A planner and a reviewer also run at most at `xhigh` effort —
+ * `high` on Anthropic when none is stored (`ROLE_AUTO_EFFORT`) — never MORE
+ * than the owner's own. Workers keep the owner's effort.
  *
  * The owner may override any of three halves per role in the Coding Agent
  * settings (`coding_agent_role_models`): the PROVIDER that pays for the role's
@@ -108,7 +109,7 @@ export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { effortCap: RoleEffort |
 /**
  * The model each role runs on with nothing stored for it, on the provider it
  * runs on: the planner gets the provider's best model, a worker and a
- * reviewer its middle one. ClawBox AI: its flash tier for all three — the one
+ * reviewer a cheaper one (Anthropic: a model each, see below). ClawBox AI: its flash tier for all three — the one
  * model every plan may use; never the pro tier, which is Max-plan only and
  * would fail a role's every run on any other plan.
  *

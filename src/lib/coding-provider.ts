@@ -66,16 +66,16 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * an unknown model id is a failed run several minutes in, and the picker's
  * job is to make that impossible from here.
  *
- * Default first. The Fable models are offered beside it, never instead of
- * it: a run nobody named a model for still lands on Opus 5.5.
+ * The Fable models are offered beside the default, never instead of it: a run
+ * nobody named a model for lands on `DEFAULT_ANTHROPIC_MODEL`.
  * `claude-fable-5-2` (2026-11-09, the owner's ask) leads them — the newer
  * generation at a lower list price than `claude-fable-5-1`, which stays for a
  * role or a follow-up run that already names it. `claude-sonnet-5-5` and
  * `claude-haiku-5-5` joined the same day, for the cheaper halves of a team:
  * all three answered the box's own Claude sign-in when asked (2026-11-09).
  *
- * `claude-opus-5` stays on the list behind the 5.5 default
- * rather than retiring with it, because this list is the fence for what a
+ * `claude-opus-5` stays on the list behind `claude-opus-5-5`
+ * rather than retiring, because this list is the fence for what a
  * caller ASKS FOR: the MCP tool's `model` enum, the run route, and a
  * follow-up run that re-states the model of the run it continues all go
  * through it, and a model that had left would be refused there by name.

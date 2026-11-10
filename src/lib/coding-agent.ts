@@ -10192,6 +10192,10 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
  * pulled, an owner who did). An app's SERVER is not restarted here: five of
  * the owner's eight apps build only when no build is there, so a restart alone
  * would serve the old build under a line saying otherwise — docs/agents/coding-agent.md.
+ * TODO(next release): rebuild and restart an installed app once its merged
+ * release is in the folder. That needs a build step `clawbox.json` does not
+ * name yet (it names how to start, not how to build); until then the owner
+ * rebuilds and restarts the app by hand.
  * Never throws.
  */
 async function bringMergeHome(runId: string): Promise<void> {
@@ -11946,6 +11950,11 @@ async function continueOnAnotherAccount(
       finishRun(run, state, exitCode);
       return;
     }
+    // TODO(next release): no fallback MODEL. When only one model's own week is
+    // spent (`why.kind === "limit"` with `why.found.limit.model` set) and no
+    // account is left for that model, the run is paused until the reset — here,
+    // and more often in finishRun's `another === false` branch — although
+    // those accounts stay usable for every other model.
     pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
     const message = why.kind === "limit" ? why.found.text : why.kind === "auth" ? why.text : "Every Anthropic account on this ClawBox is at its usage limit.";
     state.forcedAccountPause = { resetsAt: new Date(resetsAt).toISOString(), message: message.slice(0, MAX_PAUSE_MESSAGE_CHARS) };

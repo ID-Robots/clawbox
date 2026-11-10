@@ -437,6 +437,10 @@ export function mergeRunBranch(input: {
     if (ahead === 0) return { ok: true, merged: false, commit: null, ...(returnedFrom ? { returnedFrom } : {}) };
     const seen = await readCheckout(dir, "normal");
     if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project before the merge") };
+    // TODO(next release): a tracked `.clawbox/run-notes.md` the box itself just
+    // wrote a lesson to counts as the folder's own change here, so a run with no
+    // pull request is refused its merge home in a project that tracks that file.
+    // `bringBaseHome` leaves the question to git; this path does not yet.
     if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
     const as = await asBox(dir);
     if (!as.ok) return { ok: false, reason: "failed", detail: as.detail };

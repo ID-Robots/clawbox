@@ -445,6 +445,10 @@ interface RunnerPattern {
 /**
  * The reader for RUNNER_STEP. Ordered: nothing here overlaps, but a pattern
  * that could swallow another must come after it.
+ *
+ * TODO(next release): `pathsRewritten`, `checkoutReturned`, `baseHome`,
+ * `baseRefHome` and `baseNotHome` have no row here and no label key yet, so
+ * the timeline shows them in English whatever language the desktop is in.
  */
 const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Started$/, labelKey: "started", icon: "play_arrow" },
