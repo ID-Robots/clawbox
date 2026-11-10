@@ -10,7 +10,7 @@
  * worktree's, and it writes that. The worktree is removed when the work is
  * merged, and every such path is dead on arrival:
  *
- *   node /home/yanko/Projects/calculator/.clawbox/worktrees/t4-1/mcp/server.mjs
+ *   node ~/Projects/calculator/.clawbox/worktrees/t4-1/mcp/server.mjs
  *
  * Two coding teams in a row did every task, merged, and FAILED their final
  * review on exactly this (2026-11-08, calculator and pomodoro; the owner's
