@@ -37,7 +37,8 @@ answer?" — and say yes only when all of these hold:
      wrong would have kept the gateway from becoming ready, and the very next
      start then runs the full checks. A run the updater makes itself, with
      the gateway stopped and outside its unit, is recorded as `outsideUnit`
-     and is never that previous start: no gateway starts from it. On a core
+     and is never that previous start: no gateway starts from it. For the
+     same reason it may take a recorded answer but never records one. On a core
      without the start-guard (before 2026.10) there is no such proof, and
      nothing is ever reused;
   4. the operator did not ask for a full run (CLAWBOX_PRESTART_FULL=1 makes

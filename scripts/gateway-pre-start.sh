@@ -278,8 +278,12 @@ clawbox_stamp_check() {
 
 # Record a full check's answer: `clawbox_stamp_remember <step> <key> [value]`.
 # Never fails the boot; a record that cannot be written is the next full check.
+# The updater's run outside the unit (CLAWBOX_PRESTART_OUTSIDE_UNIT=1) records
+# nothing: no gateway comes up on its answer, `doctor --fix` runs after it, and
+# the unit's next start would take it on the proof of an older start.
 clawbox_stamp_remember() {
   [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && [ -n "${2:-}" ] || return 0
+  [ "${CLAWBOX_PRESTART_OUTSIDE_UNIT:-0}" = "1" ] && return 0
   if ! timeout -k 5 20 python3 -I "$CLAWBOX_STAMPS_PY" remember --step "$1" --key "$2" --value "${3:-}" \
       --record "$CLAWBOX_STAMPS_FILE" >/dev/null 2>&1; then
     echo "  WARN: could not record the $1 check in $CLAWBOX_STAMPS_FILE; the next start runs it in full" >&2

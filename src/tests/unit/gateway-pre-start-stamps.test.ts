@@ -517,30 +517,39 @@ describe.skipIf(!hasPython3)("a pre-start run outside the gateway unit", () => {
     return provenAt;
   }
 
-  /** The updater's run, then the unit's next start: the real block, twice. */
-  function updaterRunThenUnitStart(): { provenAt: number; starts: Array<Record<string, unknown>> } {
-    fakeOpenclaw();
+  /** The updater's run, then the unit's next start: the real `program`, twice. */
+  function updaterRunThenUnitStart(program = START_GUARD): {
+    guard: { provenAt: number; starts: Array<Record<string, unknown>> };
+    outs: string[];
+    asked: () => number;
+  } {
+    const cli = fakeOpenclaw();
     // systemctl answers NRestarts; the journal has nothing from the gateway.
     for (const [name, body] of [["systemctl", "echo 0"], ["journalctl", "exit 0"]]) {
       writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`);
       chmodSync(path.join(bin, name), 0o755);
     }
     const env = { CLAWBOX_OPENCLAW_2026_10: "1", OPENCLAW_STATE_DIR: home, TMPDIR: dir };
-    for (const run of [{ ...env, CLAWBOX_PRESTART_OUTSIDE_UNIT: "1" }, env]) {
-      const res = runBash(START_GUARD, run);
+    const outs = [{ ...env, CLAWBOX_PRESTART_OUTSIDE_UNIT: "1" }, env].map((run) => {
+      const res = runBash(program, run);
       expect(res.status).toBe(0);
       expect(res.out).not.toContain("start-loop recovery stopped");
-    }
+      return res.out;
+    });
     const guard = readJson(path.join(root, "data", "openclaw-start-guard.json"));
     expect(guard.starts).toHaveLength(3);
-    return guard as { provenAt: number; starts: Array<Record<string, unknown>> };
+    return {
+      guard: guard as { provenAt: number; starts: Array<Record<string, unknown>> },
+      outs,
+      asked: () => cli.calls().filter((c) => c.startsWith("plugins inspect")).length,
+    };
   }
 
   it("is not taken for the previous start: the unit's next start reuses what the last real one proved", () => {
     seedUnitStart(true);
     const key = recordFullCheck();
 
-    const guard = updaterRunThenUnitStart();
+    const { guard } = updaterRunThenUnitStart();
 
     expect(check("plugin-consent")).toEqual({ state: "hit", key, rest: "ok consented:deepseek" });
     expect(guard.starts[1].outsideUnit).toBe(true);
@@ -551,10 +560,52 @@ describe.skipIf(!hasPython3)("a pre-start run outside the gateway unit", () => {
     const provenAt = seedUnitStart(false);
     const key = recordFullCheck();
 
-    const guard = updaterRunThenUnitStart();
+    const { guard } = updaterRunThenUnitStart();
 
     // Nothing outside this case's own files said `gateway ready`.
     expect(guard.provenAt).toBe(provenAt);
     expect(check("plugin-consent")).toEqual({ state: "miss", key, rest: "the previous start did not reach gateway ready" });
+  });
+
+  // The consent check itself, run by the updater and then by the unit.
+  const CONSENT_START = () => `${SETUP}\n${START_GUARD}\n${repairHelpers()}\n${sliceScript(
+    "# ── Capability consent for the OTHER ClawBox-managed plugins",
+    "# Codex reads its ChatGPT session",
+  )}`;
+  const SETTLED = "ok consented:codex consented:deepseek";
+
+  it("takes the last real start's answer in both runs while nothing it reads changed", () => {
+    seedUnitStart(true);
+    recordFullCheck("plugin-consent", SETTLED);
+
+    const { outs, asked } = updaterRunThenUnitStart(CONSENT_START());
+
+    for (const out of outs) expect(out).toContain("reusing that report instead of asking again");
+    expect(asked()).toBe(0);
+  });
+
+  // A core-only update installs a NEW core, then the updater's run checks it and
+  // `doctor --fix` runs before the unit's next start, which is the first gateway
+  // start on that core. The updater's answer came before doctor and no gateway
+  // ever came up on it, so that start must ask the core itself.
+  it("leaves the unit's next start no answer of its own: after a new core, that start asks again", () => {
+    seedUnitStart(true);
+    const oldKey = recordFullCheck("plugin-consent", SETTLED);
+    writeJson(corePkg, { name: "openclaw", version: "2026.10.9" });
+
+    const { outs: [updater, unit], asked } = updaterRunThenUnitStart(CONSENT_START());
+
+    // The updater's run still asks, and acts on that answer itself.
+    expect(updater).toContain("Plugin consent: asking the core (something it reads changed since the last full check)");
+    expect(updater).toContain("deepseek plugin capabilities accepted/current");
+    // The unit's start does not take that answer as proven.
+    expect(unit).toContain("Plugin consent: asking the core (something it reads changed since the last full check)");
+    expect(unit).not.toContain("reusing that report");
+    expect(asked()).toBe(2);
+    // The unit's own full check is what the start after it may reuse.
+    const now = check("plugin-consent");
+    expect(now.key).not.toBe(oldKey);
+    const steps = readJson(path.join(root, "data", "gateway-pre-start-stamps.json")).steps as Record<string, { key: string }>;
+    expect(steps["plugin-consent"].key).toBe(now.key);
   });
 });
