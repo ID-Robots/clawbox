@@ -2909,16 +2909,38 @@ async function runCurrentGatewayPreStart(): Promise<string> {
     // Rethrown exactly as node built it: its message already carries stderr
     // and is the step error the owner reads. What it lacks is stdout, the step
     // the script stopped in, which under `set -euo pipefail` can be all there is.
-    const detail = err as { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown };
+    logPreStartOutput("failed", err);
+    throw err;
+  }
+  logPreStartOutput("succeeded", result);
+  // Read whole and unredacted: only the logged copy is cut and redacted.
+  return result.stdout ?? "";
+}
+
+/**
+ * The log is a record of the run, never part of its outcome: a fault here must
+ * not fail a pre-start that succeeded, nor stand in for the error of one that
+ * failed (that error is the step error the owner reads).
+ */
+function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): void {
+  try {
+    const detail = (output ?? {}) as { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown };
+    if (outcome === "succeeded") {
+      console.log(describePreStartOutput("succeeded", detail));
+      return;
+    }
     const how = detail.killed
       ? `killed by ${String(detail.signal ?? "a signal")}`
       : typeof detail.code === "number" ? `exit ${detail.code}` : String(detail.code ?? "no exit code");
     console.error(describePreStartOutput(`failed (${how})`, detail));
-    throw err;
+  } catch (logErr) {
+    try {
+      console.warn("[Updater] pre-start (outside the unit): its output could not be logged:",
+        logErr instanceof Error ? logErr.message : String(logErr));
+    } catch {
+      // Nothing left to tell it to; the run's own outcome stands.
+    }
   }
-  console.log(describePreStartOutput("succeeded", result));
-  // Read whole and unredacted: only the logged copy is cut and redacted.
-  return result.stdout ?? "";
 }
 
 /** Per stream: a reuse run's 5-20 lines whole, a full run's tail. */

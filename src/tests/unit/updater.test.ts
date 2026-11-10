@@ -3171,6 +3171,67 @@ describe("updater", () => {
         expect(lines.some((line) => line.endsWith("migrated row batch 0"))).toBe(false);
       });
 
+      it("keeps the tail within 16 KB when fewer than 200 lines already pass it", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        // About 30 KB in 101 lines: under the line bound, over the character one.
+        const body = Array.from({ length: 100 }, (_, i) => `  plugin scan ${String(i).padStart(3, "0")} ${"x".repeat(280)}`);
+        await verifyWithPreStart({ stdout: [...body, TOTAL].join("\n") + "\n", stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        const note = lines.map((line) => /(\d+) earlier lines? dropped/.exec(line)).find(Boolean);
+        expect(note).toBeTruthy();
+        const kept = lines
+          .filter((line) => !/earlier lines? dropped/.test(line))
+          .map((line) => line.slice(`${TAG}: `.length));
+        expect(Number(note![1]) + kept.length).toBe(body.length + 1);
+        expect(kept.length).toBeLessThan(body.length);
+        expect(kept.join("\n").length).toBeLessThanOrEqual(16 * 1024);
+        expect(kept.at(-1)).toBe(TOTAL);
+      });
+
+      it("cuts a last line over 16 KB to its own tail and drops every line before it", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const long = `  Timing: plugin payload list ${"p".repeat(20_000)} end-of-line`;
+        await verifyWithPreStart({ stdout: `  Plugin consent: asking the core\n${long}\n`, stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        expect(lines).toContain(`${TAG}: … 1 earlier line dropped`);
+        expect(lines.some((line) => line.includes("Plugin consent"))).toBe(false);
+        const last = lines.at(-1)!.slice(`${TAG}: `.length);
+        expect(last).toBe(`…${long.slice(-16 * 1024)}`);
+        expect(last.endsWith("end-of-line")).toBe(true);
+      });
+
+      it("still completes a run that succeeded when logging its output throws", async () => {
+        const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+          if (String(args[0]).startsWith(TAG)) throw new Error("stdout write failed");
+        });
+        await verifyWithPreStart({ stdout: `${TOTAL}\n`, stderr: "" });
+
+        expect(updater.getUpdateState().phase).toBe("completed");
+        expect(loggedLines(warned).some((line) =>
+          line.includes("could not be logged") && line.includes("stdout write failed"))).toBe(true);
+      });
+
+      it("rethrows node's own error when logging a failed run's output throws", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+          if (String(args[0]).startsWith(TAG)) throw new Error("stderr write failed");
+        });
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n",
+          stderr: "  ERROR: OpenClaw 2 auth-profile migration failed\n",
+        });
+        const original = failure.message;
+        await verifyWithPreStart(failure);
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(original);
+      });
+
       it("redacts a credential shape in what it logs and leaves the Timing line intact", async () => {
         const logged = vi.spyOn(console, "log").mockImplementation(() => {});
         await verifyWithPreStart({
