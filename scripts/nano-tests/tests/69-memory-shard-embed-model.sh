@@ -28,6 +28,9 @@
 # Shard's switch as they were. An index that was in the cloud is moved back
 # there and a full pass is asked for: the cloud index the test replaced is
 # rebuilt, not restored byte for byte.
+# jq programs (their own $variables) and board scripts are single-quoted on
+# purpose throughout this file.
+# shellcheck disable=SC2016
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -153,7 +156,11 @@ restore() {
   RESTORED=1
   if [ "$SOURCE_ADDED" = 1 ]; then
     board_owner_api DELETE /setup-api/clawkeep/memory/sources "{\"path\":\"$DIR\"}"
-    [ "$API_STATUS" = 200 ] && note "removed the test's folder from Memory Shard" || not_ok "could not remove the test's folder from Memory Shard: $(api_error)"
+    if [ "$API_STATUS" = 200 ]; then
+      note "removed the test's folder from Memory Shard"
+    else
+      not_ok "could not remove the test's folder from Memory Shard: $(api_error)"
+    fi
   fi
   if [ "$SWITCHED" = 1 ] && [ "$BEFORE_SOURCE" = cloud ]; then
     board_owner_api POST /setup-api/clawkeep/memory/provider '{"source":"cloud"}'

@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# The EMBED_* this sets are read by the script that sources it.
+# shellcheck disable=SC2034
 # Which local embedding model the memory embedder runs (TASK-2411) — sourced,
 # never executed; it defines functions and changes nothing on its own.
 #
