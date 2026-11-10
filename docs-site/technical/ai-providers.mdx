@@ -195,10 +195,15 @@ All heals are idempotent — a healthy config is left untouched.
 
 **Settings → Local AI → External engine** (`/setup-api/local-ai/external`, owner only)
 makes an OpenAI-compatible endpoint the owner runs the box's Local AI. The endpoint is
-validated with `GET {base}/models` (8 s, redirects not followed) before anything is
-written; `POST /setup-api/local-ai/external/test` runs the same check alone. Refusals carry
-a `code`: `unreachable`, `unauthorized` (401/403), `model_not_listed` (with the models the
-engine does list) or `bad_response`.
+validated with `GET {base}/models` (8 s, redirects not followed, at most 2 MB of the answer
+read, only up to 50 bounded model ids passed on) before anything is written;
+`POST /setup-api/local-ai/external/test` runs the same check alone. The base URL is http(s)
+with no credentials, query or fragment, never the box's own `/setup-api/`, and never a
+link-local or cloud-metadata target (169.254.0.0/16, fe80::/10, `metadata.google.internal`)
+or the unspecified address (0.0.0.0, `::`) — typed as an address in any spelling, or as a
+name that resolves to one. Loopback, LAN and public servers are what it is for. Refusals
+carry a `code`: `unreachable`, `unauthorized` (401/403), `model_not_listed` (with the models
+the engine does list), `bad_response` or `address_refused`.
 
 | | OpenClaw | Hermes |
 |---|---|---|
@@ -215,8 +220,10 @@ sent the key of another.
 
 **What it replaces.** While it is selected, the Local AI store keys name it
 (`local_ai_provider: clawext`), so the chat picker, Settings and the provider list show
-its model as the local model. llama.cpp (and Ollama, when that was the local engine) is
-stopped on save, the on-device fallbacks leave `agents.defaults.model.fallbacks`, and the
+its model as the local model. llama.cpp and Ollama are stopped on save and kept down while
+it is selected (a check 30 s after boot and every 5 minutes: systemd starts `ollama.service`
+at boot, and an update can restart it); Remove starts Ollama again when it was running. The
+on-device fallbacks leave `agents.defaults.model.fallbacks`, and the
 Local AI proxy answers `/setup-api/local-ai/llamacpp` and `/ollama` with
 `503 external_engine_selected` instead of starting them — for a stale session override
 or fallback as much as for a new turn. The gateway pre-start pass keeps the `clawext`

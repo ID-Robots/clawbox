@@ -58,6 +58,9 @@ else
   BEFORE=$(api_json '.activeModel // empty')
 fi
 note "chat model before: ${BEFORE:-none}"
+# Ollama as found (exact process name, so no shell whose argv mentions it counts).
+OLLAMA_BEFORE=$(board 'pgrep -x ollama >/dev/null 2>&1 && echo up || echo down' | tail -n1)
+note "ollama before: $OLLAMA_BEFORE"
 
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
 # shellcheck disable=SC2016,SC2317
@@ -210,6 +213,9 @@ chat_llama=$(board '
   echo $n
 ' | tail -n1)
 if [ "${chat_llama:-1}" = 0 ]; then ok "no llama-server for chat is running"; else not_ok "$chat_llama llama-server process(es) for chat are running"; fi
+# shellcheck disable=SC2016  # expanded on the board
+ollama_now=$(board 'for _ in $(seq 1 15); do pgrep -x ollama >/dev/null 2>&1 || { echo down; exit 0; }; sleep 1; done; echo up' | tail -n1)
+if [ "$ollama_now" = down ]; then ok "no ollama process is running (it was $OLLAMA_BEFORE before the engine)"; else not_ok "ollama still runs while the external engine is selected"; fi
 
 # 7. The owner's browser.
 # shellcheck disable=SC2016  # expanded on the board
@@ -262,5 +268,10 @@ fi
 if [ "$AFTER" = "$BEFORE" ]; then ok "the chat is back on ${AFTER:-what it was}"; else not_ok "the chat was on ${BEFORE:-none} and is now on ${AFTER:-none}"; fi
 board_owner_api GET /setup-api/local-ai/external
 if [ "$(api_json '.configured')" = false ]; then ok "GET answers no engine after Remove"; else not_ok "GET after Remove: $(printf '%s' "$API_BODY" | head -c 200)"; fi
+if [ "$OLLAMA_BEFORE" = up ]; then
+  # shellcheck disable=SC2016  # expanded on the board
+  ollama_after=$(board 'for _ in $(seq 1 30); do pgrep -x ollama >/dev/null 2>&1 && { echo up; exit 0; }; sleep 1; done; echo down' | tail -n1)
+  if [ "$ollama_after" = up ]; then ok "Remove started ollama again, as the engine found it"; else not_ok "ollama was running before the engine and is not after Remove"; fi
+fi
 
 finish

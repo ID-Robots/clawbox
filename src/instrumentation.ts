@@ -723,6 +723,25 @@ export async function register() {
       })
     }, 15_000)
     rearm.unref?.()
+    // An external AI engine as Local AI (TASK-2376): the on-device chat
+    // runtimes stay down while it is selected — systemd starts ollama.service
+    // at boot and an update's post step restarts it later, so this looks again
+    // every few minutes. Nothing happens on a box with no engine.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { standDownChatRuntimesForExternalEngine, EXTERNAL_ENGINE_STAND_DOWN_MS } = require('./lib/local-ai-runtime')
+    const standDown = () => {
+      void standDownChatRuntimesForExternalEngine().then((stopped: { ollama: boolean; llamacpp: boolean }) => {
+        if (stopped.ollama || stopped.llamacpp) {
+          console.log(`[instrumentation] external AI engine selected: stopped ${[stopped.ollama && 'ollama', stopped.llamacpp && 'llama.cpp'].filter(Boolean).join(' and ')}`)
+        }
+      }).catch((err: unknown) => {
+        console.warn('[instrumentation] external engine stand-down failed:', err instanceof Error ? err.message : err)
+      })
+    }
+    const firstStandDown = setTimeout(standDown, 30_000)
+    firstStandDown.unref?.()
+    const standDownTimer = setInterval(standDown, EXTERNAL_ENGINE_STAND_DOWN_MS)
+    standDownTimer.unref?.()
   } catch (err) {
     console.error('[instrumentation] Could not load the local AI runtime:', err instanceof Error ? err.message : err)
   }

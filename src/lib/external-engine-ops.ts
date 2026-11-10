@@ -8,7 +8,7 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
-import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { isOllamaRunning, startOllamaService, stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { applyLocalAiToHermes, HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
@@ -490,13 +490,19 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
     );
   }
 
+  // Ollama serves chat only, and while the engine holds the slot nothing may
+  // chat on it — whichever engine Local AI was before. Whether it was running
+  // is recorded (first save only), so Remove can start it again.
+  const ollamaUp = await isOllamaRunning().catch(() => false);
+  if (firstSave) record.previous = { ...record.previous, ollamaRunning: ollamaUp };
+
   // From here the store names the engine — which is also what turns the
-  // llama.cpp / Ollama start gates on — and the on-device runtime goes down.
+  // llama.cpp / Ollama start gates on — and the on-device runtimes go down.
   await setMany(selectedStoreEntries(record));
   await stopLocalAiProvider("llamacpp").catch((err) => {
     console.error("[external-engine] stopping llama.cpp failed:", err instanceof Error ? err.message : err);
   });
-  if (previous.store.local_ai_provider === "ollama") {
+  if (ollamaUp) {
     await stopLocalAiProvider("ollama").catch((err) => {
       console.error("[external-engine] stopping Ollama failed:", err instanceof Error ? err.message : err);
     });
@@ -543,5 +549,12 @@ export async function removeExternalEngine(): Promise<{ removed: boolean; warnin
   }
   await setMany({ [EXTERNAL_ENGINE_STORE_KEY]: undefined });
   deleteExternalEngineKey();
+  // Ollama back as the engine found it: running, when it was.
+  if (record.previous.ollamaRunning === true) {
+    await startOllamaService().catch((err) => {
+      console.error("[external-engine] starting Ollama again failed:", err instanceof Error ? err.message : err);
+      warnings.push("The engine was removed, but Ollama could not be started again. It starts on the next chat that uses it, or at the next boot.");
+    });
+  }
   return { removed: true, ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
 }

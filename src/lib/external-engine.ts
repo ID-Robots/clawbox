@@ -34,6 +34,8 @@ export interface PreviousLocalAiState {
   openclaw?: { primary: string | null; removedFallbacks: string[] };
   /** Hermes: the selection, and whether the on-device model was registered there. */
   hermes?: { provider: string | null; model: string | null; localRegistered: boolean };
+  /** Whether Ollama was running when the engine was first saved: Remove starts it again. */
+  ollamaRunning?: boolean;
 }
 
 export interface ExternalEngineRecord extends ExternalEngineSettings {

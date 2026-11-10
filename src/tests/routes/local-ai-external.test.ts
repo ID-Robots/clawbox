@@ -41,7 +41,11 @@ vi.mock("@/lib/gateway-hot-apply", () => ({
   settleConfigWrite: vi.fn(async () => "applied"),
   restartGatewayAnsweringEarly: vi.fn(async () => {}),
 }));
-vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: vi.fn(async () => {}) }));
+vi.mock("@/lib/local-ai-runtime", () => ({
+  stopLocalAiProvider: vi.fn(async () => {}),
+  isOllamaRunning: vi.fn(async () => false),
+  startOllamaService: vi.fn(async () => {}),
+}));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: vi.fn(async () => ({ mode: "merge", backupPath: null })),
   resolveHermesConfigValue: vi.fn(async () => ({ state: "absent" })),
@@ -64,7 +68,7 @@ import { POST as TEST } from "@/app/setup-api/local-ai/external/test/route";
 import { requireSession } from "@/lib/route-auth";
 import { getActiveHarness } from "@/lib/harness";
 import { readConfig, runOpenclawConfigSetBatch, runOpenclawConfigUnset } from "@/lib/openclaw-config";
-import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { isOllamaRunning, startOllamaService, stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { applyLocalAiToHermes, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 import { POST as chatModelPost } from "@/app/setup-api/chat/model/route";
@@ -295,6 +299,27 @@ describe("on OpenClaw", () => {
     });
     expect(store.external_engine).toBeUndefined();
     expect(keyFile()).toBeNull();
+  });
+
+  it("stops a running Ollama on save whatever Local AI was, and starts it again on remove", async () => {
+    vi.mocked(isOllamaRunning).mockResolvedValue(true);
+    await POST(req("POST", saveBody()));
+    expect(stopLocalAiProvider).toHaveBeenCalledWith("ollama");
+    expect((store.external_engine as { previous: { ollamaRunning?: boolean } }).previous.ollamaRunning).toBe(true);
+    vi.mocked(isOllamaRunning).mockResolvedValue(false);
+    // A re-save keeps what the FIRST save found.
+    await POST(req("POST", saveBody({ contextWindow: 65536 })));
+    expect((store.external_engine as { previous: { ollamaRunning?: boolean } }).previous.ollamaRunning).toBe(true);
+    await DELETE(req("DELETE"));
+    expect(startOllamaService).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an Ollama that was not running stopped on remove", async () => {
+    vi.mocked(isOllamaRunning).mockResolvedValue(false);
+    await POST(req("POST", saveBody()));
+    expect(stopLocalAiProvider).not.toHaveBeenCalledWith("ollama");
+    await DELETE(req("DELETE"));
+    expect(startOllamaService).not.toHaveBeenCalled();
   });
 
   it("remove on a box that had no Local AI clears the keys it set", async () => {
