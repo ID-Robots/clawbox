@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 import MemoryShardEmbedderCard from "@/components/MemoryShardEmbedderCard";
+import { I18nProvider } from "@/lib/i18n";
 
 type Choice = {
   source: "cloud" | "local";
@@ -151,13 +152,14 @@ describe("MemoryShardEmbedderCard — which model on this box (TASK-2411)", () =
 
   it("shows the 4B disabled with the plain reason on a Jetson", async () => {
     choice = { ...choice, localModel: "qwen3-embedding-0.6b", localModels: rows({ available: false, reason: "jetson" }) } as Choice;
-    render(<MemoryShardEmbedderCard />);
+    render(<I18nProvider><MemoryShardEmbedderCard /></I18nProvider>);
     const select = await screen.findByTestId("memory-shard-embedder-model-select");
     expect((select as HTMLSelectElement).value).toBe("qwen3-embedding-0.6b");
     const option = select.querySelector('option[value="qwen3-embedding-4b"]') as HTMLOptionElement;
     expect(option.disabled).toBe(true);
-    expect(screen.getByTestId("memory-shard-embedder-model-qwen3-embedding-4b-unavailable").textContent)
-      .toContain("localModels.embed.unavailable.jetson");
+    // The translated sentence, not its key.
+    await waitFor(() => expect(screen.getByTestId("memory-shard-embedder-model-qwen3-embedding-4b-unavailable").textContent)
+      .toContain(clawkeepTranslations.en["localModels.embed.unavailable.jetson"]));
     // …which is a real sentence in every locale.
     for (const table of Object.values(clawkeepTranslations)) expect(table["localModels.embed.unavailable.jetson"]).toMatch(/Jetson/);
   });

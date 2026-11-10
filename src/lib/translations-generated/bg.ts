@@ -2374,6 +2374,7 @@ const table: Record<string, string> = {
   "localModels.embed.notDownloaded": "Не е изтеглен",
   "localModels.embed.present": "{model} е на тази кутия ({size}).",
   "localModels.embed.remove": "Премахни",
+  "localModels.embed.sourceUnknown": "Все още не можа да се разбере къде работи търсенето в паметта, затова смяната изчаква; кутията ще бъде попитана отново след малко.",
   "localModels.embed.switchHint": "Смяната на модела вгражда всеки файл наново; файлът на другия модел остава, докато не го премахнеш.",
   "localModels.embed.title": "Модел за търсене в паметта",
   "localModels.embed.unavailable.gpuMemory": "Нужни са 6 GB свободна видеопамет, а в момента има по-малко. Спри другите локални модели и опитай пак.",
