@@ -63,8 +63,8 @@ describe("the base-URL rule", () => {
     ["http://2852039166/v1"],
     ["http://0xa9.0xfe.0xa9.0xfe/v1"],
     ["http://0251.0376.0251.0376/v1"],
-    ["http://[fe80::1]/v1"],
-    ["http://[febf::1]:8000/v1"],
+    ["http://[fe80::1]/v1"], // public-hygiene: allow link-local test vector: the engine address rule must refuse it
+    ["http://[febf::1]:8000/v1"], // public-hygiene: allow link-local test vector: the engine address rule must refuse it
     ["http://[::ffff:169.254.169.254]/v1"],
     ["http://[64:ff9b::a9fe:a9fe]/v1"],
     ["http://0.0.0.0:8000/v1"],
@@ -81,10 +81,10 @@ describe("the base-URL rule", () => {
     ["http://127.0.0.1:8000/v1"],
     ["http://localhost:8000/v1"],
     ["http://[::1]:8000/v1"],
-    ["http://10.0.0.5:8000/v1"],
-    ["http://172.16.4.2/v1"],
-    ["http://192.168.1.20:30000/v1"],
-    ["http://[fd00::5]:8000/v1"],
+    ["http://10.0.0.5:8000/v1"], // public-hygiene: allow LAN/private test vector: the engine address rule must keep it allowed
+    ["http://172.16.4.2/v1"], // public-hygiene: allow LAN/private test vector: the engine address rule must keep it allowed
+    ["http://192.168.1.20:30000/v1"], // public-hygiene: allow LAN/private test vector: the engine address rule must keep it allowed
+    ["http://[fd00::5]:8000/v1"], // public-hygiene: allow LAN/private test vector: the engine address rule must keep it allowed
     ["http://[fec0::1]/v1"],
     ["http://169.255.0.1/v1"],
     ["https://engine.example.com/v1"],
@@ -96,9 +96,9 @@ describe("the base-URL rule", () => {
 
   it("names why a host is refused", () => {
     expect(refusedEngineHost("169.254.169.254")).toMatch(/link-local/);
-    expect(refusedEngineHost("[fe80::1]")).toMatch(/link-local/);
+    expect(refusedEngineHost("[fe80::1]")).toMatch(/link-local/); // public-hygiene: allow link-local test vector: the engine address rule must refuse it
     expect(refusedEngineHost("0.0.0.0")).toMatch(/unspecified/);
-    expect(refusedEngineHost("192.168.1.20")).toBeNull();
+    expect(refusedEngineHost("192.168.1.20")).toBeNull(); // public-hygiene: allow LAN/private test vector: the engine address rule must keep it allowed
   });
 });
 
@@ -113,7 +113,7 @@ describe("the probe's own checks, before any request", () => {
   });
 
   it("refuses a NAME that resolves to a link-local or unspecified address, without a request", async () => {
-    for (const address of ["169.254.169.254", "fe80::1", "::ffff:169.254.169.254", "0.0.0.0"]) {
+    for (const address of ["169.254.169.254", "fe80::1", "::ffff:169.254.169.254", "0.0.0.0"]) { // public-hygiene: allow link-local test vector: the engine address rule must refuse it
       const fetchImpl = vi.fn(async () => ok());
       const lookupImpl = vi.fn(async () => [{ address }]);
       const r = await probeExternalEngine({
@@ -128,7 +128,7 @@ describe("the probe's own checks, before any request", () => {
 
   it("lets a name that resolves to the LAN through, and asks it exactly once", async () => {
     const fetchImpl = vi.fn(async () => ok());
-    const lookupImpl = vi.fn(async () => [{ address: "192.168.1.20" }]);
+    const lookupImpl = vi.fn(async () => [{ address: "192.168.1.20" }]); // public-hygiene: allow LAN/private test vector: the engine address rule must keep it allowed
     const r = await probeExternalEngine({
       baseUrl: "http://inference-cluster.lan:8000/v1", apiKey: KEY, modelId: MODEL,
       fetchImpl: fetchImpl as unknown as typeof fetch, lookupImpl,
