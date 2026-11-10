@@ -181,16 +181,17 @@ export async function DELETE(req: Request) {
   // A copy a dead "Download again" left aside would otherwise be put back by
   // the next download — and is disk the owner asked for back.
   await fs.rm(embedModelAsidePath(spec.modelPath), { force: true }).catch(() => {});
-  // …and so would a part an x86 PC's fetch left (TASK-2418): resumed by the
-  // next download otherwise, and disk the owner asked for back.
-  await fs.rm(partPathOf(path.dirname(spec.modelPath), localEmbeddingVariant(DEFAULT_LOCAL_EMBEDDING_MODEL_ID)), { force: true }).catch(() => {});
-  let freedBytes: number | null = null;
-  try {
-    freedBytes = (await fs.stat(spec.modelPath)).size;
-  } catch {
+  // …and so is a part an x86 PC's fetch left (TASK-2418): the next download
+  // would resume it otherwise. Measured with the model, and removed with it
+  // after the recheck below — a part alone is still something to remove.
+  const part = partPathOf(path.dirname(spec.modelPath), localEmbeddingVariant(DEFAULT_LOCAL_EMBEDDING_MODEL_ID));
+  const [modelBytes, partBytes] = await Promise.all(
+    [spec.modelPath, part].map((file) => fs.stat(file).then((st) => st.size, () => null)),
+  );
+  if (modelBytes === null && partBytes === null) {
     return NextResponse.json({ error: "The memory model is not on this box.", code: "not_found" }, { status: 404 });
   }
-  if (target === active) await stopLocalAiProvider("embed").catch(() => {});
+  if (target === active && modelBytes !== null) await stopLocalAiProvider("embed").catch(() => {});
   // The stop is awaited: a download started from another tab meanwhile owns
   // the file now (and a "Download again" may have moved it aside).
   const startedMeanwhile = liveBackgroundTask(EMBED_GROUP);
@@ -198,13 +199,15 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "The memory model is being fetched right now.", code: "busy", taskId: startedMeanwhile.id }, { status: 409 });
   }
   try {
-    await fs.unlink(spec.modelPath);
+    await fs.rm(part, { force: true });
+    if (modelBytes !== null) await fs.unlink(spec.modelPath);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not remove the memory model.", code: "remove_failed" },
       { status: 500 },
     );
   }
+  const freedBytes = (modelBytes ?? 0) + (partBytes ?? 0);
   const provisioning = await getEmbedProvisioningStatus().catch(() => null);
   return NextResponse.json({ ok: true, freedBytes, installed: !!provisioning?.installed });
 }
