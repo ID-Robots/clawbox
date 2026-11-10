@@ -147,6 +147,7 @@ import {
 } from "./harness-downgrade-backup";
 import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
 import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
+import { redactCredentialShapes } from "./incident-sanitize";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -2894,15 +2895,95 @@ async function runCurrentGatewayPreStart(): Promise<string> {
     CLAWBOX_PRESTART_OUTSIDE_UNIT: "1",
   };
   delete env.OPENCLAW_HOME;
-  const { stdout } = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
-    // Match the unit's 600s TimeoutStartSec with a little process overhead.
-    // Killing this halfway through a plugin migration recreates the lock race
-    // this maintenance path exists to avoid.
-    timeout: 650_000,
-    maxBuffer: 4 * 1024 * 1024,
-    env,
-  });
-  return stdout ?? "";
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
+      // Match the unit's 600s TimeoutStartSec with a little process overhead.
+      // Killing this halfway through a plugin migration recreates the lock race
+      // this maintenance path exists to avoid.
+      timeout: 650_000,
+      maxBuffer: 4 * 1024 * 1024,
+      env,
+    });
+  } catch (err) {
+    // Rethrown exactly as node built it: its message already carries stderr
+    // and is the step error the owner reads. What it lacks is stdout, the step
+    // the script stopped in, which under `set -euo pipefail` can be all there is.
+    logPreStartOutput("failed", err);
+    throw err;
+  }
+  logPreStartOutput("succeeded", result);
+  // Read whole and unredacted: only the logged copy is cut and redacted.
+  return result.stdout ?? "";
+}
+
+/**
+ * The log is a record of the run, never part of its outcome: a fault here must
+ * not fail a pre-start that succeeded, nor stand in for the error of one that
+ * failed (that error is the step error the owner reads).
+ */
+function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): void {
+  try {
+    const detail = (output ?? {}) as { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown };
+    if (outcome === "succeeded") {
+      console.log(describePreStartOutput("succeeded", detail));
+      return;
+    }
+    const how = detail.killed
+      ? `killed by ${String(detail.signal ?? "a signal")}`
+      : typeof detail.code === "number" ? `exit ${detail.code}` : String(detail.code ?? "no exit code");
+    console.error(describePreStartOutput(`failed (${how})`, detail));
+  } catch (logErr) {
+    try {
+      console.warn("[Updater] pre-start (outside the unit): its output could not be logged:",
+        logErr instanceof Error ? logErr.message : String(logErr));
+    } catch {
+      // Nothing left to tell it to; the run's own outcome stands.
+    }
+  }
+}
+
+/** Per stream: a reuse run's 5-20 lines whole, a full run's tail. */
+const PRE_START_LOG_MAX_LINES = 200;
+const PRE_START_LOG_MAX_CHARS = 16 * 1024;
+
+/**
+ * What the pre-start printed OUTSIDE the gateway unit, for this process's
+ * journal (clawbox-setup's) — the only record of that run, which the in-unit
+ * starts get from clawbox-gateway.service. Every line is tagged, never under
+ * the gateway's unit or identifier: the readers that diagnose a dead gateway
+ * from its journal must not take these lines for a start's.
+ *
+ * Redacted by shape BEFORE the cut, so a cut cannot part a `token=` from its
+ * value. Whole lines from the end: on stdout the last is the script's
+ * "Timing: pre-start total" reuse summary, which survives any bound.
+ */
+function describePreStartOutput(outcome: string, output: { stdout?: unknown; stderr?: unknown }): string {
+  const tag = "[Updater] pre-start (outside the unit)";
+  const lines = [`${tag} ${outcome}`];
+  for (const stream of ["stdout", "stderr"] as const) {
+    const text = output[stream];
+    if (typeof text !== "string" || text.trim() === "") continue;
+    const label = stream === "stdout" ? `${tag}:` : `${tag} stderr:`;
+    const all = redactCredentialShapes(text).trimEnd().split("\n");
+    let start = all.length - 1;
+    let chars = all[start].length;
+    while (
+      start > 0
+      && all.length - start < PRE_START_LOG_MAX_LINES
+      && chars + all[start - 1].length + 1 <= PRE_START_LOG_MAX_CHARS
+    ) {
+      start -= 1;
+      chars += all[start].length + 1;
+    }
+    if (start > 0) lines.push(`${label} … ${start} earlier line${start === 1 ? "" : "s"} dropped`);
+    for (const line of all.slice(start)) {
+      // Only the last line can be over the bound on its own; already redacted, so safe to cut.
+      const kept = line.length > PRE_START_LOG_MAX_CHARS ? `…${line.slice(-PRE_START_LOG_MAX_CHARS)}` : line;
+      lines.push(`${label} ${kept}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /**
