@@ -1202,7 +1202,7 @@ describe("how far an OpenClaw pass has got", () => {
     process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
     process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
     vi.resetModules();
-    const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
 
     // Lock-step with the pass: each file is only indexed once the card has
@@ -1225,9 +1225,11 @@ describe("how far an OpenClaw pass has got", () => {
     }
     const settled = await settledMemoryRun(tmpDir);
     expect(settled.status).toBe("succeeded");
-    // Join the status refresh the finished run starts, so no process the
-    // module spawned is still running when the directory is removed.
-    await getMemoryStatus();
+    // Wait for the status refresh the finished run starts as well, so no
+    // process the module spawned is still running when the directory is
+    // removed. The record settles before that refresh begins, so a status
+    // read here could be answered from the cache and join nothing.
+    await memoryPassSettled();
 
     // A real fraction, with the total the CLI's scan found.
     expect(seen.length).toBeGreaterThan(1);
@@ -1257,7 +1259,7 @@ describe("how far an OpenClaw pass has got", () => {
       process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
       process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
       vi.resetModules();
-      const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+      const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
       expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
       let chunks = 0;
       for (let step = 0; step <= total; step += 1) {
@@ -1275,7 +1277,7 @@ describe("how far an OpenClaw pass has got", () => {
       }
       expect(chunks).toBeGreaterThan(0);
       expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
-      await getMemoryStatus();
+      await memoryPassSettled();
     } finally {
       if (saved === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
       else process.env.CLAWBOX_OPENCLAW_HOME = saved;
@@ -1289,7 +1291,7 @@ describe("how far an OpenClaw pass has got", () => {
     process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
     process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
     vi.resetModules();
-    const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
     const totals = new Set<number>();
     for (let i = 0; i < 200; i += 1) {
@@ -1302,7 +1304,7 @@ describe("how far an OpenClaw pass has got", () => {
     // ever invented for it.
     expect((await settledMemoryRun(tmpDir, { tries: 1000 })).status).toBe("succeeded");
     // See above: nothing the module started may outlive the test.
-    await getMemoryStatus();
+    await memoryPassSettled();
     expect([...totals]).toEqual([0]);
   });
 });
