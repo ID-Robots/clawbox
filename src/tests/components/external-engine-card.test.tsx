@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
-import ExternalEngineCard from "@/components/local-ai/ExternalEngineCard";
+import ExternalEngineCard, { sendsKeyInClear } from "@/components/local-ai/ExternalEngineCard";
 import { PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
 
 /**
@@ -95,7 +95,7 @@ describe("ExternalEngineCard", () => {
     renderCard();
     await fillForm();
     fireEvent.click(screen.getByTestId("local-ai-external-save"));
-    expect(await screen.findByText("The engine refused the API key. Check it, or leave it empty if the engine needs none.")).toBeTruthy();
+    expect(await screen.findByText("The engine refused the API key. Check it — or, if the engine needs no key, tick “Remove the saved key” (or leave the field empty when none is saved).")).toBeTruthy();
   });
 
   it("saves, tells the rest of the desktop, and never shows the key back", async () => {
@@ -144,6 +144,28 @@ describe("ExternalEngineCard", () => {
     expect(screen.getByTestId("local-ai-external-hermes-note").textContent).toContain("at least 64,000 tokens");
     expect((screen.getByTestId("local-ai-external-max-tokens") as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByTestId("local-ai-external-image") as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("warns before a key would travel unencrypted to another machine", async () => {
+    stub({});
+    renderCard();
+    await fillForm();
+    expect(screen.getByTestId("local-ai-external-http-warning").textContent).toContain("unencrypted");
+    fireEvent.change(screen.getByTestId("local-ai-external-base-url"), { target: { value: "https://engine.example.com/v1" } });
+    expect(screen.queryByTestId("local-ai-external-http-warning")).toBeNull();
+  });
+
+  it("knows when HTTP carries a key off the box", () => {
+    const form = (baseUrl: string, apiKey = KEY, clearApiKey = false) => ({ baseUrl, apiKey, clearApiKey });
+    expect(sendsKeyInClear(form("http://192.0.2.10:8000/v1"), false)).toBe(true);
+    expect(sendsKeyInClear(form("http://192.0.2.10:8000/v1", ""), true)).toBe(true);
+    expect(sendsKeyInClear(form("http://192.0.2.10:8000/v1", "", true), true)).toBe(false);
+    expect(sendsKeyInClear(form("http://192.0.2.10:8000/v1", ""), false)).toBe(false);
+    expect(sendsKeyInClear(form("https://192.0.2.10/v1"), false)).toBe(false);
+    expect(sendsKeyInClear(form("http://127.0.0.1:8000/v1"), false)).toBe(false);
+    expect(sendsKeyInClear(form("http://localhost:8000/v1"), false)).toBe(false);
+    expect(sendsKeyInClear(form("http://[::1]:8000/v1"), false)).toBe(false);
+    expect(sendsKeyInClear(form("not a url"), false)).toBe(false);
   });
 
   it("will not save while Local-only mode is on", async () => {

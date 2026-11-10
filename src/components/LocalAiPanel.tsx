@@ -316,7 +316,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     // whether the slot is the owner's external engine instead, whose row is
     // not this panel's llama.cpp.
     const local = rows.find((r) => r.section === "localAi" && (r as { id?: string }).id !== EXTERNAL_ENGINE_PROVIDER);
-    setExternalSelected(rows.some((r) => (r as { id?: string }).id === EXTERNAL_ENGINE_PROVIDER));
+    // Only an ANSWER changes it: a failed read is not "no engine selected",
+    // and taking it as one would offer Gemma's Enable for a 409.
+    if (Array.isArray(providers?.providers)) {
+      setExternalSelected(rows.some((r) => (r as { id?: string }).id === EXTERNAL_ENGINE_PROVIDER));
+    }
     const llm: Role = !local ? null : local.isDefault ? "primary" : local.state === "connected" ? "fallback" : null;
     const localVoice = Array.isArray(tts?.engines) && (tts.engines as { id: string; configured: boolean }[]).some((e) => e.id === "local" && e.configured);
     const ttsRole: Role = !localVoice ? null : tts?.choice === "local" ? "primary" : "fallback";

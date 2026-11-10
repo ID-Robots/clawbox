@@ -27,10 +27,16 @@ const say = (line) => console.log(`RESULT ${line}`);
 const note = (line) => console.log(`NOTE ${line}`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** A failure no amount of waiting fixes (Chromium exited): `waitFor` rethrows it at once. */
+class Fatal extends Error {}
+
 async function waitFor(what, test, timeoutMs, everyMs = 500) {
   const end = Date.now() + timeoutMs;
   for (;;) {
-    const value = await test().catch(() => null);
+    const value = await test().catch((err) => {
+      if (err instanceof Fatal) throw err;
+      return null;
+    });
     if (value) return value;
     if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
     await sleep(everyMs);
@@ -55,7 +61,7 @@ function startChrome(noSandbox) {
 async function devtoolsPort(chrome) {
   const file = path.join(env.PROFILE_DIR, "DevToolsActivePort");
   return waitFor("Chromium's DevTools port", async () => {
-    if (chrome.child.exitCode !== null) throw new Error(`Chromium exited: ${chrome.stderr().trim().split("\n").at(-1) ?? ""}`);
+    if (chrome.child.exitCode !== null) throw new Fatal(`Chromium exited: ${chrome.stderr().trim().split("\n").at(-1) ?? ""}`);
     return Number(fs.readFileSync(file, "utf8").split("\n")[0]) || null;
   }, 30_000);
 }
@@ -74,8 +80,20 @@ async function shot(page, name) {
 
 const json = (v) => JSON.stringify(v);
 
+// The browser this run started, for the signal handler: a `timeout` that ends
+// the run with SIGTERM must not leave a headless Chromium behind.
+let current = null;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    try { current?.child.kill("SIGKILL"); } catch { /* gone */ }
+    say(`not ok - the browser check was stopped (${signal}) before it finished`);
+    process.exit(1);
+  });
+}
+
 async function run() {
   let chrome = startChrome(env.NO_SANDBOX === "1");
+  current = chrome;
   let page = null;
   try {
     let port;
@@ -86,6 +104,7 @@ async function run() {
       note("Chromium's sandbox could not start here; trying again without it");
       fs.rmSync(path.join(env.PROFILE_DIR, "DevToolsActivePort"), { force: true });
       chrome = startChrome(true);
+      current = chrome;
       port = await devtoolsPort(chrome);
     }
     const target = await waitFor("a page in Chromium", async () => (await listTargets(port)).find((t) => t.type === "page"), 15_000);

@@ -17,6 +17,7 @@ import {
   NO_KEY_PLACEHOLDER,
 } from "@/lib/external-engine";
 import { ExternalEngineRefusal, removeExternalEngine, saveExternalEngine } from "@/lib/external-engine-ops";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 
 /**
  * Settings → Local AI → External engine (TASK-2376), owner only.
@@ -89,13 +90,14 @@ export async function POST(request: Request) {
   const key = parseExternalApiKey(body.apiKey);
   if (!key.ok) return NextResponse.json({ error: key.error, code: "invalid_api_key", field: "apiKey" }, { status: 400 });
   try {
-    // Not under the provider-change lock: the save ends in chat/model's own
-    // POST, which takes that lock itself and would wait on this request.
-    const outcome = await saveExternalEngine({
+    // Under the Local AI transition lock (one save, remove or Local-only
+    // switch at a time), NOT the provider-change lock: the save ends in
+    // chat/model's own POST, which takes that one itself.
+    const outcome = await withLocalAiTransitionLock(() => saveExternalEngine({
       settings: valid.value,
       apiKey: key.key,
       clearApiKey: body.clearApiKey === true,
-    });
+    }));
     return NextResponse.json({
       success: true,
       ...externalEngineView(outcome.record),
@@ -112,7 +114,7 @@ export async function DELETE(request: Request) {
   const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) return unauthorized;
   try {
-    const outcome = await removeExternalEngine();
+    const outcome = await withLocalAiTransitionLock(() => removeExternalEngine());
     return NextResponse.json({ success: true, ...outcome });
   } catch (err) {
     return refusal(err, "Removing the external engine failed");

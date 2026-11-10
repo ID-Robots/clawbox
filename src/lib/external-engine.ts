@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "./runtime-path";
 import { get, resolveConfigRoot } from "./config-store";
@@ -70,7 +71,8 @@ export function readExternalEngineKey(): string | null {
 export function writeExternalEngineKey(key: string): void {
   const target = keyPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.tmp`;
+  // Unique per write, so two writers never share a temp file.
+  const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, key, { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, target);

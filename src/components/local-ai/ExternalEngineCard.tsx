@@ -86,6 +86,25 @@ function formFrom(view: EngineView | null): Form {
   };
 }
 
+/**
+ * Would Test or Save send a key unencrypted to another machine? An http://
+ * address that is not this box's loopback, with a key typed now or one on
+ * file (and not being removed). HTTP stays allowed — a LAN server is the
+ * common case — but the owner is told before the key goes out.
+ */
+export function sendsKeyInClear(form: Pick<Form, "baseUrl" | "apiKey" | "clearApiKey">, keyOnFile: boolean): boolean {
+  let url: URL;
+  try {
+    url = new URL(form.baseUrl.trim());
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:") return false;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
+  return form.apiKey.trim() !== "" || (keyOnFile && !form.clearApiKey);
+}
+
 function bodyFrom(form: Form): Record<string, unknown> {
   return {
     baseUrl: form.baseUrl.trim(),
@@ -107,7 +126,15 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  // Set on every mount, not only at creation: React's Strict Mode runs the
+  // cleanup and the effect again, and a ref left false would drop every answer.
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  // Only the newest read may land: a probe still in flight from mount must not
+  // overwrite what a save has just read back.
+  const loadSeq = useRef(0);
 
   const n = useCallback((v: number | undefined) => (typeof v === "number" ? v.toLocaleString(locale) : "—"), [locale]);
 
@@ -120,11 +147,12 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   const say = (message: Message): string => ("raw" in message ? message.raw : t(message.key, message.params));
 
   const load = useCallback(async (probe: boolean) => {
+    const seq = ++loadSeq.current;
     try {
       const res = await fetch(`/setup-api/local-ai/external${probe ? "?probe=1" : ""}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as EngineView;
-      if (alive.current) setView(data);
+      if (alive.current && seq === loadSeq.current) setView(data);
     } catch {
       // The card simply keeps what it showed; the panel above has its own retry.
     }
@@ -314,6 +342,12 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               autoComplete="off" spellCheck={false} placeholder="http://192.0.2.10:8000/v1"
               value={form.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} />
             <p className="text-[11px] text-[var(--text-muted)] mt-1">{t("localModels.external.baseUrlHint")}</p>
+            {sendsKeyInClear(form, view?.apiKeySet === true) && (
+              <p role="note" data-testid="local-ai-external-http-warning"
+                className="mt-1.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200">
+                {t("localModels.external.httpKeyWarning")}
+              </p>
+            )}
           </div>
           <div>
             <label className={LABEL} htmlFor="ext-api-key">{t("localModels.external.apiKey")}</label>

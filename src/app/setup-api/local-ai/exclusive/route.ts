@@ -12,6 +12,7 @@ import path, { untraced } from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
 import { externalEngineSelected } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import {
   callGatewayRpc,
   gatewayIsAbsent,
@@ -388,7 +389,16 @@ export async function GET() {
   return NextResponse.json({ enabled });
 }
 
-export async function POST(request: Request) {
+/**
+ * One Local AI transition at a time (TASK-2376): switching Local-only and
+ * saving or removing the external engine each check the other's state, so
+ * they must not overlap (src/lib/local-ai-transition-lock.ts).
+ */
+export function POST(request: Request) {
+  return withLocalAiTransitionLock(() => postLocalOnly(request));
+}
+
+async function postLocalOnly(request: Request) {
   if (gatewayIsAbsent()) {
     return NextResponse.json(UNSUPPORTED, { status: 501 });
   }

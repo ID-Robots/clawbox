@@ -64,10 +64,11 @@ function stubFetch(over: { external?: boolean; llmDefault?: boolean; llmWired?: 
     }
     if (url.startsWith("/setup-api/local-models")) return json({ models: over.models ?? MODELS, unavailable: [] });
     if (url.startsWith("/setup-api/providers/status")) {
-      return json({ harness: "openclaw", degraded: false, defaultProvider: over.llmDefault ? "llamacpp" : "clawai", providers: [
-        { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault, section: "ai", enabled: true },
+      // ONE default: the external engine's, when it holds the slot.
+      return json({ harness: "openclaw", degraded: false, defaultProvider: over.external ? "clawext" : over.llmDefault ? "llamacpp" : "clawai", providers: [
+        { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault && !over.external, section: "ai", enabled: true },
         // `llmWired: false` is a Gemma that is on the disk but wired to nothing.
-        { id: "llamacpp", label: "Gemma 4", state: over.llmWired === false ? "not_configured" : "connected", isDefault: !!over.llmDefault, section: "localAi", enabled: true },
+        { id: "llamacpp", label: "Gemma 4", state: over.llmWired === false ? "not_configured" : "connected", isDefault: !!over.llmDefault && !over.external, section: "localAi", enabled: true },
         // TASK-2376: the owner's external engine holds the Local AI slot.
         ...(over.external ? [{ id: "clawext", label: "Qwen3-32B (external engine)", state: "connected", isDefault: true, section: "localAi", enabled: true }] : []),
       ] });
@@ -87,6 +88,15 @@ function stubFetch(over: { external?: boolean; llmDefault?: boolean; llmWired?: 
       });
     }
     if (url.startsWith("/setup-api/local-ai/exclusive")) return json({ enabled: false });
+    if (url.startsWith("/setup-api/local-ai/external")) {
+      return json(over.external
+        ? {
+          configured: true, providerId: "clawext", modelRef: "clawext/Qwen/Qwen3-32B", displayName: "Qwen3-32B",
+          baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 131072, maxTokens: 8192,
+          imageInput: false, apiKeySet: true, activeHarness: "openclaw", localOnlyMode: false, hermesMinContextWindow: 64000, unsupported: [],
+        }
+        : { configured: false, activeHarness: "openclaw", localOnlyMode: false, hermesMinContextWindow: 64000, unsupported: [] });
+    }
     return json({ error: "unexpected" }, 404);
   }));
 }
@@ -105,7 +115,8 @@ describe("LocalAiPanel", () => {
     stubFetch({ external: true, llmWired: false });
     renderPanel();
     const row = await screen.findByTestId("local-model-llamacpp");
-    await screen.findByTestId("local-ai-external-card");
+    // The card names the engine that holds the slot.
+    await waitFor(() => expect(screen.getByTestId("local-ai-external-summary").textContent).toContain("Qwen3-32B"));
     await waitFor(() => expect(within(row).queryByTestId("local-model-action-llamacpp-uninstall")).not.toBeNull());
     expect(within(row).queryByTestId("local-model-action-llamacpp-enable")).toBeNull();
     expect(within(row).queryByTestId("local-model-action-llamacpp-disable")).toBeNull();
