@@ -163,6 +163,14 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
     void load(false).then(() => load(true));
   }, [load]);
 
+  // Every reset of the form — Set up, Edit, Cancel, a save or a removal —
+  // also drops the owner's yes to plain HTTP: a yes is for the address and
+  // key it was given for, never one restored from a saved engine.
+  const resetForm = (next: Form) => {
+    setForm(next);
+    setHttpConfirmed(false);
+  };
+
   const set = <K extends keyof Form>(key: K, value: Form[K]) => {
     // A yes is for the address and key it was given for; changing either asks again.
     if (key === "baseUrl" || key === "apiKey" || key === "clearApiKey") setHttpConfirmed(false);
@@ -203,6 +211,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         setEditing(false);
+        setHttpConfirmed(false);
         setOutcome({
           kind: "ok",
           message: typeof data.warning === "string" && data.warning
@@ -234,7 +243,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
           kind: "ok",
           message: typeof data.warning === "string" && data.warning ? { raw: data.warning } : { key: "localModels.external.removed" },
         });
-        setForm(formFrom(null));
+        resetForm(formFrom(null));
         notifyProvidersChanged();
         onChanged?.();
         await load(false);
@@ -301,7 +310,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
           <p>{t("localModels.external.onDeviceIdle")}</p>
           <div className="flex flex-wrap gap-2 pt-2">
             <button type="button" className={BUTTON} data-testid="local-ai-external-edit" disabled={busy !== null}
-              onClick={() => { setForm(formFrom(view)); setEditing(true); setOutcome(null); setConfirmRemove(false); }}>
+              onClick={() => { resetForm(formFrom(view)); setEditing(true); setOutcome(null); setConfirmRemove(false); }}>
               {t("localModels.external.edit")}
             </button>
             {!confirmRemove ? (
@@ -328,7 +337,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
         <div className="px-4 pb-4 flex items-center justify-between gap-3">
           <p className="text-xs text-[var(--text-secondary)]">{t("localModels.external.notConfigured")}</p>
           <button type="button" className={PRIMARY_BUTTON} data-testid="local-ai-external-setup"
-            onClick={() => { setForm(formFrom(null)); setEditing(true); setOutcome(null); }}>
+            onClick={() => { resetForm(formFrom(null)); setEditing(true); setOutcome(null); }}>
             {t("localModels.external.setUp")}
           </button>
         </div>
@@ -415,7 +424,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               {busy === "save" ? t("localModels.external.saving") : t("localModels.external.save")}
             </button>
             <button type="button" className={BUTTON} disabled={busy !== null}
-              onClick={() => { setEditing(false); setOutcome(null); }}>
+              onClick={() => { setEditing(false); setHttpConfirmed(false); setOutcome(null); }}>
               {t("localModels.external.cancel")}
             </button>
           </div>

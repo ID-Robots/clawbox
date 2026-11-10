@@ -176,6 +176,21 @@ describe("ExternalEngineCard", () => {
     expect((screen.getByTestId("local-ai-external-test") as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("never carries a yes to plain HTTP over a Cancel into a reopened form", async () => {
+    stub({ get: () => CONFIGURED });
+    renderCard();
+    fireEvent.click(await screen.findByTestId("local-ai-external-edit"));
+    // The saved engine is plain HTTP to another machine with a key on file.
+    fireEvent.click(screen.getByTestId("local-ai-external-http-confirm"));
+    expect((screen.getByTestId("local-ai-external-test") as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(await screen.findByTestId("local-ai-external-edit"));
+    expect((screen.getByTestId("local-ai-external-http-confirm") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByTestId("local-ai-external-test") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("local-ai-external-save") as HTMLButtonElement).disabled).toBe(true);
+    expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+  });
+
   it("knows when HTTP carries a key off the box", () => {
     const form = (baseUrl: string, apiKey = KEY, clearApiKey = false) => ({ baseUrl, apiKey, clearApiKey });
     expect(sendsKeyInClear(form("http://192.0.2.10:8000/v1"), false)).toBe(true);
