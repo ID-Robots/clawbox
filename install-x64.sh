@@ -266,6 +266,11 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    # A hand-edited .env can end without a newline: the key must not be glued
+    # onto its last line, which would corrupt that key and leave this one unset.
+    if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
+      printf '\n' >> "$env_file"
+    fi
     printf '%s=%s\n' "$key" "$value" >> "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi

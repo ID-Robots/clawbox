@@ -52,7 +52,7 @@ const CURRENT_HELP = [
   "--spec-draft-n-max N                    number of tokens to draft for speculative decoding (default: 3)",
   "--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,ngram-simple",
 ];
-/** An older build, such as install.sh's pinned one, before any of it. */
+/** An older build, from before any of it. */
 const OLD_HELP = ["--model, -m FNAME", "--n-gpu-layers, -ngl N"];
 
 /**
@@ -78,7 +78,15 @@ const read = (file: string) => {
   try { return readFileSync(file, "utf8"); } catch { return ""; }
 };
 
-/** One start. `log` is what this start wrote, not the starts before it. */
+/** The launcher's Jetson marker for this test; writing it makes the "box" a Jetson. */
+const tegraRelease = () => path.join(dir, "nv_tegra_release");
+const onJetson = () => writeFileSync(tegraRelease(), "# R36 (release), REVISION: 4.3\n");
+
+/**
+ * One start. `log` is what this start wrote, not the starts before it. The
+ * Jetson marker is a path in the test directory, absent unless a test writes
+ * it: never the real /etc/nv_tegra_release, so these run the same on a box.
+ */
 function start(env: Record<string, string> = {}) {
   rmSync(argsFile, { force: true });
   rmSync(envFile, { force: true });
@@ -87,7 +95,10 @@ function start(env: Record<string, string> = {}) {
   const r = spawnSync(
     "bash",
     [SCRIPT, modelDir, "org/repo", "model.gguf", "local-model", "127.0.0.1", "8080", logPath, fakeServer, "/nonexistent/hf", "32768"],
-    { encoding: "utf8", env: { NODE_ENV: "test", PATH: "/usr/bin:/bin", HOME: dir, ...env } },
+    {
+      encoding: "utf8",
+      env: { NODE_ENV: "test", PATH: "/usr/bin:/bin", HOME: dir, LLAMACPP_TEGRA_RELEASE: tegraRelease(), ...env },
+    },
   );
   const args = read(argsFile) ? read(argsFile).trim().split("\n") : [];
   const childEnv: Record<string, string> = {};
@@ -211,18 +222,16 @@ describe("start-llamacpp.sh load mode", () => {
     expect(start().help).toEqual([]);
   });
 
-  it("passes nothing when .env sets no load mode, and the launch is as it was", () => {
+  it("passes nothing off a Jetson when .env sets no load mode, and the launch is as it was", () => {
     const r = start();
     expect(r.env).not.toHaveProperty("LLAMA_ARG_LOAD_MODE");
     expect(r.args).toEqual(baseArgs());
-    expect(loadModeLines(r.log)).toEqual(["[llamacpp] load-mode=binary default, LLAMACPP_LOAD_MODE not set"]);
+    expect(loadModeLines(r.log)).toEqual(["[llamacpp] load-mode=binary default: LLAMACPP_LOAD_MODE not set"]);
   });
 
-  it("refuses auto, an empty value and anything else: one line, nothing passed", () => {
+  it("refuses auto, an empty value and anything else: one line, and off a Jetson nothing passed", () => {
     // db7d8b2 has no `auto`, and llama-server exits on a LLAMA_ARG_* value it
-    // does not know: .env alone must never make llama-server exit. On a newer
-    // build "nothing passed" means its own default, auto, which on an 8 GB
-    // Orin is the mode that ran out of memory: the log line is the trace.
+    // does not know: .env alone must never make llama-server exit.
     for (const bad of ["auto", "bogus", ""]) {
       const r = start({ LLAMACPP_LOAD_MODE: bad });
       expect(r.env, bad).not.toHaveProperty("LLAMA_ARG_LOAD_MODE");
@@ -230,7 +239,10 @@ describe("start-llamacpp.sh load mode", () => {
       expect(loadModeLines(r.log), bad).toHaveLength(1);
     }
     expect(loadModeLines(start({ LLAMACPP_LOAD_MODE: "auto" }).log)).toEqual([
-      "[llamacpp] Invalid LLAMACPP_LOAD_MODE='auto' (expected none|mmap|mlock|mmap+mlock|dio); load-mode=binary default",
+      "[llamacpp] load-mode=binary default: invalid LLAMACPP_LOAD_MODE='auto' (expected none|mmap|mlock|mmap+mlock|dio)",
+    ]);
+    expect(loadModeLines(start({ LLAMACPP_LOAD_MODE: "" }).log)).toEqual([
+      "[llamacpp] load-mode=binary default: LLAMACPP_LOAD_MODE is empty",
     ]);
   });
 
@@ -238,7 +250,7 @@ describe("start-llamacpp.sh load mode", () => {
     const r = start({ LLAMA_ARG_LOAD_MODE: "none" });
     expect(r.env.LLAMA_ARG_LOAD_MODE).toBe("none");
     expect(loadModeLines(r.log)).toEqual([
-      "[llamacpp] load-mode='none' from the inherited LLAMA_ARG_LOAD_MODE, LLAMACPP_LOAD_MODE not set",
+      "[llamacpp] load-mode='none' from the inherited LLAMA_ARG_LOAD_MODE: LLAMACPP_LOAD_MODE not set",
     ]);
   });
 
@@ -253,6 +265,45 @@ describe("start-llamacpp.sh load mode", () => {
     expect(r.args).toEqual([...baseArgs(), "--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]);
     expect(r.help).toEqual(["unset"]);
     expect(r.env.LLAMA_ARG_LOAD_MODE).toBe("mmap");
+  });
+});
+
+/**
+ * On a Jetson the launcher holds the invariant itself. Seeding mmap into .env
+ * is not enough on its own: a box whose .env lacks the key, or holds a value
+ * llama-server would refuse, would otherwise run the newer build's own
+ * default, auto, which ran the 8 GB Orin out of memory. mmap is valid at every
+ * pinned build and was db7d8b2's own default.
+ */
+describe("start-llamacpp.sh load mode on a Jetson", () => {
+  it("falls back to mmap when .env sets none, an empty value or one it refuses, and names why", () => {
+    onJetson();
+    const why: Record<string, string> = {
+      auto: "invalid LLAMACPP_LOAD_MODE='auto' (expected none|mmap|mlock|mmap+mlock|dio)",
+      bogus: "invalid LLAMACPP_LOAD_MODE='bogus' (expected none|mmap|mlock|mmap+mlock|dio)",
+      "": "LLAMACPP_LOAD_MODE is empty",
+    };
+    for (const [value, reason] of Object.entries(why)) {
+      const r = start({ LLAMACPP_LOAD_MODE: value });
+      expect(r.env.LLAMA_ARG_LOAD_MODE, value).toBe("mmap");
+      expect(r.args).toEqual(baseArgs());
+      expect(loadModeLines(r.log)).toEqual([`[llamacpp] load-mode=mmap, the Jetson fallback: ${reason}`]);
+    }
+    const unset = start();
+    expect(unset.env.LLAMA_ARG_LOAD_MODE).toBe("mmap");
+    expect(loadModeLines(unset.log)).toEqual(["[llamacpp] load-mode=mmap, the Jetson fallback: LLAMACPP_LOAD_MODE not set"]);
+  });
+
+  it("keeps the owner's valid choice, and an inherited LLAMA_ARG_LOAD_MODE", () => {
+    onJetson();
+    expect(start({ LLAMACPP_LOAD_MODE: "none" }).env.LLAMA_ARG_LOAD_MODE).toBe("none");
+    expect(start({ LLAMA_ARG_LOAD_MODE: "dio" }).env.LLAMA_ARG_LOAD_MODE).toBe("dio");
+    expect(start({ LLAMA_ARG_LOAD_MODE: "dio", LLAMACPP_LOAD_MODE: "auto" }).env.LLAMA_ARG_LOAD_MODE).toBe("dio");
+  });
+
+  it("knows a Jetson by the marker the installers use, /etc/nv_tegra_release", () => {
+    const src = readFileSync(SCRIPT, "utf8");
+    expect(src).toContain('"${LLAMACPP_TEGRA_RELEASE:-/etc/nv_tegra_release}"');
   });
 });
 
@@ -305,4 +356,25 @@ describe("LLAMACPP_LOAD_MODE in .env", () => {
     expect(example).toContain("# LLAMACPP_LOAD_MODE=mmap");
     expect(example).not.toMatch(/^\s*(LLAMACPP_LOAD_MODE|LLAMA_ARG_\w+)=/m);
   });
+
+  it.each(["install.sh", "install-x64.sh"])(
+    "%s: ensure_env_setting puts a key on its own line when a hand-edited .env lacks a final newline",
+    (installer) => {
+      const src = repoFile(installer);
+      const at = src.indexOf("\nensure_env_setting() {\n");
+      const helper = src.slice(at + 1, src.indexOf("\n}\n", at + 1) + 2);
+      const add = (body: string) => {
+        const file = path.join(dir, `${installer}.env`);
+        writeFileSync(file, body);
+        const r = spawnSync("bash", ["-c", `${helper}\nensure_env_setting "${file}" LLAMACPP_LOAD_MODE mmap`], { encoding: "utf8" });
+        expect(r.status, r.stderr).toBe(0);
+        return read(file);
+      };
+      // Glued on, the owner's last key would be corrupted and the new one unset.
+      expect(add("EMBED_CACHE_TYPE_V=q8_0")).toBe("EMBED_CACHE_TYPE_V=q8_0\nLLAMACPP_LOAD_MODE=mmap\n");
+      expect(add("EMBED_CACHE_TYPE_V=q8_0\n")).toBe("EMBED_CACHE_TYPE_V=q8_0\nLLAMACPP_LOAD_MODE=mmap\n");
+      expect(add("")).toBe("LLAMACPP_LOAD_MODE=mmap\n");
+      expect(add("LLAMACPP_LOAD_MODE=none")).toBe("LLAMACPP_LOAD_MODE=none");
+    },
+  );
 });
