@@ -179,19 +179,27 @@ trap 'restore; exit 143' TERM INT
 # shellcheck disable=SC2016  # expanded on the board
 board 'mkdir -p "$1" && printf "# Island notes\n\n%s, and logs the ferry times in a green notebook.\n" "$2" > "$1/island-notes.md" && echo made' "$DIR" "$PHRASE" >/dev/null
 
-if [ "$(jq -r '.installed' <<<"$EMBED_STATUS")" != true ]; then
-  # The owner's Install: an NDJSON stream whose last line says how it ended.
-  # shellcheck disable=SC2016  # expanded on the board
-  out=$(board 'API_MAX_TIME=1500 owner_api POST /setup-api/embed/install "$1"' "{\"model\":\"$SMALL\"}")
-  last=$(printf '%s\n' "$out" | tail -n +2 | jq -c 'select(.success != null or .error != null)' 2>/dev/null | tail -n 1)
-  if [ "$(jq -r '.success // false' <<<"$last" 2>/dev/null)" = true ]; then
-    ok "$SMALL installed through the owner's download (embed_model): $(jq -r '.status // ""' <<<"$last")"
-  else
-    not_ok "the $SMALL download did not finish: ${last:-$(printf '%s' "$out" | tail -n 2 | head -c 300)}"
-    finish
-  fi
+# The owner's download, every time: Install when the GGUF is absent, and
+# "Download again" when it is here — so the install path (install.sh's
+# embed_model, now disk-checked and sha256-verified) runs on every board.
+# An NDJSON stream whose last line says how it ended.
+FORCE=false
+[ "$(jq -r '.installed' <<<"$EMBED_STATUS")" = true ] && FORCE=true
+# shellcheck disable=SC2016  # expanded on the board
+out=$(board 'API_MAX_TIME=1500 owner_api POST /setup-api/embed/install "$1"' "{\"model\":\"$SMALL\",\"force\":$FORCE}")
+last=$(printf '%s\n' "$out" | tail -n +2 | jq -c 'select(.success != null or .error != null)' 2>/dev/null | tail -n 1)
+if [ "$(jq -r '.success // false' <<<"$last" 2>/dev/null)" = true ]; then
+  ok "$SMALL $([ "$FORCE" = true ] && echo "downloaded again" || echo installed) through the owner's download (embed_model, verified): $(jq -r '.status // ""' <<<"$last")"
 else
-  ok "$SMALL is already on the board ($(jq -r '.modelBytes' <<<"$EMBED_STATUS") bytes)"
+  not_ok "the $SMALL download did not finish: ${last:-$(printf '%s' "$out" | tail -n 2 | head -c 300)}"
+  finish
+fi
+# shellcheck disable=SC2016  # expanded on the board
+SUM=$(board 'sha256sum "$REPO/data/embed/models/Qwen3-Embedding-0.6B-Q8_0.gguf" 2>/dev/null | cut -c1-64' | tail -n 1)
+if [ "$SUM" = 06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439 ]; then
+  ok "the GGUF on the board is the catalog's: sha256 $SUM"
+else
+  not_ok "the GGUF on the board does not hash to the catalog's sha256: ${SUM:-unreadable}"
 fi
 
 if [ "$WAS_ENABLED" != true ]; then
@@ -253,8 +261,9 @@ fi
 QUERY="who paints a bicycle at the lighthouse"
 if [ "$RUNTIME" = hermes ]; then
   board_owner_api GET "/setup-api/clawkeep/memory/search?q=$(jq -rn --arg q "$QUERY" '$q|@uri')&limit=5"
-  if [ "$API_STATUS" = 200 ] && api_json '[.hits[]?.path // empty] | join(" ")' | grep -q island-notes.md; then
-    ok "the search for \"$QUERY\" finds the test's note on $SMALL (Hermes, ClawBox's index): $(api_json '.hits[0].path')"
+  # The route answers `results` (`hits` from an older shape is read too).
+  if [ "$API_STATUS" = 200 ] && api_json '[(.results // .hits // [])[]?.path // empty] | join(" ")' | grep -q island-notes.md; then
+    ok "the search for \"$QUERY\" finds the test's note on $SMALL (Hermes, ClawBox's index): $(api_json '(.results // .hits)[0] | "\(.path), score \(.score // "?")"')"
   else
     not_ok "the search for \"$QUERY\" did not find the test's note: $API_STATUS $(printf '%s' "$API_BODY" | head -c 300)"
   fi
