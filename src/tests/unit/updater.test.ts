@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import * as childProcess from "child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "fs/promises";
@@ -3820,6 +3820,170 @@ describe("updater", () => {
       const calls = commands();
       expect(calls.some((call) => call.includes(FAST_STEP))).toBe(false);
       expect(calls.some(isFullStep)).toBe(true);
+    });
+  });
+
+  /**
+   * The full update skips its OpenClaw step outright on an x64 PC whose core
+   * already IS the pin. Without the skip, install-x64.sh's step_openclaw_install
+   * skips only the npm install and still stops the gateway, runs `doctor --fix`
+   * and starts it again, on every system update.
+   */
+  describe("the OpenClaw step when the core is already at the pin", () => {
+    const SKIPPED_LINE = `OpenClaw already at ${PINNED_CORE}; skipped`;
+    const INTEGRATION_ENV = "/etc/clawbox/x64-integration.env";
+    const DESKTOP_HOME = "/home/desk-owner";
+    const DESKTOP_PREFIX = `${DESKTOP_HOME}/.nvm/versions/node/v24.0.0`;
+    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    const rootStep = (step: string) => (call: string) => new RegExp(`clawbox-run-root-step\\.sh (--no-block )?${step}$`).test(call);
+    let log: MockInstance<typeof console.log>;
+    const skippedLines = () => log.mock.calls.filter((args: unknown[]) => args.some((a) => String(a).includes("OpenClaw already at")));
+
+    beforeEach(() => {
+      updater.resetUpdateState();
+      log = vi.spyOn(console, "log");
+      // The pin file as it is written in the tree, with text after the version;
+      // and the desktop integration's host file, for the cases that use it.
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("config/openclaw-target.txt")) return `${PINNED_CORE}  # the pin\n`;
+        if (name === INTEGRATION_ENV) {
+          return `INSTALL_USER=desk-owner\nINSTALL_UID=1000\nINSTALL_HOME=${DESKTOP_HOME}\nPROJECT_DIR=/home/desk-owner/clawbox\nNODE_DIR=/usr/bin\nNPM_PREFIX=${DESKTOP_PREFIX}\n`;
+        }
+        throw new Error("ENOENT");
+      });
+    });
+    afterEach(() => { log.mockRestore(); });
+
+    /** A full update on an install-x64.sh PC, run to the UI restart. */
+    async function runX64Update(banner: string) {
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: banner, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+    }
+
+    it("x64 install: skips the step when the installed core equals the pin, and says so once", async () => {
+      await runX64Update(`OpenClaw ${PINNED_CORE} (3f2a1bc)\n`);
+      const calls = commands();
+      // No root step for it: no gateway stop, no doctor, no npm.
+      expect(calls.some(rootStep("openclaw_install"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(skippedLines()).toHaveLength(1);
+      expect(String(skippedLines()[0][0])).toContain(SKIPPED_LINE);
+      // What a ClawBox change to the patches or the config needs still runs.
+      expect(calls.some(rootStep("openclaw_patch"))).toBe(true);
+      expect(calls.some(rootStep("gateway_setup"))).toBe(true);
+    });
+
+    it("x64 install: runs the step when the installed core differs from the pin", async () => {
+      await runX64Update("OpenClaw 2026.1.1 (3f2a1bc)\n");
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("x64 install: runs the step when the version cannot be read", async () => {
+      await runX64Update("");
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("desktop integration: skips the step at the pin when no core replacement is pending", async () => {
+      mockX64Integration.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(skippedLines()).toHaveLength(1);
+      expect(commands().some(rootStep("openclaw_patch"))).toBe(true);
+    });
+
+    it("desktop integration: runs the step when an interrupted core replacement is pending, even at the pin", async () => {
+      mockX64Integration.mockReturnValue(true);
+      mockExists.mockImplementation((p) => String(p) === `${DESKTOP_PREFIX}/.openclaw-migration-pending`);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      try {
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+        expect(skippedLines()).toHaveLength(0);
+      } finally {
+        const actual = await vi.importActual<typeof import("fs")>("fs");
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    it("appliance: keeps install.sh's fast-path gate and logs the same line when it is taken", async () => {
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: `  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at ${PINNED_CORE}, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall\n`,
+          stderr: "",
+        },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      // The appliance still asks install.sh, whose gate asks more than the version.
+      expect(commands().some((call) => call.includes("clawbox-run-root-step.sh openclaw_install_fast"))).toBe(true);
+      expect(skippedLines()).toHaveLength(1);
+      expect(String(skippedLines()[0][0])).toContain(SKIPPED_LINE);
+    });
+
+    it("appliance: an equal version alone does not skip what install.sh's gate says needs the full step", async () => {
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: `  OpenClaw refresh: full path needed (no full refresh has finished for ${PINNED_CORE}; the last on record is none) — nothing changed here\n`,
+          stderr: "",
+        },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("never skips the OpenClaw-only update, the owner's repair", async () => {
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
     });
   });
 
