@@ -758,6 +758,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.embedder.local": "Auf dieser Box",
   "clawkeep.memory.embedder.localHint": "Qwen3 auf dem eigenen llama.cpp dieser Box. Nichts verlässt die Box; das Modell ist ein einmaliger Download von etwa 640 MB.",
   "clawkeep.memory.embedder.localModel": "Modell auf dieser Box",
+  "clawkeep.memory.embedder.pickBeforeSwitch": "Zu welchem Modell „Auf dieser Box“ wechselt. Ein Modell, das noch nicht hier ist, wird zuerst heruntergeladen, dann wird der Index damit neu aufgebaut.",
   "clawkeep.memory.embedder.switched": "Gewechselt. Der Index wird neu aufgebaut.",
   "clawkeep.memory.embedder.switching": "Modell wird gewechselt und der Index neu aufgebaut…",
   "clawkeep.memory.embedder.title": "Embedding-Modell",

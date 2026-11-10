@@ -10,7 +10,7 @@ import { BUTTON, CARD, CardHeading, InstallOutcomeView, InstallProgressView, PRI
 import { useStreamedInstall } from "@/components/local-ai/use-streamed-install";
 import { parseLocalEmbeddingModelOptions, type LocalEmbeddingModelOption } from "@/lib/local-embedding-gating";
 import { switchLocalEmbeddingModel, unavailableReasonKey } from "@/lib/local-embedding-client";
-import { notifyMemoryShardChanged } from "@/lib/ui-events";
+import { notifyMemoryShardChanged, onMemoryShardChanged } from "@/lib/ui-events";
 
 /**
  * Settings → Local AI → the memory-search model.
@@ -22,7 +22,9 @@ import { notifyMemoryShardChanged } from "@/lib/ui-events";
  * actually here, how big is it — and the one button that was a terminal job:
  * download it again (a box whose copy is truncated has no other repair).
  * Taking it off is the row's own Uninstall, and the panel draws this card only
- * under a row that is installed and not switched off.
+ * under a row that is installed and not switched off — the cloud's row
+ * included (TASK-2418), so a model can be downloaded while memory search
+ * still runs in the cloud, ready for Memory Shard's "On this box".
  *
  * And WHICH model (TASK-2411): one row per model on offer — Qwen3-Embedding-
  * 0.6B everywhere, the 4B where this box can run it, and the plain reason
@@ -51,6 +53,14 @@ function isStatus(value: unknown): value is EmbedStatus {
 }
 
 /** The route's answer, or null for anything that is not one. */
+/** Where the index is embedded now, or null when the box could not say. */
+async function readIndexSource(): Promise<"cloud" | "local" | null> {
+  const body = await fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" })
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null) as { source?: unknown } | null;
+  return body?.source === "cloud" || body?.source === "local" ? body.source : null;
+}
+
 async function readStatus(): Promise<EmbedStatus | null> {
   try {
     const res = await fetch("/setup-api/embed/status", { cache: "no-store" });
@@ -117,24 +127,24 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
   useEffect(() => {
     let alive = true;
     let retry: ReturnType<typeof setTimeout> | null = null;
-    void fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .catch(() => null)
-      .then((body: { source?: unknown } | null) => {
-        if (!alive) return;
-        if (body?.source === "cloud" || body?.source === "local") {
-          setIndexSource(body.source);
-          setSourceFailed(false);
-        } else {
-          setSourceFailed(true);
-          retry = setTimeout(() => setSourceTick((n) => n + 1), 5_000);
-        }
-      });
+    void readIndexSource().then((source) => {
+      if (!alive) return;
+      if (source) {
+        setIndexSource(source);
+        setSourceFailed(false);
+      } else {
+        setSourceFailed(true);
+        retry = setTimeout(() => setSourceTick((n) => n + 1), 5_000);
+      }
+    });
     return () => {
       alive = false;
       if (retry) clearTimeout(retry);
     };
   }, [status?.model, sourceTick]);
+  // Memory Shard moved the index (this card now stays under the cloud's row
+  // too, TASK-2418): read where it is again rather than keep the old answer.
+  useEffect(() => onMemoryShardChanged(() => setSourceTick((n) => n + 1)), []);
   const [rowError, setRowError] = useState<string | null>(null);
 
   const fetchModel = async (model: LocalEmbeddingModelOption) => {
@@ -152,6 +162,16 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
     setRowError(null);
     setRowBusy(model.id);
     try {
+      // Asked again at the click: the index may have moved to the cloud since
+      // this card read it (from another tab, or the assistant), and "Use"
+      // points memory search at THIS box — moving it off the cloud is Memory
+      // Shard's switch, which says what it costs, never this button's.
+      const source = await readIndexSource();
+      if (source !== "local") {
+        if (source) setIndexSource(source);
+        setRowError(t(source === "cloud" ? "localModels.embed.cloudInUse" : "localModels.embed.sourceUnknown"));
+        return;
+      }
       await switchLocalEmbeddingModel(model.id, t("clawkeep.memory.embedder.failed"));
       notifyMemoryShardChanged();
     } catch (err) {
@@ -217,7 +237,10 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
                     <span className="ml-1.5 text-[10px] text-[var(--text-muted)]">{model.dimensions}d</span>
                   </p>
                   <p className="text-[11px] text-[var(--text-muted)]" data-testid={`local-ai-embed-model-${model.id}-state`}>
-                    {model.active
+                    {/* Not "In use" while memory search runs in the cloud: the
+                        model the box is set to is then only the one "On this
+                        box" would use, and may not even be here yet. */}
+                    {model.active && indexSource !== "cloud"
                       ? t("localModels.embed.inUse")
                       : model.installed
                         ? t("localModels.embed.downloaded", { size: formatBytes(model.bytes, locale) ?? "" })

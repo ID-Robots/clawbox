@@ -9,7 +9,8 @@
  * are gone (the owner's ruling of 2026-09-15), and so are their suites.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import { I18nProvider } from "@/lib/i18n";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
@@ -218,6 +219,39 @@ describe("EmbeddingModelCard", () => {
       render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
       expect(await screen.findByTestId("local-ai-embed-models-cloud")).toBeTruthy();
       expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled();
+    });
+
+    /**
+     * The card stays mounted under the cloud's row now (TASK-2418), so an
+     * index Memory Shard moves to the cloud while it is open must not be
+     * moved back by a "Use" drawn from the old answer.
+     */
+    it("asks where the index is again at the click, and moves an index that went to the cloud nowhere", async () => {
+      let source = "local";
+      stub((url, init) => (init?.method === "POST"
+        ? json({ ok: true })
+        : url === "/setup-api/clawkeep/memory/provider" ? json({ source }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const use = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use");
+      await waitFor(() => expect(use).toBeEnabled());
+      // Memory Shard moved it to the cloud from another tab: this card never heard.
+      source = "cloud";
+      fireEvent.click(use);
+      expect(await screen.findByTestId("local-ai-embed-models-error")).toHaveTextContent(/ClawBox AI cloud/);
+      expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+      await waitFor(() => expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled());
+    });
+
+    it("reads where the index is again when Memory Shard says it moved", async () => {
+      let source = "local";
+      stub((url) => (url === "/setup-api/clawkeep/memory/provider" ? json({ source }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const use = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use");
+      await waitFor(() => expect(use).toBeEnabled());
+      source = "cloud";
+      act(() => notifyMemoryShardChanged());
+      await waitFor(() => expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled());
+      expect(screen.getByTestId("local-ai-embed-models-cloud")).toBeInTheDocument();
     });
 
     it("removes a downloaded model that is not in use by its own id, never the one in use", async () => {

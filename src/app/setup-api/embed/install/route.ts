@@ -38,7 +38,9 @@ import { partPathOf } from "@/lib/embed-model-fetch";
  * the one launcher the web server is granted (src/lib/root-step-runner.ts;
  * `embed_model` is on its list) and followed through systemd so the wizard
  * shows what the download is doing. The same step every update runs, so a
- * box provisioned from here is the same box an update produces.
+ * box provisioned from here is the same box an update produces. An x86 PC has
+ * no such step on either of its installs, and fetches the same verified file
+ * as the web server's own user instead (TASK-2418, embed-install-task.ts).
  *
  * Answers the llama.cpp install route's shape, which the wizard reads:
  * `{status}` lines while it runs, with `{completed, total}` bytes for the bar,
@@ -179,6 +181,9 @@ export async function DELETE(req: Request) {
   // A copy a dead "Download again" left aside would otherwise be put back by
   // the next download — and is disk the owner asked for back.
   await fs.rm(embedModelAsidePath(spec.modelPath), { force: true }).catch(() => {});
+  // …and so would a part an x86 PC's fetch left (TASK-2418): resumed by the
+  // next download otherwise, and disk the owner asked for back.
+  await fs.rm(partPathOf(path.dirname(spec.modelPath), localEmbeddingVariant(DEFAULT_LOCAL_EMBEDDING_MODEL_ID)), { force: true }).catch(() => {});
   let freedBytes: number | null = null;
   try {
     freedBytes = (await fs.stat(spec.modelPath)).size;

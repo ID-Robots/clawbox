@@ -27,6 +27,12 @@ vi.mock("@/lib/local-embedding-model", () => ({
   },
 }));
 
+// The appliance: install.sh's `embed_model` is what fetches the default slot
+// there. Pinned, because the runner may itself be an x86 PC with a record
+// naming CLAWBOX_ROOT — whose default slot is fetched without a root step
+// (TASK-2418, src/tests/unit/embed-install-task-x86.test.ts).
+vi.mock("@/lib/x64-integration", () => ({ hasX64Install: () => false, hasX64DesktopIntegration: () => false }));
+
 const followed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined }));
 vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followed(...(a as [])) }));
 
@@ -266,6 +272,15 @@ describe("DELETE", () => {
     const { DELETE } = await load();
     expect((await DELETE(del())).status).toBe(200);
     expect(fs.existsSync(aside())).toBe(false);
+  });
+
+  it("drops a part an x86 PC's fetch left, so the next download does not resume it", async () => {
+    fs.writeFileSync(modelPath, "weights");
+    const part = path.join(dir, "Qwen3-Embedding-0.6B-Q8_0.gguf.part");
+    fs.writeFileSync(part, "half");
+    const { DELETE } = await load();
+    expect((await DELETE(del())).status).toBe(200);
+    expect(fs.existsSync(part)).toBe(false);
   });
 
   it("answers 404 when there is nothing to remove, and touches the engine either way not at all", async () => {

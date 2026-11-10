@@ -20,6 +20,7 @@ import { execFile as execFileCb } from "child_process";
 import fs from "fs";
 import { promisify } from "util";
 import path from "./runtime-path";
+import { X64_DESKTOP_ROOT_STEPS, X64_INSTALL_ROOT_STEPS, rootStepNotImplementedMessage, type X64RootSide } from "./root-steps";
 
 const execFile = promisify(execFileCb);
 
@@ -36,6 +37,35 @@ export const ROOT_STEP_LAUNCHER = "/usr/local/libexec/clawbox/clawbox-run-root-s
  */
 const X64_HOST_FILES = ["/etc/clawbox/x64-integration.env", "/etc/clawbox/x64.env"] as const;
 
+/** Which x86 install's root side this PC has; the appliance has neither. */
+type X64Host = X64RootSide;
+
+/**
+ * The x86 root side this PC has, or null on the appliance. The integration
+ * package's contract wins over install-x64.sh's record, as it does for every
+ * other caller (x64-integration.ts).
+ */
+function x64Host(): X64Host | null {
+  try {
+    if (fs.existsSync(X64_HOST_FILES[0])) return "desktop";
+    if (fs.existsSync(X64_HOST_FILES[1])) return "install";
+  } catch {
+    // Unreadable: answer as the appliance, as the repair command always has.
+  }
+  return null;
+}
+
+/**
+ * Whether this PC's root side has `step` at all (TASK-2418): null on the
+ * appliance, whose install.sh implements every step on WEB_ROOT_STEPS; on an
+ * x86 PC, whether that install implements it (root-steps.ts says which).
+ */
+export function rootStepImplementedHere(step: string): boolean | null {
+  const host = x64Host();
+  if (!host) return null;
+  return (host === "desktop" ? X64_DESKTOP_ROOT_STEPS : X64_INSTALL_ROOT_STEPS).includes(step);
+}
+
 /**
  * The ONE command that puts the root side of the launcher contract back — the
  * launcher, the root dispatcher and the sudoers grant — from the code on disk.
@@ -43,13 +73,7 @@ const X64_HOST_FILES = ["/etc/clawbox/x64-integration.env", "/etc/clawbox/x64.en
  * install has its own installer and its own step for the same contract.
  */
 export function rootStepRepairCommand(projectDir: string = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox"): string {
-  let x64 = false;
-  try {
-    x64 = X64_HOST_FILES.some((file) => fs.existsSync(file));
-  } catch {
-    x64 = false;
-  }
-  return x64
+  return x64Host() !== null
     ? `sudo bash ${path.join(projectDir, "install-x64.sh")} --step root_step_contract`
     : `sudo bash ${path.join(projectDir, "install.sh")} --step systemd_services`;
 }
@@ -120,6 +144,33 @@ export class RootStepUnavailableError extends Error {
 }
 
 /**
+ * The launcher refused a step this PC's root side does not implement at all
+ * (TASK-2418) — not an update cut short, so there is no repair command to
+ * name, and the message says so instead of sending the owner to one that
+ * would change nothing. `rootStepUnavailable` like the error above (the
+ * launcher could not be asked, so no journal line of an earlier run belongs
+ * to this one); `rootStepNotImplemented` for a caller that must tell the two
+ * apart. Carries no `repairCommand`.
+ */
+export class RootStepNotImplementedError extends Error {
+  readonly rootStepUnavailable = true;
+  readonly rootStepNotImplemented = true;
+  readonly step: string;
+  code?: number | string;
+  stderr?: string;
+  killed?: boolean;
+
+  constructor(step: string, host: X64Host, cause: ExecError) {
+    super(rootStepNotImplementedMessage(step, host));
+    this.name = "RootStepNotImplementedError";
+    this.step = step;
+    this.code = cause.code;
+    this.stderr = cause.stderr;
+    this.killed = cause.killed;
+  }
+}
+
+/**
  * Start `clawbox-root-update@<step>.service`.
  *
  * `sudo -n`, never a bare `sudo`: on a device whose allow-list is missing this
@@ -129,7 +180,9 @@ export class RootStepUnavailableError extends Error {
  *
  * A launcher that is missing, not granted or too old for the step is thrown as
  * a {@link RootStepUnavailableError}, whose message names the one Terminal
- * command that repairs it; any other failure is rethrown untouched.
+ * command that repairs it — unless this is an x86 PC whose install does not
+ * implement the step at all, which no command repairs: that is a
+ * {@link RootStepNotImplementedError}. Any other failure is rethrown untouched.
  */
 export async function startRootStep(
   step: string,
@@ -148,7 +201,15 @@ export async function startRootStep(
     await execFile("/usr/bin/sudo", argv, { cwd: "/", timeout: opts.timeoutMs ?? 30_000 });
   } catch (err) {
     const what = err instanceof Error ? launcherRefusal(err as ExecError) : null;
-    if (what) throw new RootStepUnavailableError(step, what, err as ExecError);
+    if (what) {
+      // Asked only once the launcher has refused: the step's own run, and the
+      // updater's reading of it, are exactly what they were.
+      const host = x64Host();
+      if (host && rootStepImplementedHere(step) === false) {
+        throw new RootStepNotImplementedError(step, host, err as ExecError);
+      }
+      throw new RootStepUnavailableError(step, what, err as ExecError);
+    }
     throw err;
   }
 }

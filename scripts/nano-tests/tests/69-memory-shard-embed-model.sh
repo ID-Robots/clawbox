@@ -203,6 +203,11 @@ board 'mkdir -p "$1" && printf "# Island notes\n\n%s, and logs the ferry times i
 # An NDJSON stream whose last line says how it ended.
 FORCE=false
 [ "$(jq -r '.installed' <<<"$EMBED_STATUS")" = true ] && FORCE=true
+# On a Jetson that download is still install.sh's own embed_model, as root —
+# an x86 PC fetches the same file as the web server's user instead, since
+# neither x86 install has the step (TASK-2418). The step's own journal lines
+# since the click are the proof, not the route's word for it.
+DL_SINCE=$(board 'date +%s' | tail -n 1)
 # shellcheck disable=SC2016  # expanded on the board
 out=$(board 'API_MAX_TIME=1500 owner_api POST /setup-api/embed/install "$1"' "{\"model\":\"$SMALL\",\"force\":$FORCE}")
 last=$(printf '%s\n' "$out" | tail -n +2 | jq -c 'select(.success != null or .error != null)' 2>/dev/null | tail -n 1)
@@ -211,6 +216,13 @@ if [ "$(jq -r '.success // false' <<<"$last" 2>/dev/null)" = true ]; then
 else
   not_ok "the $SMALL download did not finish: ${last:-$(printf '%s' "$out" | tail -n 2 | head -c 300)}"
   finish
+fi
+# shellcheck disable=SC2016  # expanded on the board
+STEP_LINES=$(board 'journalctl -u clawbox-root-update@embed_model.service --since "@$1" --no-pager -q -o cat 2>/dev/null | grep -ci "memory-search model" || true' "$DL_SINCE" | tail -n 1)
+if [ "${STEP_LINES:-0}" -gt 0 ] 2>/dev/null; then
+  ok "the download ran as install.sh's embed_model root step ($STEP_LINES line(s) of it in the step's journal)"
+else
+  not_ok "no embed_model root step ran for the download: a Jetson's default slot must still come through install.sh"
 fi
 # shellcheck disable=SC2016  # expanded on the board
 SUM=$(board 'sha256sum "$REPO/data/embed/models/Qwen3-Embedding-0.6B-Q8_0.gguf" 2>/dev/null | cut -c1-64' | tail -n 1)
