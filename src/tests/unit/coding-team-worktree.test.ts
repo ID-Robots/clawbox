@@ -234,21 +234,21 @@ describe("the app a worktree is a copy of", () => {
     // run-3mnuu230 (2026-11-10): the Notes app mounts at /apps/<its folder's
     // name>, so in its worktree it mounted at /apps/run-3mnuu230 and its own
     // smoke test and mobile gate, which ask for /apps/notes, answered 404.
-    expect(worktreeAppId("/home/owner/Projects/notes/.clawbox/worktrees/run-3mnuu230")).toBe("notes");
-    expect(worktreeAppId("/home/owner/Projects/audiobook-player/.clawbox/worktrees/t4-1")).toBe("audiobook-player");
-    expect(worktreeAppId("/home/owner/Projects/notes/.clawbox/worktrees/review-t5-1/app/api")).toBe("notes");
-    expect(worktreeAppId("/home/owner/Projects/notes/.clawbox/worktrees/run-a/")).toBe("notes");
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees/run-3mnuu230")).toBe("notes");
+    expect(worktreeAppId("/home/clawbox/Projects/audiobook-player/.clawbox/worktrees/t4-1")).toBe("audiobook-player");
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees/review-t5-1/app/api")).toBe("notes");
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees/run-a/")).toBe("notes");
   });
 
   it("names nothing for a folder that is not a worktree, or a project whose name is no app id", () => {
-    expect(worktreeAppId("/home/owner/Projects/notes")).toBeNull();
-    expect(worktreeAppId("/home/owner/Projects/notes/.clawbox")).toBeNull();
-    expect(worktreeAppId("/home/owner/Projects/notes/.clawbox/worktrees")).toBeNull();
-    expect(worktreeAppId("/home/owner/Projects/notes/worktrees/run-a")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes/worktrees/run-a")).toBeNull();
     // Rebuilt from the app-id alphabet, never passed through: it reaches a process environment.
-    expect(worktreeAppId("/home/owner/Projects/my app/.clawbox/worktrees/run-a")).toBeNull();
-    expect(worktreeAppId("/home/owner/Projects/a$(id)/.clawbox/worktrees/run-a")).toBeNull();
-    expect(worktreeAppId(`/home/owner/Projects/${"a".repeat(65)}/.clawbox/worktrees/run-a`)).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/my app/.clawbox/worktrees/run-a")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/a$(id)/.clawbox/worktrees/run-a")).toBeNull();
+    expect(worktreeAppId(`/home/clawbox/Projects/${"a".repeat(65)}/.clawbox/worktrees/run-a`)).toBeNull();
     expect(worktreeAppId("/.clawbox/worktrees/run-a")).toBeNull();
   });
 });
