@@ -1,6 +1,6 @@
 # Coding Agent on Anthropic models — price against quality, November 2026
 
-Measured on one x64 box on 2026-11-09 and 2026-11-10, through the box's own routes (`/setup-api/coding-agent/run` and `/team`), on throwaway clones of two of the owner's installed apps. It is the evidence behind the Anthropic defaults in `src/lib/coding-role-models.ts` and `src/lib/coding-provider.ts`. Every figure is ONE run: read the table for its large gaps, not its small ones.
+Measured on one x64 box on 2026-11-09 and 2026-11-10, through the box's own routes (`/setup-api/coding-agent/run` and `/team`), on throwaway clones of two of the owner's installed apps and then on five of the real projects. It is the evidence behind the Anthropic defaults in `src/lib/coding-role-models.ts` and `src/lib/coding-provider.ts`. Every figure is ONE run: read the table for its large gaps, not its small ones.
 
 ## Method
 
@@ -62,7 +62,7 @@ The three `medium` runs on the small apps cost $1.18 to $1.75 and took 10 to 16 
 - `ROLE_DEFAULT_MODELS.anthropic`: planner `claude-fable-5-2`, worker `claude-sonnet-5-5`, reviewer `claude-opus-5-5`. `DEFAULT_ANTHROPIC_MODEL` (an unnamed single run): `claude-sonnet-5-5`. `ECONOMY_MODELS.anthropic`: `claude-haiku-5-5`.
 - `ROLE_AUTO_EFFORT.anthropic`: a planner and a reviewer with no effort stored start at `high`; an effort the owner stores for the role is still honoured up to the `xhigh` cap.
 - The planner's brief: steps that each build on the last are one task; only a chain too long for one session is split into serial tasks; and a yardstick for what one session does.
-- Found by the four real releases and fixed: a pull request the box merged never reached the project folder (the next run would have forked from the old base); a run's worktree mounted an app under the run's id instead of the app's (`CLAWBOX_APP_ID`); a plan naming a path outside the project failed its single-run team.
+- Found by the five real releases and fixed: a pull request the box merged never reached the project folder (the next run would have forked from the old base); a run's worktree mounted an app under the run's id instead of the app's (`CLAWBOX_APP_ID`); a Next.js build could not follow the linked `node_modules` in a run's worktree, so the review pass's preview failed (the worktree now gets a tree of hard links); a plan naming a path outside the project failed its single-run team; and a folder named like an installed app could take over that app's registration while its server was down (`docs/agents/apps-and-webapps.md`).
 - Found and fixed on the way (each has its paragraph in `docs/agents/coding-agent.md`): the review pass inheriting the owner's effort instead of its run's, a run that wrote through its shell recorded as changing nothing (so no review pass), the final reviewer shown only the first 1,200 characters of the goal, a rejected final review ending the team with all its work done, worktree paths left inside committed files, `bun test` projects treated as having no suite, the preview dying on an installed app's port, and screenshots a Claude run could not see.
 
 ## Limits of this benchmark
