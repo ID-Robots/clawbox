@@ -68,17 +68,27 @@ export async function healWorktreePaths(worktreePath: string): Promise<HealOutco
   const healed: string[] = [];
   for (const rel of names) {
     const file = path.join(own, rel);
+    let handle: fs.promises.FileHandle | undefined;
     try {
-      // A regular file of the worktree itself: never through a link, never a huge one.
-      const stat = fs.lstatSync(file);
+      // A regular file of the worktree itself: never through a link, never a
+      // huge one. ONE handle for the check, the read and the write —
+      // O_NOFOLLOW refuses a link, and nothing can swap the path between the
+      // look and the write (a path checked and then opened again is two
+      // files to anything that can rename in between). Handle methods, not
+      // fs calls on a descriptor, which the build would trace (runtime-path.ts).
+      handle = await fs.promises.open(file, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+      const stat = await handle.stat();
       if (!stat.isFile() || stat.size > MAX_HEAL_BYTES) continue;
-      const before = fs.readFileSync(file, "utf8");
+      const before = await handle.readFile("utf8");
       const after = toFolderPaths(before, project, project);
       if (after === before) continue;
-      fs.writeFileSync(file, after);
+      await handle.truncate(0);
+      await handle.write(after, 0, "utf8");
       healed.push(rel);
     } catch {
-      // Unreadable or gone meanwhile: left as the run made it.
+      // Unreadable, a link, or gone meanwhile: left as the run made it.
+    } finally {
+      await handle?.close().catch(() => undefined);
     }
   }
   if (!healed.length) return { ok: true, files: [], commit: null };
