@@ -127,6 +127,36 @@ if [ "${#SPEC_ARGS[@]}" -gt 0 ]; then
   echo "[llamacpp] speculative decoding: ${SPEC_ARGS[*]}"
 fi
 
+# How llama-server holds the model's weights, from .env (install.sh seeds mmap
+# on a Jetson). llama.cpp's own default moved from mmap to auto, and auto turns
+# mmap off for a CUDA integrated GPU: Gemma's 2.1 GB of CPU-side tensors then
+# sit in pinned host memory the kernel cannot reclaim. Measured on an 8 GB Orin
+# Nano, lowest MemAvailable: 390 MB with auto (the memory guard killed it),
+# 2251 MB with mmap, which keeps them in the page cache.
+# Passed as LLAMA_ARG_LOAD_MODE, which every pinned build reads and a build
+# older than the option ignores, so no --help is asked. Only the values every
+# pinned build takes: db7d8b2 has no `auto`, and llama-server exits on an
+# LLAMA_ARG_* value it does not know. An inherited LLAMA_ARG_LOAD_MODE is left
+# as it is unless .env names a valid mode. Exported last, after the --help
+# above, and decided on every start, never remembered.
+if [ -n "${LLAMA_ARG_LOAD_MODE+set}" ]; then
+  LOAD_MODE_ELSE="'${LLAMA_ARG_LOAD_MODE}' from the inherited LLAMA_ARG_LOAD_MODE"
+else
+  LOAD_MODE_ELSE="binary default"
+fi
+case "${LLAMACPP_LOAD_MODE:-}" in
+  none|mmap|mlock|mmap+mlock|dio)
+    echo "[llamacpp] load-mode=${LLAMACPP_LOAD_MODE}"
+    export LLAMA_ARG_LOAD_MODE="$LLAMACPP_LOAD_MODE"
+    ;;
+  "")
+    echo "[llamacpp] load-mode=${LOAD_MODE_ELSE}, LLAMACPP_LOAD_MODE not set"
+    ;;
+  *)
+    echo "[llamacpp] Invalid LLAMACPP_LOAD_MODE='${LLAMACPP_LOAD_MODE}' (expected none|mmap|mlock|mmap+mlock|dio); load-mode=${LOAD_MODE_ELSE}"
+    ;;
+esac
+
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
