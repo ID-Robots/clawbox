@@ -47,8 +47,12 @@ type X64Host = X64RootSide;
  */
 function x64Host(): X64Host | null {
   try {
-    if (fs.existsSync(X64_HOST_FILES[0])) return "desktop";
-    if (fs.existsSync(X64_HOST_FILES[1])) return "install";
+    // Two fixed paths under /etc, never the project: the comment keeps
+    // Turbopack from tracing these calls across the whole checkout (data/
+    // included), which is what failed the build (scripts/check-build-isolation.sh).
+    const [desktop, install] = X64_HOST_FILES.map((file) => fs.existsSync(/* turbopackIgnore: true */ file));
+    if (desktop) return "desktop";
+    if (install) return "install";
   } catch {
     // Unreadable: answer as the appliance, as the repair command always has.
   }
