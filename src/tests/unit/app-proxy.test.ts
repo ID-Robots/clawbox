@@ -289,6 +289,37 @@ describe("registerServerApp", () => {
     expect(await lib.registerServerApp({ id: "plain", directory: process.cwd(), manifest: { ...manifest(3000), port: null } })).toMatchObject({ ok: false, reason: "failed" });
   });
 
+  it("never takes an id that is another folder's while that folder is still there", async () => {
+    // 2026-11-10: a benchmark clone in a folder named `calculator` ran while
+    // the installed Calculator's server was down for a moment; the box started
+    // the clone's server on the app's port and rewrote the registration to the
+    // clone's folder.
+    const mine = await listen();
+    try {
+      const dir = path.join(root, "data", "webapps", "calculator");
+      fs.mkdirSync(dir, { recursive: true });
+      const installed = path.join(projects, "calculator");
+      fs.mkdirSync(installed, { recursive: true });
+      const before = JSON.stringify({ name: "Calculator", color: "#f97316", icon: "", port: mine.port, directory: installed, start: "bun run serve" });
+      fs.writeFileSync(path.join(dir, "meta.json"), before);
+      // This process's folder is not the installed one, and it IS what listens on the port.
+      const out = await lib.registerServerApp({ id: "calculator", directory: process.cwd(), manifest: manifest(mine.port) });
+      expect(out).toMatchObject({ ok: false, reason: "failed" });
+      expect(out.ok ? "" : out.detail).toContain(installed);
+      expect(fs.readFileSync(path.join(dir, "meta.json"), "utf-8")).toBe(before);
+      expect(pushed).toEqual([]);
+      // The installed folder registering itself again is the ordinary case, judged as ever (here: not its listener).
+      expect(await lib.registerServerApp({ id: "calculator", directory: installed, manifest: manifest(mine.port) })).toMatchObject({ ok: false, reason: "not_owned" });
+      // Its folder gone — moved, renamed, removed by hand — the id is free to take.
+      fs.rmSync(installed, { recursive: true, force: true });
+      lib._resetListenerCacheForTests();
+      expect(await lib.registerServerApp({ id: "calculator", directory: process.cwd(), manifest: manifest(mine.port) })).toEqual({ ok: true });
+      expect(JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf-8")).directory).toBe(process.cwd());
+    } finally {
+      await mine.close();
+    }
+  });
+
   it("keeps an earlier registration's colour and icon", async () => {
     const mine = await listen();
     try {

@@ -52,7 +52,8 @@ async function browserTools(): Promise<CaptureHarness> {
 const capture = (h: CaptureHarness) => h.call("browser_open", { url: "https://example.test/" });
 
 beforeEach(() => {
-  restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR");
+  restore = saveEnv("CLAWBOX_RUN_DIR", "CLAWBOX_RUN_ARTIFACTS_DIR", "CLAWBOX_RUN_SEES_IMAGES");
+  delete process.env.CLAWBOX_RUN_SEES_IMAGES;
   base = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shots-"));
   evidence = path.join(base, "coding-agent-artifacts", "run-abc12345");
   process.env.CLAWBOX_RUN_DIR = path.join(base, "work");
@@ -88,6 +89,57 @@ describe("saveShot", () => {
     // The lazy mkdir decides the folder's mode when the runner did not get
     // there first — and it must decide the same way ensureArtifactsDir does.
     expect(fs.statSync(evidence).mode & 0o777).toBe(0o700);
+  });
+
+  it("hands a run on a model that SEES the picture too, beside the same words and the same archive", async () => {
+    // An Anthropic run (CLAWBOX_RUN_SEES_IMAGES=1, set by the runner): it
+    // judges the page by the page, in the one reply.
+    process.env.CLAWBOX_RUN_SEES_IMAGES = "1";
+    const h = await browserTools();
+    const out = await capture(h);
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("archived to this run's evidence folder as shot-001.png");
+    expect(out.text).toContain("What the page shows: A page.");
+    expect(out.result.content.filter((part) => part.type === "image")).toEqual([{ type: "image", data: PNG.toString("base64"), mimeType: "image/png" }]);
+    expect(fs.readFileSync(path.join(evidence, "shot-001.png")).equals(PNG)).toBe(true);
+  });
+
+  it("promises a sighted run no picture that is too large to return, and says where it is instead", async () => {
+    // The gate every tool result passes (capResult) swaps an image over 1 MiB
+    // of base64 for "[image omitted…]". A tall page's PNG is over it, and with
+    // no description either the run was told to judge by a picture it never got.
+    process.env.CLAWBOX_RUN_SEES_IMAGES = "1";
+    const huge = Buffer.concat([PNG, Buffer.alloc(800_000, 7)]);
+    expect(huge.toString("base64").length).toBeGreaterThan(1024 * 1024);
+    apiPost.mockImplementation(async (_route: string, body: { action: string }) => {
+      if (body.action === "launch") return { sessionId: "browser-1" };
+      if (body.action === "screenshot") return { url: "https://example.test/", title: "Example", screenshot: huge.toString("base64"), descriptionError: "ClawBox AI cannot look at pictures right now" };
+      return {};
+    });
+    const h = await browserTools();
+    const out = await capture(h);
+    if (out.isError) throw new Error("unexpected refusal");
+    expect(out.result.content.filter((part) => part.type === "image")).toEqual([]);
+    expect(out.text).toContain("The picture is too large to return here: read shot-001.png from your evidence folder ($CLAWBOX_RUN_ARTIFACTS_DIR), or capture a smaller region.");
+    expect(out.text).toContain("Rely on the URL, the title and your knowledge of the code.");
+    expect(out.text).not.toContain("Judge by the picture itself");
+    // Still archived whole, for the owner and for the run's own Read.
+    expect(fs.readFileSync(path.join(evidence, "shot-001.png")).equals(huge)).toBe(true);
+  });
+
+  it("tells a sighted run to judge by the picture when the description could not be had", async () => {
+    process.env.CLAWBOX_RUN_SEES_IMAGES = "1";
+    apiPost.mockImplementation(async (_route: string, body: { action: string }) => {
+      if (body.action === "launch") return { sessionId: "browser-1" };
+      if (body.action === "screenshot") return { url: "https://example.test/", title: "Example", screenshot: PNG.toString("base64"), descriptionError: "ClawBox AI cannot look at pictures right now" };
+      return {};
+    });
+    const h = await browserTools();
+    const out = await capture(h);
+    if (out.isError) throw new Error("unexpected refusal");
+    expect(out.text).toContain("No vision description is available (ClawBox AI cannot look at pictures right now). Judge by the picture itself.");
+    expect(out.result.content.some((part) => part.type === "image")).toBe(true);
   });
 
   it("steps over a name the run already used instead of overwriting it", async () => {

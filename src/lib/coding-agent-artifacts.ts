@@ -208,8 +208,34 @@ export function writeRunReport(runId: string, markdown: string): boolean {
 export function ensureArtifactsDir(runId: string): string {
   const dir = artifactsDir(runId);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    // 'wx': never over one that is there — a resumed run's, or a run's own.
+    fs.writeFileSync(path.join(dir, EVIDENCE_PACKAGE_FILE), EVIDENCE_PACKAGE_JSON, { flag: "wx", mode: 0o600 });
+  } catch {
+    // Already there, or the folder will not take it: the run goes on without the stop.
+  }
   return dir;
 }
+
+/**
+ * The file that makes a run's evidence folder the ROOT of any package install
+ * made inside it.
+ *
+ * The evidence folders live under the box's own checkout (`data/` is inside
+ * it), and a package manager asked to add something in a folder with no
+ * package.json of its own climbs to the nearest one above. A run that wanted
+ * a private Playwright did `cd $CLAWBOX_RUN_ARTIFACTS_DIR && mkdir pw && cd pw
+ * && bun add playwright`: the nearest package.json was the BOX's, so the box's
+ * own `package.json`, `bun.lock` and `node_modules/playwright` moved to a
+ * version whose browser build is not on the disk — and the next run's mobile
+ * gate, which borrows the box's Playwright, could not launch (run-ziu9ocw1,
+ * then run-w263ek7z, 2026-11-10). With this file there the climb stops in the
+ * run's own folder: the install lands in its `node_modules`, which the
+ * settle's prune takes away (`INTERPRETER_TREES`). Not an artifact: the list
+ * leaves it out.
+ */
+export const EVIDENCE_PACKAGE_FILE = "package.json";
+const EVIDENCE_PACKAGE_JSON = `${JSON.stringify({ name: "clawbox-run-evidence", private: true })}\n`;
 
 /**
  * The run's artifacts, oldest first (the order they were produced). Past
@@ -229,6 +255,8 @@ export function listArtifacts(runId: string): RunArtifact[] {
   }
   const out: RunArtifact[] = [];
   for (const name of names) {
+    // The box's own stop for package installs (ensureArtifactsDir) is not evidence.
+    if (name === EVIDENCE_PACKAGE_FILE) continue;
     if (name.length > MAX_NAME_CHARS || !ARTIFACT_NAME_RE.test(name)) continue;
     let stat: fs.Stats;
     try {

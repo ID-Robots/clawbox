@@ -39,7 +39,7 @@
 import fs from "fs";
 import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
-import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
+import { excludeWorktrees, forkBase, gitIn, putBackFavicons, readCheckout, setAsideFavicons, TEAM_BRANCH_RE, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";
 import { runBranchName } from "./coding-pr-state";
 import { writeRunMarker } from "./coding-folder-kind";
@@ -195,7 +195,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch 
   const added = await gitIn(dir, ["worktree", "add", ...(fork.from ? ["--no-track", "-b", branch, target, fork.from] : ["-b", branch, target, base])]);
   if (!ok(added)) return { ok: false, reason: "failed", detail: failureDetail(added, `Making a worktree for ${runId}`) };
   await excludeWorktrees(dir);
-  linkSharedNodeModules(dir, target);
+  await shareNodeModules(dir, target);
   // Under `.clawbox/`, which excludeWorktrees keeps out of `git status`: a
   // copy of this tree is then still known for one (coding-folder-kind.ts).
   writeRunMarker(target, { kind: "run", id: runId, project: dir });
@@ -213,7 +213,9 @@ async function namedBase(dir: string, name: string): Promise<{ ok: true; base: s
 
 /**
  * `node_modules` from the project root, as a symlink, when the project has
- * one and the worktree does not.
+ * one and the worktree does not — the FALLBACK since 2026-11-10: a worktree
+ * gets a hard-linked tree first (`hardlinkSharedNodeModules`), and this link
+ * only where that could not be made.
  *
  * A fresh worktree has no dependencies, and `npm install` on a Jetson for
  * every run is minutes of disk and CPU for a tree that is about to be thrown
@@ -240,6 +242,83 @@ export function linkSharedNodeModules(projectDir: string, worktreePath: string):
   } catch {
     return false;
   }
+}
+
+/** More entries than this and the copy is not tried: the link costs nothing whatever the size, and a monorepo's tree is not seconds of work. */
+const MAX_HARDLINKED_ENTRIES = 250_000;
+
+/**
+ * `node_modules` from the project root as a tree of HARD LINKS: real folders
+ * in the worktree, every file the same bytes on disk as the project's.
+ *
+ * WHY NOT THE LINK. A bundler that will not follow a link out of its own
+ * folder cannot build through `linkSharedNodeModules`' symlink: Next.js 16
+ * (Turbopack) stops with "Could not find the Next.js package" and its
+ * filesystem-root message. Every run on the owner's Next apps met it — one
+ * moved the link aside and installed again, one wrote `turbopack.root` into
+ * the app's config and took it out, one copied the whole project to a folder
+ * of its own — and the review pass's preview, which runs the app's own start
+ * command, failed on it and the pass looked at nothing (run-xa50zhht,
+ * 2026-11-10). Measured on this box: the same app builds from a hard-linked
+ * tree, and making one took 0.2 s for 10,659 files.
+ *
+ * WHAT IT COSTS. No bytes — the files are links — and folders' worth of
+ * inodes, gone with the worktree. A package manager's install in the
+ * worktree REPLACES files (unlink, then write), so it never reaches the
+ * project's own; with the old link the same install rewrote the project's
+ * tree in place.
+ *
+ * Links inside the tree (`.bin`, a package manager's own store) are copied
+ * as links, with the target as written. Anything that is not a file, a
+ * folder or a link is left out. Never over something already there. A tree
+ * too large, a project whose `node_modules` is itself a link, another
+ * filesystem, or any failure: `false`, with whatever was made taken away
+ * again — half a tree would be worse than none — and the caller falls back
+ * to the link.
+ */
+export async function hardlinkSharedNodeModules(projectDir: string, worktreePath: string): Promise<boolean> {
+  const source = path.join(path.resolve(projectDir), "node_modules");
+  const target = path.join(path.resolve(worktreePath), "node_modules");
+  try {
+    if (!(await fs.promises.lstat(source)).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  try {
+    await fs.promises.lstat(target);
+    return false;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  let entries = 0;
+  const copy = async (from: string, to: string): Promise<void> => {
+    await fs.promises.mkdir(to);
+    const listed = await fs.promises.readdir(from, { withFileTypes: true });
+    entries += listed.length;
+    if (entries > MAX_HARDLINKED_ENTRIES) throw new Error("too many entries");
+    const folders: string[] = [];
+    await Promise.all(listed.map(async (entry) => {
+      const a = path.join(from, entry.name);
+      const b = path.join(to, entry.name);
+      if (entry.isDirectory()) folders.push(entry.name);
+      else if (entry.isSymbolicLink()) await fs.promises.symlink(await fs.promises.readlink(a), b);
+      else if (entry.isFile()) await fs.promises.link(a, b);
+    }));
+    // One folder at a time: a wide tree opened all at once runs out of descriptors.
+    for (const name of folders) await copy(path.join(from, name), path.join(to, name));
+  };
+  try {
+    await copy(source, target);
+    return true;
+  } catch {
+    await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
+    return false;
+  }
+}
+
+/** A worktree's dependencies: the hard-linked tree where it can be made, the link where it cannot. */
+async function shareNodeModules(projectDir: string, worktreePath: string): Promise<void> {
+  if (!(await hardlinkSharedNodeModules(projectDir, worktreePath))) linkSharedNodeModules(projectDir, worktreePath);
 }
 
 /**
@@ -276,7 +355,7 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
       ? await gitIn(dir, ["worktree", "add", worktreePath, branch])
       : await gitIn(dir, ["worktree", "add", "-b", branch, worktreePath, base]);
     if (!ok(added)) return false;
-    linkSharedNodeModules(dir, worktreePath);
+    await shareNodeModules(dir, worktreePath);
     return true;
   });
 }
@@ -293,7 +372,16 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
  *
  *   - only when the checkout is on the branch the run forked from. It may
  *     have been moved since, and merging into whatever happens to be checked
- *     out now is a guess;
+ *     out now is a guess. ONE exception, and it is not a guess: a checkout
+ *     sitting on a coding TEAM's branch (`clawbox/team-…`) was left there by
+ *     the box, not moved there by the owner — a team leaves the checkout on
+ *     its branch — and a run started in that project forks from the base
+ *     (`forkBase`), so its merge home was refused before it began. Runs worked
+ *     for hours and then "did not land" (team-yykapje9, 95M tokens,
+ *     2026-11-07). A CLEAN checkout on a team's branch is put back on the
+ *     base first; the team's branch stays, with everything on it. Only a
+ *     FINISHED team's (`teamLive`): a team still working merges its workers
+ *     into whatever the checkout is on, so its checkout is never moved;
  *   - only when the checkout is clean. The team's merge commits what it finds
  *     lying there first; that is right for a tree only the team uses and
  *     wrong for the owner's own folder, where uncommitted work is theirs.
@@ -310,20 +398,49 @@ export function mergeRunBranch(input: {
   branch: string;
   base: string;
   message: string;
+  /**
+   * Is this coding team's branch one a team is STILL working on? Asked before
+   * the checkout is put back on the base from it: a live team merges its
+   * workers into whatever the checkout is on, so moving it would land their
+   * work on the base, past the team's own review and pull request. Without it
+   * every team's branch is taken for a finished team's.
+   */
+  teamLive?: (branch: string) => Promise<boolean>;
 }): Promise<
-  | { ok: true; merged: boolean; commit: string | null }
+  /** `returnedFrom`: the coding team's branch the checkout was on, when it was put back on the base for this merge. */
+  | { ok: true; merged: boolean; commit: string | null; returnedFrom?: string }
   | { ok: false; reason: MergeHomeBlocker; detail: string }
 > {
   return withDirLock(input.projectDir, async () => {
     const dir = path.resolve(input.projectDir);
-    const on = await currentBranch(dir);
+    let on = await currentBranch(dir);
+    let returnedFrom: string | undefined;
     if (on !== input.base) {
-      return { ok: false, reason: "not_on_base", detail: `the project is on ${on}, not on ${input.base}` };
+      // On a coding team's branch, clean, with work to land: back to the base.
+      // With nothing to land the checkout is left where the team left it.
+      if (TEAM_BRANCH_RE.test(on) && ((await commitsAhead(dir, input.branch, input.base)) ?? 0) > 0) {
+        // A team that is still working owns the checkout: left exactly where it is.
+        if (input.teamLive && (await input.teamLive(on))) {
+          return { ok: false, reason: "not_on_base", detail: `the project is on ${on}, the branch of a coding team that is still working` };
+        }
+        const seen = await readCheckout(dir, "normal");
+        if (seen.ok && !seen.changed && ok(await gitIn(dir, ["checkout", "-q", input.base]))) {
+          returnedFrom = on;
+          on = await currentBranch(dir);
+        }
+      }
+      if (on !== input.base) {
+        return { ok: false, reason: "not_on_base", detail: `the project is on ${returnedFrom ?? on}, not on ${input.base}` };
+      }
     }
     const ahead = await commitsAhead(dir, input.branch, input.base);
-    if (ahead === 0) return { ok: true, merged: false, commit: null };
+    if (ahead === 0) return { ok: true, merged: false, commit: null, ...(returnedFrom ? { returnedFrom } : {}) };
     const seen = await readCheckout(dir, "normal");
     if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project before the merge") };
+    // TODO(next release): a tracked `.clawbox/run-notes.md` the box itself just
+    // wrote a lesson to counts as the folder's own change here, so a run with no
+    // pull request is refused its merge home in a project that tracks that file.
+    // `bringBaseHome` leaves the question to git; this path does not yet.
     if (seen.changed) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
     const as = await asBox(dir);
     if (!as.ok) return { ok: false, reason: "failed", detail: as.detail };
@@ -335,7 +452,7 @@ export function mergeRunBranch(input: {
       // in <base>, as <sha>". Best-effort: a rev-parse that will not answer
       // does not turn a landed merge into a failed one.
       const head = await gitIn(dir, ["rev-parse", "HEAD"]);
-      return { ok: true, merged: true, commit: ok(head) && out(head) ? out(head) : null };
+      return { ok: true, merged: true, commit: ok(head) && out(head) ? out(head) : null, ...(returnedFrom ? { returnedFrom } : {}) };
     }
     const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
     await gitIn(dir, ["merge", "--abort"]);
@@ -345,6 +462,79 @@ export function mergeRunBranch(input: {
       reason: conflict ? "conflict" : "failed",
       detail: conflict ? "it conflicts with the project's own changes" : failureDetail(merged, `Merging ${input.branch}`),
     };
+  });
+}
+
+/** Why the project folder could not be brought up to its base as GitHub has it (`bringBaseHome`). */
+export type BaseHomeBlocker = "fetch" | "dirty" | "diverged" | "failed";
+
+/**
+ * Bring the project folder up to its BASE BRANCH AS GITHUB HAS IT — the step
+ * after a pull request into that base was merged there.
+ *
+ * `mergeRunBranch` brings a run's work home when there is no pull request.
+ * With one, the merge happens on GitHub, and nothing brought it back: the
+ * project folder stayed on the base as it was before the run, so the app the
+ * box serves from that folder was still the old one under a run that said
+ * "Merged into the base branch", and the NEXT run forked from the old base
+ * and never saw the work (Habit Tracker 1.3.0, run-deyse3g9, 2026-11-10:
+ * merged on GitHub, 1.2.1 in the folder and on the desktop).
+ *
+ * FAST-FORWARD ONLY, and that is the whole safety argument: nothing is ever
+ * merged, rebased or overwritten here, so there is nothing to resolve and
+ * nothing to lose.
+ *   - `origin`'s base is fetched; a fetch that fails (no remote, offline, a
+ *     sign-in that expired) is said and nothing else happens;
+ *   - already there: nothing moves, and the caller says nothing;
+ *   - checked out: `merge --ff-only`, and GIT decides whether uncommitted
+ *     work is in the way — it refuses to write over a changed file and moves
+ *     nothing then (`dirty`), and takes no notice of one the merge does not
+ *     touch. NOT the merge home's "only when clean": five of the owner's
+ *     projects track `.clawbox/run-notes.md` (a team's merge committed it
+ *     once), the box itself writes a run's lessons there, and a rule that
+ *     asked for a clean folder would never have moved one of them. A favicon
+ *     the box drew that the base brings its own of is moved aside first
+ *     (`setAsideFavicons`), as for the merge home;
+ *   - the folder is on ANOTHER branch (a coding team's, the owner's own):
+ *     only the base's ref moves, by a fetch into it, which git refuses unless
+ *     it is a fast-forward. The tree is not touched (`checkedOut: false`);
+ *   - a base that has commits GitHub's has not is `diverged`: the owner's to
+ *     sort out, never the box's.
+ */
+export function bringBaseHome(input: { projectDir: string; base: string }): Promise<
+  | { ok: true; moved: boolean; commit: string | null; checkedOut: boolean }
+  | { ok: false; reason: BaseHomeBlocker; detail: string }
+> {
+  return withDirLock(input.projectDir, async () => {
+    const dir = path.resolve(input.projectDir);
+    const { base } = input;
+    const fetched = await gitIn(dir, ["fetch", "--quiet", "origin", base]);
+    if (!ok(fetched)) return { ok: false, reason: "fetch", detail: failureDetail(fetched, `Fetching ${base} from GitHub`) };
+    const theirs = await gitIn(dir, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]);
+    if (!ok(theirs) || !out(theirs)) return { ok: false, reason: "failed", detail: failureDetail(theirs, `Reading ${base} as GitHub has it`) };
+    const commit = out(theirs);
+    const on = await currentBranch(dir);
+    const mine = await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${base}^{commit}`]);
+    if (ok(mine) && out(mine) === commit) return { ok: true, moved: false, commit, checkedOut: on === base };
+    // Ahead of GitHub, or beside it: not a fast-forward, whichever way it is looked at.
+    if (ok(mine) && out(mine) && !ok(await gitIn(dir, ["merge-base", "--is-ancestor", out(mine), commit]))) {
+      return { ok: false, reason: "diverged", detail: `${base} in the project folder has commits that GitHub's ${base} does not` };
+    }
+    if (on !== base) {
+      const moved = await gitIn(dir, ["fetch", "--quiet", "origin", `${base}:${base}`]);
+      if (!ok(moved)) return { ok: false, reason: "failed", detail: failureDetail(moved, `Moving ${base} forward`) };
+      return { ok: true, moved: true, commit, checkedOut: false };
+    }
+    const seen = await readCheckout(dir, "normal");
+    if (!seen.ok) return { ok: false, reason: "failed", detail: failureDetail(seen.failed, "Reading the project folder") };
+    const aside = await setAsideFavicons(dir, commit, seen.favicons);
+    const forward = await gitIn(dir, ["merge", "--ff-only", "--quiet", commit]);
+    putBackFavicons(aside);
+    if (ok(forward)) return { ok: true, moved: true, commit, checkedOut: true };
+    // Git's own refusal to write over a file the folder has changed or added: nothing moved.
+    return /would be overwritten/i.test(forward.stdout + forward.stderr)
+      ? { ok: false, reason: "dirty", detail: "uncommitted changes there are in files the merge also changes" }
+      : { ok: false, reason: "failed", detail: failureDetail(forward, `Moving ${base} forward`) };
   });
 }
 

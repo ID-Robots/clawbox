@@ -10,6 +10,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
+import http from "http";
+import type { AddressInfo } from "net";
 import os from "os";
 import path from "path";
 
@@ -162,7 +164,82 @@ it("refuses an argument it does not know rather than guessing", async () => {
 it("has no way to ask for a particular port at all", () => {
   const source = fs.readFileSync(SCRIPT, "utf8");
   expect(source).not.toMatch(/"--port"/);
-  // listen(0, "127.0.0.1") is the only bind in the file.
-  expect(source.match(/\.listen\(/g)).toHaveLength(1);
+  // Every bind in the file is port 0 on loopback: the static server, and the
+  // probe that asks the OS for a spare port when a manifest's own is taken.
+  const binds = source.match(/\.listen\([^)]*/g) ?? [];
+  expect(binds).toHaveLength(2);
+  for (const bind of binds) expect(bind).toMatch(/^\.listen\(0, "127\.0\.0\.1"/);
   expect(source).toContain('server.listen(0, "127.0.0.1"');
+});
+
+// ─── A manifest port that is already taken: the installed app's own server ───
+
+const blockers: http.Server[] = [];
+afterEach(async () => {
+  await Promise.all(blockers.splice(0).map((s) => new Promise((r) => { s.close(() => r(null)); })));
+});
+
+/** The "installed app": something listening on a loopback port before the preview starts. */
+async function installedApp(): Promise<number> {
+  const server = http.createServer((_req, res) => res.end("the installed app"));
+  blockers.push(server);
+  await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+  return (server.address() as AddressInfo).port;
+}
+
+const listenOn = (port: number | string) => `node -e "require('http').createServer((q,s)=>s.end('the run copy')).listen(${port},'127.0.0.1')"`;
+
+it("moves the copy to a spare port when the manifest's port is held by the installed app — the command names it", async () => {
+  const port = await installedApp();
+  const dir = project({ "clawbox.json": JSON.stringify({ name: "App", kind: "server", port, start: listenOn(port) }) });
+  const preview = start(dir, ["--ttl", "20"]);
+  const [, url] = await waitFor(preview.stdout, /PREVIEW_URL (\S+)/);
+  expect(new URL(url).port).not.toBe(String(port));
+  expect(await (await fetch(url)).text()).toBe("the run copy");
+  expect(preview.stderr()).toMatch(new RegExp(`port ${port} is in use .*this copy starts on \\d+, moved in the start command`));
+  // The installed app was never touched.
+  expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe("the installed app");
+});
+
+it("moves it in the package script the start command runs (`bun run serve`), with node_modules/.bin on its PATH", async () => {
+  const port = await installedApp();
+  const dir = project({
+    "clawbox.json": JSON.stringify({ name: "App", kind: "server", port, start: "bun run serve" }),
+    // `serve-it` resolves only through node_modules/.bin, the way `next` does for a real app.
+    "package.json": JSON.stringify({ scripts: { serve: `sh -c 'exec serve-it ${port}'` } }),
+    "node_modules/.bin/serve-it": `#!/bin/sh\nexec node -e "require('http').createServer((q,s)=>s.end('the run copy')).listen($1,'127.0.0.1')"\n`,
+  });
+  fs.chmodSync(path.join(dir, "node_modules/.bin/serve-it"), 0o755);
+  const preview = start(dir, ["--ttl", "20"]);
+  const [, url] = await waitFor(preview.stdout, /PREVIEW_URL (\S+)/);
+  expect(new URL(url).port).not.toBe(String(port));
+  expect(await (await fetch(url)).text()).toBe("the run copy");
+  expect(preview.stderr()).toContain(`moved in package.json's "serve" script`);
+});
+
+it("fails at once with port_in_use when the command names the port nowhere it can be moved, and never touches the app holding it", async () => {
+  const port = await installedApp();
+  const dir = project({
+    "clawbox.json": JSON.stringify({ name: "App", kind: "server", port, start: "node server.js" }),
+    "server.js": `require('http').createServer((q,s)=>s.end('x')).listen(${port},'127.0.0.1')`,
+  });
+  const preview = start(dir, ["--ttl", "20", "--start-timeout", "60"]);
+  const began = Date.now();
+  expect(await exited(preview.child)).not.toBe(0);
+  // At once: not after the start timeout a doomed start would have waited out.
+  expect(Date.now() - began).toBeLessThan(15_000);
+  expect(preview.stdout()).toMatch(new RegExp(`PREVIEW_FAILED port_in_use port ${port} from clawbox.json is already in use`));
+  expect(preview.stdout()).toContain(`never stop the process that holds ${port}`);
+  expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe("the installed app");
+});
+
+it("leaves the command alone when the manifest's port is free", async () => {
+  const port = await installedApp();
+  // Free it again: the port is known-good and nobody listens on it now.
+  await new Promise((r) => { blockers.pop()!.close(() => r(null)); });
+  const dir = project({ "clawbox.json": JSON.stringify({ name: "App", kind: "server", port, start: listenOn(port) }) });
+  const preview = start(dir, ["--ttl", "20"]);
+  const [, url] = await waitFor(preview.stdout, /PREVIEW_URL (\S+)/);
+  expect(new URL(url).port).toBe(String(port));
+  expect(preview.stderr()).not.toContain("is in use");
 });

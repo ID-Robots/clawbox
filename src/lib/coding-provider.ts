@@ -66,11 +66,16 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * an unknown model id is a failed run several minutes in, and the picker's
  * job is to make that impossible from here.
  *
- * Default first. `claude-fable-5-1` is offered beside it, never instead of it:
- * a run nobody named a model for still lands on Opus 5.5.
+ * The Fable models are offered beside the default, never instead of it: a run
+ * nobody named a model for lands on `DEFAULT_ANTHROPIC_MODEL`.
+ * `claude-fable-5-2` (2026-11-09, the owner's ask) leads them — the newer
+ * generation at a lower list price than `claude-fable-5-1`, which stays for a
+ * role or a follow-up run that already names it. `claude-sonnet-5-5` and
+ * `claude-haiku-5-5` joined the same day, for the cheaper halves of a team:
+ * all three answered the box's own Claude sign-in when asked (2026-11-09).
  *
- * `claude-opus-5` stays on the list behind the 5.5 default
- * rather than retiring with it, because this list is the fence for what a
+ * `claude-opus-5` stays on the list behind `claude-opus-5-5`
+ * rather than retiring, because this list is the fence for what a
  * caller ASKS FOR: the MCP tool's `model` enum, the run route, and a
  * follow-up run that re-states the model of the run it continues all go
  * through it, and a model that had left would be refused there by name.
@@ -82,12 +87,28 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * (`normalizeRequestedModel`). So dropping an id here does not stop one
  * already on a run record — it only stops the next caller naming it.
  */
-export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"] as const;
+export const ANTHROPIC_MODELS = [
+  "claude-opus-5-5",
+  "claude-fable-5-2",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+  "claude-fable-5-1",
+  "claude-opus-5",
+  "claude-sonnet-5",
+] as const;
 
 export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 
-/** The model an `anthropic` run gets when the caller named none. */
-export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
+/**
+ * The model an `anthropic` run gets when the caller named none — the same one
+ * a team's worker gets (`ROLE_DEFAULT_MODELS` in coding-role-models.ts), so a
+ * one-task plan run as a single run is written by the model its tasks would
+ * have been. Sonnet 5.5 since 2026-11-10: on this box it reached the same
+ * hidden-test score as Opus 5.5 on both benchmark tasks for a quarter to a
+ * half of the cost (docs/benchmarks/coding-anthropic-models-2026-11.md). A
+ * caller that names a model still gets that model.
+ */
+export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-sonnet-5-5";
 
 /**
  * The models offered for an `openai` run — the Codex CLI's own picker list.
@@ -137,7 +158,10 @@ export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
  */
 export const ECONOMY_MODELS: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "deepseek-v4-flash",
-  anthropic: "claude-sonnet-5",
+  // Haiku 5.5 since 2026-11-10: Sonnet 5.5 became a worker's default, so the
+  // cheaper tier is the model under it — it scored 111 of 111 on the same
+  // hidden cases for a fraction of Sonnet's cost.
+  anthropic: "claude-haiku-5-5",
   openai: "gpt-5.6-luna",
 };
 

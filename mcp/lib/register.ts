@@ -109,7 +109,7 @@ export const DEFAULT_MAX_CHARS = 4_000;
  */
 export const LIST_MAX_CHARS = 8_000;
 // An image bigger than this eats a small model's whole context window.
-const MAX_IMAGE_BASE64 = 1024 * 1024;
+export const MAX_IMAGE_BASE64 = 1024 * 1024;
 
 // Both harnesses rewrite or flag these, and every one of them reads as an
 // injected instruction when a tool description is spliced into a system prompt.
