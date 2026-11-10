@@ -3832,7 +3832,7 @@ describe("updater", () => {
   describe("the OpenClaw step when the core is already at the pin", () => {
     const SKIPPED_LINE = `OpenClaw already at ${PINNED_CORE}; skipped`;
     const INTEGRATION_ENV = "/etc/clawbox/x64-integration.env";
-    const DESKTOP_HOME = "/home/desk-owner";
+    const DESKTOP_HOME = "/home/desk-owner"; // public-hygiene: allow a made-up account in a test fixture
     const DESKTOP_PREFIX = `${DESKTOP_HOME}/.nvm/versions/node/v24.0.0`;
     const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
     const rootStep = (step: string) => (call: string) => new RegExp(`clawbox-run-root-step\\.sh (--no-block )?${step}$`).test(call);
@@ -3849,7 +3849,7 @@ describe("updater", () => {
         if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
         if (name.endsWith("config/openclaw-target.txt")) return `${PINNED_CORE}  # the pin\n`;
         if (name === INTEGRATION_ENV) {
-          return `INSTALL_USER=desk-owner\nINSTALL_UID=1000\nINSTALL_HOME=${DESKTOP_HOME}\nPROJECT_DIR=/home/desk-owner/clawbox\nNODE_DIR=/usr/bin\nNPM_PREFIX=${DESKTOP_PREFIX}\n`;
+          return `INSTALL_USER=desk-owner\nINSTALL_UID=1000\nINSTALL_HOME=${DESKTOP_HOME}\nPROJECT_DIR=${DESKTOP_HOME}/clawbox\nNODE_DIR=/usr/bin\nNPM_PREFIX=${DESKTOP_PREFIX}\n`;
         }
         throw new Error("ENOENT");
       });
