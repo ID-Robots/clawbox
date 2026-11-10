@@ -19,7 +19,7 @@ const ROUTES = [
   ["/setup-api/chat/model", "fast"],
   ["/setup-api/chat/capabilities", "fast"],
   ["/setup-api/ai-models/status", "fast"],
-  ["/setup-api/email/pending", "fast"],
+  ["/setup-api/email/pending", "fast", "session"],
   ["/setup-api/harness/active", "fast"],
   ["/setup-api/kv?key=ui:pending-actions", "fast"],
   ["/setup-api/coding-agent/status", "fast"],

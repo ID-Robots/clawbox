@@ -2206,6 +2206,9 @@ describe("updater", () => {
         .toBe("/tmp/clawbox-updater-openclaw-home");
       expect(preStartOptions?.env?.OPENCLAW_CONFIG_PATH)
         .toBe("/tmp/clawbox-updater-openclaw-home/openclaw.json");
+      // No gateway runs after this pre-start: its start record must say so, or
+      // the unit's next start takes it for a previous start that never came up.
+      expect(preStartOptions?.env?.CLAWBOX_PRESTART_OUTSIDE_UNIT).toBe("1");
     });
 
     it("records consent for a NON-Codex managed plugin the gateway named", async () => {
