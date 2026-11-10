@@ -212,12 +212,12 @@ function env(extra: Record<string, string>): NodeJS.ProcessEnv {
   };
 }
 
-function guard(restarts: number, extra: Record<string, string> = {}) {
+function guard(restarts: number, extra: Record<string, string> = {}, args: string[] = []) {
   const r = spawnSync("python3", [
     "-I", HELPER, "start-guard",
     "--state-dir", stateDir, "--config", path.join(stateDir, "openclaw.json"), "--data-dir", dataDir,
     "--openclaw-bin", path.join(binDir, "openclaw"), "--restarts", String(restarts),
-    "--budget-seconds", "300", "--log-dir", logDir,
+    "--budget-seconds", "300", "--log-dir", logDir, ...args,
   ], { encoding: "utf-8", env: env(extra), timeout: 60_000 });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -474,6 +474,33 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     expect(g.starts).toHaveLength(2);
     expect(g.provenAt).toBeGreaterThan(g.starts[0].at);
     expect(g.episode).toBeUndefined();
+  });
+
+  it("records the updater's run outside the unit as such, and still reads what the last start proved", () => {
+    makeDb(agentDb("main"), [good("s1")]);
+    expect(guard(0).status).toBe(0);
+    expect(gateway()).toBe(0);
+    expect(guard(0, {}, ["--outside-unit"]).status).toBe(0);
+
+    const g = guardFile();
+    expect(g.starts).toHaveLength(2);
+    expect(g.starts[0]).not.toHaveProperty("outsideUnit");
+    expect(g.starts[1]).toMatchObject({ restarts: 0, outsideUnit: true });
+    expect(g.provenAt).toBeGreaterThan(g.starts[0].at);
+  });
+
+  it("never acts on a loop from a run outside the unit, whatever restart count it is given", () => {
+    // Three failed starts of the unit, each an automatic restart of the last...
+    for (let restarts = 0; restarts < 3; restarts++) {
+      expect(guard(restarts).status).toBe(0);
+      expect(gateway()).not.toBe(0);
+    }
+    // ...then a run with the count a fourth unit start would take for a loop.
+    expect(guard(3, {}, ["--outside-unit"]).status).toBe(0);
+
+    expect(doctorCalls()).toEqual([]);
+    expect(guardFile().episode).toBeUndefined();
+    expect(guardFile().starts.at(-1)).toMatchObject({ restarts: 3, outsideUnit: true });
   });
 });
 

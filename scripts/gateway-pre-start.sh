@@ -416,6 +416,11 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -x "$OPENCLAW_BIN" ] && [ -f 
   "${CLAWBOX_ELAPSED:-:}"
   _sg_budget=$(( _sg_ceiling - 150 - ${CLAWBOX_PRESTART_ELAPSED_S:-0} ))
   if [ "$_sg_budget" -lt 0 ]; then _sg_budget=0; fi
+  # The updater runs this script itself, outside the unit, and no gateway
+  # starts from that run (CLAWBOX_PRESTART_OUTSIDE_UNIT=1): recorded as such,
+  # so the unit's next start does not take it for the start before it.
+  _sg_where=()
+  [ "${CLAWBOX_PRESTART_OUTSIDE_UNIT:-0}" = "1" ] && _sg_where=(--outside-unit)
   _sg_rc=0
   timeout -k 10 "$(( _sg_budget + 30 ))" python3 -I "$CLAWBOX_START_GUARD" start-guard \
     --state-dir "$OPENCLAW_STATE_DIR" \
@@ -424,7 +429,8 @@ if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -x "$OPENCLAW_BIN" ] && [ -f 
     --openclaw-bin "$OPENCLAW_BIN" \
     --unit "$_sg_unit" \
     --restarts "$_sg_restarts" \
-    --budget-seconds "$_sg_budget" || _sg_rc=$?
+    --budget-seconds "$_sg_budget" \
+    "${_sg_where[@]}" || _sg_rc=$?
   if [ "$_sg_rc" -ne 0 ]; then
     echo "  WARN: start-loop recovery stopped (exit $_sg_rc); the gateway starts as it is" >&2
   fi

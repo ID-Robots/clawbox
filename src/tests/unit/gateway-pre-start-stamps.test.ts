@@ -487,3 +487,74 @@ describe.skipIf(!hasPython3)("the Claude Code version report, on the boot path",
     expect(readFileSync(bundle, "utf-8")).toContain("ANTHROPIC_CLAUDE_CODE_VERSION=`2.1.300`");
   });
 });
+
+/**
+ * The updater runs this script itself, with the gateway stopped and outside its
+ * unit (gateway_verify, a core-only update, the plugin retry). The start-guard
+ * at its top records every run, and that run then became "the previous start"
+ * of the unit's next real start — one that never reaches `gateway ready`, since
+ * no gateway ran — so that start re-ran every full check (10 s on a Jetson)
+ * behind a false "the previous start did not reach gateway ready".
+ */
+describe.skipIf(!hasPython3)("a pre-start run outside the gateway unit", () => {
+  const START_GUARD = sliceScript(
+    "# ── Start-loop recovery: a database the core refuses at every start",
+    '"${CLAWBOX_STEP:-:}" "config check"',
+  );
+
+  /** One unit start, seconds ago, and whether it reached `gateway ready`. */
+  function seedUnitStart(ready: boolean): number {
+    const now = Date.now() / 1000;
+    // Seconds, not minutes: the guard also reads the core's fixed log directory
+    // /tmp/openclaw, where a live gateway's `gateway ready` written after this
+    // start would make the start that never came up look as if it had.
+    const provenAt = ready ? now - 3 : now - 8;
+    writeJson(path.join(root, "data", "openclaw-start-guard.json"), {
+      version: 1,
+      starts: [{ at: now - 5, restarts: 0 }],
+      provenAt,
+    });
+    return provenAt;
+  }
+
+  /** The updater's run, then the unit's next start: the real block, twice. */
+  function updaterRunThenUnitStart(): { provenAt: number; starts: Array<Record<string, unknown>> } {
+    fakeOpenclaw();
+    // systemctl answers NRestarts; the journal has nothing from the gateway.
+    for (const [name, body] of [["systemctl", "echo 0"], ["journalctl", "exit 0"]]) {
+      writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`);
+      chmodSync(path.join(bin, name), 0o755);
+    }
+    const env = { CLAWBOX_OPENCLAW_2026_10: "1", OPENCLAW_STATE_DIR: home, TMPDIR: dir };
+    for (const run of [{ ...env, CLAWBOX_PRESTART_OUTSIDE_UNIT: "1" }, env]) {
+      const res = runBash(START_GUARD, run);
+      expect(res.status).toBe(0);
+      expect(res.out).not.toContain("start-loop recovery stopped");
+    }
+    const guard = readJson(path.join(root, "data", "openclaw-start-guard.json"));
+    expect(guard.starts).toHaveLength(3);
+    return guard as { provenAt: number; starts: Array<Record<string, unknown>> };
+  }
+
+  it("is not taken for the previous start: the unit's next start reuses what the last real one proved", () => {
+    seedUnitStart(true);
+    const key = recordFullCheck();
+
+    const guard = updaterRunThenUnitStart();
+
+    expect(check("plugin-consent")).toEqual({ state: "hit", key, rest: "ok consented:deepseek" });
+    expect(guard.starts[1].outsideUnit).toBe(true);
+    expect(guard.starts[2]).not.toHaveProperty("outsideUnit");
+  });
+
+  it("still re-uses nothing when the last real start did not reach gateway ready", () => {
+    const provenAt = seedUnitStart(false);
+    const key = recordFullCheck();
+
+    const guard = updaterRunThenUnitStart();
+
+    // Nothing outside this case's own files said `gateway ready`.
+    expect(guard.provenAt).toBe(provenAt);
+    expect(check("plugin-consent")).toEqual({ state: "miss", key, rest: "the previous start did not reach gateway ready" });
+  });
+});
