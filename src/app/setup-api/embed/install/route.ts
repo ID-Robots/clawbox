@@ -9,10 +9,24 @@ import {
 } from "@/lib/background-tasks";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { getEmbedLaunchSpec, getEmbedProvisioningStatus } from "@/lib/embed-server";
+import path from "@/lib/runtime-path";
+import {
+  getEmbedLaunchSpec,
+  getEmbedModelDir,
+  getEmbedProvisioningStatus,
+  readActiveLocalEmbeddingModel,
+} from "@/lib/embed-server";
 import { embedModelAsidePath } from "@/lib/embed-model-download";
 import { EMBED_GROUP, embedModelDownloadTask } from "@/lib/embed-install-task";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import {
+  DEFAULT_LOCAL_EMBEDDING_MODEL_ID,
+  isLocalEmbeddingModelId,
+  localEmbeddingModelSpec,
+  localEmbeddingVariant,
+  type LocalEmbeddingModelId,
+} from "@/lib/embed-runtime-ids";
+import { partPathOf } from "@/lib/embed-model-fetch";
 
 /**
  * POST /setup-api/embed/install → fetch the memory-search model, streamed.
@@ -74,17 +88,53 @@ export async function POST(req: Request) {
   // installed: the GGUF is on the box but the index says the embedder is not
   // answering, and fetching it afresh is the one repair that does not need a
   // terminal. A bodyless POST — every caller that predates this — is unchanged.
-  const force = await req.json().then(
-    (body: unknown) => (body as { force?: unknown })?.force === true,
-    () => false,
-  );
+  //
+  // `model` (TASK-2411) names which catalog model to fetch; absent is the
+  // model the box is set to, which is every caller that predates the choice.
+  const body = await req.json().catch(() => null) as { force?: unknown; model?: unknown } | null;
+  const force = body?.force === true;
+  if (body?.model !== undefined && !isLocalEmbeddingModelId(body.model)) {
+    return NextResponse.json({ error: "Unknown embedding model.", kind: "invalid" }, { status: 400 });
+  }
+  const model: LocalEmbeddingModelId = isLocalEmbeddingModelId(body?.model)
+    ? body.model
+    : (await readActiveLocalEmbeddingModel().catch(() => null))?.id ?? DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
 
-  const provisioning = await getEmbedProvisioningStatus().catch(() => null);
-  if (provisioning?.installed && !force) {
-    return closingLine({ success: true, status: "The memory-search model is already on this box." });
+  if (model === DEFAULT_LOCAL_EMBEDDING_MODEL_ID) {
+    const provisioning = await getEmbedProvisioningStatus(getEmbedLaunchSpec()).catch(() => null);
+    if (provisioning?.installed && !force) {
+      return closingLine({ success: true, status: "The memory-search model is already on this box." });
+    }
+    const start = startBackgroundTask(embedModelDownloadTask({ force }));
+    return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
   }
 
-  const start = startBackgroundTask(embedModelDownloadTask({ force }));
+  // Another model: only where this box can run it — the route is the
+  // boundary, not the picker that already hides it — and only the variant the
+  // gate picks for this GPU.
+  const { gateLocalModel, installedLocalEmbeddingVariant } = await import("@/lib/local-embedding-model");
+  // The model the box is set to is the variant config.json records — the one
+  // the unit loads — and not whichever variant happens to be on disk.
+  const active = await readActiveLocalEmbeddingModel().catch(() => null);
+  let installed = await installedLocalEmbeddingVariant(model);
+  let quant = installed?.quant;
+  if (active?.id === model) {
+    const variant = localEmbeddingVariant(model, active.quant);
+    const here = await fs.stat(path.join(getEmbedModelDir(), variant.file)).then((st) => st.isFile(), () => false);
+    installed = here ? { quant: variant.quant, file: variant.file, bytes: variant.bytes } : null;
+    quant = variant.quant;
+  }
+  if (installed && !force) {
+    return closingLine({ success: true, status: `${localEmbeddingModelSpec(model).label} is already on this box.` });
+  }
+  const gate = await gateLocalModel(model);
+  if (!gate.available || !gate.quant) {
+    return NextResponse.json(
+      { error: gate.detail ?? "This box cannot run that embedding model.", kind: "local_model_unavailable", reason: gate.reason },
+      { status: 409 },
+    );
+  }
+  const start = startBackgroundTask(embedModelDownloadTask({ force, model, quant: quant ?? gate.quant }));
   return backgroundTaskResponse(start.started ? start.task.id : start.running.id);
 }
 
@@ -113,6 +163,18 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "The memory model is being fetched right now.", code: "busy", taskId: running.id }, { status: 409 });
   }
 
+  // `?model=` (TASK-2411) removes one catalog model's copy — the one the box
+  // is NOT set to, typically: switching models never deletes the other GGUF
+  // on its own, this is where the owner takes it back. Absent is the model
+  // the box is set to, as before.
+  const asked = new URL(req.url).searchParams.get("model");
+  if (asked !== null && !isLocalEmbeddingModelId(asked)) {
+    return NextResponse.json({ error: "Unknown embedding model.", code: "invalid" }, { status: 400 });
+  }
+  const active = (await readActiveLocalEmbeddingModel().catch(() => null))?.id ?? DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
+  const target: LocalEmbeddingModelId = asked ?? active;
+  if (target !== DEFAULT_LOCAL_EMBEDDING_MODEL_ID) return removeCatalogModel(target, target === active);
+
   const spec = getEmbedLaunchSpec();
   // A copy a dead "Download again" left aside would otherwise be put back by
   // the next download — and is disk the owner asked for back.
@@ -123,7 +185,7 @@ export async function DELETE(req: Request) {
   } catch {
     return NextResponse.json({ error: "The memory model is not on this box.", code: "not_found" }, { status: 404 });
   }
-  await stopLocalAiProvider("embed").catch(() => {});
+  if (target === active) await stopLocalAiProvider("embed").catch(() => {});
   // The stop is awaited: a download started from another tab meanwhile owns
   // the file now (and a "Download again" may have moved it aside).
   const startedMeanwhile = liveBackgroundTask(EMBED_GROUP);
@@ -138,6 +200,39 @@ export async function DELETE(req: Request) {
       { status: 500 },
     );
   }
+  const provisioning = await getEmbedProvisioningStatus().catch(() => null);
+  return NextResponse.json({ ok: true, freedBytes, installed: !!provisioning?.installed });
+}
+
+/** Every variant of a catalog model, and a half-fetched one, off the disk. */
+async function removeCatalogModel(model: LocalEmbeddingModelId, isActive: boolean): Promise<Response> {
+  const dir = getEmbedModelDir();
+  const variants = localEmbeddingModelSpec(model).variants;
+  const files = [
+    ...variants.map((v) => path.join(dir, v.file)),
+    ...variants.map((v) => partPathOf(dir, v)),
+  ];
+  const sizes = await Promise.all(files.map((f) => fs.stat(f).then((st) => st.size, () => null)));
+  if (sizes.every((size) => size === null)) {
+    return NextResponse.json({ error: "That memory model is not on this box.", code: "not_found" }, { status: 404 });
+  }
+  // The running embedder holds the weights open: unlinking under it frees no
+  // disk until it exits, which is the one thing this button promises.
+  if (isActive) await stopLocalAiProvider("embed").catch(() => {});
+  // A download started from another tab during the stop owns the part now.
+  const startedMeanwhile = liveBackgroundTask(EMBED_GROUP);
+  if (startedMeanwhile) {
+    return NextResponse.json({ error: "The memory model is being fetched right now.", code: "busy", taskId: startedMeanwhile.id }, { status: 409 });
+  }
+  try {
+    for (const file of files) await fs.rm(file, { force: true });
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not remove the memory model.", code: "remove_failed" },
+      { status: 500 },
+    );
+  }
+  const freedBytes = sizes.reduce<number>((sum, size) => sum + (size ?? 0), 0);
   const provisioning = await getEmbedProvisioningStatus().catch(() => null);
   return NextResponse.json({ ok: true, freedBytes, installed: !!provisioning?.installed });
 }

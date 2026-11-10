@@ -11,6 +11,8 @@ import {
   parseEmbedderChoiceStatus,
 } from "@/lib/memory-shard-state";
 import { notifyMemoryShardChanged } from "@/lib/ui-events";
+import type { LocalEmbeddingModelId } from "@/lib/embed-runtime-ids";
+import { unavailableReasonKey } from "@/lib/local-embedding-client";
 import StatusMessage from "./StatusMessage";
 import { CARD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
@@ -24,6 +26,11 @@ import { CARD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-u
  * switch is followed by a FULL pass — the same rebuild the wizard asks for.
  * Nothing here is optimistic: the choice drawn is always the one the route
  * re-reads after the write.
+ *
+ * Under "On this box", WHICH model (TASK-2411): the picker lists every model
+ * the box offers, the ones it cannot run disabled with the reason beside
+ * them. A change of model is a change of embedder like a change of place —
+ * downloaded first when it is not here, then the same switch and full pass.
  */
 
 type Phase = "idle" | "downloading" | "switching" | "switched";
@@ -63,14 +70,20 @@ export default function MemoryShardEmbedderCard() {
   if (!status) return null;
   const busy = phase === "downloading" || phase === "switching";
 
-  const choose = async (next: EmbeddingSource) => {
-    if (busy || next === status.source) return;
+  const choose = async (next: EmbeddingSource, model?: LocalEmbeddingModelId) => {
+    const modelChange = next === "local" && model !== undefined && model !== status.localModel;
+    if (busy || (next === status.source && !modelChange)) return;
     setError(null);
     setDetail(null);
     try {
-      if (next === "local" && !status.localInstalled) {
+      const target = modelChange ? status.localModels.find((m) => m.id === model) : undefined;
+      const installed = target ? target.installed : status.localInstalled;
+      if (next === "local" && !installed) {
         setPhase("downloading");
-        const pull = await fetch("/setup-api/embed/install", { method: "POST" });
+        const pull = await fetch("/setup-api/embed/install", {
+          method: "POST",
+          ...(modelChange ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) } : {}),
+        });
         if (!pull.ok) throw new Error(await refusal(pull));
         const outcome = await readInstallStream(pull, (progress) => {
           if (progress.status && live.current) setDetail(progress.status);
@@ -82,7 +95,7 @@ export default function MemoryShardEmbedderCard() {
       const res = await fetch("/setup-api/clawkeep/memory/provider", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: next }),
+        body: JSON.stringify(modelChange ? { source: next, localModel: model } : { source: next }),
       });
       if (!res.ok) throw new Error(await refusal(res));
       // A FULL pass: the index belongs to the embedder that wrote it, and the
@@ -139,6 +152,33 @@ export default function MemoryShardEmbedderCard() {
           );
         })}
       </div>
+
+      {status.source === "local" && status.localModels.length > 1 && (
+        <div className="mt-3" data-testid="memory-shard-embedder-model">
+          <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest" htmlFor="memory-shard-embedder-model-select">
+            {t("clawkeep.memory.embedder.localModel")}
+          </label>
+          <select
+            id="memory-shard-embedder-model-select"
+            className="mt-1 w-full rounded-lg border border-white/10 bg-[var(--surface-card)] px-2 py-1.5 text-xs text-[var(--text-secondary)] disabled:opacity-50"
+            value={status.localModel}
+            disabled={busy}
+            onChange={(e) => void choose("local", e.target.value as LocalEmbeddingModelId)}
+            data-testid="memory-shard-embedder-model-select"
+          >
+            {status.localModels.map((m) => (
+              <option key={m.id} value={m.id} disabled={!m.available && !m.active}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          {status.localModels.filter((m) => !m.available && !m.active).map((m) => (
+            <p key={m.id} className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid={`memory-shard-embedder-model-${m.id}-unavailable`}>
+              {m.label}: {t(unavailableReasonKey(m.reason))}
+            </p>
+          ))}
+        </div>
+      )}
 
       <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="memory-shard-embedder-hint">
         {t(status.source === "cloud" ? "clawkeep.memory.embedder.cloudHint" : "clawkeep.memory.embedder.localHint")}

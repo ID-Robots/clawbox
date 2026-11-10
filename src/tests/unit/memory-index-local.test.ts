@@ -77,6 +77,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => {
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
   getEmbedProvisioningStatus: async () => ({ installed: boxState.gguf, binaryAvailable: boxState.gguf, modelAvailable: boxState.gguf, modelBytes: 1, binPath: "", modelPath: "" }),
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
 }));
 // The cloud half of the same index: where the ClawBox AI embedder is, and the
 // box's own credential for it. Both are read per request by the real resolver.

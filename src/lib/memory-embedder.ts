@@ -36,7 +36,8 @@ import {
   CLOUD_EMBEDDING_MODEL,
   CLOUD_EMBEDDING_PROVIDER,
 } from "@/lib/clawai-cloud-embeddings";
-import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import { getEmbedProxyBaseUrl, readActiveLocalEmbeddingModel } from "@/lib/embed-server";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID, localEmbeddingModelSpec } from "@/lib/embed-runtime-ids";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { resolveClawaiCloudDefaults } from "@/lib/clawai-cloud-defaults-state";
@@ -146,15 +147,23 @@ export async function defaultEmbedderSource(): Promise<EmbeddingSource> {
   return resolveClawaiCloudDefaults(facts).embeddings.source;
 }
 
-function localEmbedder(): ResolvedEmbedder {
+/**
+ * The model on this box the owner picked (TASK-2411). The default slot keeps
+ * the name and width it always had, so its index identity does not move; any
+ * other model is named by its catalog id, which is also the `--alias` the
+ * unit serves it under.
+ */
+async function localEmbedder(): Promise<ResolvedEmbedder> {
   const baseUrl = getEmbedProxyBaseUrl();
+  const active = await readActiveLocalEmbeddingModel().catch(() => null);
+  const picked = active && active.id !== DEFAULT_LOCAL_EMBEDDING_MODEL_ID ? active.id : null;
   return {
     source: "local",
     provider: LOCAL_EMBEDDING_PROVIDER,
-    model: LOCAL_EMBEDDING_MODEL,
+    model: picked ?? LOCAL_EMBEDDING_MODEL,
     baseUrl,
     requestUrl: `${baseUrl}/embeddings`,
-    dimensions: LOCAL_EMBEDDING_DIMENSIONS,
+    dimensions: picked ? localEmbeddingModelSpec(picked).dimensions : LOCAL_EMBEDDING_DIMENSIONS,
     // The proxy holds the per-install service token; read at request time by the
     // caller, which is why it is not carried here.
     token: null,
@@ -199,8 +208,8 @@ async function cloudEmbedder(): Promise<ResolvedEmbedder> {
 export async function resolveMemoryEmbedder(fallback?: EmbeddingSource): Promise<ResolvedEmbedder> {
   const pinned = await readEmbedderPin();
   const source = pinned ?? fallback ?? (await defaultEmbedderSource());
-  if (source !== "cloud") return localEmbedder();
-  return (await cloudEmbeddingsSwitchedOff()) ? localEmbedder() : await cloudEmbedder();
+  if (source !== "cloud") return await localEmbedder();
+  return (await cloudEmbeddingsSwitchedOff()) ? await localEmbedder() : await cloudEmbedder();
 }
 
 /** Trailing slashes are not part of an address. */

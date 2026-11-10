@@ -17,6 +17,15 @@ import { resetBackgroundTasksForTests } from "@/lib/background-tasks";
 let modelPath: string;
 const owner = { value: true };
 vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
+/** What the gate says about the 4B on this box (TASK-2411). */
+const gate4b = { value: { available: false, quant: null as string | null, reason: "jetson" as string | null, detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." as string | null } };
+vi.mock("@/lib/local-embedding-model", () => ({
+  gateLocalModel: async () => gate4b.value,
+  installedLocalEmbeddingVariant: async () => {
+    const file = path.join(path.dirname(modelPath), "Qwen3-Embedding-4B-Q8_0.gguf");
+    return fs.existsSync(file) ? { quant: "Q8_0", file: path.basename(file), bytes: fs.statSync(file).size } : null;
+  },
+}));
 
 const followed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined }));
 vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followed(...(a as [])) }));
@@ -26,6 +35,9 @@ vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: (...a: unknown[]
 
 vi.mock("@/lib/embed-server", () => ({
   getEmbedLaunchSpec: () => ({ modelPath }),
+  getEmbedModelDir: () => path.dirname(modelPath),
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
+
   getEmbedProvisioningStatus: async () => {
     const present = fs.existsSync(modelPath);
     return { installed: present, modelAvailable: present, binaryAvailable: true, modelBytes: present ? fs.statSync(modelPath).size : null };
@@ -46,6 +58,7 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-embed-"));
   modelPath = path.join(dir, "qwen3-embedding.gguf");
   owner.value = true;
+  gate4b.value = { available: false, quant: null, reason: "jetson", detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." };
   followed.mockReset().mockResolvedValue({ ok: true, error: undefined });
   stopped.mockClear();
   resetBackgroundTasksForTests();
@@ -181,6 +194,51 @@ describe("POST", () => {
     expect(lines[0].taskId).toBe(firstLine.taskId);
     expect(lines.at(-1)).toMatchObject({ success: true, taskId: firstLine.taskId });
     expect(followed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("which model (TASK-2411)", () => {
+  it("refuses a model that is not in the catalog", async () => {
+    const { POST } = await load();
+    const res = await POST(post({ model: "qwen3-embedding-8b" }));
+    expect(res.status).toBe(400);
+    expect(followed).not.toHaveBeenCalled();
+  });
+
+  it("refuses to fetch the 4B where this box cannot run it, with the gate's reason", async () => {
+    const { POST } = await load();
+    const res = await POST(post({ model: "qwen3-embedding-4b" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ kind: "local_model_unavailable", reason: "jetson" });
+    expect(followed).not.toHaveBeenCalled();
+  });
+
+  it("answers at once for a 4B copy that is already here, without a root step", async () => {
+    fs.writeFileSync(path.join(dir, "Qwen3-Embedding-4B-Q8_0.gguf"), "x");
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ model: "qwen3-embedding-4b" })));
+    expect(lines.at(-1)).toMatchObject({ success: true });
+    expect(followed).not.toHaveBeenCalled();
+  });
+
+  it("removes the 4B's files on ?model= without stopping the embedder that runs the 0.6B", async () => {
+    fs.writeFileSync(path.join(dir, "Qwen3-Embedding-4B-Q8_0.gguf"), "x".repeat(10));
+    fs.writeFileSync(path.join(dir, "Qwen3-Embedding-4B-Q4_K_M.gguf.part"), "x".repeat(5));
+    fs.writeFileSync(modelPath, "0.6b");
+    const { DELETE } = await load();
+    const res = await DELETE(new Request("http://localhost/setup-api/embed/install?model=qwen3-embedding-4b", { method: "DELETE" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).freedBytes).toBe(15);
+    expect(fs.existsSync(path.join(dir, "Qwen3-Embedding-4B-Q8_0.gguf"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "Qwen3-Embedding-4B-Q4_K_M.gguf.part"))).toBe(false);
+    expect(fs.existsSync(modelPath)).toBe(true);
+    expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("refuses ?model= for an id that is not in the catalog", async () => {
+    const { DELETE } = await load();
+    const res = await DELETE(new Request("http://localhost/setup-api/embed/install?model=..%2Fconfig", { method: "DELETE" }));
+    expect(res.status).toBe(400);
   });
 });
 

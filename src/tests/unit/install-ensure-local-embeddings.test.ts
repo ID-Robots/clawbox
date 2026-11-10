@@ -222,6 +222,7 @@ describe("step_embed_model — driven against stubs", () => {
     hf = true,
     present = false,
     hfRc = 0,
+    shaBad = false,
     pins = {} as Record<string, string>,
   } = {}) {
     const project = path.join(tmp, "project");
@@ -243,6 +244,18 @@ describe("step_embed_model — driven against stubs", () => {
         '[ "$HF_RC" = "0" ] || exit "$HF_RC"',
         'dir=""; while [ $# -gt 0 ]; do [ "$1" = "--local-dir" ] && dir="$2"; shift; done',
         'mkdir -p "$dir" && : > "$dir/Qwen3-Embedding-0.6B-Q8_0.gguf"',
+      ].join(NL),
+      { mode: 0o755 },
+    );
+    // sha256sum: the step verifies the shipped GGUF against the catalog's
+    // sha256 (TASK-2411). The stub file is empty, so this answers the
+    // catalog's hash for it — or a wrong one when a case asks.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "sha256sum"),
+      [
+        "#!/bin/sh",
+        'if [ "${SHA_BAD:-0}" = "1" ]; then echo "0000000000000000000000000000000000000000000000000000000000000000  $1"; exit 0; fi',
+        'echo "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439  $1"',
       ].join(NL),
       { mode: 0o755 },
     );
@@ -282,7 +295,7 @@ describe("step_embed_model — driven against stubs", () => {
       out = execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, LOG: log, HF_RC: String(hfRc) },
+        env: { ...process.env, LOG: log, HF_RC: String(hfRc), SHA_BAD: shaBad ? "1" : "0" },
       });
     } catch (e: unknown) {
       const err = e as { status?: number; stdout?: string; stderr?: string };
@@ -304,6 +317,13 @@ describe("step_embed_model — driven against stubs", () => {
       expect.stringMatching(/^hf download Qwen\/Qwen3-Embedding-0\.6B-GGUF Qwen3-Embedding-0\.6B-Q8_0\.gguf --local-dir .*\/data\/embed\/models$/),
     ]);
     expect(r.cached).toBe(true);
+  });
+
+  it("deletes a download that does not verify against the catalog's sha256, and fails (TASK-2411)", () => {
+    const r = run({ shaBad: true });
+    expect(r.out).toContain("did not verify");
+    expect(r.out).toContain("RC=1");
+    expect(r.cached).toBe(false);
   });
 
   it("is a no-op when the file is already there", () => {

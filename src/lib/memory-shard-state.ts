@@ -10,6 +10,12 @@
  */
 
 import type { CloudUnavailableReason } from "@/lib/clawai-cloud-defaults-state";
+import {
+  DEFAULT_LOCAL_EMBEDDING_MODEL_ID,
+  isLocalEmbeddingModelId,
+  type LocalEmbeddingModelId,
+} from "@/lib/embed-runtime-ids";
+import { parseLocalEmbeddingModelOptions, type LocalEmbeddingModelOption } from "@/lib/local-embedding-gating";
 
 /** The owner's consent for the index to run at all. Off on a new box. */
 export const MEMORY_SHARD_ENABLED_KEY = "memory_shard_enabled";
@@ -81,6 +87,20 @@ export const LOCAL_EMBEDDING_ENGINE = "llama.cpp";
 
 /** Roughly what the download costs, for the sentence shown before it starts. */
 export const LOCAL_EMBEDDING_BYTES = 639_000_000;
+
+/**
+ * WHICH model on this box, when the index is local (TASK-2411):
+ * `"qwen3-embedding-0.6b"` (the default, and what an absent key means) or
+ * `"qwen3-embedding-4b"`. An id from the closed catalog in
+ * `embed-runtime-ids.ts`, never a file or a repository — the unit's start
+ * script maps it through its own copy of that table
+ * (scripts/embed-model-select.sh), so a hand edit can only pick between the
+ * two. Written only by `writeActiveLocalEmbeddingModel`.
+ */
+export const MEMORY_SHARD_LOCAL_MODEL_KEY = "memory_shard_local_model";
+
+/** The GGUF quant of that model the embedder loads (`Q8_0` | `Q4_K_M`). */
+export const MEMORY_SHARD_LOCAL_QUANT_KEY = "memory_shard_local_model_quant";
 
 /** Where OpenClaw keeps the owner's extra folders. */
 export const EXTRA_PATHS_CONFIG_PATH = "memory.search.extraPaths";
@@ -194,6 +214,13 @@ export interface EmbedderChoiceStatus {
   cloudReason: CloudUnavailableReason | null;
   /** The model for this box is on disk. */
   localInstalled: boolean;
+  /**
+   * The model the embedder on this box runs (TASK-2411). The 0.6B from a
+   * server that predates the choice, which is the only model it could run.
+   */
+  localModel: LocalEmbeddingModelId;
+  /** Every model the owner can pick, with whether this box can run it. Empty from an older server. */
+  localModels: LocalEmbeddingModelOption[];
 }
 
 /**
@@ -269,5 +296,7 @@ export function parseEmbedderChoiceStatus(raw: unknown): EmbedderChoiceStatus | 
     // An older server sends no reason at all; null is the generic note.
     cloudReason: CLOUD_UNAVAILABLE_REASONS.find((reason) => reason === r.cloudReason) ?? null,
     localInstalled: r.localInstalled === true,
+    localModel: isLocalEmbeddingModelId(r.localModel) ? r.localModel : DEFAULT_LOCAL_EMBEDDING_MODEL_ID,
+    localModels: parseLocalEmbeddingModelOptions(r.localModels),
   };
 }

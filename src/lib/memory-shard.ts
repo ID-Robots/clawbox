@@ -26,7 +26,12 @@ import {
   readEmbedderPin,
   writeEmbedderPin,
 } from "@/lib/memory-embedder";
-import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import {
+  getEmbedProxyBaseUrl,
+  readActiveLocalEmbeddingModel,
+  writeActiveLocalEmbeddingModel,
+  type LocalEmbeddingSelection,
+} from "@/lib/embed-server";
 import {
   CLOUD_EMBEDDING_PROVIDER,
   OPENCLAW_CLOUD_EMBEDDING_MODEL,
@@ -45,7 +50,7 @@ import {
   type EmbeddingSource,
   type MemorySource,
 } from "@/lib/memory-shard-state";
-import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID, isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 
 /** The owner's consent for the index to run. Off on a new box. */
 export async function getMemoryShardEnabled(): Promise<boolean> {
@@ -270,7 +275,20 @@ export function embeddingConfigHome(version: string | null): "memory.search" | "
  * Jetson, and a batch is a single validated read-modify-write rather than two
  * that can interleave.
  */
-export async function switchToLocalEmbeddings(): Promise<void> {
+export async function switchToLocalEmbeddings(selection?: LocalEmbeddingSelection): Promise<void> {
+  // WHICH model first (TASK-2411), and the running embedder stopped before
+  // anything is pointed at it: the unit loads the model the box is set to when
+  // it starts, so a server left up would answer the next request — the full
+  // pass the caller is about to post — with the OLD model's vectors under the
+  // NEW model's identity. The wake path checks the served alias as well
+  // (local-ai-runtime.ts); this stop is what makes the order certain.
+  const active = await readActiveLocalEmbeddingModel();
+  const target = selection ?? active;
+  if (selection && (selection.id !== active.id || selection.quant !== active.quant)) {
+    await writeActiveLocalEmbeddingModel(selection);
+    const { stopLocalAiProvider } = await import("@/lib/local-ai-runtime");
+    await stopLocalAiProvider("embed");
+  }
   // Nothing to point on the edition where ClawBox is the client: the write
   // that remains is recording WHICH model the vectors about to be written
   // belong to, so a later embedder change is caught rather than silently
@@ -294,7 +312,10 @@ export async function switchToLocalEmbeddings(): Promise<void> {
   // the provider LAST in it: the batch is atomic, but the order is what a
   // reader of the config sees if it is ever split into single writes.
   await runOpenclawConfigSetBatch([
-    [`${home}.model`, LOCAL_EMBEDDING_MODEL],
+    // The served `--alias`: the default slot's name as it always was, or the
+    // catalog id of the model picked. The core folds it into its index
+    // identity, so a change of model is a `mismatched` index and a full pass.
+    [`${home}.model`, target.id === DEFAULT_LOCAL_EMBEDDING_MODEL_ID ? LOCAL_EMBEDDING_MODEL : target.id],
     [`${home}.remote.baseUrl`, getEmbedProxyBaseUrl()],
     [`${home}.remote.apiKey`, getLocalAiToken()],
     [`${home}.queryInputType`, "query"],

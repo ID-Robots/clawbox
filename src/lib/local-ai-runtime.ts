@@ -16,8 +16,9 @@ import {
 } from "@/lib/llamacpp-server";
 import {
   EMBED_UNIT,
+  embedServedAlias,
+  getActiveEmbedLaunchSpec,
   getEmbedBaseUrl,
-  getEmbedLaunchSpec,
   getEmbedProvisioningStatus,
   getEmbedProxyBaseUrl,
   isEmbedHealthy,
@@ -440,7 +441,7 @@ async function waitForEmbedReady(spec: EmbedLaunchSpec): Promise<void> {
     if (budgetMs === null) {
       // GGUF on disk → a wake (4 s measured); missing → the start script is
       // downloading 640 MB and only the provisioning budget is honest.
-      const provisioning = await getEmbedProvisioningStatus().catch(() => null);
+      const provisioning = await getEmbedProvisioningStatus(spec).catch(() => null);
       budgetMs = provisioning?.modelAvailable ? getLlamaCppWakeTimeoutMs() : spec.startupTimeoutMs;
       deadline = Date.now() + budgetMs;
     }
@@ -468,8 +469,19 @@ async function waitForEmbedReady(spec: EmbedLaunchSpec): Promise<void> {
  * the gateway or a running build; see DEFAULT_EMBED_WAKE_MIN_AVAILABLE_MB.
  */
 async function startEmbedIfNeeded(): Promise<void> {
-  const spec = getEmbedLaunchSpec();
-  if (await isEmbedHealthy(spec.healthUrl)) return;
+  const spec = await getActiveEmbedLaunchSpec();
+  if (await isEmbedHealthy(spec.healthUrl)) {
+    // Up, but is it the model this box is set to? A server still holding the
+    // model the owner just switched away from (TASK-2411) must not embed one
+    // more passage: vectors from two models in one index answer nothing. It is
+    // stopped and woken again, and the start script loads the model the box is
+    // set to now. A server that does not say (an older build) is taken at its
+    // word, rather than restarted on every request.
+    const served = await embedServedAlias(spec.baseUrl);
+    if (served === null || served === spec.alias) return;
+    console.warn(`[local-ai] the memory embedder runs ${served} but this box is set to ${spec.alias}; restarting it`);
+    await stopEmbed();
+  }
 
   const minMb = getEmbedWakeMinAvailableMb();
   if (minMb > 0) {

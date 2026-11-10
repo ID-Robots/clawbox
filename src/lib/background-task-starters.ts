@@ -36,8 +36,10 @@ export async function startSpecFor(kind: string, meta: Record<string, unknown>):
       if (size === null) return null;
       return (await import("./whisper-install-tasks")).whisperSizeDownloadTaskNow(size);
     }
-    case EMBED_MODEL_DOWNLOAD_KIND:
-      return (await import("./embed-install-task")).embedModelDownloadTask({ force: meta.force === true });
+    case EMBED_MODEL_DOWNLOAD_KIND: {
+      const embed = await import("./embed-install-task");
+      return embed.embedModelDownloadTask(embed.embedModelDownloadRequest(meta));
+    }
     case LLAMACPP_INSTALL_KIND: {
       const llamacpp = await import("./llamacpp-install-task");
       const request = llamacpp.llamacppInstallRequest(meta);

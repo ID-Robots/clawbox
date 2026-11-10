@@ -171,6 +171,62 @@ describe("EmbeddingModelCard", () => {
     expect(calls.find((c) => c.method === "POST")?.body).toEqual({ force: false });
   });
 
+  describe("which model (TASK-2411)", () => {
+    const row = (over: Record<string, unknown>) => ({
+      id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", dimensions: 2560, active: false, installed: false,
+      bytes: 4_279_660_224, quant: "Q8_0", available: true, reason: null, detail: null, ...over,
+    });
+    const SMALL = { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", dimensions: 1024, active: true, installed: true, bytes: 639_150_592, quant: "Q8_0", available: true, reason: null, detail: null };
+    const withModels = (fourB: Record<string, unknown>) => ({ ...PRESENT, models: [SMALL, row(fourB)] });
+
+    it("shows the 4B as unavailable on a Jetson, with the reason and nothing to press", async () => {
+      stub(() => json(withModels({ available: false, quant: null, reason: "jetson" })));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const reason = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-unavailable");
+      expect(reason.textContent).toMatch(/Jetson Orin Nano Super/);
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-4b-download")).toBeNull();
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeNull();
+      expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-0.6b-state").textContent).toMatch(/In use/);
+    });
+
+    it("downloads the 4B by name where the box can run it", async () => {
+      stub((url, init) => (init?.method === "POST" ? ndjson([{ success: true }]) : json(withModels({}))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-download"));
+      await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+      expect(calls.find((c) => c.method === "POST")).toMatchObject({ url: "/setup-api/embed/install", body: { model: "qwen3-embedding-4b" } });
+    });
+
+    it("switches memory search onto a downloaded 4B, then asks for the full pass", async () => {
+      stub((url, init) => (init?.method === "POST"
+        ? json({ ok: true })
+        : url === "/setup-api/clawkeep/memory/provider" ? json({ source: "local" }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use"));
+      await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(2));
+      const posts = calls.filter((c) => c.method === "POST");
+      expect(screen.queryByTestId("local-ai-embed-models-cloud")).toBeNull();
+      expect(posts[0]).toMatchObject({ url: "/setup-api/clawkeep/memory/provider", body: { source: "local", localModel: "qwen3-embedding-4b" } });
+      expect(posts[1]).toMatchObject({ url: "/setup-api/clawkeep/memory/index", body: { mode: "full" } });
+    });
+
+    it("does not move an index that lives in the cloud: Use waits for Memory Shard's own switch", async () => {
+      stub((url) => (url === "/setup-api/clawkeep/memory/provider" ? json({ source: "cloud" }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      expect(await screen.findByTestId("local-ai-embed-models-cloud")).toBeTruthy();
+      expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled();
+    });
+
+    it("removes a downloaded model that is not in use by its own id, never the one in use", async () => {
+      stub((url, init) => (init?.method === "DELETE" ? json({ ok: true }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-remove"));
+      await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+      expect(calls.find((c) => c.method === "DELETE")?.url).toBe("/setup-api/embed/install?model=qwen3-embedding-4b");
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-0.6b-remove")).toBeNull();
+    });
+  });
+
   it("offers no removal of its own: taking the model off is the row's Uninstall", async () => {
     stub(() => json(PRESENT));
     render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);

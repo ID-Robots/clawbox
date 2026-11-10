@@ -58,6 +58,13 @@ edition**:
 | **ClawBox AI cloud** | Your notes and documents are sent to ClawBox AI to be indexed. Nothing to download, and the box's own memory stays free. Needs a Pro or Max plan. |
 | **On this box** | Qwen3 on the box's own llama.cpp. Nothing leaves the box; the model is a one-time download of about 640 MB, and it sleeps between searches. |
 
+Under **On this box**, **Model on this box** picks which Qwen3 embedding model it is:
+**Qwen3-Embedding-0.6B** (the default, on every box) or **Qwen3-Embedding-4B** on a PC with an
+NVIDIA GPU and 6 GB of free GPU memory. On a ClawBox, and on a PC without an NVIDIA GPU, the 4B
+is listed but cannot be picked, and the reason is written under it. Picking it downloads it
+first (2.5–4.3 GB) and then rebuilds the index, like any other switch; see
+[Local AI](/guides/local-ai#memory-search-model-06b-or-4b) for what each needs.
+
 <Frame caption="Memory Shard indexing through the ClawBox AI cloud">
   <img src="/images/memory-shard.webp" alt="The Memory Shard window: the memory index card marked Cloud and Healthy, with files, chunks, sources, index size, Index now and Full reindex buttons, and the automatic indexing schedule below." />
 </Frame>
@@ -129,6 +136,10 @@ schedule and runs setup again, keeping your folders, the model and the existing 
 
 - On the **OpenClaw** edition the index is the agent's own, and it searches it as part of
   answering you. There is nothing extra to do.
+- On either edition the assistant can tell you which model your index uses and which
+  others this box could run, and it can switch between them when you ask — after telling
+  you what the rebuild costs and getting your yes. It cannot download a model for you, and
+  it cannot pick one this box cannot run.
 - On the **Hermes** edition ClawBox builds and owns the index, and the assistant gets a
   tool for it. Ask in plain words — *"what does the lease say about the deposit"* — and it
   searches your documents, quoting the file each passage came from.
