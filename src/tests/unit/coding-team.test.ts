@@ -4276,4 +4276,22 @@ describe("a plan run as a single run: each task's named files", () => {
     expect(await team.missingDeliverables(place, [`${site}/docs/new.md`, `${site}/README.md`, `${site}/gone.md`, "../beside.md", far]))
       .toEqual([`${site}/gone.md (missing)`, "../beside.md (missing)", `${far} (missing)`]);
   });
+
+  it("judges no absolute path outside the project: a plan that names one names nothing of the task's", () => {
+    // team-g4cfurux: every task's hint ended with the planner's own artifact
+    // folder, /…/data/coding-agent-artifacts/run-…/ — never looked for, so
+    // always "missing", and a single run that did all five tasks failed the team.
+    const tree = path.join(root, "tree");
+    const place = { dir: tree, branch: { repo: site, name: "clawbox/run-cccccccc", roots: [tree, site] } };
+    const artifacts = path.join(root, "data", "coding-agent-artifacts", "run-2kb4fwar");
+    expect(team.insidePlace(place, artifacts)).toBe(false);
+    expect(team.insidePlace(place, `${site}/../beside.md`)).toBe(false);
+    // Inside the folder or one of the branch's roots, and every relative path: judged as before.
+    expect(team.insidePlace(place, `${tree}/docs/new.md`)).toBe(true);
+    expect(team.insidePlace(place, `${site}/docs/new.md`)).toBe(true);
+    expect(team.insidePlace(place, "docs/new.md")).toBe(true);
+    expect(team.insidePlace(place, "../beside.md")).toBe(true);
+    expect(team.insidePlace({ dir: site, branch: null }, artifacts)).toBe(false);
+    expect(team.namedDeliverables(["scripts/", "VERIFICATION.md", `${artifacts}/`]).filter((n) => team.insidePlace(place, n))).toEqual(["scripts", "VERIFICATION.md"]);
+  });
 });

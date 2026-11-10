@@ -1905,7 +1905,9 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
     // named folder it emptied (`removedNamed`).
     const removed = await removedByRun(settled, place);
     for (const task of tasks) {
-      const named = namedDeliverables(task.files_hint);
+      // A path outside the project is no file of the task's to judge
+      // (`insidePlace`): never looked for, so never "missing" either.
+      const named = namedDeliverables(task.files_hint).filter((n) => insidePlace(place, n));
       if (!named.length) continue;
       const gone = await removedNamed(settled, place, named, removed);
       const kept = named.filter((n) => !gone.includes(n));
@@ -2059,6 +2061,23 @@ export async function missingDeliverables(place: DeliverablePlace, named: readon
     if (state !== "present") missing.push(`${entry} (${state})`);
   }
   return missing;
+}
+
+/**
+ * Is this named path one the deliverable check can judge — relative, or an
+ * absolute path under the folder or one of the branch's roots? An absolute
+ * path anywhere else is not a file of the project: `namedState` never looks
+ * for it on disk ("a file there is not the run's work"), so it could only
+ * ever be "missing" — and a planner that listed its own run's artifact folder
+ * (`…/data/coding-agent-artifacts/run-…/`, where a run's screenshots go) under
+ * every task failed a team whose single run had done all five of them
+ * (team-g4cfurux). A hint names what a task touches; outside the project
+ * there is nothing of the task's to find.
+ */
+export function insidePlace(place: DeliverablePlace, entry: string): boolean {
+  if (!path.isAbsolute(entry)) return true;
+  const file = path.resolve(entry);
+  return [place.dir, ...(place.branch?.roots ?? [])].some((root) => isInside(file, path.resolve(root)));
 }
 
 /** One named path where a settled run's work is (`missingDeliverables`): in the folder, else on the run's branch. */
