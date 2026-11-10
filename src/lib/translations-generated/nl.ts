@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "Contextvenster (tokens)",
   "localModels.external.edit": "Bewerken",
   "localModels.external.endpoint": "Engine-adres: {url}",
+  "localModels.external.error.addressRefused": "Dat adres is link-local of een cloud-metadatadienst (169.254.0.0/16, fe80::/10, 0.0.0.0) en nooit een AI-engine. Gebruik het adres van de server zelf.",
   "localModels.external.error.apiKey": "De API-sleutel moet één regel zonder spaties zijn.",
   "localModels.external.error.badResponse": "Dat adres antwoordt, maar niet als een OpenAI-compatibele API (geen modellenlijst onder /models).",
   "localModels.external.error.baseUrl": "Voer het adres van de engine in, beginnend met http:// of https://, zonder gebruikersnaam, wachtwoord of query.",

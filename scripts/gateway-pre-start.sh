@@ -2364,6 +2364,33 @@ except Exception:
 def _ext_pos_int(v):
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
+def _ext_host_refused(base):
+    # The same rule as refusedEngineHost (src/lib/external-engine-shared.ts):
+    # never a link-local / cloud-metadata or unspecified target; loopback, LAN
+    # and public hosts are the feature.
+    # (Imported as whole modules on purpose: other test suites slice this
+    # script starting at the first line that imports urlsplit by name.)
+    try:
+        import ipaddress as _ext_ip
+        import urllib.parse as _ext_urlparse
+        host = (_ext_urlparse.urlsplit(base).hostname or "").rstrip(".").lower()
+    except Exception:
+        return True
+    if host in ("metadata.google.internal", "metadata.goog", "metadata"):
+        return True
+    try:
+        ip = _ext_ip.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.version == 6 and ip in _ext_ip.ip_network("64:ff9b::/96"):
+        ip = _ext_ip.ip_address(int(ip) & 0xFFFFFFFF)
+    if ip.version == 4 and ip in _ext_ip.ip_network("0.0.0.0/8"):
+        return True
+    return ip.is_link_local or ip.is_unspecified
+
 if _ext_record is not None:
     _ext_base = _ext_record.get("baseUrl")
     _ext_model = _ext_record.get("modelId")
@@ -2372,6 +2399,7 @@ if _ext_record is not None:
     _ext_valid = (
         isinstance(_ext_base, str) and re.match(r"^https?://[^\s/?#@]+(/[^\s?#]*)?$", _ext_base) is not None
         and "/setup-api/" not in _ext_base
+        and not _ext_host_refused(_ext_base)
         and isinstance(_ext_model, str) and re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]*$", _ext_model) is not None
         and _ext_ctx is not None and _ext_max is not None
     )

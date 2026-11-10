@@ -65,6 +65,7 @@ const ERROR_KEYS: Record<string, string> = {
   unauthorized: "localModels.external.error.unauthorized",
   model_not_listed: "localModels.external.error.modelNotListed",
   bad_response: "localModels.external.error.badResponse",
+  address_refused: "localModels.external.error.addressRefused",
   invalid_base_url: "localModels.external.error.baseUrl",
   invalid_model: "localModels.external.error.model",
   invalid_context_window: "localModels.external.error.contextWindow",

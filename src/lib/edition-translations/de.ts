@@ -2026,6 +2026,7 @@ export const de: Record<string, string> = {
   "localModels.external.error.unauthorized": "Die Engine hat den API-Schlüssel abgelehnt. Prüfen Sie ihn — oder, wenn die Engine keinen braucht, setzen Sie den Haken bei „Gespeicherten Schlüssel entfernen“ (oder lassen Sie das Feld leer, wenn keiner gespeichert ist).",
   "localModels.external.error.modelNotListed": "Die Engine listet diese Modell-ID nicht.",
   "localModels.external.error.badResponse": "Die Adresse antwortet, aber nicht wie eine OpenAI-kompatible API (keine Modellliste unter /models).",
+  "localModels.external.error.addressRefused": "Diese Adresse ist link-local oder ein Cloud-Metadatendienst (169.254.0.0/16, fe80::/10, 0.0.0.0) und nie eine KI-Engine. Geben Sie die Adresse des Servers selbst ein.",
   "localModels.external.error.baseUrl": "Geben Sie die Adresse der Engine ein, beginnend mit http:// oder https://, ohne Benutzernamen, Passwort oder Abfrage.",
   "localModels.external.error.model": "Geben Sie die Modell-ID genau so ein, wie die Engine sie auflistet.",
   "localModels.external.error.contextWindow": "Das Kontextfenster muss eine ganze Zahl an Tokens sein, mindestens 1024.",

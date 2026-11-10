@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "コンテキストウィンドウ（トークン）",
   "localModels.external.edit": "編集",
   "localModels.external.endpoint": "エンジン: {url}",
+  "localModels.external.error.addressRefused": "このアドレスはリンクローカルまたはクラウドのメタデータサービス（169.254.0.0/16、fe80::/10、0.0.0.0）で、AI エンジンにはなりません。サーバー自体のアドレスを入力してください。",
   "localModels.external.error.apiKey": "API キーは空白を含まない 1 行で入力してください。",
   "localModels.external.error.badResponse": "そのアドレスは応答しますが、OpenAI 互換 API の形式ではありません（/models にモデル一覧がありません）。",
   "localModels.external.error.baseUrl": "http:// または https:// で始まるエンジンのアドレスを、ユーザー名・パスワード・クエリなしで入力してください。",

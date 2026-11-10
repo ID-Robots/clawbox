@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "上下文窗口（token）",
   "localModels.external.edit": "编辑",
   "localModels.external.endpoint": "引擎：{url}",
+  "localModels.external.error.addressRefused": "该地址是链路本地地址或云元数据服务（169.254.0.0/16、fe80::/10、0.0.0.0），不可能是 AI 引擎。请使用服务器本身的地址。",
   "localModels.external.error.apiKey": "API 密钥必须是一行，且不含空格。",
   "localModels.external.error.badResponse": "该地址有响应，但不像 OpenAI 兼容 API（/models 下没有模型列表）。",
   "localModels.external.error.baseUrl": "请输入以 http:// 或 https:// 开头的引擎地址，不要包含用户名、密码或查询参数。",

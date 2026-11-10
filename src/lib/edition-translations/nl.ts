@@ -2027,6 +2027,7 @@ export const nl: Record<string, string> = {
   "localModels.external.error.unauthorized": "De engine weigerde de API-sleutel. Controleer hem — of, als de engine er geen nodig heeft, vink ‘Opgeslagen sleutel verwijderen’ aan (of laat het veld leeg als er geen is opgeslagen).",
   "localModels.external.error.modelNotListed": "De engine vermeldt deze model-id niet.",
   "localModels.external.error.badResponse": "Dat adres antwoordt, maar niet als een OpenAI-compatibele API (geen modellenlijst onder /models).",
+  "localModels.external.error.addressRefused": "Dat adres is link-local of een cloud-metadatadienst (169.254.0.0/16, fe80::/10, 0.0.0.0) en nooit een AI-engine. Gebruik het adres van de server zelf.",
   "localModels.external.error.baseUrl": "Voer het adres van de engine in, beginnend met http:// of https://, zonder gebruikersnaam, wachtwoord of query.",
   "localModels.external.error.model": "Voer de model-id in precies zoals de engine die vermeldt.",
   "localModels.external.error.contextWindow": "Het contextvenster moet een geheel aantal tokens zijn, minstens 1024.",

@@ -2013,6 +2013,7 @@ export const bg: Record<string, string> = {
   "localModels.external.error.unauthorized": "Двигателят отказа API ключа. Проверете го — или, ако двигателят не изисква ключ, отметнете „Премахни запазения ключ“ (или оставете полето празно, когато няма запазен).",
   "localModels.external.error.modelNotListed": "Двигателят не изброява този ID на модел.",
   "localModels.external.error.badResponse": "Адресът отговаря, но не като съвместим с OpenAI API (няма списък с модели на /models).",
+  "localModels.external.error.addressRefused": "Този адрес е link-local или услуга за облачни метаданни (169.254.0.0/16, fe80::/10, 0.0.0.0), а такъв никога не е AI двигател. Въведете адреса на самия сървър.",
   "localModels.external.error.baseUrl": "Въведете адреса на двигателя, започващ с http:// или https://, без потребителско име, парола или заявка в него.",
   "localModels.external.error.model": "Въведете ID на модела точно както двигателят го изброява.",
   "localModels.external.error.contextWindow": "Контекстният прозорец трябва да е цяло число токени, поне 1024.",

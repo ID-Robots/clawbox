@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "Finestra di contesto (token)",
   "localModels.external.edit": "Modifica",
   "localModels.external.endpoint": "Motore: {url}",
+  "localModels.external.error.addressRefused": "Quell'indirizzo è link-local o un servizio di metadati cloud (169.254.0.0/16, fe80::/10, 0.0.0.0), che non è mai un motore di IA. Usa l'indirizzo del server stesso.",
   "localModels.external.error.apiKey": "La chiave API deve stare su una riga, senza spazi.",
   "localModels.external.error.badResponse": "Quell'indirizzo risponde, ma non come un'API compatibile con OpenAI (nessun elenco di modelli in /models).",
   "localModels.external.error.baseUrl": "Inserisci l'indirizzo del motore, che inizi con http:// o https://, senza nome utente, password o query.",

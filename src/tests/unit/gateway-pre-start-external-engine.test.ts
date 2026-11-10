@@ -189,6 +189,22 @@ describe.skipIf(!hasPython3)("gateway-pre-start: the external AI engine (TASK-23
     expect(out.log).toContain("External engine record in the device store is malformed");
   });
 
+  it("never writes a link-local, metadata or unspecified target, whatever the store says", () => {
+    for (const baseUrl of ["http://169.254.169.254/v1", "http://[fe80::1]:8000/v1", "http://[::ffff:169.254.169.254]/v1", "http://0.0.0.0:8000/v1", "http://metadata.google.internal/v1"]) {
+      writeStore({ external_engine: record({ baseUrl }) });
+      writeKey(KEY);
+      const out = run(selectedConfig({}));
+      expect(providersOf(out.cfg).clawext, baseUrl).toBeUndefined();
+      expect(out.log, baseUrl).toContain("External engine record in the device store is malformed");
+    }
+    // The LAN, loopback and private hosts the feature is for are written.
+    for (const baseUrl of ["http://192.168.1.20:8000/v1", "http://127.0.0.1:8000/v1", "http://[fd00::5]:8000/v1"]) {
+      writeStore({ external_engine: record({ baseUrl }) });
+      writeKey(KEY);
+      expect(providersOf(run(selectedConfig({})).cfg).clawext?.baseUrl, baseUrl).toBe(baseUrl);
+    }
+  });
+
   it("does nothing on a box with no engine selected (the appliance default)", () => {
     writeStore({ local_ai_configured: true, local_ai_provider: "llamacpp" });
     const plain: Config = {

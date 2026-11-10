@@ -209,6 +209,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.external.error.unauthorized": "The engine refused the API key. Check it — or, if the engine needs no key, tick “Remove the saved key” (or leave the field empty when none is saved).",
   "localModels.external.error.modelNotListed": "The engine does not list this model id.",
   "localModels.external.error.badResponse": "That address answers, but not like an OpenAI-compatible API (no model list at /models).",
+  "localModels.external.error.addressRefused": "That address is link-local or a cloud metadata service (169.254.0.0/16, fe80::/10, 0.0.0.0), which is never an AI engine. Use the address of the server itself.",
   "localModels.external.error.baseUrl": "Enter the engine's address, starting with http:// or https://, with no user name, password or query in it.",
   "localModels.external.error.model": "Enter the model id exactly as the engine lists it.",
   "localModels.external.error.contextWindow": "The context window must be a whole number of tokens, at least 1024.",

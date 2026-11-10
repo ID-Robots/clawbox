@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "Fenêtre de contexte (jetons)",
   "localModels.external.edit": "Modifier",
   "localModels.external.endpoint": "Moteur : {url}",
+  "localModels.external.error.addressRefused": "Cette adresse est en lien local ou un service de métadonnées cloud (169.254.0.0/16, fe80::/10, 0.0.0.0), ce qui n'est jamais un moteur d'IA. Utilisez l'adresse du serveur lui-même.",
   "localModels.external.error.apiKey": "La clé d'API doit tenir sur une ligne, sans espaces.",
   "localModels.external.error.badResponse": "Cette adresse répond, mais pas comme une API compatible OpenAI (pas de liste de modèles sous /models).",
   "localModels.external.error.baseUrl": "Saisissez l'adresse du moteur, commençant par http:// ou https://, sans nom d'utilisateur, mot de passe ni requête.",

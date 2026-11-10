@@ -178,6 +178,19 @@ describe("validation", () => {
     expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
   });
 
+  it("Test and Save refuse a link-local or metadata target with address_refused, before any request", async () => {
+    for (const baseUrl of ["http://169.254.169.254/v1", "http://[fe80::1]:8000/v1", "http://0.0.0.0:8000/v1", "http://metadata.google.internal/v1"]) {
+      for (const handler of [TEST, POST]) {
+        const res = await handler(req("POST", saveBody({ baseUrl })));
+        expect(res.status, baseUrl).toBe(400);
+        expect(await res.json(), baseUrl).toMatchObject({ code: "address_refused", field: "baseUrl" });
+      }
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    expect(keyFile()).toBeNull();
+  });
+
   it("Test answers the probe's verdict and writes nothing", async () => {
     const ok = await (await TEST(req("POST", saveBody()))).json();
     expect(ok).toMatchObject({ ok: true, models: [MODEL, "other-model"] });

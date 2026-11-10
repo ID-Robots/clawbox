@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "Контекстен прозорец (токени)",
   "localModels.external.edit": "Редактирай",
   "localModels.external.endpoint": "Двигател: {url}",
+  "localModels.external.error.addressRefused": "Този адрес е link-local или услуга за облачни метаданни (169.254.0.0/16, fe80::/10, 0.0.0.0), а такъв никога не е AI двигател. Въведете адреса на самия сървър.",
   "localModels.external.error.apiKey": "API ключът трябва да е на един ред, без интервали.",
   "localModels.external.error.badResponse": "Адресът отговаря, но не като съвместим с OpenAI API (няма списък с модели на /models).",
   "localModels.external.error.baseUrl": "Въведете адреса на двигателя, започващ с http:// или https://, без потребителско име, парола или заявка в него.",

@@ -46,7 +46,8 @@ export type ExternalEngineErrorCode =
   | "unreachable"
   | "unauthorized"
   | "model_not_listed"
-  | "bad_response";
+  | "bad_response"
+  | "address_refused";
 
 /** What the owner typed, validated. The API key travels beside it, never inside it. */
 export interface ExternalEngineSettings {
@@ -91,6 +92,77 @@ export function externalEngineDisplayName(modelIdOrRef: string): string {
  * rather than stripped: they would be a second secret riding in a field that
  * IS shown back to the owner and written to the logs as the endpoint.
  */
+// ── Targets an engine can never be ───────────────────────────────────────────
+//
+// The feature is the owner's OWN server: on this machine (loopback), on the
+// LAN (RFC 1918, link-local IPv6 excluded) or anywhere they can reach. What it
+// can never be is a link-local address — 169.254.0.0/16 and fe80::/10, where
+// cloud instance-metadata services answer — or the unspecified address, which
+// is not a server at all. Those are refused here, in every spelling the URL
+// parser leaves (it already normalizes decimal, octal and hex IPv4 forms to
+// dotted quads), and again at probe time for a NAME that resolves to one
+// (external-engine.ts).
+
+/** Well-known metadata service names; their addresses are link-local, but a resolver may not say so. */
+const METADATA_HOSTNAMES = new Set(["metadata.google.internal", "metadata.goog", "metadata"]);
+
+function ipv4Refusal(octets: number[]): string | null {
+  if (octets[0] === 0) return "the unspecified address (0.0.0.0/8)";
+  if (octets[0] === 169 && octets[1] === 254) return "a link-local address (169.254.0.0/16), where cloud metadata services answer";
+  return null;
+}
+
+function parseIpv4(text: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (!m) return null;
+  const octets = m.slice(1).map(Number);
+  return octets.every((o) => o <= 255) ? octets : null;
+}
+
+/** Eight 16-bit groups of an IPv6 literal (no brackets, no zone), or null. */
+function parseIpv6(text: string): number[] | null {
+  let head = text.toLowerCase();
+  let tailV4: number[] | null = null;
+  const lastColon = head.lastIndexOf(":");
+  if (lastColon >= 0 && head.slice(lastColon + 1).includes(".")) {
+    tailV4 = parseIpv4(head.slice(lastColon + 1));
+    if (!tailV4) return null;
+    head = `${head.slice(0, lastColon + 1)}${((tailV4[0] << 8) | tailV4[1]).toString(16)}:${((tailV4[2] << 8) | tailV4[3]).toString(16)}`;
+  }
+  const halves = head.split("::");
+  if (halves.length > 2) return null;
+  const toGroups = (part: string) => (part ? part.split(":") : []);
+  const left = toGroups(halves[0]);
+  const right = halves.length === 2 ? toGroups(halves[1]) : [];
+  const missing = 8 - left.length - right.length;
+  if (halves.length === 1 ? left.length !== 8 : missing < 1) return null;
+  const groups = [...left, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...right];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+/**
+ * Why `hostname` (as `URL.hostname` gives it: IPv6 in brackets) can never be
+ * an engine, or null when it may be one. LAN, private and loopback addresses
+ * are allowed — that is the feature.
+ */
+export function refusedEngineHost(hostname: string): string | null {
+  const host = hostname.trim().toLowerCase().replace(/\.$/, "");
+  if (METADATA_HOSTNAMES.has(host)) return "a cloud metadata service";
+  const v4 = parseIpv4(host);
+  if (v4) return ipv4Refusal(v4);
+  if (host.startsWith("[") && host.endsWith("]")) {
+    const g = parseIpv6(host.slice(1, -1).split("%")[0]);
+    if (!g) return null;
+    if (g.every((x) => x === 0)) return "the unspecified address (::)";
+    if ((g[0] & 0xffc0) === 0xfe80) return "a link-local address (fe80::/10)";
+    const embedded = (g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0xffff)
+      || (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0);
+    if (embedded) return ipv4Refusal([g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff]);
+  }
+  return null;
+}
+
 export function normalizeExternalBaseUrl(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
@@ -105,11 +177,23 @@ export function normalizeExternalBaseUrl(raw: unknown): string | null {
   if (url.username || url.password) return null;
   if (url.search || url.hash) return null;
   if (!url.hostname) return null;
+  if (refusedEngineHost(url.hostname)) return null;
   // The box's own Local AI proxy is the on-device model: "external" pointed at
   // it would start llama.cpp through the back door this feature closes.
   if (/\/setup-api\//.test(url.pathname)) return null;
   const pathname = url.pathname.replace(/\/+$/, "");
   return `${url.protocol}//${url.host}${pathname}`;
+}
+
+/** The host refusal of a URL that is otherwise well-formed http(s), or null. */
+function hostRefusalOf(raw: string): string | null {
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.hostname ? refusedEngineHost(url.hostname) : null;
+  } catch {
+    return null;
+  }
 }
 
 function intIn(raw: unknown, min: number, max: number): number | null {
@@ -127,6 +211,15 @@ const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_./:-]*$/;
 /** Validate the settings half of a save or a test. */
 export function validateExternalEngineInput(body: Record<string, unknown>): ValidationResult {
   const baseUrl = normalizeExternalBaseUrl(body.baseUrl);
+  const refused = !baseUrl && typeof body.baseUrl === "string" ? hostRefusalOf(body.baseUrl) : null;
+  if (refused) {
+    return {
+      ok: false,
+      code: "address_refused",
+      field: "baseUrl",
+      error: `That address is ${refused}, which is never an AI engine. Use the address of the server itself (on this machine, your network or the internet).`,
+    };
+  }
   if (!baseUrl) {
     return {
       ok: false,

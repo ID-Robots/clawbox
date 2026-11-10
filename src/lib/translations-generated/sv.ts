@@ -2382,6 +2382,7 @@ const table: Record<string, string> = {
   "localModels.external.contextWindow": "Kontextfönster (tokens)",
   "localModels.external.edit": "Redigera",
   "localModels.external.endpoint": "Motor: {url}",
+  "localModels.external.error.addressRefused": "Adressen är länklokal eller en metadatatjänst i molnet (169.254.0.0/16, fe80::/10, 0.0.0.0), vilket aldrig är en AI-motor. Ange adressen till själva servern.",
   "localModels.external.error.apiKey": "API-nyckeln måste vara en rad utan mellanslag.",
   "localModels.external.error.badResponse": "Adressen svarar, men inte som ett OpenAI-kompatibelt API (ingen modellista under /models).",
   "localModels.external.error.baseUrl": "Ange motorns adress, som börjar med http:// eller https://, utan användarnamn, lösenord eller frågeparametrar.",

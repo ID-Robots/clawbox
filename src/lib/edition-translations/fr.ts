@@ -2027,6 +2027,7 @@ export const fr: Record<string, string> = {
   "localModels.external.error.unauthorized": "Le moteur a refusé la clé d'API. Vérifiez-la — ou, si le moteur n'en demande pas, cochez « Supprimer la clé enregistrée » (ou laissez le champ vide si aucune n'est enregistrée).",
   "localModels.external.error.modelNotListed": "Le moteur n'indique pas cet identifiant de modèle.",
   "localModels.external.error.badResponse": "Cette adresse répond, mais pas comme une API compatible OpenAI (pas de liste de modèles sous /models).",
+  "localModels.external.error.addressRefused": "Cette adresse est en lien local ou un service de métadonnées cloud (169.254.0.0/16, fe80::/10, 0.0.0.0), ce qui n'est jamais un moteur d'IA. Utilisez l'adresse du serveur lui-même.",
   "localModels.external.error.baseUrl": "Saisissez l'adresse du moteur, commençant par http:// ou https://, sans nom d'utilisateur, mot de passe ni requête.",
   "localModels.external.error.model": "Saisissez l'identifiant du modèle exactement comme le moteur l'indique.",
   "localModels.external.error.contextWindow": "La fenêtre de contexte doit être un nombre entier de jetons, au moins 1024.",

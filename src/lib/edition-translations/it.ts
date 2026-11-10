@@ -2038,6 +2038,7 @@ export const it: Record<string, string> = {
   "localModels.external.error.unauthorized": "Il motore ha rifiutato la chiave API. Controllala — oppure, se il motore non ne ha bisogno, spunta «Rimuovi la chiave salvata» (o lascia vuoto il campo se non ce n'è una salvata).",
   "localModels.external.error.modelNotListed": "Il motore non elenca questo ID di modello.",
   "localModels.external.error.badResponse": "Quell'indirizzo risponde, ma non come un'API compatibile con OpenAI (nessun elenco di modelli in /models).",
+  "localModels.external.error.addressRefused": "Quell'indirizzo è link-local o un servizio di metadati cloud (169.254.0.0/16, fe80::/10, 0.0.0.0), che non è mai un motore di IA. Usa l'indirizzo del server stesso.",
   "localModels.external.error.baseUrl": "Inserisci l'indirizzo del motore, che inizi con http:// o https://, senza nome utente, password o query.",
   "localModels.external.error.model": "Inserisci l'ID del modello esattamente come lo elenca il motore.",
   "localModels.external.error.contextWindow": "La finestra di contesto deve essere un numero intero di token, almeno 1024.",

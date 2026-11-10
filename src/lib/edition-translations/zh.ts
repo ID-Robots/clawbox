@@ -2035,6 +2035,7 @@ export const zh: Record<string, string> = {
   "localModels.external.error.unauthorized": "引擎拒绝了 API 密钥。请检查密钥；如果引擎不需要密钥，请勾选“删除已保存的密钥”（若没有保存密钥，留空即可）。",
   "localModels.external.error.modelNotListed": "引擎没有列出这个模型 ID。",
   "localModels.external.error.badResponse": "该地址有响应，但不像 OpenAI 兼容 API（/models 下没有模型列表）。",
+  "localModels.external.error.addressRefused": "该地址是链路本地地址或云元数据服务（169.254.0.0/16、fe80::/10、0.0.0.0），不可能是 AI 引擎。请使用服务器本身的地址。",
   "localModels.external.error.baseUrl": "请输入以 http:// 或 https:// 开头的引擎地址，不要包含用户名、密码或查询参数。",
   "localModels.external.error.model": "请按引擎列出的样子准确输入模型 ID。",
   "localModels.external.error.contextWindow": "上下文窗口必须是整数个 token，至少 1024。",

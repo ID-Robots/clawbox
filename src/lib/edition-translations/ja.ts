@@ -2027,6 +2027,7 @@ export const ja: Record<string, string> = {
   "localModels.external.error.unauthorized": "エンジンが API キーを拒否しました。キーを確認するか、エンジンがキーを必要としない場合は「保存したキーを削除」にチェックを入れてください（保存済みのキーがなければ空欄のままで構いません）。",
   "localModels.external.error.modelNotListed": "エンジンはこのモデル ID を表示していません。",
   "localModels.external.error.badResponse": "そのアドレスは応答しますが、OpenAI 互換 API の形式ではありません（/models にモデル一覧がありません）。",
+  "localModels.external.error.addressRefused": "このアドレスはリンクローカルまたはクラウドのメタデータサービス（169.254.0.0/16、fe80::/10、0.0.0.0）で、AI エンジンにはなりません。サーバー自体のアドレスを入力してください。",
   "localModels.external.error.baseUrl": "http:// または https:// で始まるエンジンのアドレスを、ユーザー名・パスワード・クエリなしで入力してください。",
   "localModels.external.error.model": "エンジンが表示するとおりにモデル ID を入力してください。",
   "localModels.external.error.contextWindow": "コンテキストウィンドウは 1024 以上の整数（トークン数）で指定してください。",

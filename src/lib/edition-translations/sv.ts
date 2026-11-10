@@ -2023,6 +2023,7 @@ export const sv: Record<string, string> = {
   "localModels.external.error.unauthorized": "Motorn nekade API-nyckeln. Kontrollera den — eller, om motorn inte behöver någon nyckel, kryssa i ”Ta bort den sparade nyckeln” (eller lämna fältet tomt om ingen är sparad).",
   "localModels.external.error.modelNotListed": "Motorn listar inte det här modell-id:t.",
   "localModels.external.error.badResponse": "Adressen svarar, men inte som ett OpenAI-kompatibelt API (ingen modellista under /models).",
+  "localModels.external.error.addressRefused": "Adressen är länklokal eller en metadatatjänst i molnet (169.254.0.0/16, fe80::/10, 0.0.0.0), vilket aldrig är en AI-motor. Ange adressen till själva servern.",
   "localModels.external.error.baseUrl": "Ange motorns adress, som börjar med http:// eller https://, utan användarnamn, lösenord eller frågeparametrar.",
   "localModels.external.error.model": "Ange modell-id exakt som motorn listar det.",
   "localModels.external.error.contextWindow": "Kontextfönstret måste vara ett heltal tokens, minst 1024.",

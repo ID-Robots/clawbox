@@ -2,9 +2,12 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "./runtime-path";
 import { get, resolveConfigRoot } from "./config-store";
+import { lookup as dnsLookup } from "dns/promises";
 import {
+  EXTERNAL_ENGINE_LIMITS,
   EXTERNAL_ENGINE_PROVIDER,
   EXTERNAL_ENGINE_STORE_KEY,
+  refusedEngineHost,
   externalEngineDisplayName,
   externalEngineModelRef,
   normalizeExternalBaseUrl,
@@ -195,6 +198,10 @@ export function openclawExternalProviderDefinition(settings: ExternalEngineSetti
 // ── The /models probe ───────────────────────────────────────────────────────
 
 export const PROBE_TIMEOUT_MS = 8_000;
+/** The most of a `/models` answer that is read; a large vLLM or router list is a few hundred KB. */
+export const PROBE_MAX_BODY_BYTES = 2 * 1024 * 1024;
+/** The most model ids a probe answers with. */
+export const PROBE_MAX_MODELS = 50;
 
 export type ProbeResult =
   | { ok: true; models: string[]; latencyMs: number }
@@ -219,9 +226,64 @@ function modelIdsOf(payload: unknown): string[] | null {
           ?? (entry as { model?: unknown }).model
           ?? (entry as { name?: unknown }).name)
         : null;
-    if (typeof id === "string" && id.trim()) ids.push(id.trim());
+    // Only an id that could be one: bounded and printable. Nothing else of the
+    // engine's answer is ever passed on.
+    const clean = typeof id === "string" ? id.trim() : "";
+    if (clean && clean.length <= EXTERNAL_ENGINE_LIMITS.modelIdMax && !/[\u0000-\u001f\u007f]/.test(clean)) ids.push(clean);
   }
   return ids;
+}
+
+/** The body as text, or null once it passes `maxBytes` (the read is cancelled there). */
+async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+type LookupFn = (hostname: string) => Promise<{ address: string }[]>;
+const defaultLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
+
+/**
+ * The refusal for a base URL whose HOST is an address an engine can never be
+ * — the literal (`refusedEngineHost`), or what a name resolves to, so a DNS
+ * name pointing at a metadata service is refused like its address. A name
+ * that does not resolve is left to the request, which then fails as
+ * `unreachable`.
+ */
+async function hostRefusal(baseUrl: string, lookupImpl: LookupFn): Promise<string | null> {
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname;
+  } catch {
+    return "not a valid address";
+  }
+  const literal = refusedEngineHost(hostname);
+  if (literal) return literal;
+  if (/^\[.*\]$/.test(hostname) || /^[\d.]+$/.test(hostname)) return null;
+  const addresses = await lookupImpl(hostname).catch(() => []);
+  for (const { address } of addresses) {
+    const why = refusedEngineHost(address.includes(":") ? `[${address}]` : address);
+    if (why) return why;
+  }
+  return null;
 }
 
 /**
@@ -237,9 +299,18 @@ export async function probeExternalEngine(options: {
   modelId: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  lookupImpl?: LookupFn;
 }): Promise<ProbeResult> {
   const doFetch = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
+  const refused = await hostRefusal(options.baseUrl, options.lookupImpl ?? defaultLookup);
+  if (refused) {
+    return {
+      ok: false,
+      code: "address_refused",
+      error: `That address is ${refused}, which is never an AI engine.`,
+    };
+  }
   const url = `${options.baseUrl}/models`;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.apiKey && options.apiKey !== NO_KEY_PLACEHOLDER) headers.Authorization = `Bearer ${options.apiKey}`;
@@ -292,7 +363,16 @@ export async function probeExternalEngine(options: {
   }
   let payload: unknown;
   try {
-    payload = await res.json();
+    const text = await readCapped(res, PROBE_MAX_BODY_BYTES);
+    if (text === null) {
+      return {
+        ok: false,
+        code: "bad_response",
+        status: res.status,
+        error: `The engine's /models answer is larger than ${PROBE_MAX_BODY_BYTES / (1024 * 1024)} MB, so it was not read.`,
+      };
+    }
+    payload = JSON.parse(text);
   } catch {
     return { ok: false, code: "bad_response", status: res.status, error: `The engine's /models answer is not JSON — is ${options.baseUrl} an OpenAI-compatible API?` };
   }
@@ -305,11 +385,11 @@ export async function probeExternalEngine(options: {
       ok: false,
       code: "model_not_listed",
       status: res.status,
-      models: models.slice(0, 50),
+      models: models.slice(0, PROBE_MAX_MODELS),
       error: models.length
         ? `The engine does not list "${options.modelId}". It lists: ${models.slice(0, 8).join(", ")}${models.length > 8 ? ", …" : ""}.`
         : `The engine lists no models, so "${options.modelId}" cannot be used.`,
     };
   }
-  return { ok: true, models: models.slice(0, 50), latencyMs: Date.now() - started };
+  return { ok: true, models: models.slice(0, PROBE_MAX_MODELS), latencyMs: Date.now() - started };
 }
