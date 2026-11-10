@@ -7032,8 +7032,28 @@ export interface RunArgsOptions { resumeSessionId?: string | null; maxTurns?: nu
  * Codex as `developer_instructions` — one text, so the two runners are told the
  * same things. Exported for the contract test.
  */
+/**
+ * What a run in its own copy of a project is told about that copy — only a
+ * writing run that is not a team's, and only in `<project>/.clawbox/worktrees/…`
+ * (`worktreeAppId`).
+ *
+ * Without it the two things the box does for such a copy are invisible:
+ * `CLAWBOX_APP_ID` (buildRunEnv) and the hard-linked `node_modules`
+ * (hardlinkSharedNodeModules). A project's own run notes, written by runs
+ * from before either existed, still say "run the gates from a copy in a
+ * folder named like the app" and "install again first", and a run believes
+ * its project's notes: with the variable already set, a run made a throwaway
+ * copy named `calculator` to run a smoke test that would have passed where it
+ * stood, and left the screenshots it refreshed there (run-w263ek7z,
+ * 2026-11-10). The last sentence is for exactly those notes.
+ */
+export function worktreeCopyBrief(appId: string): string {
+  return `This folder is a temporary copy of the project "${appId}" (a git worktree). CLAWBOX_APP_ID=${appId} is set, so an app that mounts itself by its folder's name still mounts at /apps/${appId}/ here, and node_modules holds the project's own packages as real files: build and run the project's checks in THIS folder. An earlier run's note that says to copy the project elsewhere, rename the folder or install again first is out of date.`;
+}
+
 export function buildRunSystemPrompt(opts: RunArgsOptions): string {
   const visual = runHoldsVisualTools(opts.visual);
+  const copyOf = !opts.readOnly && !opts.run?.team && opts.run?.directory ? worktreeAppId(opts.run.directory) : null;
   // A run whose diff a separate review will read is told not to review it
   // twice — see leanHelpersBrief. A team's run is told it never merges.
   const headless = headlessBrief({
@@ -7070,6 +7090,8 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
     // The run's share of the CPU (src/lib/coding-run-cpu.ts). Not for a
     // read-only run: it runs nothing but read-only git, so no build to cap.
     ...(typeof opts.cpuBudget === "number" && opts.cpuBudget >= 1 && !opts.readOnly ? [cpuBudgetBrief(opts.cpuBudget)] : []),
+    // A run in its own copy of a project: what the box did for that copy.
+    ...(copyOf ? [worktreeCopyBrief(copyOf)] : []),
     // How a writing run adds a lesson to its project's run notes
     // (src/lib/coding-run-notes.ts); a read-only run cannot write one.
     ...(opts.lessonChannel && !opts.readOnly ? [LESSON_CHANNEL_BRIEF] : []),

@@ -84,6 +84,36 @@ describe("listing", () => {
   });
 });
 
+describe("the stop for package installs", () => {
+  it("makes the evidence folder the root of an install made inside it, and is not evidence itself", () => {
+    // run-ziu9ocw1 (2026-11-10): `cd $CLAWBOX_RUN_ARTIFACTS_DIR && mkdir pw &&
+    // cd pw && bun add playwright` climbed to the nearest package.json — the
+    // BOX's own, whose checkout the evidence folders live under — and moved
+    // the box's Playwright to a version with no browser build on the disk.
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    const stop = path.join(dir, lib.EVIDENCE_PACKAGE_FILE);
+    expect(JSON.parse(fs.readFileSync(stop, "utf-8"))).toEqual({ name: "clawbox-run-evidence", private: true });
+    // Nearest package.json above a folder made inside the evidence folder: the stop, not the box's.
+    fs.writeFileSync(path.join(root, "package.json"), '{"name":"the-box"}\n');
+    const inner = path.join(dir, "pw");
+    fs.mkdirSync(inner);
+    let at = inner;
+    while (!fs.existsSync(path.join(at, "package.json"))) at = path.dirname(at);
+    expect(at).toBe(dir);
+    // Not an artifact, beside one that is.
+    fs.writeFileSync(path.join(dir, "shot.png"), "png");
+    expect(lib.listArtifacts(RUN_ID).map((a) => a.name)).toEqual(["shot.png"]);
+  });
+
+  it("never writes over a package.json that is already there", () => {
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    const stop = path.join(dir, lib.EVIDENCE_PACKAGE_FILE);
+    fs.writeFileSync(stop, '{"name":"clawbox-run-evidence","private":true,"dependencies":{"playwright":"^1.63.0"}}\n');
+    lib.ensureArtifactsDir(RUN_ID);
+    expect(JSON.parse(fs.readFileSync(stop, "utf-8")).dependencies).toEqual({ playwright: "^1.63.0" });
+  });
+});
+
 describe("serving gate", () => {
   it("resolves a real file", () => {
     const dir = lib.ensureArtifactsDir(RUN_ID);
@@ -279,7 +309,8 @@ describe("pruning", () => {
       [".venv", path.join("deep", "er", "venv"), "node_modules", path.join("work", "__pycache__")].sort(),
     );
     expect(pruned.every((p) => p.reason === "interpreter")).toBe(true);
-    expect(fs.readdirSync(dir).sort()).toEqual(["deep", "work"]);
+    // What is left: the run's own folders, and the box's stop for package installs (ensureArtifactsDir).
+    expect(fs.readdirSync(dir).sort()).toEqual(["deep", "package.json", "work"]);
   });
 
   it("drops a link that leads out of the folder even when its target exists, and never touches the target", async () => {

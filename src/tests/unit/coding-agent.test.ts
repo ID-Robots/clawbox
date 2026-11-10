@@ -2348,7 +2348,8 @@ describe("the report", () => {
     expect(done.status).toBe("completed");
     expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe(`${done.summary}\n`);
     // Renamed into place: nothing half-written is left beside it.
-    expect(fs.readdirSync(path.dirname(reportOf(run.id)))).toEqual(["report.md"]);
+    // The report, beside the box's stop for package installs (ensureArtifactsDir) and nothing else.
+    expect(fs.readdirSync(path.dirname(reportOf(run.id))).sort()).toEqual(["package.json", "report.md"]);
     // The listing the app reads carries it as markdown, which is what opens
     // it rendered rather than as plain text.
     const artifactsLib = await import("@/lib/coding-agent-artifacts");
@@ -2422,7 +2423,8 @@ describe("the report", () => {
     // must still say what the run did.
     installFakeWrapper([
       `echo '${INIT}'`,
-      `rmdir "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
+      // rm -rf, not rmdir: the folder holds the box's stop for package installs (ensureArtifactsDir).
+      `rm -rf "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
       `echo '${RESULT}'`,
       "exit 0",
     ].join("\n"));
@@ -2469,7 +2471,8 @@ describe("the evidence folder at settle", () => {
 
     expect(done.status).toBe("completed");
     const dir = evidenceOf(run.id);
-    expect(fs.readdirSync(dir).sort()).toEqual(["report.md", "tests.txt", "venv-attempt"]);
+    // …beside the box's own stop for package installs (ensureArtifactsDir), which is not the run's and stays.
+    expect(fs.readdirSync(dir).sort()).toEqual(["package.json", "report.md", "tests.txt", "venv-attempt"]);
     expect(fs.readdirSync(path.join(dir, "venv-attempt"))).toEqual([]);
     const line = done.progress.find((l) => l.startsWith("Removed from the evidence folder"));
     expect(line).toBe(RUNNER_STEP.evidencePruned("latest.txt, venv-attempt/venv/"));

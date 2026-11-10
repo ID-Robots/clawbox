@@ -22,7 +22,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 import fs from "fs";
-import { buildRunEnv, previewScriptPath, reviewPassTask, REVIEW_PASS_TASK, HEADLESS_BRIEF } from "@/lib/coding-agent";
+import { buildRunEnv, buildRunSystemPrompt, previewScriptPath, reviewPassTask, REVIEW_PASS_TASK, HEADLESS_BRIEF, worktreeCopyBrief } from "@/lib/coding-agent";
 
 beforeEach(() => {
   configGet.mockReset().mockResolvedValue(undefined);
@@ -72,5 +72,32 @@ describe("the preview script the brief names", () => {
   it("is offered to an ordinary run too, in the brief's own live-verification clause", () => {
     expect(HEADLESS_BRIEF).toContain("$CLAWBOX_PREVIEW");
     expect(HEADLESS_BRIEF).toContain("PREVIEW_URL");
+  });
+});
+
+describe("what a run in its own copy of a project is told about the copy", () => {
+  const copy = "/home/clawbox/Projects/calculator/.clawbox/worktrees/run-w263ek7z";
+  const run = (directory: string, over: Record<string, unknown> = {}) => ({ id: "run-w263ek7z", directory, ...over });
+
+  it("says the app's id is set and the packages are real, and that older notes saying otherwise are out of date", () => {
+    // run-w263ek7z (2026-11-10): CLAWBOX_APP_ID was already in its environment,
+    // and its project's notes — written before the variable existed — said to
+    // run the gates from a copy in a folder named like the app. It believed
+    // the notes, made a throwaway copy, and left the screenshots it refreshed there.
+    const said = buildRunSystemPrompt({ run: run(copy) } as Parameters<typeof buildRunSystemPrompt>[0]);
+    expect(said).toContain(worktreeCopyBrief("calculator"));
+    expect(worktreeCopyBrief("calculator")).toMatch(/CLAWBOX_APP_ID=calculator is set/);
+    expect(worktreeCopyBrief("calculator")).toMatch(/mounts at \/apps\/calculator\/ here/);
+    expect(worktreeCopyBrief("calculator")).toMatch(/build and run the project's checks in THIS folder/);
+    expect(worktreeCopyBrief("calculator")).toMatch(/copy the project elsewhere, rename the folder or install again first is out of date/);
+  });
+
+  it("is said to no run that is not in such a copy, reads only, or is a team's", () => {
+    const of = (opts: Record<string, unknown>) => buildRunSystemPrompt(opts as Parameters<typeof buildRunSystemPrompt>[0]);
+    expect(of({ run: run("/home/clawbox/Projects/calculator") })).not.toMatch(/temporary copy of the project/);
+    expect(of({ run: run(copy), readOnly: true })).not.toMatch(/temporary copy of the project/);
+    // A team's worker is told about its folder in its own brief (workerTask), and gets no node_modules.
+    expect(of({ run: run(copy, { team: { id: "team-abcd1234", role: "worker", taskId: "t1" } }) })).not.toMatch(/temporary copy of the project/);
+    expect(of({})).not.toMatch(/temporary copy of the project/);
   });
 });
