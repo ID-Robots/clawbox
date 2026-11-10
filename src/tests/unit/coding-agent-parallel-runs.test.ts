@@ -620,17 +620,21 @@ describe("a run's own copy of the project", () => {
     expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
   });
 
-  it("still removes a copy whose only stray entry is the project's own linked node_modules", async () => {
+  it("still removes a copy whose only stray entry is the project's own shared node_modules", async () => {
     const dir = makeGitProject("alpha");
-    fs.mkdirSync(path.join(dir, "node_modules"));
+    fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
     const started = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
-    expect(fs.lstatSync(path.join(started.directory, "node_modules")).isSymbolicLink()).toBe(true);
+    // A tree of hard links since 2026-11-10 (hardlinkSharedNodeModules): a real
+    // folder in the copy, which a bundler that follows no link out of it can build from.
+    expect(fs.lstatSync(path.join(started.directory, "node_modules")).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(started.directory, "node_modules", "left-pad", "index.js"))).toBe(true);
     await finished(started.id);
     await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
     expect(fs.existsSync(started.directory)).toBe(false);
     expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed; it left nothing on its branch/);
-    // The link went, never what it pointed at.
-    expect(fs.existsSync(path.join(dir, "node_modules"))).toBe(true);
+    // The copy's names for the files went, never the project's own.
+    expect(fs.readFileSync(path.join(dir, "node_modules", "left-pad", "index.js"), "utf8")).toBe("module.exports = 1;\n");
   });
 
   it("refuses Remove for a run that worked in the project folder itself", async () => {

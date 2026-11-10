@@ -16,6 +16,7 @@ import {
   bringBaseHome,
   commitsAhead,
   deleteRunBranch,
+  hardlinkSharedNodeModules,
   linkSharedNodeModules,
   listRunWorktrees,
   mergeRunBranch,
@@ -112,15 +113,63 @@ describe("a run's worktree", () => {
     expect(git(dir, "show", "--name-only", "--format=", "clawbox/run-bbbbbbbb").trim()).toBe("b.js");
   });
 
-  it("symlinks the project's node_modules into the worktree and never over one that is already there", async () => {
-    fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+  it("gives the worktree the project's node_modules as a tree of hard links, never over one that is already there", async () => {
+    // A bundler that will not follow a link out of its folder (Next.js 16's
+    // Turbopack: "Could not find the Next.js package") could not build
+    // through the symlink a worktree used to get; every run on a Next app
+    // worked round it, and the review pass's preview failed on it.
+    fs.mkdirSync(path.join(dir, "node_modules", "left-pad", "lib"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "node_modules", ".bin"));
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "package.json"), '{"name":"left-pad"}\n');
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "lib", "index.js"), "module.exports = 1;\n");
+    fs.symlinkSync("../left-pad/lib/index.js", path.join(dir, "node_modules", ".bin", "left-pad"));
     const made = await addRunWorktree({ projectDir: dir, runId: "run-nodemods", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
-    const link = path.join(made.path, "node_modules");
-    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
-    expect(fs.existsSync(path.join(link, "left-pad"))).toBe(true);
-    // A second call over an existing entry changes nothing.
+    const tree = path.join(made.path, "node_modules");
+    // A real folder inside the worktree, not a link out of it...
+    expect(fs.lstatSync(tree).isDirectory()).toBe(true);
+    expect(fs.lstatSync(path.join(tree, "left-pad", "lib")).isDirectory()).toBe(true);
+    // ...whose files are the project's own bytes on disk (one inode, two names)...
+    const mine = fs.statSync(path.join(tree, "left-pad", "lib", "index.js"));
+    const theirs = fs.statSync(path.join(dir, "node_modules", "left-pad", "lib", "index.js"));
+    expect(mine.ino).toBe(theirs.ino);
+    expect(mine.nlink).toBe(2);
+    // ...and whose own links are links still, with the target as written.
+    expect(fs.readlinkSync(path.join(tree, ".bin", "left-pad"))).toBe("../left-pad/lib/index.js");
+    expect(fs.readFileSync(path.join(tree, ".bin", "left-pad"), "utf8")).toBe("module.exports = 1;\n");
+    // An install in the worktree replaces a file (unlink, then write): the project's stays as it was.
+    fs.unlinkSync(path.join(tree, "left-pad", "package.json"));
+    fs.writeFileSync(path.join(tree, "left-pad", "package.json"), '{"name":"left-pad","version":"2.0.0"}\n');
+    expect(fs.readFileSync(path.join(dir, "node_modules", "left-pad", "package.json"), "utf8")).toBe('{"name":"left-pad"}\n');
+    // A second call over an existing entry changes nothing, for either way of sharing.
+    expect(await hardlinkSharedNodeModules(dir, made.path)).toBe(false);
     expect(linkSharedNodeModules(dir, made.path)).toBe(false);
+  });
+
+  it("falls back to the link when the tree cannot be made, and leaves no half of one", async () => {
+    // The project's node_modules is itself a link (a workspace's): not a tree to copy.
+    const real = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-nm-"));
+    try {
+      fs.mkdirSync(path.join(real, "left-pad"));
+      fs.symlinkSync(real, path.join(dir, "node_modules"), "dir");
+      const made = await addRunWorktree({ projectDir: dir, runId: "run-nmlinked", protectedRoot: PROTECTED });
+      if (!made.ok) throw new Error(made.detail);
+      expect(await hardlinkSharedNodeModules(dir, path.join(real, "nowhere"))).toBe(false);
+      expect(fs.existsSync(path.join(real, "nowhere"))).toBe(false);
+      const link = path.join(made.path, "node_modules");
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.existsSync(path.join(link, "left-pad"))).toBe(true);
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true });
+    }
+    // No node_modules in the project at all: nothing is made, and nothing is said.
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-bare-"));
+    try {
+      expect(await hardlinkSharedNodeModules(bare, path.join(bare, "wt"))).toBe(false);
+      expect(fs.existsSync(path.join(bare, "wt"))).toBe(false);
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true });
+    }
   });
 
   it("keeps the old in-place behaviour for a folder that is not a repository, is not its root, or is ClawBox's own checkout", async () => {
@@ -250,14 +299,16 @@ describe("a run's worktree", () => {
    * the branch, and a commit that failed after `git add -A` leaves the work
    * staged in the tree with the branch where it was.
    */
-  it("says whether the tree holds work its branch does not, never counting the linked node_modules", async () => {
+  it("says whether the tree holds work its branch does not, never counting the shared node_modules", async () => {
     // `node_modules/` (trailing slash) matches directories only; the box also
-    // excludes `/node_modules`, so the worktree's LINK is neither untracked
-    // nor swept into the branch by a settle's `git add -A`.
-    fs.mkdirSync(path.join(dir, "node_modules"));
+    // excludes `/node_modules`, so the worktree's tree of hard links — or the
+    // LINK it falls back to — is neither untracked nor swept into the branch
+    // by a settle's `git add -A`.
+    fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
     const made = await addRunWorktree({ projectDir: dir, runId: "run-unsaved0", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
-    expect(fs.lstatSync(path.join(made.path, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(made.path, "node_modules", "left-pad", "index.js"))).toBe(true);
     expect(git(made.path, "status", "--porcelain")).not.toContain("node_modules");
     git(made.path, "add", "-A");
     expect(git(made.path, "diff", "--cached", "--name-only")).not.toContain("node_modules");

@@ -195,7 +195,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch 
   const added = await gitIn(dir, ["worktree", "add", ...(fork.from ? ["--no-track", "-b", branch, target, fork.from] : ["-b", branch, target, base])]);
   if (!ok(added)) return { ok: false, reason: "failed", detail: failureDetail(added, `Making a worktree for ${runId}`) };
   await excludeWorktrees(dir);
-  linkSharedNodeModules(dir, target);
+  await shareNodeModules(dir, target);
   // Under `.clawbox/`, which excludeWorktrees keeps out of `git status`: a
   // copy of this tree is then still known for one (coding-folder-kind.ts).
   writeRunMarker(target, { kind: "run", id: runId, project: dir });
@@ -213,7 +213,9 @@ async function namedBase(dir: string, name: string): Promise<{ ok: true; base: s
 
 /**
  * `node_modules` from the project root, as a symlink, when the project has
- * one and the worktree does not.
+ * one and the worktree does not — the FALLBACK since 2026-11-10: a worktree
+ * gets a hard-linked tree first (`hardlinkSharedNodeModules`), and this link
+ * only where that could not be made.
  *
  * A fresh worktree has no dependencies, and `npm install` on a Jetson for
  * every run is minutes of disk and CPU for a tree that is about to be thrown
@@ -240,6 +242,83 @@ export function linkSharedNodeModules(projectDir: string, worktreePath: string):
   } catch {
     return false;
   }
+}
+
+/** More entries than this and the copy is not tried: the link costs nothing whatever the size, and a monorepo's tree is not seconds of work. */
+const MAX_HARDLINKED_ENTRIES = 250_000;
+
+/**
+ * `node_modules` from the project root as a tree of HARD LINKS: real folders
+ * in the worktree, every file the same bytes on disk as the project's.
+ *
+ * WHY NOT THE LINK. A bundler that will not follow a link out of its own
+ * folder cannot build through `linkSharedNodeModules`' symlink: Next.js 16
+ * (Turbopack) stops with "Could not find the Next.js package" and its
+ * filesystem-root message. Every run on the owner's Next apps met it — one
+ * moved the link aside and installed again, one wrote `turbopack.root` into
+ * the app's config and took it out, one copied the whole project to a folder
+ * of its own — and the review pass's preview, which runs the app's own start
+ * command, failed on it and the pass looked at nothing (run-xa50zhht,
+ * 2026-11-10). Measured on this box: the same app builds from a hard-linked
+ * tree, and making one took 0.2 s for 10,659 files.
+ *
+ * WHAT IT COSTS. No bytes — the files are links — and folders' worth of
+ * inodes, gone with the worktree. A package manager's install in the
+ * worktree REPLACES files (unlink, then write), so it never reaches the
+ * project's own; with the old link the same install rewrote the project's
+ * tree in place.
+ *
+ * Links inside the tree (`.bin`, a package manager's own store) are copied
+ * as links, with the target as written. Anything that is not a file, a
+ * folder or a link is left out. Never over something already there. A tree
+ * too large, a project whose `node_modules` is itself a link, another
+ * filesystem, or any failure: `false`, with whatever was made taken away
+ * again — half a tree would be worse than none — and the caller falls back
+ * to the link.
+ */
+export async function hardlinkSharedNodeModules(projectDir: string, worktreePath: string): Promise<boolean> {
+  const source = path.join(path.resolve(projectDir), "node_modules");
+  const target = path.join(path.resolve(worktreePath), "node_modules");
+  try {
+    if (!(await fs.promises.lstat(source)).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  try {
+    await fs.promises.lstat(target);
+    return false;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  let entries = 0;
+  const copy = async (from: string, to: string): Promise<void> => {
+    await fs.promises.mkdir(to);
+    const listed = await fs.promises.readdir(from, { withFileTypes: true });
+    entries += listed.length;
+    if (entries > MAX_HARDLINKED_ENTRIES) throw new Error("too many entries");
+    const folders: string[] = [];
+    await Promise.all(listed.map(async (entry) => {
+      const a = path.join(from, entry.name);
+      const b = path.join(to, entry.name);
+      if (entry.isDirectory()) folders.push(entry.name);
+      else if (entry.isSymbolicLink()) await fs.promises.symlink(await fs.promises.readlink(a), b);
+      else if (entry.isFile()) await fs.promises.link(a, b);
+    }));
+    // One folder at a time: a wide tree opened all at once runs out of descriptors.
+    for (const name of folders) await copy(path.join(from, name), path.join(to, name));
+  };
+  try {
+    await copy(source, target);
+    return true;
+  } catch {
+    await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
+    return false;
+  }
+}
+
+/** A worktree's dependencies: the hard-linked tree where it can be made, the link where it cannot. */
+async function shareNodeModules(projectDir: string, worktreePath: string): Promise<void> {
+  if (!(await hardlinkSharedNodeModules(projectDir, worktreePath))) linkSharedNodeModules(projectDir, worktreePath);
 }
 
 /**
@@ -276,7 +355,7 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
       ? await gitIn(dir, ["worktree", "add", worktreePath, branch])
       : await gitIn(dir, ["worktree", "add", "-b", branch, worktreePath, base]);
     if (!ok(added)) return false;
-    linkSharedNodeModules(dir, worktreePath);
+    await shareNodeModules(dir, worktreePath);
     return true;
   });
 }
