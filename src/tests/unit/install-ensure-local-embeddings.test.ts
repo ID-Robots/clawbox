@@ -494,7 +494,7 @@ describe("ensure_local_embeddings never fails the update", () => {
     // the one way a non-interactive CLI hangs without doing any work — a prompt
     // on the stdin it inherits from the root step, which it would wait on for
     // ever. That is a bound on a STALL, not on slowness.
-    expect(body).toMatch(/memory status --agent main --deep --json 2>\/dev\/null <\/dev\/null/);
+    expect(body).toMatch(/memory status --agent "\$MEMORY_AGENT" --deep --json 2>\/dev\/null <\/dev\/null/);
   });
 
   it("puts no verdict on a core that never answers", () => {

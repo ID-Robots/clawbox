@@ -56,6 +56,7 @@ import {
 import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
 import { isInside } from "@/lib/file-guard";
 import { readConfig as readOpenclawConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
 import {
   EXTRA_PATHS_CONFIG_PATH,
   INDEXABLE_EXTENSIONS,
@@ -1620,13 +1621,18 @@ function assertDimension(db: IndexDb, sample: Float32Array | undefined): boolean
 // ─── status ──────────────────────────────────────────────────────────────────
 
 /**
- * The same JSON `openclaw memory status --agent main --deep --json` answers.
+ * The same JSON `openclaw memory status --agent <id> --deep --json` answers.
  *
  * Every field here is one `parseMemoryStatus` already reads; nothing is
  * invented, and nothing this shape cannot carry is reported. See the module
  * comment for why it is worth impersonating rather than parallel-implementing.
+ *
+ * Its row is labelled with the agent the reader asks about (the box's default
+ * agent, `openclawDefaultAgentId`, which is "main" where there is no
+ * openclaw.json), so both arms answer under the same id.
  */
-export async function localMemoryStatusJson(): Promise<unknown> {
+export async function localMemoryStatusJson(agentId?: string): Promise<unknown> {
+  const rowAgentId = agentId ?? await openclawDefaultAgentId();
   const [sources, provisioning, embedder] = await Promise.all([
     readLocalSources(),
     getEmbedProvisioningStatus().catch(() => null),
@@ -1673,7 +1679,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
   const db = await openIndexForRead();
   try {
     return {
-      agentId: "main",
+      agentId: rowAgentId,
       scan: { totalFiles: db ? Number(metaGet(db, "scan_total_files") ?? 0) : 0 },
       status: {
         provider: embedder.provider,

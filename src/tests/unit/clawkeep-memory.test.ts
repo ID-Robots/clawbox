@@ -1153,8 +1153,8 @@ describe("how far an OpenClaw pass has got", () => {
    * `ENOTEMPTY` on a loaded CI runner, intermittently, in whichever pull
    * request happened to be running.
    */
-  async function fakeIndexer(total: number, { gated = false } = {}): Promise<{ script: string; db: string; gate: (n: number) => Promise<void> }> {
-    const db = path.join(tmpDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+  async function fakeIndexer(total: number, { gated = false, agent = "main" } = {}): Promise<{ script: string; db: string; gate: (n: number) => Promise<void> }> {
+    const db = path.join(tmpDir, "agents", agent, "agent", "openclaw-agent.sqlite");
     await fs.mkdir(path.dirname(db), { recursive: true });
     const script = path.join(tmpDir, "fake-index.mjs");
     const gates = path.join(tmpDir, "gates");
@@ -1202,7 +1202,7 @@ describe("how far an OpenClaw pass has got", () => {
     process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
     process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
     vi.resetModules();
-    const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
 
     // Lock-step with the pass: each file is only indexed once the card has
@@ -1225,9 +1225,11 @@ describe("how far an OpenClaw pass has got", () => {
     }
     const settled = await settledMemoryRun(tmpDir);
     expect(settled.status).toBe("succeeded");
-    // Join the status refresh the finished run starts, so no process the
-    // module spawned is still running when the directory is removed.
-    await getMemoryStatus();
+    // Wait for the status refresh the finished run starts as well, so no
+    // process the module spawned is still running when the directory is
+    // removed. The record settles before that refresh begins, so a status
+    // read here could be answered from the cache and join nothing.
+    await memoryPassSettled();
 
     // A real fraction, with the total the CLI's scan found.
     expect(seen.length).toBeGreaterThan(1);
@@ -1244,6 +1246,44 @@ describe("how far an OpenClaw pass has got", () => {
     expect((await readMemoryRunState()).progress).toBeNull();
   });
 
+  it("counts chunks in the database of the agent the config names, not a stale agents/main", async () => {
+    // TASK-2248, with no path override: the database comes from the pinned
+    // state directory and the default agent openclaw.json names.
+    const saved = process.env.CLAWBOX_OPENCLAW_HOME;
+    process.env.CLAWBOX_OPENCLAW_HOME = tmpDir;
+    try {
+      await fs.writeFile(path.join(tmpDir, "openclaw.json"), JSON.stringify({ agents: { entries: { default: {}, travel: {} } } }));
+      await fs.mkdir(path.join(tmpDir, "agents", "main", "agent"), { recursive: true });
+      const total = 2;
+      const { script, gate } = await fakeIndexer(total, { gated: true, agent: "default" });
+      process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+      process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+      vi.resetModules();
+      const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      let chunks = 0;
+      for (let step = 0; step <= total; step += 1) {
+        const deadline = Date.now() + 20_000;
+        for (;;) {
+          const { progress } = await readMemoryRunState();
+          if (progress && progress.filesDone === step && (step < total || progress.chunks > 0)) {
+            chunks = progress.chunks;
+            break;
+          }
+          if (Date.now() > deadline) throw new Error(`the card never showed ${step}/${total} with chunks: ${JSON.stringify(progress)}`);
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        await gate(step);
+      }
+      expect(chunks).toBeGreaterThan(0);
+      expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+      await memoryPassSettled();
+    } finally {
+      if (saved === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
+      else process.env.CLAWBOX_OPENCLAW_HOME = saved;
+    }
+  });
+
   it("falls back to the bar with no numbers when there is no terminal to run it on", async () => {
     const { script, db } = await fakeIndexer(3);
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
@@ -1251,7 +1291,7 @@ describe("how far an OpenClaw pass has got", () => {
     process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
     process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
     vi.resetModules();
-    const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
     const totals = new Set<number>();
     for (let i = 0; i < 200; i += 1) {
@@ -1264,7 +1304,7 @@ describe("how far an OpenClaw pass has got", () => {
     // ever invented for it.
     expect((await settledMemoryRun(tmpDir, { tries: 1000 })).status).toBe("succeeded");
     // See above: nothing the module started may outlive the test.
-    await getMemoryStatus();
+    await memoryPassSettled();
     expect([...totals]).toEqual([0]);
   });
 });
@@ -1870,5 +1910,199 @@ describe("the OpenClaw index on a box where no gateway start comes round", () =>
     expect(status.errorCode).toBe("embedder_unavailable");
     expect(await rebuildKeywordOnlyIndex(status)).toBe(false);
     expect(await indexRuns(argv)).toEqual([]);
+  });
+});
+
+/**
+ * A customer report (TASK-2248): four agents, the main one called `default`,
+ * and no `main` in the config, only the `agents/main/` directory left from
+ * before the rename. Every status read asked the core about `--agent main`,
+ * and Memory Shard said "status unavailable" over memory that was working.
+ */
+describe("a box whose default agent is not called main", () => {
+  const saved = { home: process.env.OPENCLAW_HOME, clawboxHome: process.env.CLAWBOX_OPENCLAW_HOME };
+
+  afterEach(() => {
+    for (const [name, value] of [["OPENCLAW_HOME", saved.home], ["CLAWBOX_OPENCLAW_HOME", saved.clawboxHome]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+    delete process.env.CLAWKEEP_MEMORY_PTY_HOST;
+  });
+
+  const realRow = (agentId: string) => ({ ...(REAL_STATUS as Record<string, unknown>[])[0], agentId });
+
+  /**
+   * A box whose openclaw.json holds `agents`, and a core that, like 2026.10.9,
+   * refuses `--agent` for an agent the config does not have. It answers
+   * `memory status` with `rows`.
+   */
+  async function boxWithAgents(agents: unknown, rows: unknown[]): Promise<string> {
+    const home = path.join(tmpDir, "openclaw-state");
+    await fs.mkdir(path.join(home, "agents", "main", "agent"), { recursive: true });
+    await fs.writeFile(path.join(home, "openclaw.json"), JSON.stringify({ agents }));
+    process.env.CLAWBOX_OPENCLAW_HOME = home;
+    const known = Object.keys((agents as { entries: Record<string, unknown> }).entries).join(" ");
+    const argv = path.join(tmpDir, "core-argv");
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      `printf '%s\\n' "$*" >> ${argv}`,
+      'agent=""; prev=""',
+      'for a in "$@"; do [ "$prev" = "--agent" ] && agent="$a"; prev="$a"; done',
+      `case " ${known} " in *" $agent "*) ;; *) echo "Unknown agent id \\"$agent\\"." >&2; exit 1;; esac`,
+      `case "$*" in *"memory status"*) cat <<'JSON'`,
+      JSON.stringify(rows),
+      "JSON",
+      ";; esac",
+      "exit 0",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
+    vi.resetModules();
+    return argv;
+  }
+
+  const calls = async (argv: string, verb: string) =>
+    (await fs.readFile(argv, "utf8").catch(() => "")).trim().split("\n").filter((line) => line.startsWith(verb));
+
+  const customer = {
+    ownership: "explicit",
+    defaults: { systemAgent: { agentId: "default" } },
+    entries: { default: {}, research: {}, writer: {}, travel: {} },
+  };
+
+  it("reads the status of the agent the config names, not main", async () => {
+    const argv = await boxWithAgents(customer, [realRow("default")]);
+    const { getMemoryStatus } = await lib();
+    const status = await getMemoryStatus();
+    expect(await calls(argv, "memory status")).toEqual(["memory status --agent default --deep --json"]);
+    expect(status.available).toBe(true);
+    expect(status.errorCode).not.toBe("status_unavailable");
+    expect(status.agentId).toBe("default");
+    expect(status.provider).toBe("ollama");
+  });
+
+  it("picks the default agent's row out of an answer about several", async () => {
+    const stale = { agentId: "main", status: { provider: "none", files: 0, chunks: 0 } };
+    await boxWithAgents(customer, [stale, realRow("default")]);
+    const { getMemoryStatus } = await lib();
+    const status = await getMemoryStatus();
+    expect(status.agentId).toBe("default");
+    expect(status.provider).toBe("ollama");
+    expect(status.health).toBe("healthy");
+  });
+
+  it("settles its cache when the core labels its row differently from the agent asked about", async () => {
+    // A core may print the roster key as written where ClawBox passed the
+    // normalised id. The reading is still about the agent that was asked for;
+    // reported under the row's label it never matched the default agent, and
+    // every read waited on a cold `memory status --deep` probe.
+    const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("Default")]);
+    const { getMemoryStatus } = await lib();
+    const first = await getMemoryStatus();
+    const second = await getMemoryStatus();
+    // One probe: the second read is answered from the cache.
+    expect(await calls(argv, "memory status")).toEqual(["memory status --agent default --deep --json"]);
+    expect(first.agentId).toBe("default");
+    expect(second.agentId).toBe("default");
+    expect(second.provider).toBe("ollama");
+  });
+
+  it("indexes that agent", async () => {
+    const argv = await boxWithAgents(customer, [realRow("default")]);
+    const { startMemoryIndex, memoryPassSettled } = await lib();
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+    // The record settles before the pass's status refresh even starts: wait
+    // for that refresh too, so no process the module spawned is still running
+    // when the directory is removed.
+    await memoryPassSettled();
+    // That wait covers the refresh: the probe behind the pass has been made.
+    expect((await calls(argv, "memory")).at(-1)).toBe("memory status --agent default --deep --json");
+    // The fixture's index is empty, so the planner may promote the pass to a full one.
+    expect(await calls(argv, "memory index")).toEqual([expect.stringMatching(/^memory index --agent default( --force)?$/)]);
+  });
+
+  it("still asks about main on a box whose agent is main", async () => {
+    const argv = await boxWithAgents({ entries: { main: {}, travel: {} } }, [realRow("main")]);
+    const { getMemoryStatus, memoryPassSettled, startMemoryIndex } = await lib();
+    expect((await getMemoryStatus()).agentId).toBe("main");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    await settledMemoryRun(tmpDir);
+    // Wait for the pass's status refresh too (see above).
+    await memoryPassSettled();
+    expect(await calls(argv, "memory status")).toContain("memory status --agent main --deep --json");
+    expect(await calls(argv, "memory index")).toEqual([expect.stringMatching(/^memory index --agent main( --force)?$/)]);
+  });
+
+  it("says unavailable, about the agent it asked, when the core refuses", async () => {
+    // The roster names `default`, the core knows only `travel`: the refusal path.
+    const argv = await boxWithAgents({ entries: { travel: {} } }, [realRow("travel")]);
+    await fs.writeFile(path.join(process.env.CLAWBOX_OPENCLAW_HOME as string, "openclaw.json"),
+      JSON.stringify({ agents: { entries: { default: {} } } }));
+    const { getMemoryStatus } = await lib();
+    const status = await getMemoryStatus();
+    expect(await calls(argv, "memory status")).toEqual(["memory status --agent default --deep --json"]);
+    expect(status).toMatchObject({ available: false, errorCode: "status_unavailable", agentId: "default" });
+  });
+
+  it("plans a pass on a reading about the agent it indexes, not the one the box was renamed from", async () => {
+    // Read while the agent was `main`, whose index is empty; then renamed to
+    // `default`, whose index is populated. Planned on the cached reading about
+    // `main`, that zero sent `--force` to `default`'s index unasked.
+    const row: Record<string, unknown> = realRow("default");
+    const populated = { ...row, status: { ...(row.status as Record<string, unknown>), files: 7, chunks: 512 } };
+    const argv = await boxWithAgents({ entries: { main: {}, default: {} } }, [realRow("main"), populated]);
+    const config = path.join(process.env.CLAWBOX_OPENCLAW_HOME as string, "openclaw.json");
+    await fs.writeFile(config, JSON.stringify({ agents: { entries: { main: {} } } }));
+    const { getMemoryStatus, memoryPassSettled, resolveIndexMode, startMemoryIndex } = await lib();
+    expect(await getMemoryStatus()).toMatchObject({ agentId: "main", chunks: 0 });
+    await fs.writeFile(config, JSON.stringify({ agents: { entries: { default: {} } } }));
+    expect(await resolveIndexMode("incremental", "manual")).toBe("incremental");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect((await settledMemoryRun(tmpDir)).mode).toBe("incremental");
+    // Wait for the pass's status refresh too (see above).
+    await memoryPassSettled();
+    expect(await calls(argv, "memory index")).toEqual(["memory index --agent default"]);
+    expect(await calls(argv, "memory status")).toContain("memory status --agent default --deep --json");
+  });
+
+  it("does not force the default agent's index over a keyword-only reading about another agent", async () => {
+    const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("default")]);
+    const { memoryPassSettled, parseMemoryStatus, rebuildKeywordOnlyIndex, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const aboutMain = await parseMemoryStatus(
+      KEYWORD_ONLY_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), null, null, "main",
+    );
+    expect(aboutMain).toMatchObject({ agentId: "main", errorCode: "index_keyword_only" });
+    expect(await rebuildKeywordOnlyIndex(aboutMain)).toBe(false);
+    expect(await calls(argv, "memory index")).toEqual([]);
+    // The same verdict about the agent the box means is rebuilt, at once: the
+    // decline above left no retry time on this agent's setting.
+    const aboutDefault = { ...aboutMain, agentId: "default" };
+    expect(await rebuildKeywordOnlyIndex(aboutDefault)).toBe(true);
+    await settledMemoryRun(tmpDir);
+    // Wait for the pass's status refresh too (see above).
+    await memoryPassSettled();
+    expect(await calls(argv, "memory index")).toEqual(["memory index --agent default --force"]);
+    // A late reading about the other agent claims nothing, so it cannot wipe
+    // that agent's once-per-setting record: the next reading about it, still
+    // keyword-only, is not rebuilt a second time.
+    expect(await rebuildKeywordOnlyIndex(aboutMain)).toBe(false);
+    expect(await rebuildKeywordOnlyIndex(aboutDefault)).toBe(false);
+    expect(await calls(argv, "memory index")).toHaveLength(1);
+  });
+
+  it("starts no pass for a caller whose reading is about an agent that is no longer the default", async () => {
+    const argv = await boxWithAgents({ entries: { default: {} } }, [realRow("default")]);
+    const { startMemoryIndex } = await lib();
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true, forAgent: "main" });
+    expect(result).toMatchObject({ accepted: false, declined: "agent_changed" });
+    expect(result.run.status).not.toBe("running");
+    expect(await calls(argv, "memory index")).toEqual([]);
   });
 });
