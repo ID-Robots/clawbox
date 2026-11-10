@@ -1,15 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTr } from "@/lib/i18n-floor";
 import {
+  appendStepDetails,
   describeUpdateFailure,
   shownStepStatus,
   stepFailureReason,
   UpdateStepCount,
   UpdateStepList,
+  UpdateStepLog,
   UpdateStepMeter,
   visibleUpdateSteps,
+  type StepDetailLog,
 } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
@@ -147,11 +150,18 @@ export const UPDATE_COMPACT_MEDIA = [
  * screen, so a stopped run keeps the window's layout. Below the media query
  * none of it applies.
  */
-const UPDATE_SCREEN_CSS = `
-@media ${UPDATE_SCREEN_MEDIA}{
-[data-update-screen]{--update-px:clamp(1px,min(.078125vw,.138889dvh),3px)}
-[data-update-screen="completed"]{--update-px:clamp(1px,min(.078125vw,calc((100dvh - 220px) / 748)),3px)}
-[data-update-screen] .us-page{flex-direction:column;align-items:center;padding:calc(20*var(--update-px)) calc(${SCREEN_GUTTER_PX}*var(--update-px)) calc(16*var(--update-px))}
+/**
+ * `--update-px` for a screen: `perWidth` is its width over 1280, `perHeight`
+ * its height over 720 and `height` its height — of the viewport in a media
+ * query, of the main monitor where /updating is laid over a row of them.
+ */
+function screenScale(perWidth: string, perHeight: string, height: string): string {
+  return `[data-update-screen]{--update-px:clamp(1px,min(${perWidth},${perHeight}),3px)}
+[data-update-screen="completed"]{--update-px:clamp(1px,min(${perWidth},calc((${height} - 220px) / 748)),3px)}`;
+}
+
+/** Every full-screen rule but the scale, which is the screen's. */
+const SCREEN_RULES = `[data-update-screen] .us-page{flex-direction:column;align-items:center;padding:calc(20*var(--update-px)) calc(${SCREEN_GUTTER_PX}*var(--update-px)) calc(16*var(--update-px))}
 [data-update-screen] .us-frame{flex:1 1 auto;display:flex;flex-direction:column;max-width:calc(1440*var(--update-px))}
 [data-update-screen] .us-run{flex:1 1 auto;display:flex;flex-direction:column}
 [data-update-screen] .us-grid{flex:1 1 auto;grid-template-columns:minmax(0,calc(${SCREEN_STEPS_PX}*var(--update-px))) minmax(0,1fr);grid-template-rows:auto 1fr;column-gap:calc(${SCREEN_GUTTER_PX}*var(--update-px))}
@@ -180,6 +190,7 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .us-list li>span:last-child,[data-update-screen] .us-list [data-testid=update-step-detail]{font-size:calc(11.5*var(--update-px))}
 [data-update-screen] .us-bar{bottom:calc(16*var(--update-px));margin-top:calc(14*var(--update-px));gap:calc(12*var(--update-px));border-radius:calc(10*var(--update-px));padding:calc(12*var(--update-px)) calc(20*var(--update-px));font-size:calc(13*var(--update-px))}
 [data-update-screen] .us-bar-note{margin-top:calc(2*var(--update-px));font-size:calc(11.5*var(--update-px))}
+[data-update-screen] .us-full-log{flex:none;max-height:calc(240*var(--update-px));margin-top:calc(14*var(--update-px));padding:calc(10*var(--update-px)) calc(14*var(--update-px));font-size:calc(11*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo{gap:calc(8*var(--update-px));padding:calc(20*var(--update-px)) calc(30*var(--update-px)) 0}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo img{width:calc(28*var(--update-px));height:calc(28*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo span{font-size:calc(18*var(--update-px))}
@@ -194,7 +205,12 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .wns[data-layout="wide"] .wns-chip{gap:calc(5*var(--update-px));padding:calc(4*var(--update-px)) calc(9*var(--update-px));font-size:calc(11*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"]+.wns-more{margin-top:calc(10*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"]+.wns-more a{font-size:calc(12.5*var(--update-px))}
-[data-update-screen] .wns[data-layout="wide"]+.wns-more svg{width:1em;height:1em}
+[data-update-screen] .wns[data-layout="wide"]+.wns-more svg{width:1em;height:1em}`;
+
+const UPDATE_SCREEN_CSS = `
+@media ${UPDATE_SCREEN_MEDIA}{
+${screenScale(".078125vw", ".138889dvh", "100dvh")}
+${SCREEN_RULES}
 }`;
 
 /**
@@ -210,9 +226,7 @@ const UPDATE_SCREEN_CSS = `
  * What's new is the part to drop: it is the one thing on the page the owner
  * does not need to follow the update. Same marks as UPDATE_SCREEN_CSS, at 1 px.
  */
-const UPDATE_COMPACT_CSS = `
-@media ${UPDATE_COMPACT_MEDIA}{
-[data-update-screen] .us-page{flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 16px}
+const COMPACT_RULES = `[data-update-screen] .us-page{flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 16px}
 [data-update-screen] .us-frame{flex:1 1 auto;display:flex;flex-direction:column;max-width:760px}
 [data-update-screen="updating"] .us-frame{max-height:740px}
 [data-update-screen] .us-run{flex:1 1 auto;display:flex;flex-direction:column}
@@ -227,8 +241,49 @@ const UPDATE_COMPACT_CSS = `
 [data-update-screen] .us-list{flex:1 1 auto;display:flex;flex-direction:column;margin-top:12px}
 [data-update-screen] .us-list>ol{flex:1 1 auto;display:flex;flex-direction:column}
 [data-update-screen] .us-list li{flex:1 1 auto;min-height:28px;max-height:46px;padding-block:2px}
-[data-update-screen] .us-bar{margin-top:14px;padding:12px 20px}
+[data-update-screen] .us-bar{margin-top:14px;padding:12px 20px}`;
+
+const UPDATE_COMPACT_CSS = `
+@media ${UPDATE_COMPACT_MEDIA}{
+${COMPACT_RULES}
 }`;
+
+/** The least a screen must measure for the full-screen layout (UPDATE_SCREEN_MEDIA). */
+const SCREEN_MIN_WIDTH_PX = SHOWCASE_NARROW_PX + SCREEN_STEPS_PX + 3 * SCREEN_GUTTER_PX;
+
+/**
+ * Which of /updating's layouts a screen of `width`×`height` CSS pixels takes —
+ * the same answer UPDATE_SCREEN_MEDIA and UPDATE_COMPACT_MEDIA give for a
+ * viewport that size: "full", "compact", or null (a phone: the window's
+ * layout, scrolled).
+ */
+export function updateScreenFit(width: number, height: number): "full" | "compact" | null {
+  if (width >= SCREEN_MIN_WIDTH_PX && height >= SCREEN_HEIGHT_PX) return "full";
+  if (width >= 768 && height >= 501) return "compact";
+  return null;
+}
+
+/** A number of CSS pixels, short. */
+const px = (n: number) => `${Number(n.toFixed(5))}px`;
+
+/**
+ * The CSS /updating draws for the run (TASK-2137, TASK-2146): with no `screen`
+ * the two media-query layouts, chosen and scaled by the viewport, exactly as
+ * before monitors were known. With `screen` — the main monitor's size, where
+ * the window is laid over a row of monitors — the layout that monitor takes,
+ * scaled by it, with no media query: the viewport is the whole row there, and
+ * its width would choose and scale for monitors the run is not drawn on.
+ */
+export function updateScreenCss(screen: { width: number; height: number } | null | undefined): { full: string | null; compact: string | null } {
+  if (!screen) return { full: UPDATE_SCREEN_CSS, compact: UPDATE_COMPACT_CSS };
+  const fit = updateScreenFit(screen.width, screen.height);
+  return {
+    full: fit === "full"
+      ? `\n${screenScale(px(screen.width / 1280), px(screen.height / SCREEN_HEIGHT_PX), px(screen.height))}\n${SCREEN_RULES}\n`
+      : null,
+    compact: fit === "compact" ? `\n${COMPACT_RULES}\n` : null,
+  };
+}
 
 /** The line across the bottom of a live or finished run: "don't power off", or what the screen around it has to say. */
 export interface RunNotice {
@@ -816,6 +871,9 @@ export function HarnessDowngradeNotice({
   );
 }
 
+/** No line seen yet: the full log's starting point. */
+const NO_DETAILS: StepDetailLog = {};
+
 /** A step's place in the list, as the log writes it: `05`. */
 function stepNumber(index: number): string {
   return String(index + 1).padStart(2, "0");
@@ -871,6 +929,7 @@ export function UpdateRunView({
   onResume,
   onOverrideDowngrade,
   fill = false,
+  screen = null,
 }: {
   status: RunStatus;
   state: UpdateState | null;
@@ -897,9 +956,17 @@ export function UpdateRunView({
   onOverrideDowngrade?: () => void;
   /** /updating: a live or finished run fills a computer's screen (see UPDATE_SCREEN_CSS). */
   fill?: boolean;
+  /**
+   * With `fill`: the size of the screen the run is drawn on when that is not
+   * the viewport — the main monitor of a row of them (`updateScreenCss`).
+   */
+  screen?: { width: number; height: number } | null;
 }) {
   const tr = useTr();
   const SubHeading = Heading === "h1" ? "h2" : "h3";
+  // The full log behind the terminal button: closed until it is asked for.
+  const [logOpen, setLogOpen] = useState(false);
+  const logId = useId();
   // Asked only while a run is on screen: the route reads the target's notes,
   // and an idle System Update window has no target to ask about. Asked again
   // after an outage: the first answer can predate the updater's own fetch,
@@ -916,6 +983,13 @@ export function UpdateRunView({
   // "In progress" and the progress holds. The failure is read from every step,
   // so the error panel still names a hidden step that stopped the run.
   const steps = visibleUpdateSteps(state?.steps ?? []);
+  // Every line a step reported while this view watched, for the full log:
+  // the poll only ever carries the line a step is on now. Kept the way React
+  // keeps what a render saw before (a guarded update during render), and the
+  // same object when no line is new, so nothing renders twice for nothing.
+  const [details, setDetails] = useState<StepDetailLog>(NO_DETAILS);
+  const seenDetails = appendStepDetails(details, steps);
+  if (seenDetails !== details) setDetails(seenDetails);
   const running = steps.find((s) => shownStepStatus(s, phase) === "running");
   const failure = failed ? describeUpdateFailure(state, error) : null;
   // A refused downgrade (or the backup its override could not take) is said
@@ -1000,6 +1074,7 @@ export function UpdateRunView({
         ? tr("update.notAnswering", "Restarting — not answering yet")
         : running?.label ?? (state ? tr("update.progressRunning", "In progress") : tr("update.connecting", "Connecting…"));
   const listedSteps = waiting ? steps.map((s) => (s.detail ? { ...s, detail: undefined } : s)) : steps;
+  const logLabel = tr("update.fullLog", "Full update log");
 
   const stepsPanel = (
     <section
@@ -1014,7 +1089,25 @@ export function UpdateRunView({
           )}
           <span className="truncate">{countHeadline}</span>
         </span>
-        {steps.length > 0 && <UpdateStepCount steps={steps} />}
+        {steps.length > 0 && (
+          <span className="inline-flex shrink-0 items-center gap-2">
+            <UpdateStepCount steps={steps} />
+            {/* Sized in em on the header's text, and pulled into its line
+                height, so the header is no taller for it at any scale. */}
+            <button
+              type="button"
+              onClick={() => setLogOpen((open) => !open)}
+              aria-label={logLabel}
+              title={logLabel}
+              aria-expanded={logOpen}
+              aria-controls={logId}
+              className="-my-[0.3333em] grid h-[2em] w-[2em] shrink-0 cursor-pointer place-items-center rounded-[var(--r-1)] text-[var(--text-muted)] hover:bg-[var(--fill-2)] hover:text-[var(--text-primary)] aria-expanded:bg-[var(--fill-2)] aria-expanded:text-[var(--text-primary)]"
+              data-testid="update-log-toggle"
+            >
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: "calc(16em / 12)" }}>terminal</span>
+            </button>
+          </span>
+        )}
       </div>
       {steps.length > 0 && (
         <>
@@ -1024,6 +1117,17 @@ export function UpdateRunView({
           <div className="us-list mt-[18px]">
             <UpdateStepList steps={listedSteps} phase={phase} />
           </div>
+          {logOpen && (
+            <UpdateStepLog
+              id={logId}
+              label={logLabel}
+              steps={steps}
+              phase={phase}
+              details={details}
+              warnings={warnings}
+              reasons={!downgrade}
+            />
+          )}
         </>
       )}
     </section>
@@ -1222,12 +1326,13 @@ export function UpdateRunView({
     </>
   );
   const showcase = whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />;
+  const screenCss = updateScreenCss(screen);
 
   return (
     <>
       {/* Beside the view, not in it: its text is the window's, word for word. */}
-      {fill && <style>{UPDATE_SCREEN_CSS}</style>}
-      {fill && <style data-update-compact="">{UPDATE_COMPACT_CSS}</style>}
+      {fill && screenCss.full && <style data-update-full="">{screenCss.full}</style>}
+      {fill && screenCss.compact && <style data-update-compact="">{screenCss.compact}</style>}
       <div className={`${fill ? "us-run " : ""}@container w-full`} data-testid="update-run" data-status={status} data-fill={fill ? "true" : undefined}>
         {fill ? (
           // The same view placed for a whole screen: the header and version row

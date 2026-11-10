@@ -42,6 +42,7 @@ import SystemUpdateApp from "@/components/SystemUpdateApp";
 import { HANDOVER_MAX_MS, HANDOVER_MIN_MS } from "@/components/UpdateHandover";
 import { UPDATE_COMPACT_MEDIA, UPDATE_SCREEN_MEDIA } from "@/components/UpdateRunView";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
+import { rememberMonitorStatus } from "@/lib/use-monitor-layout";
 
 const LABELS: [string, string][] = [
   ["bootstrap_updater", "Refreshing updater scripts"],
@@ -851,5 +852,171 @@ describe("/updating and the drift a run was started over", () => {
     await advance();
     expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "failed");
     expect(view.getByTestId("update-warning-checkout-behind-pin")).toHaveTextContent(DRIFT.message);
+  });
+});
+
+/**
+ * The owner's x64 laptop test (2026-11-10): the terminal button in the steps
+ * panel's header opens the full update log and closes it again, on /updating
+ * as in the window — for a live run and a finished one. The box sends the page
+ * no journal, so the log is what the status poll delivered: each step's
+ * outcome and every line a step reported while this screen watched.
+ */
+describe("/updating's full update log", () => {
+  /** RUNNING, with the restart step on line `detail`. */
+  const on = (detail: string): Answer => ({ body: { ...RUNNING, steps: steps(7, { status: "running", detail }) } });
+
+  it("opens on the terminal button and closes on the next click, keeping each line a step reported", async () => {
+    stubBox(inOrder(on("Fetching the new build"), on("Building the web app")));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const toggle = within(view.getByTestId("update-steps-panel")).getByRole("button", { name: "Full update log" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(view.queryByTestId("update-full-log")).toBeNull();
+
+    // The next poll: the step is on its next line, and the list shows only that one.
+    await advance(2_000);
+    expect(view.getByTestId("update-step-detail")).toHaveTextContent("Building the web app");
+    expect(view.queryByTestId("update-full-log")).toBeNull();
+
+    fireEvent.click(toggle);
+    const log = view.getByTestId("update-full-log");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const rows = within(log).getAllByTestId("update-full-log-step");
+    expect(rows).toHaveLength(8);
+    expect(rows[0]).toHaveTextContent("Completed");
+    expect(rows[5]).toHaveAttribute("data-status", "running");
+    expect(rows[5]).toHaveTextContent("Updating ClawBox and restarting");
+    expect(rows[5]).toHaveTextContent("In progress");
+    expect(within(rows[5]).getAllByTestId("update-full-log-detail").map((line) => line.textContent)).toEqual([
+      "› Fetching the new build",
+      "› Building the web app",
+    ]);
+    expect(rows[6]).toHaveTextContent("Waiting");
+
+    fireEvent.click(toggle);
+    expect(view.queryByTestId("update-full-log")).toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("is there for a finished run too", async () => {
+    stubBox(() => ({ body: COMPLETED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const toggle = view.getByRole("button", { name: "Full update log" });
+    expect(view.queryByTestId("update-full-log")).toBeNull();
+    fireEvent.click(toggle);
+    const rows = within(view.getByTestId("update-full-log")).getAllByTestId("update-full-log-step");
+    expect(rows.map((row) => row.getAttribute("data-status"))).toEqual(Array(8).fill("completed"));
+    fireEvent.click(toggle);
+    expect(view.queryByTestId("update-full-log")).toBeNull();
+  });
+
+  it("says itself in the owner's language", async () => {
+    locale = "de";
+    // Stopped at a step the screen lists (FAILED stops at a hidden one).
+    stubBox(() => ({ body: INTERRUPTED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    fireEvent.click(view.getByRole("button", { name: translations.de["update.fullLog"] }));
+    const log = view.getByTestId("update-full-log");
+    expect(log).toHaveTextContent(translations.de["update.stepFailed"]);
+    expect(log).toHaveTextContent(translations.de["update.stepCompleted"]);
+    expect(document.body.textContent).not.toMatch(/\bupdate\.[a-zA-Z]/);
+  });
+});
+
+/**
+ * Two monitors (the owner's x64 laptop test, 2026-11-10): the desktop is ONE
+ * app window laid over the row, and /updating was laid out, scaled and
+ * centred across the whole of it — half the run on each monitor. Now it is
+ * drawn inside the MAIN monitor's rect only, laid out and scaled for that
+ * monitor, and the others show plain ground. The layout comes from the answer
+ * the desktop kept for this window: the box is down for minutes mid-rebuild.
+ */
+describe("/updating on a row of monitors", () => {
+  /** A row of two monitors, `main` the primary, in a window exactly the row's size. */
+  function layOver(monitors: { id: string; rect: { x: number; y: number; width: number; height: number } }[], main: string) {
+    const width = Math.max(...monitors.map((m) => m.rect.x + m.rect.width));
+    const height = Math.max(...monitors.map((m) => m.rect.y + m.rect.height));
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: height, configurable: true });
+    rememberMonitorStatus({
+      available: true,
+      main,
+      box: { width, height },
+      monitors: monitors.map((m) => ({ ...m, label: m.id, enabled: true })),
+    });
+  }
+
+  let savedSize: [PropertyDescriptor | undefined, PropertyDescriptor | undefined];
+  beforeEach(() => {
+    savedSize = [Object.getOwnPropertyDescriptor(window, "innerWidth"), Object.getOwnPropertyDescriptor(window, "innerHeight")];
+  });
+  afterEach(() => {
+    sessionStorage.clear();
+    if (savedSize[0]) Object.defineProperty(window, "innerWidth", savedSize[0]);
+    if (savedSize[1]) Object.defineProperty(window, "innerHeight", savedSize[1]);
+  });
+
+  const box = (element: HTMLElement) => {
+    const { left, top, width, height } = element.style;
+    return { left, top, width, height };
+  };
+
+  it("draws a live run inside the main monitor on the right, scaled for that monitor, and nothing on the other", async () => {
+    layOver([
+      { id: "laptop", rect: { x: 0, y: 0, width: 1280, height: 800 } },
+      { id: "desk", rect: { x: 1280, y: 0, width: 1920, height: 1080 } },
+    ], "desk");
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const ground = view.getByTestId("updating-screen");
+    expect(ground).toHaveAttribute("data-update-main", "desk");
+    const main = view.getByTestId("updating-main-screen");
+    expect(box(main)).toEqual({ left: "1280px", top: "0px", width: "1920px", height: "1080px" });
+    // The whole run is inside that box; the ground around it carries nothing else.
+    expect(main.contains(view.getByTestId("update-run"))).toBe(true);
+    expect(main.contains(view.getByTestId("update-run-notice"))).toBe(true);
+    expect([...ground.children]).toEqual([main]);
+    // Laid out and scaled for 1920×1080, not for the 3200 px row: no viewport units, no media query.
+    const css = document.querySelector("style[data-update-full]")?.textContent ?? "";
+    expect(css).toContain("[data-update-screen]{--update-px:clamp(1px,min(1.5px,1.5px),3px)}");
+    expect(css).not.toMatch(/vw|dvh|@media/);
+    expect(document.querySelector("style[data-update-compact]")).toBeNull();
+  });
+
+  it("follows the main monitor's size on the left, where the row would choose the other layout", async () => {
+    // The row is 3584×1440 — the full-screen layout's size — but the main
+    // monitor is 1024×768: the steps alone, as on any window that size.
+    layOver([
+      { id: "small", rect: { x: 0, y: 0, width: 1024, height: 768 } },
+      { id: "big", rect: { x: 1024, y: 0, width: 2560, height: 1440 } },
+    ], "small");
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(box(view.getByTestId("updating-main-screen"))).toEqual({ left: "0px", top: "0px", width: "1024px", height: "768px" });
+    expect(document.querySelector("style[data-update-full]")).toBeNull();
+    const compact = document.querySelector("style[data-update-compact]")?.textContent ?? "";
+    expect(compact).toContain("[data-update-screen] .us-show{display:none}");
+    expect(compact).not.toContain("@media");
+  });
+
+  it("fills the viewport as before with one monitor", async () => {
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(view.getByTestId("updating-screen")).not.toHaveAttribute("data-update-main");
+    const main = view.getByTestId("updating-main-screen");
+    expect(main).toHaveClass("contents");
+    expect(main.getAttribute("style")).toBeNull();
+    expect(document.querySelector("style[data-update-full]")?.textContent?.trim().startsWith(`@media ${UPDATE_SCREEN_MEDIA}{`)).toBe(true);
   });
 });
