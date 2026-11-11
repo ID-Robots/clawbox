@@ -59,6 +59,22 @@ export const UPDATE_LOG_LINGER_MS = 3_000;
 const JOURNAL_READ_TIMEOUT_MS = 15_000;
 const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
 const JOURNAL_TAIL_BYTES = 8 * 1024;
+/** How long an open waits for the units an earlier process followed (the update goes on after it). */
+const REOPEN_DRAIN_MS = 2_000;
+/** How long a returning root step waits for its last journal lines (the rest come in the background). */
+const FINISH_WAIT_MS = 2_000;
+
+/** `work`, or nothing once `ms` have passed — whichever is first. Never rejects. */
+function within<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = deps.setTimer(() => resolve(undefined), ms);
+    work.then(
+      (value) => { deps.clearTimer(timer); resolve(value); },
+      () => { deps.clearTimer(timer); resolve(undefined); },
+    );
+  });
+}
+
 /** How long a streamed command's whole lines wait to be written together. */
 const STREAM_BATCH_MS = 250;
 const STREAM_BATCH_BYTES = 64 * 1024;
@@ -186,17 +202,17 @@ function latestPointerPath(): string {
 
 async function readLatestPointer(): Promise<string | null> {
   try {
-    const id = (await fs.promises.readFile(latestPointerPath(), "utf8")).trim();
+    const id = fs.readFileSync(latestPointerPath(), "utf8").trim();
     return UPDATE_LOG_ID_RE.test(id) && fs.existsSync(logPath(id)) ? id : null;
   } catch {
     return null;
   }
 }
 
-async function writeLatestPointer(id: string): Promise<void> {
+function writeLatestPointer(id: string): void {
   const tmp = untraced(`${latestPointerPath()}.${process.pid}.tmp`);
-  await fs.promises.writeFile(tmp, `${id}\n`, { mode: 0o600 });
-  await fs.promises.rename(tmp, latestPointerPath());
+  fs.writeFileSync(tmp, `${id}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, latestPointerPath());
 }
 
 /** The run started last: the pointer, or (no pointer yet) the newest id. */
@@ -446,17 +462,22 @@ class JournalFollow {
     if (this.stopped && this.record.done) return;
     this.halt();
     // A read already in flight may have started before the step's last line:
-    // it is waited for, and then the journal is read once more.
-    if (this.polling) await this.polling;
-    await this.pollOnce();
-    if (!this.readable || this.record.done) {
-      await this.log.markDone(this);
-      return;
-    }
-    this.timer = deps.setTimer(() => {
-      this.timer = null;
-      void this.pollOnce().then(() => this.log.markDone(this));
-    }, UPDATE_LOG_LINGER_MS);
+    // it is waited for, and then the journal is read once more — for at most
+    // FINISH_WAIT_MS of the step's time; past that, the rest is written in the
+    // background as it comes.
+    const drain = track((async () => {
+      if (this.polling) await this.polling;
+      await this.pollOnce();
+      if (!this.readable || this.record.done) {
+        void this.log.markDone(this);
+        return;
+      }
+      this.timer = deps.setTimer(() => {
+        this.timer = null;
+        void this.pollOnce().then(() => this.log.markDone(this));
+      }, UPDATE_LOG_LINGER_MS);
+    })().catch(() => {}));
+    await within(drain, FINISH_WAIT_MS);
   }
 
   /** The run is ending: one last read, now, and done. */
@@ -604,14 +625,16 @@ class RunLog {
 }
 
 let current: RunLog | null = null;
-/** A close in flight: the next open waits for it, so two runs never write one file. */
+/** Closes, one after the other (each writes its run's last line). */
 let closing: Promise<void> = Promise.resolve();
+/** Runs being closed in this process: an open never goes on with one. */
+const closingIds = new Set<string>();
 /** Opens, one after the other. */
 let opening: Promise<void> = Promise.resolve();
 
 async function readMeta(id: string): Promise<UpdateLogMeta | null> {
   try {
-    const meta = JSON.parse(await fs.promises.readFile(metaPath(id), "utf8")) as UpdateLogMeta;
+    const meta = JSON.parse(fs.readFileSync(metaPath(id), "utf8")) as UpdateLogMeta;
     if (!meta || meta.id !== id || typeof meta.size !== "number" || !Array.isArray(meta.follows)) return null;
     return meta;
   } catch {
@@ -622,7 +645,7 @@ async function readMeta(id: string): Promise<UpdateLogMeta | null> {
 /** Run ids on disk, newest first. */
 async function listRunIds(): Promise<string[]> {
   try {
-    const names = await fs.promises.readdir(updateLogDir());
+    const names = fs.readdirSync(updateLogDir());
     return names
       .filter((n) => n.endsWith(".log"))
       .map((n) => n.slice(0, -4))
@@ -666,25 +689,30 @@ export function openUpdateLog(opts: OpenUpdateLogOptions): Promise<string | null
 }
 
 async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
+  // The update never waits on the log's own bookkeeping: a close in flight
+  // (its last journal reads) finishes in the background, and its run is
+  // simply not one this open may go on with.
   try {
-    await closing;
     if (current && !current.meta.finished) {
       if (!opts.fresh) return current.meta.id;
-      await closeUpdateLog("failed", "a new update started before this one finished");
+      void closeUpdateLog("failed", "a new update started before this one finished");
     }
     current = null;
-    await fs.promises.mkdir(updateLogDir(), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(updateLogDir(), { recursive: true, mode: 0o700 });
     const latest = await latestRunId();
-    const last = latest ? await readMeta(latest) : null;
+    const last = latest && !closingIds.has(latest) ? await readMeta(latest) : null;
     if (last && !last.finished) {
       if (!opts.fresh) {
         current = await reopen(last, opts.title);
         return last.id;
       }
       // A run whose server died without a word, and is not being continued:
-      // its log says so and stops being followed.
-      const stale = await reopen(last, "This update did not finish");
-      await stale.close("failed", undefined);
+      // its log says so and stops being followed — in the background.
+      closingIds.add(last.id);
+      void track((async () => {
+        const stale = await reopen(last, "This update did not finish");
+        await stale.close("failed", undefined);
+      })().catch(() => {}).finally(() => closingIds.delete(last.id)));
     }
     if (opts.resumeOnly) return null;
     const startedMs = deps.now();
@@ -696,10 +724,14 @@ async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
       finished: false,
       follows: [],
     };
+    // The file exists from the first moment, so the pointer below never
+    // names a run a reader cannot find yet.
+    fs.writeFileSync(logPath(meta.id), "", { flag: "a", mode: 0o600 });
+    fs.writeFileSync(metaPath(meta.id), JSON.stringify(meta), { mode: 0o600 });
     current = new RunLog(meta);
-    await current.write(`${BOLD}=== ${redactUpdateLogText(opts.title)}${RESET} ${DIM}(started ${meta.startedAt})${RESET}\n`, { force: true });
-    await writeLatestPointer(meta.id);
-    await prune(meta.id);
+    void current.write(`${BOLD}=== ${redactUpdateLogText(opts.title)}${RESET} ${DIM}(started ${meta.startedAt})${RESET}\n`, { force: true });
+    writeLatestPointer(meta.id);
+    void prune(meta.id);
     return meta.id;
   } catch {
     current = null;
@@ -712,8 +744,8 @@ async function reopen(meta: UpdateLogMeta, title: string): Promise<RunLog> {
   // recorded cursor. No reader was sent those bytes (updateLogInfo serves the
   // recorded size only), so nothing anybody has seen changes.
   try {
-    const { size } = await fs.promises.stat(logPath(meta.id));
-    if (size > meta.size) await fs.promises.truncate(logPath(meta.id), meta.size);
+    const { size } = fs.statSync(logPath(meta.id));
+    if (size > meta.size) fs.truncateSync(logPath(meta.id), meta.size);
     else meta.size = size;
   } catch {
     meta.size = 0;
@@ -724,13 +756,14 @@ async function reopen(meta: UpdateLogMeta, title: string): Promise<RunLog> {
   // What the units this server was following said while it was down, first.
   // A unit still running (the rebuild restarts the services before it ends)
   // is read on until it has stopped.
+  // Read, briefly: what the journal no longer holds back after REOPEN_DRAIN_MS
+  // still comes, under a "(continued)" line, while the update goes on.
   for (const record of pending) {
     const follow = log.follow(record.step, record.sinceMs, record.cursor);
     follow.settleThenFinish();
-    await follow.pollOnce();
-    await log.flushed();
+    await within(follow.pollOnce(), REOPEN_DRAIN_MS);
   }
-  await log.write(`\n${CYAN}=== ${redactUpdateLogText(title)}${RESET} ${DIM}(${clock(deps.now())})${RESET}\n`, { force: true });
+  void log.write(`\n${CYAN}=== ${redactUpdateLogText(title)}${RESET} ${DIM}(${clock(deps.now())})${RESET}\n`, { force: true });
   return log;
 }
 
@@ -832,7 +865,9 @@ export async function logUpdateCommand<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   if (!current || current.meta.finished) return run();
-  await writeUpdateLog(`${DIM}$ ${argv.join(" ")}${RESET}\n`);
+  // Queued, not waited for: the log keeps the order it is asked in, and the
+  // command does not wait on the disk.
+  void writeUpdateLog(`${DIM}$ ${argv.join(" ")}${RESET}\n`);
   const pending = run();
   let streamed: { flush: () => Promise<void> } | null = null;
   try {
@@ -842,12 +877,12 @@ export async function logUpdateCommand<T>(
   try {
     const result = await pending;
     if (streamed) await streamed.flush();
-    else await writeCommandOutput(result);
+    else void writeCommandOutput(result);
     return result;
   } catch (err) {
     if (streamed) await streamed.flush();
-    else await writeCommandOutput(err);
-    await writeUpdateLog(`${RED}(${describeExit(err)})${RESET}\n`);
+    else void writeCommandOutput(err);
+    void writeUpdateLog(`${RED}(${describeExit(err)})${RESET}\n`);
     throw err;
   }
 }
@@ -857,7 +892,8 @@ export async function writeCommandOutput(result: unknown): Promise<void> {
   const r = (result ?? {}) as { stdout?: unknown; stderr?: unknown };
   for (const part of [r.stdout, r.stderr]) {
     const text = Buffer.isBuffer(part) ? part.toString("utf8") : typeof part === "string" ? part : "";
-    if (text) await writeUpdateLog(text.endsWith("\n") ? text : `${text}\n`);
+    // Queued in order, both at once (each write is queued as it is asked for).
+    if (text) void writeUpdateLog(text.endsWith("\n") ? text : `${text}\n`);
   }
 }
 
@@ -909,7 +945,11 @@ export function closeUpdateLog(outcome: "completed" | "failed", error?: string):
   const log = current;
   if (!log || log.meta.finished) return closing;
   current = null;
-  closing = closing.then(() => log.close(outcome, error)).catch(() => {});
+  closingIds.add(log.meta.id);
+  closing = closing
+    .then(() => log.close(outcome, error))
+    .catch(() => {})
+    .finally(() => closingIds.delete(log.meta.id));
   return closing;
 }
 
@@ -936,7 +976,7 @@ export async function settleUpdateLogForTests(): Promise<void> {
  * would — its files stay exactly as the last write left them.
  */
 export async function resetUpdateLogForTests(): Promise<void> {
-  await closing;
+  await settleUpdateLogForTests();
   if (current) {
     for (const f of current.activeFollows()) await f.abandon().catch(() => {});
     await current.flushed();

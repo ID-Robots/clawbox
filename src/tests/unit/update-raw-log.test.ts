@@ -240,6 +240,7 @@ describe("capture", () => {
     expect(answer.stdout).toBe("HEAD is now at abc1234 msg\n");
     const failure = Object.assign(new Error("Command failed"), { code: 1, stdout: "", stderr: "error: build failed" });
     await expect(logUpdateCommand(["bun", "run", "build"], async () => { throw failure; })).rejects.toBe(failure);
+    await settle(); // the lines are queued, not waited for by the command
     const text = logText(id!);
     expect(text).toContain("$ git reset --hard HEAD");
     expect(text).toContain("HEAD is now at abc1234 msg\n");
@@ -335,8 +336,9 @@ describe("capture, when things go wrong", () => {
       (now += 1_000, openUpdateLog({ fresh: true, flow: "update", title: "second" })),
     ]);
     expect(first).not.toBe(second);
-    expect(await updateLogInfo(first!)).toMatchObject({ finished: true, outcome: "failed" });
     expect(currentUpdateLogId()).toBe(second);
+    await settle(); // the first is closed in the background
+    expect(await updateLogInfo(first!)).toMatchObject({ finished: true, outcome: "failed" });
   });
 
   it("serves only what the record accounts for: bytes a dying process wrote after it are not handed out", async () => {
@@ -367,6 +369,7 @@ describe("the run started last, and a full log", () => {
 
   it("still writes where each step starts and how it ended once the log is full", async () => {
     const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    await settle(); // the title line is in
     const { size } = (await updateLogInfo(id!))!;
     await writeUpdateLog(`${"x".repeat(UPDATE_LOG_MAX_BYTES - size - 6)}\n`); // five bytes short of full
     await writeUpdateLog("dropped output\n");
@@ -424,6 +427,7 @@ describe("commands the web server runs itself", () => {
     await expect(logUpdateCommand(["bun", "install"], () => running(async (_out, err) => {
       err.emit("data", "error: lockfile had changes\n");
     }, true))).rejects.toThrow("Command failed");
+    await settle();
     const text = logText(id!);
     expect(text).toContain("error: lockfile had changes\n");
     expect(text).toContain("(exit 2)");
@@ -505,6 +509,8 @@ describe("a restart in the middle of the run", () => {
     now += 60_000;
     const second = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
     expect(second).not.toBe(first);
+    // Closed in the background: the new run does not wait for it.
+    await settle();
     expect(await updateLogInfo(first!)).toMatchObject({ finished: true, outcome: "failed" });
     expect(logText(first!)).toContain("This update did not finish");
     expect(await latestUpdateLog()).toMatchObject({ id: second, finished: false });

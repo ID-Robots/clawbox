@@ -5774,9 +5774,9 @@ async function resumeContinuation(): Promise<boolean> {
         // The dead run's raw log ends here, with what its units said after it
         // died, instead of being followed by readers for ever. A resume
         // starts a new one.
-        if (await openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "The update was interrupted" })) {
-          await closeUpdateLog("failed", interruptedMessage(describeInterruption(record, applicableSteps()).detail));
-        }
+        const interruption = interruptedMessage(describeInterruption(record, applicableSteps()).detail);
+        void openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "The update was interrupted" })
+          .then((id) => (id ? closeUpdateLog("failed", interruption) : undefined));
       } else {
         record = await readInterruptionRecord();
       }
@@ -5854,10 +5854,14 @@ async function resumeContinuation(): Promise<boolean> {
     runtime.state.error = message;
     // The raw log the first half was writing: the rebuild's own output, read
     // on from where that process stopped, and how it ended.
-    if (await openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "ClawBox restarted" })) {
-      await logUpdateStepEnd(steps[restartIndex], "failed", message);
-      await closeUpdateLog("failed", message);
-    }
+    // In the background: the verdict above is the update's, and nothing here
+    // waits on the log.
+    const restartStep = steps[restartIndex];
+    void openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "ClawBox restarted" }).then((id) => {
+      if (!id) return undefined;
+      void logUpdateStepEnd(restartStep, "failed", message);
+      return closeUpdateLog("failed", message);
+    });
     // The rebuild failed and the previous build is what came back up: move the
     // checkout back to it rather than leave new code beside an old build.
     await rollBackCheckoutIfStranded();
@@ -6577,7 +6581,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     runtime.state.currentStepIndex = i;
     runtime.state.steps[i].status = "running";
     runtime.state.steps[i].error = undefined;
-    await logUpdateStepStart(step, i, steps.length);
+    void logUpdateStepStart(step, i, steps.length);
 
     // Re-assert the lock at every step boundary, because another PROCESS can
     // drop it. config-store.set is an unlocked read-modify-write of the whole
@@ -6638,7 +6642,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         runtime.state.downgrade = stop.backupFailure === undefined
           ? refusal.detail
           : { ...refusal.detail, backupFailure: stop.backupFailure };
-        await logUpdateStepEnd(step, "failed", stop.message);
+        void logUpdateStepEnd(step, "failed", stop.message);
         failed = true;
         break;
       }
@@ -6660,7 +6664,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (skip.skip && skip.version) {
         console.log(`[Updater] ${openclawSkippedLine(skip.version)}`);
         runtime.state.steps[i].status = "completed";
-        await logUpdateStepEnd(step, "skipped", openclawSkippedLine(skip.version));
+        void logUpdateStepEnd(step, "skipped", openclawSkippedLine(skip.version));
         continue;
       }
     }
@@ -6757,7 +6761,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
-      await logUpdateStepEnd(step, "completed", undefined, stepStartedAt);
+      void logUpdateStepEnd(step, "completed", undefined, stepStartedAt);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
       // An overrun on an advisory step doesn't fail the update. Serialized
@@ -6771,7 +6775,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
         runtime.state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
-        await logUpdateStepEnd(step, "completed", `${message} (advisory)`, stepStartedAt);
+        void logUpdateStepEnd(step, "completed", `${message} (advisory)`, stepStartedAt);
         continue;
       }
       // Only let the unit's journal override the error when the unit actually
@@ -6795,7 +6799,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       runtime.state.steps[i].status = "failed";
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
-      await logUpdateStepEnd(step, "failed", message, stepStartedAt);
+      void logUpdateStepEnd(step, "failed", message, stepStartedAt);
       failed = true;
       if (step.failFast || (desktopIntegration && step.id === "apt_update")) {
         runtime.state.error = message;
