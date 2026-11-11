@@ -1413,9 +1413,10 @@ openclaw_version_is_v2() {
 # is readable and its version is a date, all three agree on the generation.
 # The launcher still decides whether there is an installed core at all. An
 # unusable manifest is an empty answer and takes the pin, then OPENCLAW_VERSION.
-# Quiet and never failing, so a bare caller under `set -euo pipefail` cannot
-# abort its step; the program comes from a heredoc, so a `while read` caller's
-# input is left alone.
+# The manifest read is quiet and never fails on its own. The answer is the exit
+# status, 1 before OpenClaw 2, so call it as a condition (`if`, `&&`): a bare
+# call under `set -e` ends its step on an older core. The program comes from a
+# heredoc, so a `while read` caller's input is left alone.
 openclaw_is_v2() {
   local v=""
   if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
@@ -8702,8 +8703,8 @@ tts_write_local_provider_definition() {
   # nothing mid-restage. $3 is the copy ROOT EXECUTES for the timeout probe
   # below, which must be the root-owned one: this runs as root inside
   # step_openclaw_tts, `openclaw_tts` is on WEB_ROOT_STEPS, and the dispatcher's
-  # verify is long past by the time the step gets here — so `bash` on the tree
-  # copy is a foothold's payload with seconds to spare. TASK-733.
+  # verify is long past by the time the step gets here — so the probe runs the
+  # copy root holds, and with no $3 it refuses and runs nothing.
   local TTS_HOME="$1" TTS_SCRIPT="$2" TTS_PROBE="${3:-}"
   if [ -z "$TTS_PROBE" ]; then
     echo "  ERROR: no root-held copy of clawbox-tts.sh was given to probe for the provider timeout" >&2
