@@ -323,6 +323,13 @@ describe("chatOnLocalAi", () => {
     expect(chatOnLocalAi("openclaw", "clawlocal", "primary")).toBe(false);
   });
 
+  it("an external AI engine in the slot is not a model on this box (TASK-2376)", () => {
+    expect(chatOnLocalAi("openclaw", "", "local", true)).toBe(false);
+    expect(chatOnLocalAi("openclaw", "", "local", false)).toBe(true);
+    // Hermes names the engine by its own provider, never clawlocal.
+    expect(chatOnLocalAi("hermes", "clawext", null)).toBe(false);
+  });
+
   it("reads the provider Hermes' header picked: the box's own clawlocal", () => {
     expect(chatOnLocalAi("hermes", "clawlocal", null)).toBe(true);
     expect(chatOnLocalAi("hermes", "anthropic", "local")).toBe(false);

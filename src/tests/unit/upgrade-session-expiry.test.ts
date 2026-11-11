@@ -72,13 +72,14 @@ function mint(exp: number, extra: Record<string, unknown> = {}, gen = 0): string
 
 const nowS = () => Math.floor(Date.now() / 1000);
 
-function writeConfig(gen: number, openclawShared = false) {
+function writeConfig(gen: number, openclawShared = false, orgMode = false) {
   fs.writeFileSync(
     path.join(root, "data", "config.json"),
     JSON.stringify({
       session_generation: gen,
       clawbox_users: [{ username: USER, sv: USER_SV }],
       ...(openclawShared ? { openclaw_shared_with_users: true } : {}),
+      ...(orgMode ? { org_mode: true } : {}),
     }),
   );
   // The proxy caches config.json on its mtime, which the kernel stamps at a
@@ -412,3 +413,36 @@ describe("another ClawBox user's gateway sockets and the OpenClaw sharing switch
   });
 });
 
+// An organisation box (TASK-2435, scripts/org-mode.js): a ClawBox user other
+// than the owner keeps their own chat socket and nothing else — the Terminal,
+// the remote desktop and the gateway's Control UI (shared or not) answer 403,
+// and a Terminal they had open closes once the owner turns the switch on.
+describe("an organisation box and another ClawBox user's sockets", () => {
+  const carol = () => mint(nowS() + 600, { u: USER, sv: USER_SV });
+
+  afterEach(() => writeConfig(0));
+
+  it("refuses the user's Terminal, remote desktop and Control UI, and keeps the owner's", async () => {
+    writeConfig(0, true, true);
+    for (const pathname of ["/terminal-ws", "/novnc-ws", "/"]) {
+      expect((await dial(pathname, carol())).status, pathname).toBe(403);
+    }
+    const owner = await open("/terminal-ws", mint(nowS() + 600));
+    expect(await echoes(owner, "owner")).toBe(true);
+    owner.close();
+  });
+
+  it("still relays the user's own chat socket", async () => {
+    writeConfig(0, false, true);
+    const result = await dial("/user-chat-ws", carol());
+    expect(result.ws, "user-chat-ws admitted").toBeDefined();
+    result.ws?.close();
+  });
+
+  it("closes a Terminal the user had open once the owner turns organisation mode on", async () => {
+    const ws = await open("/terminal-ws", carol());
+    expect(await echoes(ws, "before")).toBe(true);
+    writeConfig(0, false, true);
+    expect(await closedWithin(ws, RECHECK_MS * 20)).not.toBeNull();
+  });
+});

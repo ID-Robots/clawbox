@@ -10,6 +10,7 @@
 import { get, set } from "@/lib/config-store";
 import { OPENCLAW_SHARED_KEY, openclawSharedFrom } from "@/lib/non-owner-scope";
 import type { SessionIdentity } from "@/lib/session-identity";
+import { readOrgMode } from "@/lib/org-mode-server";
 
 /** The switch as stored. A store that cannot be read shares nothing. */
 export async function readOpenclawShared(): Promise<boolean> {
@@ -26,9 +27,12 @@ export async function writeOpenclawShared(shared: boolean): Promise<void> {
 
 /**
  * May this signed-in person's page carry the gateway's token? The owner's
- * always; another ClawBox user's only while the owner shares OpenClaw.
+ * always; another ClawBox user's only while the owner shares OpenClaw — and
+ * never on an organisation box (src/lib/org-mode.ts), which shares nothing
+ * with its staff.
  */
 export async function mayHaveGatewayToken(person: Pick<SessionIdentity, "isOwner"> | null): Promise<boolean> {
   if (!person) return false;
-  return person.isOwner || await readOpenclawShared();
+  if (person.isOwner) return true;
+  return (await readOpenclawShared()) && !(await readOrgMode());
 }

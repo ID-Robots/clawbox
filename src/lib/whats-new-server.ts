@@ -21,6 +21,7 @@ import {
   type WhatsNewPlanCta,
   type WhatsNewState,
 } from "@/lib/whats-new";
+import { readOrgMode } from "@/lib/org-mode-server";
 
 /**
  * The config-store key holding the release whose card the owner dismissed
@@ -73,6 +74,9 @@ export async function readFreeMonthCode(): Promise<string | null> {
  * the Harness card's own `swapAllowed` (Max).
  */
 async function readPlanCta(source: EditionSource): Promise<WhatsNewPlanCta> {
+  // An organisation box sells nothing (src/lib/org-mode.ts): its ClawBox AI
+  // offers are hidden for everyone, the owner included.
+  if (await readOrgMode()) return { ...NO_PLAN_CTA };
   // A plan that cannot be read offers NOTHING (TASK-1198). Either read failing
   // used to fail the whole route with a 500, and the desktop drew no card at
   // all over a question only its plan section asks. The card still announces

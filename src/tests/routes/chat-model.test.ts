@@ -328,6 +328,67 @@ describe("/setup-api/chat/model", () => {
     expect(body.local.label).toBe("Gemma 4 Local");
   });
 
+  describe("the external AI engine in the Local AI slot (TASK-2376)", () => {
+    const REF = "clawext/Qwen/Qwen3-32B";
+    function engineBox(primary: string) {
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_provider: "clawai",
+        local_ai_configured: true,
+        local_ai_provider: "clawext",
+        local_ai_model: REF,
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        models: {
+          providers: {
+            deepseek: { models: [{ id: "deepseek-v4-flash", name: "ClawBox AI Flash" }] },
+            clawext: {
+              baseUrl: "http://192.0.2.10:8000/v1",
+              api: "openai-completions",
+              models: [{ id: "Qwen/Qwen3-32B", name: "Qwen3-32B", contextWindow: 131072, maxTokens: 8192 }],
+            },
+          },
+        },
+        agents: { defaults: { model: { primary } } },
+      } as never);
+    }
+
+    it("is THE local row, named for its model, with its own window", async () => {
+      engineBox(REF);
+      const body = await (await GET()).json();
+      const local = body.options.find((option: { isLocal: boolean }) => option.isLocal);
+      expect(local).toMatchObject({ id: REF, model: REF, provider: "clawext", label: "Qwen3-32B", available: true, settingsSection: "localAi" });
+      expect(body.options.filter((option: { isLocal: boolean }) => option.isLocal)).toHaveLength(1);
+      expect(body.local).toEqual({ available: true, label: "Qwen3-32B", model: REF, contextWindow: 131072, external: true });
+      expect(body.activeSource).toBe("local");
+      expect(body.activeLabel).toBe("Qwen3-32B");
+      // "Back to primary" is still the cloud model, not the engine.
+      expect(body.primary.model).toBe("deepseek/deepseek-v4-flash");
+    });
+
+    it("a pick writes it as the primary without the on-device Tool Search arm", async () => {
+      engineBox("deepseek/deepseek-v4-flash");
+      coreAtLeastMock.mockReset().mockResolvedValue(true);
+      const calls: string[][][] = [];
+      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => { calls.push(ops as string[][]); });
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: REF }),
+      }));
+      expect(response.status).toBe(200);
+      const batch = calls.find((ops) => ops.some((op) => op[0] === "agents.defaults.model.primary"));
+      expect(batch).toContainEqual(["agents.defaults.model.primary", REF]);
+      expect(batch?.some((op) => op[0] === "tools.toolSearch")).toBe(false);
+    });
+
+    it("leaves a box with no engine exactly as it was: no `external` flag on the slot", async () => {
+      const body = await (await GET()).json();
+      expect(body.local.external).toBeUndefined();
+      expect(body.local.model).toBe("llamacpp/gemma4-e2b-it-q4_0");
+    });
+  });
+
   describe("a provider the box can run no model from", () => {
     /** The three-profile box of the test above: ClawBox AI, OpenAI, Anthropic. */
     function threeProviderBox(primary: string) {

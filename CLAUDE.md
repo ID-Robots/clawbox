@@ -99,7 +99,7 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 
 - [setup-api.md](docs/agents/setup-api.md) — read this when you touch a route under `src/app/setup-api/` that no feature file below owns, or `src/middleware.ts`.
 - [core-libraries.md](docs/agents/core-libraries.md) — read this when you touch module-level state, a `path` import, the config or KV store, auth, i18n, or any `src/lib/` module no area below owns.
-- [multi-user.md](docs/agents/multi-user.md) — read this when you touch sessions, `/login`, users, or the access rule of any new route (owner-only is the default).
+- [multi-user.md](docs/agents/multi-user.md) — read this when you touch sessions, `/login`, users, organisation mode (`org_mode`), or the access rule of any new route (owner-only is the default).
 - [setup-wizard.md](docs/agents/setup-wizard.md) — read this when you touch the first-boot wizard, `setup/*` or the unified image's edition choice.
 - [harness-openclaw.md](docs/agents/harness-openclaw.md) — read this when you touch `openclaw.json`, the gateway's auth store, the OpenClaw CLI, `gateway-pre-start.sh` or the agent's persona and first-run ritual.
 - [harness-hermes.md](docs/agents/harness-hermes.md) — read this when you touch `hermes-*.ts` (but `hermes-pets.ts` is in desktop.md), the `hermes/*` routes or anything ClawBox writes under `~/.hermes`.

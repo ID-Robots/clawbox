@@ -339,6 +339,12 @@ interface ChatPopupProps {
    * as it was before multi-user.
    */
   chatUser?: string | null
+  /**
+   * A member of staff on an organisation box (src/lib/org-mode.ts): their
+   * chat is a chat and nothing more — no coding-run cards, no "create an
+   * app", no owner's email drafts, whose routes answer them 403.
+   */
+  orgMember?: boolean
   onOpenFull?: () => void
   onOpenSettingsSection?: (section: 'ai' | 'localAi') => void
   onThinkingChange?: (thinking: boolean) => void
@@ -470,8 +476,9 @@ interface ChatModelState {
     thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
-  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127). */
-  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null }
+  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127).
+   *  `external`: the slot holds the owner's external AI engine (TASK-2376). */
+  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null; external?: boolean }
   /** Providers this box authenticates to by SUBSCRIPTION only. The catalogue's
    * `availableOnSubscription` stamp says what a provider's subscription
    * surface carries; this says whether that applies to this device. Optional
@@ -995,7 +1002,7 @@ function shownCodingCardIds(transcript: HTMLElement | null): string[] {
   return Array.from(transcript.querySelectorAll(CODING_CARD_SELECTOR), el => el.getAttribute('data-run-id') ?? '')
 }
 
-function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
@@ -1234,7 +1241,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // still in the document; moved once the chip is.
   const restoreChipRef = useRef<HTMLButtonElement>(null)
   const focusRestoreChipRef = useRef(false)
-  const codingCards = useCodingChatCards(isOpen, (id) => {
+  const codingCards = useCodingChatCards(isOpen && !orgMember, (id) => {
     const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"], [data-testid="coding-team-activity"]')
     if (focused?.getAttribute('data-run-id') === id || (focused?.getAttribute('data-team-id') && `team:${focused.getAttribute('data-team-id')}` === id)) focusRestoreChipRef.current = true
   })
@@ -2525,7 +2532,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // idle, so the chat says so: a note at the top (LocalAiChatBanner) and,
   // until the turn's first token, "Loading the local model…" in place of a
   // spinner verb.
-  const onLocalAi = harnessLoaded && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource)
+  // An external engine in the Local AI slot is not on this box: no load note,
+  // no on-device long-chat handling (TASK-2376).
+  const onLocalAi = harnessLoaded
+    && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource, chatModelState?.local?.external === true)
   const [localAiBannerDismissed, dismissLocalAiBanner] = useLocalAiBannerDismissed()
   const localAiLoadingLabel = useLocalAiLoadingLabel()
   // A long conversation on Local AI (TASK-2127): measured between turns, held
@@ -5911,6 +5921,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
    * for the turn-end caller and `recoverEmailDrafts` for the scheduled one.
    */
   const collectEmailDrafts = useCallback(async () => {
+    // The box's mail is the owner's; an organisation box's staff have none here.
+    if (orgMember) return
     const read = ++emailQueueReadSeq.current
     try {
       // `no-store`, and not because the route is slow to change: the route's
@@ -5988,7 +6000,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The queue could not be read. Nothing is waiting as far as this surface
       // is concerned, and Settings → Email is unaffected.
     }
-  }, [])
+  }, [orgMember])
 
   /**
    * The turn-end caller: collect at once, but only for a turn that asked to
@@ -9212,7 +9224,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
-        <NewAppToggleButton card={newApp} />
+        {!orgMember && <NewAppToggleButton card={newApp} />}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made

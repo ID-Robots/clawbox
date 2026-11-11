@@ -5,6 +5,8 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { getAll, set as setConfigKey, setMany } from "@/lib/config-store";
+import { externalEngineSelected } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -2543,7 +2545,28 @@ export async function POST(request: Request) {
 }
 
 /** The save itself, answered as one JSON body once it is done. */
+/**
+ * Turning the on-device model on is a Local AI transition (TASK-2376): it runs
+ * under the lock an external engine's save and remove take, so its "no engine
+ * selected" check and its writes cannot interleave with them.
+ */
 async function configureNow(request: Request): Promise<Response> {
+  if (await isOnDeviceConfigure(request)) {
+    return withLocalAiTransitionLock(() => configureNowUnlocked(request));
+  }
+  return configureNowUnlocked(request);
+}
+
+async function isOnDeviceConfigure(request: Request): Promise<boolean> {
+  try {
+    const body = await request.clone().json() as { provider?: unknown } | null;
+    return body?.provider === "llamacpp" || body?.provider === "ollama";
+  } catch {
+    return false;
+  }
+}
+
+async function configureNowUnlocked(request: Request): Promise<Response> {
   const gateway: GatewayTracker = { state: "untouched" };
   let response: Response;
   try {
@@ -2784,6 +2807,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
+      );
+    }
+    // An external AI engine holds the Local AI slot (TASK-2376). Turning the
+    // on-device model on beside it would hand the chat back to a runtime the
+    // proxy refuses to start; the engine's own Remove is the way back.
+    if ((isOllama || isLlamaCpp) && await externalEngineSelected()) {
+      return NextResponse.json(
+        {
+          error: "An external AI engine is selected as Local AI. Remove it in Settings → Local AI → External engine before turning on the on-device model.",
+          code: "external_engine_selected",
+        },
+        { status: 409 },
       );
     }
     // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.

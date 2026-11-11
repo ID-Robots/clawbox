@@ -4,6 +4,7 @@ import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { ClawaiImageError, generateClawaiImage } from "@/lib/harness/clawai-images";
 import { appendTranscript } from "@/lib/harness/transcript-store";
 import { transcriptKeyFor } from "@/lib/chat-scope-server";
+import { recordMediaOwner } from "@/lib/chat-media-owners";
 
 export const dynamic = "force-dynamic";
 
@@ -130,6 +131,9 @@ export async function POST(req: NextRequest) {
     }
     return NextResponse.json({ error: err.message }, { status: err.status });
   }
+
+  // Drawn for a ClawBox user other than the owner: theirs (src/lib/chat-media-owners.ts).
+  if (!which.principal.isOwner) recordMediaOwner(which.principal.username, [result.path]);
 
   // The picture, as the bubble will hold it. Stored as the `/setup-api/chat/media`
   // ref rather than as the absolute path so that a replayed transcript is

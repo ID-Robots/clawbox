@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
 // The whole settings app mounts here — every panel and every status fetch.
@@ -108,6 +108,8 @@ describe("Settings → Appearance and Network expose named, stateful controls", 
     render(<SettingsApp ui={ui} />);
     fireEvent.click(screen.getByRole("button", { name: /settings\.network/ }));
     const toggle = await screen.findByRole("switch", { name: "settings.hotspot" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // Read once /users/me has said who is looking (the box's network is the
+    // owner's on an organisation box, TASK-2435).
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
   });
 });

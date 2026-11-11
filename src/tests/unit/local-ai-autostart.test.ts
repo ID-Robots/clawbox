@@ -211,6 +211,26 @@ describe("llama.cpp auto-start gate", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it("never starts llama.cpp while an external AI engine is the Local AI (TASK-2376)", async () => {
+    // Even with an explicit alias and a primary that still names llama.cpp —
+    // the caller that asks is the one this floor exists for.
+    readConfigMock.mockResolvedValue({
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+    getAllMock.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_provider: "clawext",
+      local_ai_model: "clawext/Qwen/Qwen3-32B",
+      external_engine: { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 65536, maxTokens: 4096 },
+    });
+    llamaCppMocks.getConfiguredLlamaCppModelAlias.mockReturnValue("gemma4-e2b-it-q4_0");
+
+    const { startLlamaCppServer } = await loadModule();
+    expect(await startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("skipped-disabled");
+    expect(await startLlamaCppServer()).toBe("skipped-disabled");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it("does not spawn a second server when one is already running", async () => {
     readConfigMock.mockResolvedValue({});
     getAllMock.mockResolvedValue({ local_ai_configured: true, local_ai_provider: "llamacpp" });

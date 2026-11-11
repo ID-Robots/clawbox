@@ -513,6 +513,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.attachment.remove": "Remove {name}",
     "chat.attachment.error.tooLarge": "{name} is too large to attach.",
     "chat.attachment.error.rejected": "{name} could not be attached.",
+    "chat.attachment.error.unreadable": "{name} could not be read, so it was not attached.",
     "chat.attachment.error.session": "Your session expired. Reload the page and attach {name} again.",
     "chat.attachment.error.box": "This ClawBox could not save {name}. Try attaching it again.",
     "chat.attachment.error.imagesOnly": "This ClawBox can look at pictures, but not documents yet, so {name} was not attached.",

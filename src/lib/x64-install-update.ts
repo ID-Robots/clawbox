@@ -154,6 +154,12 @@ function tracedFileRace(output: string): boolean {
 export interface OwnerRebuildOptions {
   /** What the rebuild is doing now, for the step's detail line. */
   onProgress?: (detail: string) => void;
+  /**
+   * Every command, run through this: the updater's raw log writes the command
+   * and its output (update-raw-log.ts `logUpdateCommand`). It must run `run`
+   * and answer with its result or its error unchanged.
+   */
+  onCommand?: <T>(argv: readonly string[], run: () => Promise<T>) => Promise<T>;
   /** Test seam: the bun to run. Defaults to the owner's ~/.bun/bin/bun, then PATH. */
   bun?: string;
   /** Test seam: the environment the commands start from. */
@@ -182,10 +188,11 @@ export async function rebuildAsOwner(projectDir: string, options: OwnerRebuildOp
   const env = ownerBuildEnv(options.env ?? process.env, projectDir);
   const bun = options.bun ?? bunBinary(env);
   const progress = options.onProgress ?? (() => {});
+  const through = options.onCommand ?? (<T>(_argv: readonly string[], go: () => Promise<T>) => go());
   const buildDir = path.join(projectDir, ".next");
   const keptDir = path.join(projectDir, ".next-old");
   const run = (file: string, args: string[], timeout: number) =>
-    execFile(file, args, { cwd: projectDir, env, timeout, maxBuffer: 64 * 1024 * 1024 });
+    through([file, ...args], () => execFile(file, args, { cwd: projectDir, env, timeout, maxBuffer: 64 * 1024 * 1024 }));
 
   let stage = "bun install";
   let parked = false;
@@ -198,13 +205,15 @@ export async function rebuildAsOwner(projectDir: string, options: OwnerRebuildOp
       await run(process.execPath, ["-e", "require('node-pty')"], 60_000);
     } catch {
       progress("Rebuilding the terminal's native module");
-      const npm = path.join(path.dirname(process.execPath), "npm");
-      await execFile(existsSync(npm) ? npm : "npm", ["rebuild", "node-pty", "--foreground-scripts"], {
+      const npmPath = path.join(path.dirname(process.execPath), "npm");
+      const npm = existsSync(npmPath) ? npmPath : "npm";
+      const npmArgs = ["rebuild", "node-pty", "--foreground-scripts"];
+      await through([npm, ...npmArgs], () => execFile(npm, npmArgs, {
         cwd: projectDir,
         env: { ...env, npm_config_python: "/usr/bin/python3" },
         timeout: INSTALL_TIMEOUT_MS,
         maxBuffer: 64 * 1024 * 1024,
-      });
+      }));
     }
 
     stage = "setting the previous build aside";

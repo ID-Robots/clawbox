@@ -18,6 +18,8 @@ export interface SessionUser {
   multiUser: boolean;
   /** The owner shares OpenClaw with every user, so its icon is theirs too (src/lib/non-owner-scope.ts). */
   openclawShared: boolean;
+  /** An organisation box: a user gets Chat, Files and their own Settings (src/lib/org-mode.ts). */
+  orgMode: boolean;
 }
 
 let pending: Promise<SessionUser | null> | null = null;
@@ -31,6 +33,7 @@ function parse(data: unknown): SessionUser | null {
     isOwner: d.isOwner === true,
     multiUser: d.multiUser === true,
     openclawShared: d.openclawShared === true,
+    orgMode: d.orgMode === true,
   };
 }
 

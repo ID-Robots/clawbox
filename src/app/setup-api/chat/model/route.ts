@@ -34,6 +34,7 @@ import {
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { DEFAULT_LLAMACPP_CONTEXT_WINDOW, getLlamaCppContextWindow } from "@/lib/llamacpp";
+import { EXTERNAL_ENGINE_PROVIDER, externalEngineDisplayName, isExternalEngineRef } from "@/lib/external-engine-shared";
 import { llamaCppModelName } from "@/lib/local-models";
 import { CLAWBOX_AI_CHAT_MODEL } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
@@ -203,6 +204,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   ollama: "Ollama Local",
   llamacpp: "Gemma 4 Local",
   deepseek: "ClawBox AI",
+  [EXTERNAL_ENGINE_PROVIDER]: "External engine",
 };
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter", "xai"] as const;
@@ -235,8 +237,13 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
 // namespace — both auth modes write `openai/<id>` — so both routes pass the
 // answer in (src/lib/chatgpt-subscription.ts).
 
+/**
+ * The Local AI slot: the on-device runtimes, and the owner's external AI
+ * engine when one is selected in their place (TASK-2376) — the picker offers
+ * it as THE local row, and "back to primary" leaves it like the on-device one.
+ */
 function isLocalModel(model: string | null | undefined): boolean {
-  return !!model && (model.startsWith("llamacpp/") || model.startsWith("ollama/"));
+  return !!model && (model.startsWith("llamacpp/") || model.startsWith("ollama/") || isExternalEngineRef(model));
 }
 
 const OLLAMA_PREFIX = "ollama/";
@@ -281,6 +288,8 @@ function labelForProvider(provider: string | null, fallback: string): string {
  * no name.
  */
 function localModelLabel(provider: string | null, model: string): string {
+  // The external engine is named for its model, as the owner's engine lists it.
+  if (provider === EXTERNAL_ENGINE_PROVIDER) return externalEngineDisplayName(model);
   if (provider === "llamacpp") {
     const name = llamaCppModelName(model);
     if (name) return `${name} Local`;
@@ -1077,6 +1086,9 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       label: localLabel,
       model: localModel,
       contextWindow: localModelContextWindow(openclawConfig, localModel),
+      // The slot is the owner's external engine, not a model on this box: no
+      // load wait, no on-device notes (TASK-2376).
+      ...(localProvider === EXTERNAL_ENGINE_PROVIDER ? { external: true as const } : {}),
     },
     subscriptionProviders,
   };

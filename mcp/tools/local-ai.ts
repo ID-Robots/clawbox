@@ -42,6 +42,14 @@ interface LocalModelRow {
 interface InventoryBody {
   models?: LocalModelRow[];
   unavailable?: string[];
+  /** The owner's external AI engine in the Local AI slot (TASK-2376), or null. */
+  externalEngine?: {
+    model?: string;
+    displayName?: string;
+    baseUrl?: string;
+    contextWindow?: number;
+    harness?: string;
+  } | null;
 }
 
 /** GET /setup-api/tts — only the fields that say which voice answers. */
@@ -135,8 +143,21 @@ export function registerLocalAiTools(reg: Registrar): void {
       const embeddingsPending = wants("embeddings")
         && !rows.some((r) => r.id === "embeddings")
         && !unreadable.includes("embeddings");
+      const external = inventory.externalEngine;
       return json({
         engines: rows,
+        // The chat's Local AI is the owner's own server elsewhere, not a model
+        // on this box: llama.cpp is not started for chat while it is selected.
+        ...(external && (engine === "all" || engine === "llamacpp")
+          ? {
+            external_engine: {
+              model: external.model ?? external.displayName ?? "unknown",
+              endpoint: external.baseUrl ?? "unknown",
+              ...(typeof external.contextWindow === "number" ? { context_window: external.contextWindow } : {}),
+              note: "Local AI answers through this OpenAI-compatible engine, which the owner runs; the on-device chat model is not started while it is selected.",
+            },
+          }
+          : {}),
         ...(unreadable.length ? { could_not_read: unreadable } : {}),
         ...(embeddingsPending ? { not_read_yet: "embeddings — the device is still reading the memory index; ask again in a moment" } : {}),
         ...(voice

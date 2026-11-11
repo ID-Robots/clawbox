@@ -51,6 +51,8 @@ import PathGuardPanel from "./PathGuardPanel";
 import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
 import { useSettledSessionUser } from "@/lib/use-session-user";
+import { isOrgMember, ORG_USER_SETTINGS_SECTIONS } from "@/lib/org-mode";
+import OwnPasswordCard from "./OwnPasswordCard";
 import MonitorsPanel from "./MonitorsPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
@@ -241,7 +243,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "account", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
 
 /**
  * Users is a part of System now — System → Users, beside the device's own
@@ -362,6 +364,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // not by history: the brain and the ways to reach it first, the box's own
   // machinery next, the once-a-year pages last.
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
+  // A signed-in user other than the owner: their own password. Drawn for
+  // them alone (`sectionShown`); the owner's password is System's.
+  { id: "account", icon: "person", labelKey: "users.account" },
   // Monitor mode: the monitors the desktop is spread over. Only on a box that
   // has a monitor session (`monitorsAvailable` below) — every other box never
   // shows the row.
@@ -681,6 +686,33 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
   const sessionUser = useSettledSessionUser();
   const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
+  // Which sections this person is drawn. Until /users/me answers, the owner's
+  // set (as the desktop draws), minus Account, which is a user's alone. A
+  // user never gets System Update — updating the box is the owner's on every
+  // box — and on an organisation box (src/lib/org-mode.ts) gets only their
+  // own: Appearance (language, wallpaper, look) and Account (password). The
+  // routes behind every other section answer them 403 whatever is drawn.
+  const nonOwner = sessionUser != null && sessionUser.isOwner === false;
+  const orgMember = isOrgMember(sessionUser);
+  // The box's own reads beyond a member's sections (its network, its figures,
+  // its jobs) are the owner's on an organisation box (src/lib/org-mode.ts).
+  // They wait for /users/me, so nobody is asked before it is known who is looking.
+  const boxReads = sessionUser !== undefined && !orgMember;
+  const sectionShown = useCallback((id: Section): boolean => {
+    if (id === "account") return nonOwner;
+    if (id === "update" && nonOwner) return false;
+    if (orgMember) return ORG_USER_SETTINGS_SECTIONS.includes(id === "localModels" ? "localAi" : id);
+    return true;
+  }, [nonOwner, orgMember]);
+  // Once it is known who is looking, a section they are not drawn is not kept
+  // either — not only not rendered: every effect keyed on the section (the
+  // System figures' poll, a channel's status) then stops asking for it.
+  useEffect(() => {
+    if (sessionUser === undefined) return;
+    const shown = (id: Section) => (isChannelSection(id) ? sectionShown("channels") : sectionShown(id));
+    if (!shown(section)) setSection(DEFAULT_SECTION);
+    if (mobileSection !== null && !shown(mobileSection)) setMobileSection(DEFAULT_SECTION);
+  }, [sessionUser, section, mobileSection, sectionShown]);
   const systemShows: SystemView | null = systemView === "device" ? "device" : usersAllowed === null ? null : usersAllowed ? "users" : "device";
   useEffect(() => {
     let alive = true;
@@ -694,12 +726,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       monitorsLink.current = false;
     };
+    // The monitors are the box's: not asked for a member of staff on an
+    // organisation box, nor before it is known who is looking.
+    if (!boxReads) return () => { alive = false; };
     fetch("/setup-api/monitors", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body: { available?: boolean } | null) => answer(body?.available === true))
       .catch(() => answer(false));
     return () => { alive = false; };
-  }, []);
+  }, [boxReads]);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -940,7 +975,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [processesOpen, setProcessesOpen] = useState(false);
   // Which commit this box is really running, and whether that agrees with the
   // code on its disk. Fetched only where it is shown (About + System).
-  const buildIdentity = useBuildIdentity(section === "system" || section === "about");
+  const buildIdentity = useBuildIdentity(!orgMember && (section === "system" || section === "about"));
   // `processes` has always been the by-CPU list, so a server that predates the
   // second ordering simply has no memory view to switch to.
   const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
@@ -949,7 +984,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // keeps `section` while it is up — so neither polls.
   const systemFiguresShown = (isMobile ? mobileSection : section) === "system" && systemShows === "device";
   useEffect(() => {
-    if (!systemFiguresShown && section !== "about") return;
+    if (!boxReads || (!systemFiguresShown && section !== "about")) return;
     // Ask only for what is on screen. About draws neither block, and on System
     // each one is behind its own button — so a collapsed panel costs no `ps`
     // and no /proc/stat diff on the box, not merely a hidden <div> here.
@@ -965,7 +1000,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (!systemFiguresShown) return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
-  }, [section, systemFiguresShown, processesOpen, perCoreOpen]);
+  }, [boxReads, section, systemFiguresShown, processesOpen, perCoreOpen]);
 
   /* ── Versions, for About's rows and the sidebar subtitles. The update
      itself — its run, the beta channel, the branch pin, the force — is the
@@ -978,13 +1013,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Load version info on mount
   useEffect(() => {
+    // Updating is the owner's on every box, and so are the versions: another
+    // user's Settings never asks (the route answers them 403).
+    if (usersAllowed !== true) return;
     // /update/status only returns versions when phase=idle and not completed.
     // Use the dedicated /update/versions endpoint which always reports them.
     fetch("/setup-api/update/versions")
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.clawbox || data?.openclaw) setVersionInfo(data); })
       .catch(() => {});
-  }, []);
+  }, [usersAllowed]);
 
   /* ── WiFi ── */
   const [ssid, setSsid] = useState("");
@@ -1066,7 +1104,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       console.warn("[SettingsApp] refreshSavedNetworks failed:", err);
     }
   };
-  useEffect(() => { void refreshSavedNetworks(); }, []);
+  useEffect(() => { if (boxReads) void refreshSavedNetworks(); }, [boxReads]);
   const updateSavedPassword = async (name: string) => {
     if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
       setSavedStatus({ type: "error", message: t("settings.security.wifiPasswordLength") });
@@ -1250,6 +1288,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   useEffect(() => {
+    if (!boxReads) return;
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
       if (d.connected && d.ssid) setConnectedSSID(d.ssid);
       setWifiQuality({ signalDbm: d.signalDbm ?? null, bitrateMbps: d.bitrateMbps ?? null, pingMs: d.pingMs ?? null });
@@ -1271,7 +1310,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       if (typeof d.ipv4 === "string") setIpv4(d.ipv4);
     }).catch(() => {});
-  }, []);
+  }, [boxReads]);
 
   const saveHostname = async () => {
     const name = hostnameInput.trim().toLowerCase().replace(/\.local$/, "");
@@ -1474,7 +1513,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean; clawaiConfigured?: boolean } | null>(null);
   useEffect(() => {
-    if (section !== "ai" && !isMobile) return;
+    if (!boxReads || (section !== "ai" && !isMobile)) return;
     const load = () => {
       fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
     };
@@ -1485,7 +1524,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // while the card underneath still named the old one — until the section was
     // left and re-entered. Seen on a live box, in the same window.
     return onProvidersChanged(load);
-  }, [section, isMobile]);
+  }, [boxReads, section, isMobile]);
 
   // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
   // tracks its own copy — seeded from the immutable cache, then confirmed once.
@@ -1513,7 +1552,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // its own inventory. Read once when the section opens and again when the
   // providers change — the subtitle names the configured model, which changes
   // through actions, not on its own.
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null } | null>(null);
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; externalName?: string | null } | null>(null);
   const localTabOpen = section === "localAi";
   useEffect(() => {
     if (!localTabOpen && !isMobile) return;
@@ -1524,6 +1563,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           configured: !!data.local_ai_configured,
           provider: typeof data.local_ai_provider === "string" ? data.local_ai_provider : null,
           model: typeof data.local_ai_model === "string" ? data.local_ai_model : null,
+          // An external engine in the slot (TASK-2376) is named for its model,
+          // the way the chat header names it.
+          externalName: typeof data.external_engine?.displayName === "string" ? data.external_engine.displayName : null,
         }))
         .catch(() => setLocalAiStatus({ configured: false, provider: null, model: null }));
     };
@@ -1765,21 +1807,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // claiming the question is unanswerable while it is being asked. The other
   // three status effects below do the same, for the same reason.
   useEffect(() => {
-    if (!isMobile && section !== "telegram" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "telegram" && section !== "channels")) return;
     unsettleChannel("telegram");
     refreshTelegramStatus();
-  }, [section, isMobile, refreshTelegramStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshTelegramStatus, unsettleChannel]);
 
   // Pane-only detail — the approved list and the streaming toggle have no
   // reader on the hub, so the hub must not pay for them.
   useEffect(() => {
-    if (section !== "telegram" && !isMobile) return;
+    if (!boxReads || (section !== "telegram" && !isMobile)) return;
     refreshPairing();
     fetch("/setup-api/telegram/streaming", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
-  }, [section, isMobile, refreshPairing]);
+  }, [boxReads, section, isMobile, refreshPairing]);
 
   // Refresh the approved/pending lists when an approval happens anywhere (e.g.
   // the desktop popup) so the Settings list updates without a manual reload.
@@ -2119,17 +2161,17 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // The status the hub's dot and the pane's card both read. Unsettle-then-read,
   // as on the Telegram effect above.
   useEffect(() => {
-    if (!isMobile && section !== "email" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "email" && section !== "channels")) return;
     unsettleChannel("email");
     refreshEmailStatus();
-  }, [section, isMobile, refreshEmailStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshEmailStatus, unsettleChannel]);
 
   // Pane-only detail — the approvals strip and the chat-approval bot.
   useEffect(() => {
-    if (section !== "email" && !isMobile) return;
+    if (!boxReads || (section !== "email" && !isMobile)) return;
     refreshEmailPending();
     refreshChatApproval();
-  }, [section, isMobile, refreshEmailPending, refreshChatApproval]);
+  }, [boxReads, section, isMobile, refreshEmailPending, refreshChatApproval]);
 
   /**
    * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
@@ -2161,7 +2203,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
 
   useEffect(() => {
-    if (!emailPanelVisible) return;
+    if (!boxReads || !emailPanelVisible) return;
     // The pacing — interval, focus, visible-edge, and never behind a hidden tab
     // — is `installPendingRefresh`, shared with the chat surface's batch card so
     // the two cannot drift into disagreeing about how fresh this list is.
@@ -2173,7 +2215,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // being told nobody can be asked.
       refreshChatApproval();
     });
-  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+  }, [boxReads, emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
 
   /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
   const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
@@ -2510,10 +2552,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (!isMobile && section !== "whatsapp" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "whatsapp" && section !== "channels")) return;
     unsettleChannel("whatsapp");
     refreshWhatsapp();
-  }, [section, isMobile, refreshWhatsapp, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshWhatsapp, unsettleChannel]);
 
   const saveWhatsapp = useCallback(
     async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
@@ -2854,7 +2896,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (every || subjects.has("whatsapp")) void refreshWhatsapp();
     if (every || subjects.has("discord")) void refreshDiscordStatus();
   }, [refreshTelegramStatus, refreshPairing, refreshEmailStatus, refreshWhatsapp, refreshDiscordStatus]);
-  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { onEnded: onChannelJobsEnded });
+  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { enabled: boxReads, onEnded: onChannelJobsEnded });
   const channelJobFor = (subject: string): SettingsJob | null => (channelJob?.subject === subject ? channelJob : null);
   const telegramJob = channelJobFor("telegram");
   const emailJob = channelJobFor("email");
@@ -2886,10 +2928,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (!isMobile && section !== "discord" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "discord" && section !== "channels")) return;
     unsettleChannel("discord");
     refreshDiscordStatus();
-  }, [section, isMobile, refreshDiscordStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshDiscordStatus, unsettleChannel]);
 
   useEffect(() => {
     if (section !== "discord") return;
@@ -3284,13 +3326,18 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
   }, []);
 
-  const activeSection = isMobile ? (mobileSection ?? section) : section;
+  const requestedSection = isMobile ? (mobileSection ?? section) : section;
+  // A section this person is not drawn (a deep link from an older page, a
+  // channel pane on an organisation box) opens on Appearance instead.
+  const activeSection: Section = isChannelSection(requestedSection)
+    ? (sectionShown("channels") ? requestedSection : DEFAULT_SECTION)
+    : sectionShown(requestedSection) ? requestedSection : DEFAULT_SECTION;
 
   // Read when the Channels list or a channel pane is on screen — the two
   // places the badge can appear — and not on every section, since it costs a
   // request that answers nothing anywhere else.
   useEffect(() => {
-    if (activeSection !== "channels" && !isChannelSection(activeSection)) return;
+    if (!boxReads || (activeSection !== "channels" && !isChannelSection(activeSection))) return;
     // `alive` because the answer comes back after an await and a Settings pane
     // is left by clicking another one.
     let alive = true;
@@ -3299,14 +3346,14 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       if (alive && rows) setPluginRepairs(rows);
     })();
     return () => { alive = false; };
-  }, [activeSection, fetchPluginRepairs]);
+  }, [boxReads, activeSection, fetchPluginRepairs]);
 
   // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
   const navSection: Section = isChannelSection(activeSection)
     ? "channels"
     : activeSection === "localModels" ? "localAi" : activeSection;
-  const visibleNavItems = monitorsAvailable ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id !== "monitors");
+  const visibleNavItems = NAV_ITEMS.filter((item) => (monitorsAvailable || item.id !== "monitors") && sectionShown(item.id));
   // The panel's own heading. Taken from the entry that already names it — the
   // channels list for a channel pane, the sidebar for every other section — so
   // a heading needs no new translation key and cannot drift from the row the
@@ -3888,6 +3935,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         )}
 
         {/* ─── Network ─── */}
+        {activeSection === "account" && (
+          <div className="max-w-xl space-y-5">
+            <OwnPasswordCard />
+          </div>
+        )}
+
         {activeSection === "wifi" && (
           <div className="max-w-xl space-y-5">
 
@@ -4318,7 +4371,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 time this page opened. A refused credential is still a
                 configured one and is the connect panel's to fix, not this
                 card's to pitch over. */}
-            {aiProvider?.clawaiConfigured === false && (
+            {/* Never on an organisation box (src/lib/org-mode.ts): its ClawBox AI
+                offers are hidden for everyone, the owner included. */}
+            {aiProvider?.clawaiConfigured === false && !sessionUser?.orgMode && (
               <ClawboxAiPitchCard
                 onConnect={() => {
                   // Two panels answer this page, and only one of them acts on
@@ -6618,7 +6673,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 It is about the box, not the assistant, so it lives with the box's
                 figures (owner, 2026-09-16); Desktop & power stays on Harness.
                 Rendered outside the stats ternary: a box whose stats call fails
-                must still let the owner change its password. */}
+                must still let the owner change its password. The OWNER's
+                password: another user changes their own under Account. */}
+            {!nonOwner && (
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
@@ -6724,6 +6781,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
             </div>
+            )}
           </div>
         )}
 
@@ -6828,6 +6886,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 the pin. The current OpenClaw version is still displayed
                 in the version-info section above. */}
             <div className="flex gap-2">
+              {/* Updating is the owner's on every box: nobody else is offered it. */}
+              {sectionShown("update") && (
               <button
                 onClick={() => { setSection("update"); setMobileSection("update"); }}
                 data-testid="settings-about-open-update"
@@ -6844,6 +6904,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   )}
                 </div>
               </button>
+              )}
             </div>
 
             <button
@@ -7001,6 +7062,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       case "localAi": {
         if (localAiStatus === null) return { subtitle: null };
         if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        if (localAiStatus.externalName) {
+          return { subtitle: t("localModels.external.subtitle", { model: localAiStatus.externalName }) };
+        }
         return { subtitle: localAiStatus.model || localAiStatus.provider };
       }
       case "telegram": {

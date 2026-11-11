@@ -3811,7 +3811,61 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# refresh_root_update_log_limit [UNIT_DIR] — makes the NEXT root step start
+# under the root update unit's journald rate limit (the LogRateLimit* lines of
+# config/clawbox-root-update@.service). The update screen's raw log is these
+# units' journals (src/lib/update-raw-log.ts), and journald fixes a unit's
+# limit when the unit starts: step_systemd_services re-copies the unit inside
+# rebuild_reboot, which is too late for rebuild_reboot itself, so the first
+# update from a build whose installed unit lacks the limit would rebuild under
+# journald's default and lose lines.
+#
+# A bridge, never a second copy of the setting: while the INSTALLED unit lacks
+# the lines, they are installed as a drop-in (logging only — never ExecStart —
+# so it is safe before the root-owned copies the unit names are current); once
+# the installed unit carries them itself, the drop-in is removed. So
+# step_apt_update, first in every update and before its rebuild, bridges an
+# older unit, and step_systemd_services, right after copying the new unit,
+# takes the bridge down — a box left on an older build later has that build's
+# unit and nothing of this one's. daemon-reload only when something changed.
+# Never fails the step it runs in. TASK-2428.
+refresh_root_update_log_limit() {
+  local unit_dir="${1:-/etc/systemd/system}"
+  local unit="$SRC_DIR/config/clawbox-root-update@.service"
+  local installed="$unit_dir/clawbox-root-update@.service"
+  local dir="$unit_dir/clawbox-root-update@.service.d"
+  local conf="$dir/50-log-rate-limit.conf" lines have want
+  lines="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$unit" 2>/dev/null)" || true
+  have="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$installed" 2>/dev/null)" || true
+  if [ -z "$lines" ] || [ "$have" = "$lines" ]; then
+    # Nothing to bridge: the unit as installed already has this limit (or this
+    # build sets none).
+    [ -e "$conf" ] || return 0
+    if rm -f "$conf"; then
+      rmdir "$dir" 2>/dev/null || true
+      echo "  Root update steps: the installed unit carries its journald limit; bridge drop-in removed"
+      systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after removing the root update unit's log-limit drop-in failed (non-fatal)" >&2
+    else
+      echo "  Warning: could not remove $conf (non-fatal)" >&2
+    fi
+    return 0
+  fi
+  want="$(printf '# Installed by install.sh (refresh_root_update_log_limit) until the unit itself carries these lines.\n[Service]\n%s' "$lines")"
+  [ -f "$conf" ] && [ "$(cat "$conf" 2>/dev/null)" = "$want" ] && return 0
+  if mkdir -p "$dir" && printf '%s\n' "$want" > "$conf.tmp" && mv -f "$conf.tmp" "$conf"; then
+    echo "  Root update steps: journald limit bridged with a drop-in until the new unit is installed ($(printf '%s' "$lines" | tr '\n' ' '))"
+    systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after the root update unit's log limit failed (non-fatal)" >&2
+  else
+    rm -f "$conf.tmp" 2>/dev/null || true
+    echo "  Warning: could not install the root update unit's log limit at $conf (non-fatal)" >&2
+  fi
+  return 0
+}
+
 step_apt_update() {
+  # First, before anything that can fail: every later root step of the update
+  # (rebuild_reboot included) keeps all its lines.
+  refresh_root_update_log_limit
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   # poppler-utils is `pdftotext`, and it is the ONLY reason Memory Shard can
@@ -7698,6 +7752,33 @@ step_clawkeep_install() {
   # and ~/.local/bin/clawkeepd; without a forced reinstall, an existing
   # install with the same version string ("0.1.0") would skip the upgrade
   # and leave stale code on disk after a `git pull`.
+  #
+  # One forced install per update, though, not two (UPD-04: 9 s in
+  # rebuild_reboot, then 8 s more in post_update with the gateway down).
+  # A verified forced install records the git tree id of clawkeep/ in a
+  # root-owned file on /run (tmpfs: gone at every boot, so the reboot arm's
+  # post_update forces). post_update alone passes --reuse-this-update, and
+  # skips only when that record names the tree HEAD has NOW, with no local
+  # change, clawkeepd is there and the CLI still answers. The skip spends
+  # the record. git runs as the tree's owner and its answer is only compared.
+  local record="${CLAWBOX_CLAWKEEP_INSTALLED_RECORD:-/run/clawbox/clawkeep-installed}"
+  local tree="" kept="" dirty="" tmp=""
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  if [ "${1:-}" = "--reuse-this-update" ] && [ -f "$record" ] && [ ! -L "$record" ] \
+    && IFS= read -r kept < "$record" \
+    && tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" \
+    && [ -n "$tree" ] && [ "$tree" = "$kept" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && [ -x "$CLAWBOX_HOME/.local/bin/clawkeepd" ] \
+    && as_clawbox_login 'clawkeep --help' >/dev/null 2>&1; then
+    rm -f "$record" 2>/dev/null || true
+    echo "  ClawKeep CLI: the same code (clawkeep tree ${tree:0:12}) was installed and verified earlier in this update; not reinstalled"
+    return 0
+  fi
+  # Every forced run drops the record first: a failed, partial, pip --user or
+  # skipped install must never leave an older one for post_update to trust.
+  rm -f "$record" 2>/dev/null || true
+
   if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
     echo "  ClawKeep source missing; skipping"
     return 0
@@ -7736,6 +7817,19 @@ step_clawkeep_install() {
     return 1
   fi
   echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
+  # The record, for this update's post_update. Root writes it in root's
+  # /run/clawbox through a fresh mktemp file renamed into place, so it never
+  # writes through a link. A tree with local changes is never recorded.
+  if tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" && [ -n "$tree" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && mkdir -p "$(dirname "$record")" \
+    && tmp="$(mktemp "$(dirname "$record")/.clawkeep-installed.XXXXXX" 2>/dev/null)" \
+    && printf '%s\n' "$tree" > "$tmp" && mv -f "$tmp" "$record"; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  echo "  ClawKeep CLI install not recorded (local changes under clawkeep/, or git or /run/clawbox could not answer); post_update will reinstall it"
+  return 0
 }
 
 # Legacy path, used only when pipx could not be provisioned. Still the
@@ -10244,6 +10338,9 @@ step_systemd_services() {
     fi
     cp "$src" /etc/systemd/system/
   done
+  # The unit just copied carries the journald limit itself: the drop-in
+  # step_apt_update bridged an older unit with comes down (see there).
+  refresh_root_update_log_limit
   systemctl daemon-reload
   # Enable all services except templates and on-demand units.
   #
@@ -10598,8 +10695,12 @@ step_post_update() {
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
-  # we have to force-reinstall.
-  optional_step clawkeep_install step_clawkeep_install
+  # we have to force-reinstall. Unless step_rebuild_reboot already did, in
+  # this boot, from the same clean clawkeep/ tree and the CLI still answers
+  # (UPD-04): it is the one forced install of the update. This step cannot
+  # simply drop the call: it fetches and resets the tree before it runs, so
+  # the code may have moved since; the tree id comparison catches that.
+  optional_step clawkeep_install step_clawkeep_install --reuse-this-update
   # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
   # step_post_update never ran step_ai_tools_install, which is exactly why no
   # already-shipped box has `claude` on it today. Idempotent — a present
@@ -14426,7 +14527,8 @@ step_rebuild_reboot() {
   step_openclaw_patch
   step_openclaw_config
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
-  # sees the new restore.py / scheduler logic.
+  # sees the new restore.py / scheduler logic. Always forced: this is the
+  # update's one ClawKeep install, which post_update reuses (UPD-04).
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
   # HOW THE UPDATE ENDS, decided here (update_reboot_reasons): after the redeploy
   # above, so a marker one of those steps leaves counts, and before the rebuild,

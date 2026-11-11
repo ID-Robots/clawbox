@@ -11,6 +11,7 @@ const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: `/tmp/clawbox-users-test-${process.pid}`,
   get: vi.fn(async (key: string) => store.get(key)),
+  getKnown: vi.fn(async (key: string) => (store.has("__unreadable__") ? { value: undefined, known: false } : { value: store.get(key), known: true })),
   set: vi.fn(async (key: string, value: unknown) => { store.set(key, value); }),
 }));
 vi.mock("@/lib/root-step-runner", () => ({ startRootStep: vi.fn() }));
@@ -76,6 +77,14 @@ describe("clawbox-users", () => {
       expect(created.username).toBe("alice");
       expect(created.sv).toMatch(/^[0-9a-f]{32}$/);
       expect(await lib.listUsers()).toEqual([created]);
+    });
+
+    it("starts a name used before clean: an earlier account's preferences and language are cleared first", async () => {
+      store.set("prefs_by_user", { alice: { wp_id: "dunes" }, bob: { wp_id: "aurora" } });
+      store.set("ui_language_by_user", { alice: "de" });
+      await lib.createUser("alice", "correct horse");
+      expect(store.get("prefs_by_user")).toEqual({ bob: { wp_id: "aurora" } });
+      expect(store.get("ui_language_by_user")).toBeUndefined();
     });
 
     it("asks getent without a shell, argument by argument", async () => {
@@ -154,6 +163,12 @@ describe("clawbox-users", () => {
       expect(store.get("ui_language_by_user")).toEqual({ bob: "fr" });
     });
 
+    it("forgets the user's own desktop preferences with the account, and nobody else's", async () => {
+      store.set("prefs_by_user", { alice: { wp_id: "dunes" }, bob: { wp_id: "aurora" } });
+      await lib.removeUser("alice", { currentUser: "clawbox" });
+      expect(store.get("prefs_by_user")).toEqual({ bob: { wp_id: "aurora" } });
+    });
+
     it("keeps the language of a user whose account could not be removed", async () => {
       store.set("ui_language_by_user", { alice: "de" });
       vi.mocked(startRootStep).mockRejectedValue(new Error("Job failed"));
@@ -194,6 +209,61 @@ describe("clawbox-users", () => {
       expect(await lib.verifyUserPassword("alice\nroot", "x")).toBe(false);
       expect(await lib.verifyUserPassword("root", "x")).toBe(false);
       expect(await lib.verifyUserPassword("alice", "pw\nroot")).toBe(false);
+      expect(spawn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("rotateUserSessionVersion", () => {
+    beforeEach(() => {
+      store.set("clawbox_users", [{ username: "alice", createdAt: "2026-10-01T09:00:00.000Z", sv: "a".repeat(32) }]);
+    });
+
+    it("gives the user a new session version, so every older cookie is dead", async () => {
+      const before = (await lib.listUsers())[0];
+      const sv = await lib.rotateUserSessionVersion("alice");
+      expect(sv).toMatch(/^[0-9a-f]{32}$/);
+      expect(sv).not.toBe(before.sv);
+      expect((await lib.listUsers())[0].sv).toBe(sv);
+    });
+
+    it("answers null for a name the registry does not hold", async () => {
+      expect(await lib.rotateUserSessionVersion("nobody")).toBeNull();
+    });
+
+    it("throws, rather than answer 'no such user', when the registry cannot be read", async () => {
+      store.set("__unreadable__", true);
+      await expect(lib.rotateUserSessionVersion("alice")).rejects.toThrow(/could not be read/);
+    });
+  });
+
+  // Settings → Account (TASK-2435): a user changes their OWN password through
+  // the helper's `passwd` verb, which checks the current one as root first.
+  describe("changeUserPassword", () => {
+    it("asks the helper's passwd verb with both passwords on stdin, never argv", async () => {
+      vi.mocked(spawn).mockImplementation((() => fakeChild(0)) as never);
+      expect(await lib.changeUserPassword("alice", "old secret", "new secret 1")).toBe("ok");
+      const [bin, args] = vi.mocked(spawn).mock.calls[0];
+      expect(bin).toBe("/usr/bin/sudo");
+      expect(args).toEqual(["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "passwd"]);
+      expect(JSON.stringify(args)).not.toContain("secret");
+      const child = vi.mocked(spawn).mock.results[0].value as ReturnType<typeof fakeChild>;
+      expect(child.stdin.end).toHaveBeenCalledWith("alice\nold secret\nnew secret 1\n");
+    });
+
+    it("reads the helper's answer: wrong, invalid, failed, and an old helper or no grant as unavailable", async () => {
+      for (const [code, verdict] of [[7, "wrong"], [65, "invalid"], [66, "failed"], [64, "unavailable"], [1, "unavailable"]] as const) {
+        vi.mocked(spawn).mockImplementation((() => fakeChild(code)) as never);
+        expect(await lib.changeUserPassword("alice", "old secret", "new secret 1"), String(code)).toBe(verdict);
+      }
+    });
+
+    it("never spawns anything for the owner, an unsafe name, or a new password outside the rules", async () => {
+      expect(await lib.changeUserPassword("clawbox", "old secret", "new secret 1")).toBe("wrong");
+      expect(await lib.changeUserPassword("alice\nroot", "old secret", "new secret 1")).toBe("wrong");
+      expect(await lib.changeUserPassword("alice", "", "new secret 1")).toBe("wrong");
+      expect(await lib.changeUserPassword("alice", "old secret", "short")).toBe("invalid");
+      expect(await lib.changeUserPassword("alice", "old secret", "new\nsecret 1")).toBe("invalid");
+      expect(await lib.changeUserPassword("alice", "old secret", "x".repeat(257))).toBe("invalid");
       expect(spawn).not.toHaveBeenCalled();
     });
   });
