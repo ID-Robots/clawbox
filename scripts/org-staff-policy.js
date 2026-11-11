@@ -83,7 +83,22 @@ function staffAgentConfigured(config, agentId) {
   return table.openclaw.deny.every((tool) => deny.has(tool));
 }
 
+/** The OpenClaw plugin that holds a staff agent's file tools to the member's folder. */
+const STAFF_GUARD_PLUGIN_ID = "clawbox-staff-guard";
+
+/**
+ * Does this openclaw.json load the staff guard? The relay sends a member's
+ * turn only while it does: without it the file tools the staff policy allows
+ * would reach past the member's folder.
+ */
+function staffGuardEnabled(config) {
+  const entry = config && config.plugins && config.plugins.entries ? config.plugins.entries[STAFF_GUARD_PLUGIN_ID] : null;
+  return !!entry && typeof entry === "object" && entry.enabled === true;
+}
+
 module.exports = {
+  STAFF_GUARD_PLUGIN_ID,
+  staffGuardEnabled,
   STAFF_AGENT_PREFIX,
   STAFF_SLASH_COMMANDS,
   staffAgentId,

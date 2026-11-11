@@ -335,6 +335,12 @@ function relayUserChatUpgrade(req, socket, head, url, identity) {
     // only as long as the switch stays where it was when it opened.
     const orgMode = readSessionConfig().orgMode;
     const staffAgent = orgMode ? staffAgentId(identity.username) : null;
+    if (orgMode && !staffAgent) {
+      // A member of staff whose name cannot be an agent id gets no chat at
+      // all rather than the home box's relay.
+      try { clientWs.close(1008, "This chat is not available."); } catch { /* gone */ }
+      return;
+    }
     relayUserChat({
       clientWs,
       username: identity.username,

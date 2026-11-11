@@ -141,6 +141,10 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
 
     for key, raw in candidates:
         value = raw.strip()
+        # A file a patch envelope names relative to the working directory is
+        # not rewritten (it is inside the patch text), so it is not run either.
+        if not key and not os.path.isabs(value):
+            return block(f"`{tool_name}` on {raw[:200]}, a relative path in a patch (name the file inside {folder})")
         if value.lower().startswith("file://"):
             value = value[len("file://"):]
         elif _URL_RE.match(value) or value.lower().startswith("data:"):

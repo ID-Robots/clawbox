@@ -159,10 +159,18 @@ describe("staffReadyReader", () => {
     expect(ready()).toBe(false);
     fs.writeFileSync(file, JSON.stringify({ agents: { entries: { main: {} } } }));
     expect(ready()).toBe(false);
-    fs.writeFileSync(file, JSON.stringify({ agents: { entries: { main: {}, [STAFF]: staffAgentEntry(dir, "alice") } } }));
+    const roster = { agents: { entries: { main: {}, [STAFF]: staffAgentEntry(dir, "alice") } } };
+    fs.writeFileSync(file, JSON.stringify(roster));
     // A new mtime, even on a fast filesystem.
     const later = new Date(Date.now() + 5_000);
     fs.utimesSync(file, later, later);
+    // The agent is there, but not the staff guard: not ready.
+    expect(ready()).toBe(false);
+    fs.writeFileSync(file, JSON.stringify({ ...roster, plugins: { entries: { "clawbox-staff-guard": { enabled: true } } } }));
+    fs.utimesSync(file, new Date(Date.now() + 7_000), new Date(Date.now() + 7_000));
+    expect(ready()).toBe(false); // enabled, but its files are not installed
+    fs.mkdirSync(path.join(dir, "extensions", "clawbox-staff-guard"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "extensions", "clawbox-staff-guard", "index.mjs"), "export default {}\n");
     expect(ready()).toBe(true);
     fs.writeFileSync(file, "{ not json");
     fs.utimesSync(file, new Date(Date.now() + 10_000), new Date(Date.now() + 10_000));

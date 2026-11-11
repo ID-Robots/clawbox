@@ -61,3 +61,20 @@ export async function orgMemberOf(request: Request): Promise<{ username: string 
   const who = await personSession(request);
   return who && !who.isOwner ? { username: who.username } : null;
 }
+
+/**
+ * {@link orgMemberOf} for a route that must FAIL CLOSED: a signed-in user other
+ * than the owner on a box whose switch cannot be read is `"unknown"` — not the
+ * home box `orgMemberOf` reads it as — so a member of staff's chat is never
+ * handed the owner's assistant because data/config.json was unreadable for a
+ * moment (TASK-2444). The owner, the agent's bearer and no session are null.
+ */
+export async function orgMemberStrictOf(request: Request): Promise<{ username: string } | null | "unknown"> {
+  const { personSession } = await import("@/lib/owner-session");
+  const who = await personSession(request);
+  if (!who || who.isOwner) return null;
+  const on = await readOrgModeStrict();
+  if (on === null) return "unknown";
+  return on ? { username: who.username } : null;
+}
+

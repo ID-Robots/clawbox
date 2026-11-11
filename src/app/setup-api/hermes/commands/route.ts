@@ -5,7 +5,7 @@ import { commandsFromHermesCatalog } from "@/lib/chat-slash-commands";
 import { getActiveHarness } from "@/lib/harness";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 import { requireSession } from "@/lib/route-auth";
-import { orgMemberOf } from "@/lib/org-mode-server";
+import { orgMemberStrictOf } from "@/lib/org-mode-server";
 import { isStaffCatalogueCommand } from "@/lib/org-staff-policy";
 
 /**
@@ -50,7 +50,8 @@ export async function GET(request: Request) {
   // /new and /reasoning (config/org-staff-policy.json; the chat route refuses
   // the rest).
   const commands = commandsFromHermesCatalog(catalog);
-  const member = await orgMemberOf(request);
+  // An unreadable switch is read as an organisation box here: fail closed.
+  const member = await orgMemberStrictOf(request);
   return NextResponse.json({
     commands: member ? commands.filter((command) => isStaffCatalogueCommand(command.id)) : commands,
     available: true,

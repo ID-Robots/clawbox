@@ -1120,6 +1120,14 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     // trustworthy answer to "which model will the next turn use" — the pills in
     // our UI are a request, not a fact.
     const info = (result.info || {}) as Record<string, unknown>;
+    // A member of staff's turn runs only in their own profile: the dashboard
+    // answers the profile the session is bound to (`info.profile_name`, from
+    // the session's own home on resume), and anything else — a dashboard that
+    // ignored the request, an older one that does not say — is refused here
+    // rather than run with the launch profile's tools and memory.
+    if (req.profile && info.profile_name !== req.profile) {
+      throw new OpenFailure("refused", `the session is not in profile ${req.profile}`);
+    }
     let activeModel = typeof info.model === "string" ? info.model : "";
     let activeProvider = typeof info.provider === "string" ? info.provider : "";
     // Whether `activeProvider` is the REQUEST's slug (a session this turn

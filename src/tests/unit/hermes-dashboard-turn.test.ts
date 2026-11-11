@@ -386,7 +386,7 @@ describe("running a dashboard turn", () => {
   it("answers a member of staff's approvals with deny, and opens their session on their own profile and folder", async () => {
     // An organisation box (TASK-2444): a member of staff approves nothing on
     // the box's behalf, and their conversation lives in their own profile.
-    const { turn, socket } = await connect({ profile: "clawbox-staff-maria", cwd: "/p/workspace", denyApprovals: true });
+    const { turn, socket } = await connect({ profile: "clawbox-staff-maria", cwd: "/p/workspace", denyApprovals: true }, undefined, { model: "m", provider: "custom", profile_name: "clawbox-staff-maria" });
     const create = socket.sent.find((f) => f.method === "session.create");
     expect(create?.params).toMatchObject({ profile: "clawbox-staff-maria", cwd: "/p/workspace", cwd_explicit: true });
     const running = turn!.run(() => {});
@@ -405,9 +405,22 @@ describe("running a dashboard turn", () => {
     await Promise.resolve();
     const resume = socket.sent.find((f) => f.method === "session.resume");
     expect(resume?.params).toMatchObject({ session_id: "20261111_090000_aaaaaa", profile: "clawbox-staff-maria" });
-    socket.deliver({ jsonrpc: "2.0", id: 1, result: { session_id: "e1", stored_session_id: "20261111_090000_aaaaaa", info: { model: "m", provider: "custom" } } });
+    socket.deliver({ jsonrpc: "2.0", id: 1, result: { session_id: "e1", stored_session_id: "20261111_090000_aaaaaa", info: { model: "m", provider: "custom", profile_name: "clawbox-staff-maria" } } });
     const turn = await opening;
+    expect(turn).not.toBeNull();
     turn?.close();
+  });
+
+  it("refuses a member of staff's session the dashboard did not open in their profile", async () => {
+    const failures: unknown[] = [];
+    const opening = openDashboardTurn({ text: "Hey", profile: "clawbox-staff-maria", onOpenFailure: (f) => failures.push(f) });
+    const socket = await latest();
+    socket.open();
+    await Promise.resolve();
+    // The launch profile answered: an older dashboard, or one that ignored the request.
+    socket.deliver({ jsonrpc: "2.0", id: 1, result: { session_id: "e2", stored_session_id: "20261111_090000_bbbbbb", info: { model: "m", provider: "custom", profile_name: "default" } } });
+    expect(await opening).toBeNull();
+    expect(failures).toEqual([expect.objectContaining({ reason: "refused" })]);
   });
 
   it("still answers an approval that arrives without a request id", async () => {

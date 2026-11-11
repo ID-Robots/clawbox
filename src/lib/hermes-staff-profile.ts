@@ -126,6 +126,29 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
  * when it could not be made — the caller then refuses the member's turn
  * rather than run it on the owner's profile.
  */
+/** The Hermes plugin that holds a staff profile's file tools to the member's folder. */
+export const STAFF_GUARD_HERMES_PLUGIN = "clawbox_staff_guard";
+
+/**
+ * Is the staff guard installed and enabled for the dashboard (register-mcp.sh,
+ * step 2c)? Without it the `file` toolset the staff profile keeps would write
+ * past the member's folder, so a member's turn does not run.
+ */
+function staffGuardInstalled(root: string, owner: unknown): boolean {
+  if (!fs.existsSync(path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN, "__init__.py"))) return false;
+  const plugins = isRecord(owner) && isRecord(owner.plugins) ? owner.plugins : {};
+  const enabled = plugins.enabled;
+  let names: unknown = enabled;
+  if (typeof enabled === "string") {
+    try {
+      names = JSON.parse(enabled);
+    } catch {
+      names = null;
+    }
+  }
+  return Array.isArray(names) && names.includes(STAFF_GUARD_HERMES_PLUGIN);
+}
+
 export async function ensureStaffHermesProfile(username: string, root: string = hermesHome()): Promise<StaffHermesProfile | null> {
   const paths = staffHermesProfilePaths(username, root);
   if (!paths) return null;
@@ -139,6 +162,10 @@ export async function ensureStaffHermesProfile(username: string, root: string = 
       owner = yaml.load(await fsp.readFile(path.join(root, "config.yaml"), "utf-8"));
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+    }
+    if (!staffGuardInstalled(root, owner)) {
+      console.error(`[org-staff] the ${STAFF_GUARD_HERMES_PLUGIN} plugin is not installed and enabled; ${username}'s turn is refused`);
+      return null;
     }
     const config = staffHermesConfig(owner, paths.folder);
     await writeIfChanged(

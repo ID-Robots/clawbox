@@ -117,6 +117,13 @@ describe("a member of staff's files", () => {
     expect(staffToolCallDenyReason(call("view_image", { image: path.join(home, "photo.png") }), MARIA, opts)).toMatch(/outside/);
   });
 
+  it("refuses a read that names no file, and lets an inline picture through", () => {
+    expect(staffToolCallDenyReason(call("read", {}), MARIA, opts)).toMatch(/without a file/);
+    expect(staffToolCallDenyReason(call("view_image", { prompt: "what is this?" }), MARIA, opts)).toMatch(/without a file/);
+    expect(staffToolCallDenyReason(call("view_image", { image: "data:image/png;base64,iVBORw0KGgo=" }), MARIA, opts)).toBeNull();
+    expect(staffToolCallDenyReason(call("read", { paths: [path.join(openclawHome, "workspace", "MEMORY.md")] }), MARIA, opts)).toMatch(/outside/);
+  });
+
   it("is never fetched from the web", () => {
     expect(staffToolCallDenyReason(call("pdf", { pdf: "https://example.com/a.pdf" }), MARIA, opts)).toMatch(/nothing on the web/);
     expect(staffToolCallDenyReason(call("view_image", { image: "http://169.254.169.254/latest" }), MARIA, opts)).toMatch(/nothing on the web/);

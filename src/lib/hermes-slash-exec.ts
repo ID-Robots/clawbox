@@ -404,6 +404,9 @@ export async function runHermesSlashCommand(
       SESSION_TIMEOUT_MS,
     );
     const result = sessionFrame && sessionFrame !== TIMED_OUT ? sessionFrame.result : undefined;
+    // A member of staff's command runs only in their own profile (the same
+    // check as the turn's, src/lib/hermes-dashboard-turn.ts).
+    if (req.profile && (result?.info as Record<string, unknown> | undefined)?.profile_name !== req.profile) return null;
     // The handle this socket's session-scoped RPCs take…
     const transportSid = typeof result?.session_id === "string" ? result.session_id : "";
     // …and the durable key the CONVERSATION is threaded by. See the note on

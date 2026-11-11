@@ -99,7 +99,10 @@ function resolveCandidate(raw, folder, home) {
     } catch {
       return { url: raw };
     }
-  } else if (URL_RE.test(value) || /^data:/i.test(value)) {
+  } else if (/^data:/i.test(value)) {
+    // Inline content (a pasted picture): nothing is fetched and no file is named.
+    return { inline: true };
+  } else if (URL_RE.test(value)) {
     return { url: raw };
   }
   if (value === "~") value = home;
@@ -108,7 +111,7 @@ function resolveCandidate(raw, folder, home) {
 }
 
 /** The keys a file tool names its target under in the pinned core, plus the media tools' own. */
-const PATH_KEYS = new Set(["path", "file_path", "filePath", "file", "target", "destination", "pdf", "pdfs", "image", "images", "url", "src", "source"]);
+const PATH_KEYS = new Set(["path", "paths", "file_path", "filePath", "file", "files", "target", "destination", "pdf", "pdfs", "image", "images", "url", "urls", "src", "source"]);
 
 function pathParams(params) {
   const out = [];
@@ -169,10 +172,14 @@ export function staffToolCallDenyReason(event, ctx, opts = {}) {
     if (candidates.length === 0) return `\`${toolName}\` without a file it names`;
   } else {
     candidates = pathParams(params);
+    // A read whose source cannot be read off the call is not one this guard
+    // can vouch for either.
+    if (candidates.length === 0) return `\`${toolName}\` without a file it names`;
   }
 
   for (const raw of candidates) {
     const resolved = resolveCandidate(raw, folder, home);
+    if (resolved.inline) continue;
     if (resolved.url !== undefined) return `\`${toolName}\` on ${resolved.url.slice(0, 120)} (nothing on the web)`;
     const real = realish(resolved.path);
     if (inside(real, folderReal)) continue;

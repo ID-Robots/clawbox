@@ -56,7 +56,7 @@ import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { chatKeyUser } from "@/lib/chat-scope";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
-import { orgMemberOf, readOrgMode } from "@/lib/org-mode-server";
+import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
 import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
 import { ensureStaffHermesProfile, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
 import { personSession } from "@/lib/owner-session";
@@ -1225,7 +1225,14 @@ export async function POST(request: Request) {
   // other than /new and /reasoning, and — fail closed — a turn whose profile
   // could not be prepared. The model is the box's: what the composer names is
   // not theirs to change.
-  const member = await orgMemberOf(request);
+  const memberState = await orgMemberStrictOf(request);
+  if (memberState === "unknown") {
+    return NextResponse.json(
+      { error: "This ClawBox's settings could not be read. Try again in a minute.", code: "org_mode_unknown" },
+      { status: 503 },
+    );
+  }
+  const member = memberState;
   let staff: StaffHermesProfile | null = null;
   if (member) {
     const verdict = staffMessageVerdict(message, { inline: false });

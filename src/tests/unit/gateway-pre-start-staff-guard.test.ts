@@ -1,9 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testEnv } from "@/tests/helpers/env";
+
+// Starts real processes (bash, python3, node): vitest's 5 s default is not enough
+// on a loaded runner. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // gateway-pre-start.sh installs clawbox-staff-guard (TASK-2444, TASK-2445) the
 // way it installs every ClawBox hook plugin — the policy table copied in

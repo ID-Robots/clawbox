@@ -72,7 +72,14 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { agentIdOfKey, openclawUserMainKey, userMayUseKey } = require("./chat-scope.js");
-const { isStaffCatalogueCommand, staffAgentConfigured, staffCommandRefusal, staffMessageVerdict } = require("./org-staff-policy.js");
+const {
+  STAFF_GUARD_PLUGIN_ID,
+  isStaffCatalogueCommand,
+  staffAgentConfigured,
+  staffCommandRefusal,
+  staffGuardEnabled,
+  staffMessageVerdict,
+} = require("./org-staff-policy.js");
 
 /** The client the relay connects as: the same identity the browser's chat uses. */
 const RELAY_CLIENT = Object.freeze({ id: "openclaw-control-ui", mode: "webchat", platform: "linux", version: "clawbox-user-relay" });
@@ -612,11 +619,14 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, s
 
 /**
  * `staffReady` for production-server.js: is `agentId` configured with the
- * staff policy in openclaw.json right now? Re-read when the file changes (its
- * mtime), so a roster the owner's switch just wrote is seen on the next turn;
- * an unreadable file is "not ready".
+ * staff policy in openclaw.json right now, AND is the staff guard installed
+ * and enabled beside it (its file tools reach past the member's folder
+ * without it)? Re-read when the file changes (its mtime), so a roster the
+ * owner's switch just wrote is seen on the next turn; an unreadable file is
+ * "not ready".
  */
 function staffReadyReader(configPath, agentId) {
+  const guard = path.join(path.dirname(configPath), "extensions", STAFF_GUARD_PLUGIN_ID, "index.mjs");
   let seen = null;
   let ready = false;
   return () => {
@@ -624,9 +634,10 @@ function staffReadyReader(configPath, agentId) {
       const mtimeMs = fs.statSync(configPath).mtimeMs;
       if (seen !== mtimeMs) {
         seen = mtimeMs;
-        ready = staffAgentConfigured(JSON.parse(fs.readFileSync(configPath, "utf-8")), agentId);
+        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        ready = staffAgentConfigured(config, agentId) && staffGuardEnabled(config);
       }
-      return ready;
+      return ready && fs.existsSync(guard);
     } catch {
       seen = null;
       return false;

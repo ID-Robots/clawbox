@@ -45,7 +45,7 @@ vi.mock("@/lib/hermes-model-options", () => ({
 }));
 vi.mock("@/lib/org-mode-server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/org-mode-server")>()),
-  orgMemberOf: memberMock,
+  orgMemberStrictOf: memberMock,
 }));
 vi.mock("@/lib/hermes-staff-profile", () => ({ ensureStaffHermesProfile: profileMock }));
 vi.mock("@/lib/chat-scope-server", () => ({
@@ -139,6 +139,18 @@ describe("a member of staff's turn", () => {
     const res = await POST(post({ message: "hello" }));
     expect(res.status).toBe(503);
     expect((await res.json()).code).toBe("staff_profile_unavailable");
+    expect(openTurnMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("a box whose organisation switch cannot be read", () => {
+  it("refuses a non-owner's turn rather than run it on the owner's profile", async () => {
+    memberMock.mockResolvedValue("unknown");
+    const res = await POST(post({ message: "hello" }));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("org_mode_unknown");
+    expect(appendMock).not.toHaveBeenCalled();
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
   });

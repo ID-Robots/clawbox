@@ -36,6 +36,9 @@ beforeEach(() => {
   fs.writeFileSync(path.join(root, ".env"), "CLAWAI_API_KEY=placeholder\n");
   fs.writeFileSync(path.join(root, "SOUL.md"), "You are the ClawBox assistant.\n");
   fs.mkdirSync(path.join(root, "memories"));
+  // The staff guard as register-mcp.sh installs it.
+  fs.mkdirSync(path.join(root, "plugins", "clawbox_staff_guard"), { recursive: true });
+  fs.writeFileSync(path.join(root, "plugins", "clawbox_staff_guard", "__init__.py"), "");
   fs.writeFileSync(path.join(root, "memories", "MEMORY.md"), "the owner's private fact\n");
 });
 
@@ -92,7 +95,7 @@ describe("ensureStaffHermesProfile", () => {
     expect(fs.statSync(cfgFile).mtimeMs).toBe(mtime);
 
     // The owner moves the box to another model: the member's profile follows.
-    fs.writeFileSync(path.join(root, "config.yaml"), yaml.dump({ model: { default: "claude-sonnet", provider: "anthropic" } }));
+    fs.writeFileSync(path.join(root, "config.yaml"), yaml.dump({ model: { default: "claude-sonnet", provider: "anthropic" }, plugins: { enabled: ["clawbox_staff_guard"] } }));
     fs.writeFileSync(path.join(root, "auth.json"), "{}");
     await ensureStaffHermesProfile("maria", root);
     expect((yaml.load(fs.readFileSync(cfgFile, "utf-8")) as { model: unknown }).model).toEqual({ default: "claude-sonnet", provider: "anthropic" });
@@ -106,6 +109,18 @@ describe("ensureStaffHermesProfile", () => {
     await forgetStaffHermesProfile("maria", root);
     expect(fs.existsSync(a!.home)).toBe(false);
     expect(fs.existsSync(b!.home)).toBe(true);
+  });
+
+  it("refuses, fail closed, while the staff guard is not installed and enabled", async () => {
+    fs.rmSync(path.join(root, "plugins", "clawbox_staff_guard"), { recursive: true });
+    expect(await ensureStaffHermesProfile("maria", root)).toBeNull();
+    fs.mkdirSync(path.join(root, "plugins", "clawbox_staff_guard"), { recursive: true });
+    fs.writeFileSync(path.join(root, "plugins", "clawbox_staff_guard", "__init__.py"), "");
+    fs.writeFileSync(path.join(root, "config.yaml"), yaml.dump({ plugins: { enabled: ["clawai"] } }));
+    expect(await ensureStaffHermesProfile("maria", root)).toBeNull();
+    // `hermes config set` stores the list as a JSON string.
+    fs.writeFileSync(path.join(root, "config.yaml"), yaml.dump({ plugins: { enabled: '["clawai", "clawbox_staff_guard"]' } }));
+    expect(await ensureStaffHermesProfile("maria", root)).not.toBeNull();
   });
 
   it("refuses a name that is not a username", async () => {
@@ -168,6 +183,9 @@ d("the Hermes staff guard (clawbox_staff_guard)", () => {
     }
     expect(judge("patch", { path: path.join(root, "config.yaml"), old_string: "a", new_string: "b" }, staff.home)).toMatchObject({ action: "block" });
     expect(judge("write_file", { content: "x" }, staff.home)).toMatchObject({ action: "block" });
+    // A patch envelope must name its files absolutely, inside the folder.
+    expect(judge("patch", { patch: `*** Begin Patch\n*** Add File: ${path.join(staff.folder, "a.md")}\n+x\n*** End Patch` }, staff.home)).toBeNull();
+    expect(judge("patch", { patch: "*** Begin Patch\n*** Add File: a.md\n+x\n*** End Patch" }, staff.home)).toMatchObject({ action: "block" });
   });
 
   it("never reaches the web through vision or a file URL elsewhere", async () => {
