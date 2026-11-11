@@ -67,7 +67,7 @@ function readOwners(): Owners {
   // exactly the bytes that were parsed (no check-then-use window).
   let fd: number;
   try {
-    fd = fs.openSync(OWNERS_PATH, "r");
+    fd = fs.openSync(/* turbopackIgnore: true */ OWNERS_PATH, "r");
   } catch {
     cache = null;
     return new Map();
@@ -110,7 +110,7 @@ function bound(owners: Owners, username: string): void {
   // A record whose file retention already swept protects nothing.
   for (const file of owners.keys()) {
     if (owners.size <= MAX_MEDIA_OWNER_RECORDS) return;
-    if (!fs.existsSync(file)) owners.delete(file);
+    if (!fs.existsSync(/* turbopackIgnore: true */ file)) owners.delete(file);
   }
   for (const file of owners.keys()) {
     if (owners.size <= MAX_MEDIA_OWNER_RECORDS) return;
@@ -119,10 +119,10 @@ function bound(owners: Owners, username: string): void {
 }
 
 function writeOwners(owners: Owners): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(/* turbopackIgnore: true */ DATA_DIR, { recursive: true });
   const tmp = untraced(`${OWNERS_PATH}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(owners)), { mode: 0o600 });
-  fs.renameSync(tmp, OWNERS_PATH);
+  fs.writeFileSync(/* turbopackIgnore: true */ tmp, JSON.stringify(Object.fromEntries(owners)), { mode: 0o600 });
+  fs.renameSync(/* turbopackIgnore: true */ tmp, /* turbopackIgnore: true */ OWNERS_PATH);
   cache = null;
 }
 
@@ -140,7 +140,7 @@ export function recordMediaOwner(username: string, files: ReadonlyArray<string |
   for (const file of files) {
     if (!file || !path.isAbsolute(file)) continue;
     try {
-      reals.push(fs.realpathSync(file));
+      reals.push(fs.realpathSync(/* turbopackIgnore: true */ file));
     } catch {
       /* gone already: nothing to serve */
     }

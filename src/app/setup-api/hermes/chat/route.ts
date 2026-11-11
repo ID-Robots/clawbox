@@ -1437,7 +1437,7 @@ export async function POST(request: Request) {
   // one (src/lib/chat-media-owners.ts). Otherwise naming another person's
   // upload here would have the agent read it into the member's conversation.
   const member = await orgMemberOf(request);
-  const memberRootReal = member ? await fsp.realpath(await chatMediaRoot()).catch(() => null) : null;
+  const memberRootReal = member ? await fsp.realpath(/* turbopackIgnore: true */ await chatMediaRoot()).catch(() => null) : null;
   const theirs = (safe: string) => !member || (memberRootReal !== null && isMediaOwnedBy(member.username, safe, memberRootReal));
   const requestedImages = Array.isArray(body.imagePaths)
     ? body.imagePaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)

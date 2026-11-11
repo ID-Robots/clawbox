@@ -521,10 +521,10 @@ export async function POST(req: NextRequest) {
           // member who learnt someone else's could otherwise stage a file
           // into that folder and have the folder recorded as theirs. An
           // existing batch they do not own is refused.
-          if (user && batchDir && fs.existsSync(batchDir)) {
+          if (user && batchDir && fs.existsSync(/* turbopackIgnore: true */ batchDir)) {
             let owned = false;
             try {
-              owned = isMediaOwnedBy(user, fs.realpathSync(batchDir), dirReal);
+              owned = isMediaOwnedBy(user, fs.realpathSync(/* turbopackIgnore: true */ batchDir), dirReal);
             } catch { /* vanished: refused below like any other */ }
             if (!owned) {
               fail(new BadUpload("That folder is already being staged by someone else. Drop it again.", 409, "batch_in_use"));
