@@ -133,7 +133,12 @@ if [ -z "$bad" ]; then
 else
   say "not ok - [$RUNTIME] cleanup answered:$bad"
 fi
-listed=$(call GET /setup-api/users "$OWNER" | tail -n +2 | python3 -c "import json,sys; print(\" \".join(u.get(\"username\",\"\") for u in (json.load(sys.stdin).get(\"users\") or [])))" 2>/dev/null || echo "?")
+# Only a 200 carrying a `users` list is a list: an error answer is unreadable.
+r=$(call GET /setup-api/users "$OWNER" 2>/dev/null || true)
+listed="?"
+if [ "$(status_of "$r")" = 200 ]; then
+  listed=$(printf "%s\n" "$r" | tail -n +2 | python3 -c "import json,sys; u=json.load(sys.stdin).get(\"users\"); assert isinstance(u, list); print(\" \".join(str(x.get(\"username\",\"\")) for x in u if isinstance(x, dict)))" 2>/dev/null || echo "?")
+fi
 if [ "$listed" = "?" ]; then
   say "not ok - [$RUNTIME] the user list could not be read after cleanup"
 else
