@@ -95,6 +95,10 @@ const percentOf = (text) => {
   return m ? Number(m[1]) : null;
 };
 
+/**
+ * Drives steps 1-4 above against the board's desktop, printing the RESULT
+ * and NOTE lines described above, and always closes its own Chromium.
+ */
 async function run() {
   let chrome = startChrome(env.NO_SANDBOX === "1");
   let page = null;

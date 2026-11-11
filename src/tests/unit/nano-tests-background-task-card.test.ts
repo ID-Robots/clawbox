@@ -115,6 +115,7 @@ describe("nano tests 66/99: opening Settings -> Local AI (TASK-2379)", () => {
 // a script of status codes and `sleep` made instant.
 const canRunBash = process.platform === "linux" && spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 
+/** The board script's own `put_desktop_back` definition, cut out verbatim so the test runs the real function. */
 function putBackFunction(): string {
   const match = /\nput_desktop_back\(\) \{\n[\s\S]*?\n\}\n/.exec(BOARD_SCRIPT);
   if (!match) throw new Error("the board script no longer defines put_desktop_back");
