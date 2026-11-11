@@ -33,14 +33,16 @@ export function hermesProviderValues(settings: ExternalEngineSettings, key: stri
 
 /**
  * Register the engine with Hermes when the store names it and config.yaml
- * does not — a dual box that switched to Hermes after the engine was saved on
- * OpenClaw. Registers the provider only; the selection stays the owner's.
+ * does not, or names an older endpoint — a dual box that switched to Hermes
+ * after the engine was saved on OpenClaw. Registers the provider only; the
+ * selection stays the owner's.
  *
  * Latched once the block is in place (registered here or found), like
  * `reconcileLocalAiWithHermes`; not latched when there is no record yet or
  * config.yaml could not be read, so a later save or read tries again. Remove
- * forgets the latch. `force` skips it: the wizard's selection must know the
- * block is there before it names the provider. Answers whether it is.
+ * forgets the latch. `force` skips it and writes the block from the record:
+ * the wizard's selection must know the block is there, and current, before it
+ * names the provider. Answers whether it is.
  */
 let hermesReconciled = false;
 export async function reconcileExternalEngineWithHermes(opts: { force?: boolean } = {}): Promise<boolean> {
@@ -58,11 +60,16 @@ export async function reconcileExternalEngineWithHermes(opts: { force?: boolean 
       return false;
     }
     const declared = await resolveHermesConfigValue("providers.clawext.base_url");
-    if (declared.state === "value" || declared.state === "present") {
+    if (declared.state === "unreadable") return false;
+    // A block that names another endpoint is an older save's (a dual box that
+    // saved again on OpenClaw): rewritten from the record. The selection
+    // rewrites it in any case, so it never names a stale endpoint or key.
+    const inPlace = declared.state === "present"
+      || (declared.state === "value" && declared.value === record.baseUrl);
+    if (inPlace && !opts.force) {
       hermesReconciled = true;
       return true;
     }
-    if (declared.state !== "absent") return false;
     const key = readExternalEngineKey();
     const v = hermesProviderValues(record, key === NO_KEY_PLACEHOLDER ? null : key);
     await patchHermesConfig({

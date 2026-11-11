@@ -489,12 +489,17 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
   } catch (err) {
     // The harness names the engine but the store could not: put the key and
     // the harness back, so no engine is left that Settings cannot see or remove.
-    await rollBackUnrecordedSave({ record, existing, harness, keyBefore }).catch((undoErr) => {
+    const undone = await rollBackUnrecordedSave({ record, existing, harness, keyBefore }).then(() => true, (undoErr) => {
       console.error("[external-engine] undoing the unrecorded save failed:", scrub(undoErr, key));
+      return false;
     });
+    const why = scrub(err, key) || "The engine could not be recorded on this box.";
     throw new ExternalEngineRefusal(
       "write_failed",
-      scrub(err, key) || "The engine could not be recorded on this box, so it was not saved.",
+      undone
+        ? why
+        // Said as it is: the assistant may still be pointed at the engine.
+        : `${why} Undoing its write into the assistant's config also failed, so the assistant may still use the engine: save it again once the box can write its settings, then Remove it if you do not want it.`,
       502,
     );
   }

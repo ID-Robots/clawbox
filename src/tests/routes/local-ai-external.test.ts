@@ -568,6 +568,61 @@ describe("a save the store could not record, and Hermes' provider block", () => 
     expect(sets.some((set) => "model.provider" in set)).toBe(false);
   });
 
+  it("says so when undoing an unrecorded save fails too, instead of claiming nothing was saved", async () => {
+    const { setMany } = await import("@/lib/config-store");
+    const real = vi.mocked(setMany).getMockImplementation()!;
+    let storeFailed = false;
+    vi.mocked(setMany).mockImplementation(async (entries: Record<string, unknown>) => {
+      if ("external_engine" in entries) {
+        storeFailed = true;
+        throw new Error("ENOSPC: no space left on device");
+      }
+      return real(entries);
+    });
+    // The undo cannot read openclaw.json either.
+    const readReal = vi.mocked(readConfig).getMockImplementation()!;
+    vi.mocked(readConfig).mockImplementation(async () => {
+      if (storeFailed) throw new Error("openclaw.json unreadable");
+      return readReal();
+    });
+    const res = await POST(req("POST", saveBody()));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("write_failed");
+    expect(body.error).toContain("may still use the engine");
+    expect(JSON.stringify(body)).not.toContain(KEY);
+  });
+
+  it("select on Hermes rewrites a block left by an older save, so it never names a stale endpoint", async () => {
+    // Saved on OpenClaw; Hermes still holds an earlier save's block.
+    await POST(req("POST", saveBody()));
+    vi.mocked(getActiveHarness).mockResolvedValue("hermes");
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "value", value: "http://198.51.100.7:8000/v1" });
+    vi.mocked(patchHermesConfig).mockClear();
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(200);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    const block = sets.findIndex((set) => set["providers.clawext.base_url"] === BASE);
+    const selection = sets.findIndex((set) => set["model.provider"] === "clawext");
+    expect(block).toBeGreaterThanOrEqual(0);
+    expect(selection).toBeGreaterThan(block);
+  });
+
+  it("the Hermes read path rewrites a block that names another endpoint, and leaves a current one alone", async () => {
+    const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
+    await POST(req("POST", saveBody()));
+    resetExternalEngineReconcileForTests();
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "value", value: BASE });
+    vi.mocked(patchHermesConfig).mockClear();
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    expect(patchHermesConfig).not.toHaveBeenCalled();
+    resetExternalEngineReconcileForTests();
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "value", value: "http://198.51.100.7:8000/v1" });
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets.some((set) => set["providers.clawext.base_url"] === BASE)).toBe(true);
+  });
+
   it("registers the block again after Remove, for an engine saved on OpenClaw and read on Hermes", async () => {
     const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
     resetExternalEngineReconcileForTests();
