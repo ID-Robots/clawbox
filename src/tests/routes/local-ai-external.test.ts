@@ -462,12 +462,18 @@ describe("on Hermes", () => {
 });
 
 describe("select: the wizard's Continue with an engine already connected", () => {
+  // A box before its first setup: no AI step done yet.
+  beforeEach(() => {
+    delete store.ai_model_configured;
+  });
+
   it("answers 404 not_configured when there is no engine, and changes nothing", async () => {
     const res = await SELECT(req("POST"));
     expect(res.status).toBe(404);
     expect((await res.json()).code).toBe("not_configured");
     expect(chatModelPost).not.toHaveBeenCalled();
     expect(patchHermesConfig).not.toHaveBeenCalled();
+    expect(store.ai_model_configured).toBeUndefined();
   });
 
   it("on OpenClaw makes the engine the chat's model through chat/model, probes nothing and starts nothing", async () => {
@@ -487,6 +493,11 @@ describe("select: the wizard's Continue with an engine already connected", () =>
     expect(fetch).not.toHaveBeenCalled();
     expect(startOllamaService).not.toHaveBeenCalled();
     expect(store.local_ai_provider).toBe("clawext");
+    // The wizard's AI step counts as done (its resume and setup status read
+    // this); the cloud provider the chat lists beside Local AI is untouched.
+    expect(store.ai_model_configured).toBe(true);
+    expect(typeof store.ai_model_configured_at).toBe("string");
+    expect(store.ai_model_provider).toBeUndefined();
   });
 
   it("answers 502 primary_not_set when chat/model refuses, and says so", async () => {
@@ -495,6 +506,7 @@ describe("select: the wizard's Continue with an engine already connected", () =>
     const res = await SELECT(req("POST"));
     expect(res.status).toBe(502);
     expect((await res.json()).code).toBe("primary_not_set");
+    expect(store.ai_model_configured).toBeUndefined();
   });
 
   it("on Hermes selects its block in config.yaml", async () => {
@@ -508,6 +520,7 @@ describe("select: the wizard's Continue with an engine already connected", () =>
     const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
     expect(sets).toContainEqual({ "model.provider": "clawext", "model.default": MODEL });
     expect(chatModelPost).not.toHaveBeenCalled();
+    expect(store.ai_model_configured).toBe(true);
   });
 
   it("on Hermes refuses an engine under Hermes' window floor rather than select a model Hermes will refuse", async () => {

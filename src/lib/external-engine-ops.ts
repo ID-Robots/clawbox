@@ -563,6 +563,10 @@ export async function selectExternalEngine(): Promise<{ modelRef: string; harnes
       );
     }
   }
+  // The wizard's AI step is done, as after any provider's configure: setup
+  // status and the wizard's resume read this flag. Not `ai_model_provider`:
+  // that names the cloud provider the chat's picker lists beside Local AI.
+  await setMany({ ai_model_configured: true, ai_model_configured_at: new Date().toISOString() });
   await standDownChatRuntimesForExternalEngine().catch((err) => {
     console.error("[external-engine] standing down the on-device runtimes failed:", scrub(err, null));
   });
