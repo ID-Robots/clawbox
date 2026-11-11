@@ -10,15 +10,19 @@
 
 # latest_run — prints the id of the run the box started last ("" when the box
 # has no pointer yet) and returns 0; returns 1, printing nothing, when the
-# pointer could not be READ (the hop failed, or the file is there and unreadable).
-# A read error is never an empty answer.
+# pointer could not be READ: the hop failed, the file is there and unreadable,
+# or a folder on the way cannot be searched (where "no such file" would only
+# mean "cannot see"). A read error is never an empty answer.
 latest_run() {
   local out
   # shellcheck disable=SC2016  # expanded on the board
   out=$(board '
-f="$REPO/data/update-logs/latest"
-if [ ! -e "$f" ]; then echo "POINTER"
-elif id=$(cat "$f" 2>/dev/null); then printf "POINTER %s\n" "$(printf %s "$id" | tr -d "[:space:]")"
+d="$REPO/data/update-logs"; f="$d/latest"
+if [ -e "$f" ]; then
+  if id=$(cat "$f" 2>/dev/null); then printf "POINTER %s\n" "$(printf %s "$id" | tr -d "[:space:]")"
+  else echo "POINTER_UNREADABLE"; fi
+elif [ -d "$d" ] && [ -x "$d" ] && [ -r "$d" ]; then echo "POINTER"
+elif [ ! -e "$d" ] && [ -d "$REPO/data" ] && [ -x "$REPO/data" ] && [ -r "$REPO/data" ]; then echo "POINTER"
 else echo "POINTER_UNREADABLE"
 fi' | grep -E '^POINTER( |$)' | tail -n 1)
   [ -n "$out" ] || return 1

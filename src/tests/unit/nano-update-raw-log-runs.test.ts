@@ -76,6 +76,33 @@ describe.skipIf(!canRun)("the latest-run pointer, as 92-update-raw-log reads it"
     expect(sh("latest_run")).toEqual({ status: 1, stdout: "" });
   });
 
+  it("answers empty on a box that has logged no update yet (no log folder)", () => {
+    fs.rmSync(logs(), { recursive: true });
+    expect(sh("latest_run")).toEqual({ status: 0, stdout: "" });
+  });
+
+  it.skipIf(isRoot)("fails, never answers empty, when the log folder cannot be searched", () => {
+    pointTo(OLD);
+    fs.chmodSync(logs(), 0o000);
+    try {
+      expect(sh("latest_run")).toEqual({ status: 1, stdout: "" });
+      expect(sh('if read_baseline 2; then echo "read <$BEFORE_RUN>"; else echo unread; fi').stdout.trim()).toBe("unread");
+    } finally {
+      fs.chmodSync(logs(), 0o755);
+    }
+  });
+
+  it.skipIf(isRoot)("fails when the data folder above it cannot be searched", () => {
+    pointTo(OLD);
+    const data = path.join(repo, "data");
+    fs.chmodSync(data, 0o000);
+    try {
+      expect(sh("latest_run")).toEqual({ status: 1, stdout: "" });
+    } finally {
+      fs.chmodSync(data, 0o755);
+    }
+  });
+
   it("fails when the hop to the board failed", () => {
     pointTo(OLD);
     expect(sh("latest_run", { hop: false })).toEqual({ status: 1, stdout: "" });
