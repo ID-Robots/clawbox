@@ -8,6 +8,7 @@ import {
   readHermesBillingProvider,
   readHermesTurn,
   readHermesUsageMarks,
+  withHermesStateHome,
 } from "@/lib/harness/hermes-turn-record";
 
 /**
@@ -310,6 +311,23 @@ describe("readHermesTurn against a real state.db", () => {
   it("returns null rather than throwing when the database is missing", async () => {
     process.env.HERMES_HOME = path.join(home, "gone");
     await expect(readHermesTurn("s1")).resolves.toBeNull();
+  });
+
+  it("reads a member of staff's turn from their own profile's store, inside the turn's scope only", async () => {
+    // Their conversation lives in their profile's state.db (TASK-2444): the
+    // box's own store is pointed somewhere empty, the scope names theirs.
+    process.env.HERMES_HOME = path.join(home, "gone");
+    const turn = await withHermesStateHome(home, () => readHermesTurn("s1"));
+    if (available) expect(turn?.text).toBe("It printed Linux 5.15.185-tegra.");
+    // The scope follows the turn's own awaits, and ends with it.
+    const later = await withHermesStateHome(home, async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      return readHermesTurn("s2");
+    });
+    if (available) expect(later?.text).toBe("other answer");
+    await expect(readHermesTurn("s1")).resolves.toBeNull();
+    // No home: the box's own store, as before.
+    await expect(withHermesStateHome(undefined, () => readHermesTurn("s1"))).resolves.toBeNull();
   });
 });
 

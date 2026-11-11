@@ -13,12 +13,15 @@
 //     `<OpenClaw home>/staff/<name>`): `write`, `edit` and `apply_patch` may
 //     touch nothing else, so no other member's memory, no owner's MEMORY.md,
 //     no openclaw.json; `read`, `pdf` and `view_image` may also open the
-//     chat's staged attachments, and nothing on the web.
+//     chat's staged attachments THAT ARE THEIRS — the record ClawBox keeps of
+//     whose upload each staged file is (src/lib/chat-media-owners.ts), so one
+//     member who learns another's attachment path still cannot open it — and
+//     nothing on the web.
 //
 // Every other agent — the owner's above all — is not this plugin's business:
 // it answers `null` ("no opinion") for them without looking further.
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -41,6 +44,57 @@ export function staffPolicyTable() {
     }
   }
   throw new Error("clawbox-staff-guard: config/org-staff-policy.json is missing or unreadable");
+}
+
+/**
+ * Where ClawBox keeps whose upload each staged attachment is
+ * (`<CLAWBOX_ROOT>/data/chat-media-owners.json`), as gateway-pre-start.sh
+ * recorded it beside the installed plugin; the gateway does not know where
+ * ClawBox keeps its data. Undefined when it was not recorded: then no staged
+ * file is a member's (fail closed).
+ */
+function mediaOwnersFile() {
+  try {
+    const paths = JSON.parse(readFileSync(new URL("./clawbox-paths.json", import.meta.url), "utf-8"));
+    return typeof paths?.mediaOwners === "string" && paths.mediaOwners ? paths.mediaOwners : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let ownersCache = { file: "", mtimeMs: -1, owners: {} };
+/** `{ realpath: username }`, re-read when the file changes; `{}` when it cannot be read. */
+function readMediaOwners(file) {
+  try {
+    const { mtimeMs } = statSync(file);
+    if (ownersCache.file === file && ownersCache.mtimeMs === mtimeMs) return ownersCache.owners;
+    const parsed = JSON.parse(readFileSync(file, "utf-8"));
+    const owners = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    ownersCache = { file, mtimeMs, owners };
+    return owners;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Is `real`, a resolved path below the staging root `rootReal`, recorded as
+ * `username`'s upload? The file itself or a folder it sits in below the root
+ * (a dropped folder is recorded once, by its root) — the rule of
+ * src/lib/chat-media-owners.ts `isMediaOwnedBy`. A file with no record is
+ * nobody's to a member.
+ */
+export function stagedFileOwnedBy(username, real, rootReal, ownersFile) {
+  if (!ownersFile) return false;
+  const owners = readMediaOwners(ownersFile);
+  let current = real;
+  for (;;) {
+    const rel = path.relative(rootReal, current);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+    const owner = owners[current];
+    if (typeof owner === "string") return owner === username;
+    current = path.dirname(current);
+  }
 }
 
 const USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
@@ -143,7 +197,8 @@ function patchPaths(params) {
  * null for any agent that is not a member of staff's).
  *
  * `opts.openclawHome` is OpenClaw's state directory; the folder and the
- * attachment directory hang off it.
+ * attachment directory hang off it. `opts.mediaOwners` is the attachment
+ * owner record (default: the one recorded beside the installed plugin).
  */
 /**
  * Tool Search's controls (docs/tools/tool-search.md in the pinned core): with
@@ -213,7 +268,11 @@ export function staffToolCallDenyReason(event, ctx, opts = {}) {
     if (resolved.url !== undefined) return `\`${toolName}\` on ${resolved.url.slice(0, 120)} (nothing on the web)`;
     const real = realish(resolved.path);
     if (inside(real, folderReal)) continue;
-    if (reading && inside(real, attachmentsReal)) continue;
+    if (reading && inside(real, attachmentsReal)) {
+      const ownersFile = "mediaOwners" in opts ? opts.mediaOwners : mediaOwnersFile();
+      if (stagedFileOwnedBy(username, real, attachmentsReal, ownersFile)) continue;
+      return `\`${toolName}\` on ${raw.slice(0, 200)}, a chat attachment that is not theirs`;
+    }
     return `\`${toolName}\` on ${raw.slice(0, 200)}, outside their own folder (${folder})`;
   }
   return null;

@@ -43,6 +43,7 @@
 
 import fs from "fs";
 import { promises as fsp } from "fs";
+import { randomUUID } from "crypto";
 import yaml from "js-yaml";
 import path from "@/lib/runtime-path";
 import { hermesHome } from "@/lib/hermes-env";
@@ -152,9 +153,14 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
     current = null;
   }
   if (current === content) return;
-  const temp = `${file}.tmp-${process.pid}`;
-  await fsp.writeFile(temp, content, { mode: 0o600 });
-  await fsp.rename(temp, file);
+  // A temp file of its own per write: two writers never share one.
+  const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await fsp.writeFile(temp, content, { mode: 0o600 });
+    await fsp.rename(temp, file);
+  } finally {
+    await fsp.rm(temp, { force: true }).catch(() => undefined);
+  }
 }
 
 /**
@@ -168,12 +174,27 @@ function staffGuardInstalled(root: string, owner: unknown): boolean {
   return pluginNames(plugins.enabled).includes(STAFF_GUARD_HERMES_PLUGIN);
 }
 
+/** The preparation in flight per profile (process-local). */
+const preparing = new Map<string, Promise<StaffHermesProfile | null>>();
+
 /**
  * Make sure `username`'s profile exists, follows the owner's config and carries
  * the staff guard. Null when it could not be made — the caller then refuses
  * the member's turn rather than run it on the owner's profile.
  */
-export async function ensureStaffHermesProfile(username: string, root: string = hermesHome()): Promise<StaffHermesProfile | null> {
+export function ensureStaffHermesProfile(username: string, root: string = hermesHome()): Promise<StaffHermesProfile | null> {
+  // One preparation per profile at a time: two turns of the same member
+  // arriving together would otherwise interleave the link and config writes.
+  const key = `${root}\0${username}`;
+  const turn = (preparing.get(key) ?? Promise.resolve(null)).then(() => prepareStaffHermesProfile(username, root));
+  preparing.set(key, turn);
+  void turn.finally(() => {
+    if (preparing.get(key) === turn) preparing.delete(key);
+  });
+  return turn;
+}
+
+async function prepareStaffHermesProfile(username: string, root: string): Promise<StaffHermesProfile | null> {
   const paths = staffHermesProfilePaths(username, root);
   if (!paths) return null;
   try {

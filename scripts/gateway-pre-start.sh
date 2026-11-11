@@ -8340,6 +8340,15 @@ install_clawbox_hook_plugin "$CLAWBOX_STAFF_GUARD_ID" "$CLAWBOX_STAFF_GUARD_DST"
   "$CLAWBOX_STAFF_GUARD_SRC/index.mjs" \
   "$CLAWBOX_STAFF_GUARD_SRC/staff-guard.mjs" \
   "$CLAWBOX_ROOT/config/org-staff-policy.json"
+# Where ClawBox records whose upload each staged attachment is
+# (src/lib/chat-media-owners.ts): a member may open only their own. The gateway
+# does not know where ClawBox keeps its data, so it is written beside the
+# plugin; when it cannot be, no staged file is a member's (the guard fails closed).
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
+  python3 -c 'import json,sys; print(json.dumps({"mediaOwners": sys.argv[1]}))' "$CLAWBOX_ROOT/data/chat-media-owners.json" \
+    > "$CLAWBOX_STAFF_GUARD_DST/clawbox-paths.json" 2>/dev/null \
+    || echo "  WARNING: could not record the attachment owner file for $CLAWBOX_STAFF_GUARD_ID — members of staff cannot open their chat attachments with the read tools" >&2
+fi
 # The same cheap proof as the path guard's: the INSTALLED copy imports, reads
 # its table, refuses a staff agent's write outside its folder and leaves the
 # owner's agent alone.

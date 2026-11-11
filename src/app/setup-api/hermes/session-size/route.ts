@@ -2,7 +2,9 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
-import { readHermesSessionBytes } from "@/lib/harness/hermes-turn-record";
+import { readHermesSessionBytes, withHermesStateHome } from "@/lib/harness/hermes-turn-record";
+import { staffHermesProfilePaths } from "@/lib/hermes-staff-profile";
+import { orgMemberStrictOf } from "@/lib/org-mode-server";
 import { readHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { getLlamaCppServerContextSize } from "@/lib/llamacpp";
 import { requireSession } from "@/lib/route-auth";
@@ -60,8 +62,16 @@ export async function GET(request: Request) {
   if (!SESSION_ID.test(sessionId)) {
     return NextResponse.json({ error: "A Hermes session id is required." }, { status: 400 });
   }
+  // A member of staff's conversations are in their own profile's store
+  // (src/lib/hermes-staff-profile.ts), and only those are measured for them;
+  // a box whose switch cannot be read measures nothing for a non-owner.
+  const member = await orgMemberStrictOf(request);
+  const home = member && member !== "unknown" ? staffHermesProfilePaths(member.username)?.home : undefined;
   const window = getLlamaCppServerContextSize("hermes");
-  const [bytes, limit] = await Promise.all([readHermesSessionBytes(sessionId), compressionLimit(window)]);
+  const [bytes, limit] = await Promise.all([
+    member && !home ? Promise.resolve(null) : withHermesStateHome(home, () => readHermesSessionBytes(sessionId)),
+    compressionLimit(window),
+  ]);
   return NextResponse.json(
     { tokens: bytes === null ? null : Math.ceil(bytes / BYTES_PER_TOKEN), window, limit },
     { headers: { "Cache-Control": "no-store" } },

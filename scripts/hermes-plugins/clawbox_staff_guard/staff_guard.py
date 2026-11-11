@@ -9,8 +9,10 @@ is the second lock, and the part toolsets cannot say:
 * any tool config/org-staff-policy.json does not allow is refused here too;
 * ``write_file`` and ``patch`` may touch only the member's own folder
   (``<profile>/workspace``); ``read_file``, ``search_files`` and
-  ``vision_analyze`` may also open the chat's staged attachments, and nothing
-  on the web;
+  ``vision_analyze`` may also open the chat's staged attachments THAT ARE
+  THEIRS — by the record ClawBox keeps of whose upload each staged file is
+  (src/lib/chat-media-owners.ts), so a member who learns another's
+  attachment path still cannot open it — and nothing on the web;
 * a relative path is made absolute INSIDE the folder (a ``modify``), so the
   file the tool opens is the one that was checked, whatever its working
   directory.
@@ -52,14 +54,45 @@ def policy_table() -> dict:
     raise RuntimeError("clawbox_staff_guard: config/org-staff-policy.json is missing or unreadable")
 
 
-def attachments_dir() -> Optional[Path]:
-    """The chat's staging directory, as register-mcp.sh recorded it beside the plugin."""
+def recorded_paths() -> dict:
+    """What register-mcp.sh recorded beside the plugin (clawbox-paths.json), as
+    the dashboard process does not know where ClawBox keeps its data:
+    ``attachments`` (the chat's staging directory) and ``mediaOwners`` (whose
+    upload each staged file is, ``{realpath: username}``,
+    src/lib/chat-media-owners.ts). ``{}`` when it cannot be read: then no
+    staged file is a member's (fail closed)."""
     try:
         paths = json.loads((_HERE / "clawbox-paths.json").read_text(encoding="utf-8"))
-        value = paths.get("attachments") if isinstance(paths, dict) else None
-        return Path(value) if isinstance(value, str) and value else None
+        return paths if isinstance(paths, dict) else {}
     except (OSError, ValueError):
-        return None
+        return {}
+
+
+def _path_of(paths: dict, key: str) -> Optional[Path]:
+    value = paths.get(key)
+    return Path(value) if isinstance(value, str) and value else None
+
+
+def staged_file_owned_by(username: str, real: Path, root_real: Path, owners_file: Optional[Path]) -> bool:
+    """Is ``real``, a resolved path below the staging root ``root_real``,
+    recorded as ``username``'s upload? The file itself or a folder it sits in
+    below the root (a dropped folder is recorded once, by its root) — the rule
+    of chat-media-owners.ts ``isMediaOwnedBy``. No record: nobody's."""
+    if owners_file is None:
+        return False
+    try:
+        owners = json.loads(owners_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(owners, dict):
+        return False
+    current = real
+    while _inside(current, root_real) and current != root_real:
+        owner = owners.get(str(current))
+        if isinstance(owner, str):
+            return owner == username
+        current = current.parent
+    return False
 
 
 def staff_member_of(hermes_home: Any) -> Optional[str]:
@@ -116,17 +149,18 @@ TOOL_SEARCH_READS = ("tool_search", "tool_describe")
 TOOL_SEARCH_CALL = "tool_call"
 
 
-def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] = None) -> Optional[dict]:
+def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] = None, paths: Optional[dict] = None) -> Optional[dict]:
     """The pre_tool_call directive for one call: ``None`` to let it run,
     ``{"action": "block", "message"}`` to refuse it, or ``{"action": "modify",
-    "args"}`` to run it with its relative paths made absolute inside the folder."""
+    "args"}`` to run it with its relative paths made absolute inside the folder.
+    ``paths`` stands in for clawbox-paths.json (tests)."""
     username = staff_member_of(hermes_home)
     if username is None:
         return None
     if tool_name in TOOL_SEARCH_READS:
         return None
     if tool_name == TOOL_SEARCH_CALL:
-        return _judge_tool_call(args, hermes_home, user_home)
+        return _judge_tool_call(args, hermes_home, user_home, paths)
     policy = policy_table()["hermes"]
     if tool_name not in policy["allowTools"]:
         return block(f"`{tool_name}` is not available to members of staff")
@@ -137,7 +171,8 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
     args = args if isinstance(args, dict) else {}
     folder = Path(str(hermes_home)) / "workspace"
     folder_real = _real(folder)
-    attachments = attachments_dir()
+    recorded = recorded_paths() if paths is None else paths
+    attachments = _path_of(recorded, "attachments")
     attachments_real = _real(attachments) if attachments else None
     home = user_home or os.path.expanduser("~")
 
@@ -170,7 +205,9 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
         if _inside(real, folder_real):
             continue
         if reading and attachments_real is not None and _inside(real, attachments_real):
-            continue
+            if staged_file_owned_by(username, real, attachments_real, _path_of(recorded, "mediaOwners")):
+                continue
+            return block(f"`{tool_name}` on {raw[:200]}, a chat attachment that is not theirs")
         return block(f"`{tool_name}` on {raw[:200]}, outside their own folder ({folder})")
     return {"action": "modify", "args": modified} if modified else None
 
@@ -190,7 +227,7 @@ def _entry_arguments(entry: dict) -> tuple[Optional[str], dict]:
     return None, {k: v for k, v in entry.items() if k not in ("name", "id", "tool")}
 
 
-def _judge_tool_call(args: Any, hermes_home: Any, user_home: Optional[str]) -> Optional[dict]:
+def _judge_tool_call(args: Any, hermes_home: Any, user_home: Optional[str], paths: Optional[dict] = None) -> Optional[dict]:
     """A Tool Search ``tool_call`` judged by the tool(s) it names: Hermes takes
     ``{"name", "arguments"}`` or a batch under ``calls`` (tools/tool_labels.py),
     and a small model may send the target's fields flat. Any refused entry refuses
@@ -206,7 +243,7 @@ def _judge_tool_call(args: Any, hermes_home: Any, user_home: Optional[str]) -> O
         if not isinstance(target, str) or not target.strip():
             return block("`tool_call` without a tool it names")
         key, inner = _entry_arguments(entry)
-        verdict = judge(target.strip().split(":")[-1], inner, hermes_home, user_home)
+        verdict = judge(target.strip().split(":")[-1], inner, hermes_home, user_home, paths)
         if verdict is not None and verdict.get("action") == "block":
             return verdict
         if verdict is not None and verdict.get("action") == "modify":

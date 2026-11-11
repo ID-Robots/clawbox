@@ -15,13 +15,13 @@ import { staffWorkspaceDir } from "@/lib/org-staff-agents";
 let root: string;
 let home: string;
 let openclawHome: string;
-let opts: { openclawHome: string; home: string };
+let opts: { openclawHome: string; home: string; mediaOwners: string };
 
 beforeAll(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "staff-guard-")));
   home = path.join(root, "home");
   openclawHome = path.join(home, ".openclaw");
-  opts = { openclawHome, home };
+  opts = { openclawHome, home, mediaOwners: path.join(root, "chat-media-owners.json") };
   for (const dir of [
     staffWorkspaceDir(openclawHome, "maria"),
     staffWorkspaceDir(openclawHome, "ivan"),
@@ -30,6 +30,15 @@ beforeAll(() => {
   ]) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(openclawHome, "workspace", "MEMORY.md"), "# Owner's memory\n- the owner's private fact\n");
   fs.writeFileSync(path.join(openclawHome, "media", "chat-attachments", "batch1", "q3.xlsx.txt"), "a,b\n1,2\n");
+  fs.mkdirSync(path.join(openclawHome, "media", "chat-attachments", "batch2"), { recursive: true });
+  fs.writeFileSync(path.join(openclawHome, "media", "chat-attachments", "batch2", "payroll.txt"), "ivan's\n");
+  fs.writeFileSync(path.join(openclawHome, "media", "chat-attachments", "owners-own.txt"), "the owner's\n");
+  // Whose upload each staged file is (src/lib/chat-media-owners.ts): maria's
+  // dropped folder by its root, ivan's file by itself; the owner's has none.
+  fs.writeFileSync(opts.mediaOwners, JSON.stringify({
+    [path.join(openclawHome, "media", "chat-attachments", "batch1")]: "maria",
+    [path.join(openclawHome, "media", "chat-attachments", "batch2", "payroll.txt")]: "ivan",
+  }));
   // A link planted inside maria's folder that points at the owner's workspace.
   fs.symlinkSync(path.join(openclawHome, "workspace"), path.join(staffWorkspaceDir(openclawHome, "maria"), "owner-link"));
 });
@@ -128,6 +137,21 @@ describe("a member of staff's files", () => {
     expect(staffToolCallDenyReason(call("read", { path: "report.md" }), MARIA, opts)).toBeNull();
     expect(staffToolCallDenyReason(call("read", { path: path.join(openclawHome, "workspace", "MEMORY.md") }), MARIA, opts)).toMatch(/outside/);
     expect(staffToolCallDenyReason(call("view_image", { image: path.join(home, "photo.png") }), MARIA, opts)).toMatch(/outside/);
+  });
+
+  it("opens a staged attachment only for the member it was staged for, never another's by its path", () => {
+    const staged = (...p: string[]) => path.join(openclawHome, "media", "chat-attachments", ...p);
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), IVAN, opts)).toBeNull();
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), MARIA, opts)).toMatch(/attachment that is not theirs/);
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), IVAN, opts)).toMatch(/attachment that is not theirs/);
+    // No record is nobody's: the owner's own uploads and the gateway's files.
+    expect(staffToolCallDenyReason(call("read", { path: staged("owners-own.txt") }), MARIA, opts)).toMatch(/attachment that is not theirs/);
+    expect(staffToolCallDenyReason(call("pdf", { pdfs: [staged("batch1", "a.pdf"), staged("batch2", "payroll.txt")] }), MARIA, opts)).toMatch(/not theirs/);
+    // No owner record at all (not written, or unreadable): fail closed.
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), MARIA, { ...opts, mediaOwners: undefined })).toMatch(/not theirs/);
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), MARIA, { ...opts, mediaOwners: path.join(root, "missing.json") })).toMatch(/not theirs/);
+    // The owner is not judged at all.
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), OWNER, opts)).toBeNull();
   });
 
   it("refuses a read that names no file, and lets an inline picture through", () => {

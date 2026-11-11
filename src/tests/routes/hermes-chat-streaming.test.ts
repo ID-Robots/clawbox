@@ -42,6 +42,7 @@ vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock 
 // fills the half (see `chat-served-model-dashboard.test.ts`). These cases are
 // about what the TRANSPORT says, so the other source is held quiet.
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  withHermesStateHome: (_home: unknown, fn: () => unknown) => fn(),
   readHermesTurn: readTurnMock,
   // An empty baseline rather than null, so the route really does consult the
   // billing record and `billedMock` is the thing deciding, not a skipped call.

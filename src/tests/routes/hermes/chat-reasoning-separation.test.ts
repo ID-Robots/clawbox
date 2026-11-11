@@ -84,6 +84,7 @@ let turnRecord: unknown = null;
 // keeps the mock complete: an omitted export the route imports fails as a
 // missing-export error rather than as the assertion it was written for.
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  withHermesStateHome: (_home: unknown, fn: () => unknown) => fn(),
   readHermesTurn: async () => turnRecord,
   readHermesUsageMarks: async () => null,
   readHermesBillingProvider: async () => "",

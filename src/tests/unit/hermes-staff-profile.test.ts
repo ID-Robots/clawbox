@@ -121,6 +121,15 @@ describe("ensureStaffHermesProfile", () => {
     expect(fs.readlinkSync(path.join(made!.home, "auth.json"))).toBe(path.join(root, "auth.json"));
   });
 
+  it("prepares one member's profile once at a time, however many turns arrive together", async () => {
+    const made = await Promise.all(Array.from({ length: 8 }, () => ensureStaffHermesProfile("maria", root)));
+    expect(made.every((m) => m?.home === made[0]?.home && m !== null)).toBe(true);
+    const home = made[0]!.home;
+    expect(fs.readlinkSync(path.join(home, "plugins", "clawbox_staff_guard"))).toBe(path.join(root, "plugins", "clawbox_staff_guard"));
+    // No temp file is left behind by any of them.
+    expect(fs.readdirSync(home).filter((f) => f.includes(".tmp-"))).toEqual([]);
+  });
+
   it("gives every member their own profile, and a removed member's goes with them", async () => {
     const a = await ensureStaffHermesProfile("maria", root);
     const b = await ensureStaffHermesProfile("ivan", root);
@@ -181,16 +190,16 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 const d = hasPython3 ? describe : describe.skip;
 
 /** `judge(tool, args, hermes_home, user_home)` through python3; `null` or the directive. */
-function judge(tool: string, args: Record<string, unknown>, hermesHome: string, userHome = "/home/clawbox"): { action: string; message?: string; args?: Record<string, string> } | null {
+function judge(tool: string, args: Record<string, unknown>, hermesHome: string, userHome = "/home/clawbox", paths?: Record<string, string>): { action: string; message?: string; args?: Record<string, string> } | null {
   const program = [
     "import json, sys",
     "sys.path.insert(0, sys.argv[1])",
     "from clawbox_staff_guard.staff_guard import judge",
     "a = json.loads(sys.stdin.read())",
-    "print(json.dumps(judge(a['tool'], a['args'], a['home'], a['user'])))",
+    "print(json.dumps(judge(a['tool'], a['args'], a['home'], a['user'], a.get('paths'))))",
   ].join("\n");
   const out = execFileSync("python3", ["-I", "-c", program, PLUGINS_ROOT], {
-    input: JSON.stringify({ tool, args, home: hermesHome, user: userHome }),
+    input: JSON.stringify({ tool, args, home: hermesHome, user: userHome, ...(paths ? { paths } : {}) }),
     encoding: "utf-8",
   });
   return JSON.parse(out);
@@ -232,6 +241,35 @@ d("the Hermes staff guard (clawbox_staff_guard)", () => {
     // A patch envelope must name its files absolutely, inside the folder.
     expect(judge("patch", { patch: `*** Begin Patch\n*** Add File: ${path.join(staff.folder, "a.md")}\n+x\n*** End Patch` }, staff.home)).toBeNull();
     expect(judge("patch", { patch: "*** Begin Patch\n*** Add File: a.md\n+x\n*** End Patch" }, staff.home)).toMatchObject({ action: "block" });
+  });
+
+  it("opens a staged attachment only for the member it was staged for, never another's by its path", async () => {
+    const staff = (await ensureStaffHermesProfile("maria", root))!;
+    const other = (await ensureStaffHermesProfile("ivan", root))!;
+    const stage = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "staff-stage-")));
+    try {
+      const attachments = path.join(stage, "chat-attachments");
+      fs.mkdirSync(path.join(attachments, "batch1"), { recursive: true });
+      fs.writeFileSync(path.join(attachments, "batch1", "q3.txt"), "maria's");
+      fs.writeFileSync(path.join(attachments, "payroll.txt"), "ivan's");
+      fs.writeFileSync(path.join(attachments, "owners-own.txt"), "the owner's");
+      const mediaOwners = path.join(stage, "chat-media-owners.json");
+      fs.writeFileSync(mediaOwners, JSON.stringify({ [path.join(attachments, "batch1")]: "maria", [path.join(attachments, "payroll.txt")]: "ivan" }));
+      const paths = { attachments, mediaOwners };
+      expect(judge("read_file", { path: path.join(attachments, "batch1", "q3.txt") }, staff.home, undefined, paths)).toBeNull();
+      expect(judge("read_file", { path: path.join(attachments, "payroll.txt") }, other.home, undefined, paths)).toBeNull();
+      expect(judge("read_file", { path: path.join(attachments, "payroll.txt") }, staff.home, undefined, paths))
+        .toMatchObject({ action: "block", message: expect.stringMatching(/attachment that is not theirs/) });
+      expect(judge("vision_analyze", { image_url: path.join(attachments, "batch1", "q3.txt") }, other.home, undefined, paths))
+        .toMatchObject({ action: "block", message: expect.stringMatching(/not theirs/) });
+      // No record is nobody's; no owner record at all fails closed.
+      expect(judge("read_file", { path: path.join(attachments, "owners-own.txt") }, staff.home, undefined, paths)).toMatchObject({ action: "block" });
+      expect(judge("read_file", { path: path.join(attachments, "batch1", "q3.txt") }, staff.home, undefined, { attachments })).toMatchObject({ action: "block" });
+      // Through Tool Search too.
+      expect(judge("tool_call", { name: "read_file", arguments: { path: path.join(attachments, "payroll.txt") } }, staff.home, undefined, paths)).toMatchObject({ action: "block" });
+    } finally {
+      fs.rmSync(stage, { recursive: true, force: true });
+    }
   });
 
   it("lets Tool Search's controls through and judges a tool_call by the tool it names", async () => {

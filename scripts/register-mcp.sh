@@ -329,8 +329,9 @@ fi
 # does not allow and holds the file tools to that member's folder. Every other
 # profile — the owner's — is never judged. Installed on every box, so turning
 # the organisation switch on needs no restart; the policy table is copied in
-# beside it, and the chat's staging directory is recorded for it, because the
-# dashboard process does not know where ClawBox keeps its data. The same rules as
+# beside it, and the chat's staging directory and attachment owner record
+# (src/lib/chat-media-owners.ts) are recorded for it, because the dashboard
+# process does not know where ClawBox keeps its data. The same rules as
 # the plugins above: sources read first, half-written copies removed, never fatal.
 STAFF_GUARD_PLUGIN="clawbox_staff_guard"
 STAFF_GUARD_SRC="$PROJECT_DIR/scripts/hermes-plugins/$STAFF_GUARD_PLUGIN"
@@ -341,7 +342,7 @@ STAFF_GUARD_INSTALLED=0
 if ! cat "${STAFF_GUARD_SOURCES[@]}" >/dev/null 2>&1; then
   log "WARNING: $STAFF_GUARD_SRC is not a complete, readable plugin — leaving whatever is already installed in place; a member of staff's file tools are held only by their profile's toolsets"
 elif mkdir -p "$STAFF_GUARD_DST" 2>/dev/null && cp -f "${STAFF_GUARD_SOURCES[@]}" "$STAFF_GUARD_DST/" 2>/dev/null \
-  && printf '{"attachments": %s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$PROJECT_DIR/data/chat-media/chat-attachments")" > "$STAFF_GUARD_DST/clawbox-paths.json" 2>/dev/null; then
+  && python3 -c 'import json,sys; print(json.dumps({"attachments": sys.argv[1], "mediaOwners": sys.argv[2]}))' "$PROJECT_DIR/data/chat-media/chat-attachments" "$PROJECT_DIR/data/chat-media-owners.json" > "$STAFF_GUARD_DST/clawbox-paths.json" 2>/dev/null; then
   rm -rf "$STAFF_GUARD_DST/__pycache__" 2>/dev/null || true
   STAFF_GUARD_INSTALLED=1
 elif rm -rf "$STAFF_GUARD_DST" 2>/dev/null; then

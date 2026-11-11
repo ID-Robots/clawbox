@@ -73,8 +73,10 @@ sign_in() {
   [ "$login" = 200 ] && printf "%s" "$cookie"
 }
 
+# Staff agents left on the roster, in either shape (agents.entries, or the
+# legacy agents.list); "?" when the config cannot be read, which is not zero.
 staff_on_roster() {
-  python3 -c "import json,sys; c=json.load(open(sys.argv[1])); e=(c.get(\"agents\") or {}).get(\"entries\") or {}; print(len([k for k in e if k.startswith(\"clawbox-staff-\")]))" "$HOME/.openclaw/openclaw.json" 2>/dev/null || echo 0
+  python3 -c "import json,sys; a=json.load(open(sys.argv[1])).get(\"agents\") or {}; ids=list((a.get(\"entries\") or {}).keys())+[x.get(\"id\") for x in (a.get(\"list\") or []) if isinstance(x,dict)]; print(len([k for k in ids if isinstance(k,str) and k.startswith(\"clawbox-staff-\")]))" "$HOME/.openclaw/openclaw.json" 2>/dev/null || echo "?"
 }
 
 cleanup() {
@@ -103,8 +105,15 @@ call GET /setup-api/gateway/ws-config "$A_COOKIE" >/dev/null
 call GET /setup-api/gateway/ws-config "$B_COOKIE" >/dev/null
 
 # 2-4. The chats.
+# Its own exit status counts: a driver that was killed or crashed midway has
+# not proved the checks it never reached.
+DRIVER_OUT=$(mktemp)
 cd "$REPO" && A_NAME="$A_NAME" A_COOKIE="$A_COOKIE" B_NAME="$B_NAME" B_COOKIE="$B_COOKIE" OWNER_COOKIE="$OWNER" MARK="$MARK" RUNTIME="$RUNTIME" REPO="$REPO" \
-  timeout 1900 node "$REPO/scripts/nano-tests/board/org-mode-staff.mjs" 2>&1 | grep -E "^(RESULT|NOTE) " || say "not ok - [$RUNTIME] the chat driver printed nothing"
+  timeout 1900 node "$REPO/scripts/nano-tests/board/org-mode-staff.mjs" >"$DRIVER_OUT" 2>&1
+DRIVER_RC=$?
+grep -E "^(RESULT|NOTE) " "$DRIVER_OUT" || say "not ok - [$RUNTIME] the chat driver printed nothing"
+[ "$DRIVER_RC" = 0 ] || say "not ok - [$RUNTIME] the chat driver ended with status $DRIVER_RC (124: it ran out of time)"
+rm -f "$DRIVER_OUT"
 
 # 5. Off, and the users gone.
 trap - EXIT
@@ -132,10 +141,17 @@ else
   fi
   [ -e "$P" ] && find "$P" -maxdepth 2 -printf "NOTE [$RUNTIME] left in the removed profile: %P (%s bytes)\n" 2>/dev/null | head -n 10
 fi
+echo "FLOW-END"
 '
 
 out=$(board "$FLOW")
+board_rc=$?
 results=$(printf '%s\n' "$out" | grep -E '^(RESULT|NOTE) ')
+# A flow cut short (the connection dropped, the board rebooted) has not proved
+# what it never reached, however good the part that did come back looks.
+if [ "$board_rc" != 0 ] || ! printf '%s\n' "$out" | grep -qx 'FLOW-END'; then
+  not_ok "the organisation-mode staff flow did not run to its end on the board (status $board_rc)"
+fi
 if [ -z "$results" ]; then
   not_ok "the organisation-mode staff flow printed nothing on the board"
   printf '%s\n' "$out" | tail -n 20 | while IFS= read -r line; do note "$line"; done

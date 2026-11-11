@@ -69,6 +69,7 @@ import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-rea
 import {
   readHermesBillingProvider,
   readHermesTurn,
+  withHermesStateHome,
   readHermesUsageMarks,
 } from "@/lib/harness/hermes-turn-record";
 import { recordProviderVerified } from "@/lib/provider-verified";
@@ -1716,9 +1717,11 @@ export async function POST(request: Request) {
         console.log(`[hermes chat] Hermes would not switch this conversation to ${turn.refusedModel}; `
           + `its own model ${turn.model || "(unnamed)"} answers`);
       }
-      return streamed
+      // A member's session, record and billing rows are in their own
+      // profile's state.db: every read the turn makes opens that one.
+      return withHermesStateHome(staff?.home, () => (streamed
         ? streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, listening)
-        : settledTurnResponse(turn, rawSessionId, sessionKey, wantsProvider, live, listening);
+        : settledTurnResponse(turn, rawSessionId, sessionKey, wantsProvider, live, listening)));
     };
     // ── The one retry ───────────────────────────────────────────────────────
     //
@@ -1829,7 +1832,7 @@ export async function POST(request: Request) {
       // config.yaml's pairing, which is the same read the validation above makes
       // when it has a reason to: recorded too, because a blank under a reply the
       // box knows the model of is a false unknown, not modesty.
-      const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
+      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed));
       live.emit("done", answered);
       // The one-shot answer is held to the same rule as the stream: a session
       // that ran out while the CLI was answering is signed out rather than

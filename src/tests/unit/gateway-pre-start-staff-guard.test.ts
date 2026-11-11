@@ -78,7 +78,10 @@ d("gateway-pre-start.sh — the staff guard", () => {
     const r = run();
     expect(r.status).toBe(0);
     const target = path.join(openclawHome, "extensions", PLUGIN_ID);
-    expect(readdirSync(target).sort()).toEqual(["index.mjs", "openclaw.plugin.json", "org-staff-policy.json", "package.json", "staff-guard.mjs"]);
+    expect(readdirSync(target).sort()).toEqual(["clawbox-paths.json", "index.mjs", "openclaw.plugin.json", "org-staff-policy.json", "package.json", "staff-guard.mjs"]);
+    // Where ClawBox records whose upload each staged attachment is, for the
+    // guard's "only their own attachments" rule.
+    expect(JSON.parse(readFileSync(path.join(target, "clawbox-paths.json"), "utf-8"))).toEqual({ mediaOwners: path.join(root, "data", "chat-media-owners.json") });
     expect(JSON.parse(readFileSync(configPath, "utf-8")).plugins.entries[PLUGIN_ID].enabled).toBe(true);
     expect(r.stderr).toBe("");
   });

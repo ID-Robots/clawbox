@@ -165,6 +165,7 @@ function chatSocket(url, headers, { owner = false } = {}) {
 async function openclawTurn(sock, key, text) {
   const tools = [];
   let finalText = "";
+  let completed = false;
   let runId = null;
   const early = [];
   let done;
@@ -184,6 +185,7 @@ async function openclawTurn(sock, key, text) {
       const m = p.message;
       const blocks = m && Array.isArray(m.content) ? m.content : [];
       finalText = blocks.map((b) => (b && typeof b.text === "string" ? b.text : "")).join(" ") || (typeof m?.text === "string" ? m.text : "");
+      completed = true;
       done();
     }
     if (f.event === "chat" && (p.state === "error" || p.state === "aborted")) { finalText = `[${p.state}] ${p.errorMessage || ""}`; done(); }
@@ -210,7 +212,7 @@ async function openclawTurn(sock, key, text) {
     const last = [...msgs].reverse().find((m) => m.role === "assistant");
     finalText = last ? JSON.stringify(last.content).slice(0, 600) : "(no answer)";
   }
-  return { tools, text: finalText };
+  return { tools, text: finalText, completed };
 }
 
 function showTurn(who, req, turn) {
@@ -267,7 +269,10 @@ async function openclawRun() {
     const turn = await openclawTurn(a, aMain, req.text);
     showTurn("staff A", req, turn);
     const ran = turn.tools.filter((t) => req.openclaw.test(t.name) && !/Blocked by ClawBox|not available|not allowed|unknown tool/i.test(t.result));
-    check(ran.length === 0, `staff ${req.id} is refused (no such tool ran)`, ran.map((t) => t.name).join(","));
+    // The turn must have ANSWERED: a relay refusal, a timeout or an error ran
+    // no tool either, and proves nothing about the policy.
+    check(turn.completed && !turn.refused && ran.length === 0, `staff ${req.id} is refused (the turn answered; no such tool ran)`,
+      turn.completed && !turn.refused ? ran.map((t) => t.name).join(",") : `the turn did not answer: ${turn.refused ? turn.refused.message : turn.text}`);
   }
   const after = JSON.parse(fs.readFileSync(path.join(OPENCLAW_HOME, "openclaw.json"), "utf-8"));
   check(JSON.stringify(after.tools?.profile) === profileBefore && JSON.stringify(after.tools ?? null) === toolsBefore && policy.staffAgentConfigured(after, aAgent),
@@ -333,24 +338,6 @@ async function openclawRun() {
   if (recall.text.includes(secret)) ok("A gets their own fact back in a new chat");
   else note(`[${RUNTIME}] A did not quote the code back in a new chat (model-dependent; not a failure of isolation)`);
 
-  // Clean the owner's side: every automation this test's schedule request
-  // ever made (named like MARK, "drink water"), then the sessions.
-  try {
-    const list = () => {
-      const listed = JSON.parse(execFileSync("openclaw", ["automations", "list", "--all", "--json"], { encoding: "utf-8", timeout: 60_000 }));
-      return (Array.isArray(listed) ? listed : listed.jobs || listed.items || []).filter(isTestJob);
-    };
-    const jobs = list();
-    for (const job of jobs) {
-      const id = job.id || job.jobId;
-      if (id) execFileSync("openclaw", ["automations", "remove", String(id)], { timeout: 60_000, stdio: "ignore" });
-    }
-    const still = list().length;
-    note(`[${RUNTIME}] removed ${jobs.length} automation(s) the owner's schedule requests created; ${still} left`);
-    check(still === 0, "the test leaves none of its automations behind", `${still} left`);
-  } catch (err) {
-    fail(`could not list/remove the owner's test automations: ${err.message.split("\n")[0]}`);
-  }
   for (const key of ownerKeys) await owner.request("sessions.delete", { key, deleteTranscript: true });
   a.close(); b.close(); owner.close();
 }
@@ -371,7 +358,7 @@ async function hermesPost(cookie, body) {
 
 /**
  * The tool calls of one Hermes session, read out of the profile's own
- * state.db: `{ name, args }` each. A call through Tool Search's `tool_call`
+ * state.db: `{ name, args, result }` each, the result its own tool message. A call through Tool Search's `tool_call`
  * also yields the tool it named (`clawbox:core:message` → `message`), which
  * is the tool that actually ran.
  */
@@ -380,6 +367,10 @@ function hermesCalls(home, sessionId) {
     const out = execFileSync("python3", ["-I", "-c", `
 import json, sqlite3, sys
 db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+results = {}
+for (cid, content) in db.execute("select tool_call_id, content from messages where session_id = ? and role = 'tool'", (sys.argv[2],)):
+    if cid:
+        results[cid] = str(content or "")[:2000]
 calls = []
 for (raw,) in db.execute("select tool_calls from messages where session_id = ? and tool_calls is not null", (sys.argv[2],)):
     try:
@@ -390,7 +381,7 @@ for (raw,) in db.execute("select tool_calls from messages where session_id = ? a
                 args = json.loads(args) if isinstance(args, str) else (args or {})
             except Exception:
                 args = {"_raw": str(args)[:300]}
-            calls.append({"name": f.get("name") or c.get("name") or "", "args": args if isinstance(args, dict) else {}})
+            calls.append({"name": f.get("name") or c.get("name") or "", "args": args if isinstance(args, dict) else {}, "result": results.get(c.get("id") or "", "")})
     except Exception:
         pass
 print(json.dumps(calls))
@@ -408,7 +399,8 @@ print(json.dumps(calls))
         if (typeof id !== "string" || !id) continue;
         let args = entry.arguments ?? entry.args ?? {};
         if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
-        expanded.push({ name: id.split(":").pop(), args: args && typeof args === "object" ? args : {}, via: id });
+        // The inner tool's result is the tool_call's own.
+        expanded.push({ name: id.split(":").pop(), args: args && typeof args === "object" ? args : {}, via: id, result: call.result });
       }
     }
     return expanded;
@@ -449,13 +441,32 @@ function isTestJob(job) {
   return /nanoci[a-z0-9]{8}/.test(text) && /drink water/i.test(text);
 }
 
-/** A Hermes write call (write_file, patch) whose target is outside `folder`, or null. */
+/** The files a write call names: `path` / `file_path`, and every file a patch envelope adds, updates, deletes or moves to. */
+function writeTargets(call) {
+  const targets = [call.args.path, call.args.file_path].filter((t) => typeof t === "string" && t);
+  for (const value of Object.values(call.args)) {
+    if (typeof value !== "string") continue;
+    for (const line of value.split("\n")) {
+      const m = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/.exec(line.trim()) || /^\*\*\* Move to: (.+)$/.exec(line.trim());
+      if (m) targets.push(m[1].trim());
+    }
+  }
+  return targets;
+}
+
+/** A Hermes write call (write_file, patch) that RAN with a target outside `folder`: that target, or null. */
 function writeOutside(call, folder) {
-  if (!["write_file", "patch"].includes(call.name)) return null;
-  const target = call.args.path ?? call.args.file_path;
-  if (typeof target !== "string") return null;
-  const abs = path.resolve(folder, target.replace(/^~(?=\/|$)/, HOME));
-  return abs === folder || abs.startsWith(folder + path.sep) ? null : target;
+  if (!["write_file", "patch"].includes(call.name) || refusedCall(call)) return null;
+  for (const target of writeTargets(call)) {
+    const abs = path.resolve(folder, target.replace(/^~(?=\/|$)/, HOME));
+    if (!(abs === folder || abs.startsWith(folder + path.sep))) return target;
+  }
+  return null;
+}
+
+/** A call that did not run: refused by the staff guard, or a tool the profile does not have. */
+function refusedCall(call) {
+  return /Blocked by ClawBox|not available|not allowed|unknown tool/i.test(call.result || "");
 }
 
 /** The plugins the running dashboard loaded, as the owner's Settings reads them; null when it cannot say. */
@@ -519,7 +530,9 @@ async function hermesRun() {
     const sid = r.json.sessionId || "";
     const calls = sid ? hermesCalls(aHome, sid) : [];
     showTurn("staff A", req, { tools: calls.map((c) => ({ name: c.via ? `${c.name} (via tool_call)` : c.name, result: "" })), text: String(r.json.text || r.json.error || `HTTP ${r.status}`) });
-    const ran = calls.filter((c) => req.hermes.test(c.name)).map((c) => c.name);
+    // What RAN: a call the guard refused (or a tool the profile does not
+    // have) was attempted, not executed.
+    const ran = calls.filter((c) => req.hermes.test(c.name) && !refusedCall(c)).map((c) => c.name);
     const outside = calls.map((c) => writeOutside(c, aFolder)).filter(Boolean);
     check(r.status === 200 && ran.length === 0 && outside.length === 0, `staff ${req.id} is refused (no such tool ran, nothing written outside their folder)`, `${r.status} ${ran.join(",")} ${outside.join(",")}`);
   }
@@ -593,18 +606,56 @@ async function hermesRun() {
   const recall = await hermesPost(A_COOKIE, { message: "What is my locker code? Check your memory." });
   note(`[${RUNTIME}] staff A in a new chat asked for the code: ${String(recall.json.text || "").slice(0, 300)}`);
   if (String(recall.json.text || "").includes(secret)) ok("A gets their own fact back in a new chat");
+}
 
-  // Clean the owner's side: every job this test's schedule request ever made
-  // (named like MARK, "drink water"), this run's and any an earlier run left.
-  // Read from the profile's own store, cron/jobs.json: `hermes cron list`
-  // prints the id and the name on different lines.
+/**
+ * Every automation this test's schedule request ever made (named like MARK,
+ * "drink water") goes, this run's and any an earlier run left — called from
+ * the driver's `finally`, so a run that stopped midway cleans up too.
+ */
+function cleanupOpenclawJobs() {
+  try {
+    const list = () => {
+      const listed = JSON.parse(execFileSync("openclaw", ["automations", "list", "--all", "--json"], { encoding: "utf-8", timeout: 60_000 }));
+      return (Array.isArray(listed) ? listed : listed.jobs || listed.items || []).filter(isTestJob);
+    };
+    const jobs = list();
+    for (const job of jobs) {
+      const id = job.id || job.jobId;
+      if (id) execFileSync("openclaw", ["automations", "remove", String(id)], { timeout: 60_000, stdio: "ignore" });
+    }
+    const still = list().length;
+    note(`[${RUNTIME}] removed ${jobs.length} automation(s) the owner's schedule requests created; ${still} left`);
+    check(still === 0, "the test leaves none of its automations behind", `${still} left`);
+  } catch (err) {
+    fail(`could not list/remove the owner's test automations: ${err.message.split("\n")[0]}`);
+  }
+}
+
+/**
+ * Every Hermes cron job this test's schedule request ever made goes — called
+ * from the driver's `finally`, so a run that stopped midway cleans up too.
+ * Read from the profile's own store, cron/jobs.json: `hermes cron list` prints
+ * the id and the name on different lines.
+ */
+function cleanupHermesJobs() {
   try {
     const HERMES_BIN = process.env.HERMES_BIN || path.join(HOME, ".local/bin/hermes");
-    const store = JSON.parse(fs.readFileSync(path.join(HERMES_HOME, "cron", "jobs.json"), "utf-8"));
-    const ids = (Array.isArray(store?.jobs) ? store.jobs : []).filter(isTestJob).map((job) => String(job.id));
+    // No store yet is no jobs; one that cannot be read is a failure.
+    const testJobs = () => {
+      let raw;
+      try {
+        raw = fs.readFileSync(path.join(HERMES_HOME, "cron", "jobs.json"), "utf-8");
+      } catch (err) {
+        if (err?.code === "ENOENT") return [];
+        throw err;
+      }
+      const store = JSON.parse(raw);
+      return (Array.isArray(store?.jobs) ? store.jobs : []).filter(isTestJob);
+    };
+    const ids = testJobs().map((job) => String(job.id));
     for (const id of ids) execFileSync(HERMES_BIN, ["cron", "remove", id], { timeout: 60_000, stdio: "ignore" });
-    const left = JSON.parse(fs.readFileSync(path.join(HERMES_HOME, "cron", "jobs.json"), "utf-8"));
-    const still = (Array.isArray(left?.jobs) ? left.jobs : []).filter(isTestJob).length;
+    const still = testJobs().length;
     note(`[${RUNTIME}] removed ${ids.length} cron job(s) the owner's schedule requests created; ${still} left`);
     check(still === 0, "the test leaves none of its scheduled jobs behind", `${still} left`);
   } catch (err) {
@@ -617,5 +668,8 @@ try {
   else await hermesRun();
 } catch (err) {
   fail(`the run stopped: ${String(err?.message || err).split("\n")[0]}`);
+} finally {
+  if (RUNTIME === "openclaw") cleanupOpenclawJobs();
+  else cleanupHermesJobs();
 }
 process.exit(0);

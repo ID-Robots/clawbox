@@ -15,6 +15,8 @@ const appendMock = vi.hoisted(() => vi.fn());
 const slashMock = vi.hoisted(() => vi.fn());
 const memberMock = vi.hoisted(() => vi.fn());
 const profileMock = vi.hoisted(() => vi.fn());
+/** Whose state.db each turn's reads were scoped to (undefined: the box's own). */
+const stateHomes = vi.hoisted(() => [] as Array<string | null | undefined>);
 
 vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
@@ -27,6 +29,10 @@ vi.mock("@/lib/hermes-slash-exec", async (importOriginal) => ({
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  withHermesStateHome: (home: string | null | undefined, fn: () => unknown) => {
+    stateHomes.push(home);
+    return fn();
+  },
   readHermesTurn: vi.fn(async () => null),
   readHermesUsageMarks: async () => new Set<string>(),
   readHermesBillingProvider: vi.fn(async () => ""),
@@ -88,6 +94,7 @@ beforeEach(() => {
   profileMock.mockReset();
   memberMock.mockResolvedValue({ username: "maria" });
   profileMock.mockResolvedValue(STAFF);
+  stateHomes.length = 0;
   guardLoadedMock.mockReset();
   guardLoadedMock.mockResolvedValue(true);
   openTurnMock.mockResolvedValue(fakeTurn());
@@ -122,6 +129,8 @@ describe("a member of staff's turn", () => {
     expect(openTurnMock).toHaveBeenCalledTimes(1);
     const req = openTurnMock.mock.calls[0][0];
     expect(req).toMatchObject({ profile: "clawbox-staff-maria", cwd: STAFF.folder, denyApprovals: true });
+    // The turn's record and billing are read from their profile's own store.
+    expect(stateHomes).toEqual([STAFF.home]);
     expect(req.model).toBeUndefined();
     expect(req.provider).toBeUndefined();
   });
@@ -191,6 +200,7 @@ describe("the owner (and a home box's user)", () => {
     const req = openTurnMock.mock.calls[0][0];
     expect(req.profile).toBeUndefined();
     expect(req.denyApprovals).toBeUndefined();
+    expect(stateHomes.every((h) => h == null)).toBe(true);
     expect(req.model).toBe("claude-opus");
   });
 });

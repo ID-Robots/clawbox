@@ -133,7 +133,7 @@ d("register-mcp.sh — the staff guard", () => {
     const dir = path.join(pluginsDir, STAFF);
     expect(fs.readdirSync(dir).sort()).toEqual(["__init__.py", "clawbox-paths.json", "org-staff-policy.json", "plugin.yaml", "staff_guard.py"]);
     expect(fs.readFileSync(path.join(dir, "org-staff-policy.json"), "utf-8")).toBe(fs.readFileSync(path.join(REPO, "config/org-staff-policy.json"), "utf-8"));
-    expect(JSON.parse(fs.readFileSync(path.join(dir, "clawbox-paths.json"), "utf-8"))).toEqual({ attachments: path.join(REPO, "data/chat-media/chat-attachments") });
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "clawbox-paths.json"), "utf-8"))).toEqual({ attachments: path.join(REPO, "data/chat-media/chat-attachments"), mediaOwners: path.join(REPO, "data/chat-media-owners.json") });
     const enabled = (readConfig().plugins as { enabled: string[] }).enabled;
     expect(enabled).toEqual(["clawai", "clawbox_email_directives", LEAN, STAFF]);
     expect(r.stdout).toContain(`enabled the ${STAFF} plugin`);
