@@ -262,8 +262,10 @@ function runStep(recorded: string, extra: Record<string, string> = {}): StepRun 
     // it under `set -u`, and a fresh dispatch of the step starts it at 0.
     "GATEWAY_READY_SPENT=0",
     // `runuser -u clawbox -- env HOME=… cmd…` → run cmd… as this user, marked
-    // as the service account's run.
-    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
+    // as the service account's run only when -u names it: a switch to root
+    // must still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     "systemctl() {",
     `  printf '%s\\n' "$*" >> ${JSON.stringify(systemctlCalls)}`,
     '  if [ "${1:-}" = "is-enabled" ]; then printf \'%s\\n\' "${STUB_UNIT_ENABLED:-enabled}"; fi',

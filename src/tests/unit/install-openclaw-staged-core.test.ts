@@ -323,7 +323,10 @@ exit 0
       // which this suite is not about: the step is cut off after the install.
       "openclaw_version_is_v2() { return 1; }",
       'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; AS_SERVICE_USER=1 "$@"; }',
-      'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
+      // Marks the run as the service account only when -u names it: a switch to
+      // root must still read as root.
+      'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+        + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
       shellFunction("recover_parked_openclaw_core"),
       shellFunction("promote_staged_openclaw_core"),
       // Stubbed, never lifted: the step calls it with no arguments, which means

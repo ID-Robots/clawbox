@@ -254,8 +254,10 @@ function program(box: Box, entry: string, lift: string[] = []): string {
     'gateway_port_listening() { [ "${GW_LISTENING:-1}" = 1 ]; }',
     AS_CLAWBOX,
     // `runuser -u <account> -- env HOME=… cmd…`: cmd… as this user, marked as
-    // the service account's run.
-    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
+    // the service account's run only when -u names it: a switch to root must
+    // still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     shellFunction("openclaw_version_is_v2"),
     shellFunction("openclaw_is_v2"),
     shellFunction("openclaw_migration_complete"),

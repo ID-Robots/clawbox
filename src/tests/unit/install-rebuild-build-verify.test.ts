@@ -579,7 +579,10 @@ function run(scenario: Scenario = {}): Run {
     "# is whoever runs the test. Both account switches mark what they run as the",
     "# service account's.",
     'as_clawbox() { AS_SERVICE_USER=1 "$@"; }',
-    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
+    // Marks the run as the service account only when -u names it: a switch to
+    // root must still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     // node-pty's state is a file: present while the module loads. The first
     // run is do_rebuild's own, before the build; a second can only be the
     // rebuild after a rollback. Logged beside systemctl so the order shows.
