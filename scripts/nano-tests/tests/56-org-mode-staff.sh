@@ -67,7 +67,7 @@ status_of() { printf "%s\n" "$1" | head -n1; }
 sign_in() {
   local name=$1 pass=$2 jar login cookie
   jar=$(mktemp)
-  login=$(printf "%s" "{\"username\":\"$name\",\"password\":\"$pass\",\"duration\":3600}" \
+  login=$(printf "%s" "{\"username\":\"$name\",\"password\":\"$pass\",\"duration\":21600}" \
     | curl -sS -c "$jar" -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" --max-time 60 --data-binary @- "$DASHBOARD/login-api")
   cookie=$(awk '"'"'$6 == "clawbox_session" { print $7 }'"'"' "$jar"); rm -f "$jar"
   [ "$login" = 200 ] && printf "%s" "$cookie"
