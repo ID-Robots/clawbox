@@ -83,9 +83,11 @@ interface FakeIndexer {
  *   lines the CLI prints whatever happened.
  */
 async function fakeIndexer(
-  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0 }:
-  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number } = {},
+  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0, chunks = false }:
+  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number; chunks?: boolean } = {},
 ): Promise<FakeIndexer> {
+  const db = process.env.CLAWKEEP_MEMORY_AGENT_DB!;
+  await fs.mkdir(path.dirname(db), { recursive: true });
   const script = path.join(tmpDir, "fake-openclaw.mjs");
   const started = path.join(tmpDir, "started");
   const termed = path.join(tmpDir, "termed");
@@ -104,7 +106,11 @@ async function fakeIndexer(
     "  process.stderr.write('09:49:46 [state/agent-db] agent database clean-close receipt: active-leases\\n');",
     "  process.exit(1);",
     "}",
-    "const say = (done) => { if (process.stderr.isTTY && process.argv.includes('--verbose')) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/" + `${Math.max(steps, 1)}` + " \\u00b7 elapsed 0:0${done % 10} 50%`); };",
+    // `chunks`: a full pass's scratch index, a row more at every step, the
+    // only progress there is to see off a terminal.
+    `const scratch = ${JSON.stringify(chunks)} ? new (await import('node:sqlite')).DatabaseSync(${JSON.stringify(db)} + '.memory-reindex-' + crypto.randomUUID()) : null;`,
+    "scratch?.exec('CREATE TABLE memory_index_chunks (id TEXT PRIMARY KEY)');",
+    "const say = (done) => { scratch?.prepare('INSERT INTO memory_index_chunks VALUES (?)').run('c' + done); if (process.stderr.isTTY && process.argv.includes('--verbose')) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/" + `${Math.max(steps, 1)}` + " \\u00b7 elapsed 0:0${done % 10} 50%`); };",
     "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
     `for (let done = 0; done <= ${steps}; done += 1) { say(done); if (done < ${steps}) await sleep(${stepMs}); }`,
     `if (${JSON.stringify(hang)}) { setInterval(() => {}, 1000); } else {`,
@@ -174,6 +180,21 @@ describe("an OpenClaw pass that stops moving", () => {
     expect(run).toMatchObject({ status: "succeeded", errorCode: "" });
     expect(existsSync(fake.termed)).toBe(false);
     expect((await readMemoryRunState()).durationMs).toBeGreaterThan(4_000);
+  });
+});
+
+describe("an OpenClaw pass off a terminal, under a short stall window", () => {
+  it("is read often enough to be seen moving: its chunks are sampled inside the window", async () => {
+    // Off a terminal the chunk count is the only progress there is, read on a
+    // 15 s clock — longer than a window this short, which ended a pass that
+    // was writing chunks all along before its first reading.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "2000";
+    noTerminal();
+    const fake = await fakeIndexer({ steps: 16, stepMs: 300, chunks: true });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
   });
 });
 
@@ -260,6 +281,27 @@ describe("the pass after one that died holding OpenClaw's memory workspace lock"
     } finally {
       vi.doUnmock("node:child_process");
     }
+  });
+
+  it("names this process on its record while it waits, so no other reader takes it for lost", async () => {
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "1500";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 1 });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    // The first attempt has exited on the lock; the record must not name it.
+    const waiting = () => vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes("memory workspace lock held"));
+    for (let i = 0; i < 250 && !waiting(); i += 1) await new Promise((r) => setTimeout(r, 20));
+    expect(waiting()).toBe(true);
+    let during = 0;
+    for (let i = 0; i < 50 && during !== process.pid; i += 1) {
+      during = Number(JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")).childPid);
+      if (during !== process.pid) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(during).toBe(process.pid);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded" });
+    expect(await fake.attempts()).toBe(2);
   });
 
   it("is stopped at once while it waits to try again, and does not try again", async () => {

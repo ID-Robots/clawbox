@@ -1183,6 +1183,8 @@ export async function runLocalIndexPass(
   // last files of a run against a different budget from its first.
   const ceiling = maxIndexChunks(embedder.dimensions);
   const db = await openIndexForWrite();
+  /** This pass committed rows: a cached copy of the vectors is out of date. */
+  let wrote = false;
   try {
     // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
     // tables, and reading the owner's folder list can fail — the config store
@@ -1254,7 +1256,6 @@ export async function runLocalIndexPass(
     // reads as nothing owed over work that did not happen.
     let incompleteFiles = 0;
     let capped = false;
-    let wrote = false;
     // The denominator as soon as it exists. Until the scan has walked every
     // source the pass genuinely does not know how much work there is, and the
     // bar says so by staying indeterminate rather than by guessing.
@@ -1339,6 +1340,9 @@ export async function runLocalIndexPass(
         // `continue` runs this too, so the descriptor is released on every path.
         await opened.close();
       }
+      // The read can outlast the run that gave up on this pass (it takes no
+      // signal): nothing below may be written for a run that is over.
+      throwIfAborted(signal);
       const sha = sha256Of(text);
       if (sameMeta && row!.sha === sha) {
         // Touched, not edited. Record the new stat so the next pass skips it
@@ -1374,6 +1378,10 @@ export async function runLocalIndexPass(
         incompleteFiles += 1;
         continue;
       }
+      // The last check before this file's rows are replaced (and before a
+      // width change could empty the store): a batch that came back after the
+      // run gave up on the pass must not overwrite what a newer pass wrote.
+      throwIfAborted(signal);
       // A width change empties the store, so everything counted before it is
       // gone: re-read rather than carry a total that no longer describes
       // anything. Left stale, the next cap check fired on a store of ~19,800
@@ -1519,6 +1527,19 @@ export async function runLocalIndexPass(
 
     if (wrote) invalidateVectorCache();
     return { mode: rebuild ? "full" : "incremental", files, chunks, failures, capped };
+  } catch (err) {
+    // Files this pass committed before it ended — stopped, given up on, an
+    // embedder that went away — are in the store whatever ended it, and the
+    // vector cache keys on `generation`: left as it was, a search kept the
+    // old chunk ids of a file this pass replaced and found nothing of it.
+    // The rest of the bookkeeping stays undone; that is the next pass's.
+    if (wrote) {
+      try {
+        metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+      } catch { /* a newer pass holding the store moves it itself */ }
+      invalidateVectorCache();
+    }
+    throw err;
   } finally {
     db.close();
   }

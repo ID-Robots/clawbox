@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
@@ -524,6 +524,42 @@ describe("a running record this process is not supervising", () => {
     const started = await startMemoryIndex("full", "manual");
     expect(started.accepted).toBe(true);
     expect((await settled()).status).toBe("succeeded");
+  });
+
+  it("ends a stalled record's indexer that outlived its supervisor before freeing the lock", async () => {
+    // A server stopped some other way than through its unit leaves its
+    // OpenClaw child running, holding the embed lock: every later pass would
+    // end `migration_busy`. Verified as that indexer before it is signalled.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
+    const startedAtMs = Date.now() - 2_000;
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "memory", "index", "--agent", "main"], { stdio: "ignore" });
+    const exited = new Promise<NodeJS.Signals | null>((resolve) => orphan.once("exit", (_code, signal) => resolve(signal)));
+    try {
+      await writeRunning({ startedAtMs, progressAtMs: 0, childPid: orphan.pid });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { readMemoryRunState } = await lib();
+      expect((await readMemoryRunState()).errorCode).toBe("stalled");
+      expect(await exited).toBe("SIGTERM");
+      expect(fs.existsSync(lockPath())).toBe(false);
+    } finally {
+      orphan.kill("SIGKILL");
+      vi.mocked(console.warn).mockRestore();
+    }
+  });
+
+  it("never signals a live process that is not that indexer, whatever pid the record names", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
+    const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    try {
+      await writeRunning({ startedAtMs: Date.now() - 2_000, progressAtMs: 0, childPid: bystander.pid });
+      const { readMemoryRunState } = await lib();
+      expect((await readMemoryRunState()).errorCode).toBe("stalled");
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+      expect(bystander.pid && (() => { try { process.kill(bystander.pid, 0); return true; } catch { return false; } })()).toBe(true);
+    } finally {
+      bystander.kill("SIGKILL");
+    }
   });
 
   it("still reads a `timed_out` record an older build wrote", async () => {
