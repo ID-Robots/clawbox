@@ -146,13 +146,21 @@ async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, wha
 
 const settled = () => until(readState, (s) => s.status !== undefined && s.status !== "running", "the run settled");
 
+/** A few milliseconds of REAL time, for the run record's writes to land. */
+async function letIoLand(ms = 5): Promise<void> {
+  const until = performance.now() + ms;
+  while (performance.now() < until) await new Promise((resolve) => setImmediate(resolve));
+}
+
 /** Hours of fake clock, a minute at a time, with real I/O let through between. */
 async function advance(ms: number, stepMs = MIN): Promise<void> {
   for (let left = ms; left > 0; left -= stepMs) {
     await vi.advanceTimersByTimeAsync(Math.min(stepMs, left));
-    await new Promise((resolve) => setImmediate(resolve));
+    await letIoLand();
   }
 }
+
+const lockGone = () => until(async () => fs.existsSync(lockPath()), (present) => !present, "the lock was freed");
 
 function useFakeClock(): void {
   vi.useFakeTimers({
@@ -291,9 +299,8 @@ describe("a pass that keeps moving", () => {
 
     await advance(2 * HOUR + 10 * MIN);
     // Past the old two-hour budget, still going, the bar still moving.
-    const midway = await readMemoryRunState();
-    expect(midway.status).toBe("running");
-    expect(midway.progress?.filesDone).toBeGreaterThan(20);
+    expect((await readMemoryRunState()).status).toBe("running");
+    await until(readState, (s) => Number((s.progress as { filesDone?: number } | null)?.filesDone) > 20, "the bar past file 20");
     expect(aborted).toBe(false);
 
     await advance(HOUR);
@@ -383,8 +390,8 @@ describe("a pass that stops moving", () => {
       });
       expect(abortedAtMs - startedAtMs).toBeGreaterThanOrEqual(30 * MIN);
       expect(abortedAtMs - startedAtMs).toBeLessThanOrEqual(31 * MIN + 1_000);
-      // The lock went with it: the next pass is not refused.
-      expect(fs.existsSync(lockPath())).toBe(false);
+      // The lock went with it (just after the record): the next pass is not refused.
+      await lockGone();
       // The device log says why, with the window.
       const said = warn.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
       expect(said).toMatch(/full index run failed \(stalled, threw\): no progress for 30 min/);
@@ -418,12 +425,13 @@ describe("a pass that stops moving", () => {
     try {
       const { startMemoryIndex, readMemoryRunState } = await lib();
       await startMemoryIndex("full", "manual");
-      await advance(32 * MIN);
+      // The watchdog gives up between 30 and 31 min; the grace runs 2 min more.
+      await advance(31 * MIN + 30_000, 30_000);
       // Given up on, not yet settled: still the pass's record.
       expect((await readMemoryRunState()).status).toBe("running");
-      await advance(2 * MIN);
+      await advance(2 * MIN, 30_000);
       expect(await settled()).toMatchObject({ status: "failed", errorCode: "stalled" });
-      expect(fs.existsSync(lockPath())).toBe(false);
+      await lockGone();
       expect(warn.mock.calls.flat().map(String).join("\n")).toMatch(/had not ended 120 s after it was given up on/);
     } finally {
       warn.mockRestore();

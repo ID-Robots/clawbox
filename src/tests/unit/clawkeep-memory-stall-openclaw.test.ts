@@ -126,6 +126,13 @@ async function waitFor(file: string): Promise<void> {
   expect(existsSync(file), `${path.basename(file)} never appeared`).toBe(true);
 }
 
+/** The lock goes just after the settled record is written, not with it. */
+async function lockGone(): Promise<boolean> {
+  const lock = path.join(tmpDir, "memory-index.lock");
+  for (let i = 0; i < 250 && existsSync(lock); i += 1) await new Promise((r) => setTimeout(r, 20));
+  return !existsSync(lock);
+}
+
 function deviceLog(warn: { mock: { calls: unknown[][] } }): string {
   return warn.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
 }
@@ -141,7 +148,7 @@ describe("an OpenClaw pass that stops moving", () => {
     expect(run).toMatchObject({ status: "failed", errorCode: "stalled" });
     expect(run.error).toBe("Indexing made no progress for a long time and was stopped. Run it again.");
     expect(await fs.readFile(fake.termed, "utf8")).toBe("TERM");
-    expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(false);
+    expect(await lockGone()).toBe(true);
     expect(deviceLog(warn)).toMatch(/full index run failed \(stalled, [^)]*\): no progress for 1 min/);
   });
 
@@ -248,7 +255,7 @@ describe("the pass after one that died holding OpenClaw's memory workspace lock"
       expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "index_failed" });
       expect(indexSpawns).toBe(2);
       expect(await fake.attempts()).toBe(1);
-      expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(false);
+      expect(await lockGone()).toBe(true);
       expect((await readMemoryRunState()).status).toBe("failed");
     } finally {
       vi.doUnmock("node:child_process");

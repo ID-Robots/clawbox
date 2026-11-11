@@ -2500,15 +2500,32 @@ export async function startMemoryIndex(
       .catch(() => { /* the next write tries again */ });
     return progressWritten;
   };
+  /** A report arrived while a write was on its way: write once more after it. */
+  let reportWaiting = false;
   const persistThrottled = () => {
-    if (settled || reportInFlight) return;
+    if (settled) return;
+    if (reportInFlight) {
+      reportWaiting = true;
+      return;
+    }
     const now = Date.now();
     // The first report always lands, so the bar gets its denominator the
     // moment the scan has one, whatever the clock says.
     if (reportedAtMs && now - reportedAtMs < PROGRESS_WRITE_EVERY_MS) return;
     reportedAtMs = now;
     reportInFlight = true;
-    void persistState().finally(() => { reportInFlight = false; });
+    reportWaiting = false;
+    void persistState().finally(() => {
+      reportInFlight = false;
+      // What came in while the disk was slow is not lost until the next
+      // report: a pass that goes quiet right after (a stall, a long file)
+      // would otherwise leave the record — `progressAtMs` included — behind.
+      if (reportWaiting && !settled) {
+        reportWaiting = false;
+        reportedAtMs = 0;
+        persistThrottled();
+      }
+    });
   };
   // TASK-2431: the stall watchdog, and the record's own note of when the pass
   // last moved for a reader in another process. Created once the pass is on
