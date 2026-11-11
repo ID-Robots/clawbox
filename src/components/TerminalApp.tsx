@@ -69,6 +69,7 @@ import {
   type PasteUpload,
   type PictureTaker,
 } from "@/lib/terminal-paste";
+import { XTERM_LOOK, loadXtermModules, terminalBufferText, xtermLiveOptions as liveOptions } from "@/lib/xterm-setup";
 import "@xterm/xterm/css/xterm.css";
 
 type XTerm = import("@xterm/xterm").Terminal;
@@ -108,43 +109,6 @@ export interface TerminalAppProps {
   session?: string;
   /** Told the id of each session this terminal starts or reattaches to. */
   onSession?: (id: string) => void;
-}
-
-interface XtermModules {
-  Terminal: typeof import("@xterm/xterm").Terminal;
-  FitAddon: typeof import("@xterm/addon-fit").FitAddon;
-  WebLinksAddon: typeof import("@xterm/addon-web-links").WebLinksAddon;
-  /** Unicode 11 widths; null where the addon would not load (xterm's own tables then). */
-  Unicode11Addon: typeof import("@xterm/addon-unicode11").Unicode11Addon | null;
-}
-
-let xtermModules: Promise<XtermModules> | null = null;
-
-/**
- * xterm and its addons, loaded ONCE however many terminals ask at the same
- * moment — a restored desktop mounts every Terminal tab at once (TASK-1306).
- * A load that fails is not kept: the next Reconnect loads again.
- */
-function loadXtermModules(): Promise<XtermModules> {
-  if (!xtermModules) {
-    const loading = (async () => {
-      const { Terminal } = await import("@xterm/xterm");
-      const { FitAddon } = await import("@xterm/addon-fit");
-      const { WebLinksAddon } = await import("@xterm/addon-web-links");
-      let Unicode11Addon: XtermModules["Unicode11Addon"] = null;
-      try {
-        ({ Unicode11Addon } = await import("@xterm/addon-unicode11"));
-      } catch {
-        // xterm's own Unicode 6 tables: emoji may count as one cell.
-      }
-      return { Terminal, FitAddon, WebLinksAddon, Unicode11Addon };
-    })();
-    xtermModules = loading;
-    loading.catch(() => {
-      if (xtermModules === loading) xtermModules = null;
-    });
-  }
-  return xtermModules;
 }
 
 /** The default face's stack, as the rest of the desktop has always read it. */
@@ -225,45 +189,8 @@ export function terminalTheme(ground: string): TerminalColors {
   return { ...colors, background: ground, cursorAccent: ground };
 }
 
-/** The xterm options a settings value decides — every one of them can change on a live terminal. */
-function liveOptions(settings: TerminalSettings) {
-  const theme = terminalThemeFor(settings.theme);
-  return {
-    theme: theme.colors,
-    fontFamily: terminalFontFor(settings.font).family,
-    fontSize: settings.fontSize,
-    lineHeight: settings.lineHeight,
-    cursorStyle: settings.cursorStyle,
-    cursorBlink: settings.cursorBlink,
-    scrollback: settings.scrollback,
-    // A light ground needs the colours an app chose for a dark one nudged
-    // until they read; on a dark ground every colour is drawn exactly as sent,
-    // truecolor included.
-    minimumContrastRatio: theme.tone === "light" ? 3 : 1,
-  };
-}
-
-/**
- * The buffer's whole text — scrollback and screen — with every wrapped row
- * joined back onto the line it continues, so "Copy all" pastes the lines the
- * program printed rather than the width the window happened to be.
- */
-export function terminalBufferText(term: Pick<XTerm, "buffer">): string {
-  const buffer = term.buffer.active;
-  const lines: string[] = [];
-  for (let y = 0; y < buffer.length; y++) {
-    const line = buffer.getLine(y);
-    if (!line) continue;
-    // A row that continues on the next keeps its trailing spaces: they are
-    // text the program wrote, not the padding after it.
-    const continues = buffer.getLine(y + 1)?.isWrapped === true;
-    const text = line.translateToString(!continues);
-    if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
-    else lines.push(text);
-  }
-  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  return lines.join("\n");
-}
+// Re-exported where it has always been read from.
+export { terminalBufferText };
 
 // ── Touch selection ───────────────────────────────────────────────────
 //
@@ -1055,27 +982,12 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
       const term = new Terminal({
         ...liveOptions(initial),
-        letterSpacing: 0,
-        cursorInactiveStyle: "outline",
-        // The background is opaque, so transparency bought nothing and cost the
-        // renderer its fast path — on a redraw-heavy TUI that showed as tearing.
-        allowTransparency: false,
-        // Claude Code marks emphasis with bold. Remapping bold onto the BRIGHT
-        // palette (xterm's default) recoloured its text instead of weighting it.
-        drawBoldTextInBrightColors: false,
-        fontWeight: "normal",
-        fontWeightBold: "bold",
+        // The look every terminal shares (src/lib/xterm-setup.ts).
+        ...XTERM_LOOK,
         macOptionIsMeta: true,
         // A right click on a word selects it, so "right click, Copy" works
         // on a word without dragging first.
         rightClickSelectsWord: true,
-        // Unicode 11 widths are "proposed" API in xterm 6.
-        allowProposedApi: true,
-        // WebGL draws box drawing and block elements itself, so `╭─╮ │ ╰─╯`
-        // joins at every line height, and scales a glyph that would spill
-        // into the next cell (an emoji, a Nerd Font icon) back into its own.
-        customGlyphs: true,
-        rescaleOverlappingGlyphs: true,
       });
       appliedSettingsRef.current = initial;
 

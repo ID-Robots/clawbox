@@ -3,17 +3,15 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTr } from "@/lib/i18n-floor";
 import {
-  appendStepDetails,
   describeUpdateFailure,
   shownStepStatus,
   stepFailureReason,
   UpdateStepCount,
   UpdateStepList,
-  UpdateStepLog,
   UpdateStepMeter,
   visibleUpdateSteps,
-  type StepDetailLog,
 } from "@/components/UpdateStep";
+import UpdateRawLog from "@/components/UpdateRawLog";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
 import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
@@ -190,7 +188,9 @@ const SCREEN_RULES = `[data-update-screen] .us-page{flex-direction:column;align-
 [data-update-screen] .us-list li>span:last-child,[data-update-screen] .us-list [data-testid=update-step-detail]{font-size:calc(11.5*var(--update-px))}
 [data-update-screen] .us-bar{bottom:calc(16*var(--update-px));margin-top:calc(14*var(--update-px));gap:calc(12*var(--update-px));border-radius:calc(10*var(--update-px));padding:calc(12*var(--update-px)) calc(20*var(--update-px));font-size:calc(13*var(--update-px))}
 [data-update-screen] .us-bar-note{margin-top:calc(2*var(--update-px));font-size:calc(11.5*var(--update-px))}
-[data-update-screen] .us-full-log{flex:none;max-height:calc(240*var(--update-px));margin-top:calc(14*var(--update-px));padding:calc(10*var(--update-px)) calc(14*var(--update-px));font-size:calc(11*var(--update-px))}
+[data-update-screen] .us-full-log{flex:none;margin-top:calc(14*var(--update-px))}
+[data-update-screen] .us-raw-head{padding:calc(6*var(--update-px)) calc(12*var(--update-px));font-size:calc(11*var(--update-px))}
+[data-update-screen] .us-raw-term{height:calc(240*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo{gap:calc(8*var(--update-px));padding:calc(20*var(--update-px)) calc(30*var(--update-px)) 0}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo img{width:calc(28*var(--update-px));height:calc(28*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo span{font-size:calc(18*var(--update-px))}
@@ -871,9 +871,6 @@ export function HarnessDowngradeNotice({
   );
 }
 
-/** No line seen yet: the full log's starting point. */
-const NO_DETAILS: StepDetailLog = {};
-
 /** A step's place in the list, as the log writes it: `05`. */
 function stepNumber(index: number): string {
   return String(index + 1).padStart(2, "0");
@@ -964,7 +961,8 @@ export function UpdateRunView({
 }) {
   const tr = useTr();
   const SubHeading = Heading === "h1" ? "h2" : "h3";
-  // The full log behind the terminal button: closed until it is asked for.
+  // The raw log behind the terminal button (UpdateRawLog): closed until it is
+  // asked for, and connected only while it is open.
   const [logOpen, setLogOpen] = useState(false);
   const logId = useId();
   // Asked only while a run is on screen: the route reads the target's notes,
@@ -983,13 +981,6 @@ export function UpdateRunView({
   // "In progress" and the progress holds. The failure is read from every step,
   // so the error panel still names a hidden step that stopped the run.
   const steps = visibleUpdateSteps(state?.steps ?? []);
-  // Every line a step reported while this view watched, for the full log:
-  // the poll only ever carries the line a step is on now. Kept the way React
-  // keeps what a render saw before (a guarded update during render), and the
-  // same object when no line is new, so nothing renders twice for nothing.
-  const [details, setDetails] = useState<StepDetailLog>(NO_DETAILS);
-  const seenDetails = appendStepDetails(details, steps);
-  if (seenDetails !== details) setDetails(seenDetails);
   const running = steps.find((s) => shownStepStatus(s, phase) === "running");
   const failure = failed ? describeUpdateFailure(state, error) : null;
   // A refused downgrade (or the backup its override could not take) is said
@@ -1117,17 +1108,7 @@ export function UpdateRunView({
           <div className="us-list mt-[18px]">
             <UpdateStepList steps={listedSteps} phase={phase} />
           </div>
-          {logOpen && (
-            <UpdateStepLog
-              id={logId}
-              label={logLabel}
-              steps={steps}
-              phase={phase}
-              details={details}
-              warnings={warnings}
-              reasons={!downgrade}
-            />
-          )}
+          {logOpen && <UpdateRawLog id={logId} label={logLabel} live={status === "updating"} />}
         </>
       )}
     </section>
