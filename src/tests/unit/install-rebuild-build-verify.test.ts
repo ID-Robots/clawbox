@@ -164,6 +164,48 @@ interface Scenario {
   probeWindow?: string;
   /** The serving build carries a framework cache (`.next/cache/entry`). */
   previousCache?: boolean;
+  /**
+   * projectDir as a real git checkout, and the shipped
+   * build_type_check_proven_by_ci in place of the stub every other case gets.
+   * Absent: projectDir is no checkout at all and the stub answers "not one".
+   */
+  checkout?: Checkout;
+  /** is_test_mode answers yes, as it does under e2e-install's CLAWBOX_TEST_MODE=1. */
+  testMode?: boolean;
+}
+
+/** The checkout run_next_build asks about before it builds. */
+interface Checkout {
+  /** The branch the checkout is on; origin carries it at the same commit. */
+  branch: string;
+  /** HEAD detached at that commit (applied before `ahead`). */
+  detached?: boolean;
+  /** One local commit origin does not have — on the branch, or on a detached HEAD. */
+  ahead?: boolean;
+  /** origin/<branch> has one commit the checkout has not got. */
+  behind?: boolean;
+  /** A tracked file edited and not committed. */
+  edited?: boolean;
+  /** A new file nothing ignores. */
+  untracked?: boolean;
+  /**
+   * A change `git status` would not show on its own: a new page that
+   * `.git/info/exclude` or the owner's global ignore file (at its default
+   * place, `$XDG_CONFIG_HOME/git/ignore`) hides, or an edit to a tracked file
+   * whose index entry tells git not to look (`--skip-worktree`,
+   * `--assume-unchanged`).
+   */
+  hidden?: "info-exclude" | "global-ignore" | "skip-worktree" | "assume-unchanged";
+  /**
+   * A tracked `scripts/x.sh` without its executable bit and a tracked symlink
+   * `src/link.ts`, then the rebuild step's own `chmod +x` over scripts/*.sh (as
+   * every in-app update runs it before it builds), then this change or none.
+   */
+  modeFlip?: "only" | "edit" | "new" | "deleted" | "symlink-to-file" | "file-to-symlink";
+  /** `.update-branch`, the pin the updater writes. */
+  pin?: string;
+  /** git fails: every call, or only `status`; or `ls-files -v` answers nothing with exit 0. */
+  gitFails?: "all" | "status" | "tracked-list-empty";
 }
 
 interface Run {
@@ -195,6 +237,8 @@ interface Run {
   ptyLoadable: boolean;
   /** How many times ensure_node_pty ran. */
   ptyRebuilds: number;
+  /** Every build command handed to as_clawbox_login, verbatim, in order. */
+  buildCommands: string[];
 }
 
 let sandbox: string;
@@ -205,6 +249,140 @@ let buildAttempts: string;
 let unwritableTmp: string;
 let ptyOk: string;
 let ptyCalls: string;
+let buildCommands: string;
+
+/**
+ * git with no config of the machine running the suite: no global or system
+ * file (a `status.showUntrackedFiles` or a signing key there would change the
+ * answers), no global ignore file but the sandbox's own, and no walking up out
+ * of the sandbox into a repository above it.
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CEILING_DIRECTORIES: sandbox,
+    XDG_CONFIG_HOME: path.join(sandbox, "xdg"),
+  };
+}
+
+function fixtureGit(...args: string[]): string {
+  const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", projectDir, ...args], {
+    encoding: "utf-8",
+    env: gitEnv(),
+  });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/**
+ * The `chmod +x` over scripts/*.sh that step_directories_permissions runs,
+ * verbatim. step_rebuild_reboot, the step every in-app update dispatches, runs
+ * it first and builds after it.
+ */
+function rebuildChmodLine(): string {
+  const line = shellFunction("step_directories_permissions").split("\n").map((l) => l.trim())
+    .find((l) => l.startsWith('find "$PROJECT_DIR/scripts"') && l.includes("chmod +x"));
+  if (!line) throw new Error("step_directories_permissions no longer makes scripts/*.sh executable");
+  return line;
+}
+
+/**
+ * projectDir as the box keeps it after a sync: on `branch`, at origin's tip,
+ * nothing changed — then whatever the case moves away from that.
+ */
+function setUpCheckout(c: Checkout): void {
+  fixtureGit("init", "-q");
+  fixtureGit("symbolic-ref", "HEAD", `refs/heads/${c.branch}`);
+  // The entries of the repository's own .gitignore that cover what this
+  // harness writes into projectDir.
+  writeFileSync(path.join(projectDir, ".gitignore"), ".next/\n.next-old/\n.update-branch\n", "utf-8");
+  mkdirSync(path.join(projectDir, "src"), { recursive: true });
+  writeFileSync(path.join(projectDir, "src", "app.ts"), "export const app = 1;\n", "utf-8");
+  if (c.modeFlip) {
+    mkdirSync(path.join(projectDir, "scripts"), { recursive: true });
+    writeFileSync(path.join(projectDir, "scripts", "x.sh"), "echo x\n", { encoding: "utf-8", mode: 0o644 });
+    symlinkSync("app.ts", path.join(projectDir, "src", "link.ts"));
+  }
+  fixtureGit("add", "-A");
+  fixtureGit("commit", "-q", "-m", "base");
+  fixtureGit("update-ref", `refs/remotes/origin/${c.branch}`, "HEAD");
+  if (c.modeFlip) {
+    if (fixtureGit("ls-files", "-s", "scripts/x.sh").split(" ")[0] !== "100644") throw new Error("scripts/x.sh is not tracked as 100644");
+    const chmod = rebuildChmodLine();
+    const r = spawnSync("bash", ["-c", chmod], { encoding: "utf-8", env: { ...gitEnv(), PROJECT_DIR: projectDir } });
+    if (r.status !== 0) throw new Error(`${chmod} failed: ${r.stderr}`);
+    const src = (name: string) => path.join(projectDir, "src", name);
+    if (c.modeFlip === "edit") writeFileSync(path.join(projectDir, "scripts", "x.sh"), "echo y\n", "utf-8");
+    if (c.modeFlip === "new") writeFileSync(src("fresh.ts"), "export const fresh = 1;\n", "utf-8");
+    if (c.modeFlip === "deleted") rmSync(src("app.ts"));
+    if (c.modeFlip === "symlink-to-file") {
+      rmSync(src("link.ts"));
+      writeFileSync(src("link.ts"), "export const link = 1;\n", "utf-8");
+    }
+    if (c.modeFlip === "file-to-symlink") {
+      rmSync(src("app.ts"));
+      symlinkSync("link-target.ts", src("app.ts"));
+    }
+  }
+  if (c.behind) {
+    const next = fixtureGit("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "landed on origin");
+    fixtureGit("update-ref", `refs/remotes/origin/${c.branch}`, next);
+  }
+  if (c.detached) fixtureGit("checkout", "-q", "--detach");
+  if (c.ahead) {
+    writeFileSync(path.join(projectDir, "src", "local.ts"), "export const local = 1;\n", "utf-8");
+    fixtureGit("add", "src/local.ts");
+    fixtureGit("commit", "-q", "-m", "local");
+  }
+  if (c.edited) writeFileSync(path.join(projectDir, "src", "app.ts"), "export const app = 2;\n", "utf-8");
+  if (c.untracked) writeFileSync(path.join(projectDir, "src", "new.ts"), "export const fresh = 1;\n", "utf-8");
+  if (c.hidden === "info-exclude" || c.hidden === "global-ignore") {
+    const page = c.hidden === "info-exclude" ? "x" : "y";
+    mkdirSync(path.join(projectDir, "src", "app", page), { recursive: true });
+    writeFileSync(path.join(projectDir, "src", "app", page, "page.tsx"), "export default function P() { return null; }\n", "utf-8");
+    const ignoreFile = c.hidden === "info-exclude"
+      ? path.join(projectDir, ".git", "info", "exclude")
+      : path.join(sandbox, "xdg", "git", "ignore");
+    mkdirSync(path.dirname(ignoreFile), { recursive: true });
+    writeFileSync(ignoreFile, `src/app/${page}/\n`, { encoding: "utf-8", flag: "a" });
+  }
+  if (c.hidden === "skip-worktree" || c.hidden === "assume-unchanged") {
+    writeFileSync(path.join(projectDir, "src", "app.ts"), "export const app = 3;\n", "utf-8");
+    fixtureGit("update-index", `--${c.hidden}`, "src/app.ts");
+  }
+  if (c.pin !== undefined) writeFileSync(path.join(projectDir, ".update-branch"), c.pin + "\n", "utf-8");
+}
+
+/**
+ * The shipped probe and its path-list helper, replacing the "not a checkout"
+ * stub. findShellFunction, not shellFunction: on a tree without the probe the
+ * slice is empty and run_next_build simply builds as before, so a case fails on
+ * what it asserts about the build rather than on a missing function; "is
+ * extracted whole" below holds both to existing. The root-side branch
+ * resolution is defined too, so a probe that called it would run it and the
+ * owner-only case below would see it.
+ */
+function checkoutLines(c: Checkout): string[] {
+  return [
+    // Only the checkout picks the branch, never the environment of the runner.
+    'CLAWBOX_BRANCH=""',
+    ...(c.gitFails === "all" ? ['git() { echo "fatal: not a git repository" >&2; return 128; }'] : []),
+    ...(c.gitFails === "status"
+      ? ['git() { case " $* " in *" status "*) echo "fatal: index file corrupt" >&2; return 128 ;; esac; command git "$@"; }']
+      : []),
+    ...(c.gitFails === "tracked-list-empty"
+      ? ['git() { case " $* " in *" ls-files -v "*) return 0 ;; esac; command git "$@"; }']
+      : []),
+    shellFunctions("is_safe_git_ref", "recover_detached_branch", "resolve_update_branch"),
+    "",
+    findShellFunction("first_paths"),
+    "",
+    findShellFunction("build_type_check_proven_by_ci"),
+    "",
+  ];
+}
 
 function writeBuild(dir: string, buildId: string, withEntry = true): void {
   mkdirSync(path.join(dir, "standalone"), { recursive: true });
@@ -231,6 +409,8 @@ function run(scenario: Scenario = {}): Run {
     previousCache = false,
     ptyBrokenByBuild = false,
     ptyRebuildAfterRollback = "works",
+    checkout,
+    testMode = false,
   } = scenario;
   // `step_build` calls run_next_build directly and ignores its arguments, so
   // pairing it with the flag would silently omit the behaviour and read as
@@ -243,6 +423,7 @@ function run(scenario: Scenario = {}): Run {
   // first build's attempts as the second's.
   rmSync(buildAttempts, { force: true });
   rmSync(ptyCalls, { force: true });
+  rmSync(buildCommands, { force: true });
   // The box starts with a node-pty that loads, as one with a working terminal.
   writeFileSync(ptyOk, "", "utf-8");
   mkdirSync(projectDir, { recursive: true });
@@ -280,6 +461,7 @@ function run(scenario: Scenario = {}): Run {
       "utf-8",
     );
   }
+  if (checkout) setUpCheckout(checkout);
 
   // Stands in for `bun run build`. The four outcomes are the four the box can
   // produce, including the two that exit 0 without leaving a servable build.
@@ -371,7 +553,12 @@ function run(scenario: Scenario = {}): Run {
     "DASHBOARD_UP=0",
     'DISK_HEADROOM=' + JSON.stringify(diskHeadroom),
     "",
-    "is_test_mode() { return 1; }",
+    `is_test_mode() { return ${testMode ? 0 : 1}; }`,
+    // run_next_build asks whether CI already type-checked this tree. projectDir
+    // is no checkout unless the case sets `checkout`, so the answer is no; those
+    // cases replace this with the shipped function, further down.
+    'build_type_check_proven_by_ci() { echo "not a checkout"; return 1; }',
+    "BUILD_COMMANDS=" + JSON.stringify(buildCommands),
     // wait_note's bucket state, a top-level assignment in install.sh: under
     // `set -u` an unset one ends the slice on the first heartbeat check.
     'WAIT_NOTE_EVERY_S=30',
@@ -416,7 +603,9 @@ function run(scenario: Scenario = {}): Run {
     "# dashboard is down.",
     "as_clawbox_login() {",
     '  case "$*" in',
-    '    *"run build"*) "$FAKE_BUILD" "$PROJECT_DIR" ;;',
+    // Recorded verbatim: `su -` clears the environment, so whatever the build
+    // is told has to be inside this string.
+    '    *"run build"*) printf "%s\\n" "$*" >> "$BUILD_COMMANDS"; "$FAKE_BUILD" "$PROJECT_DIR" ;;',
     "    *\"require('node-pty')\"*) [ -f \"$PTY_OK\" ] ;;",
     bunInstall === "succeeds" ? "    *) return 0 ;;" : '    *"install"*) return 1 ;;\n    *) return 0 ;;',
     "  esac",
@@ -517,6 +706,7 @@ function run(scenario: Scenario = {}): Run {
       "ensure_node_pty_after_rollback",
     ),
     "",
+    ...(checkout ? checkoutLines(checkout) : []),
     shellFunction(entry),
     "",
     rebootFollows ? `${entry} --reboot-follows` : entry,
@@ -534,7 +724,7 @@ function run(scenario: Scenario = {}): Run {
   const result = spawnSync("bash", [scriptPath], {
     encoding: "utf-8",
     cwd: REPO,
-    env: { ...process.env, CLAWBOX_RESTORE_PROBE_WAIT_S: probeWindow },
+    env: { ...gitEnv(), CLAWBOX_RESTORE_PROBE_WAIT_S: probeWindow },
   });
   const elapsedMs = Date.now() - startedAt;
   const log = existsSync(systemctlLog)
@@ -557,6 +747,9 @@ function run(scenario: Scenario = {}): Run {
       : 0,
     ptyLoadable: existsSync(ptyOk),
     ptyRebuilds: existsSync(ptyCalls) ? Number(readFileSync(ptyCalls, "utf-8").trim()) : 0,
+    buildCommands: existsSync(buildCommands)
+      ? readFileSync(buildCommands, "utf-8").split("\n").filter(Boolean)
+      : [],
   };
 }
 
@@ -573,6 +766,7 @@ beforeEach(() => {
   unwritableTmp = path.join(sandbox, "no-write");
   ptyOk = path.join(sandbox, "node-pty-loads");
   ptyCalls = path.join(sandbox, "ensure-node-pty-calls.txt");
+  buildCommands = path.join(sandbox, "build-commands.txt");
   writeFileSync(unwritableTmp, "", "utf-8");
 });
 
@@ -585,7 +779,10 @@ describe("the shipped function bodies these tests run", () => {
   // of every function it reads today, and silently wrong the day one grows a
   // heredoc or an indented closing brace at column 0 — the tests would then
   // assert against a fragment and pass for the wrong reason.
-  it.each(["do_rebuild", "step_build", "verify_build_present", "restore_previous_build", "run_next_build"])(
+  it.each([
+    "do_rebuild", "step_build", "verify_build_present", "restore_previous_build", "run_next_build",
+    "build_type_check_proven_by_ci", "first_paths",
+  ])(
     "%s is extracted whole",
     (name) => {
       const body = shellFunction(name);
@@ -753,6 +950,265 @@ describe("do_rebuild verifies the build it produced", () => {
  * being EARLY in a long log is what triggers it, which is the normal shape of a
  * kernel log on a box that went on running afterwards.
  */
+/**
+ * Next's own type check is 77 s of a 113 s `bun run build` on an 8 GB board,
+ * with a ~1 GB heap of its own. A box may leave it to CI only for a tree CI has
+ * already checked: ON branch beta or main, HEAD exactly origin's fetched tip,
+ * nothing changed or added. Every other build — another branch, a detached
+ * HEAD even at the tip, a commit ahead or behind, an edit or a new file, one
+ * hidden from `git status`, a git that cannot answer, test mode — keeps the
+ * check, says so in its own command (`=0`, which neither a `.env` line nor a
+ * login dotfile can override), and the log says why.
+ */
+describe("run_next_build leaves the type check to CI only at origin's beta or main tip", () => {
+  const SKIP = "CLAWBOX_BUILD_SKIP_TYPECHECK=1 ";
+  const KEEP = "CLAWBOX_BUILD_SKIP_TYPECHECK=0 ";
+  const skipped = (branch: string) => new RegExp(
+    `^  Building without the on-box type check: [0-9a-f]{12} is origin/${branch}'s tip on branch ${branch}; `
+      + `CI type-checks every pull request before it lands on ${branch}$`,
+    "m",
+  );
+  const withCheck = (r: Run) => r.stdout.split("\n").filter((l) => l.startsWith("  Building with the type check ("));
+
+  it.each<[string, Checkout]>([
+    ["on beta at origin/beta's tip", { branch: "beta" }],
+    ["on main at origin/main's tip", { branch: "main" }],
+    ["on beta at the tip with beta pinned, as an updated box is", { branch: "beta", pin: "beta" }],
+    // A script's executable bit changes nothing Next compiles or checks.
+    ["on beta at the tip after the rebuild step made a tracked 100644 script executable, as every in-app update does",
+      { branch: "beta", pin: "beta", modeFlip: "only" }],
+  ])("builds without it %s with a clean tree", (_what, checkout) => {
+    const r = run({ checkout });
+    expect(r.status).toBe(0);
+    expect(r.buildCommands).toEqual([`cd ${projectDir} && ${SKIP}/nonexistent/bun run build`]);
+    expect(r.stdout).toMatch(skipped(checkout.branch));
+    expect(withCheck(r)).toEqual([]);
+  });
+
+  it.each<[string, Checkout, RegExp[]]>([
+    ["HEAD is behind origin/beta", { branch: "beta", behind: true },
+      [/^HEAD [0-9a-f]{12} is not origin\/beta's tip [0-9a-f]{12}$/]],
+    ["HEAD carries a commit origin has not got", { branch: "beta", ahead: true },
+      [/^HEAD [0-9a-f]{12} is not origin\/beta's tip [0-9a-f]{12}$/]],
+    ["a tracked file is edited", { branch: "beta", edited: true }, [/^the tree has changes: src\/app\.ts$/]],
+    ["a file nothing ignores was added", { branch: "beta", untracked: true }, [/^the tree has changes: src\/new\.ts$/]],
+    // What the device proof reads on a box following a pull request's branch.
+    ["the box follows another branch", { branch: "feature/x" }, [/^the box follows feature\/x, not beta or main$/]],
+    ["HEAD is detached at origin/beta's tip with beta pinned", { branch: "beta", detached: true, pin: "beta" },
+      [/^HEAD is not on a branch$/]],
+    // Unpinned and detached, the probe does not recover which branch the tree
+    // came from: that takes root git and the tree's build stamp, and a detached
+    // HEAD keeps the check whatever the answer.
+    ["HEAD is detached at origin/beta's tip with no pin", { branch: "beta", detached: true }, [
+      /^no update branch could be resolved$/,
+      /^HEAD is not on a branch$/,
+      /^there is no origin branch to compare HEAD with$/,
+    ]],
+    ["no update branch can be resolved", { branch: "beta", detached: true, ahead: true }, [
+      /^no update branch could be resolved$/,
+      /^HEAD is not on a branch$/,
+      /^there is no origin branch to compare HEAD with$/,
+    ]],
+    ["the pin names beta but HEAD is on another branch", { branch: "feature/x", pin: "beta" }, [
+      /^HEAD is on feature\/x, not beta$/,
+      /^origin\/beta is not in this checkout$/,
+    ]],
+    // Changes `git status` alone would not show. Next would compile a hidden
+    // page as a route, with no type check.
+    ["a new page only .git/info/exclude hides", { branch: "beta", hidden: "info-exclude" },
+      [/^new files hidden from git status: src\/app\/x\/page\.tsx$/]],
+    // `status` names a directory that is new as a whole, here all of src/app/.
+    ["a new page only the owner's global ignore file hides", { branch: "beta", hidden: "global-ignore" },
+      [/^the tree has changes: src\/app\/$/]],
+    ["an edit git is told to skip (skip-worktree)", { branch: "beta", hidden: "skip-worktree" },
+      [/^git does not check these tracked files for changes: src\/app\.ts$/]],
+    ["an edit git is told to skip (assume-unchanged)", { branch: "beta", hidden: "assume-unchanged" },
+      [/^git does not check these tracked files for changes: src\/app\.ts$/]],
+    // The executable bits the rebuild step sets are not counted; any other
+    // change beside them still is, and is the only one named.
+    ["the rebuild step's chmod is followed by an edit of that script", { branch: "beta", modeFlip: "edit" },
+      [/^the tree has changes: scripts\/x\.sh$/]],
+    ["the rebuild step's chmod is followed by a new file", { branch: "beta", modeFlip: "new" },
+      [/^the tree has changes: src\/fresh\.ts$/]],
+    ["the rebuild step's chmod is followed by a deleted file", { branch: "beta", modeFlip: "deleted" },
+      [/^the tree has changes: src\/app\.ts$/]],
+    ["the rebuild step's chmod is followed by a tracked symlink turned into a file", { branch: "beta", modeFlip: "symlink-to-file" },
+      [/^the tree has changes: src\/link\.ts$/]],
+    ["the rebuild step's chmod is followed by a tracked file turned into a symlink", { branch: "beta", modeFlip: "file-to-symlink" },
+      [/^the tree has changes: src\/app\.ts$/]],
+    // A real checkout always tracks files: an empty list is a doubt, not "all plain".
+    ["git lists no tracked files", { branch: "beta", gitFails: "tracked-list-empty" }, [/^git listed no tracked files$/]],
+    // An empty answer from a status that failed must not read as a clean tree.
+    ["git status fails", { branch: "beta", gitFails: "status" }, [/^git status could not answer$/]],
+    // Nor two empty answers as equal commits.
+    ["git cannot answer at all", { branch: "beta", gitFails: "all" }, [
+      /^no update branch could be resolved$/,
+      /^HEAD is not on a branch$/,
+      /^git could not read HEAD$/,
+      /^git status could not answer$/,
+      /^git could not list the tracked files$/,
+    ]],
+  ])("keeps it when %s, and names every condition that failed", (_what, checkout, reasons) => {
+    const r = run({ checkout });
+    expect(r.status).toBe(0);
+    expect(r.buildCommands).toEqual([`cd ${projectDir} && ${KEEP}/nonexistent/bun run build`]);
+    expect(r.stdout).not.toContain("without the on-box type check");
+    const lines = withCheck(r);
+    expect(lines).toHaveLength(1);
+    const named = lines[0].replace(/^  Building with the type check \(/, "").replace(/\)$/, "").split("; ");
+    expect(named).toHaveLength(reasons.length);
+    reasons.forEach((reason, i) => expect(named[i]).toMatch(reason));
+  });
+
+  it("keeps it in test mode, as e2e-install runs install.sh", () => {
+    const r = run({ checkout: { branch: "beta" }, testMode: true });
+    expect(r.status).toBe(0);
+    expect(r.buildCommands).toEqual([`cd ${projectDir} && ${KEEP}/nonexistent/bun run build`]);
+    expect(withCheck(r)).toEqual(["  Building with the type check (a test-mode run)"]);
+  });
+
+  it("builds the retry after a trace race without it too, asking once", () => {
+    const r = run({ checkout: { branch: "beta" }, build: "trace-race-then-succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.buildCommands).toEqual(Array(2).fill(`cd ${projectDir} && ${SKIP}/nonexistent/bun run build`));
+    expect(r.stdout.match(/Building without the on-box type check/g)).toHaveLength(1);
+  });
+
+  it("builds the retry after a trace race with it when the first attempt had it", () => {
+    const r = run({ checkout: { branch: "feature/x" }, build: "trace-race-then-succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.buildCommands).toEqual(Array(2).fill(`cd ${projectDir} && ${KEEP}/nonexistent/bun run build`));
+    expect(withCheck(r)).toHaveLength(1);
+  });
+
+  it("puts it in the build command that runs without a build log too", () => {
+    const r = run({ checkout: { branch: "beta" }, buildLog: "unwritable" });
+    expect(r.status).toBe(0);
+    expect(r.buildCommands).toEqual([`cd ${projectDir} && ${SKIP}/nonexistent/bun run build`]);
+  });
+
+  it("gives the full-install build the same decision", () => {
+    const r = run({ checkout: { branch: "beta" }, entry: "step_build" });
+    expect(r.status).toBe(0);
+    expect(r.buildCommands).toEqual([`cd ${projectDir} && ${SKIP}/nonexistent/bun run build`]);
+    expect(r.stdout).toMatch(skipped("beta"));
+  });
+
+  it("leaves the caller's update target as it found it, even called bare", () => {
+    // run_next_build reads the answer through `$(…)`, which would hide a leak;
+    // the probe must not lean on that. resolve_update_branch sets all three,
+    // so a probe that called it would change them.
+    mkdirSync(projectDir, { recursive: true });
+    setUpCheckout({ branch: "beta" });
+    const script = [
+      "set -euo pipefail",
+      "PROJECT_DIR=" + JSON.stringify(projectDir),
+      "is_test_mode() { return 1; }",
+      'as_clawbox() { "$@"; }',
+      ...checkoutLines({ branch: "beta" }),
+      "UPDATE_TARGET_LOCAL=kept-local",
+      "UPDATE_TARGET_UPSTREAM=kept-upstream",
+      "UPDATE_TARGET_UNRESOLVED=kept",
+      "build_type_check_proven_by_ci",
+      'echo "AFTER:$UPDATE_TARGET_LOCAL|$UPDATE_TARGET_UPSTREAM|$UPDATE_TARGET_UNRESOLVED"',
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: gitEnv() });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/is origin\/beta's tip on branch beta/);
+    expect(r.stdout).toContain("AFTER:kept-local|kept-upstream|kept");
+  });
+
+  // Why the probe must not count an executable bit: the step every in-app
+  // update dispatches sets them on scripts/*.sh, then builds.
+  it("is asked after the rebuild step has made every scripts/*.sh executable", () => {
+    const code = shellFunction("step_rebuild_reboot").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    const perms = code.indexOf("step_directories_permissions");
+    expect(perms).toBeGreaterThan(-1);
+    expect(code.indexOf("do_rebuild", perms)).toBeGreaterThan(perms);
+    expect(rebuildChmodLine()).toBe('find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +');
+  });
+
+  // A here-string over a pipe buffer goes through a temp file, and with /tmp
+  // full the redirection fails before a loop over it runs once. The decision on
+  // index tags must not rest on such a loop: here every `read` fails, as it
+  // does then.
+  it("keeps it for an edit git is told to skip even when its line-by-line scan cannot run", () => {
+    mkdirSync(projectDir, { recursive: true });
+    setUpCheckout({ branch: "beta", hidden: "skip-worktree" });
+    const script = [
+      "set -euo pipefail",
+      "PROJECT_DIR=" + JSON.stringify(projectDir),
+      "is_test_mode() { return 1; }",
+      'as_clawbox() { "$@"; }',
+      ...checkoutLines({ branch: "beta" }),
+      "read() { return 1; }",
+      'if why="$(build_type_check_proven_by_ci)"; then echo "SKIP: $why"; else echo "KEEP: $why"; fi',
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: gitEnv() });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/^KEEP: git does not check these tracked files for changes/m);
+  });
+
+  // The dispatched rebuild steps run as root and ran no git in the service
+  // account's tree before this probe; the probe must not start doing so, nor
+  // read the tree's files as root.
+  it.each<[string, Checkout, RegExp]>([
+    ["a pinned box", { branch: "beta", pin: "beta" }, /is origin\/beta's tip on branch beta/],
+    ["an unpinned box", { branch: "beta" }, /is origin\/beta's tip on branch beta/],
+    ["a detached HEAD", { branch: "beta", detached: true }, /HEAD is not on a branch/],
+  ])("runs every git it adds, and every read of the tree, as the tree's owner on %s", (_what, checkout, answer) => {
+    mkdirSync(projectDir, { recursive: true });
+    setUpCheckout(checkout);
+    // The build stamp root-side branch recovery reads for a detached HEAD.
+    mkdirSync(path.join(projectDir, ".next"), { recursive: true });
+    writeFileSync(path.join(projectDir, ".next", "build-info.json"), '{"branch": "beta"}\n', "utf-8");
+    const calls = path.join(sandbox, "calls.txt");
+    const script = [
+      "set -euo pipefail",
+      "PROJECT_DIR=" + JSON.stringify(projectDir),
+      "CALLS=" + JSON.stringify(calls),
+      "is_test_mode() { return 1; }",
+      // The owner's wrapper marks what runs inside it; each recorder below
+      // writes down who ran it, then runs the real command.
+      'as_clawbox() { local RUN_AS=owner; "$@"; }',
+      ...["git", "head", "sed", "cat", "grep"].map(
+        (cmd) => `${cmd}() { printf '%s ${cmd} %s\\n' "\${RUN_AS:-root}" "$*" >> "$CALLS"; command ${cmd} "$@"; }`,
+      ),
+      ...checkoutLines(checkout),
+      "build_type_check_proven_by_ci || true",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: gitEnv() });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(answer);
+    const ran = existsSync(calls) ? readFileSync(calls, "utf-8").split("\n").filter(Boolean) : [];
+    expect(ran.filter((l) => l.startsWith("owner git ")).length).toBeGreaterThan(0);
+    expect(ran.filter((l) => !l.startsWith("owner "))).toEqual([]);
+    expect(ran.filter((l) => l.includes("build-info"))).toEqual([]);
+  });
+
+  it("never rewrites .git/index, and runs every git it adds as the tree's owner", () => {
+    const body = shellFunction("build_type_check_proven_by_ci");
+    expect(body).toContain('as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR"');
+    expect(body).toMatch(/--no-optional-locks status --porcelain/);
+    // No git at a command position: every call goes through the owner's array,
+    // and no helper that runs git as root is called.
+    const code = body.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    expect(code).toContain('"${tree_git[@]}"');
+    expect(code).not.toMatch(/(?:^|[;&|(!]|\$\(|\bthen|\bdo)\s*git\s/m);
+    expect(code).not.toMatch(/\b(?:resolve_update_branch|recover_detached_branch|is_safe_git_ref)\b/);
+    // Nor a root read of the tree the recorders cannot see: no input
+    // redirection from it, no file test on it, and the pin only through the
+    // owner's wrapper.
+    expect(code).not.toMatch(/<\s*"?\$PROJECT_DIR/);
+    expect(code).not.toMatch(/\[\s+-[a-zA-Z]\s+"?\$PROJECT_DIR/);
+    const pinReads = code.split("\n").filter((l) => l.includes(".update-branch"));
+    expect(pinReads.length).toBeGreaterThan(0);
+    for (const l of pinReads) expect(l).toMatch(/\bas_clawbox head -n 1 -- "\$PROJECT_DIR\/\.update-branch"/);
+  });
+});
+
 describe("oom_killer_in_kernel_log does not lose an early match", () => {
   /** Run the shipped body with the kernel log stubbed to `text`. */
   function ask(text: string): number | null {

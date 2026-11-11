@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 import { execSync } from "child_process";
 import { readFileSync } from "fs";
+import { createRequire } from "module";
 import path from "path";
 // A RELATIVE import, and of a module that imports nothing: this file is loaded
 // by Next's own config loader before any alias or bundler exists, so `@/…`
@@ -39,6 +40,27 @@ const APP_VERSION = (() => {
   }
 })();
 
+// CLAWBOX_BUILD_SKIP_TYPECHECK=1 as the build was STARTED with: `next build`
+// loads the checkout's .env files into process.env before it reads this file,
+// so process.env cannot tell the build command's own value from a line in one
+// of them. @next/env keeps the environment from before that load
+// (`initialEnv`, set by Next's first env load), and this reads it from the copy
+// Next itself loaded, resolved from Next's own install. Anything that cannot be
+// read keeps the check. An export in the account's login dotfiles, or a .env
+// line a bun release may load before Next starts, is in that environment too:
+// install.sh's run_next_build puts =0 or =1 on its own command, which outranks
+// both, while a build started any other way sets nothing on its command and
+// takes whatever reached its environment.
+const SKIP_BUILD_TYPE_CHECK = (() => {
+  try {
+    const fromNext = createRequire(createRequire(__filename).resolve("next/package.json"));
+    const { initialEnv } = fromNext("@next/env") as { initialEnv?: NodeJS.ProcessEnv };
+    return initialEnv?.CLAWBOX_BUILD_SKIP_TYPECHECK === "1";
+  } catch {
+    return false;
+  }
+})();
+
 const nextConfig: NextConfig = {
   output: "standalone",
   // The build's own type check runs over tsconfig.build.json: the project
@@ -53,8 +75,19 @@ const nextConfig: NextConfig = {
   // which is the gate that catches an error only the full program shows.
   // tsconfig.build.json repeats tsconfig.json's exclusions (`data/` above all —
   // see tsconfig-excludes-data.test.ts, which pins both files).
+  //
+  // CLAWBOX_BUILD_SKIP_TYPECHECK=1 on the build command (SKIP_BUILD_TYPE_CHECK
+  // above) skips that check, and Next 16.4.2 then skips only the check: config
+  // validation still runs. Only install.sh's run_next_build sets it to 1, and
+  // only for a checkout ON beta or main at origin's fetched tip with nothing
+  // changed, whose pull requests CI type-checked before they landed. On an
+  // 8 GB board the check is 77 s of a 113 s build. CI, force-update.sh, the x64
+  // rebuilds and a developer's build never set it on their command, so they
+  // keep the check unless an export in the account's own environment says 1
+  // (next-config-typecheck-flag.test.ts).
   typescript: {
     tsconfigPath: "tsconfig.build.json",
+    ignoreBuildErrors: SKIP_BUILD_TYPE_CHECK,
   },
   // The build's root is this checkout, always. Left alone, Next infers it from
   // the lockfiles it finds walking UP from here, and one in a parent directory
