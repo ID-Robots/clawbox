@@ -56,23 +56,21 @@ function readRootOwnedProjectDir(file: string, label: string): string | null {
  * own answer.
  */
 export function x64IntegrationNpmPrefix(file: string = INTEGRATION_FILE): string | null {
-  let text: string;
-  let fd: number | null = null;
+  let fd: number;
   try {
     fd = fs.openSync(/* turbopackIgnore: true */ file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  let text: string;
+  try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > 4096) return null;
-    text = fs.readFileSync(fd, "utf8");
+    text = fs.readFileSync(/* turbopackIgnore: true */ fd, "utf8");
   } catch {
     return null;
   } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // Already gone; nothing to release.
-      }
-    }
+    fs.closeSync(fd);
   }
   let value: string | null = null;
   for (const line of text.split(/\r?\n/)) {

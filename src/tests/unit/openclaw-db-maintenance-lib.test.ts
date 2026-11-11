@@ -414,7 +414,7 @@ describe("the core package.json the helper reads (--core-pkg)", () => {
     const writer = "import shlex, sys\nhost = dict(INSTALL_USER='fixture', NPM_PREFIX=sys.argv[1], NODE_DIR='/opt/node/bin')\n"
       + "open(sys.argv[2], 'w').write(''.join(f'{k}={shlex.quote(v)}\\n' for k, v in host.items()))\n";
     const file = path.join(h.root, "written.env");
-    for (const prefix of ["/home/fixture/.npm-global", "/home/fixture user/.npm-global", "/srv/a+b@c/.npm-global"]) {
+    for (const prefix of ["/opt/fixture/.npm-global", "/opt/fixture user/.npm-global", "/srv/a+b@c/.npm-global"]) {
       const run = spawnSync("python3", ["-I", "-c", writer, prefix, file], { encoding: "utf8" });
       expect(run.status, run.stderr).toBe(0);
       expect(x64IntegrationNpmPrefix(file), prefix).toBe(prefix);
