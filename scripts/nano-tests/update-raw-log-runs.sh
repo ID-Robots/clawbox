@@ -63,3 +63,63 @@ new_run_finished() {
   finished=$(board 'python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"finished\") is True)" "$REPO/data/update-logs/$1.json" 2>/dev/null' "$id") || return 1
   [ "$(printf '%s\n' "$finished" | tail -n 1)" = True ]
 }
+
+# log_limit_ok — reads `systemctl show -p LogRateLimitIntervalUSec -p
+# LogRateLimitBurst -p NeedDaemonReload <unit>` on stdin and succeeds when
+# systemd will hand journald a limit no update step reaches: a positive
+# interval (0, or unset, is journald's own default of 10000 lines per 30 s,
+# which dropped a rebuild's lines by the thousand), a burst of at least
+# LOG_BURST_MIN lines, and the unit loaded as it is on disk. Otherwise it says
+# why on stdout and fails.
+#
+# For a unit that is running, the input may also carry what systemd handed
+# journald for it — the /run/systemd/units/log-rate-limit-{interval,burst}:<unit>
+# links journald reads — as `Exported_interval=<usec|none>` and
+# `Exported_burst=<lines|none>`: then those must be that limit too, since a
+# limit loaded after the unit started never reaches journald for it.
+LOG_BURST_MIN=1000000
+log_limit_ok() {
+  local line interval="" burst="" reload="" exported_interval="" exported_burst=""
+  while IFS= read -r line; do
+    case "$line" in
+      LogRateLimitIntervalUSec=*) interval=${line#*=} ;;
+      LogRateLimitBurst=*) burst=${line#*=} ;;
+      NeedDaemonReload=*) reload=${line#*=} ;;
+      Exported_interval=*) exported_interval=${line#*=} ;;
+      Exported_burst=*) exported_burst=${line#*=} ;;
+    esac
+  done
+  if [ -n "$exported_interval$exported_burst" ]; then
+    case "$exported_interval" in
+      '' | none | 0 | *[!0-9]*)
+        echo "journald was handed no interval for the running unit (${exported_interval:-unset}): its default applies"
+        return 1
+        ;;
+    esac
+    case "$exported_burst" in
+      '' | none | *[!0-9]*)
+        echo "journald was handed no burst for the running unit (${exported_burst:-unset}): its default applies"
+        return 1
+        ;;
+    esac
+    if [ "$exported_burst" -lt "$LOG_BURST_MIN" ]; then
+      echo "journald was handed a burst of $exported_burst lines for the running unit, under $LOG_BURST_MIN"
+      return 1
+    fi
+  fi
+  if [ -z "$interval" ] || [ "$interval" = 0 ]; then
+    echo "LogRateLimitIntervalUSec=${interval:-unset}: journald applies its default limit to it"
+    return 1
+  fi
+  case "$burst" in
+    '' | *[!0-9]*) echo "LogRateLimitBurst=${burst:-unset} is not a line count"; return 1 ;;
+  esac
+  if [ "$burst" -lt "$LOG_BURST_MIN" ]; then
+    echo "LogRateLimitBurst=$burst is under $LOG_BURST_MIN lines"
+    return 1
+  fi
+  if [ "$reload" != no ]; then
+    echo "NeedDaemonReload=${reload:-unset}: systemd has not loaded the unit file on disk"
+    return 1
+  fi
+}

@@ -34,8 +34,15 @@ ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i
 TimeoutStartSec=7200
 # Every line a step prints is kept. The update screen's raw log is this unit's
 # journal (src/lib/update-raw-log.ts), and journald's default per-service rate
-# limit dropped a rebuild's build output by the thousand ("Suppressed 1147
-# messages from clawbox-root-update@rebuild_reboot.service", measured on a lab
-# board, TASK-2428). A step's output is bounded by the step; nothing here can
-# flood the journal for longer than the step runs.
-LogRateLimitIntervalSec=0
+# limit (10000 messages per 30 s) dropped a rebuild's build output by the
+# thousand ("Suppressed 1147 messages from
+# clawbox-root-update@rebuild_reboot.service", measured on a lab board,
+# TASK-2428). Not `LogRateLimitIntervalSec=0`: systemd hands journald a unit's
+# limit only when it is above zero, so 0 means "journald's default", not "off".
+# A million lines in any one second is more than any step prints or journald
+# takes in, so nothing is dropped; a step's output is bounded by the step.
+# install.sh (refresh_root_update_log_limit) also installs these two lines as a
+# drop-in before an update's rebuild, which starts under whatever limit systemd
+# had loaded. Keep them positive.
+LogRateLimitIntervalSec=1s
+LogRateLimitBurst=1000000

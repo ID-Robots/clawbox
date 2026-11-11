@@ -159,6 +159,26 @@ describe.skipIf(!canRun)("the latest-run pointer, as 92-update-raw-log reads it"
     expect(r.stdout.trim()).toBe("no");
   });
 
+  it("passes journald's limit for the root update unit only when no step can reach it", () => {
+    const verdict = (shown: string) => sh(`if why=$(printf '%s\\n' '${shown}' | log_limit_ok); then echo "ok"; else echo "no: $why"; fi`).stdout.trim();
+    expect(verdict("LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=1000000\nNeedDaemonReload=no\nFragmentPath=/etc/systemd/system/clawbox-root-update@.service")).toBe("ok");
+    // What LogRateLimitIntervalSec=0 gives: nothing exported, journald's own default.
+    expect(verdict("LogRateLimitIntervalUSec=0\nLogRateLimitBurst=0\nNeedDaemonReload=no")).toMatch(/^no: LogRateLimitIntervalUSec=0: journald applies its default/);
+    expect(verdict("LogRateLimitIntervalUSec=30s\nLogRateLimitBurst=10000\nNeedDaemonReload=no")).toBe("no: LogRateLimitBurst=10000 is under 1000000 lines");
+    expect(verdict("LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=1000000\nNeedDaemonReload=yes")).toMatch(/^no: NeedDaemonReload=yes/);
+    expect(verdict("NeedDaemonReload=no")).toMatch(/^no: LogRateLimitIntervalUSec=unset/);
+  });
+
+  it("for the running rebuild, also wants the limit systemd handed journald, not only the loaded one", () => {
+    const verdict = (shown: string) => sh(`if why=$(printf '%s\\n' '${shown}' | log_limit_ok); then echo "ok"; else echo "no: $why"; fi`).stdout.trim();
+    const loaded = "LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=1000000\nNeedDaemonReload=no";
+    expect(verdict(`${loaded}\nExported_interval=1000000\nExported_burst=1000000`)).toBe("ok");
+    // Loaded after the unit started (daemon-reload mid-step): journald still has its default.
+    expect(verdict(`${loaded}\nExported_interval=none\nExported_burst=none`)).toMatch(/^no: journald was handed no interval for the running unit \(none\)/);
+    expect(verdict(`${loaded}\nExported_interval=1000000\nExported_burst=none`)).toMatch(/^no: journald was handed no burst/);
+    expect(verdict(`${loaded}\nExported_interval=30000000\nExported_burst=10000`)).toBe("no: journald was handed a burst of 10000 lines for the running unit, under 1000000");
+  });
+
   it("refuses a new run that has not finished", () => {
     run(OLD, true);
     pointTo(OLD);

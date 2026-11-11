@@ -3806,7 +3806,44 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# refresh_root_update_log_limit [UNIT_DIR] — the root update unit's journald
+# rate limit (the LogRateLimit* lines of config/clawbox-root-update@.service),
+# installed as a drop-in and daemon-reloaded, so the NEXT root step starts
+# under it. The update screen's raw log is these units' journals
+# (src/lib/update-raw-log.ts), and journald fixes a unit's rate limit when the
+# unit starts: step_systemd_services re-copies the unit inside rebuild_reboot,
+# which is too late for rebuild_reboot itself, so the first update that brings
+# a new limit (or a box whose unit copy is stale) would build under the old one
+# and lose lines. step_apt_update runs this first, before the rebuild on every
+# edition. A drop-in carries the logging lines only — never ExecStart — so it
+# is safe to install before the root-owned copies the unit names are current.
+# Idempotent: nothing is written or reloaded when the drop-in already matches.
+# Never fails the step it runs in. TASK-2428.
+refresh_root_update_log_limit() {
+  local unit_dir="${1:-/etc/systemd/system}"
+  local unit="$SRC_DIR/config/clawbox-root-update@.service"
+  local dir="$unit_dir/clawbox-root-update@.service.d"
+  local conf="$dir/50-log-rate-limit.conf" lines want
+  lines="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$unit" 2>/dev/null)" || true
+  if [ -z "$lines" ]; then
+    rm -f "$conf" 2>/dev/null || true
+    return 0
+  fi
+  want="$(printf '# Installed by install.sh (refresh_root_update_log_limit) from config/clawbox-root-update@.service.\n[Service]\n%s' "$lines")"
+  [ -f "$conf" ] && [ "$(cat "$conf" 2>/dev/null)" = "$want" ] && return 0
+  if mkdir -p "$dir" && printf '%s\n' "$want" > "$conf.tmp" && mv -f "$conf.tmp" "$conf"; then
+    systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after the root update unit's log limit failed (non-fatal)" >&2
+  else
+    rm -f "$conf.tmp" 2>/dev/null || true
+    echo "  Warning: could not install the root update unit's log limit at $conf (non-fatal)" >&2
+  fi
+  return 0
+}
+
 step_apt_update() {
+  # First, before anything that can fail: every later root step of the update
+  # (rebuild_reboot included) keeps all its lines.
+  refresh_root_update_log_limit
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   # poppler-utils is `pdftotext`, and it is the ONLY reason Memory Shard can
@@ -10128,6 +10165,9 @@ step_systemd_services() {
     fi
     cp "$src" /etc/systemd/system/
   done
+  # The root update unit's log limit drop-in, kept in step with the unit just
+  # copied (step_apt_update installs it earlier in an update; see there).
+  refresh_root_update_log_limit
   systemctl daemon-reload
   # Enable all services except templates and on-demand units.
   #

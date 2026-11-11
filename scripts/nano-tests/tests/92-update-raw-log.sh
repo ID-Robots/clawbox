@@ -94,7 +94,8 @@ raw_log() {
 }
 
 # latest_run, read_baseline, new_run_finished: which run is which, by the
-# box's own latest-run pointer.
+# box's own latest-run pointer; log_limit_ok: journald's limit for the root
+# update unit.
 # shellcheck source=scripts/nano-tests/update-raw-log-runs.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 
@@ -110,6 +111,57 @@ cleanup() {
 trap cleanup EXIT
 
 raw_log reader-start reader 60 || { not_ok "[$RUNTIME] the background log reader did not start"; finish; }
+
+# The limit journald will apply to the root update unit — the one the update's
+# rebuild_reboot starts under — asserted before the update: a positive one no
+# step reaches, loaded as it is on disk (log_limit_ok says why 0 is not "off").
+# `systemctl cat` shows the files it comes from.
+UNIT_SHOW='systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p FragmentPath -p DropInPaths clawbox-root-update@rebuild_reboot.service'
+root_unit_limit() {
+  local when=$1 shown why line
+  if ! shown=$(board "$UNIT_SHOW"); then
+    not_ok "[$RUNTIME] could not read the root update unit's journald limit $when"
+    return 0
+  fi
+  note "root update unit $when: $(printf '%s' "$shown" | tr '\n' ' ')"
+  # shellcheck disable=SC2016  # expanded on the board
+  while IFS= read -r line; do [ -n "$line" ] && note "  $line"; done <<<"$(board 'systemctl cat clawbox-root-update@rebuild_reboot.service 2>/dev/null | grep -E "^# /|^LogRateLimit"')"
+  if why=$(printf '%s\n' "$shown" | log_limit_ok); then
+    ok "[$RUNTIME] $when, journald's limit for the root update unit is one no step reaches ($(printf '%s\n' "$shown" | grep -E '^LogRateLimit' | tr '\n' ' '| sed 's/ $//'))"
+  else
+    not_ok "[$RUNTIME] $when, the root update unit would lose lines: $why"
+  fi
+}
+root_unit_limit "before the update"
+
+# The same, at the moment rebuild_reboot runs — the step whose build output
+# journald dropped — including what systemd handed journald for the running
+# unit (a limit loaded after it started never reaches it). Asked every poll of
+# the update until the unit is seen active.
+REBUILD_LIMIT=0
+# shellcheck disable=SC2016  # expanded on the board
+RUNNING_SHOW='u=clawbox-root-update@rebuild_reboot.service
+[ "$(systemctl is-active "$u" 2>/dev/null)" = active ] || exit 0
+echo RUNNING
+systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p DropInPaths "$u"
+if [ -r /run/systemd/units ] && [ -x /run/systemd/units ]; then
+  for k in interval burst; do printf "Exported_%s=%s\n" "$k" "$(readlink "/run/systemd/units/log-rate-limit-$k:$u" 2>/dev/null || echo none)"; done
+else
+  echo "Exported=unreadable"
+fi'
+rebuild_unit_limit() {
+  local shown why
+  shown=$(board "$RUNNING_SHOW") || return 0
+  case "$shown" in RUNNING*) ;; *) return 0 ;; esac
+  REBUILD_LIMIT=1
+  note "rebuild_reboot running: $(printf '%s' "$shown" | sed 1d | tr '\n' ' ')"
+  case "$shown" in *Exported=unreadable*) note "/run/systemd/units is not readable here: checked by systemctl show alone" ;; esac
+  if why=$(printf '%s\n' "$shown" | log_limit_ok); then
+    ok "[$RUNTIME] while rebuild_reboot runs, journald's limit for it is one no step reaches ($(printf '%s\n' "$shown" | grep -E '^(LogRateLimit|Exported_)' | tr '\n' ' ' | sed 's/ $//'))"
+  else
+    not_ok "[$RUNTIME] while rebuild_reboot runs, it would lose lines: $why"
+  fi
+}
 
 # The run before this test's, read for certain (read_baseline says why).
 if ! read_baseline 3; then
@@ -138,7 +190,10 @@ follow_update() {
   local deadline=$(( $(date +%s) + $1 )) phase step seen_running=0 last=""
   UPDATE_PHASE=timeout UPDATE_ERROR=
   while [ "$(date +%s)" -lt "$deadline" ]; do
+    # First and between the slower panel checks, so a short rebuild is not missed.
+    [ "$REBUILD_LIMIT" = 0 ] && rebuild_unit_limit
     if [ "$LIVE_BEFORE" = 0 ] && raw_log live before-restart; then LIVE_BEFORE=1 LIVE_BEFORE_PANEL=$PANEL_OK; fi
+    [ "$REBUILD_LIMIT" = 0 ] && rebuild_unit_limit
     if [ "$LIVE_AFTER" = 0 ] && raw_log live after-restart; then LIVE_AFTER=1 LIVE_AFTER_PANEL=$PANEL_OK; fi
     API_MAX_TIME=20 board_api GET /setup-api/update/status
     if [ "$API_STATUS" = 200 ]; then
@@ -173,8 +228,11 @@ esac
 # phase whose check never ran is a failure, not a footnote.
 [ "$LIVE_BEFORE_PANEL" = 1 ] || not_ok "[$RUNTIME] no live panel check ran before the web server's restart"
 [ "$LIVE_AFTER_PANEL" = 1 ] || not_ok "[$RUNTIME] no live panel check ran after the web server's restart"
+[ "$REBUILD_LIMIT" = 1 ] || not_ok "[$RUNTIME] rebuild_reboot was never seen running, so its journald limit went unchecked"
 
 if [ "$(board_head)" = "$NANO_SHA" ]; then ok "[$RUNTIME] the board is on ${NANO_SHA:0:12} after the update"; else not_ok "[$RUNTIME] the board is on $(board_head | cut -c1-12), not ${NANO_SHA:0:12}"; fi
+
+root_unit_limit "after the update"
 
 raw_log after after-reload 900 || not_ok "[$RUNTIME] the after-update checks said nothing"
 cleanup
