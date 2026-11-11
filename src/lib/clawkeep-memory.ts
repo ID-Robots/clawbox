@@ -2120,13 +2120,17 @@ function workspaceLockWasHeld(outcome: PassOutcome, tail: string): boolean {
  * times, WORKSPACE_LOCK_RETRY_MS apart (see WORKSPACE_LOCK_HELD_RE). One pass
  * to the caller: `ended` is the last attempt's, `abandon` reaches whichever
  * attempt is current or the wait between two, and `onRespawn` names the new
- * process so the record and the liveness check follow it.
+ * process so the record and the liveness check follow it. The wait is told to
+ * the stall watchdog as it starts and as it ends (`onWaiting`): it is the pass
+ * doing what it should, not a pass that has hung, and a stall window set
+ * shorter than it would otherwise end the pass in the middle of it.
  */
 function startOpenclawPass(
   mode: MemoryIndexMode,
   onProgress: PassProgressReporter,
   agentId: string,
   onRespawn: (pid: number) => void,
+  onWaiting: () => void,
 ): IndexPass {
   let current = startOpenclawAttempt(mode, onProgress, agentId);
   let abandoned = false;
@@ -2141,6 +2145,7 @@ function startOpenclawPass(
         + ` (a pass that ended without releasing it, or the gateway's own memory work);`
         + ` running it again in ${Math.round(waitMs / 1000)} s (${retry}/${WORKSPACE_LOCK_RETRIES})`,
       );
+      onWaiting();
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, waitMs);
         wake = () => {
@@ -2150,6 +2155,7 @@ function startOpenclawPass(
       });
       wake = null;
       if (abandoned) return outcome;
+      onWaiting();
       current = startOpenclawAttempt(mode, onProgress, agentId);
       onRespawn(current.pid);
     }
@@ -2531,7 +2537,7 @@ export async function startMemoryIndex(
       }
       state = { ...state, childPid: pid };
       void persistState();
-    });
+    }, noteMoved);
   if (pass.pid) {
     passPids.add(pass.pid);
     settlingPasses().add(pass.pid);
