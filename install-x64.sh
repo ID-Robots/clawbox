@@ -1744,15 +1744,17 @@ ensure_bwrap_userns_profile() {
   fi
   # Not a failure: step_apt_update, which also calls this, runs BEFORE the
   # first install has cloned the checkout. step_ai_tools_install asks again.
-  if [ ! -r "$src" ]; then
-    echo "  bubblewrap AppArmor profile: skipped ($src is not in the checkout yet)"
+  # Regular files only: this path is in a tree the install user can write, and
+  # root reading a FIFO there would hang the update, a device would fill /tmp.
+  if [ ! -f "$src" ] || [ ! -r "$src" ]; then
+    echo "  bubblewrap AppArmor profile: skipped (no regular file at $src yet)"
     return 0
   fi
 
   # A private, root-only copy: what is hashed below is what is installed.
   staged="$(mktemp)" || { echo "  WARN: could not stage the bubblewrap AppArmor profile" >&2; return 1; }
   actual=""
-  if cat "$src" > "$staged" 2>/dev/null; then
+  if head -c 65537 "$src" > "$staged" 2>/dev/null; then
     actual="$(sha256sum "$staged" 2>/dev/null | cut -d' ' -f1 || true)"
   fi
   if [ "$actual" != "$BWRAP_USERNS_PROFILE_SHA256" ]; then

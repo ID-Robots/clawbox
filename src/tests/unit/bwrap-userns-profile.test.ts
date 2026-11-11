@@ -348,6 +348,7 @@ d("ensure_bwrap_userns_profile against a modelled box", () => {
     const bins = opts.withParser === false ? "" : `${box}/bin:`;
     const r = spawnSync("bash", ["-c", script], {
       encoding: "utf-8",
+      timeout: 10_000,
       env: { PATH: `${bins}/usr/bin:/bin`, BOX: box, HOME: box, TMPDIR: path.join(box, "tmp") } as unknown as NodeJS.ProcessEnv,
     });
     const rc = Number(/^rc=(\d+)$/m.exec(r.stdout)?.[1] ?? NaN);
@@ -528,8 +529,23 @@ d("ensure_bwrap_userns_profile against a modelled box", () => {
       fs.rmSync(path.join(box, "tree/config"), { recursive: true });
       const r = run(inst);
       expect(r.rc).toBe(0);
-      expect(r.out).toMatch(/is not in the checkout yet/);
+      expect(r.out).toMatch(/no regular file at/);
       expect(fs.existsSync(dest())).toBe(false);
+    });
+
+    it("does not read, let alone hang on, a source that is not a regular file", () => {
+      // The checkout is the install user's to write: a FIFO there would block
+      // root's cat for the unit's whole timeout, and a link to a device would
+      // fill /tmp. Refused before a byte is read.
+      const src = path.join(box, "tree/config/apparmor/bwrap-userns-restrict");
+      fs.rmSync(src);
+      expect(spawnSync("mkfifo", [src]).status).toBe(0);
+      const r = run(inst);
+      expect(r.rc).toBe(0);
+      expect(r.out).toMatch(/no regular file at/);
+      expect(fs.existsSync(dest())).toBe(false);
+      expect(parserCalls()).toEqual([]);
+      noLeftovers();
     });
   });
 });
