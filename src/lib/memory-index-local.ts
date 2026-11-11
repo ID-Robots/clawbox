@@ -1194,6 +1194,8 @@ export async function runLocalIndexPass(
     // a read that FAILED is never written over as if it were empty.
     const sources = await readLocalSources();
     const scan = await scanSources(sources, signal, options.onHeartbeat);
+    // Nothing is written for a run that is over — and the scan is long.
+    throwIfAborted(signal);
 
     const identity = identityOf(db, sources, embedder);
     const schema = metaGet(db, "schema_version");
@@ -1230,6 +1232,9 @@ export async function runLocalIndexPass(
       // unit for them, and a refusal ends the pass (`EmbeddingUnavailableError`)
       // with the index it was going to replace still on disk.
       await embedBatch([REBUILD_PROBE_TEXT], "document", signal, embedder);
+      // The probe can answer after the run has given up on this pass; the
+      // DELETE below must not then empty a store a newer pass is filling.
+      throwIfAborted(signal);
       // The identity goes WITH the rows it describes. Stamping it here — before
       // a single vector had been written — meant a rebuild whose first embed
       // failed left a valid identity over an empty index, which the shared

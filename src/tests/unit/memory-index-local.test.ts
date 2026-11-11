@@ -1472,6 +1472,23 @@ describe("a pass given up on inside its last file", () => {
     expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(0);
   });
 
+  it("does not empty the store when the rebuild's probe answers after the stop", async () => {
+    // The probe that wakes the embedder before a rebuild deletes anything can
+    // come back after the run gave up on the pass — by then a newer pass may
+    // be filling the store, and the DELETE behind the probe would empty it.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(1);
+    const controller = new AbortController();
+    const embed = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      controller.abort();
+      return embed(...args);
+    }));
+    await expect(runLocalIndexPass("full", controller.signal)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(1);
+  });
+
   it("still tells a search that the files it committed before the stop have changed", async () => {
     // The vector cache keys on `generation`, which a pass moves only at the
     // end of its bookkeeping. A pass that committed one file and was stopped

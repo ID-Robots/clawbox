@@ -531,7 +531,8 @@ describe("a running record this process is not supervising", () => {
     // OpenClaw child running, holding the embed lock: every later pass would
     // end `migration_busy`. Verified as that indexer before it is signalled.
     process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
-    const startedAtMs = Date.now() - 2_000;
+    // Past the window and the record's write lag (RECORD_LAG_MS, 5 s).
+    const startedAtMs = Date.now() - 8_000;
     const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "memory", "index", "--agent", "main"], { stdio: "ignore" });
     const exited = new Promise<NodeJS.Signals | null>((resolve) => orphan.once("exit", (_code, signal) => resolve(signal)));
     try {
@@ -551,7 +552,7 @@ describe("a running record this process is not supervising", () => {
     process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
     const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     try {
-      await writeRunning({ startedAtMs: Date.now() - 2_000, progressAtMs: 0, childPid: bystander.pid });
+      await writeRunning({ startedAtMs: Date.now() - 8_000, progressAtMs: 0, childPid: bystander.pid });
       const { readMemoryRunState } = await lib();
       expect((await readMemoryRunState()).errorCode).toBe("stalled");
       expect(bystander.exitCode).toBeNull();
@@ -560,6 +561,33 @@ describe("a running record this process is not supervising", () => {
     } finally {
       bystander.kill("SIGKILL");
     }
+  });
+
+  it("keeps a run going while the process supervising it lives, though the pid it names has exited", async () => {
+    // The wait between two OpenClaw attempts: the record still names the
+    // attempt that exited on the lock, and the write naming the next one is
+    // not ordered against a reader elsewhere. The supervisor's own pid,
+    // written before any spawn, is what that reader goes by.
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: process.pid });
+    const { readMemoryRunState } = await lib();
+    expect((await readMemoryRunState()).status).toBe("running");
+    expect(fs.existsSync(lockPath())).toBe(true);
+  });
+
+  it("calls it lost once the supervisor is gone as well", async () => {
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: deadPid() });
+    const { readMemoryRunState } = await lib();
+    expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "interrupted" });
+  });
+
+  it("does not read the record's own write lag as a stall under a window of seconds", async () => {
+    // Progress lands on the record at most every 1.5 s, and a write takes time.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now() - 2_500, childPid: process.pid });
+    const { readMemoryRunState } = await lib();
+    expect((await readMemoryRunState()).status).toBe("running");
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now() - 7_000, childPid: process.pid });
+    expect((await readMemoryRunState()).errorCode).toBe("stalled");
   });
 
   it("still reads a `timed_out` record an older build wrote", async () => {

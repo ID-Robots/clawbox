@@ -168,9 +168,18 @@ interface PersistedMemoryRunState {
    * judges a stall by — the supervising one has its own watchdog.
    */
   progressAtMs: number;
+  /**
+   * Internal only: the process supervising the pass, written with the very
+   * first record — before the spawn, so before any pid of the pass's own. A
+   * reader in another process takes the run for going while this is alive,
+   * whatever `childPid` names at that moment: during the wait between two
+   * OpenClaw attempts it names the attempt that has exited, and the write
+   * that would name the next one is not ordered against that reader.
+   */
+  supervisorPid: number;
 }
 
-export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid" | "progressAtMs">;
+export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid" | "progressAtMs" | "supervisorPid">;
 
 export interface ClawKeepMemoryStatus {
   available: boolean;
@@ -328,6 +337,7 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   progress: null,
   childPid: 0,
   progressAtMs: 0,
+  supervisorPid: 0,
 };
 
 let writeSeq = 0;
@@ -471,6 +481,9 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     progress: status === "running" ? sanitiseProgress(raw.progress) : null,
     childPid: Number.isSafeInteger(raw.childPid) && Number(raw.childPid) > 0 ? Number(raw.childPid) : 0,
     progressAtMs: status === "running" ? finiteNonNegative(raw.progressAtMs) : 0,
+    supervisorPid: status === "running" && Number.isSafeInteger(raw.supervisorPid) && Number(raw.supervisorPid) > 0
+      ? Number(raw.supervisorPid)
+      : 0,
   };
 }
 
@@ -632,10 +645,20 @@ function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" 
   if (state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS) return "going";
   if (supervisedHere(state)) return "going";
   return staleRunVerdict(
-    { startedAtMs: state.startedAtMs, progressAtMs: state.progressAtMs, alive: runIsAlive(state.childPid) },
+    { startedAtMs: state.startedAtMs, progressAtMs: state.progressAtMs, alive: runIsAlive(state.childPid) || supervisorAlive(state) },
     now,
-    indexStallMs(),
+    // The record carries the pass's last move at most PROGRESS_WRITE_EVERY_MS
+    // late, and a write takes time: a window set in seconds must not read
+    // that lag as a stall.
+    indexStallMs() + RECORD_LAG_MS,
   );
+}
+
+/** How far behind the pass a reader of its record may be. */
+const RECORD_LAG_MS = 5_000;
+
+function supervisorAlive(state: PersistedMemoryRunState): boolean {
+  return state.supervisorPid > 0 && processIsAlive(state.supervisorPid);
 }
 
 /**
@@ -688,7 +711,11 @@ function isRecordedIndexer(pid: number, startedAtMs: number): boolean {
  */
 async function stopOrphanedIndexer(state: PersistedMemoryRunState): Promise<void> {
   const pid = state.childPid;
-  if (pid <= 0 || pid === process.pid || settlingPasses().has(pid) || !isRecordedIndexer(pid, state.startedAtMs)) return;
+  if (pid <= 0 || pid === process.pid || settlingPasses().has(pid)) return;
+  // Not an orphan while the process supervising it lives: its own watchdog
+  // ends it, and settles the run.
+  if (state.supervisorPid !== pid && supervisorAlive(state)) return;
+  if (!isRecordedIndexer(pid, state.startedAtMs)) return;
   console.warn(`[clawkeep-memory] ending the stalled ${state.mode || "index"} pass's indexer, which no ClawBox process supervises any more`);
   try {
     process.kill(pid, "SIGTERM");
@@ -712,17 +739,21 @@ async function markInterrupted(
   // how it really ended, and that answer is the better one.
   const current = await readPersistedRunState();
   if (current.status !== "running" || current.startedAtMs !== state.startedAtMs) return current;
+  // And judged once more on that fresh read: a record that has moved since —
+  // a newer pid, a newer `progressAtMs` — is going, and is left as it is.
+  if (runningRecordVerdict(current) === "going") return current;
   const finishedAtMs = Date.now();
   const failed: PersistedMemoryRunState = {
-    ...state,
+    ...current,
     status: "failed",
     finishedAtMs,
-    durationMs: state.startedAtMs ? Math.max(0, finishedAtMs - state.startedAtMs) : 0,
+    durationMs: current.startedAtMs ? Math.max(0, finishedAtMs - current.startedAtMs) : 0,
     error: failure.error,
     errorCode: failure.errorCode,
     progress: null,
     childPid: 0,
     progressAtMs: 0,
+    supervisorPid: 0,
   };
   await writeRunState(failed);
   await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
@@ -2188,12 +2219,10 @@ function workspaceLockWasHeld(outcome: PassOutcome, tail: string): boolean {
  * memory workspace lock that someone else holds — up to WORKSPACE_LOCK_RETRIES
  * times, WORKSPACE_LOCK_RETRY_MS apart (see WORKSPACE_LOCK_HELD_RE). One pass
  * to the caller: `ended` is the last attempt's, `abandon` reaches whichever
- * attempt is current or the wait between two, and `onRespawn` names the
- * process the record should carry so the liveness check follows it: the new
- * attempt's, and THIS process's own for the length of the wait — the attempt
- * before it has exited, and a reader in another process that found its pid
- * would take the run for lost and free the lock under a pass about to run
- * again, while this one dying with its supervisor still reads as lost. The
+ * attempt is current or the wait between two, and `onRespawn` names the new
+ * attempt's process so the record and the liveness check follow it. Through
+ * the wait the record still names the attempt that has exited; what keeps a
+ * reader elsewhere from taking the run for lost then is `supervisorPid`. The
  * wait is told to the stall watchdog all through (`onWaiting`): it is the pass
  * doing what it should, not a pass that has hung, and a stall window set
  * shorter than it would otherwise end the pass in the middle of it.
@@ -2221,7 +2250,6 @@ function startOpenclawPass(
       );
       // Told to the watchdog all through the wait, not only at its two ends: a
       // window shorter than the wait would otherwise fire inside it.
-      onRespawn(process.pid);
       onWaiting();
       const beat = setInterval(onWaiting, WORKSPACE_LOCK_WAIT_BEAT_MS);
       beat.unref?.();
@@ -2540,6 +2568,7 @@ export async function startMemoryIndex(
     progress: null,
     childPid: 0,
     progressAtMs: 0,
+    supervisorPid: process.pid,
   };
   try {
     await writeRunState(state);
@@ -2649,8 +2678,7 @@ export async function startMemoryIndex(
       // An attempt whose spawn failed has no pid (its "error" ends it at
       // once): the record keeps the last real one, which stays in
       // `settlingPasses` until `finish`, so no reader takes the run for lost
-      // in between. During the wait between two attempts this is THIS
-      // process's pid (see startOpenclawPass).
+      // in between.
       if (settled || !pid) return;
       passPids.add(pid);
       settlingPasses().add(pid);
@@ -2773,6 +2801,7 @@ export async function startMemoryIndex(
       progress: null,
       childPid: 0,
       progressAtMs: 0,
+      supervisorPid: 0,
     };
     // See `persistState`: no report may still be on its way to the file.
     await progressWritten;

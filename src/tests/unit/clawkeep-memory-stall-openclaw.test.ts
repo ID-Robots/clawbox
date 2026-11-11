@@ -283,24 +283,23 @@ describe("the pass after one that died holding OpenClaw's memory workspace lock"
     }
   });
 
-  it("names this process on its record while it waits, so no other reader takes it for lost", async () => {
+  it("keeps its supervisor on the record through the wait, for a reader elsewhere", async () => {
+    // The record names the attempt that exited on the lock until the next one
+    // starts; `supervisorPid` is what tells another process the run is going.
     process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "1500";
     noTerminal();
     const fake = await fakeIndexer({ lockHeldTimes: 1 });
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
-    // The first attempt has exited on the lock; the record must not name it.
     const waiting = () => vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes("memory workspace lock held"));
     for (let i = 0; i < 250 && !waiting(); i += 1) await new Promise((r) => setTimeout(r, 20));
     expect(waiting()).toBe(true);
-    let during = 0;
-    for (let i = 0; i < 50 && during !== process.pid; i += 1) {
-      during = Number(JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")).childPid);
-      if (during !== process.pid) await new Promise((r) => setTimeout(r, 20));
-    }
-    expect(during).toBe(process.pid);
-    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded" });
+    const during = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")) as { status: string; supervisorPid: number };
+    expect(during).toMatchObject({ status: "running", supervisorPid: process.pid });
+    const settled = await settledMemoryRun(tmpDir, { tries: 1_000 });
+    expect(settled).toMatchObject({ status: "succeeded" });
+    expect((settled as unknown as { supervisorPid: number }).supervisorPid).toBe(0);
     expect(await fake.attempts()).toBe(2);
   });
 
