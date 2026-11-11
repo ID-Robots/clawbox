@@ -380,7 +380,7 @@ async function composite(page, name, panelJpeg, columns) {
   await sleep(1500);
   const size = await page.evaluate(`({ width: Math.ceil(document.body.scrollWidth), height: Math.ceil(document.body.scrollHeight) })`);
   await page.send("Emulation.setDeviceMetricsOverride", { width: Math.min(size.width, 2000), height: Math.min(size.height, 4000), deviceScaleFactor: 1, mobile: false });
-  const { data } = await page.send("Page.captureScreenshot", { format: "jpeg", quality: 75, captureBeyondViewport: true });
+  const { data } = await page.send("Page.captureScreenshot", { format: "jpeg", quality: 70, captureBeyondViewport: true });
   await page.send("Emulation.clearDeviceMetricsOverride");
   const bytes = Buffer.from(data, "base64");
   fs.writeFileSync(path.join(STATE, `${name}.jpg`), bytes);
@@ -597,5 +597,7 @@ if (!main) {
 main().catch((err) => {
   say(`not ok - ${mode}: ${err instanceof Error ? err.message : String(err)}`);
 }).finally(() => {
-  if (mode !== "reader") setTimeout(() => process.exit(0), 200).unref();
+  // Out once stdout has taken every line: a pipe is written asynchronously,
+  // and exiting with a picture's line still queued cut it short.
+  if (mode !== "reader") process.stdout.write("", () => process.exit(0));
 });
