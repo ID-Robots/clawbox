@@ -43,6 +43,8 @@ import {
 } from "@/lib/plugin-repair";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 import { llamaCppModelName } from "@/lib/local-models";
+import { EXTERNAL_ENGINE_PROVIDER, externalEngineDisplayName } from "@/lib/external-engine-shared";
+import { readExternalEngine } from "@/lib/external-engine";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -199,6 +201,9 @@ const LOCAL_PROVIDER_LABELS: Record<string, string> = {
   ollama: "Ollama Local",
   // Hermes registers the on-device model under its own slug.
   clawlocal: "Gemma 4 (on-device)",
+  // The owner's external AI engine in the Local AI slot (TASK-2376), the same
+  // id on both harnesses; the row is named for its model below.
+  [EXTERNAL_ENGINE_PROVIDER]: "External engine",
 };
 
 const LOCAL_PROVIDER_IDS = new Set(Object.keys(LOCAL_PROVIDER_LABELS));
@@ -211,11 +216,19 @@ const LOCAL_PROVIDER_IDS = new Set(Object.keys(LOCAL_PROVIDER_LABELS));
  * a box with no model stored.
  */
 function openclawLocalRowLabel(provider: string, storedModel: unknown): string {
+  if (provider === EXTERNAL_ENGINE_PROVIDER && typeof storedModel === "string" && storedModel) {
+    return externalEngineRowLabel(storedModel);
+  }
   if (provider === "llamacpp" && typeof storedModel === "string") {
     const name = llamaCppModelName(storedModel);
     if (name) return `${name} (on-device)`;
   }
   return LOCAL_PROVIDER_LABELS[provider];
+}
+
+/** "Qwen3-32B (external engine)" — the model first, as the chat header shows it. */
+function externalEngineRowLabel(modelOrRef: string): string {
+  return `${externalEngineDisplayName(modelOrRef)} (external engine)`;
 }
 
 /**
@@ -352,6 +365,10 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // with a working default as having no default at all.
   const ids: string[] = [CLAWAI_PROVIDER, ...HERMES_PANEL_PROVIDERS.map((p) => p.id)];
   if (defaultProvider && !ids.includes(defaultProvider)) ids.push(defaultProvider);
+  // The external engine is the Local AI slot (TASK-2376): listed while it is
+  // selected even when the chat is on a cloud provider, as the on-device row is.
+  const externalEngine = await readExternalEngine();
+  if (externalEngine && !ids.includes(EXTERNAL_ENGINE_PROVIDER)) ids.push(EXTERNAL_ENGINE_PROVIDER);
 
   // Asked once, outside the loop: it reads config and the config store, and the
   // answer is the same for every row that consults it.
@@ -420,7 +437,9 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
       : reported;
     return {
       id,
-      label: hermesProviderLabel(id, byId.get(id)?.name),
+      label: id === EXTERNAL_ENGINE_PROVIDER && externalEngine
+        ? externalEngineRowLabel(externalEngine.modelId)
+        : hermesProviderLabel(id, byId.get(id)?.name),
       state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed === true
         ? "needs-reauth"
         : stateFor(credentialed, isDefault, awaitingProbe),

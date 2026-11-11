@@ -7,6 +7,7 @@ import { isOllamaExecutable } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { getActiveHarnessSource } from "@/lib/harness";
+import { externalEngineSelected } from "@/lib/external-engine";
 import {
   getLlamaCppLaunchSpec,
   getLlamaCppProvisioningStatus,
@@ -654,6 +655,12 @@ export async function activateLocalAiProvider(provider: LocalAiProvider): Promis
 }
 
 export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<void> {
+  // An external AI engine holds the Local AI slot (TASK-2376): the on-device
+  // runtimes are not started by any caller — the proxy, the Ollama pull and
+  // delete routes, an activation. The memory embedder is not one of them.
+  if (provider !== "embed" && await externalEngineSelected()) {
+    throw new Error("An external AI engine is selected as Local AI, so the on-device model is not started. Remove the engine in Settings → Local AI first.");
+  }
   clearIdleTimer(provider);
 
   const state = runtimeStates[provider];
@@ -691,6 +698,37 @@ export async function stopLocalAiProvider(provider: LocalAiProvider): Promise<vo
   state.activeRequests = 0;
   await PROVIDERS[provider].stop();
 }
+
+/** Is the Ollama server answering right now? */
+export async function isOllamaRunning(): Promise<boolean> {
+  return isOllamaReachable();
+}
+
+/**
+ * While an external AI engine holds the Local AI slot (TASK-2376), the
+ * on-device CHAT runtimes stay down — including an Ollama that systemd started
+ * at boot (install.sh enables the unit) or that an update's post step brought
+ * back, neither of which goes through ClawBox. `stop`, never `disable`, as in
+ * the idle standby: Remove, or the next boot without an engine, has it back.
+ * A no-op on a box with no engine (the appliance default). The memory
+ * embedder is not a chat runtime and is never touched.
+ */
+export async function standDownChatRuntimesForExternalEngine(): Promise<{ ollama: boolean; llamacpp: boolean }> {
+  const stopped = { ollama: false, llamacpp: false };
+  if (!(await externalEngineSelected())) return stopped;
+  if (await isOllamaReachable()) {
+    await stopLocalAiProvider("ollama");
+    stopped.ollama = true;
+  }
+  if (await PROVIDERS.llamacpp.isUp()) {
+    await stopLocalAiProvider("llamacpp");
+    stopped.llamacpp = true;
+  }
+  return stopped;
+}
+
+/** The boot check and every 5 minutes after (an update can start Ollama again minutes after boot). */
+export const EXTERNAL_ENGINE_STAND_DOWN_MS = 5 * 60_000;
 
 export function getLocalAiRuntimeSnapshot(provider: LocalAiProvider) {
   const state = runtimeStates[provider];

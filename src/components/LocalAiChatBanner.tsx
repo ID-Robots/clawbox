@@ -78,8 +78,12 @@ export function chatOnLocalAi(
   harness: string | null | undefined,
   hermesProvider: string | null | undefined,
   activeSource: string | null | undefined,
+  /** The Local AI slot holds the owner's external engine (TASK-2376): not a model on this box. */
+  localIsExternal = false,
 ): boolean {
-  return harness === "hermes" ? hermesProvider === HERMES_LOCAL_REASONING_PROVIDER : activeSource === "local";
+  return harness === "hermes"
+    ? hermesProvider === HERMES_LOCAL_REASONING_PROVIDER
+    : activeSource === "local" && !localIsExternal;
 }
 
 /**

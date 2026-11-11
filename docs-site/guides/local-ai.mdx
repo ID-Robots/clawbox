@@ -157,6 +157,58 @@ fallback and remain selectable: pick the box in this panel, or in Memory Shard's
 for the index, and the box is what it uses. A choice you make here is never overwritten by
 a later default.
 
+## External engine
+
+If you already run a bigger model somewhere else — an inference cluster, or a
+vLLM, SGLang or llama.cpp server on a computer on your network — the box can use it
+as its Local AI instead of the model on the box. Open **Settings → Local AI →
+External engine → Set up** and fill in:
+
+| Field | What to enter |
+|---|---|
+| **Base URL** | The address of the OpenAI-compatible API, usually ending in `/v1` — for example `http://192.0.2.10:8000/v1`. No user name, password or query in it. |
+| **API key** | The key the server asks for, or leave it empty if it needs none. It is kept on the box in a file only the box can read and is never shown again; the field says when one is saved. |
+| **Model id** | Exactly as the server lists it under `/models` (for example `Qwen/Qwen3-32B`). |
+| **Context window** | How many tokens the model takes, as the server runs it. |
+| **Max output tokens** | The longest reply to ask for. |
+| **The model accepts images** | Tick it for a vision model. |
+
+**Test** asks the server's `GET /models` and writes nothing. It tells you in plain words
+when the server cannot be reached, refuses the key, or does not list that model — and in
+the last case shows the models it does list, so you can pick one. **Save and use** runs
+the same check, then makes the engine the chat's model: the chat header and the provider
+list name its model, and you can still switch between it and a cloud model in the chat
+header as with the on-device model.
+
+When the engine is already connected before the box's first setup — for example by
+whoever prepared the box — the setup wizard's AI step offers it, already selected.
+**Continue with** *its model* makes it the chat's model and goes on to Telegram, without
+installing or starting the model on the box. **Connect a different AI provider instead**
+opens the usual list, with a way back to the engine.
+
+While an external engine is selected, the model on the box is **not started for chat** —
+not at boot, not on the first message and not by the assistant restarting — and Ollama, if
+it is installed, is stopped too. Speech, speech to text and memory search keep running on
+the box as before. **Remove** puts back what Local AI was before you saved: the on-device
+model, as the chat's model when it was, or nothing — and Ollama running again when it was.
+
+The address must be the engine's own server. Link-local and cloud-metadata addresses
+(169.254.x.x, fe80::…) and 0.0.0.0 are refused, whether typed or behind a name; addresses on
+this machine, your network or the internet are fine.
+
+<Note>
+**Hermes:** the engine works the same way, with two differences. Hermes needs a context
+window of at least 64,000 tokens, so a smaller one is refused. And Hermes decides the
+reply length and how it sends images itself, so **Max output tokens** and **The model
+accepts images** are not used there. **Local-only mode** is not available while an
+external engine is selected on either edition: it promises that nothing leaves the box,
+and an external engine is somewhere else.
+</Note>
+
+The full prompt and tool set go to an external engine, like a cloud model — the short
+prompt the on-device model gets is only for a small model on the box. How the engine is
+wired into each assistant is in [AI Providers](/technical/ai-providers#external-ai-engine).
+
 ## What the hardware can run
 
 <Note>

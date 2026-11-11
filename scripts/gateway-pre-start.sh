@@ -2336,6 +2336,117 @@ if isinstance(_lai_providers, dict):
             " proxy, which accepts only the current bearer."
         )
 
+# Reconciliation: the external AI engine (TASK-2376).
+#
+# Settings -> Local AI -> External engine makes an OpenAI-compatible endpoint
+# the owner runs the box's Local AI: `models.providers.clawext` in this file,
+# the primary through chat/model, and a record in the device store
+# (`external_engine`: base URL, model, window, output cap, image input — the
+# key in its own 0600 file, data/.external-engine-key). Nothing above touches a
+# provider it does not own, so a start keeps the entry as it is; this block is
+# the half that PUTS IT BACK when the store says an engine is selected and the
+# entry is gone or differs — a dual box that ran Hermes when the engine was
+# saved, a doctor pass, a config restored from an older backup. Only ClawBox's
+# own keys are written (an owner's extra header on the entry survives), the
+# primary and fallbacks are never touched, and nothing starts llama.cpp or
+# Ollama: while an engine is selected the Local AI proxy refuses to.
+# No record (the appliance default) → nothing happens, whatever the file holds.
+_ext_store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or os.path.join(_clawbox_root, "data", "config.json")
+_ext_record = None
+try:
+    with open(_ext_store_path) as _ext_f:
+        _ext_store = json.load(_ext_f)
+    if isinstance(_ext_store, dict) and isinstance(_ext_store.get("external_engine"), dict):
+        _ext_record = _ext_store["external_engine"]
+except Exception:
+    _ext_record = None
+
+def _ext_pos_int(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+def _ext_host_refused(base):
+    # The same rule as refusedEngineHost (src/lib/external-engine-shared.ts):
+    # never a link-local / cloud-metadata or unspecified target; loopback, LAN
+    # and public hosts are the feature.
+    # (Imported as whole modules on purpose: other test suites slice this
+    # script starting at the first line that imports urlsplit by name.)
+    try:
+        import ipaddress as _ext_ip
+        import urllib.parse as _ext_urlparse
+        host = (_ext_urlparse.urlsplit(base).hostname or "").rstrip(".").lower()
+    except Exception:
+        return True
+    if host in ("metadata.google.internal", "metadata.goog", "metadata"):
+        return True
+    try:
+        ip = _ext_ip.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.version == 6 and ip in _ext_ip.ip_network("64:ff9b::/96"):
+        ip = _ext_ip.ip_address(int(ip) & 0xFFFFFFFF)
+    if ip.version == 4 and ip in _ext_ip.ip_network("0.0.0.0/8"):
+        return True
+    return ip.is_link_local or ip.is_unspecified
+
+if _ext_record is not None:
+    _ext_base = _ext_record.get("baseUrl")
+    _ext_model = _ext_record.get("modelId")
+    _ext_ctx = _ext_pos_int(_ext_record.get("contextWindow"))
+    _ext_max = _ext_pos_int(_ext_record.get("maxTokens"))
+    _ext_valid = (
+        isinstance(_ext_base, str) and re.match(r"^https?://[^\s/?#@]+(/[^\s?#]*)?$", _ext_base) is not None
+        and "/setup-api/" not in _ext_base
+        and not _ext_host_refused(_ext_base)
+        and isinstance(_ext_model, str) and re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]*$", _ext_model) is not None
+        and _ext_ctx is not None and _ext_max is not None
+    )
+    if not _ext_valid:
+        print("  External engine record in the device store is malformed; models.providers.clawext left as it is.")
+    else:
+        _ext_key = None
+        try:
+            with open(os.path.join(_clawbox_root, "data", ".external-engine-key")) as _ext_kf:
+                _ext_key = _ext_kf.read().strip() or None
+        except Exception:
+            _ext_key = None
+        if not isinstance(cfg.get("models"), dict):
+            cfg["models"] = {}
+        if not isinstance(cfg["models"].get("providers"), dict):
+            cfg["models"]["providers"] = {}
+        _ext_providers = cfg["models"]["providers"]
+        _ext_entry = _ext_providers.get("clawext")
+        _ext_entry = dict(_ext_entry) if isinstance(_ext_entry, dict) else {}
+        if _ext_key is None:
+            # No key file: keep whatever key the entry already carries.
+            _ext_key = _ext_entry.get("apiKey") if isinstance(_ext_entry.get("apiKey"), str) and _ext_entry.get("apiKey") else "none"
+        _ext_name = [p for p in _ext_model.split("/") if p][-1]
+        _ext_want = {
+            "baseUrl": _ext_base,
+            "api": "openai-completions",
+            "apiKey": _ext_key,
+            "models": [{
+                "id": _ext_model,
+                "name": _ext_name,
+                "reasoning": False,
+                "input": ["text", "image"] if _ext_record.get("imageInput") is True else ["text"],
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                "contextWindow": _ext_ctx,
+                "maxTokens": min(_ext_max, _ext_ctx),
+            }],
+        }
+        _ext_merged = dict(_ext_entry)
+        _ext_merged.update(_ext_want)
+        if _ext_merged != _ext_entry:
+            _ext_providers["clawext"] = _ext_merged
+            changed = True
+            print(
+                "  Restored models.providers.clawext (the external AI engine selected as"
+                " Local AI) from the device store: model " + _ext_model + " at " + _ext_base + "."
+            )
+
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
 # routed ChatGPT picks through Codex. On a device with ChatGPT (Codex OAuth)

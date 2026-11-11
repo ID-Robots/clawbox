@@ -9,6 +9,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { requireSession } from "@/lib/route-auth";
 import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
+import { reconcileExternalEngineWithHermes } from "@/lib/external-engine-hermes";
 import {
   catalogStaleness,
   getModelOptions,
@@ -101,6 +102,9 @@ export async function GET(request: Request) {
   if ((await getActiveHarness()) === "hermes") {
     await reconcileLocalAiWithHermes();
     await reconcileClawaiModelsWithHermes();
+    // A dual box that switched here after the external engine was saved on
+    // OpenClaw (TASK-2376): register the provider, leave the selection alone.
+    await reconcileExternalEngineWithHermes();
   }
 
   // When this box last got the harness to re-read its providers' lists, as

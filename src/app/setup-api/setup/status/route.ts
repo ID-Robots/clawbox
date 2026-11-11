@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
+import { externalEngineFromState, externalEngineSummary } from "@/lib/external-engine";
 import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
 import { readEditionChoice } from "@/lib/edition-select";
 import { getActiveHarnessSource } from "@/lib/harness";
@@ -50,7 +51,8 @@ export async function GET(request: Request) {
     const livePrimaryModel = typeof openclawConfig.agents?.defaults?.model?.primary === "string"
       ? openclawConfig.agents.defaults.model.primary
       : null;
-    const liveCloudProvider = livePrimaryModel && !/^(llamacpp|ollama)\//i.test(livePrimaryModel)
+    // The external engine (`clawext/…`, TASK-2376) is the Local AI slot too.
+    const liveCloudProvider = livePrimaryModel && !/^(llamacpp|ollama|clawext)\//i.test(livePrimaryModel)
       ? livePrimaryModel.split("/")[0]
       : null;
     const localAiConfigured = hasExplicitLocalAiFlag ? !!config.local_ai_configured : !!inferredLocal;
@@ -98,6 +100,9 @@ export async function GET(request: Request) {
       local_ai_configured: localAiConfigured,
       local_ai_provider: localAiProvider,
       local_ai_model: localAiModel,
+      // Which external engine holds the Local AI slot, if any (TASK-2376):
+      // its model and endpoint, never its key.
+      external_engine: externalEngineSummary(externalEngineFromState(config)),
       ai_model_configured: !!config.ai_model_configured,
       ai_model_provider: liveCloudProvider || config.ai_model_provider || null,
       telegram_configured: !!telegramBot?.token,

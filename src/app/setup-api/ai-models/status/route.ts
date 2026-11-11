@@ -28,6 +28,7 @@ import {
 // `clawai-plan-tier.ts` and TASK-744.
 import { CLAWAI_PLAN_TIER_KEY, clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
 
+import { EXTERNAL_ENGINE_PROVIDER } from "@/lib/external-engine-shared";
 export const dynamic = "force-dynamic";
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -43,6 +44,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   // "clawlocal" leaked into the UI as a provider name. Matches the wording in
   // lib/hermes-providers.ts so the same model isn't called two things.
   clawlocal: "Gemma 4 (on-device)",
+  // The owner's external AI engine in the Local AI slot (TASK-2376).
+  [EXTERNAL_ENGINE_PROVIDER]: "External engine",
 };
 
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
@@ -130,7 +133,14 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
 
   let provider: string | null = null;
   let mode: string | null = null;
-  if (activeKey) {
+  if (primaryProviderHint === EXTERNAL_ENGINE_PROVIDER && !profileKeys.some((key) =>
+    normalizeProvider(profileProviderId(key, profiles[key])) === EXTERNAL_ENGINE_PROVIDER)) {
+    // The external AI engine (TASK-2376) authenticates with the key in its
+    // provider block and files no auth profile: the primary names it, not
+    // whichever unrelated profile happens to be first.
+    provider = EXTERNAL_ENGINE_PROVIDER;
+    mode = "api_key";
+  } else if (activeKey) {
     const entry = profiles[activeKey];
     provider = entry?.provider ?? activeKey.split(":")[0];
     mode = entry?.mode ?? null;

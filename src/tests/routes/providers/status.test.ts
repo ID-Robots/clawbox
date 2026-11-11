@@ -426,6 +426,18 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(rowFor(jetson, "llamacpp")!.label).toBe("Gemma 4 (on-device)");
   });
 
+  it("shows an external AI engine as the Local AI row, named for its model (TASK-2376)", async () => {
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "clawext/Qwen/Qwen3-32B" } } } });
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "clawext",
+      local_ai_model: "clawext/Qwen/Qwen3-32B",
+    } as Record<string, string>)[key] ?? null);
+    const body = await (await GET()).json();
+    const row = rowFor(body, "clawext")!;
+    expect(row).toMatchObject({ label: "Qwen3-32B (external engine)", section: "localAi", state: "connected", isDefault: true });
+    expect(rowFor(body, "llamacpp")).toBeUndefined();
+  });
+
   it("names the local row after the primary when no local engine is stored", async () => {
     // The setup wizard's scope "primary" writes no local_ai_* keys: the row
     // comes from the primary alone, and said "Gemma 4" over a Qwen primary.

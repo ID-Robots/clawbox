@@ -133,6 +133,22 @@ describe("POST /setup-api/local-ai", () => {
     });
   });
 
+  it("waits for an external engine transition in flight before it reads or writes anything (TASK-2376)", async () => {
+    const { withLocalAiTransitionLock } = await import("@/lib/local-ai-transition-lock");
+    let release!: () => void;
+    const held = withLocalAiTransitionLock(() => new Promise<void>((resolve) => { release = resolve; }));
+    let settled = false;
+    const pending = localAiPost(jsonRequest({ action: "disable" })).then((res) => { settled = true; return res; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    expect(mockStopLocalAiProvider).not.toHaveBeenCalled();
+    expect(mockSetMany).not.toHaveBeenCalled();
+    release();
+    await held;
+    expect((await pending).status).toBe(200);
+    expect(mockStopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
+  });
+
   it("leaves a cloud primary where it is", async () => {
     await localAiPost(jsonRequest({ action: "disable" }));
     expect(setChatModel).not.toHaveBeenCalled();
