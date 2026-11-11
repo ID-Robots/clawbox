@@ -6767,37 +6767,41 @@ SINGLE_ENGINE_ROWS = [SINGLE_ENGINE_ROW + ".".join(path) for path, _ in SINGLE_E
 
 
 def setting(name):
-    """`name` from the process environment first, then `$CLAWBOX_ROOT/.env`.
+    """`name` from the process environment, else from `$CLAWBOX_ROOT/.env`.
 
-    Read the way the Local AI repair's `.env` reader reads it: `export ` and
-    one pair of matching quotes stripped, the last assignment wins. The truth
-    test below is `isSingleEngineBox` in `src/lib/background-jobs.ts`. errors="replace" and a broad except
-    for the reason that reader gives: `.env` is clawbox-writable, and a stray
-    byte must not cost a blocking ExecStartPre its gateway — an unreadable
-    file is simply no setting.
+    The process decides whenever it HAS the variable, empty included — an
+    empty value there is "off", as it is for `isSingleEngineBox` in
+    `src/lib/background-jobs.ts`, which reads only its process — and `.env` is
+    read only when it does not. `.env` is read the way the Local AI repair's
+    reader reads it: `export ` stripped, the last assignment wins. Whichever
+    source answered, one pair of matching quotes is stripped, as the panel
+    strips them, so the two never disagree about the same value.
+    errors="replace" and a broad except for the reason that reader gives:
+    `.env` is clawbox-writable, and a stray byte must not cost a blocking
+    ExecStartPre its gateway — an unreadable file is simply no setting.
     """
-    value = (os.environ.get(name) or "").strip()
-    if value:
-        return value
-    try:
-        with open(os.environ.get("CLAWBOX_DOTENV") or "", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, raw = line.partition("=")
-                key = key.strip()
-                if key.startswith("export "):
-                    key = key[len("export "):].strip()
-                if key != name:
-                    continue
-                raw = raw.strip()
-                if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
-                    raw = raw[1:-1]
-                value = raw.strip()
-    except Exception:
-        return ""
-    return value
+    if name in os.environ:
+        value = os.environ[name]
+    else:
+        value = ""
+        try:
+            with open(os.environ.get("CLAWBOX_DOTENV") or "", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, raw = line.partition("=")
+                    key = key.strip()
+                    if key.startswith("export "):
+                        key = key[len("export "):].strip()
+                    if key == name:
+                        value = raw
+        except Exception:
+            return ""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return value.strip()
 
 
 def single_engine():

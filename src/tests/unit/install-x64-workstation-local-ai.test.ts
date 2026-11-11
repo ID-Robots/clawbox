@@ -218,6 +218,19 @@ describe("install-x64.sh: the local model a workstation gets", () => {
     expect(readEnv(envFile).CLAWBOX_SINGLE_ENGINE).toBe("0");
   });
 
+  it.each([
+    "export CLAWBOX_SINGLE_ENGINE=0",
+    "  export\tCLAWBOX_SINGLE_ENGINE = 0",
+    "CLAWBOX_SINGLE_ENGINE =0",
+  ])("keeps an owner's %j: no `=1` appended after it to win as the last assignment", (line) => {
+    gpu("[N/A]");
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, `${line}\n`);
+    seed(envFile, 128);
+    expect(readFileSync(envFile, "utf8")).not.toMatch(/CLAWBOX_SINGLE_ENGINE=1/);
+    expect(readFileSync(envFile, "utf8").startsWith(`${line}\n`)).toBe(true);
+  });
+
   it("is what step_directories_permissions seeds .env with", () => {
     expect(sliceFunction("step_directories_permissions")).toContain('seed_llamacpp_env "$ENV_FILE"');
   });

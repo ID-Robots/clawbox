@@ -575,6 +575,25 @@ d("gateway-pre-start.sh — a single-engine box (CLAWBOX_SINGLE_ENGINE=1)", () =
     expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
   });
 
+  // The process decides whenever it has the variable — empty included — the
+  // way the panel's `isSingleEngineBox` does, and quotes are stripped from
+  // either source, so the boot script and Settings never disagree.
+  it("takes an EMPTY process value as off, without falling back to .env", () => {
+    writeDotenv("CLAWBOX_SINGLE_ENGINE=1\n");
+    writeConfig(OPTED_OUT);
+    run({ CLAWBOX_SINGLE_ENGINE: "" });
+    expect(at(MODE)).toBe("auto");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it.each(['"1"', "'1'", ' "true" '])("reads a quoted process value %j as on, as the panel does", (value) => {
+    writeConfig(OPTED_OUT);
+    run({ CLAWBOX_SINGLE_ENGINE: value });
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
   it.each(["0", "", "no", "2"])("is not a single-engine box at CLAWBOX_SINGLE_ENGINE=%j", (value) => {
     writeDotenv(`CLAWBOX_SINGLE_ENGINE=${value}\n`);
     const r = run();
