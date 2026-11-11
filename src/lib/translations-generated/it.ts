@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "{name} è stato rimosso.",
   "users.removing": "Rimozione…",
   "users.scopeNote": "Gli altri utenti accedono con la propria password e ottengono lo stesso ClawBox: tutte le app, File, il browser, l’agente di programmazione, l’app store, il desktop remoto e le impostazioni. Ognuno ha la propria chat con l’assistente e non vede mai quella degli altri. Il loro Terminale funziona con il proprio account Linux. Chiavi e password restano nascoste per loro, e solo il proprietario può modificare il proprio account.",
+  "users.scopeNoteOrg": "Su questo dispositivo in modalità organizzazione, gli altri utenti accedono con la propria password e hanno Chat, File e le proprie impostazioni: lingua, password e aspetto. Ognuno ha la propria chat con l’assistente e non vede mai quella degli altri. Tutto il resto del dispositivo resta al proprietario.",
   "users.scopeTitle": "Cosa possono fare gli altri utenti",
   "users.shareOpenclaw.applies": "Ha effetto subito. Gli altri vedranno comparire o sparire l’icona di OpenClaw al prossimo caricamento del loro desktop.",
   "users.shareOpenclaw.failed": "Non è stato possibile salvare l’interruttore.",

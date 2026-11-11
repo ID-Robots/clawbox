@@ -48,6 +48,7 @@ export const usersEn: Record<string, string> = {
   "users.errCannotRemove": "The owner and the user you are signed in as cannot be removed.",
   "users.scopeTitle": "What other users can do",
   "users.scopeNote": "Other users sign in with their own password and get the same ClawBox: every app, Files, the browser, the coding agent, the app store, the remote desktop and Settings. Each has their own chat with the assistant and never sees anyone else's. Their Terminal runs as their own Linux account. Keys and passwords stay masked for them, and only the owner can change the owner's own account.",
+  "users.scopeNoteOrg": "On this organisation box, other users sign in with their own password and get Chat, Files and their own settings — language, password and look. Each has their own chat with the assistant and never sees anyone else's. Everything else on the box stays with the owner.",
   "users.trustNote": "The assistant, Files and the coding agent work as this box's own account for everyone who signs in, so add only people you trust with the box.",
   "users.shareOpenclaw.title": "Share OpenClaw with all users",
   "users.shareOpenclaw.hint": "When this is on, everyone who signs in gets the OpenClaw app on their desktop. OpenClaw shows every conversation on this box, yours and every other user's, and has full control of the assistant. Turn it on only if you trust everyone here with all of that.",

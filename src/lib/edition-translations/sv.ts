@@ -1806,6 +1806,7 @@ export const sv: Record<string, string> = {
   "users.errCannotRemove": "Ägaren och användaren du är inloggad som kan inte tas bort.",
   "users.scopeTitle": "Vad andra användare kan göra",
   "users.scopeNote": "Andra användare loggar in med sitt eget lösenord och får samma ClawBox: alla appar, Filer, webbläsaren, kodagenten, appbutiken, fjärrskrivbordet och Inställningar. Var och en har sin egen chatt med assistenten och ser aldrig någon annans. Deras Terminal körs som deras eget Linux-konto. Nycklar och lösenord visas maskerade för dem, och bara ägaren kan ändra ägarens eget konto.",
+  "users.scopeNoteOrg": "På den här boxen i organisationsläge loggar andra användare in med sitt eget lösenord och får Chatt, Filer och sina egna inställningar — språk, lösenord och utseende. Var och en har en egen chatt med assistenten och ser aldrig någon annans. Allt annat på boxen förblir ägarens.",
   "users.trustNote": "Assistenten, Filer och kodagenten arbetar med boxens eget konto för alla som loggar in, så lägg bara till personer som du anförtror boxen.",
   "users.shareOpenclaw.title": "Dela OpenClaw med alla användare",
   "users.shareOpenclaw.hint": "När detta är på får alla som loggar in OpenClaw-appen på sitt skrivbord. OpenClaw visar varje konversation på den här boxen, dina och alla andra användares, och har full kontroll över assistenten. Slå bara på det om du anförtror allt detta åt alla här.",

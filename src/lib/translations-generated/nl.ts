@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "{name} is verwijderd.",
   "users.removing": "Bezig met verwijderen…",
   "users.scopeNote": "Andere gebruikers melden zich aan met hun eigen wachtwoord en krijgen dezelfde ClawBox: elke app, Bestanden, de browser, de codeeragent, de app store, het externe bureaublad en Instellingen. Iedereen heeft een eigen chat met de assistent en ziet nooit die van een ander. Hun Terminal draait als hun eigen Linux-account. Sleutels en wachtwoorden blijven voor hen verborgen, en alleen de eigenaar kan het eigen account van de eigenaar wijzigen.",
+  "users.scopeNoteOrg": "Op deze box in organisatiemodus melden andere gebruikers zich aan met hun eigen wachtwoord en krijgen ze Chat, Bestanden en hun eigen instellingen — taal, wachtwoord en uiterlijk. Iedereen heeft een eigen chat met de assistent en ziet nooit die van een ander. Al het andere op de box blijft van de eigenaar.",
   "users.scopeTitle": "Wat andere gebruikers kunnen",
   "users.shareOpenclaw.applies": "Werkt meteen. Anderen zien het OpenClaw-pictogram verschijnen of verdwijnen wanneer hun bureaublad de volgende keer laadt.",
   "users.shareOpenclaw.failed": "De schakelaar kon niet worden opgeslagen.",

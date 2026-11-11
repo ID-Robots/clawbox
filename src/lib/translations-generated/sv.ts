@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "{name} har tagits bort.",
   "users.removing": "Tar bort…",
   "users.scopeNote": "Andra användare loggar in med sitt eget lösenord och får samma ClawBox: alla appar, Filer, webbläsaren, kodagenten, appbutiken, fjärrskrivbordet och Inställningar. Var och en har sin egen chatt med assistenten och ser aldrig någon annans. Deras Terminal körs som deras eget Linux-konto. Nycklar och lösenord visas maskerade för dem, och bara ägaren kan ändra ägarens eget konto.",
+  "users.scopeNoteOrg": "På den här boxen i organisationsläge loggar andra användare in med sitt eget lösenord och får Chatt, Filer och sina egna inställningar — språk, lösenord och utseende. Var och en har en egen chatt med assistenten och ser aldrig någon annans. Allt annat på boxen förblir ägarens.",
   "users.scopeTitle": "Vad andra användare kan göra",
   "users.shareOpenclaw.applies": "Gäller direkt. Andra ser OpenClaw-ikonen dyka upp eller försvinna nästa gång deras skrivbord läses in.",
   "users.shareOpenclaw.failed": "Reglaget kunde inte sparas.",

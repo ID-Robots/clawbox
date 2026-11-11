@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "{name} was removed.",
   "users.removing": "Removing…",
   "users.scopeNote": "Other users sign in with their own password and get the same ClawBox: every app, Files, the browser, the coding agent, the app store, the remote desktop and Settings. Each has their own chat with the assistant and never sees anyone else's. Their Terminal runs as their own Linux account. Keys and passwords stay masked for them, and only the owner can change the owner's own account.",
+  "users.scopeNoteOrg": "On this organisation box, other users sign in with their own password and get Chat, Files and their own settings — language, password and look. Each has their own chat with the assistant and never sees anyone else's. Everything else on the box stays with the owner.",
   "users.scopeTitle": "What other users can do",
   "users.shareOpenclaw.applies": "Takes effect at once. Others see the OpenClaw icon appear or disappear the next time their desktop loads.",
   "users.shareOpenclaw.failed": "The switch could not be saved.",

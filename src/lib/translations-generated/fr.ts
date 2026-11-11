@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "{name} a été supprimé.",
   "users.removing": "Suppression…",
   "users.scopeNote": "Les autres utilisateurs se connectent avec leur propre mot de passe et disposent de la même ClawBox : toutes les apps, Fichiers, le navigateur, l’agent de code, la boutique d’apps, le bureau à distance et les réglages. Chacun a sa propre conversation avec l’assistant et ne voit jamais celle d’un autre. Leur Terminal s’exécute sous leur propre compte Linux. Les clés et mots de passe restent masqués pour eux, et seul le propriétaire peut modifier son propre compte.",
+  "users.scopeNoteOrg": "Sur cette box en mode organisation, les autres utilisateurs se connectent avec leur propre mot de passe et ont Chat, Fichiers et leurs propres réglages — langue, mot de passe et apparence. Chacun a sa propre discussion avec l’assistant et ne voit jamais celle des autres. Tout le reste de la box reste au propriétaire.",
   "users.scopeTitle": "Ce que peuvent faire les autres utilisateurs",
   "users.shareOpenclaw.applies": "S’applique immédiatement. Les autres verront l’icône OpenClaw apparaître ou disparaître au prochain chargement de leur bureau.",
   "users.shareOpenclaw.failed": "Le réglage n’a pas pu être enregistré.",

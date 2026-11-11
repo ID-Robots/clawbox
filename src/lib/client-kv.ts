@@ -5,8 +5,23 @@
 
 const cache = new Map<string, string>();
 let initPromise: Promise<void> | null = null;
+/**
+ * This page may not use the box's store at all: a member of staff on an
+ * organisation box (src/lib/org-mode.ts), whom `/setup-api/kv` answers 403.
+ * Reads and writes then stay in this page's memory; nothing is sent.
+ */
+let localOnly = false;
+
+/** Keep this page's store in memory only, and drop any write still waiting to go. */
+export function keepLocal(): void {
+  localOnly = true;
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = null;
+  pendingWrites.clear();
+}
 
 export function init(): Promise<void> {
+  if (localOnly) return Promise.resolve();
   if (!initPromise) {
     initPromise = (async () => {
       try {
@@ -93,6 +108,7 @@ function post(body: string, keepalive: boolean): void {
 function sendPending(keepalive: boolean): void {
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = null;
+  if (localOnly) pendingWrites.clear();
   if (pendingWrites.size === 0) return;
   const entries: Record<string, string> = {};
   const deletes: string[] = [];

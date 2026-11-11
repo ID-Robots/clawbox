@@ -23,9 +23,13 @@ function isStatus(body: unknown): body is OrgModeStatus {
 
 const URL_ = "/setup-api/settings/org-mode";
 
-export default function OrgModeCard() {
+export default function OrgModeCard({ onChange }: { onChange?: (orgMode: boolean) => void } = {}) {
   const { t } = useT();
   const [status, setStatus] = useState<OrgModeStatus | null>(null);
+  // The panel around the card says what other users get, which this decides.
+  useEffect(() => {
+    if (status) onChange?.(status.orgMode);
+  }, [status, onChange]);
   const [busy, setBusy] = useState(false);
   // The route's own sentence for a refusal; "" for a failure that had none.
   const [failed, setFailed] = useState<string | null>(null);

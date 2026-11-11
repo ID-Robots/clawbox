@@ -149,7 +149,6 @@ const ORG_USER_API_READS: ReadonlySet<string> = new Set([
   "/setup-api/system/battery",
   "/setup-api/network/internet",
   "/setup-api/monitors",
-  "/setup-api/pets",
   "/setup-api/mascot-lines",
   "/setup-api/hermes/models",
   "/setup-api/hermes/commands",
@@ -160,10 +159,14 @@ const ORG_USER_API_READS: ReadonlySet<string> = new Set([
   "/setup-api/providers/status",
   "/setup-api/ai-models/status",
   "/setup-api/ai-models/catalog",
+  "/setup-api/ai-models/usage",
   "/setup-api/tts",
   "/setup-api/stt",
   "/setup-api/whisper",
 ]);
+
+/** `/setup-api` trees a member of staff may READ: the mascot's pets (its sprites and thumbnails). */
+const ORG_USER_API_READ_TREES: readonly string[] = ["/setup-api/pets"];
 
 function underTree(path: string, tree: string): boolean {
   return path === tree || path.startsWith(tree + "/");
@@ -184,7 +187,7 @@ export function orgMemberVerdict(canon: string, method: string): "allow" | "deny
   if (underTree(canon, "/setup-api")) {
     if (ORG_USER_API_TREES.some((tree) => underTree(canon, tree))) return "allow";
     if (ORG_USER_API_PATHS.has(canon)) return "allow";
-    if (isRead && ORG_USER_API_READS.has(canon)) return "allow";
+    if (isRead && (ORG_USER_API_READS.has(canon) || ORG_USER_API_READ_TREES.some((tree) => underTree(canon, tree)))) return "allow";
     return "deny";
   }
   if (ORG_USER_PAGES.has(canon)) return "allow";

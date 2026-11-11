@@ -66,6 +66,14 @@ describe("OrgModeCard", () => {
     expect(screen.getByTestId("org-mode-switch")).toHaveAttribute("aria-checked", "false");
   });
 
+  it("tells the Users panel around it what the switch says, once read and on every change", async () => {
+    const onChange = vi.fn();
+    render(<OrgModeCard onChange={onChange} />);
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(false));
+    fireEvent.click(await screen.findByTestId("org-mode-switch"));
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(true));
+  });
+
   it("is drawn for nobody but the owner", async () => {
     state = { orgMode: true, canChange: false };
     const { container } = render(<OrgModeCard />);

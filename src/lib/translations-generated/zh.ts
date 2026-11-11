@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "已删除 {name}。",
   "users.removing": "正在删除…",
   "users.scopeNote": "其他用户使用自己的密码登录，并获得同样的 ClawBox：所有应用、文件、浏览器、编程代理、应用商店、远程桌面和设置。每个人都有自己与助手的聊天，看不到别人的聊天。他们的终端以其自己的 Linux 账户运行。密钥和密码对他们隐藏显示，只有所有者可以更改所有者本人的账户。",
+  "users.scopeNoteOrg": "在这台处于组织模式的设备上，其他用户使用自己的密码登录，只能使用聊天、文件和自己的设置（语言、密码、外观）。每个人都有自己与助手的聊天，永远看不到别人的聊天。设备上的其他一切仍归所有者。",
   "users.scopeTitle": "其他用户可以做什么",
   "users.shareOpenclaw.applies": "立即生效。其他人会在下次加载桌面时看到 OpenClaw 图标出现或消失。",
   "users.shareOpenclaw.failed": "无法保存该开关。",

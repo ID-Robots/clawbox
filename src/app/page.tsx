@@ -798,9 +798,15 @@ function ChromeDesktopInner() {
   useEffect(() => {
     Promise.all([
       syncSetupStatus(),
-      // The box's KV store is the owner's: another user's desktop keeps the
-      // in-memory cache empty rather than be refused it.
-      mayUseOwnerApis().then((may) => (may ? kv.init() : undefined)),
+      // The box's KV store is the owner's on an organisation box: a member of
+      // staff's desktop keeps its cache in memory rather than be refused it.
+      fetchSessionUser().then((who) => {
+        if (isOrgMember(who)) {
+          kv.keepLocal();
+          return undefined;
+        }
+        return mayUseOwnerApis().then((may) => (may ? kv.init() : undefined));
+      }),
     ])
       .then(() => setSetupChecked(true))
       .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
@@ -4526,7 +4532,10 @@ function ChromeDesktopInner() {
  * browser is refused both the read and the write, so it is not asked.
  */
 function OwnerTimezoneAdopter() {
-  return useMayUseOwnerApis() === true ? <TimezoneAdopter /> : null;
+  const may = useMayUseOwnerApis() === true;
+  const who = useSettledSessionUser();
+  // Nor a member of staff on an organisation box, whose browser's zone is not the box's.
+  return may && who !== undefined && !isOrgMember(who) ? <TimezoneAdopter /> : null;
 }
 
 export default function ChromeDesktop() {

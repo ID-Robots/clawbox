@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
 vi.mock("@/lib/i18n", () => ({
@@ -68,6 +68,10 @@ async function openAboutVersions(versions: unknown) {
   render(<SettingsApp ui={defaultUi} />);
   fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
 
+  // The versions are the owner's (TASK-2435): asked once /users/me has said who
+  // is looking — here no one could be told, which reads as the owner.
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u) === "/setup-api/update/versions")).toBe(true));
+  await new Promise((r) => setTimeout(r, 20));
   const label = await screen.findByText("settings.version");
   const block = label.closest(".space-y-2");
   if (!block) throw new Error("About version block not found");

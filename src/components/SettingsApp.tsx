@@ -997,13 +997,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Load version info on mount
   useEffect(() => {
+    // Updating is the owner's on every box, and so are the versions: another
+    // user's Settings never asks (the route answers them 403).
+    if (usersAllowed !== true) return;
     // /update/status only returns versions when phase=idle and not completed.
     // Use the dedicated /update/versions endpoint which always reports them.
     fetch("/setup-api/update/versions")
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.clawbox || data?.openclaw) setVersionInfo(data); })
       .catch(() => {});
-  }, []);
+  }, [usersAllowed]);
 
   /* ── WiFi ── */
   const [ssid, setSsid] = useState("");
@@ -1085,7 +1088,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       console.warn("[SettingsApp] refreshSavedNetworks failed:", err);
     }
   };
-  useEffect(() => { void refreshSavedNetworks(); }, []);
+  // The box's network is the owner's on an organisation box (src/lib/org-mode.ts):
+  // a member of staff's Settings asks nothing about it. `boxReads` waits for
+  // /users/me so they are never asked before it is known who is looking.
+  const boxReads = sessionUser !== undefined && !orgMember;
+  useEffect(() => { if (boxReads) void refreshSavedNetworks(); }, [boxReads]);
   const updateSavedPassword = async (name: string) => {
     if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
       setSavedStatus({ type: "error", message: t("settings.security.wifiPasswordLength") });
@@ -1269,6 +1276,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   useEffect(() => {
+    if (!boxReads) return;
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
       if (d.connected && d.ssid) setConnectedSSID(d.ssid);
       setWifiQuality({ signalDbm: d.signalDbm ?? null, bitrateMbps: d.bitrateMbps ?? null, pingMs: d.pingMs ?? null });
@@ -1290,7 +1298,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       if (typeof d.ipv4 === "string") setIpv4(d.ipv4);
     }).catch(() => {});
-  }, []);
+  }, [boxReads]);
 
   const saveHostname = async () => {
     const name = hostnameInput.trim().toLowerCase().replace(/\.local$/, "");
@@ -2873,7 +2881,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (every || subjects.has("whatsapp")) void refreshWhatsapp();
     if (every || subjects.has("discord")) void refreshDiscordStatus();
   }, [refreshTelegramStatus, refreshPairing, refreshEmailStatus, refreshWhatsapp, refreshDiscordStatus]);
-  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { onEnded: onChannelJobsEnded });
+  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { enabled: boxReads, onEnded: onChannelJobsEnded });
   const channelJobFor = (subject: string): SettingsJob | null => (channelJob?.subject === subject ? channelJob : null);
   const telegramJob = channelJobFor("telegram");
   const emailJob = channelJobFor("email");

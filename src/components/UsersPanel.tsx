@@ -138,6 +138,9 @@ function Avatar({ name, owner }: { name: string; owner: boolean }) {
 }
 
 export default function UsersPanel() {
+  // What the scope note says follows the owner's Organisation mode switch
+  // (OrgModeCard reports it once read and on every change).
+  const [orgMode, setOrgMode] = useState(false);
   const { t } = useT();
   const [listing, setListing] = useState<UsersListing | null>(null);
   const [loading, setLoading] = useState(true);
@@ -459,12 +462,12 @@ export default function UsersPanel() {
 
       {/* ── The owner may share OpenClaw (hidden from anyone else) ── */}
       <OpenClawSharingCard />
-      <OrgModeCard />
+      <OrgModeCard onChange={setOrgMode} />
 
-      {/* ── What another user gets ── */}
+      {/* ── What another user gets: on an organisation box, much less ── */}
       <div className="rounded-xl border border-white/10 p-4">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-white/50">{t("users.scopeTitle")}</h4>
-        <p className="text-xs text-white/60 mt-2 leading-relaxed">{t("users.scopeNote")}</p>
+        <p className="text-xs text-white/60 mt-2 leading-relaxed" data-testid="users-scope-note">{t(orgMode ? "users.scopeNoteOrg" : "users.scopeNote")}</p>
         <p className="text-xs text-white/45 mt-2 leading-relaxed">{t("users.trustNote")}</p>
       </div>
     </div>

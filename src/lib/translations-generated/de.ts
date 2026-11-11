@@ -4772,6 +4772,7 @@ const table: Record<string, string> = {
   "users.removed": "{name} wurde entfernt.",
   "users.removing": "Wird entfernt …",
   "users.scopeNote": "Andere Benutzer melden sich mit ihrem eigenen Passwort an und erhalten dieselbe ClawBox: jede App, Dateien, den Browser, den Coding-Agent, den App Store, den Remote-Desktop und die Einstellungen. Jeder hat einen eigenen Chat mit dem Assistenten und sieht nie den eines anderen. Ihr Terminal läuft unter ihrem eigenen Linux-Konto. Schlüssel und Passwörter bleiben für sie verdeckt, und nur der Eigentümer kann sein eigenes Konto ändern.",
+  "users.scopeNoteOrg": "Auf dieser Box im Organisationsmodus melden sich andere Benutzer mit ihrem eigenen Passwort an und erhalten Chat, Dateien und ihre eigenen Einstellungen — Sprache, Passwort und Aussehen. Jeder hat einen eigenen Chat mit dem Assistenten und sieht nie den eines anderen. Alles andere auf der Box bleibt dem Eigentümer vorbehalten.",
   "users.scopeTitle": "Was andere Benutzer tun können",
   "users.shareOpenclaw.applies": "Gilt sofort. Andere sehen das OpenClaw-Symbol erscheinen oder verschwinden, wenn ihr Desktop das nächste Mal lädt.",
   "users.shareOpenclaw.failed": "Der Schalter konnte nicht gespeichert werden.",
