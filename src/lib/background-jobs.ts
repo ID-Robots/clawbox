@@ -91,8 +91,14 @@ export interface BackgroundJobsStatus {
  * itself.
  */
 export function isSingleEngineBox(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.CLAWBOX_SINGLE_ENGINE ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+  let raw = (env.CLAWBOX_SINGLE_ENGINE ?? "").trim();
+  // One pair of matching quotes, as the boot script strips them: whatever
+  // loaded `.env` into this process may have left a hand-written `"1"` quoted.
+  if (raw.length >= 2 && raw[0] === raw[raw.length - 1] && (raw[0] === '"' || raw[0] === "'")) {
+    raw = raw.slice(1, -1).trim();
+  }
+  const value = raw.toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 const OPENCLAW_KEYS: Record<BackgroundJobId, string> = {

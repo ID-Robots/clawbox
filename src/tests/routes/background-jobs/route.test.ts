@@ -124,6 +124,9 @@ describe("background-jobs — a single-engine box", () => {
     expect(await singleEngine()).toBe(true);
     process.env.CLAWBOX_SINGLE_ENGINE = " TRUE ";
     expect(await singleEngine()).toBe(true);
+    // A hand-written `"1"` the loader left quoted: the boot script strips it too.
+    process.env.CLAWBOX_SINGLE_ENGINE = '"1"';
+    expect(await singleEngine()).toBe(true);
   });
 
   it("does not on a box without the flag, or with it off", async () => {
