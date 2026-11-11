@@ -29,9 +29,12 @@ import {
  * A name part TOKENS right after a count word (MAX_TOKENS, PROMPT_TOKENS)
  * counts tokens; API_TOKENS is still a credential. NOT_A_CREDENTIAL lists the
  * names read and found to hold no secret, each with what it holds.
- * Every sudo call on a line is read, chained ones included. A value under a
- * name that says nothing is out of its reach, so review still matters. systemd
- * units are not shell and are not read.
+ * Every sudo call on a line is read, chained ones included, and so is every
+ * call inside single-quoted text, which is often a program a shell runs: a
+ * trap, `bash -c '…'`, a program handed to the nano-tests' `board`, a variable
+ * that holds one. A call there is read up to the closing quote. A value under
+ * a name that says nothing is out of its reach, so review still matters.
+ * systemd units are not shell and are not read.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -107,6 +110,13 @@ interface Allowed {
 
 /** Each entry needs a reason, an expiry date and exactly one live line. */
 const ALLOWED: Allowed[] = [];
+
+/**
+ * The fewest sudo and wrapper calls the tree may read: the shipped shell had
+ * 344 when this was set. A drop past it means the reader lost a shape it read
+ * before, or the calls left the scripts on purpose, in which case lower it.
+ */
+const CALL_FLOOR = 335;
 
 interface Hit {
   file: string;
@@ -205,7 +215,12 @@ describe("no credential-named variable reaches a sudo command line in the shippe
   it("finds sudo calls in the tree, so an empty result means something", () => {
     const { calls, wrappers } = tree();
     expect(shellFiles()).toEqual(expect.arrayContaining(["install.sh", "install-x64.sh"]));
-    expect(calls).toBeGreaterThan(100);
+    expect(
+      calls,
+      `the tree reads ${calls} sudo and wrapper calls, under the floor of ${CALL_FLOOR}. If a change to ` +
+        "src/tests/helpers/shell-reader.ts did this, it stopped reading a shape (quoted program text, a heredoc " +
+        "fed to a shell, a forwarding function); if the calls were removed from the scripts, lower CALL_FLOOR.",
+    ).toBeGreaterThanOrEqual(CALL_FLOOR);
     expect(wrappers.has("as_clawbox")).toBe(true);
   });
 
@@ -357,7 +372,7 @@ describe("no credential-named variable reaches a sudo command line in the shippe
     ]);
   });
 
-  it("reads a wrapper name inside a single-quoted program as text, not as a second call", () => {
+  it("reads a call inside a single-quoted program on its own, without cutting the outer call short", () => {
     const sample = [
       `as_clawbox sh -c 'sudo true' sh "$API_KEY"`,
       `as_clawbox bash -c 'as_clawbox x; echo' -- "$API_KEY"`,
@@ -370,6 +385,40 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       [3, "as_clawbox", ["API_KEY"]],
       [4, "sudo", ["API_KEY"]],
     ]);
+  });
+
+  it("reads the sudo calls of a single-quoted program a shell runs, and a quoted sudo", () => {
+    const sample = [
+      `trap 'sudo -u clawbox tool --key "$OPENAI_API_KEY"' EXIT`,
+      `bash -c 'sudo -n tool "$API_KEY"'`,
+      `board 'sudo -n x --token "$GH_TOKEN"'`,
+      "RACE_ONCE='",
+      'sudo -n /usr/bin/tool enter "$RACE_SECRET"',
+      "'",
+      "board '",
+      '  if [ "$1" = system ]; then',
+      '    sudo -n /usr/bin/systemctl restart x "$BOARD_TOKEN"',
+      "  fi",
+      `' "$scope"`,
+      `'sudo' -n tool "$QUOTED_NAME_TOKEN"`,
+      `'/usr/bin/sudo' -u clawbox tool "$QUOTED_PATH_SECRET"`,
+      // Clean, and still read: install.sh's own trap, a path to a credential,
+      // and a quoted program whose wrapper is the line's own call.
+      `trap 'as_clawbox rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT`,
+      `board 'sudo -n x --token-file "$TOKEN_FILE"'`,
+      `as_clawbox sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"`,
+    ].join("\n");
+    const { calls, hits } = scan([{ file: "sample.sh", text: sample }]);
+    expect(hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
+      [1, "sudo", ["OPENAI_API_KEY"]],
+      [2, "sudo", ["API_KEY"]],
+      [3, "sudo", ["GH_TOKEN"]],
+      [4, "sudo", ["RACE_SECRET"]],
+      [7, "sudo", ["BOARD_TOKEN"]],
+      [12, "sudo", ["QUOTED_NAME_TOKEN"]],
+      [13, "sudo", ["QUOTED_PATH_SECRET"]],
+    ]);
+    expect(calls).toBe(10);
   });
 
   it("reads a token count and a config key path as no credential", () => {

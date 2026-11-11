@@ -293,27 +293,40 @@ export function logicalLines(text: string, file: string, offset = 0, options: Re
   return out;
 }
 
-/** `text` with the contents of single-quoted strings blanked: nothing in them is expanded. */
-export function blankSingleQuoted(text: string): string {
-  let out = "";
+/** The contents of the single-quoted strings in `text`, as `[start, end)` offsets; a `'` inside `"…"` opens none. */
+export function singleQuotedSpans(text: string): [number, number][] {
+  const spans: [number, number][] = [];
   let state: "code" | "'" | '"' = "code";
+  let from = 0;
   for (let i = 0; i < text.length; i += 1) {
     const c = text[i];
     if (state === "'") {
-      if (c === "'") state = "code";
-      out += c === "'" ? c : " ";
+      if (c === "'") {
+        spans.push([from, i]);
+        state = "code";
+      }
       continue;
     }
     if (c === "\\") {
-      out += c + (text[i + 1] ?? "");
       i += 1;
       continue;
     }
     if (state === '"' && c === '"') state = "code";
-    else if (state === "code" && (c === "'" || c === '"')) state = c;
-    out += c;
+    else if (state === "code" && c === '"') state = '"';
+    else if (state === "code" && c === "'") {
+      state = "'";
+      from = i + 1;
+    }
   }
-  return out;
+  if (state === "'") spans.push([from, text.length]);
+  return spans;
+}
+
+/** `text` with the contents of single-quoted strings blanked: nothing in them is expanded. */
+export function blankSingleQuoted(text: string): string {
+  const out = text.split("");
+  for (const [start, end] of singleQuotedSpans(text)) out.fill(" ", start, end);
+  return out.join("");
 }
 
 /**
@@ -383,19 +396,38 @@ export function ownWords(rest: string): { text: string; literal: boolean }[] {
   return words;
 }
 
+/** A single-quoted string that can only be a command word: a name or a path, nothing to expand. */
+const QUOTED_COMMAND = /^[A-Za-z0-9_./-]+$/;
+
 /**
  * Every call through `wrapper` on a line, each with its own text: up to the
- * next call. A wrapper's name inside a single-quoted program is text, not a
- * call, so the calls are found on the line with those strings blanked (which
- * keeps every offset) and each call's text is cut from the line as written.
+ * next call. The calls of the line itself are found with its single-quoted
+ * strings blanked (which keeps every offset), so a wrapper's name inside one
+ * never cuts an outer call's text short. A single-quoted string is often a
+ * program a shell runs (`trap '…'`, `bash -c '…'`, a variable that holds one),
+ * so each is read for calls too, every call up to the next one in it or its
+ * closing quote.
  */
 export function wrapperCalls(text: string, wrapper: RegExp): { name: string; rest: string }[] {
-  const found = [...blankSingleQuoted(text).matchAll(new RegExp(wrapper.source, "g"))];
-  return found.map((m, n) => ({
-    name: m[1],
-    rest: text.slice((m.index ?? 0) + m[0].length, found[n + 1]?.index ?? text.length),
-  }));
+  const re = new RegExp(wrapper.source, "g");
+  const spans = singleQuotedSpans(text);
+  const calls: { at: number; name: string; rest: string }[] = [];
+  /** The calls found in `searched`, which is text[from…] as written or with strings blanked. */
+  const read = (searched: string, from: number): void => {
+    const found = [...searched.matchAll(re)];
+    found.forEach((m, n) => {
+      const at = from + (m.index ?? 0);
+      calls.push({ at, name: m[1], rest: text.slice(at + m[0].length, from + (found[n + 1]?.index ?? searched.length)) });
+    });
+  };
+  // A quoted word that is only a command name (`'sudo' -n …`) is that command, so it is not blanked.
+  const line = text.split("");
+  for (const [start, end] of spans) if (!QUOTED_COMMAND.test(text.slice(start, end))) line.fill(" ", start, end);
+  read(line.join(""), 0);
+  for (const [start, end] of spans) read(text.slice(start, end), start);
+  return calls.sort((a, b) => a.at - b.at).map(({ name, rest }) => ({ name, rest }));
 }
+
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
