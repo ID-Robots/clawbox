@@ -28,6 +28,15 @@
  * the session's working directory and the only place clawbox_staff_guard
  * (scripts/hermes-plugins/) lets a file tool write.
  *
+ * PLUGINS ARE PER PROFILE TOO. The dashboard keeps one plugin manager per
+ * profile home and scans `<home>/plugins` for it (hermes_cli/plugins.py
+ * `_plugin_managers_by_home`, plugins_discovery.py `collect_directory_manifests`),
+ * and a tool call's `pre_tool_call` hooks are that manager's. A guard installed
+ * only in the owner's `~/.hermes/plugins` never sees a member's calls — measured
+ * on a board: a member's `read_file` opened /etc and the owner's config while the
+ * owner's manager had the guard loaded. So the profile's own `plugins/` links the
+ * installed guard and its config enables it, before the profile is first served.
+ *
  * Under `~/.hermes`, which the Files app refuses to everybody
  * (src/lib/file-guard.ts), so no other user opens it.
  */
@@ -50,6 +59,9 @@ export interface StaffHermesProfile {
 
 type Json = Record<string, unknown>;
 
+/** The Hermes plugin that holds a staff profile's file tools to the member's folder. */
+export const STAFF_GUARD_HERMES_PLUGIN = "clawbox_staff_guard";
+
 function isRecord(value: unknown): value is Json {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -60,6 +72,19 @@ export function staffHermesProfilePaths(username: string, root: string = hermesH
   if (!profile) return null;
   const home = path.join(root, "profiles", profile);
   return { profile, home, folder: path.join(home, "workspace") };
+}
+
+/** `plugins.enabled` / `plugins.disabled` as a list of names: a YAML list, or the JSON text `hermes config set` leaves. */
+function pluginNames(value: unknown): string[] {
+  let names: unknown = value;
+  if (typeof value === "string") {
+    try {
+      names = JSON.parse(value);
+    } catch {
+      names = null;
+    }
+  }
+  return Array.isArray(names) ? names.filter((n): n is string => typeof n === "string") : [];
 }
 
 /**
@@ -91,10 +116,21 @@ export function staffHermesConfig(ownerConfig: unknown, folder: string): Json {
   // own cron ticker. The member's profile is served to the dashboard chat only.
   cfg.gateway = { ...(isRecord(cfg.gateway) ? cfg.gateway : {}), standalone: true };
   delete cfg.cron;
+  // The staff guard runs in the profile's own plugin manager: enabled here,
+  // never disabled (the owner's other plugins stay as they are).
+  const plugins = isRecord(cfg.plugins) ? cfg.plugins : {};
+  cfg.plugins = {
+    ...plugins,
+    enabled: [...new Set([...pluginNames(plugins.enabled), STAFF_GUARD_HERMES_PLUGIN])],
+    disabled: pluginNames(plugins.disabled).filter((n) => n !== STAFF_GUARD_HERMES_PLUGIN),
+  };
   return cfg;
 }
 
-/** Point `link` at `target`, replacing whatever is there; remove it when the target does not exist. */
+/**
+ * Point `link` at `target`, replacing whatever is there (a link is removed,
+ * never followed); remove it when the target does not exist.
+ */
 async function linkTo(link: string, target: string): Promise<void> {
   const exists = fs.existsSync(target);
   let current: string | null = null;
@@ -104,7 +140,7 @@ async function linkTo(link: string, target: string): Promise<void> {
     current = null;
   }
   if (exists && current === target) return;
-  await fsp.rm(link, { force: true });
+  await fsp.rm(link, { force: true, recursive: true });
   if (exists) await fsp.symlink(target, link);
 }
 
@@ -122,14 +158,6 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
 }
 
 /**
- * Make sure `username`'s profile exists and follows the owner's config. Null
- * when it could not be made — the caller then refuses the member's turn
- * rather than run it on the owner's profile.
- */
-/** The Hermes plugin that holds a staff profile's file tools to the member's folder. */
-export const STAFF_GUARD_HERMES_PLUGIN = "clawbox_staff_guard";
-
-/**
  * Is the staff guard installed and enabled for the dashboard (register-mcp.sh,
  * step 2c)? Without it the `file` toolset the staff profile keeps would write
  * past the member's folder, so a member's turn does not run.
@@ -137,23 +165,19 @@ export const STAFF_GUARD_HERMES_PLUGIN = "clawbox_staff_guard";
 function staffGuardInstalled(root: string, owner: unknown): boolean {
   if (!fs.existsSync(path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN, "__init__.py"))) return false;
   const plugins = isRecord(owner) && isRecord(owner.plugins) ? owner.plugins : {};
-  const enabled = plugins.enabled;
-  let names: unknown = enabled;
-  if (typeof enabled === "string") {
-    try {
-      names = JSON.parse(enabled);
-    } catch {
-      names = null;
-    }
-  }
-  return Array.isArray(names) && names.includes(STAFF_GUARD_HERMES_PLUGIN);
+  return pluginNames(plugins.enabled).includes(STAFF_GUARD_HERMES_PLUGIN);
 }
 
+/**
+ * Make sure `username`'s profile exists, follows the owner's config and carries
+ * the staff guard. Null when it could not be made — the caller then refuses
+ * the member's turn rather than run it on the owner's profile.
+ */
 export async function ensureStaffHermesProfile(username: string, root: string = hermesHome()): Promise<StaffHermesProfile | null> {
   const paths = staffHermesProfilePaths(username, root);
   if (!paths) return null;
   try {
-    for (const dir of [paths.home, path.join(paths.home, "memories"), paths.folder]) {
+    for (const dir of [paths.home, path.join(paths.home, "memories"), path.join(paths.home, "plugins"), paths.folder]) {
       await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
     }
     await fsp.chmod(paths.home, 0o700).catch(() => undefined);
@@ -167,6 +191,10 @@ export async function ensureStaffHermesProfile(username: string, root: string = 
       console.error(`[org-staff] the ${STAFF_GUARD_HERMES_PLUGIN} plugin is not installed and enabled; ${username}'s turn is refused`);
       return null;
     }
+    // The guard in the profile's own plugins/ (see the header), before anything
+    // the dashboard could serve: a link, so register-mcp.sh's reinstall of the
+    // owner's copy is the member's too.
+    await linkTo(path.join(paths.home, "plugins", STAFF_GUARD_HERMES_PLUGIN), path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN));
     const config = staffHermesConfig(owner, paths.folder);
     await writeIfChanged(
       path.join(paths.home, "config.yaml"),
@@ -193,7 +221,7 @@ export const STAFF_GUARD_RELOAD_COOLDOWN_MS = 10 * 60_000;
 
 /**
  * Has the RUNNING dashboard loaded the staff guard? Installed and enabled is
- * not loaded: Hermes scans for plugins once per process, and register-mcp.sh
+ * not loaded: Hermes scans for plugins once per manager, and register-mcp.sh
  * installs it from the web server's own boot, which can be after the
  * dashboard's (measured on a board: a member's `patch` reached openclaw.json
  * through a dashboard started before the plugin was there). `false` asks the
@@ -201,6 +229,11 @@ export const STAFF_GUARD_RELOAD_COOLDOWN_MS = 10 * 60_000;
  * (src/lib/hermes-plugin-reload.ts), at most once per cooldown — and the
  * member's turn is refused until it has. `null`: the dashboard could not say
  * (it is down; a turn then runs on the CLI, which loads plugins afresh).
+ *
+ * `plugins.list` answers for the dashboard's launch (owner's) manager: proof
+ * that this process scanned after the install and that the guard imports. A
+ * member's profile manager is made the first time the profile is served, and
+ * ensureStaffHermesProfile has linked the guard into it before that.
  */
 export async function staffGuardLoaded(now: () => number = Date.now): Promise<boolean | null> {
   const { readLoadedHermesPlugins } = await import("@/lib/hermes-plugin-set");

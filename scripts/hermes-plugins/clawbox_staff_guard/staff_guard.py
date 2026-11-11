@@ -126,20 +126,7 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
     if tool_name in TOOL_SEARCH_READS:
         return None
     if tool_name == TOOL_SEARCH_CALL:
-        outer = args if isinstance(args, dict) else {}
-        target = outer.get("id") or outer.get("name") or outer.get("tool")
-        if not isinstance(target, str) or not target.strip():
-            return block("`tool_call` without a tool it names")
-        # The target's arguments: nested under `args`, or flat beside the id
-        # (Hermes' bridge takes both; a small model drops the nesting).
-        nested = isinstance(outer.get("args"), dict)
-        inner_args = outer["args"] if nested else {k: v for k, v in outer.items() if k not in ("id", "name", "tool")}
-        verdict = judge(target.strip().split(":")[-1], inner_args, hermes_home, user_home)
-        if verdict is not None and verdict.get("action") == "modify":
-            if nested:
-                return {"action": "modify", "args": {**outer, "args": {**inner_args, **verdict["args"]}}}
-            return {"action": "modify", "args": {**outer, **verdict["args"]}}
-        return verdict
+        return _judge_tool_call(args, hermes_home, user_home)
     policy = policy_table()["hermes"]
     if tool_name not in policy["allowTools"]:
         return block(f"`{tool_name}` is not available to members of staff")
@@ -186,6 +173,49 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
             continue
         return block(f"`{tool_name}` on {raw[:200]}, outside their own folder ({folder})")
     return {"action": "modify", "args": modified} if modified else None
+
+
+def _entry_arguments(entry: dict) -> tuple[Optional[str], dict]:
+    """``(key, arguments)`` of one tool_call entry: Hermes' own ``arguments``
+    (a dict, or JSON text), an ``args`` dict, or — flat — the entry's other fields."""
+    for key in ("arguments", "args"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = None
+        if isinstance(value, dict):
+            return key, value
+    return None, {k: v for k, v in entry.items() if k not in ("name", "id", "tool")}
+
+
+def _judge_tool_call(args: Any, hermes_home: Any, user_home: Optional[str]) -> Optional[dict]:
+    """A Tool Search ``tool_call`` judged by the tool(s) it names: Hermes takes
+    ``{"name", "arguments"}`` or a batch under ``calls`` (tools/tool_labels.py),
+    and a small model may send the target's fields flat. Any refused entry refuses
+    the whole call; relative paths are rewritten inside each entry."""
+    outer = args if isinstance(args, dict) else {}
+    batched = isinstance(outer.get("calls"), list)
+    entries = outer["calls"] if batched else [outer]
+    rewritten = []
+    changed = False
+    for raw in entries:
+        entry = raw if isinstance(raw, dict) else {}
+        target = entry.get("name") or entry.get("id") or entry.get("tool")
+        if not isinstance(target, str) or not target.strip():
+            return block("`tool_call` without a tool it names")
+        key, inner = _entry_arguments(entry)
+        verdict = judge(target.strip().split(":")[-1], inner, hermes_home, user_home)
+        if verdict is not None and verdict.get("action") == "block":
+            return verdict
+        if verdict is not None and verdict.get("action") == "modify":
+            changed = True
+            entry = {**entry, key: {**inner, **verdict["args"]}} if key else {**entry, **verdict["args"]}
+        rewritten.append(entry)
+    if not changed:
+        return None
+    return {"action": "modify", "args": {**outer, "calls": rewritten} if batched else rewritten[0]}
 
 
 def block(reason: str) -> dict:

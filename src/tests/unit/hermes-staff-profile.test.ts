@@ -78,6 +78,13 @@ describe("a staff profile's config", () => {
     expect((cfg.terminal as { cwd: string }).cwd).toBe("/p/workspace");
     expect(cfg.gateway).toEqual({ multiplex_profiles: true, standalone: true });
   });
+
+  it("enables the staff guard in the profile's own plugin manager, whatever the owner's list says", () => {
+    expect((config().plugins as { enabled: string[] }).enabled).toEqual(["clawbox_staff_guard"]);
+    const fromJson = staffHermesConfig({ plugins: { enabled: '["clawai"]', disabled: ["clawbox_staff_guard", "x"] } }, "/p/workspace");
+    expect(fromJson.plugins).toEqual({ enabled: ["clawai", "clawbox_staff_guard"], disabled: ["x"] });
+    expect((staffHermesConfig({}, "/p/workspace").plugins as { enabled: string[] }).enabled).toEqual(["clawbox_staff_guard"]);
+  });
 });
 
 describe("ensureStaffHermesProfile", () => {
@@ -93,6 +100,11 @@ describe("ensureStaffHermesProfile", () => {
     expect(fs.readFileSync(path.join(made!.home, "SOUL.md"), "utf-8")).toBe("You are the ClawBox assistant.\n");
     // Their memory starts empty: nothing of the owner's is copied in.
     expect(fs.readdirSync(path.join(made!.home, "memories"))).toEqual([]);
+    // Hermes scans <profile home>/plugins for the profile's own plugin manager:
+    // the installed guard is linked there, and nothing else of the owner's.
+    expect(fs.readlinkSync(path.join(made!.home, "plugins", "clawbox_staff_guard"))).toBe(path.join(root, "plugins", "clawbox_staff_guard"));
+    expect(fs.readdirSync(path.join(made!.home, "plugins"))).toEqual(["clawbox_staff_guard"]);
+    expect(fs.existsSync(path.join(made!.home, "plugins", "clawbox_staff_guard", "__init__.py"))).toBe(true);
 
     const cfgFile = path.join(made!.home, "config.yaml");
     const first = fs.readFileSync(cfgFile, "utf-8");
@@ -116,6 +128,8 @@ describe("ensureStaffHermesProfile", () => {
     await forgetStaffHermesProfile("maria", root);
     expect(fs.existsSync(a!.home)).toBe(false);
     expect(fs.existsSync(b!.home)).toBe(true);
+    // The link went with the profile; the owner's installed guard did not.
+    expect(fs.existsSync(path.join(root, "plugins", "clawbox_staff_guard", "__init__.py"))).toBe(true);
   });
 
   it("refuses, fail closed, while the staff guard is not installed and enabled", async () => {
@@ -128,6 +142,13 @@ describe("ensureStaffHermesProfile", () => {
     // `hermes config set` stores the list as a JSON string.
     fs.writeFileSync(path.join(root, "config.yaml"), yaml.dump({ plugins: { enabled: '["clawai", "clawbox_staff_guard"]' } }));
     expect(await ensureStaffHermesProfile("maria", root)).not.toBeNull();
+    // A copy someone left where the link belongs is replaced by the link.
+    const own = path.join(root, "profiles", "clawbox-staff-maria", "plugins", "clawbox_staff_guard");
+    fs.rmSync(own, { force: true });
+    fs.mkdirSync(own);
+    fs.writeFileSync(path.join(own, "__init__.py"), "# stale");
+    expect(await ensureStaffHermesProfile("maria", root)).not.toBeNull();
+    expect(fs.readlinkSync(own)).toBe(path.join(root, "plugins", "clawbox_staff_guard"));
   });
 
   it("refuses a name that is not a username", async () => {
@@ -224,6 +245,12 @@ d("the Hermes staff guard (clawbox_staff_guard)", () => {
     expect(judge("tool_call", { id: "write_file", args: { path: "out.md", content: "x" } }, staff.home))
       .toEqual({ action: "modify", args: { id: "write_file", args: { path: path.join(staff.folder, "out.md"), content: "x" } } });
     expect(judge("tool_call", { args: {} }, staff.home)).toMatchObject({ action: "block" });
+    // Hermes' own shapes (tools/tool_labels.py): {name, arguments}, arguments as JSON text, and a batch.
+    expect(judge("tool_call", { name: "session_search", arguments: { query: "x" } }, staff.home)).toBeNull();
+    expect(judge("tool_call", { name: "cronjob_manage", arguments: "{\"action\":\"create\"}" }, staff.home)).toMatchObject({ action: "block" });
+    expect(judge("tool_call", { calls: [{ name: "todo_list", arguments: {} }, { name: "send_message", arguments: {} }] }, staff.home)).toMatchObject({ action: "block" });
+    expect(judge("tool_call", { calls: [{ name: "todo_list", arguments: {} }, { name: "write_file", arguments: { path: "a.md", content: "x" } }] }, staff.home))
+      .toEqual({ action: "modify", args: { calls: [{ name: "todo_list", arguments: {} }, { name: "write_file", arguments: { path: path.join(staff.folder, "a.md"), content: "x" } }] } });
     // The flat form a small model sends: the target's fields beside the id.
     expect(judge("tool_call", { id: "read_file", path: "/etc/passwd" }, staff.home)).toMatchObject({ action: "block" });
     expect(judge("tool_call", { id: "write_file", path: "notes.md", content: "x" }, staff.home))

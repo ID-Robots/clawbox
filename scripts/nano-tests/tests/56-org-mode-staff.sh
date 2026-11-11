@@ -121,7 +121,16 @@ if [ "$RUNTIME" = openclaw ]; then
   fi
   [ ! -e "$HOME/.openclaw/staff/$A_NAME" ] && say "ok - [$RUNTIME] a removed member'"'"'s workspace goes with them" || say "not ok - [$RUNTIME] the removed member'"'"'s workspace is still there"
 else
-  [ ! -e "$HOME/.hermes/profiles/clawbox-staff-$A_NAME" ] && say "ok - [$RUNTIME] a removed member'"'"'s profile goes with them" || say "not ok - [$RUNTIME] the removed member'"'"'s profile is still there"
+  # Their memory, folder and config go. The dashboard may seed a bare state.db
+  # back into a profile it still serves (tui_gateway/server.py
+  # _bootstrap_served_profile_store) — an empty store, listed here as evidence.
+  P="$HOME/.hermes/profiles/clawbox-staff-$A_NAME"
+  if [ ! -e "$P/memories" ] && [ ! -e "$P/workspace" ] && [ ! -e "$P/config.yaml" ] && [ ! -e "$P/.env" ]; then
+    say "ok - [$RUNTIME] a removed member'"'"'s memory, folder and profile config go with them"
+  else
+    say "not ok - [$RUNTIME] the removed member'"'"'s memory, folder or profile config is still there"
+  fi
+  [ -e "$P" ] && find "$P" -maxdepth 2 -printf "NOTE [$RUNTIME] left in the removed profile: %P (%s bytes)\n" 2>/dev/null | head -n 10
 fi
 '
 
