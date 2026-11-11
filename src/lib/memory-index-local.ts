@@ -276,7 +276,7 @@ async function pauseBeforeRetry(ms: number, signal: AbortSignal | undefined): Pr
   });
 }
 
-/** The pass was abandoned — the two-hour budget, or a web server going down. */
+/** The pass was abandoned — the stall watchdog, an owner's stop, or a web server going down. */
 export class IndexPassAbortedError extends Error {
   constructor() {
     super("Indexing was stopped");
@@ -977,6 +977,15 @@ export interface LocalIndexPassOptions {
    * touched a row (one that is not).
    */
   mayDiscard?: boolean;
+  /**
+   * Told whenever the pass did work that moves none of the counts it reports
+   * (TASK-2431): a document converted during the scan, a batch of passages
+   * embedded inside one file. The run's stall watchdog reads these beside the
+   * progress reports, so one large document — the same `filesDone` for many
+   * minutes while its passages are embedded — or a long first conversion of a
+   * folder of PDFs is never taken for a pass that has stopped moving.
+   */
+  onHeartbeat?: () => void;
 }
 
 /**
@@ -1182,7 +1191,7 @@ export async function runLocalIndexPass(
     // working index over a momentary failure. Same rule as `mutateExtraPaths`:
     // a read that FAILED is never written over as if it were empty.
     const sources = await readLocalSources();
-    const scan = await scanSources(sources, signal);
+    const scan = await scanSources(sources, signal, options.onHeartbeat);
 
     const identity = identityOf(db, sources, embedder);
     const schema = metaGet(db, "schema_version");
@@ -1354,6 +1363,8 @@ export async function runLocalIndexPass(
         for (let at = 0; at < pieces.length; at += EMBED_BATCH_INPUTS) {
           throwIfAborted(signal);
           vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal, embedder));
+          // Passages embedded: progress, though no count moves until the file commits.
+          options.onHeartbeat?.();
         }
       } catch (err) {
         // The embedder is the shared resource; a failure there is not this
@@ -1540,7 +1551,11 @@ interface ScanResult {
 }
 
 /** Find everything there is to index, and be honest about what could not be looked at. */
-async function scanSources(sources: readonly string[], signal: AbortSignal | undefined): Promise<ScanResult> {
+async function scanSources(
+  sources: readonly string[],
+  signal: AbortSignal | undefined,
+  onDocument?: () => void,
+): Promise<ScanResult> {
   const files: PendingFile[] = [];
   const seen = new Set<string>();
   const unreadableSources = new Set<string>();
@@ -1557,7 +1572,7 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
     let origins: Record<string, string> = {};
     let derived: string | null = null;
     try {
-      const extraction = await extractDocuments(source, signal);
+      const extraction = await extractDocuments(source, signal, onDocument);
       origins = extraction.origins;
       derived = extraction.derived;
       unusableDocuments += extraction.skipped;

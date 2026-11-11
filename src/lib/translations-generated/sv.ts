@@ -811,6 +811,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.runError.migrationBusy": "Inbäddningsmodellen håller fortfarande på att ställas in. Försök igen om några minuter.",
   "clawkeep.memory.runError.openclawMissing": "OpenClaw är inte installerat eller gick inte att starta.",
   "clawkeep.memory.runError.providerMismatch": "Indexeringen misslyckades: inbäddningsmodellen som används är inte den du ställt in.",
+  "clawkeep.memory.runError.stalled": "Indexeringen kom inte framåt på länge och stoppades. Kör den igen.",
   "clawkeep.memory.runError.timedOut": "Indexeringen tog för lång tid. Försök igen när enheten är ledig.",
   "clawkeep.memory.runFailed": "misslyckades",
   "clawkeep.memory.runNever": "aldrig",

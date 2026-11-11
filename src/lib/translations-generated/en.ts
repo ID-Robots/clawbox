@@ -811,6 +811,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.runError.migrationBusy": "The embedding model is still being set up. Try again in a few minutes.",
   "clawkeep.memory.runError.openclawMissing": "OpenClaw is not installed or could not be started.",
   "clawkeep.memory.runError.providerMismatch": "Indexing failed: the embedding model in use is not the one you configured.",
+  "clawkeep.memory.runError.stalled": "Indexing made no progress for a long time and was stopped. Run it again.",
   "clawkeep.memory.runError.timedOut": "Indexing timed out. Try again after the device is idle.",
   "clawkeep.memory.runFailed": "failed",
   "clawkeep.memory.runNever": "never",

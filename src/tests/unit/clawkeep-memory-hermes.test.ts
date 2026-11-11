@@ -454,7 +454,7 @@ describe("the schedule never rebuilds ClawBox's own index", () => {
       expect((await startMemoryIndex("incremental", "schedule")).accepted).toBe(true);
       const run = await settledMemoryRun(clawkeepDir);
       expect(runLocalIndexPass).toHaveBeenCalledWith(
-        "incremental", expect.anything(), expect.any(Function), { mayDiscard: false },
+        "incremental", expect.anything(), expect.any(Function), { mayDiscard: false, onHeartbeat: expect.any(Function) },
       );
       expect(run.status).toBe("failed");
       expect(run.errorCode).toBe("full_reindex_required");
@@ -482,7 +482,7 @@ describe("the schedule never rebuilds ClawBox's own index", () => {
       expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
       await settledMemoryRun(clawkeepDir);
       expect(runLocalIndexPass).toHaveBeenCalledWith(
-        "full", expect.anything(), expect.any(Function), { mayDiscard: true },
+        "full", expect.anything(), expect.any(Function), { mayDiscard: true, onHeartbeat: expect.any(Function) },
       );
     } finally {
       vi.doUnmock("@/lib/memory-index-local");

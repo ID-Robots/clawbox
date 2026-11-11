@@ -73,6 +73,8 @@ describe("memoryReindexAdvice", () => {
     expect(codes({ ...HEALTHY, dirty: true }, "openclaw")).toEqual(["files_changed"]);
     expect(codes({ ...HEALTHY, run: { status: "failed", errorCode: "interrupted" } })).toEqual(["last_pass_stopped"]);
     expect(codes({ ...HEALTHY, run: { status: "failed", errorCode: "timed_out" } })).toEqual(["last_pass_stopped"]);
+    // TASK-2431: the stall watchdog's verdict is a stopped pass like any other.
+    expect(codes({ ...HEALTHY, run: { status: "failed", errorCode: "stalled" } })).toEqual(["last_pass_stopped"]);
   });
 
   it("never sends a stopped FULL pass to an incremental one", () => {

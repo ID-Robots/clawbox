@@ -811,6 +811,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.runError.migrationBusy": "Моделът за вграждания още се настройва. Опитай отново след няколко минути.",
   "clawkeep.memory.runError.openclawMissing": "OpenClaw не е инсталиран или не можа да бъде стартиран.",
   "clawkeep.memory.runError.providerMismatch": "Индексирането се провали: използваният модел за вграждания не е този, който си настроил.",
+  "clawkeep.memory.runError.stalled": "Индексирането дълго време не напредваше и беше спряно. Пусни го отново.",
   "clawkeep.memory.runError.timedOut": "Индексирането надхвърли времето. Опитай отново, когато устройството е свободно.",
   "clawkeep.memory.runFailed": "неуспешно",
   "clawkeep.memory.runNever": "никога",

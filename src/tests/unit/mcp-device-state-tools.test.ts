@@ -119,6 +119,27 @@ describe("memory_shard_status", () => {
     expect(String(s.guidance)).not.toMatch(/memory_shard_search/);
   });
 
+  it("says in plain words why the last pass failed, beside its code", async () => {
+    // TASK-2431: a pass the stall watchdog ended. The code alone ("stalled")
+    // left the assistant to guess what had happened to it.
+    apiGet.mockResolvedValue({
+      ...MEMORY,
+      run: {
+        ...MEMORY.run, status: "failed", mode: "full",
+        error: "Indexing made no progress for a long time and was stopped. Run it again.", errorCode: "stalled",
+      },
+    });
+    const out = await harness("hermes").call("memory_shard_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect((JSON.parse(out.text) as Record<string, unknown>).indexing).toMatchObject({
+      last_pass: "failed",
+      mode: "full",
+      problem: "stalled",
+      problem_text: "Indexing made no progress for a long time and was stopped. Run it again.",
+    });
+  });
+
   it("gives a running pass's progress as files, chunks and a percentage", async () => {
     apiGet.mockResolvedValue({
       ...MEMORY,

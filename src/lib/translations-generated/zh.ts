@@ -811,6 +811,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.runError.migrationBusy": "嵌入模型仍在准备中。请几分钟后重试。",
   "clawkeep.memory.runError.openclawMissing": "OpenClaw 未安装或无法启动。",
   "clawkeep.memory.runError.providerMismatch": "建立索引失败：正在使用的嵌入模型不是你配置的那个。",
+  "clawkeep.memory.runError.stalled": "建立索引长时间没有进展，已被停止。请重新运行。",
   "clawkeep.memory.runError.timedOut": "建立索引超时。请在设备空闲时重试。",
   "clawkeep.memory.runFailed": "失败",
   "clawkeep.memory.runNever": "从未运行",

@@ -811,6 +811,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.runError.migrationBusy": "Das Einbettungsmodell wird noch eingerichtet. Versuch es in ein paar Minuten noch einmal.",
   "clawkeep.memory.runError.openclawMissing": "OpenClaw ist nicht installiert oder ließ sich nicht starten.",
   "clawkeep.memory.runError.providerMismatch": "Die Indexierung ist fehlgeschlagen: Das benutzte Einbettungsmodell ist nicht das, das du eingestellt hast.",
+  "clawkeep.memory.runError.stalled": "Die Indexierung kam lange nicht voran und wurde gestoppt. Starte sie noch einmal.",
   "clawkeep.memory.runError.timedOut": "Die Indexierung hat zu lange gedauert. Versuch es noch einmal, wenn die Box nichts zu tun hat.",
   "clawkeep.memory.runFailed": "fehlgeschlagen",
   "clawkeep.memory.runNever": "nie",
