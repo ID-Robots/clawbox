@@ -120,6 +120,28 @@ export PATH="$NODE_DIST_ROOT/bin:$PATH"
 
 as_user() { sudo -u "$CLAWBOX_USER" "$@"; }
 
+# `openclaw config set` for a value that must stay off every argument list,
+# because sudo records its command line. Reads a `--batch-file` batch (a JSON
+# array of {"path", "value"}) on stdin, writes it as the service user to a 0600
+# file in a private directory, applies it, and removes the directory on every
+# exit, a stopping signal included. Every step on that directory runs as the
+# service user, its removal too. Returns the CLI's status. The body is a
+# subshell, so its traps are its own and the caller's stay as they were.
+as_user_config_set_batch() (
+  local dir rc=0
+  dir=$(as_user mktemp -d) || exit 1
+  trap 'as_user rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if as_user sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
+    as_user "$OPENCLAW_BIN" config set --batch-file "$dir/batch.json" || rc=$?
+  else
+    rc=1
+  fi
+  exit "$rc"
+)
+
 as_user_runtime() {
   sudo -u "$CLAWBOX_USER" -H env \
     HOME="$CLAWBOX_HOME" \
@@ -880,7 +902,9 @@ PY
   fi
   if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
     GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    as_user "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN" 2>/dev/null || true
+    # Hex only, so it needs no JSON escaping.
+    printf '[{"path":"gateway.auth.token","value":"%s"}]\n' "$GW_TOKEN" \
+      | as_user_config_set_batch 2>/dev/null || true
   fi
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
