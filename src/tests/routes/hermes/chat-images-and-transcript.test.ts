@@ -68,6 +68,13 @@ vi.mock("@/lib/owner-session", async (importOriginal) => ({
   personSession: session.who,
 }));
 
+// A member's turn runs only once the running dashboard has loaded the staff
+// guard (src/lib/hermes-staff-profile.ts staffGuardLoaded): it has, here.
+vi.mock("@/lib/hermes-plugin-set", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-plugin-set")>()),
+  readLoadedHermesPlugins: async () => ["clawbox_staff_guard"],
+}));
+
 let root: string;
 let mediaRoot: string;
 
@@ -107,9 +114,10 @@ describe("POST /setup-api/hermes/chat", () => {
     stderrBanner = "session_id: 20260810_221825_609d1e";
     harness = "hermes";
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hermeschat-"));
-    restoreEnv = saveEnv("CLAWBOX_ROOT", "HOME", "OPENCLAW_HOME");
+    restoreEnv = saveEnv("CLAWBOX_ROOT", "HOME", "OPENCLAW_HOME", "HERMES_HOME");
     process.env.CLAWBOX_ROOT = root;
     process.env.HOME = root;
+    delete process.env.HERMES_HOME;
     mediaRoot = path.join(root, "data", "chat-media");
     fs.mkdirSync(path.join(mediaRoot, "chat-attachments"), { recursive: true });
     for (const name of ["one.png", "two.png", "three.png"]) {
@@ -330,6 +338,12 @@ describe("POST /setup-api/hermes/chat", () => {
       vi.resetModules();
       await (await import("@/lib/config-store")).set("org_mode", true);
       session.who.mockResolvedValue({ username: "alice", isOwner: false });
+      // The member's turn runs on their own Hermes profile, which is made only
+      // where the staff guard is installed and enabled (register-mcp.sh 2c).
+      const guard = path.join(root, ".hermes", "plugins", "clawbox_staff_guard");
+      fs.mkdirSync(guard, { recursive: true });
+      fs.writeFileSync(path.join(guard, "__init__.py"), "");
+      fs.writeFileSync(path.join(root, ".hermes", "config.yaml"), "plugins:\n  enabled:\n  - clawbox_staff_guard\n");
     });
     afterEach(() => {
       session.who.mockResolvedValue(null);
@@ -349,6 +363,7 @@ describe("POST /setup-api/hermes/chat", () => {
       });
       expect(res.status).toBe(200);
       const args = lastArgs();
+      expect(args[0]).toBe("--profile=clawbox-staff-alice");
       expect(args[args.indexOf("--image") + 1]).toBe(fs.realpathSync(staged("one.png")));
       const all = args.join("\n");
       for (const other of ["two.png", "three.png", "bobs-notes.txt"]) expect(all).not.toContain(other);

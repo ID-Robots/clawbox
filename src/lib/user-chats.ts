@@ -87,16 +87,25 @@ export async function forgetUserChats(username: string): Promise<void> {
   }
 
   try {
-    if ((await getActiveHarness()) !== "openclaw") return;
-    const keys = await openclawKeysOf(username);
-    if (keys.length === 0) return;
-    const { gatewayWsCall } = await import("@/lib/openclaw-gateway-ws");
-    for (const key of keys) {
-      await gatewayWsCall("sessions.delete", { key, deleteTranscript: true }).catch((err: unknown) => {
-        console.error(`[user-chats] could not delete ${key}:`, err instanceof Error ? err.message : err);
-      });
+    if ((await getActiveHarness()) === "openclaw") {
+      const keys = await openclawKeysOf(username);
+      const { gatewayWsCall } = await import("@/lib/openclaw-gateway-ws");
+      for (const key of keys) {
+        await gatewayWsCall("sessions.delete", { key, deleteTranscript: true }).catch((err: unknown) => {
+          console.error(`[user-chats] could not delete ${key}:`, err instanceof Error ? err.message : err);
+        });
+      }
     }
   } catch (err) {
     console.error("[user-chats] could not delete the user's conversations:", err instanceof Error ? err.message : err);
   }
+
+  // Their own assistant on an organisation box goes too — its memory and their
+  // folder with it (src/lib/org-staff-agents.ts, src/lib/hermes-staff-profile.ts).
+  const [{ forgetStaffAgent }, { forgetStaffHermesProfile }] = await Promise.all([
+    import("@/lib/org-staff-agents"),
+    import("@/lib/hermes-staff-profile"),
+  ]);
+  await forgetStaffAgent(username);
+  await forgetStaffHermesProfile(username);
 }

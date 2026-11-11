@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
 import { sessionIdentity } from "@/lib/route-auth";
 import { USER_CHAT_WS_PATH } from "@/lib/non-owner-scope";
+import { readOrgMode } from "@/lib/org-mode-server";
+import { syncStaffAgents } from "@/lib/org-staff-agents";
 import fs from "fs/promises";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +40,11 @@ export async function GET(request: NextRequest) {
   const me = await sessionIdentity(request);
   const relayed = !!me && !me.isOwner;
   const token = relayed ? "" : await getGatewayToken();
+  // A member of staff on an organisation box is about to open their chat:
+  // make sure their own agent is on the roster first (a user added before the
+  // switch, or a sync an earlier write could not finish). Idempotent — a
+  // roster that already says so is not written.
+  if (relayed && (await readOrgMode())) await syncStaffAgents();
 
   let model = "";
   try {

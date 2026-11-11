@@ -26,7 +26,8 @@ const {
   createUpgradeSessionWatch,
   recheckMsFromEnv,
 } = require("./scripts/upgrade-session-watch.js");
-const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
+const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat, staffReadyReader } = require("./scripts/gateway-user-relay.js");
+const { staffAgentId } = require("./scripts/org-staff-policy.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
 const { ORG_MODE_KEY, orgModeFrom, orgModeRefusesUpgrade } = require("./scripts/org-mode.js");
 
@@ -329,11 +330,25 @@ function relayUserChatUpgrade(req, socket, head, url, identity) {
     if (!relayIdentity) relayIdentity = loadOrCreateRelayIdentity(RELAY_IDENTITY_PATH);
     // The relay closes its gateway side when the browser's socket closes.
     endWsWithSession(clientWs, req, identity);
+    // On an organisation box a member of staff talks to their own agent, held
+    // to the staff tool policy (scripts/org-staff-policy.js); the socket lasts
+    // only as long as the switch stays where it was when it opened.
+    const orgMode = readSessionConfig().orgMode;
+    const staffAgent = orgMode ? staffAgentId(identity.username) : null;
+    if (orgMode && !staffAgent) {
+      // A member of staff whose name cannot be an agent id gets no chat at
+      // all rather than the home box's relay.
+      try { clientWs.close(1008, "This chat is not available."); } catch { /* gone */ }
+      return;
+    }
     relayUserChat({
       clientWs,
       username: identity.username,
       token: readGatewayToken(OPENCLAW_CONFIG_PATH),
       identity: relayIdentity,
+      staffAgent,
+      staffReady: staffAgent ? staffReadyReader(OPENCLAW_CONFIG_PATH, staffAgent) : undefined,
+      stillCurrent: () => readSessionConfig().orgMode === orgMode,
       connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
         // Port-less to satisfy the gateway's strict origin allowlist, as the
         // owner's pipe and the WSS proxy below send it.

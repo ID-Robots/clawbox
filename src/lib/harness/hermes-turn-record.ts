@@ -53,6 +53,7 @@
 // schema moves under us loses the reasoning panel and the tool chips. It does
 // not lose the reply.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "../runtime-path";
 
 /** One tool the agent invoked during a turn. */
@@ -95,8 +96,24 @@ function hermesHome(): string {
   return process.env.HERMES_HOME || path.join(process.env.HOME || "/home/clawbox", ".hermes");
 }
 
+/**
+ * The Hermes home whose `state.db` a turn's reads open, when it is not the
+ * box's own: a member of staff's turn runs on their own profile
+ * (src/lib/hermes-staff-profile.ts), and its session, record and billing rows
+ * are in THAT profile's store (TASK-2444, TASK-2445). Scoped to the turn by
+ * `withHermesStateHome`, so every read the turn makes — the reply record, the
+ * billing marks, a quiet stream's recovery — follows it without each one being
+ * handed a path.
+ */
+const stateHomeScope = new AsyncLocalStorage<string>();
+
+/** Run `fn` with this module's reads on `home`'s `state.db`; on the box's own when `home` is empty. */
+export function withHermesStateHome<T>(home: string | null | undefined, fn: () => T): T {
+  return home ? stateHomeScope.run(home, fn) : fn();
+}
+
 function statePath(): string {
-  return path.join(hermesHome(), "state.db");
+  return path.join(stateHomeScope.getStore() ?? hermesHome(), "state.db");
 }
 
 /**

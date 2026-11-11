@@ -70,6 +70,10 @@
   "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
   "spawnOpenclawConfigSet: argv is computed at runtime": 1
  },
+ "src/lib/org-staff-agents.ts": {
+  "runOpenclawConfigSetBatch: the operations are built at runtime": 1,
+  "runOpenclawConfigUnset: the key is computed at runtime": 1
+ },
  "src/lib/prime-radiant/plugin-wiring.ts": {
   "runOpenclawConfigSetBatch: the operations are built at runtime": 1
  },

@@ -56,7 +56,9 @@ import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { chatKeyUser } from "@/lib/chat-scope";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
-import { orgMemberOf, readOrgMode } from "@/lib/org-mode-server";
+import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
+import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
+import { ensureStaffHermesProfile, staffGuardLoaded, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
@@ -67,6 +69,7 @@ import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-rea
 import {
   readHermesBillingProvider,
   readHermesTurn,
+  withHermesStateHome,
   readHermesUsageMarks,
 } from "@/lib/harness/hermes-turn-record";
 import { recordProviderVerified } from "@/lib/provider-verified";
@@ -1215,8 +1218,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
-  const rawModel = typeof body.model === "string" ? body.model.trim() : "";
-  const rawProvider = typeof body.provider === "string" ? body.provider.trim() : "";
+  // ── A member of staff on an organisation box (TASK-2444, TASK-2445) ──────
+  //
+  // Their turn runs on THEIR OWN Hermes profile (src/lib/hermes-staff-profile.ts):
+  // the staff toolsets of config/org-staff-policy.json, their own memory and
+  // sessions, their own folder. Refused before anything is recorded: a command
+  // other than /new and /reasoning, and — fail closed — a turn whose profile
+  // could not be prepared. The model is the box's: what the composer names is
+  // not theirs to change.
+  const memberState = await orgMemberStrictOf(request);
+  if (memberState === "unknown") {
+    return NextResponse.json(
+      { error: "This ClawBox's settings could not be read. Try again in a minute.", code: "org_mode_unknown" },
+      { status: 503 },
+    );
+  }
+  const member = memberState;
+  let staff: StaffHermesProfile | null = null;
+  if (member) {
+    const verdict = staffMessageVerdict(message, { inline: false });
+    if (!verdict.ok) {
+      return NextResponse.json({ error: staffCommandRefusal(verdict.command), code: "staff_command_refused" }, { status: 403 });
+    }
+    staff = await ensureStaffHermesProfile(member.username);
+    // The running dashboard must have LOADED the staff guard, not only have it
+    // on disk: refused (and the dashboard asked to reload) until it has.
+    if (staff && (await staffGuardLoaded()) === false) staff = null;
+    if (!staff) {
+      return NextResponse.json(
+        { error: "Your assistant is being set up on this ClawBox. Try again in a minute.", code: "staff_profile_unavailable" },
+        { status: 503 },
+      );
+    }
+  }
+
+  const rawModel = staff ? "" : typeof body.model === "string" ? body.model.trim() : "";
+  const rawProvider = staff ? "" : typeof body.provider === "string" ? body.provider.trim() : "";
   let rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
   const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (requestedSessionId && !SESSION_ID_RE.test(requestedSessionId)) {
@@ -1352,8 +1389,11 @@ export async function POST(request: Request) {
     // `-t` is a whitelist over the BUILT-IN toolsets only (verified against
     // agent_init.py / model_tools.py); MCP tools are merged separately, so the
     // ClawBox device tools survive it. See src/lib/local-model-profile.ts.
+    // Never for a member of staff: `-t` names toolsets over their profile's
+    // own selection, and the slim list is the owner's (web search included).
     if (
-      effectiveProvider === HERMES_LOCAL_REASONING_PROVIDER
+      !staff
+      && effectiveProvider === HERMES_LOCAL_REASONING_PROVIDER
       && slimLocalProfileEnabled()
       && isSmallLocalModel({ modelId: rawModel || payload.current.model })
     ) {
@@ -1436,7 +1476,6 @@ export async function POST(request: Request) {
   // someone else's — or as nobody's, the owner's — is dropped like a missing
   // one (src/lib/chat-media-owners.ts). Otherwise naming another person's
   // upload here would have the agent read it into the member's conversation.
-  const member = await orgMemberOf(request);
   const memberRootReal = member ? await fsp.realpath(/* turbopackIgnore: true */ await chatMediaRoot()).catch(() => null) : null;
   const theirs = (safe: string) => !member || (memberRootReal !== null && isMediaOwnedBy(member.username, safe, memberRootReal));
   const requestedImages = Array.isArray(body.imagePaths)
@@ -1546,6 +1585,7 @@ export async function POST(request: Request) {
     if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
       const ran = await runHermesSlashCommand({
         command: message.trim(),
+        ...(staff ? { profile: staff.profile } : {}),
         ...(rawSessionId ? { sessionId: rawSessionId } : {}),
         ...(rawModel ? { model: rawModel } : {}),
         ...(wantsProvider ? { provider: rawProvider } : {}),
@@ -1652,6 +1692,7 @@ export async function POST(request: Request) {
           ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
           ...(rawReasoning ? { reasoning: rawReasoning } : {}),
           ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+          ...(staff ? { profile: staff.profile, cwd: staff.folder, denyApprovals: true } : {}),
           signal: live.signal,
           onOpenFailure: (failure) => {
             lastOpen.failure = failure;
@@ -1676,9 +1717,11 @@ export async function POST(request: Request) {
         console.log(`[hermes chat] Hermes would not switch this conversation to ${turn.refusedModel}; `
           + `its own model ${turn.model || "(unnamed)"} answers`);
       }
-      return streamed
+      // A member's session, record and billing rows are in their own
+      // profile's state.db: every read the turn makes opens that one.
+      return withHermesStateHome(staff?.home, () => (streamed
         ? streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, listening)
-        : settledTurnResponse(turn, rawSessionId, sessionKey, wantsProvider, live, listening);
+        : settledTurnResponse(turn, rawSessionId, sessionKey, wantsProvider, live, listening)));
     };
     // ── The one retry ───────────────────────────────────────────────────────
     //
@@ -1724,6 +1767,10 @@ export async function POST(request: Request) {
     // The CLI's argv is built here, beside its one use, rather than before the
     // dashboard is tried: only the fallback reads it.
     const args = ["chat", "-q", promptWithImages, "-Q"];
+    // A member of staff's turn runs on their own profile here too: the CLI's
+    // global `--profile`, ahead of the subcommand, where Hermes reads it before
+    // anything else (hermes_cli/main.py).
+    if (staff) args.unshift(`--profile=${staff.profile}`);
     if (firstImage) args.push("--image", firstImage);
     // The creation flags below go on a NEW conversation only. From Hermes v0.22.4
     // `hermes chat` runs through the gateway, and a resume keeps the session's
@@ -1785,7 +1832,7 @@ export async function POST(request: Request) {
       // config.yaml's pairing, which is the same read the validation above makes
       // when it has a reason to: recorded too, because a blank under a reply the
       // box knows the model of is a false unknown, not modesty.
-      const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
+      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed));
       live.emit("done", answered);
       // The one-shot answer is held to the same rule as the stream: a session
       // that ran out while the CLI was answering is signed out rather than

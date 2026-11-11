@@ -17,12 +17,17 @@ type Who = { username: string; isOwner: boolean } | null;
 const h = vi.hoisted(() => ({
   who: vi.fn(async (): Promise<{ username: string; isOwner: boolean } | null> => ({ username: "clawbox", isOwner: true })),
   sameOrigin: vi.fn(() => true),
+  sync: vi.fn(async () => true),
 }));
 
 vi.mock("@/lib/owner-session", () => ({ personSession: h.who }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
 vi.mock("@/lib/route-auth", () => ({ sessionIdentity: h.who }));
 vi.mock("@/lib/clawbox-users", () => ({ listUsers: vi.fn(async () => [{ username: "alice" }]) }));
+// Each member of staff's own OpenClaw agent follows the switch
+// (src/lib/org-staff-agents.ts, pinned by its own tests); here only that the
+// switch asks for it.
+vi.mock("@/lib/org-staff-agents", () => ({ syncStaffAgents: h.sync }));
 
 let root: string;
 let restoreEnv: () => void;
@@ -86,8 +91,11 @@ describe("GET", () => {
 
 describe("POST", () => {
   it("lets the owner turn it on and off", async () => {
+    h.sync.mockClear();
     const on = await post({ orgMode: true });
     expect(on.status).toBe(200);
+    // The staff agents arrive with the switch, before the answer.
+    expect(h.sync).toHaveBeenCalledTimes(1);
     expect(await on.json()).toEqual({ orgMode: true, canChange: true });
     expect(stored()).toBe(true);
     const off = await post({ orgMode: false });

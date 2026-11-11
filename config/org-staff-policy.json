@@ -1,0 +1,73 @@
+{
+  "_readme": [
+    "THE DEFINITION of what a member of staff's assistant may do on an organisation",
+    "box (org_mode on, src/lib/org-mode.ts). No second copy of this table exists;",
+    "JSON because its readers are four languages:",
+    "  src/lib/org-staff-policy.ts                     the agent roster and the Hermes profile (TypeScript)",
+    "  scripts/org-staff-policy.js                     the user relay's slash-command filter (CommonJS)",
+    "  scripts/openclaw-plugins/clawbox-staff-guard    a before_tool_call hook (JavaScript, ESM)",
+    "  scripts/hermes-plugins/clawbox_staff_guard      a pre_tool_call hook (Python)",
+    "An ALLOW-list on both runtimes, like org-mode.ts: a tool the core or a plugin",
+    "adds later is the owner's until it is named here. The owner keeps everything;",
+    "a home box (org_mode off) never reads this file."
+  ],
+
+  "_agentPrefix": [
+    "Each member of staff has their OWN agent on OpenClaw (agents.entries.<prefix><name>)",
+    "and their OWN profile on Hermes (~/.hermes/profiles/<prefix><name>): their own",
+    "workspace, memory files, memory index, sessions and skills. Usernames are",
+    "[a-z_][a-z0-9_-]{0,31} (src/lib/username-rules.ts), so the id is at most 46",
+    "characters — inside both cores' [a-z0-9][a-z0-9_-]{0,63} id rule."
+  ],
+  "agentPrefix": "clawbox-staff-",
+
+  "_slashCommands": [
+    "The only slash commands a member of staff may send: a fresh conversation and",
+    "the reasoning switch. /model, /config, /restart, /bash and every other command",
+    "or inline directive is refused before it reaches the runtime."
+  ],
+  "slashCommands": ["new", "reasoning"],
+
+  "_openclaw": [
+    "allow: the per-agent tools.allow of every staff agent (core tool ids). File",
+    "tools are further held to the member's own folder by clawbox-staff-guard.",
+    "deny: written beside it so the intent survives a widened allow — deny always",
+    "wins in the core (docs/tools/multi-agent-sandbox-tools.md). group:sessions",
+    "takes sub-agents and cross-session sends, group:automation cron, gateway,",
+    "plugins and the setup helper, group:ui the browser and the terminal,",
+    "group:messaging every outbound channel, clawbox__* the device's MCP tools.",
+    "writeTools may only touch the member's folder; readTools may also read the",
+    "chat's staged attachments."
+  ],
+  "openclaw": {
+    "allow": ["read", "write", "edit", "apply_patch", "memory_search", "memory_get", "pdf", "view_image", "ask_user", "progress_card"],
+    "deny": [
+      "group:runtime", "group:web", "group:ui", "group:automation", "group:messaging", "group:nodes", "group:sessions",
+      "image_generate", "music_generate", "video_generate", "tts", "skill_workshop",
+      "agents_list", "get_goal", "create_goal", "update_goal", "transcripts",
+      "clawbox__*"
+    ],
+    "writeTools": ["write", "edit", "apply_patch"],
+    "readTools": ["read", "pdf", "view_image"]
+  },
+
+  "_hermes": [
+    "toolsets: platform_toolsets.cli of every staff profile — the dashboard builds",
+    "a session's agent from it (tui_gateway/agent_factory.py). disabledToolsets:",
+    "agent.disabled_toolsets, which Hermes applies last and which also strips the",
+    "client-surface toolsets the desktop folds in. allowTools is what",
+    "clawbox_staff_guard lets a staff profile's turn call at all; writeTools may only",
+    "touch the member's folder, readTools may also read the staged attachments."
+  ],
+  "hermes": {
+    "toolsets": ["file", "vision", "clarify", "todo", "memory", "session_search"],
+    "disabledToolsets": [
+      "web", "search", "x_search", "browser", "terminal", "code_execution", "delegation", "cronjob",
+      "image_gen", "video_gen", "video", "tts", "skills", "computer_use", "kanban", "connections",
+      "discord", "discord_admin", "project", "desktop_ui", "catalog", "onboarding"
+    ],
+    "allowTools": ["read_file", "write_file", "patch", "search_files", "vision_analyze", "clarify", "todo_list", "memory", "session_search"],
+    "writeTools": ["write_file", "patch"],
+    "readTools": ["read_file", "search_files", "vision_analyze"]
+  }
+}

@@ -8429,6 +8429,58 @@ else
   fi
 fi
 
+# ── The staff guard (TASK-2444, TASK-2445) ──────────────────────────────────
+#
+# On an organisation box every member of staff talks to an agent of their own
+# (`clawbox-staff-<name>`, src/lib/org-staff-agents.ts) whose tool policy is the
+# staff allow-list of config/org-staff-policy.json. This hook is the half of
+# the rule the core's tool policy cannot express — a member's file tools write
+# only inside their own folder and read only there or in the chat's staged
+# attachments — and a second refusal of every tool the table does not name.
+# It has an opinion only on a staff agent's calls; the owner's agent is never
+# looked at. Installed and enabled on every box, like the path guard, so the
+# owner turning the organisation switch on needs no gateway restart; the table
+# is copied in beside it.
+CLAWBOX_STAFF_GUARD_ID="clawbox-staff-guard"
+CLAWBOX_STAFF_GUARD_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_STAFF_GUARD_ID"
+CLAWBOX_STAFF_GUARD_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_STAFF_GUARD_ID"
+install_clawbox_hook_plugin "$CLAWBOX_STAFF_GUARD_ID" "$CLAWBOX_STAFF_GUARD_DST" \
+  "a member of staff's file tools on an organisation box are held only by their agent's own tool policy" \
+  "$CLAWBOX_STAFF_GUARD_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_STAFF_GUARD_SRC/package.json" \
+  "$CLAWBOX_STAFF_GUARD_SRC/index.mjs" \
+  "$CLAWBOX_STAFF_GUARD_SRC/staff-guard.mjs" \
+  "$CLAWBOX_ROOT/config/org-staff-policy.json"
+# Where ClawBox records whose upload each staged attachment is
+# (src/lib/chat-media-owners.ts): a member may open only their own. The gateway
+# does not know where ClawBox keeps its data, so it is written beside the
+# plugin; when it cannot be, no staged file is a member's (the guard fails closed).
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
+  python3 -c 'import json,sys; print(json.dumps({"mediaOwners": sys.argv[1]}))' "$CLAWBOX_ROOT/data/chat-media-owners.json" \
+    > "$CLAWBOX_STAFF_GUARD_DST/clawbox-paths.json" 2>/dev/null \
+    || echo "  WARNING: could not record the attachment owner file for $CLAWBOX_STAFF_GUARD_ID — members of staff cannot open their chat attachments with the read tools" >&2
+fi
+# The same cheap proof as the path guard's: the INSTALLED copy imports, reads
+# its table, refuses a staff agent's write outside its folder and leaves the
+# owner's agent alone.
+CLAWBOX_STAFF_GUARD_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_STAFF_GUARD_NODE" ]; then
+  if ! CLAWBOX_STAFF_GUARD_DST="$CLAWBOX_STAFF_GUARD_DST" "$CLAWBOX_STAFF_GUARD_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_STAFF_GUARD_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const hooks = [];
+    plugin.register({ on: (name) => hooks.push(name) });
+    if (!hooks.includes("before_tool_call")) throw new Error("no before_tool_call hook");
+    const { staffToolCallDenyReason } = await import(`${dir}/staff-guard.mjs`);
+    const opts = { openclawHome: "/nonexistent/.openclaw", home: "/nonexistent" };
+    if (!staffToolCallDenyReason({ toolName: "write", params: { path: "/nonexistent/.openclaw/openclaw.json" } }, { agentId: "clawbox-staff-probe" }, opts)) throw new Error("a staff write outside its folder was not refused");
+    if (!staffToolCallDenyReason({ toolName: "exec", params: { command: "ls" } }, { agentId: "clawbox-staff-probe" }, opts)) throw new Error("a staff exec was not refused");
+    if (staffToolCallDenyReason({ toolName: "exec", params: { command: "ls" } }, { agentId: "main" }, opts)) throw new Error("the owner agent was judged");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_STAFF_GUARD_ID plugin did not load or did not refuse a staff write — a member of staff's file tools are held only by their agent's own tool policy" >&2
+  fi
+fi
+
 # ── Field cleanup: retired ClawBox plugins ──────────────────────────────────
 #
 # Hook plugins ClawBox once shipped and no longer does. An earlier boot copied

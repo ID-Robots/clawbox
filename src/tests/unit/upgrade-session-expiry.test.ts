@@ -194,6 +194,9 @@ beforeAll(async () => {
   for (const name of fs.readdirSync(path.join(REPO, "scripts"))) {
     if (name.endsWith(".js")) fs.copyFileSync(path.join(REPO, "scripts", name), path.join(root, "scripts", name));
   }
+  // …and the staff policy table the user relay reads (scripts/org-staff-policy.js).
+  fs.mkdirSync(path.join(root, "config"));
+  fs.copyFileSync(path.join(REPO, "config", "org-staff-policy.json"), path.join(root, "config", "org-staff-policy.json"));
   fs.symlinkSync(path.join(REPO, "node_modules"), path.join(root, "node_modules"));
   // The stand-in Next server: answers HTTP and owns an `upgrade` listener, the
   // way Next's does, which the proxy replaces with its own.

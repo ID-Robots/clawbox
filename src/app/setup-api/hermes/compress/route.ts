@@ -5,6 +5,8 @@ import { getActiveHarness } from "@/lib/harness";
 import { runHermesSlashCommand } from "@/lib/hermes-slash-exec";
 import { requireSession } from "@/lib/route-auth";
 import { chatPrincipalOf, hermesSessionFor } from "@/lib/chat-scope-server";
+import { orgMemberStrictOf } from "@/lib/org-mode-server";
+import { staffHermesProfilePaths } from "@/lib/hermes-staff-profile";
 
 /**
  * Shorten a Hermes conversation now — the chat's "Shorten this conversation
@@ -49,7 +51,12 @@ export async function POST(request: Request) {
   if (hermesSessionFor(await chatPrincipalOf(request), sessionId) !== sessionId) {
     return NextResponse.json({ error: "That conversation belongs to someone else on this ClawBox.", code: "not_your_chat" }, { status: 403 });
   }
-  const ran = await runHermesSlashCommand({ command: "/compress", sessionId, rpc: "session.compress", signal: request.signal });
+  // A member of staff's conversation lives in their own Hermes profile on an
+  // organisation box (src/lib/hermes-staff-profile.ts).
+  const member = await orgMemberStrictOf(request);
+  const profile = member && member !== "unknown" ? staffHermesProfilePaths(member.username)?.profile : undefined;
+  if (member && !profile) return NextResponse.json({ error: "Hermes could not be reached." }, { status: 503 });
+  const ran = await runHermesSlashCommand({ command: "/compress", sessionId, rpc: "session.compress", signal: request.signal, ...(profile ? { profile } : {}) });
   if (!ran) return NextResponse.json({ error: "Hermes could not be reached." }, { status: 503 });
   const result = ran.result;
   const summary = result?.summary && typeof result.summary === "object" ? result.summary as Record<string, unknown> : null;
