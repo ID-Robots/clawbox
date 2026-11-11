@@ -367,6 +367,26 @@ describe("the run started last, and a full log", () => {
     expect(await openUpdateLog({ fresh: false, flow: "update", title: "ClawBox restarted" })).toBe(second);
   });
 
+  it("prunes in the order the runs were started, not by their clock-stamped ids", async () => {
+    const before: string[] = [];
+    for (let i = 0; i < UPDATE_LOG_KEEP - 1; i++) {
+      now += 60_000;
+      before.push((await openUpdateLog({ fresh: true, flow: "update", title: `before ${i}` }))!);
+      await closeUpdateLog("completed");
+    }
+    now -= 24 * 3_600_000; // the clock is stepped back a day
+    const after: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      now += 60_000;
+      after.push((await openUpdateLog({ fresh: true, flow: "update", title: `after ${i}` }))!);
+      await closeUpdateLog("completed");
+    }
+    await settle();
+    const left = fs.readdirSync(updateLogDir()).filter((n) => n.endsWith(".log")).map((n) => n.slice(0, -4));
+    // The newest five by START: all three after the step, the last two before it.
+    expect(left.sort()).toEqual([...after, ...before.slice(-2)].sort());
+  });
+
   it("still writes where each step starts and how it ended once the log is full", async () => {
     const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
     await settle(); // the title line is in
@@ -420,6 +440,41 @@ describe("commands the web server runs itself", () => {
     expect(text).toContain("$ bun run build");
     expect(text).toContain("Creating an optimized production build ...\nwarn: a deprecation\n✓ Compiled successfully\nno newline at the end\n");
     expect(text).not.toContain("ignored");
+  });
+
+  it("pauses a command that prints faster than the log takes it, and lets it go on once the log caught up", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    await settle();
+    // A disk that takes its time with every write.
+    const real = fs.promises.appendFile.bind(fs.promises);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(fs.promises, "appendFile").mockImplementation(async (file, data, opts) => {
+      await gate;
+      return real(file as string, data as string, opts as never);
+    });
+    const out = Object.assign(new EventEmitter(), { pause: vi.fn(), resume: vi.fn() });
+    const err = Object.assign(new EventEmitter(), { pause: vi.fn(), resume: vi.fn() });
+    let finish: () => void = () => {};
+    const promise = new Promise<{ stdout: string; stderr: string }>((resolve) => {
+      finish = () => resolve({ stdout: "", stderr: "" });
+    }) as Promise<{ stdout: string; stderr: string }> & { child: unknown };
+    promise.child = { stdout: out, stderr: err };
+    const running = logUpdateCommand(["bun", "run", "build"], () => promise);
+    const line = `${"x".repeat(1023)}\n`;
+    // ~1.5 MiB while nothing is written: whole 64 KiB batches go to the queue at once.
+    for (let i = 0; i < 1500; i++) out.emit("data", line);
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    expect(out.pause).toHaveBeenCalled();
+    expect(err.pause).toHaveBeenCalled();
+    expect(out.resume).not.toHaveBeenCalled();
+    release();
+    await settle();
+    expect(out.resume).toHaveBeenCalled();
+    finish();
+    await running;
+    await settle();
+    expect(logText(id!).split(line)).toHaveLength(1501);
   });
 
   it("still says how a streamed command ended when it fails", async () => {

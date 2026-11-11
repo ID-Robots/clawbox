@@ -54,16 +54,18 @@ FLOW='SHOTS=$1 DRIVER_TIMEOUT_S=$5 bash "$REPO/scripts/nano-tests/board/update-r
 
 # raw_log MODE LABEL [TIMEOUT_S] — run a board check and relay its lines.
 # Returns 1 when it only said "not yet" (or nothing), so the caller asks again.
-# A check that ended badly (the driver timed out, the hop failed) is a failure
-# whatever it printed first. PANEL_OK says whether it checked the panel.
+# A check that ended badly is a failure whatever it printed first: the board
+# wrapper reports the driver's own exit status (DRIVER_EXIT, 124 when it timed
+# out), and no such line means the hop to the board failed. PANEL_OK says
+# whether it checked the panel.
 PANEL_OK=0
 raw_log() {
-  local out rc line said=0 later=0
+  local out line said=0 later=0 driver=""
   PANEL_OK=0
   out=$(board "$FLOW" "$SHOTS" "$1" "$RUN_TAG" "$2" "${3:-600}")
-  rc=$?
   while IFS= read -r line; do
     case "$line" in
+      "DRIVER_EXIT "*) driver=${line#DRIVER_EXIT } ;;
       "RESULT ok - "*"rows the panel shows"*) ok "[$RUNTIME] ${line#RESULT ok - }"; said=1; PANEL_OK=1 ;;
       "RESULT ok - "*) ok "[$RUNTIME] ${line#RESULT ok - }"; said=1 ;;
       "RESULT not ok - "*) not_ok "[$RUNTIME] ${line#RESULT not ok - }"; said=1 ;;
@@ -75,22 +77,37 @@ raw_log() {
       *) note "$line" ;;
     esac
   done <<<"$out"
-  # 1 is grep finding no line to keep: "said nothing", the callers' own case.
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ] && [ "$later" = 0 ]; then
-    not_ok "[$RUNTIME] the $1 check on the board ended with status $rc"
+  if [ -z "$driver" ]; then
+    # A hop that failed while the web server restarts is "ask again" for a
+    # live check; for any other it is a failure.
+    if [ "$1" = live ]; then return 1; fi
+    not_ok "[$RUNTIME] the $1 check never reached its end on the board"
+    return 0
+  fi
+  if [ "$driver" != 0 ]; then
+    not_ok "[$RUNTIME] the $1 check's driver ended with status $driver"
     return 0
   fi
   [ "$said" = 1 ] && [ "$later" = 0 ]
 }
 
-# run_started_since EPOCH — the update log the box started last began at or
-# after EPOCH (less a little clock slack): the run that ended is this test's,
-# not a previous update's synthesised "completed".
-run_started_since() {
-  local started
+# latest_run — the id of the update log the box started last ("" for none).
+latest_run() {
   # shellcheck disable=SC2016  # expanded on the board
-  started=$(board 'd="$REPO/data/update-logs"; id=$(cat "$d/latest" 2>/dev/null); [ -n "$id" ] && python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[\"startedAt\"])" "$d/$id.json" 2>/dev/null' | tail -n 1)
-  [ -n "$started" ] && [ "$(date -d "$started" +%s 2>/dev/null || echo 0)" -ge $(( $1 - 10 )) ]
+  board 'cat "$REPO/data/update-logs/latest" 2>/dev/null' | tail -n 1 | tr -d '[:space:]'
+}
+
+# new_run_finished — the box started an update log after this test read
+# BEFORE_RUN, and that run is marked finished: the completion is this test's
+# run, not a previous update's synthesised "completed". By run identity, never
+# by comparing two machines' clocks.
+new_run_finished() {
+  local id finished
+  id=$(latest_run)
+  [ -n "$id" ] && [ "$id" != "$BEFORE_RUN" ] || return 1
+  # shellcheck disable=SC2016  # expanded on the board
+  finished=$(board 'python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"finished\") is True)" "$REPO/data/update-logs/$1.json" 2>/dev/null' "$id" | tail -n 1)
+  [ "$finished" = True ]
 }
 
 # The board is left as it was found: the reader stopped, its folder gone. Run
@@ -106,6 +123,7 @@ trap cleanup EXIT
 
 raw_log reader-start reader 60 || { not_ok "[$RUNTIME] the background log reader did not start"; finish; }
 
+BEFORE_RUN=$(latest_run)
 START=$(date +%s)
 if start_app_update "$NANO_BRANCH"; then
   ok "[$RUNTIME] the owner's update to $NANO_BRANCH started"
@@ -139,8 +157,8 @@ follow_update() {
         running) seen_running=1 ;;
         completed|failed)
           # A completion this test never saw running is still this run's
-          # when the box's newest update log began after the test started it.
-          if [ "$seen_running" = 1 ] || [ "$phase" = failed ] || run_started_since "$START"; then
+          # when the box started a new update log since the test began.
+          if [ "$seen_running" = 1 ] || [ "$phase" = failed ] || new_run_finished; then
             UPDATE_PHASE=$phase
             UPDATE_ERROR=$(api_json '(.error // ([.steps[]? | select(.status == "failed") | .error] | first) // "") | tostring | .[0:300]')
             return 0

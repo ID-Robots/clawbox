@@ -46,3 +46,7 @@ trap 'rm -rf "$PROFILE"' EXIT
 REPO=$REPO STATE_DIR=$STATE CHROME=$CHROME PROFILE_DIR=$PROFILE LABEL=$LABEL SHOTS=${SHOTS:-0} \
   timeout "${DRIVER_TIMEOUT_S:-600}" node "$HERE/update-raw-log.mjs" "$MODE" 2>&1 \
   | grep -E '^(RESULT|NOTE|SHOT) '
+# How the driver itself ended (124: timed out), apart from grep's "no line":
+# the test tells a failed check from one that had nothing to say.
+status=("${PIPESTATUS[@]}")
+echo "DRIVER_EXIT ${status[0]}"

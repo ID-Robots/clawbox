@@ -78,6 +78,9 @@ function within<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
 /** How long a streamed command's whole lines wait to be written together. */
 const STREAM_BATCH_MS = 250;
 const STREAM_BATCH_BYTES = 64 * 1024;
+/** Streamed output queued for the log past which the command is paused, and where it goes on. */
+const STREAM_PENDING_MAX = 1024 * 1024;
+const STREAM_PENDING_RESUME = 256 * 1024;
 /** Reads that fail in a row, with a cursor, before the follow moves on to the unit's newest entry. */
 const CURSOR_FAILURES_BEFORE_SKIP = 3;
 
@@ -115,6 +118,11 @@ export interface UpdateLogMeta {
   startedAt: string;
   /** What the run is: "update" (the full one) or "openclaw" (the core-only flow). */
   flow: string;
+  /**
+   * 1 for the first run this box logged, one more for each after: the order
+   * runs were started in, whatever the wall clock did between them.
+   */
+  seq?: number;
   /** Bytes of the log every follow cursor below accounts for. */
   size: number;
   finished: boolean;
@@ -633,6 +641,10 @@ const closingIds = new Set<string>();
 let opening: Promise<void> = Promise.resolve();
 
 async function readMeta(id: string): Promise<UpdateLogMeta | null> {
+  return readMetaSync(id);
+}
+
+function readMetaSync(id: string): UpdateLogMeta | null {
   try {
     const meta = JSON.parse(fs.readFileSync(metaPath(id), "utf8")) as UpdateLogMeta;
     if (!meta || meta.id !== id || typeof meta.size !== "number" || !Array.isArray(meta.follows)) return null;
@@ -644,6 +656,10 @@ async function readMeta(id: string): Promise<UpdateLogMeta | null> {
 
 /** Run ids on disk, newest first. */
 async function listRunIds(): Promise<string[]> {
+  return listRunIdsSync();
+}
+
+function listRunIdsSync(): string[] {
   try {
     const names = fs.readdirSync(updateLogDir());
     return names
@@ -657,9 +673,18 @@ async function listRunIds(): Promise<string[]> {
   }
 }
 
+/** Every run on disk with its sequence number (0 for a record without one). */
+function runsBySeq(): { id: string; seq: number }[] {
+  return listRunIdsSync()
+    .map((id) => ({ id, seq: readMetaSync(id)?.seq ?? 0 }))
+    // Started last first: by sequence, the id (start time) only between equals.
+    .sort((a, b) => b.seq - a.seq || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+}
+
 async function prune(keep: string): Promise<void> {
-  const ids = await listRunIds();
-  const stale = ids.filter((id) => id !== keep).slice(UPDATE_LOG_KEEP - 1);
+  // In the order the runs were STARTED (their sequence), not by their ids'
+  // wall-clock stamps, which a clock stepped back would reorder.
+  const stale = runsBySeq().map((r) => r.id).filter((id) => id !== keep).slice(UPDATE_LOG_KEEP - 1);
   await Promise.all(stale.flatMap((id) => [
     fs.promises.rm(logPath(id), { force: true }),
     fs.promises.rm(metaPath(id), { force: true }),
@@ -720,6 +745,7 @@ async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
       id: newRunId(startedMs),
       startedAt: new Date(startedMs).toISOString(),
       flow: opts.flow,
+      seq: Math.max(0, ...runsBySeq().map((r) => r.seq)) + 1,
       size: 0,
       finished: false,
       follows: [],
@@ -817,6 +843,21 @@ interface ChildStreams {
 function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
   const partial = new Map<NodeJS.ReadableStream, string>();
   let writing: Promise<void> = Promise.resolve();
+  const streams = [child.stdout, child.stderr].filter(
+    (stream): stream is NodeJS.ReadableStream => Boolean(stream) && typeof stream?.on === "function",
+  );
+  // Backpressure: past STREAM_PENDING_MAX bytes queued for the log, the
+  // command's pipes are paused (it waits on its own writes, losing nothing)
+  // until the log has taken them down to STREAM_PENDING_RESUME.
+  let pending = 0;
+  let paused = false;
+  const settle = (bytes: number) => {
+    pending -= bytes;
+    if (paused && pending <= STREAM_PENDING_RESUME) {
+      paused = false;
+      for (const stream of streams) stream.resume?.();
+    }
+  };
   // Whole lines wait here for at most STREAM_BATCH_MS (or STREAM_BATCH_BYTES),
   // then go to the log as ONE write: a chatty build is a few writes a second,
   // not one write and one record per line.
@@ -828,7 +869,13 @@ function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
     if (!batch) return;
     const lines = batch;
     batch = "";
-    writing = track(writing.then(() => writeUpdateLog(lines)));
+    const bytes = Buffer.byteLength(lines);
+    pending += bytes;
+    if (!paused && pending > STREAM_PENDING_MAX) {
+      paused = true;
+      for (const stream of streams) stream.pause?.();
+    }
+    writing = track(writing.then(() => writeUpdateLog(lines)).finally(() => settle(bytes)));
   };
   const take = (stream: NodeJS.ReadableStream, chunk: Buffer | string) => {
     const text = (partial.get(stream) ?? "") + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
@@ -839,9 +886,7 @@ function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
     if (batch.length >= STREAM_BATCH_BYTES) send();
     else if (timer === null) timer = deps.setTimer(send, STREAM_BATCH_MS);
   };
-  for (const stream of [child.stdout, child.stderr]) {
-    if (stream && typeof stream.on === "function") stream.on("data", (chunk: Buffer | string) => take(stream, chunk));
-  }
+  for (const stream of streams) stream.on("data", (chunk: Buffer | string) => take(stream, chunk));
   return {
     flush: async () => {
       send();
