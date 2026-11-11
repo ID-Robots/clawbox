@@ -352,6 +352,21 @@ export async function createUser(username: unknown, password: unknown): Promise<
       throw new UserAdminError("user_exists", "An account or group with that name already exists on this box.");
     }
 
+    // A name used before starts clean: whatever an earlier account of this
+    // name left — its desktop preferences, its UI language — is cleared here,
+    // where removal could not, before the account exists to read it. If it
+    // cannot be cleared, the account is not created.
+    try {
+      await forgetUserPreferences(name);
+      await forgetUserLanguage(name);
+    } catch (err) {
+      console.error("[clawbox-users] could not clear an earlier account's settings:", err instanceof Error ? err.message : err);
+      throw new UserAdminError(
+        "create_failed",
+        "The account could not be created: settings an earlier account of this name left behind could not be cleared. Try again.",
+      );
+    }
+
     try {
       await fs.mkdir(path.dirname(USER_ADD_INPUT_PATH), { recursive: true });
       await fs.writeFile(USER_ADD_INPUT_PATH, userAddRecord(name, password as string), { mode: 0o600 });

@@ -9,12 +9,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   users: vi.fn(async () => [{ username: "alice", createdAt: "2026-09-27T10:00:00.000Z", sv: "a1b2c3d4e5f60718" }]),
-  orgMode: vi.fn(async () => false),
+  orgMode: vi.fn(async (): Promise<boolean | null> => false),
   tunnel: vi.fn(() => false),
 }));
 
 vi.mock("@/lib/clawbox-users", () => ({ listUsers: h.users }));
-vi.mock("@/lib/org-mode-server", () => ({ readOrgMode: h.orgMode }));
+vi.mock("@/lib/org-mode-server", () => ({ readOrgModeStrict: h.orgMode }));
 vi.mock("@/lib/host-allowlist", () => ({ isTunnelRequest: h.tunnel }));
 vi.mock("@/lib/auth", () => ({ getSystemUsername: () => "clawbox" }));
 
@@ -37,6 +37,11 @@ describe("the login screen's user list", () => {
 
   it("lists nobody on an organisation box, so the page asks for a username", async () => {
     h.orgMode.mockResolvedValue(true);
+    expect(await ask()).toEqual({ multiUser: true, users: null });
+  });
+
+  it("lists nobody when the switch cannot be read: it may be an organisation's box", async () => {
+    h.orgMode.mockResolvedValue(null);
     expect(await ask()).toEqual({ multiUser: true, users: null });
   });
 

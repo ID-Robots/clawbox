@@ -401,8 +401,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // signs in on the portal in another tab — no manual refresh needed.
   const clawboxLogin = useClawboxLogin()
   // Never on an organisation box (src/lib/org-mode.ts): the ClawBox AI offers
-  // are hidden for everyone there.
-  const orgMode = useSettledSessionUser()?.orgMode === true
+  // are hidden for everyone there — and not before the box has said who is
+  // looking, which is the only way to know it is not one.
+  const viewer = useSettledSessionUser()
+  const offerAllowed = viewer != null && viewer.orgMode !== true
   const [welcomeDismissed, setWelcomeDismissed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false
     return kv.get('clawbox-portal-welcome-dismissed') === '1'
@@ -2187,7 +2189,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
             <img src={harnessId === 'hermes' ? '/hermes-agent.png' : '/clawbox-crab.png'} alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
-            {!orgMode && !clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
+            {offerAllowed && !clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
               <div style={{
                 marginTop: 8,
                 padding: '12px 14px',

@@ -57,6 +57,13 @@ const MAX_COLUMNS = 1_024;
  */
 const MAX_SHEET_ROWS = 20_000;
 const MAX_SHEET_CELLS = 400_000;
+/**
+ * Characters kept from one cell, and from one sheet in all. A cell repeated
+ * a thousand times is a thousand copies, so the characters are counted as
+ * they are laid out — the CSV is never built past the text's own bound.
+ */
+const MAX_CELL_CHARS = 32 * 1024;
+const MAX_SHEET_CHARS = OFFICE_TEXT_MAX_CHARS;
 
 export type OfficeTextResult =
   | { ok: true; text: string; truncated: boolean }
@@ -483,16 +490,16 @@ function odtText(zip: ZipReader, sink: Sink): void {
 function slideOrder(zip: ZipReader): string[] {
   const rels = relationships(zip, "ppt/_rels/presentation.xml.rels", "ppt");
   const presentation = zip.text("ppt/presentation.xml");
-  const ordered: string[] = [];
+  const ordered = new Set<string>();
   if (presentation !== null) {
     for (const tok of tokens(presentation)) {
       if ((tok.kind === "self" || tok.kind === "open") && tok.name === "p:sldId") {
         const target = rels.get(attr(tok.attrs, "r:id") ?? "");
-        if (target && zip.has(target) && !ordered.includes(target)) ordered.push(target);
+        if (target && zip.has(target)) ordered.add(target);
       }
     }
   }
-  if (ordered.length > 0) return ordered;
+  if (ordered.size > 0) return [...ordered];
   // No usable order: the slides by their number.
   return zip
     .names()
@@ -569,6 +576,8 @@ function sharedStrings(zip: ZipReader): string[] {
 function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; cut: boolean } {
   const rows: string[][] = [];
   let cells = 0;
+  let chars = 0;
+  let cut = false;
   let row: string[] | null = null;
   let rowIndex = 0;
   let col = 0;
@@ -579,7 +588,7 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
   let inInline = 0;
   let inCell = false;
   for (const tok of tokens(xml)) {
-    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS) return { rows, cut: true };
+    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS || chars >= MAX_SHEET_CHARS) return { rows, cut: true };
     if (tok.kind === "text") {
       if (inCell && (inValue > 0 || inInline > 0)) value += tok.text;
       continue;
@@ -595,6 +604,9 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
         const next = r !== null ? r : rowIndex + 1;
         // Rows the file leaves out are blank in the sheet: kept as blank lines, a bounded run of them.
         for (let gap = rowIndex + 1; gap < next && gap - rowIndex <= MAX_REPEAT && rows.length < MAX_SHEET_ROWS; gap++) rows.push([]);
+        // A longer run of blank rows is shortened, so the rows below it no
+        // longer sit at their own numbers: the text says it was cut.
+        if (next - rowIndex - 1 > MAX_REPEAT) cut = true;
         rowIndex = next;
         col = 0;
         if (tok.kind === "self") rows.push([]);
@@ -608,7 +620,12 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
             if (cellType === "s") shown = shared[Number(value)] ?? "";
             else if (cellType === "b") shown = value === "1" ? "TRUE" : value === "0" ? "FALSE" : value;
             if (cellCol < MAX_COLUMNS) {
+              if (shown.length > MAX_CELL_CHARS) {
+                shown = shown.slice(0, MAX_CELL_CHARS);
+                cut = true;
+              }
               cells += Math.max(1, cellCol + 1 - row.length);
+              chars += shown.length + 1;
               while (row.length < cellCol) row.push("");
               row[cellCol] = shown;
             }
@@ -634,7 +651,7 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
         break;
     }
   }
-  return { rows, cut: false };
+  return { rows, cut };
 }
 
 function xlsxText(zip: ZipReader, sink: Sink): void {
@@ -675,15 +692,24 @@ function odsText(zip: ZipReader, sink: Sink): void {
   let paragraphs = 0;
   let sheets = 0;
   let cells = 0;
+  let chars = 0;
+  /** The characters of the row being read, so its repeats are counted too. */
+  let rowChars = 0;
   let depth = 0; // nested tables inside a cell are read as that cell's text
   const finishCell = () => {
     if (!row || cell === null) return;
-    const shown = cell.trim() ? cell.replace(/\n$/, "") : cellValue ?? "";
+    let shown = cell.trim() ? cell.replace(/\n$/, "") : cellValue ?? "";
+    if (shown.length > MAX_CELL_CHARS) {
+      shown = shown.slice(0, MAX_CELL_CHARS);
+      sink.partial = true;
+    }
     // A run of empty cells is only blank space; a run of the same value is kept, bounded.
     const times = Math.min(cellRepeat, shown === "" ? MAX_COLUMNS : MAX_REPEAT);
-    for (let i = 0; i < times && row.length < MAX_COLUMNS; i++) {
+    for (let i = 0; i < times && row.length < MAX_COLUMNS && chars < MAX_SHEET_CHARS; i++) {
       row.push(shown);
       cells++;
+      chars += shown.length + 1;
+      rowChars += shown.length + 1;
     }
     cell = null;
   };
@@ -692,10 +718,11 @@ function odsText(zip: ZipReader, sink: Sink): void {
     sheetName = null;
     rows = [];
     cells = 0;
+    chars = 0;
   };
   for (const tok of tokens(xml)) {
     if (sink.full) return;
-    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS) {
+    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS || chars >= MAX_SHEET_CHARS) {
       // The rest of this document is left out; what was read is kept.
       sink.partial = true;
       finishSheet();
@@ -727,13 +754,27 @@ function odsText(zip: ZipReader, sink: Sink): void {
     if (name === "table:table-row") {
       if (tok.kind === "open") {
         row = [];
+        rowChars = 0;
         rowRepeat = repeatOf(tok.attrs, "table:number-rows-repeated");
       } else {
-        if (tok.kind === "self") rowRepeat = repeatOf(tok.attrs, "table:number-rows-repeated");
+        if (tok.kind === "self") {
+          rowRepeat = repeatOf(tok.attrs, "table:number-rows-repeated");
+          rowChars = 0;
+        }
         const done = row ?? [];
         // A sheet's trailing blank rows are repeated by the million: bounded
-        // here, and dropped from the end of the CSV anyway.
-        for (let i = 0; i < Math.min(rowRepeat, MAX_REPEAT) && rows.length < MAX_SHEET_ROWS; i++) rows.push(done);
+        // here, and dropped from the end of the CSV anyway. A repeated row of
+        // text counts its characters every time it is laid out again.
+        for (let i = 0; i < Math.min(rowRepeat, MAX_REPEAT) && rows.length < MAX_SHEET_ROWS; i++) {
+          if (i > 0) {
+            if (chars + rowChars > MAX_SHEET_CHARS) {
+              sink.partial = true;
+              break;
+            }
+            chars += rowChars;
+          }
+          rows.push(done);
+        }
         row = null;
       }
       continue;

@@ -118,10 +118,11 @@ const UNREADABLE_DOCUMENT: Record<Extract<OfficeTextResult, { ok: false }>["reas
  * left beside it as `<path>.txt` — which the Hermes prompt quotes and the
  * OpenClaw turn names. A file whose text cannot be had is refused (422
  * `unreadable_document`) rather than handed to an agent that would answer
- * from the name alone. Returns the text's path, or undefined when a file of
- * that name already sits there (a dropped folder that carries its own).
+ * from the name alone. Returns the text's path. A file of that name already
+ * there (only a dropped folder that carries its own `<name>.txt` can do that)
+ * is refused 409: the agent would be pointed at it as the document's text.
  */
-async function stageOfficeText(staged: string): Promise<string | undefined> {
+async function stageOfficeText(staged: string): Promise<string> {
   // At most CHAT_ATTACHMENT_MAX_BYTES: busboy's limit already held the file to it.
   const bytes = await fsp.readFile(staged);
   const result = extractOfficeText(bytes, staged);
@@ -134,8 +135,12 @@ async function stageOfficeText(staged: string): Promise<string | undefined> {
     await fsp.writeFile(textPath, body, { flag: "wx" });
   } catch (err) {
     // A file of that name was there before us — only a dropped folder that
-    // carries its own `<name>.txt` can do that: it is theirs, left alone.
-    if ((err as NodeJS.ErrnoException)?.code === "EEXIST") return undefined;
+    // carries its own `<name>.txt` can do that. It is theirs and is left
+    // alone; the document is refused rather than handed over with a text
+    // that is not its own.
+    if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+      throw new BadUpload(`A file called ${path.basename(textPath)} is already beside it, so its text could not be saved there. Rename one of the two and attach it again.`, 409, "office_text_exists");
+    }
     // A write that failed part-way (a full disk) leaves nothing behind: the
     // staged file goes too (the caller's cleanup), and a later upload of the
     // same name must not find a half-written text and trust it.

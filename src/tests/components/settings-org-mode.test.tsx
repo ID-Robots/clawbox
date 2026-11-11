@@ -74,6 +74,7 @@ function serve() {
     if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
     if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: true });
     if (url === "/setup-api/harness/active") return jsonResponse({ active: "openclaw", edition: "openclaw", activeKnown: true });
+    if (url === "/setup-api/ai-models/status") return jsonResponse({ connected: true, provider: "openai", clawaiConfigured: false });
     return jsonResponse({});
   }));
 }
@@ -147,7 +148,51 @@ describe("a member of staff on an organisation box", () => {
   });
 });
 
+describe("what a section that is not drawn may still ask", () => {
+  afterEach(() => {
+    delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+  });
+
+  it("a member's deep link to System neither shows it nor polls its figures", async () => {
+    me = { ...IVAN, orgMode: true };
+    (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection = "system";
+    await mount();
+    await waitFor(() => expect(hasRow("Account")).toBe(true));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(calls.filter((c) => c.includes("/setup-api/system/stats"))).toEqual([]);
+    expect(screen.getByText("Language")).toBeInTheDocument();
+  });
+});
+
+describe("the ClawBox AI pitch in Providers", () => {
+  const openProviders = () => fireEvent.click(within(sidebar()).getAllByRole("button").find((b) => (b.textContent ?? "").includes("Providers"))!);
+
+  it("is shown to a home box's owner without ClawBox AI", async () => {
+    await mount();
+    openProviders();
+    expect(await screen.findByTestId("clawai-pitch-card")).toBeInTheDocument();
+  });
+
+  it("is never shown on an organisation box, the owner included", async () => {
+    me = { ...OWNER, orgMode: true };
+    await mount();
+    openProviders();
+    await waitFor(() => expect(calls).toContain("GET /setup-api/ai-models/status"));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(screen.queryByTestId("clawai-pitch-card")).toBeNull();
+  });
+});
+
 describe("a user on a home box", () => {
+  it("is not offered System Update from About", async () => {
+    me = IVAN;
+    await mount();
+    await waitFor(() => expect(hasRow("Account")).toBe(true));
+    fireEvent.click(within(sidebar()).getAllByRole("button").find((b) => (b.textContent ?? "").includes("About"))!);
+    await screen.findByText("settings.version".replace("settings.version", translations.en["settings.version"] ?? "settings.version"));
+    expect(screen.queryByTestId("settings-about-open-update")).toBeNull();
+  });
+
   it("has Account, every app section, and no System Update", async () => {
     me = IVAN;
     await mount();

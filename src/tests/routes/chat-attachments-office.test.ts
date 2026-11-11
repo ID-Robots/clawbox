@@ -111,6 +111,33 @@ describe.each(["openclaw", "hermes"] as const)("on %s", (runtime) => {
     expect(stagedFiles()).toEqual([]);
   });
 
+  it("refuses an office file whose text file name a dropped folder already took", async () => {
+    const BATCH = "0123456789abcdef0123456789abcdef";
+    const folderPart = (relativePath: string, content: Buffer) => {
+      const field = (name: string, value: string) => Buffer.from(`--${BOUNDARY}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
+      const buf = Buffer.concat([
+        field("batch", BATCH),
+        field("relativePath", relativePath),
+        Buffer.from(`--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="${path.basename(relativePath)}"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+        content,
+        Buffer.from(`\r\n--${BOUNDARY}--\r\n`),
+      ]);
+      return new NextRequest("http://localhost/setup-api/chat/attachments", {
+        method: "POST",
+        headers: { "content-type": `multipart/form-data; boundary=${BOUNDARY}` },
+        body: new Uint8Array(buf),
+        duplex: "half",
+      } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+    };
+    expect((await POST(folderPart("site/report.docx.txt", Buffer.from("their own notes")))).status).toBe(200);
+    const res = await POST(folderPart("site/report.docx", fs.readFileSync(path.join(FIXTURES, "report.docx"))));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "office_text_exists" });
+    // Their own file is untouched, and the document did not stay behind.
+    const left = stagedFiles().map((f) => path.basename(f));
+    expect(left).toEqual(["report.docx.txt"]);
+  });
+
   it("leaves every other document as it was: no text file beside it", async () => {
     const res = await POST(request("notes.txt", Buffer.from("plain notes")));
     expect(res.status).toBe(200);

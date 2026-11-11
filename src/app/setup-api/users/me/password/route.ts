@@ -36,6 +36,8 @@ const NO_STORE = { "Cache-Control": "no-store" };
 const MAX_WRONG = 5;
 const WRONG_WINDOW_MS = 15 * 60 * 1000;
 const wrongAttempts = new Map<string, number[]>();
+/** Attempts still waiting on the helper, per user: counted against the limit before they answer. */
+const inFlight = new Map<string, number>();
 
 function recentWrong(username: string, now: number): number[] {
   const kept = (wrongAttempts.get(username) ?? []).filter((t) => now - t < WRONG_WINDOW_MS);
@@ -71,13 +73,24 @@ async function secondsLeft(req: Request, secret: string): Promise<number> {
 
 /**
  * End every other session of theirs and keep this one: a new session version,
- * and this browser's cookie re-minted under it. Best effort — the password has
- * changed either way, and a failure here is logged, never the change's.
+ * and this browser's cookie re-minted under it. Part of the change's success:
+ * false when the new version could not be stored (tried twice), so the caller
+ * says so rather than report sessions ended that were not.
  */
-async function keepOnlyThisSession(req: Request, username: string, res: NextResponse): Promise<void> {
+async function keepOnlyThisSession(req: Request, username: string, res: NextResponse): Promise<boolean> {
+  let sv: string | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      sv = await rotateUserSessionVersion(username);
+      // No such user any more: their every cookie is dead already.
+      if (sv === null) return true;
+      break;
+    } catch (err) {
+      console.error("[users] could not end the user's other sessions:", err instanceof Error ? err.message : err);
+    }
+  }
+  if (!sv) return false;
   try {
-    const sv = await rotateUserSessionVersion(username);
-    if (!sv) return;
     const secret = await getSessionSigningSecret();
     const left = await secondsLeft(req, secret);
     const cookie = createSessionCookie(left, secret, await getSessionGeneration(), { u: username, sv });
@@ -89,8 +102,10 @@ async function keepOnlyThisSession(req: Request, username: string, res: NextResp
       secure: requestIsHttps(req),
     });
   } catch (err) {
-    console.error("[users] could not end the user's other sessions:", err instanceof Error ? err.message : err);
+    // The other sessions ARE ended; this browser signs in again.
+    console.error("[users] could not re-sign this browser's session:", err instanceof Error ? err.message : err);
   }
+  return true;
 }
 
 function refuse(status: number, code: string, error: string): NextResponse {
@@ -124,21 +139,34 @@ export async function POST(req: Request) {
   }
 
   const now = Date.now();
-  if (recentWrong(who.username, now).length >= MAX_WRONG) {
+  const pending = inFlight.get(who.username) ?? 0;
+  // Attempts still waiting on the helper count too, so guesses sent side by
+  // side cannot all slip under the limit before the first one is answered.
+  if (recentWrong(who.username, now).length + pending >= MAX_WRONG) {
     return refuse(429, "too_many_attempts", "Too many wrong passwords. Try again in a few minutes.");
   }
 
-  const result = await changeUserPassword(who.username, currentPassword, password);
+  inFlight.set(who.username, pending + 1);
+  let result: Awaited<ReturnType<typeof changeUserPassword>>;
+  try {
+    result = await changeUserPassword(who.username, currentPassword, password);
+  } finally {
+    const left = (inFlight.get(who.username) ?? 1) - 1;
+    if (left > 0) inFlight.set(who.username, left);
+    else inFlight.delete(who.username);
+  }
   switch (result) {
     case "ok": {
       wrongAttempts.delete(who.username);
       console.log(`[users] ${who.username} changed their own password`);
       const res = NextResponse.json({ ok: true }, { headers: NO_STORE });
-      await keepOnlyThisSession(req, who.username, res);
+      if (!(await keepOnlyThisSession(req, who.username, res))) {
+        return refuse(500, "sessions_not_ended", "Your password was changed, but your other sessions could not be signed out. Change it once more, or ask the owner to remove and re-add your account.");
+      }
       return res;
     }
     case "wrong":
-      wrongAttempts.set(who.username, [...recentWrong(who.username, now), now]);
+      wrongAttempts.set(who.username, [...recentWrong(who.username, Date.now()), Date.now()]);
       return refuse(400, "wrong_password", "Your current password is not right.");
     case "invalid":
       return refuse(400, "invalid_password", `Passwords must be ${USER_PASSWORD_MIN}–${USER_PASSWORD_MAX} characters with no control characters.`);

@@ -12,6 +12,7 @@ import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 
 /** The route's refusal codes, each with the line the person reads. */
 const ERROR_KEYS: Record<string, string> = {
+  sessions_not_ended: "users.password.errSessions",
   wrong_password: "users.password.errWrong",
   invalid_password: "users.password.errInvalid",
   too_many_attempts: "users.password.errTooMany",
@@ -82,7 +83,7 @@ export default function OwnPasswordCard() {
             type="password"
             autoComplete="current-password"
             value={current}
-            onChange={(e) => setCurrent(e.target.value)}
+            onChange={(e) => { setCurrent(e.target.value); setStatus(null); }}
             className={inputClass}
           />
         </div>
@@ -94,7 +95,7 @@ export default function OwnPasswordCard() {
             autoComplete="new-password"
             value={next}
             maxLength={USER_PASSWORD_MAX}
-            onChange={(e) => setNext(e.target.value)}
+            onChange={(e) => { setNext(e.target.value); setStatus(null); }}
             aria-invalid={tooShort}
             aria-describedby={tooShort ? "own-password-new-error" : undefined}
             className={inputClass}
@@ -113,7 +114,7 @@ export default function OwnPasswordCard() {
             autoComplete="new-password"
             value={confirm}
             maxLength={USER_PASSWORD_MAX}
-            onChange={(e) => setConfirm(e.target.value)}
+            onChange={(e) => { setConfirm(e.target.value); setStatus(null); }}
             aria-invalid={mismatch}
             aria-describedby={mismatch ? "own-password-confirm-error" : undefined}
             className={inputClass}

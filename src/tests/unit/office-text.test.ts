@@ -188,6 +188,51 @@ describe("a hostile part", () => {
   });
 });
 
+describe("a spreadsheet built to balloon", () => {
+  const ods = (content: string) => zip([
+    { name: "META-INF/manifest.xml", data: Buffer.from("<manifest:manifest/>") },
+    { name: "content.xml", data: Buffer.from(`<office:document-content><office:body><office:spreadsheet>${content}</office:spreadsheet></office:body></office:document-content>`) },
+  ]);
+
+  it("never lays a big cell out a thousand times over", () => {
+    const big = "y".repeat(1024 * 1024);
+    const started = Date.now();
+    const result = extractOfficeText(
+      ods(`<table:table table:name="S"><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="1000"><text:p>${big}</text:p></table:table-cell></table:table-row></table:table>`),
+      "balloon.ods",
+    );
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
+    }
+  });
+
+  it("says so when a run of blank rows was shortened", () => {
+    const workbook = zip([
+      { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: "xl/worksheets/sheet1.xml", data: Buffer.from('<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="3000"><c r="A3000"><v>2</v></c></row></sheetData></worksheet>') },
+    ]);
+    const result = extractOfficeText(workbook, "gap.xlsx");
+    expect(result.ok && result.truncated).toBe(true);
+  });
+
+  it("reads a presentation that names its slides a hundred thousand times without a quadratic walk", () => {
+    const ids = Array.from({ length: 100_000 }, () => '<p:sldId r:id="rId1"/>').join("");
+    const deck = zip([
+      { name: "ppt/presentation.xml", data: Buffer.from(`<p:presentation><p:sldIdLst>${ids}</p:sldIdLst></p:presentation>`) },
+      { name: "ppt/_rels/presentation.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/></Relationships>') },
+      { name: "ppt/slides/slide1.xml", data: Buffer.from("<p:sld><a:p><a:r><a:t>Only slide</a:t></a:r></a:p></p:sld>") },
+    ]);
+    const started = Date.now();
+    const result = extractOfficeText(deck, "deck.pptx");
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(result).toEqual({ ok: true, text: "=== Slide 1 ===\nOnly slide", truncated: false });
+  });
+});
+
 describe("bounds", () => {
   it("keeps the beginning of a document past the text bound, and says it was cut", () => {
     const run = "<w:p><w:r><w:t>" + "x".repeat(1000) + "</w:t></w:r></w:p>";

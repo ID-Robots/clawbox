@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSystemUsername } from "@/lib/auth";
 import { listUsers } from "@/lib/clawbox-users";
 import { isTunnelRequest } from "@/lib/host-allowlist";
-import { readOrgMode } from "@/lib/org-mode-server";
+import { readOrgModeStrict } from "@/lib/org-mode-server";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +36,8 @@ export async function GET(request: Request) {
   if (users.length === 0) {
     return NextResponse.json({ multiUser: false }, { headers });
   }
-  if (isTunnelRequest(request.headers) || (await readOrgMode())) {
+  // A switch that cannot be read lists nobody either: it may be an organisation's box.
+  if (isTunnelRequest(request.headers) || (await readOrgModeStrict()) !== false) {
     return NextResponse.json({ multiUser: true, users: null }, { headers });
   }
   return NextResponse.json(

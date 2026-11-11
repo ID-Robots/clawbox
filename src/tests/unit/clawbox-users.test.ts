@@ -78,6 +78,14 @@ describe("clawbox-users", () => {
       expect(await lib.listUsers()).toEqual([created]);
     });
 
+    it("starts a name used before clean: an earlier account's preferences and language are cleared first", async () => {
+      store.set("prefs_by_user", { alice: { wp_id: "dunes" }, bob: { wp_id: "aurora" } });
+      store.set("ui_language_by_user", { alice: "de" });
+      await lib.createUser("alice", "correct horse");
+      expect(store.get("prefs_by_user")).toEqual({ bob: { wp_id: "aurora" } });
+      expect(store.get("ui_language_by_user")).toBeUndefined();
+    });
+
     it("asks getent without a shell, argument by argument", async () => {
       await lib.createUser("alice", "correct horse");
       const calls = vi.mocked(execFile).mock.calls.map(([bin, args]) => [bin, args]);

@@ -46,6 +46,8 @@ beforeEach(async () => {
   h.sameOrigin.mockReturnValue(true);
   h.change.mockReset();
   h.change.mockResolvedValue("ok");
+  h.rotate.mockReset();
+  h.rotate.mockResolvedValue("f".repeat(32));
 });
 
 describe("who may change a password here", () => {
@@ -67,6 +69,26 @@ describe("who may change a password here", () => {
     const cookie = res.headers.get("set-cookie") ?? "";
     expect(cookie).toContain(`clawbox_session=fresh.alice.${"f".repeat(32)}.`);
     expect(cookie.toLowerCase()).toContain("httponly");
+  });
+
+  it("says so when the other sessions could not be ended, rather than report it done", async () => {
+    h.rotate.mockRejectedValue(new Error("disk full"));
+    const res = await post(BODY);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ code: "sessions_not_ended" });
+    expect(h.rotate).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts guesses still waiting on the helper: six at once reach it five times", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    h.change.mockImplementation(async () => { await gate; return "wrong"; });
+    const replies = Array.from({ length: 6 }, () => post(BODY));
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    const statuses = (await Promise.all(replies)).map((r) => r.status).sort();
+    expect(statuses).toEqual([400, 400, 400, 400, 400, 429]);
+    expect(h.change).toHaveBeenCalledTimes(5);
   });
 
   it("rotates nothing when the password did not change", async () => {

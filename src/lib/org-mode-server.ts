@@ -19,6 +19,19 @@ export async function readOrgMode(): Promise<boolean> {
   }
 }
 
+/**
+ * The switch as stored, or null when it could not be read at all — for a
+ * caller that must fail closed rather than read a home box into a failure
+ * (the login screen, which would otherwise list an organisation's staff).
+ */
+export async function readOrgModeStrict(): Promise<boolean | null> {
+  try {
+    return orgModeFrom(await get(ORG_MODE_KEY));
+  } catch {
+    return null;
+  }
+}
+
 export async function writeOrgMode(on: boolean): Promise<void> {
   await set(ORG_MODE_KEY, on);
 }
