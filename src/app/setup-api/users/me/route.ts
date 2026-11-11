@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listUsers } from "@/lib/clawbox-users";
 import { sessionIdentity } from "@/lib/route-auth";
 import { readOpenclawShared } from "@/lib/openclaw-sharing";
+import { readOrgMode } from "@/lib/org-mode-server";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 
 export const dynamic = "force-dynamic";
@@ -26,9 +27,9 @@ export async function GET(request: Request) {
   } catch {
     multiUser = false;
   }
-  const openclawShared = await readOpenclawShared();
+  const [openclawShared, orgMode] = await Promise.all([readOpenclawShared(), readOrgMode()]);
   return NextResponse.json(
-    { username: identity.username, isOwner: identity.isOwner, multiUser, openclawShared },
+    { username: identity.username, isOwner: identity.isOwner, multiUser, openclawShared, orgMode },
     { headers: { "cache-control": "no-store" } },
   );
 }

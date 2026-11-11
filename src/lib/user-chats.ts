@@ -28,6 +28,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { chatKeyUser } from "@/lib/chat-scope";
 import { forgetHermesSessionsOf } from "@/lib/chat-scope-server";
 import { removeUserInventory } from "@/lib/chat-tab-store";
+import { forgetMediaOwner } from "@/lib/chat-media-owners";
 import { clearTranscript, TRANSCRIPT_DIR } from "@/lib/harness/transcript-store";
 
 /** The native visibility that keeps a user's sessions to themselves. */
@@ -71,6 +72,9 @@ export async function forgetUserChats(username: string): Promise<void> {
     console.error("[user-chats] could not remove the tab list:", err instanceof Error ? err.message : err);
   }
   forgetHermesSessionsOf(username);
+  // Their record of chat media goes too: a user created later under the same
+  // name must not be served the files of the one removed.
+  forgetMediaOwner(username);
 
   try {
     for (const entry of fs.readdirSync(TRANSCRIPT_DIR, { withFileTypes: true })) {

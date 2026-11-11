@@ -7,10 +7,14 @@ import { pipeline } from "stream/promises";
 import Busboy from "busboy";
 import { randomUUID } from "crypto";
 import { chatAttachmentDir, pruneMediaDir, type MediaRetention } from "@/lib/harness/media-root";
+import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
+import { personSession } from "@/lib/owner-session";
 import { getActiveHarness } from "@/lib/harness";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isImageMedia } from "@/lib/chat-media";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_DROP_BATCH_RE, CHAT_DROP_MAX_DEPTH } from "@/lib/chat-attachments";
+import { isOfficeDocumentName, officeTextPath } from "@/lib/office-documents";
+import { extractOfficeText, type OfficeTextResult } from "@/lib/office-text";
 
 export const dynamic = "force-dynamic";
 
@@ -97,10 +101,55 @@ const RETENTION: MediaRetention = {
 
 /** Raised for input the client got wrong (400) as opposed to a failure of ours (500). */
 class BadUpload extends Error {
-  constructor(message: string, readonly status = 400) {
+  constructor(message: string, readonly status = 400, readonly code?: string) {
     super(message);
     this.name = "BadUpload";
   }
+}
+
+/** Why an office document's text could not be had, in the customer's words (the composer shows it under its own line). */
+const UNREADABLE_DOCUMENT: Record<Extract<OfficeTextResult, { ok: false }>["reason"], string> = {
+  encrypted: "The file is password-protected, so its text cannot be read. Save a copy without a password and attach that.",
+  too_large: "The file unpacks to more than the box reads from one document. Split it, or save the part you need on its own.",
+  unreadable: "The file is damaged or is not really a Word, Excel, PowerPoint or OpenDocument file.",
+};
+
+/**
+ * An office document (src/lib/office-documents.ts) is a ZIP of XML no model
+ * reads by itself, on either runtime: its text is taken out once, here, and
+ * left beside it as `<path>.txt` — which the Hermes prompt quotes and the
+ * OpenClaw turn names. A file whose text cannot be had is refused (422
+ * `unreadable_document`) rather than handed to an agent that would answer
+ * from the name alone. Returns the text's path. A file of that name already
+ * there (only a dropped folder that carries its own `<name>.txt` can do that)
+ * is refused 409: the agent would be pointed at it as the document's text.
+ */
+async function stageOfficeText(staged: string): Promise<string> {
+  // At most CHAT_ATTACHMENT_MAX_BYTES: busboy's limit already held the file to it.
+  const bytes = await fsp.readFile(staged);
+  const result = extractOfficeText(bytes, staged);
+  if (!result.ok) throw new BadUpload(UNREADABLE_DOCUMENT[result.reason], 422, "unreadable_document");
+  const body = (result.text || "(This document holds no text — only pictures or empty pages.)")
+    + (result.truncated ? "\n\n[… the document goes on; only its beginning was kept here]" : "")
+    + "\n";
+  const textPath = officeTextPath(staged);
+  try {
+    await fsp.writeFile(textPath, body, { flag: "wx" });
+  } catch (err) {
+    // A file of that name was there before us — only a dropped folder that
+    // carries its own `<name>.txt` can do that. It is theirs and is left
+    // alone; the document is refused rather than handed over with a text
+    // that is not its own.
+    if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+      throw new BadUpload(`A file called ${path.basename(textPath)} is already beside it, so its text could not be saved there. Rename one of the two and attach it again.`, 409, "office_text_exists");
+    }
+    // A write that failed part-way (a full disk) leaves nothing behind: the
+    // staged file goes too (the caller's cleanup), and a later upload of the
+    // same name must not find a half-written text and trust it.
+    await fsp.unlink(textPath).catch(() => {});
+    throw err;
+  }
+  return textPath;
 }
 
 /**
@@ -313,6 +362,13 @@ export async function POST(req: NextRequest) {
   // sitting on the disk until the next one arrived.
   await pruneMediaDir(dirReal, RETENTION);
 
+  // Who is staging: a ClawBox user other than the owner has what they stage
+  // recorded as theirs (src/lib/chat-media-owners.ts), and may add to a
+  // dropped folder's batch only when that batch is new or already theirs.
+  const person = await personSession(req);
+  const user = person && !person.isOwner ? person.username : null;
+  let batchDirUsed: string | null = null;
+
   let written: string | null = null;
   // Hoisted so the cleanup below can wait for the write to stop before
   // unlinking. Rejecting on a limit does not halt the pipeline synchronously,
@@ -461,6 +517,21 @@ export async function POST(req: NextRequest) {
         let dest: string | null;
         if (segments && batch) {
           const batchDir = resolveDest(dirReal, batch);
+          // A batch id is the composer's own and travels in paths, so a
+          // member who learnt someone else's could otherwise stage a file
+          // into that folder and have the folder recorded as theirs. An
+          // existing batch they do not own is refused.
+          if (user && batchDir && fs.existsSync(/* turbopackIgnore: true */ batchDir)) {
+            let owned = false;
+            try {
+              owned = isMediaOwnedBy(user, fs.realpathSync(/* turbopackIgnore: true */ batchDir), dirReal);
+            } catch { /* vanished: refused below like any other */ }
+            if (!owned) {
+              fail(new BadUpload("That folder is already being staged by someone else. Drop it again.", 409, "batch_in_use"));
+              return;
+            }
+          }
+          batchDirUsed = batchDir;
           dest = batchDir;
           for (const segment of segments) {
             dest = dest ? resolveDest(dest, segment) : null;
@@ -475,6 +546,10 @@ export async function POST(req: NextRequest) {
               fail(err);
               return;
             }
+            // Recorded in the same tick it was checked and made: a drop's
+            // files arrive as concurrent requests, and the next one must find
+            // the batch already theirs.
+            if (user && batchDir) recordMediaOwner(user, [batchDir]);
           }
         } else {
           dest = resolveDest(dirReal, `${randomUUID()}-${leaf}`);
@@ -538,9 +613,18 @@ export async function POST(req: NextRequest) {
     if (!documentsAllowed && !looksLikeImage(await readHead(result.path))) {
       throw new BadUpload(IMAGE_ONLY_MESSAGE, 415);
     }
-    return NextResponse.json(result.root
-      ? { ok: true, name: result.name, path: result.path, root: result.root }
-      : { ok: true, name: result.name, path: result.path });
+    const textPath = documentsAllowed && isOfficeDocumentName(result.path) ? await stageOfficeText(result.path) : undefined;
+    // Staged for a ClawBox user other than the owner: theirs, so the media
+    // route serves it back to them on an organisation box and to no other
+    // member. A dropped folder by its batch, which holds everything of it.
+    if (user) recordMediaOwner(user, [result.path, batchDirUsed ?? result.root, textPath]);
+    return NextResponse.json({
+      ok: true,
+      name: result.name,
+      path: result.path,
+      ...(result.root ? { root: result.root } : {}),
+      ...(textPath ? { textPath } : {}),
+    });
   } catch (err) {
     // A rejected upload must not leave a partial file behind: the composer
     // would be told nothing, but a later request reusing the name would
@@ -558,6 +642,10 @@ export async function POST(req: NextRequest) {
     // The same relative path twice in one batch: "wx" refused to clobber the
     // first copy, which is the caller's doing, not the box's.
     const status = err instanceof BadUpload ? err.status : (err as NodeJS.ErrnoException)?.code === "EEXIST" ? 409 : 500;
+    // A refusal with a code is a sentence written for the customer: shown as is.
+    if (err instanceof BadUpload && err.code) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status });
+    }
     return NextResponse.json(
       { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}` },
       { status },
