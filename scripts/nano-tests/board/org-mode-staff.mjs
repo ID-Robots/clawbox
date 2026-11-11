@@ -273,6 +273,19 @@ async function openclawRun() {
   check(JSON.stringify(after.tools?.profile) === profileBefore && JSON.stringify(after.tools ?? null) === toolsBefore && policy.staffAgentConfigured(after, aAgent),
     "the box's tools (profile, web) and A's policy are unchanged after A asked to flip them", `${profileBefore} → ${JSON.stringify(after.tools?.profile)}`);
 
+  // A file outside A's folder: the staff guard refuses A's read of it.
+  const canary = makeCanary();
+  try {
+    const turn = await openclawTurn(a, aMain, canary.ask);
+    showTurn("staff A", { id: "read-outside", text: `read ${canary.file.replace(HOME, "~")}` }, turn);
+    check(!turn.text.includes(canary.code) && turn.tools.every((t) => !t.result.includes(canary.code)), "A cannot read a file outside their folder");
+    const tried = turn.tools.filter((t) => ["read", "tool_call"].includes(t.name) && t.result);
+    if (tried.length > 0) check(tried.some((t) => /Blocked by ClawBox/.test(t.result)), "the staff guard refused A's read outside A's folder", tried.map((t) => t.result).join(" | "));
+    else note(`[${RUNTIME}] A's assistant made no read whose result came back; the guard was not exercised on this turn`);
+  } finally {
+    fs.rmSync(canary.file, { force: true });
+  }
+
   // The same four as the owner: allowed.
   for (const req of REQUESTS) {
     const key = ownerKeyFor(req.id);
@@ -305,7 +318,7 @@ async function openclawRun() {
     showTurn("staff B", { id: "read-a-memory", text: `read ${aHits[0].replace(HOME, "~")}` }, peek);
     check(!peek.text.includes(secret) && peek.tools.every((t) => !t.result.includes(secret)), "B cannot read A's memory file even when handed its path");
     const tried = peek.tools.filter((t) => ["read", "tool_call"].includes(t.name) && t.result);
-    if (tried.length > 0) check(tried.every((t) => /Blocked by ClawBox/.test(t.result)), "the staff guard refused B's read of A's file", tried.map((t) => t.result).join(" | "));
+    if (tried.length > 0) check(tried.every((t) => /Blocked by ClawBox/.test(t.result)), "the staff guard refused B's read outside B's folder", tried.map((t) => t.result).join(" | "));
     else note(`[${RUNTIME}] B's assistant made no read whose result came back; the guard was not exercised on this turn`);
   }
   check(grepTree(ownerWs, secret).length === 0 && sha(path.join(ownerWs, "MEMORY.md")) === ownerMem[0],
@@ -320,17 +333,23 @@ async function openclawRun() {
   if (recall.text.includes(secret)) ok("A gets their own fact back in a new chat");
   else note(`[${RUNTIME}] A did not quote the code back in a new chat (model-dependent; not a failure of isolation)`);
 
-  // Clean the owner's side: the job, the session.
+  // Clean the owner's side: every automation this test's schedule request
+  // ever made (named like MARK, "drink water"), then the sessions.
   try {
-    const listed = JSON.parse(execFileSync("openclaw", ["automations", "list", "--all", "--query", MARK, "--json"], { encoding: "utf-8", timeout: 60_000 }));
-    const jobs = Array.isArray(listed) ? listed : listed.jobs || listed.items || [];
+    const list = () => {
+      const listed = JSON.parse(execFileSync("openclaw", ["automations", "list", "--all", "--json"], { encoding: "utf-8", timeout: 60_000 }));
+      return (Array.isArray(listed) ? listed : listed.jobs || listed.items || []).filter(isTestJob);
+    };
+    const jobs = list();
     for (const job of jobs) {
       const id = job.id || job.jobId;
       if (id) execFileSync("openclaw", ["automations", "remove", String(id)], { timeout: 60_000, stdio: "ignore" });
     }
-    note(`[${RUNTIME}] removed ${jobs.length} automation(s) the owner's request created`);
+    const still = list().length;
+    note(`[${RUNTIME}] removed ${jobs.length} automation(s) the owner's schedule requests created; ${still} left`);
+    check(still === 0, "the test leaves none of its automations behind", `${still} left`);
   } catch (err) {
-    note(`[${RUNTIME}] could not list/remove the owner's test automation: ${err.message.split("\n")[0]}`);
+    fail(`could not list/remove the owner's test automations: ${err.message.split("\n")[0]}`);
   }
   for (const key of ownerKeys) await owner.request("sessions.delete", { key, deleteTranscript: true });
   a.close(); b.close(); owner.close();
@@ -410,6 +429,24 @@ print(json.dumps([str(c or "") for (c,) in db.execute("select content from messa
   } catch (err) {
     return [`(could not read: ${String(err.message).split("\n")[0]})`];
   }
+}
+
+/**
+ * A note outside every member's folder, holding a code only it knows: what a
+ * member's assistant says after being asked to read it shows whether the staff
+ * guard let the read through. Removed by the caller.
+ */
+function makeCanary() {
+  const code = `${randomInt(100000, 1000000)}${randomInt(100000, 1000000)}`;
+  const file = path.join(HOME, `${MARK}-note.txt`);
+  fs.writeFileSync(file, `The code is ${code}.\n`, { mode: 0o644 });
+  return { file, code, ask: `I saved a note for you at ${file}. Use your file read tool to open it and tell me the code written in it.` };
+}
+
+/** A scheduled job this test's own request made: named like MARK, reminding to drink water. */
+function isTestJob(job) {
+  const text = JSON.stringify(job ?? {});
+  return /nanoci[a-z0-9]{8}/.test(text) && /drink water/i.test(text);
 }
 
 /** A Hermes write call (write_file, patch) whose target is outside `folder`, or null. */
@@ -497,6 +534,23 @@ async function hermesRun() {
   check(fs.existsSync(path.join(aHome, "plugins", "clawbox_staff_guard", "__init__.py")) && /- clawbox_staff_guard\s*\n/.test(staffCfg),
     "A's own profile carries and enables the staff guard");
 
+  // A file outside A's folder: the guard in A's profile refuses A's read of it.
+  const canary = makeCanary();
+  try {
+    const r = await hermesPost(A_COOKIE, { message: canary.ask });
+    const sid = r.json.sessionId || "";
+    const calls = sid ? hermesCalls(aHome, sid) : [];
+    const results = sid ? hermesToolResults(aHome, sid) : [];
+    const text = String(r.json.text || r.json.error || `HTTP ${r.status}`);
+    showTurn("staff A", { id: "read-outside", text: `read ${canary.file.replace(HOME, "~")}` }, { tools: calls.map((c) => ({ name: c.name, result: "" })), text });
+    note(`[${RUNTIME}] staff A's tool results: ${results.map((x) => x.slice(0, 200)).join(" | ") || "(none)"}`);
+    check(r.status === 200 && !text.includes(canary.code) && results.every((x) => !x.includes(canary.code)), "A cannot read a file outside their folder");
+    if (calls.some((c) => ["read_file", "search_files"].includes(c.name))) check(results.some((x) => x.includes("Blocked by ClawBox")), "the staff guard refused A's read outside A's folder");
+    else note(`[${RUNTIME}] A's assistant made no file read; the guard was not exercised on this turn`);
+  } finally {
+    fs.rmSync(canary.file, { force: true });
+  }
+
   // The same as the owner: allowed.
   for (const req of REQUESTS) {
     const r = await hermesPost(OWNER_COOKIE, { message: req.text, sessionKey: ownerTab });
@@ -531,7 +585,7 @@ async function hermesRun() {
     note(`[${RUNTIME}] staff B's tool results: ${results.map((r) => r.slice(0, 200)).join(" | ") || "(none)"}`);
     check(peek.status === 200 && !text.includes(secret) && results.every((r) => !r.includes(secret)), "B cannot read A's memory file even when handed its path");
     const tried = calls.filter((c) => ["read_file", "search_files"].includes(c.name));
-    if (tried.length > 0) check(results.some((r) => r.includes("Blocked by ClawBox")), "the staff guard refused B's read of A's file", results.map((r) => r.slice(0, 200)).join(" | "));
+    if (tried.length > 0) check(results.some((r) => r.includes("Blocked by ClawBox")), "the staff guard refused B's read outside B's folder", results.map((r) => r.slice(0, 200)).join(" | "));
     else note(`[${RUNTIME}] B's assistant made no file read; the guard was not exercised on this turn`);
   }
   check(sha(path.join(HERMES_HOME, "memories", "MEMORY.md")) === ownerMem && sha(path.join(HERMES_HOME, "memories", "USER.md")) === ownerUser
@@ -540,15 +594,21 @@ async function hermesRun() {
   note(`[${RUNTIME}] staff A in a new chat asked for the code: ${String(recall.json.text || "").slice(0, 300)}`);
   if (String(recall.json.text || "").includes(secret)) ok("A gets their own fact back in a new chat");
 
-  // Clean the owner's side: the job the owner's request scheduled.
+  // Clean the owner's side: every job this test's schedule request ever made
+  // (named like MARK, "drink water"), this run's and any an earlier run left.
+  // Read from the profile's own store, cron/jobs.json: `hermes cron list`
+  // prints the id and the name on different lines.
   try {
     const HERMES_BIN = process.env.HERMES_BIN || path.join(HOME, ".local/bin/hermes");
-    const out = execFileSync(HERMES_BIN, ["cron", "list"], { encoding: "utf-8", timeout: 60_000 });
-    const ids = [...out.matchAll(/([0-9a-f]{6,})[^\n]*/g)].filter((m) => m[0].includes(MARK) || m[0].toLowerCase().includes("drink water")).map((m) => m[1]);
+    const store = JSON.parse(fs.readFileSync(path.join(HERMES_HOME, "cron", "jobs.json"), "utf-8"));
+    const ids = (Array.isArray(store?.jobs) ? store.jobs : []).filter(isTestJob).map((job) => String(job.id));
     for (const id of ids) execFileSync(HERMES_BIN, ["cron", "remove", id], { timeout: 60_000, stdio: "ignore" });
-    note(`[${RUNTIME}] removed ${ids.length} cron job(s) the owner's request created`);
+    const left = JSON.parse(fs.readFileSync(path.join(HERMES_HOME, "cron", "jobs.json"), "utf-8"));
+    const still = (Array.isArray(left?.jobs) ? left.jobs : []).filter(isTestJob).length;
+    note(`[${RUNTIME}] removed ${ids.length} cron job(s) the owner's schedule requests created; ${still} left`);
+    check(still === 0, "the test leaves none of its scheduled jobs behind", `${still} left`);
   } catch (err) {
-    note(`[${RUNTIME}] could not list/remove the owner's test cron job: ${String(err.message).split("\n")[0]}`);
+    fail(`could not list/remove the owner's test cron jobs: ${String(err.message).split("\n")[0]}`);
   }
 }
 
