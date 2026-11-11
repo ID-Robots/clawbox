@@ -5125,6 +5125,9 @@ describe("updater", () => {
       const fresh = await loadUpdater("dual");
 
       expect(fresh.startOpenclawUpdate().started).toBe(true);
+      // Let the run end before the state is reset: one left going writes its
+      // step results by index into whatever run the next test starts.
+      await vi.waitFor(() => expect(fresh.getUpdateState().phase).not.toBe("running"), { timeout: 5_000 });
       fresh.resetUpdateState();
     });
 

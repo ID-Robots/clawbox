@@ -3811,7 +3811,61 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# refresh_root_update_log_limit [UNIT_DIR] — makes the NEXT root step start
+# under the root update unit's journald rate limit (the LogRateLimit* lines of
+# config/clawbox-root-update@.service). The update screen's raw log is these
+# units' journals (src/lib/update-raw-log.ts), and journald fixes a unit's
+# limit when the unit starts: step_systemd_services re-copies the unit inside
+# rebuild_reboot, which is too late for rebuild_reboot itself, so the first
+# update from a build whose installed unit lacks the limit would rebuild under
+# journald's default and lose lines.
+#
+# A bridge, never a second copy of the setting: while the INSTALLED unit lacks
+# the lines, they are installed as a drop-in (logging only — never ExecStart —
+# so it is safe before the root-owned copies the unit names are current); once
+# the installed unit carries them itself, the drop-in is removed. So
+# step_apt_update, first in every update and before its rebuild, bridges an
+# older unit, and step_systemd_services, right after copying the new unit,
+# takes the bridge down — a box left on an older build later has that build's
+# unit and nothing of this one's. daemon-reload only when something changed.
+# Never fails the step it runs in. TASK-2428.
+refresh_root_update_log_limit() {
+  local unit_dir="${1:-/etc/systemd/system}"
+  local unit="$SRC_DIR/config/clawbox-root-update@.service"
+  local installed="$unit_dir/clawbox-root-update@.service"
+  local dir="$unit_dir/clawbox-root-update@.service.d"
+  local conf="$dir/50-log-rate-limit.conf" lines have want
+  lines="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$unit" 2>/dev/null)" || true
+  have="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$installed" 2>/dev/null)" || true
+  if [ -z "$lines" ] || [ "$have" = "$lines" ]; then
+    # Nothing to bridge: the unit as installed already has this limit (or this
+    # build sets none).
+    [ -e "$conf" ] || return 0
+    if rm -f "$conf"; then
+      rmdir "$dir" 2>/dev/null || true
+      echo "  Root update steps: the installed unit carries its journald limit; bridge drop-in removed"
+      systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after removing the root update unit's log-limit drop-in failed (non-fatal)" >&2
+    else
+      echo "  Warning: could not remove $conf (non-fatal)" >&2
+    fi
+    return 0
+  fi
+  want="$(printf '# Installed by install.sh (refresh_root_update_log_limit) until the unit itself carries these lines.\n[Service]\n%s' "$lines")"
+  [ -f "$conf" ] && [ "$(cat "$conf" 2>/dev/null)" = "$want" ] && return 0
+  if mkdir -p "$dir" && printf '%s\n' "$want" > "$conf.tmp" && mv -f "$conf.tmp" "$conf"; then
+    echo "  Root update steps: journald limit bridged with a drop-in until the new unit is installed ($(printf '%s' "$lines" | tr '\n' ' '))"
+    systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after the root update unit's log limit failed (non-fatal)" >&2
+  else
+    rm -f "$conf.tmp" 2>/dev/null || true
+    echo "  Warning: could not install the root update unit's log limit at $conf (non-fatal)" >&2
+  fi
+  return 0
+}
+
 step_apt_update() {
+  # First, before anything that can fail: every later root step of the update
+  # (rebuild_reboot included) keeps all its lines.
+  refresh_root_update_log_limit
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   # poppler-utils is `pdftotext`, and it is the ONLY reason Memory Shard can
@@ -10284,6 +10338,9 @@ step_systemd_services() {
     fi
     cp "$src" /etc/systemd/system/
   done
+  # The unit just copied carries the journald limit itself: the drop-in
+  # step_apt_update bridged an older unit with comes down (see there).
+  refresh_root_update_log_limit
   systemctl daemon-reload
   # Enable all services except templates and on-demand units.
   #

@@ -150,6 +150,15 @@ import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, opencl
 import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
 import { redactCredentialShapes } from "./incident-sanitize";
 import {
+  closeUpdateLog,
+  finishUpdateUnitFollows,
+  followUpdateUnit,
+  logUpdateCommand,
+  logUpdateStepEnd,
+  logUpdateStepStart,
+  openUpdateLog,
+} from "./update-raw-log";
+import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
   isLegacyChatgptProvider,
@@ -624,7 +633,7 @@ function noUpdateBranchReason(): RemoteReachability {
 async function reachOrigin(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
 ): Promise<RemoteReachability> {
   return (await readFromOrigin(projectDir, args, options)).remote;
 }
@@ -638,7 +647,8 @@ async function reachOrigin(
 async function readFromOrigin(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+  /** `log`: each attempt, its output and its exit into the update's raw log. */
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
 ): Promise<{ remote: RemoteReachability; stdout: string }> {
   const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
@@ -646,11 +656,12 @@ async function readFromOrigin(
   let lastErr: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const { stdout } = await execGit(projectDir, args, {
+      const attemptGit = () => execGit(projectDir, args, {
         timeout: options.timeout,
         maxBuffer: options.maxBuffer,
         env: { ...process.env, ...GIT_NO_PROMPT_ENV },
       });
+      const { stdout } = options.log ? await logUpdateCommand(["git", ...args], attemptGit) : await attemptGit();
       return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
     } catch (err) {
       lastErr = err;
@@ -1154,7 +1165,15 @@ async function readRootStepFailure(stepId: string, sinceMs: number | null): Prom
  * Used for steps that will kill the current process (rebuild, reboot).
  */
 async function startRootServiceFireAndForget(stepId: string): Promise<void> {
-  await startRootStep(stepId, { noBlock: true, timeoutMs: 10_000 });
+  // Followed into the raw log until this process is replaced; the next one
+  // reads the unit on from where this one stopped (update-raw-log.ts).
+  const follow = followUpdateUnit(stepId);
+  try {
+    await startRootStep(stepId, { noBlock: true, timeoutMs: 10_000 });
+  } catch (err) {
+    await follow.finish();
+    throw err;
+  }
 }
 
 /**
@@ -1891,6 +1910,7 @@ async function updateClawBoxAsOwner(): Promise<void> {
   await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
   try {
     await rebuildAsOwner(PROJECT_DIR, {
+      onCommand: logUpdateCommand,
       onProgress: (detail) => {
         const running = runtime.state.steps[runtime.state.currentStepIndex];
         if (running?.status === "running") running.detail = detail;
@@ -1930,7 +1950,8 @@ async function syncCheckoutAsOwner(): Promise<void> {
   const fetched = await reachOrigin(
     PROJECT_DIR,
     ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
-    { timeout: 120_000 },
+    // Every attempt, with git's own output, into the update's raw log.
+    { timeout: 120_000, log: true },
   );
   if (!fetched.reachable) {
     throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
@@ -2041,14 +2062,16 @@ async function syncCheckoutToUpstream(local: string, upstream: string, savedCode
     warnUpdate(savedCode, saved.message);
     await persistWarnings();
   }
-  await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
+  // Each into the update's raw log as it would read typed by hand.
+  const git = (args: string[]) => logUpdateCommand(["git", ...args], () => execGit(PROJECT_DIR, args, gitOptions));
+  await git(["reset", "--hard", "HEAD"]);
   try {
-    await execGit(PROJECT_DIR, ["checkout", local], gitOptions);
+    await git(["checkout", local]);
   } catch {
-    await execGit(PROJECT_DIR, ["checkout", "-b", local, upstream], gitOptions);
+    await git(["checkout", "-b", local, upstream]);
   }
-  await execGit(PROJECT_DIR, ["reset", "--hard", upstream], gitOptions);
-  await execGit(PROJECT_DIR, ["clean", "-fd"], gitOptions);
+  await git(["reset", "--hard", upstream]);
+  await git(["clean", "-fd"]);
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
@@ -4474,16 +4497,25 @@ function onX64Host(): boolean {
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   const startedAt = monotonicNow();
+  // The unit's own output, into the update's raw log as it is written. Read
+  // from the journal, beside the dispatch: nothing about how the step is
+  // started, timed or torn down changes.
+  const follow = followUpdateUnit(stepId);
   try {
     await startRootStep(stepId, { timeoutMs: timeoutMs + 30_000 });
+    await follow.finish();
   } catch (err) {
+    const killed = (err as { killed?: boolean }).killed === true;
+    // An overrun unit runs on, and so does the read of its journal.
+    if (killed) follow.settleThenFinish();
+    else await follow.finish();
     // When OUR timeout kills the blocking `systemctl start`, the unit itself
     // usually keeps running (it has its own much larger TimeoutStartSec) and
     // often finishes fine in the background. Report that as a budget overrun
     // — otherwise the caller dresses up the unit's most recent (often
     // successful) log line as the failure, which is how a healthy update
     // once showed "failed: Linkdown routing sysctl installed".
-    if ((err as { killed?: boolean }).killed) {
+    if (killed) {
       const waitedS = Math.round((monotonicNow() - startedAt) / 1000);
       throw new BudgetOverrunError(
         `${stepId} was still running after ${waitedS}s — gave up waiting (it may finish on its own in the background)`,
@@ -4503,7 +4535,10 @@ async function waitForRootStepToSettle(stepId: string): Promise<void> {
         ["show", serviceName, "-p", "ActiveState", "--value"],
         { timeout: 10_000 },
       );
-      if (/^(?:inactive|failed)$/.test(stdout.trim())) return;
+      if (/^(?:inactive|failed)$/.test(stdout.trim())) {
+        await finishUpdateUnitFollows(stepId);
+        return;
+      }
     } catch {
       // A transient systemd query failure must not unmask a still-running
       // writer. Keep the gateway quiesced and retry within the unit ceiling.
@@ -5553,6 +5588,12 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
     })
     .finally(() => {
       runtime.running = false;
+      // The raw log is complete: a reader following it is told the run ended.
+      // Only a run that SAID how it ended — a refusal before step 1 says so
+      // too. Not reached when the rebuild replaces this process: the next one
+      // goes on writing the same file.
+      const { phase, error } = runtime.state;
+      if (phase === "completed" || phase === "failed") void closeUpdateLog(phase, error);
       // The lock is released here and nowhere else on the success path. This
       // does NOT run when do_rebuild kills the server mid-run — the process
       // simply ends — which is exactly right: the flag stays on disk and the
@@ -5730,6 +5771,12 @@ async function resumeContinuation(): Promise<boolean> {
         await set(UPDATE_INTERRUPTED_DETAIL_KEY, record);
         // Only on the transition, so the record keeps the time it happened.
         await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
+        // The dead run's raw log ends here, with what its units said after it
+        // died, instead of being followed by readers for ever. A resume
+        // starts a new one.
+        const interruption = interruptedMessage(describeInterruption(record, applicableSteps()).detail);
+        void openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "The update was interrupted" })
+          .then((id) => (id ? closeUpdateLog("failed", interruption) : undefined));
       } else {
         record = await readInterruptionRecord();
       }
@@ -5805,6 +5852,16 @@ async function resumeContinuation(): Promise<boolean> {
     runtime.state.steps[restartIndex].status = "failed";
     runtime.state.steps[restartIndex].error = message;
     runtime.state.error = message;
+    // The raw log the first half was writing: the rebuild's own output, read
+    // on from where that process stopped, and how it ended.
+    // In the background: the verdict above is the update's, and nothing here
+    // waits on the log.
+    const restartStep = steps[restartIndex];
+    void openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "ClawBox restarted" }).then((id) => {
+      if (!id) return undefined;
+      void logUpdateStepEnd(restartStep, "failed", message);
+      return closeUpdateLog("failed", message);
+    });
     // The rebuild failed and the previous build is what came back up: move the
     // checkout back to it rather than leave new code beside an old build.
     await rollBackCheckoutIfStranded();
@@ -6318,6 +6375,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // run again, never skipped as "already at the pin": the work it was doing
   // when it died may be what is unfinished.
   let resumedAt = -1;
+  // Where the caller asked to start: 0 is a new run, anything later the second
+  // half of one (the raw log goes on in the file the first half wrote).
+  const requestedStart = startFrom;
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -6405,6 +6465,21 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       );
     }
   }
+
+  // The raw log of this run (update-raw-log.ts): a new file for a new run, the
+  // same file for the half after the restart and for a resumed run, so the
+  // owner reads one transcript of one update. After the resume is resolved, so
+  // a resume is known for one, and before anything below can refuse the run,
+  // so a refusal is in it too.
+  const continuing = requestedStart > 0 || resumedAt >= 0;
+  await openUpdateLog({
+    fresh: !continuing,
+    flow: ownsTheDesktop ? "update" : "openclaw",
+    title: continuing
+      ? `${requestedStart > 0 ? "ClawBox restarted on the new build" : "Continuing the interrupted update"}`
+        + ` — from step ${startFrom + 1}: ${steps[startFrom]?.label ?? ""}`
+      : ownsTheDesktop ? "ClawBox update" : "OpenClaw update",
+  });
 
   // THE STATE-SCHEMA PRE-FLIGHT — its first ask; the second stands at the
   // `openclaw_install` boundary in the loop.
@@ -6506,6 +6581,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     runtime.state.currentStepIndex = i;
     runtime.state.steps[i].status = "running";
     runtime.state.steps[i].error = undefined;
+    void logUpdateStepStart(step, i, steps.length);
 
     // Re-assert the lock at every step boundary, because another PROCESS can
     // drop it. config-store.set is an unlocked read-modify-write of the whole
@@ -6566,6 +6642,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         runtime.state.downgrade = stop.backupFailure === undefined
           ? refusal.detail
           : { ...refusal.detail, backupFailure: stop.backupFailure };
+        void logUpdateStepEnd(step, "failed", stop.message);
         failed = true;
         break;
       }
@@ -6587,6 +6664,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (skip.skip && skip.version) {
         console.log(`[Updater] ${openclawSkippedLine(skip.version)}`);
         runtime.state.steps[i].status = "completed";
+        void logUpdateStepEnd(step, "skipped", openclawSkippedLine(skip.version));
         continue;
       }
     }
@@ -6651,10 +6729,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           await execAsRoot(step.id, timeoutMs);
         }
       } else if (step.command) {
-        await execShell(step.command, {
+        const command = step.command;
+        await logUpdateCommand([command], () => execShell(command, {
           timeout: step.timeoutMs,
           maxBuffer: 2 * 1024 * 1024,
-        });
+        }));
       }
       if (desktopIntegration && step.id === "apt_update") {
         // Existing desktop adapters already refresh the verified mirror and
@@ -6663,13 +6742,18 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         // root adapter (which can contain additional workstation repairs).
         // Match the coding runner's capability drop: the web server can carry
         // ambient network capabilities that its installer must not inherit.
-        await execFile("/usr/bin/setpriv", [
+        const harnessArgv = [
+          "/usr/bin/setpriv",
           "--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--",
           "/bin/bash",
           "/var/lib/clawbox/root-exec-mirror/scripts/x64-migration/install-coding-harness.sh",
           "/var/lib/clawbox/root-exec-mirror/scripts/claude-ds",
           PROJECT_DIR,
-        ], { timeout: 900_000, maxBuffer: 2 * 1024 * 1024 });
+        ];
+        await logUpdateCommand(harnessArgv, () => execFile(harnessArgv[0], harnessArgv.slice(1), {
+          timeout: 900_000,
+          maxBuffer: 2 * 1024 * 1024,
+        }));
       }
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
@@ -6677,6 +6761,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
+      void logUpdateStepEnd(step, "completed", undefined, stepStartedAt);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
       // An overrun on an advisory step doesn't fail the update. Serialized
@@ -6690,6 +6775,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
         runtime.state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
+        void logUpdateStepEnd(step, "completed", `${message} (advisory)`, stepStartedAt);
         continue;
       }
       // Only let the unit's journal override the error when the unit actually
@@ -6713,6 +6799,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       runtime.state.steps[i].status = "failed";
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
+      void logUpdateStepEnd(step, "failed", message, stepStartedAt);
       failed = true;
       if (step.failFast || (desktopIntegration && step.id === "apt_update")) {
         runtime.state.error = message;
