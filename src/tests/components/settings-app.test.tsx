@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { dispatchOpenSettingsSection } from "@/lib/ui-events";
 
 // Every test in this file mounts the WHOLE settings app — every panel, every
 // status fetch, and now the pet picker as well. On a Jetson under full-suite
@@ -914,6 +915,47 @@ describe("SettingsApp providers and Local AI pages", () => {
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localModels" } }));
     expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
+    expect(local.className).toContain("coral-bright");
+    expect(pending.__clawboxPendingSettingsSection).toBeUndefined();
+  });
+
+  // TASK-2379, the state found on the board that failed nano tests 66/99: the
+  // owner's saved desktop held a Settings window, so the desktop brought it
+  // back on load — mounted, on Appearance — before anything asked for a
+  // section. The test then left only the COLD-open handoff on `window` and
+  // opened the app, which for a window already up is a focus: Settings stayed
+  // on Appearance, and Local AI's memory-search row was never drawn although
+  // the box's inventory carried it. The box's own links send the event as well
+  // (dispatchOpenSettingsSection), and that reaches the window that is up.
+  it("moves a Settings window the desktop brought back to Local AI and its memory-search row, through the event the box's links send", async () => {
+    const memoryRow = {
+      id: "embeddings", name: "Memory search", nameCode: "memorySearch", kind: "embedding",
+      runtime: "Qwen 3 via llama.cpp", runtimeCode: "modelVia", installed: false, enabled: null,
+      running: "not-installed", diskBytes: null, memoryBytes: null, control: "none", managedBy: "clawkeep",
+      detailCode: "embeddingsNotInstalled", detail: "Not installed. Set it up in Memory Shard.",
+      params: { model: "Qwen 3", via: "llama.cpp" },
+    };
+    const inner = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => (
+      input.toString() === "/setup-api/local-models"
+        ? jsonResponse({ models: [memoryRow], unavailable: [] })
+        : inner(input, init)
+    )));
+    const pending = window as Window & { __clawboxPendingSettingsSection?: string };
+    delete pending.__clawboxPendingSettingsSection;
+    // The window the saved desktop restored: up, on its default page, so the
+    // box's memory-search row is nowhere on screen.
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
+    expect(local.className).not.toContain("coral-bright");
+    expect(screen.queryByTestId("local-ai-loading")).toBeNull();
+    expect(screen.queryByTestId("local-model-embeddings")).toBeNull();
+
+    // The box's own link: the same window moves to Local AI, which draws the
+    // memory-search row with its Install.
+    act(() => dispatchOpenSettingsSection("localAi"));
+    const row = await screen.findByTestId("local-model-embeddings");
+    expect(within(row).getByTestId("local-model-action-embeddings-install")).toBeInTheDocument();
     expect(local.className).toContain("coral-bright");
     expect(pending.__clawboxPendingSettingsSection).toBeUndefined();
   });
