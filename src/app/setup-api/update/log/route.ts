@@ -107,10 +107,12 @@ export async function GET(req: Request) {
 
   const encoder = new TextEncoder();
   let cleanup = () => {};
+  let stop = () => {};
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      stop = () => close();
       const send = (text: string) => {
         if (closed) return;
         try {
@@ -163,9 +165,10 @@ export async function GET(req: Request) {
               // The newest run changed under a follower of "the newest".
               announce(info, 0);
             }
-            // Everything there is, a chunk at a time.
+            // Everything there is, a chunk at a time — up to the recorded
+            // size only (updateLogInfo says why).
             for (;;) {
-              const chunk = await readUpdateLogChunk(info.id, offset, CHUNK_BYTES);
+              const chunk = await readUpdateLogChunk(info.id, offset, CHUNK_BYTES, info.size);
               if (closed) return;
               if (!chunk || chunk.next === offset) break;
               offset = chunk.next;
@@ -207,7 +210,8 @@ export async function GET(req: Request) {
       void step();
     },
     cancel() {
-      cleanup();
+      // The reader went away: stop the follow loop too, not only its timers.
+      stop();
     },
   });
 

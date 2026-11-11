@@ -12,7 +12,7 @@ import { EventEmitter } from "events";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   UPDATE_LOG_KEEP,
   closeUpdateLog,
@@ -39,6 +39,8 @@ interface Entry { unit: string; at: number; message: string; cursor: string }
 
 let entries: Entry[] = [];
 let unitState: Record<string, string> = {};
+/** journalctl refuses every --after-cursor read (a rotated journal). */
+let cursorRefused = false;
 let journalCalls: string[][] = [];
 let now = 1_800_000_000_000;
 let timers: { fn: () => void; at: number; id: number }[] = [];
@@ -69,6 +71,11 @@ function fakeSpawn(command: string, args: readonly string[]) {
   journalCalls.push([...args]);
   const unit = args[args.indexOf("-u") + 1];
   const after = args.includes("--after-cursor") ? args[args.indexOf("--after-cursor") + 1] : null;
+  if (after && cursorRefused) return fakeChild("Failed to seek to cursor: Invalid argument\n", 1);
+  if (args.includes("-n") && args[args.indexOf("-n") + 1] === "1") {
+    const last = entries.filter((e) => e.unit === unit).at(-1);
+    return fakeChild(last ? `${last.message}\n-- cursor: ${last.cursor}\n` : "");
+  }
   const since = args.includes("--since") ? Number(args[args.indexOf("--since") + 1].slice(1)) * 1000 : 0;
   let mine = entries.filter((e) => e.unit === unit);
   if (after) mine = mine.slice(mine.findIndex((e) => e.cursor === after) + 1);
@@ -106,6 +113,7 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = root;
   entries = [];
   unitState = {};
+  cursorRefused = false;
   journalCalls = [];
   timers = [];
   setUpdateLogDepsForTests({
@@ -124,6 +132,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await resetUpdateLogForTests();
   setUpdateLogDepsForTests();
+  vi.restoreAllMocks();
   if (previousRoot === undefined) delete process.env.CLAWBOX_ROOT;
   else process.env.CLAWBOX_ROOT = previousRoot;
   fs.rmSync(root, { recursive: true, force: true });
@@ -132,7 +141,7 @@ afterEach(async () => {
 describe("capture", () => {
   it("writes a step's journal byte for byte — colours and carriage returns included — under a header, then the step's result", async () => {
     const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
-    expect(id).toMatch(/^\d{8}T\d{6}Z-[0-9a-f]{4}$/);
+    expect(id).toMatch(/^\d{8}T\d{9}Z-[0-9a-f]{4}$/);
     const step = { id: "apt_update", label: "Updating system packages" };
     await logUpdateStepStart(step, 1, 9);
     const dispatched = now;
@@ -251,6 +260,142 @@ describe("capture", () => {
     fs.writeFileSync(path.join(root, "data"), "a file where the folder should be");
     expect(await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" })).toBeNull();
     expect(await logUpdateCommand(["true"], async () => "ok")).toBe("ok");
+  });
+});
+
+describe("capture, when things go wrong", () => {
+  it("moves on from the unit's newest entry when journald no longer knows the cursor", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    followUpdateUnit("post_update", now);
+    say("post_update", "before the rotation");
+    await advance(1_000);
+    cursorRefused = true;
+    say("post_update", "lost in the rotation");
+    for (let i = 0; i < 4; i++) await advance(1_000);
+    cursorRefused = false;
+    say("post_update", "after the rotation");
+    await advance(1_000);
+    await advance(1_000);
+    const text = logText(id!);
+    expect(text).toContain("before the rotation\n");
+    expect(text).toContain("could not be read on from where the log stopped");
+    expect(text).toContain("after the rotation\n");
+    expect(text.split("before the rotation")).toHaveLength(2);
+  });
+
+  it("keeps the follow moving when one read is more than the log takes", async () => {
+    setUpdateLogDepsForTests({
+      spawn: fakeSpawn as never,
+      journalMaxBytes: 64,
+      now: () => now,
+      setTimer: (fn, ms) => { const t = { fn, at: now + ms, id: ++timerId }; timers.push(t); return t; },
+      clearTimer: (handle) => { timers = timers.filter((t) => t !== handle); },
+    });
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    followUpdateUnit("rebuild_reboot", now);
+    for (let i = 0; i < 20; i++) say("rebuild_reboot", `compiling module ${i}`);
+    await advance(1_000);
+    say("rebuild_reboot", "Build complete");
+    await advance(1_000);
+    const text = logText(id!);
+    expect(text).toContain("compiling module 0\n");
+    expect(text).toMatch(/\d+ more bytes of this unit's output came in one read/);
+    expect(text).toContain("Build complete\n");
+    expect(text).not.toContain("compiling module 19");
+  });
+
+  it("takes a half-written chunk back off the file, so the record never points into it", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    await writeUpdateLog("whole line\n");
+    const real = fs.promises.appendFile.bind(fs.promises);
+    vi.spyOn(fs.promises, "appendFile").mockImplementationOnce(async (file, data) => {
+      await real(file as string, String(data).slice(0, 5));
+      throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    });
+    await writeUpdateLog("this write fails half-way\n");
+    await writeUpdateLog("next line\n");
+    const text = logText(id!);
+    expect(text).not.toContain("this ");
+    expect(text.endsWith("whole line\nnext line\n")).toBe(true);
+    expect(await updateLogInfo(id!)).toMatchObject({ size: Buffer.byteLength(text) });
+  });
+
+  it("marks the run finished even when its closing line cannot be written", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    vi.spyOn(fs.promises, "appendFile").mockRejectedValueOnce(new Error("EIO"));
+    await closeUpdateLog("failed", "gateway did not start");
+    expect(await updateLogInfo(id!)).toMatchObject({ finished: true, outcome: "failed" });
+  });
+
+  it("opens one run at a time: a second fresh open closes the first instead of racing it", async () => {
+    const [first, second] = await Promise.all([
+      openUpdateLog({ fresh: true, flow: "update", title: "first" }),
+      (now += 1_000, openUpdateLog({ fresh: true, flow: "update", title: "second" })),
+    ]);
+    expect(first).not.toBe(second);
+    expect(await updateLogInfo(first!)).toMatchObject({ finished: true, outcome: "failed" });
+    expect(currentUpdateLogId()).toBe(second);
+  });
+
+  it("serves only what the record accounts for: bytes a dying process wrote after it are not handed out", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    await writeUpdateLog("recorded\n");
+    const recorded = Buffer.byteLength(logText(id!));
+    fs.appendFileSync(path.join(updateLogDir(), `${id}.log`), "never recorded\n");
+    const info = await updateLogInfo(id!);
+    expect(info!.size).toBe(recorded);
+    const chunk = await readUpdateLogChunk(id!, 0, 1 << 20, info!.size);
+    expect(chunk!.text).not.toContain("never recorded");
+    expect(chunk!.next).toBe(recorded);
+  });
+});
+
+describe("commands the web server runs itself", () => {
+  /** A promise that carries its child, the way util.promisify(execFile) hands it out. */
+  function running(script: (out: EventEmitter, err: EventEmitter) => Promise<void>, fail = false) {
+    const child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+    const promise = (async () => {
+      // A child speaks only after it was started: after the caller has it.
+      await new Promise((resolve) => setImmediate(resolve));
+      await script(child.stdout, child.stderr);
+      if (fail) throw Object.assign(new Error("Command failed"), { code: 2, stdout: "ignored", stderr: "ignored" });
+      return { stdout: "ignored", stderr: "ignored" };
+    })() as Promise<{ stdout: string; stderr: string }> & { child: typeof child };
+    promise.child = child;
+    return promise;
+  }
+
+  it("writes the output live, in the order it arrives, a whole line at a time", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    let seenMidway = "";
+    await logUpdateCommand(["bun", "run", "build"], () => running(async (out, err) => {
+      out.emit("data", "Creating an optimized production build ...\n");
+      err.emit("data", "warn: a deprecat");
+      out.emit("data", "✓ Compiled succ");
+      await settle();
+      seenMidway = logText(id!);
+      err.emit("data", "ion\n");
+      out.emit("data", "essfully\n");
+      out.emit("data", "no newline at the end");
+    }));
+    await settle();
+    expect(seenMidway).toContain("Creating an optimized production build ...\n");
+    expect(seenMidway).not.toContain("warn: a deprecat");
+    const text = logText(id!);
+    expect(text).toContain("$ bun run build");
+    expect(text).toContain("Creating an optimized production build ...\nwarn: a deprecation\n✓ Compiled successfully\nno newline at the end\n");
+    expect(text).not.toContain("ignored");
+  });
+
+  it("still says how a streamed command ended when it fails", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    await expect(logUpdateCommand(["bun", "install"], () => running(async (_out, err) => {
+      err.emit("data", "error: lockfile had changes\n");
+    }, true))).rejects.toThrow("Command failed");
+    const text = logText(id!);
+    expect(text).toContain("error: lockfile had changes\n");
+    expect(text).toContain("(exit 2)");
+    expect(text).not.toContain("ignored");
   });
 });
 
@@ -389,12 +534,12 @@ describe("reading from an offset", () => {
   it("refuses an id that is not one, and answers null for a run it has no log for", async () => {
     expect(await readUpdateLogChunk("../../etc/passwd", 0)).toBeNull();
     expect(await updateLogInfo("../x")).toBeNull();
-    expect(await updateLogInfo("20261111T000000Z-abcd")).toBeNull();
+    expect(await updateLogInfo("20261111T000000000Z-abcd")).toBeNull();
   });
 
   it("parses the resume id the stream hands out, and nothing else", () => {
-    expect(parseUpdateLogResumeId("20261111T093015Z-a1b2:1234")).toEqual({ run: "20261111T093015Z-a1b2", offset: 1234 });
-    for (const bad of [null, "", "x:1", "20261111T093015Z-a1b2:-1", "20261111T093015Z-a1b2:1.5", "20261111T093015Z-a1b2", "../a:1"]) {
+    expect(parseUpdateLogResumeId("20261111T093015123Z-a1b2:1234")).toEqual({ run: "20261111T093015123Z-a1b2", offset: 1234 });
+    for (const bad of [null, "", "x:1", "20261111T093015123Z-a1b2:-1", "20261111T093015123Z-a1b2:1.5", "20261111T093015123Z-a1b2", "../a:1"]) {
       expect(parseUpdateLogResumeId(bad)).toBeNull();
     }
   });

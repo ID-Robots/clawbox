@@ -633,7 +633,7 @@ function noUpdateBranchReason(): RemoteReachability {
 async function reachOrigin(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
 ): Promise<RemoteReachability> {
   return (await readFromOrigin(projectDir, args, options)).remote;
 }
@@ -647,7 +647,8 @@ async function reachOrigin(
 async function readFromOrigin(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+  /** `log`: each attempt, its output and its exit into the update's raw log. */
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
 ): Promise<{ remote: RemoteReachability; stdout: string }> {
   const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
@@ -655,11 +656,12 @@ async function readFromOrigin(
   let lastErr: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const { stdout } = await execGit(projectDir, args, {
+      const attemptGit = () => execGit(projectDir, args, {
         timeout: options.timeout,
         maxBuffer: options.maxBuffer,
         env: { ...process.env, ...GIT_NO_PROMPT_ENV },
       });
+      const { stdout } = options.log ? await logUpdateCommand(["git", ...args], attemptGit) : await attemptGit();
       return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
     } catch (err) {
       lastErr = err;
@@ -1945,8 +1947,12 @@ async function syncCheckoutAsOwner(): Promise<void> {
     throw new Error(`This ClawBox cannot fetch its update branch: ${upstream} is not a remote branch the updater can name.`);
   }
   console.log(`[Updater] Fetching ${upstream} as the desktop owner (resolved from: ${source})`);
-  const fetchArgs = ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`];
-  const fetched = await logUpdateCommand(["git", ...fetchArgs], () => reachOrigin(PROJECT_DIR, fetchArgs, { timeout: 120_000 }));
+  const fetched = await reachOrigin(
+    PROJECT_DIR,
+    ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
+    // Every attempt, with git's own output, into the update's raw log.
+    { timeout: 120_000, log: true },
+  );
   if (!fetched.reachable) {
     throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
   }

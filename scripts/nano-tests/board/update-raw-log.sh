@@ -7,7 +7,8 @@
 #   update-raw-log.sh live RUN_ID LABEL       mid-update checks and the panel
 #   update-raw-log.sh after RUN_ID LABEL      the checks once the update is over
 #
-# RUN_ID names this run's folder in /tmp, where the reader keeps what it read
+# RUN_ID names this run's folder under ~/.cache (the box account's own, not the
+# shared /tmp), where the reader keeps what it read
 # and the screenshots are kept. SHOTS=1 prints the screenshots as SHOT lines.
 # The owner's cookie is minted by the driver from data/.session-secret and
 # reaches the browser through DevTools only: never printed, never on a
@@ -20,8 +21,8 @@ LABEL=${3:-$MODE}
 REPO=/home/clawbox/clawbox
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 [[ $RUN =~ ^[A-Za-z0-9._-]+$ ]] || { echo "RESULT not ok - bad run id"; exit 0; }
-STATE=/tmp/nano-update-raw-log-$RUN
-mkdir -p "$STATE"
+STATE=$HOME/.cache/nano-update-raw-log-$RUN
+mkdir -p -m 700 "$STATE"
 
 if [ ! -r "$REPO/data/.session-secret" ]; then
   echo "RESULT not ok - $REPO/data/.session-secret is not readable as the box account"

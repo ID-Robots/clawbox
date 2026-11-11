@@ -28,7 +28,7 @@
 # They are printed as `# SHOT <name> <sha256> <jpeg as hex>` lines everywhere
 # but GitHub Actions, whose artifacts are public: the picture shows the box's
 # own output, which the text redactor of this suite never reads. There they
-# stay on the board in /tmp until the test removes them.
+# stay on the board (under the box account's ~/.cache) until the test removes them.
 #
 # Skipped without NANO_BRANCH or NANO_SHA.
 # shellcheck source=scripts/nano-tests/lib.sh
@@ -74,7 +74,7 @@ raw_log() {
 
 cleanup() {
   # shellcheck disable=SC2016  # expanded on the board
-  board 'd=/tmp/nano-update-raw-log-$1; [ -s "$d/reader.pid" ] && kill "$(cat "$d/reader.pid")" 2>/dev/null; rm -rf -- "$d"' "$RUN_TAG" >/dev/null 2>&1
+  board 'd=$HOME/.cache/nano-update-raw-log-$1; [ -s "$d/reader.pid" ] && kill "$(cat "$d/reader.pid")" 2>/dev/null; rm -rf -- "$d"' "$RUN_TAG" >/dev/null 2>&1
 }
 trap cleanup EXIT
 

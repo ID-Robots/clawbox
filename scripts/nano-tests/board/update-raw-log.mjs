@@ -18,9 +18,11 @@
 // and — with SHOTS=1 — `SHOT <name> <sha256> <hex>` lines: a JPEG of the
 // update screen's panel beside the matching journalctl and log-file lines.
 //
-// Env: OWNER_COOKIE (minted by update-raw-log.sh from the box's session
-// secret), CHROME, PROFILE_DIR, STATE_DIR (this run's folder in /tmp), REPO,
-// SHOTS, LABEL (names the shot: "before-restart", "after-restart", …).
+// Env: CHROME, PROFILE_DIR, STATE_DIR (this run's folder under ~/.cache),
+// REPO, SHOTS, LABEL (names the shot: "before-restart", "after-restart", …).
+// The owner's cookie is minted here, from the box's session secret, for each
+// request and for the browser (through DevTools): never printed, never on a
+// command line.
 import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -31,7 +33,9 @@ const BASE = "http://127.0.0.1";
 const env = process.env;
 const REPO = env.REPO || "/home/clawbox/clawbox";
 const LOG_DIR = path.join(REPO, "data", "update-logs");
-const STATE = env.STATE_DIR || "/tmp/nano-update-raw-log";
+// The box account's own folder, never the shared temporary one: what is kept
+// here is read back by the next check.
+const STATE = env.STATE_DIR || path.join(env.HOME || "/home/clawbox", ".cache", "nano-update-raw-log");
 const say = (line) => console.log(`RESULT ${line}`);
 const note = (line) => console.log(`NOTE ${line}`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -123,7 +127,7 @@ async function streamWhole(ms) {
 // The background reader: what a browser's EventSource does through a restart.
 
 async function reader() {
-  fs.mkdirSync(STATE, { recursive: true });
+  fs.mkdirSync(STATE, { recursive: true, mode: 0o700 });
   const textFile = path.join(STATE, "reader.txt");
   const lastFile = path.join(STATE, "reader.last");
   const eventsFile = path.join(STATE, "reader.events");
@@ -173,7 +177,7 @@ async function reader() {
 }
 
 function startReader() {
-  fs.mkdirSync(STATE, { recursive: true });
+  fs.mkdirSync(STATE, { recursive: true, mode: 0o700 });
   const out = fs.openSync(path.join(STATE, "reader.out"), "a");
   const child = spawn(process.execPath, [new URL(import.meta.url).pathname, "reader"], {
     detached: true,

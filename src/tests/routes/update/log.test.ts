@@ -129,7 +129,7 @@ describe("GET /setup-api/update/log", () => {
     const cut = Buffer.byteLength(whole.slice(0, whole.indexOf("second half")));
     const resumed = await events(await GET(request(`?after=${encodeURIComponent(`${id}:${cut}`)}`)), ended);
     expect(text(resumed)).toBe(whole.slice(whole.indexOf("second half")));
-    const other = await events(await GET(request("", { "Last-Event-ID": `20200101T000000Z-dead:${cut}` })), ended);
+    const other = await events(await GET(request("", { "Last-Event-ID": `20200101T000000000Z-dead:${cut}` })), ended);
     expect(text(other)).toBe(whole);
   });
 
@@ -199,7 +199,7 @@ describe("GET /setup-api/update/log", () => {
 
   it("answers 400 for a run id that is not one and 404 for a run it has no log of", async () => {
     expect((await GET(request("?run=../../etc/passwd"))).status).toBe(400);
-    expect((await GET(request("?run=20200101T000000Z-dead"))).status).toBe(404);
+    expect((await GET(request("?run=20200101T000000000Z-dead"))).status).toBe(404);
     expect((await GET(request("?download=1"))).status).toBe(404);
   });
 });

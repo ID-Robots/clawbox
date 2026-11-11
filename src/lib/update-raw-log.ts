@@ -25,9 +25,9 @@
  * file now holds and how far each followed unit has been read
  * (`<run>.json`), so the process that continues the update truncates the log
  * to the last recorded size — dropping a chunk whose cursor never reached the
- * disk — and reads each unit on from its recorded cursor. The bytes written
- * again are the same bytes, so a reader that already had them sees nothing
- * change.
+ * disk — and reads each unit on from its recorded cursor. Readers are only
+ * ever sent RECORDED bytes (`updateLogInfo`), so what a truncate drops is
+ * nothing anybody has seen, and the stream a reader resumes is the one it had.
  *
  * REDACTED BEFORE IT IS WRITTEN, with the update logs' own rule
  * (`redactCredentialShapes`, which the gateway pre-start log uses), line by
@@ -35,7 +35,10 @@
  *
  * NEVER IN THE UPDATE'S WAY. Every export here swallows its own failures: a
  * full disk, an unreadable journal or a missing `journalctl` costs the log, not
- * the update. Nothing an update step does waits on more than one journal read.
+ * the update. A root step that returns waits for the journal read already in
+ * flight and one more (each bounded, normally milliseconds), so its last lines
+ * sit above the step's result; what journald stores later still is read in the
+ * background and written under a "(continued)" line naming the unit.
  *
  * SERVER ONLY: spawns journalctl.
  */
@@ -55,9 +58,16 @@ export const UPDATE_LOG_POLL_MS = 1_000;
 export const UPDATE_LOG_LINGER_MS = 3_000;
 const JOURNAL_READ_TIMEOUT_MS = 15_000;
 const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
+const JOURNAL_TAIL_BYTES = 8 * 1024;
+/** Reads that fail in a row, with a cursor, before the follow moves on to the unit's newest entry. */
+const CURSOR_FAILURES_BEFORE_SKIP = 3;
 
-/** `20261111T093015Z-a1b2`: sortable by start time, and nothing a path can be built from. */
-export const UPDATE_LOG_ID_RE = /^\d{8}T\d{6}Z-[0-9a-f]{4,8}$/;
+/**
+ * `20261111T093015123Z-a1b2` (to the millisecond): sortable by start time, and
+ * nothing a path can be built from. The milliseconds are optional only so the
+ * logs of the first builds of this (to the second) are still listed and pruned.
+ */
+export const UPDATE_LOG_ID_RE = /^\d{8}T\d{6}(?:\d{3})?Z-[0-9a-f]{4,8}$/;
 
 const ESC = "\x1b[";
 const BOLD = `${ESC}1m`;
@@ -113,6 +123,8 @@ type SpawnLike = (
 
 interface Deps {
   spawn: SpawnLike;
+  /** The most one journal read keeps (tests make it small). */
+  journalMaxBytes: number;
   now: () => number;
   setTimer: (fn: () => void, ms: number) => unknown;
   clearTimer: (handle: unknown) => void;
@@ -120,6 +132,7 @@ interface Deps {
 
 const realDeps: Deps = {
   spawn: (command, args, options) => nodeSpawn(command, args as string[], options),
+  journalMaxBytes: JOURNAL_MAX_BYTES,
   now: () => Date.now(),
   setTimer: (fn, ms) => {
     const t = setTimeout(fn, ms);
@@ -161,7 +174,7 @@ function clock(ms: number): string {
 }
 
 function newRunId(ms: number): string {
-  const stamp = new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  const stamp = new Date(ms).toISOString().replace(/[-:.]/g, "");
   const tail = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
   return `${stamp}-${tail}`;
 }
@@ -175,6 +188,16 @@ function readJournal(step: string, sinceMs: number, cursor: string | null): Prom
   const args = cursor
     ? ["-u", rootStepUnit(step), "--after-cursor", cursor, "--no-pager", "-o", "cat"]
     : rootStepJournalArgs(step, { sinceMs });
+  return runJournalctl(args);
+}
+
+/** The cursor of the unit's newest entry (the text is not wanted), or null. */
+async function newestCursor(step: string): Promise<string | null> {
+  const got = await runJournalctl(["-u", rootStepUnit(step), "-n", "1", "--no-pager", "-o", "cat"]);
+  return got?.cursor ?? null;
+}
+
+function runJournalctl(args: readonly string[]): Promise<{ text: string; cursor: string | null } | null> {
   // -q: no "-- No entries --" or boot banner in the output; the cursor line is
   // printed all the same, and only when there was an entry to point at.
   const argv = ["-q", ...args, "--show-cursor"];
@@ -192,6 +215,9 @@ function readJournal(step: string, sinceMs: number, cursor: string | null): Prom
     }
     const chunks: Buffer[] = [];
     let bytes = 0;
+    // The last bytes, always: past the cap they still carry the cursor line,
+    // so a read too big to keep moves the follow on instead of stalling it.
+    let tail = Buffer.alloc(0);
     let settled = false;
     const done = (value: { text: string; cursor: string | null } | null) => {
       if (settled) return;
@@ -205,9 +231,10 @@ function readJournal(step: string, sinceMs: number, cursor: string | null): Prom
     }, JOURNAL_READ_TIMEOUT_MS);
     child.stdout.on("data", (chunk: Buffer | string) => {
       const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      tail = Buffer.concat([tail, buf]);
+      if (tail.length > JOURNAL_TAIL_BYTES) tail = tail.subarray(tail.length - JOURNAL_TAIL_BYTES);
+      if (bytes < deps.journalMaxBytes) chunks.push(buf.subarray(0, deps.journalMaxBytes - bytes));
       bytes += buf.length;
-      if (bytes > JOURNAL_MAX_BYTES) return;
-      chunks.push(buf);
     });
     child.on("error", () => done(null));
     child.on("close", (code) => {
@@ -215,7 +242,16 @@ function readJournal(step: string, sinceMs: number, cursor: string | null): Prom
         done(null);
         return;
       }
-      done(splitCursor(Buffer.concat(chunks).toString("utf8")));
+      if (bytes <= deps.journalMaxBytes) {
+        done(splitCursor(Buffer.concat(chunks).toString("utf8")));
+        return;
+      }
+      const kept = Buffer.concat(chunks).toString("utf8");
+      const whole = kept.slice(0, kept.lastIndexOf("\n") + 1);
+      done({
+        text: `${whole}${YELLOW}[${bytes - Buffer.byteLength(whole)} more bytes of this unit's output came in one read; they are in its journal]${RESET}\n`,
+        cursor: splitCursor(tail.toString("utf8")).cursor,
+      });
     });
   });
 }
@@ -282,6 +318,8 @@ class JournalFollow {
   private untilSettled = false;
   /** Lines of this unit are in the log already: a header for more of them says "(continued)". */
   wrote: boolean;
+  /** Reads with a cursor that failed in a row. */
+  private failures = 0;
 
   constructor(private readonly log: RunLog, readonly record: FollowRecord) {
     this.wrote = record.cursor !== null;
@@ -328,7 +366,25 @@ class JournalFollow {
     const reading = (async () => {
       if (this.record.done) return false;
       const got = await readJournal(this.record.step, this.record.sinceMs, this.record.cursor);
-      if (!got) return false;
+      if (!got) {
+        // A cursor journald no longer knows (the journal was rotated or
+        // vacuumed under it), or reads that keep timing out: the follow moves
+        // on from the unit's newest entry rather than asking the same thing
+        // for the rest of the update.
+        if (this.record.cursor && ++this.failures >= CURSOR_FAILURES_BEFORE_SKIP) {
+          const newest = await newestCursor(this.record.step);
+          if (newest && !this.record.done) {
+            this.failures = 0;
+            await this.log.writeFromFollow(
+              this,
+              `${YELLOW}[the journal could not be read on from where the log stopped; continuing from its newest entry]${RESET}\n`,
+              newest,
+            );
+          }
+        }
+        return false;
+      }
+      this.failures = 0;
       this.readable = true;
       if (!got.cursor || this.record.done) return false;
       await this.log.writeFromFollow(this, got.text, got.cursor);
@@ -410,7 +466,14 @@ class RunLog {
       this.capped = true;
       out = `\r\n${YELLOW}[the log reached ${UPDATE_LOG_MAX_BYTES / (1024 * 1024)} MiB: further output is in the journal]${RESET}\r\n`;
     }
-    await fs.promises.appendFile(logPath(this.meta.id), out, { mode: 0o600 });
+    try {
+      await fs.promises.appendFile(logPath(this.meta.id), out, { mode: 0o600 });
+    } catch (err) {
+      // Half a write must not stay in front of the next one: the record
+      // below would then point into the middle of it after a restart.
+      await fs.promises.truncate(logPath(this.meta.id), this.meta.size).catch(() => {});
+      throw err;
+    }
     this.meta.size += Buffer.byteLength(out);
   }
 
@@ -480,11 +543,16 @@ class RunLog {
     const said = outcome === "completed" ? "Update finished" : "Update failed";
     const why = error ? `: ${redactUpdateLogText(error)}` : "";
     await this.enqueue(async () => {
-      await this.append(`\n${tone}=== ${said}${why}${RESET} ${DIM}(${clock(deps.now())})${RESET}\n`, { force: true });
+      // Finished whatever the disk says to the last line: a run that ended is
+      // never followed as live again.
       this.meta.finished = true;
       this.meta.outcome = outcome;
       this.lastWriter = "runner";
-      await this.commit();
+      try {
+        await this.append(`\n${tone}=== ${said}${why}${RESET} ${DIM}(${clock(deps.now())})${RESET}\n`, { force: true });
+      } finally {
+        await this.commit();
+      }
     });
   }
 
@@ -497,6 +565,8 @@ class RunLog {
 let current: RunLog | null = null;
 /** A close in flight: the next open waits for it, so two runs never write one file. */
 let closing: Promise<void> = Promise.resolve();
+/** Opens, one after the other. */
+let opening: Promise<void> = Promise.resolve();
 
 async function readMeta(id: string): Promise<UpdateLogMeta | null> {
   try {
@@ -547,7 +617,14 @@ export interface OpenUpdateLogOptions {
  * left unfinished (the second half of an update, after the rebuild restarted
  * the web server). Answers the run id, or null when no log can be written.
  */
-export async function openUpdateLog(opts: OpenUpdateLogOptions): Promise<string | null> {
+export function openUpdateLog(opts: OpenUpdateLogOptions): Promise<string | null> {
+  // One open at a time: two at once could both find no run and both start one.
+  const next = opening.then(() => openNow(opts), () => openNow(opts));
+  opening = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
   try {
     await closing;
     if (current && !current.meta.finished) {
@@ -590,7 +667,8 @@ export async function openUpdateLog(opts: OpenUpdateLogOptions): Promise<string 
 
 async function reopen(meta: UpdateLogMeta, title: string): Promise<RunLog> {
   // Whatever was written after the last record is written again from the
-  // recorded cursor: the same bytes, so a reader that had them sees no change.
+  // recorded cursor. No reader was sent those bytes (updateLogInfo serves the
+  // recorded size only), so nothing anybody has seen changes.
   try {
     const { size } = await fs.promises.stat(logPath(meta.id));
     if (size > meta.size) await fs.promises.truncate(logPath(meta.id), meta.size);
@@ -646,10 +724,47 @@ export async function logUpdateStepEnd(
   await writeUpdateLog(`${tone}==> ${step.label}: ${outcome}${detail ? ` — ${detail}` : ""}${RESET}${took}\n`);
 }
 
+/** The streams of a child process, as `util.promisify(execFile)` hands it out on `.child`. */
+interface ChildStreams {
+  stdout?: NodeJS.ReadableStream | null;
+  stderr?: NodeJS.ReadableStream | null;
+}
+
+/**
+ * What a running command prints, into the log as it prints it: stdout and
+ * stderr in the order they arrive, a whole line at a time (so redaction never
+ * sees half a credential). `flush` writes what is left once the command ends.
+ */
+function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
+  const partial = new Map<NodeJS.ReadableStream, string>();
+  let writing: Promise<void> = Promise.resolve();
+  const take = (stream: NodeJS.ReadableStream, chunk: Buffer | string) => {
+    const text = (partial.get(stream) ?? "") + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    const cut = text.lastIndexOf("\n");
+    partial.set(stream, cut < 0 ? text : text.slice(cut + 1));
+    if (cut >= 0) {
+      const lines = text.slice(0, cut + 1);
+      writing = writing.then(() => writeUpdateLog(lines));
+    }
+  };
+  for (const stream of [child.stdout, child.stderr]) {
+    if (stream && typeof stream.on === "function") stream.on("data", (chunk: Buffer | string) => take(stream, chunk));
+  }
+  return {
+    flush: async () => {
+      await writing;
+      for (const rest of partial.values()) if (rest) await writeUpdateLog(`${rest}\n`);
+      partial.clear();
+    },
+  };
+}
+
 /**
  * A command the web server runs itself, and what it printed: `$ argv`, then
- * stdout, then stderr. `run` is the command exactly as the caller runs it; its
- * answer and its error are passed through untouched.
+ * its output — live, as it prints it, where `run` answers with the promise
+ * `util.promisify(execFile)` makes (it carries the child), and as stdout then
+ * stderr once it ends otherwise. `run` is the command exactly as the caller
+ * runs it; its answer and its error are passed through untouched.
  */
 export async function logUpdateCommand<T>(
   argv: readonly string[],
@@ -657,12 +772,20 @@ export async function logUpdateCommand<T>(
 ): Promise<T> {
   if (!current || current.meta.finished) return run();
   await writeUpdateLog(`${DIM}$ ${argv.join(" ")}${RESET}\n`);
+  const pending = run();
+  let streamed: { flush: () => Promise<void> } | null = null;
   try {
-    const result = await run();
-    await writeCommandOutput(result);
+    const child = (pending as { child?: ChildStreams }).child;
+    if (child && (child.stdout || child.stderr)) streamed = streamCommand(child);
+  } catch { /* written when it ends instead */ }
+  try {
+    const result = await pending;
+    if (streamed) await streamed.flush();
+    else await writeCommandOutput(result);
     return result;
   } catch (err) {
-    await writeCommandOutput(err);
+    if (streamed) await streamed.flush();
+    else await writeCommandOutput(err);
     await writeUpdateLog(`${RED}(${describeExit(err)})${RESET}\n`);
     throw err;
   }
@@ -763,7 +886,9 @@ export async function updateLogInfo(id: string): Promise<UpdateLogInfo | null> {
   const meta = await readMeta(id);
   return {
     id,
-    size,
+    // What the record accounts for: bytes past it are a write whose record a
+    // dying process never made, which the next one truncates and writes again.
+    size: meta ? Math.min(size, meta.size) : size,
     // A log with no record is one an older build cannot have written: it is
     // read as finished rather than followed for ever.
     finished: meta ? meta.finished : true,
@@ -795,8 +920,12 @@ export async function readUpdateLogChunk(
   id: string,
   offset: number,
   max: number = 64 * 1024,
+  /** Read nothing at or past this byte (the recorded size). */
+  limit: number = Number.MAX_SAFE_INTEGER,
 ): Promise<{ text: string; next: number } | null> {
   if (!UPDATE_LOG_ID_RE.test(id)) return null;
+  max = Math.max(0, Math.min(max, limit - offset));
+  if (max === 0) return { text: "", next: offset };
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(logPath(id), "r");
