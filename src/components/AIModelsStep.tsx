@@ -423,6 +423,52 @@ export default function AIModelsStep({
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
+  // ── An external AI engine already connected (TASK-2376) ──────────────────
+  //
+  // First-boot wizard only. A box whose owner (or provisioning) already set up
+  // an external engine as Local AI used to open this step on ClawBox AI, with
+  // the engine shown as "default" in the hero and no way forward but
+  // "Skip — I'll use only local AI", which installs and starts llama.cpp. When
+  // an engine is connected the step offers IT, selected, with a Continue that
+  // installs and starts nothing. `undefined` while the one read is in flight
+  // (the step waits, like for the edition, rather than flash the list); any
+  // failure is `null`: the step as it always was.
+  const wizardScope = !embedded && configureScope !== "local";
+  const [wizardEngine, setWizardEngine] = useState<{ displayName: string; modelRef: string } | null | undefined>(
+    wizardScope ? undefined : null,
+  );
+  const [useOtherProvider, setUseOtherProvider] = useState(false);
+  const [engineBusy, setEngineBusy] = useState(false);
+  const [engineError, setEngineError] = useState(false);
+  useEffect(() => {
+    if (!wizardScope) return;
+    let alive = true;
+    fetch("/setup-api/local-ai/external", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!alive) return;
+        const ok = data && data.configured === true && typeof data.displayName === "string" && typeof data.modelRef === "string";
+        setWizardEngine(ok ? { displayName: data.displayName, modelRef: data.modelRef } : null);
+      })
+      .catch(() => { if (alive) setWizardEngine(null); });
+    return () => { alive = false; };
+  }, [wizardScope]);
+
+  const continueWithEngine = useCallback(async () => {
+    setEngineBusy(true);
+    setEngineError(false);
+    try {
+      const res = await fetch("/setup-api/local-ai/external/select", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      notifyProvidersChanged();
+      onNext?.();
+    } catch {
+      setEngineError(true);
+    } finally {
+      setEngineBusy(false);
+    }
+  }, [onNext]);
+
   const [status, setStatus] = useState<{
     type: "success" | "error" | "info";
     message: string;
@@ -2201,7 +2247,7 @@ export default function AIModelsStep({
   // llamacpp row), so the card visibly collapsed the moment the edition landed.
   // The contextual area below the list reserves the same min-height both
   // branches use for their selected-provider controls.
-  if (edition === null) {
+  if (edition === null || (wizardScope && wizardEngine === undefined)) {
     return (
       <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
         <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8" role="status" aria-busy="true">
@@ -2231,6 +2277,81 @@ export default function AIModelsStep({
     );
   }
 
+  // An external engine is connected (TASK-2376): it is THE choice, selected,
+  // on both editions — Continue makes it the chat's model and installs or
+  // starts nothing on the box. Another provider stays one tap away.
+  if (wizardScope && wizardEngine && !useOtherProvider) {
+    return (
+      <div className="w-full max-w-[520px]" data-testid={testId}>
+        <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8">
+          <Title className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">{resolvedTitle}</Title>
+          <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)] mb-6">{resolvedDescription}</p>
+          <div role="radiogroup" aria-label={t("settings.providers.radioGroupLabel")} className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
+            <div
+              role="radio"
+              aria-checked="true"
+              tabIndex={0}
+              data-testid="setup-external-engine-choice"
+              className="flex items-center gap-3 px-4 py-3.5 bg-[var(--fill-2)]"
+            >
+              <span aria-hidden="true" className="w-5 h-5 rounded-full border-2 border-[var(--coral-bright)] flex items-center justify-center shrink-0">
+                <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />
+              </span>
+              <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 24 }} aria-hidden="true">hub</span>
+              <span className="flex-1 min-w-0">
+                <span className="block text-[length:var(--t-4)] font-semibold text-[var(--text-primary)] truncate">
+                  {t("localModels.external.subtitle", { model: wizardEngine.displayName })}
+                </span>
+                <span className="block text-[length:var(--t-2)] text-[var(--text-secondary)]">{t("localModels.external.wizard.connected")}</span>
+              </span>
+            </div>
+          </div>
+          <p className="mt-4 text-[length:var(--t-3)] leading-[1.6] text-[var(--text-secondary)]">{t("localModels.external.wizard.hint")}</p>
+          {engineError && (
+            <p role="alert" data-testid="setup-external-engine-error" className="mt-3 text-[length:var(--t-3)] text-red-300">
+              {t("localModels.external.wizard.failed", { model: wizardEngine.displayName })}
+            </p>
+          )}
+          <div className="mt-5">
+            <button
+              type="button"
+              data-testid="setup-external-engine-continue"
+              onClick={() => void continueWithEngine()}
+              disabled={engineBusy}
+              className={PRIMARY_ACTION_CLASS}
+            >
+              {engineBusy && ButtonSpinner}
+              {t("localModels.external.wizard.continue", { model: wizardEngine.displayName })}
+            </button>
+          </div>
+          <div className="mt-3 text-center">
+            <button
+              type="button"
+              data-testid="setup-external-engine-use-other"
+              onClick={() => setUseOtherProvider(true)}
+              disabled={engineBusy}
+              className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)] bg-transparent border-none cursor-pointer"
+            >
+              {t("localModels.external.wizard.useOther")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Back to the engine, for an owner who looked at the other providers first.
+  const backToEngine = wizardScope && wizardEngine ? (
+    <button
+      type="button"
+      data-testid="setup-external-engine-back"
+      onClick={() => setUseOtherProvider(false)}
+      className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)] bg-transparent border-none cursor-pointer"
+    >
+      {t("localModels.external.wizard.backToEngine", { model: wizardEngine.displayName })}
+    </button>
+  ) : null;
+
   // Hermes edition: providers/models are managed by Hermes, not the OpenClaw
   // provider config this step drives — render Hermes' own model/provider/key
   // config instead.
@@ -2242,7 +2363,7 @@ export default function AIModelsStep({
   // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
   // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
   if (edition === "hermes" && configureScope !== "local") {
-    return <HermesProviderConfig
+    const hermesPanel = <HermesProviderConfig
       embedded={embedded}
       onNext={onNext}
       testId={testId}
@@ -2253,6 +2374,12 @@ export default function AIModelsStep({
       requestedProviderId={requestedProviderId}
       providerSelectionRequest={providerSelectionRequest}
     />;
+    return backToEngine ? (
+      <>
+        {hermesPanel}
+        <div className="w-full max-w-[520px] mt-3 text-center">{backToEngine}</div>
+      </>
+    ) : hermesPanel;
   }
 
   return (
@@ -2670,7 +2797,13 @@ export default function AIModelsStep({
             </button>
           )}
         </div>
-        {!embedded && (
+        {!embedded && backToEngine && (
+          // With an engine connected the local choice IS the engine: the
+          // llama.cpp skip below would install and start the very runtime the
+          // engine replaces (and its configure is refused while it is selected).
+          <div className="mt-3 text-center">{backToEngine}</div>
+        )}
+        {!embedded && !backToEngine && (
           <div className="mt-3 text-center">
             <button
               type="button"

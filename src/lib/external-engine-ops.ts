@@ -8,14 +8,14 @@ import {
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
-import { isOllamaRunning, startOllamaService, stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { isOllamaRunning, standDownChatRuntimesForExternalEngine, startOllamaService, stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { applyLocalAiToHermes, HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
-import { hermesProviderValues } from "@/lib/external-engine-hermes";
+import { hermesProviderValues, reconcileExternalEngineWithHermes } from "@/lib/external-engine-hermes";
 import {
   EXTERNAL_ENGINE_PROVIDER,
   EXTERNAL_ENGINE_STORE_KEY,
@@ -513,6 +513,60 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
     warning = "The engine is saved, but the chat could not be switched to it. Pick it in the chat header.";
   }
   return { record, harness, models: probe.models, ...(warning ? { warning } : {}) };
+}
+
+/**
+ * Make the engine that is already set up the chat's model on the active
+ * harness — the first-boot wizard's "Continue with <model>" when an engine is
+ * connected (TASK-2376). Nothing is probed, installed or started: OpenClaw's
+ * primary goes through chat/model's own POST (the owner's explicit pick), Hermes'
+ * selection is `model.provider` / `model.default`, and the on-device chat
+ * runtimes are stood down. Idempotent.
+ */
+export async function selectExternalEngine(): Promise<{ modelRef: string; harness: Harness }> {
+  const record = externalEngineFromState(await getAll());
+  if (!record) {
+    throw new ExternalEngineRefusal("not_configured", "No external AI engine is set up on this box.", 404);
+  }
+  const harness = await getActiveHarness();
+  const modelRef = externalEngineModelRef(record.modelId);
+  if (harness === "hermes") {
+    if (record.contextWindow < HERMES_MIN_CONTEXT_WINDOW) {
+      throw new ExternalEngineRefusal(
+        "context_too_small_for_hermes",
+        `Hermes needs a model with a context window of at least ${HERMES_MIN_CONTEXT_WINDOW.toLocaleString("en-US")} tokens; edit the engine in Settings → Local AI.`,
+        409,
+      );
+    }
+    // A dual box may have saved the engine on OpenClaw: register its block first.
+    await reconcileExternalEngineWithHermes();
+    try {
+      await withProviderMcpRefresh(() => patchHermesConfig({
+        set: { "model.provider": EXTERNAL_ENGINE_PROVIDER, "model.default": record.modelId },
+      }));
+    } catch (err) {
+      throw new ExternalEngineRefusal(
+        "hermes_write_failed",
+        scrub(err, null) || "The engine could not be selected in Hermes' config.",
+        502,
+      );
+    } finally {
+      invalidateModelOptions();
+    }
+  } else {
+    if (openclawIsAbsent()) throw new ExternalEngineRefusal("no_harness", "OpenClaw is not installed on this box.", 501);
+    if (!(await chatModelPost(modelRef, false))) {
+      throw new ExternalEngineRefusal(
+        "primary_not_set",
+        "The chat could not be switched to the external engine. Pick it in the chat header, or try again.",
+        502,
+      );
+    }
+  }
+  await standDownChatRuntimesForExternalEngine().catch((err) => {
+    console.error("[external-engine] standing down the on-device runtimes failed:", scrub(err, null));
+  });
+  return { modelRef, harness };
 }
 
 /** Take the engine out of the harness and put the previous Local AI back. */

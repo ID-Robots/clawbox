@@ -45,6 +45,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   stopLocalAiProvider: vi.fn(async () => {}),
   isOllamaRunning: vi.fn(async () => false),
   startOllamaService: vi.fn(async () => {}),
+  standDownChatRuntimesForExternalEngine: vi.fn(async () => ({ ollama: false, llamacpp: false })),
 }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: vi.fn(async () => ({ mode: "merge", backupPath: null })),
@@ -65,15 +66,17 @@ vi.mock("@/app/setup-api/chat/model/route", () => ({
 
 import { DELETE, GET, POST } from "@/app/setup-api/local-ai/external/route";
 import { POST as TEST } from "@/app/setup-api/local-ai/external/test/route";
+import { POST as SELECT } from "@/app/setup-api/local-ai/external/select/route";
 import { requireSession } from "@/lib/route-auth";
 import { getActiveHarness } from "@/lib/harness";
 import { readConfig, runOpenclawConfigSetBatch, runOpenclawConfigUnset } from "@/lib/openclaw-config";
-import { isOllamaRunning, startOllamaService, stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { isOllamaRunning, standDownChatRuntimesForExternalEngine, startOllamaService, stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { patchHermesConfig, resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { applyLocalAiToHermes, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 import { POST as chatModelPost } from "@/app/setup-api/chat/model/route";
 
 let openclaw: Record<string, unknown>;
+let chatBodies: Record<string, unknown>[] = [];
 let logs: string[];
 let engineModels: string[];
 let engineStatus: number;
@@ -124,8 +127,10 @@ beforeEach(() => {
   vi.mocked(runOpenclawConfigUnset).mockImplementation(async (p) => {
     if (p === "models.providers.clawext") delete (openclaw.models as { providers: Record<string, unknown> }).providers.clawext;
   });
+  chatBodies = [];
   vi.mocked(chatModelPost).mockImplementation((async (r: Request) => {
     const body = await r.json();
+    chatBodies.push(body);
     (openclaw.agents as { defaults: { model: Record<string, unknown> } }).defaults.model.primary = body.model;
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   }) as never);
@@ -455,3 +460,64 @@ describe("on Hermes", () => {
     expect(applyLocalAiToHermes).not.toHaveBeenCalled();
   });
 });
+
+describe("select: the wizard's Continue with an engine already connected", () => {
+  it("answers 404 not_configured when there is no engine, and changes nothing", async () => {
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("not_configured");
+    expect(chatModelPost).not.toHaveBeenCalled();
+    expect(patchHermesConfig).not.toHaveBeenCalled();
+  });
+
+  it("on OpenClaw makes the engine the chat's model through chat/model, probes nothing and starts nothing", async () => {
+    await POST(req("POST", saveBody()));
+    // The owner (or a provisioning step) moved the chat elsewhere since.
+    (openclaw.agents as { defaults: { model: Record<string, unknown> } }).defaults.model.primary = "deepseek/deepseek-v4-flash";
+    vi.mocked(chatModelPost).mockClear();
+    vi.mocked(fetch).mockClear();
+    vi.mocked(stopLocalAiProvider).mockClear();
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, modelRef: REF, harness: "openclaw" });
+    expect((openclaw.agents as { defaults: { model: { primary: string } } }).defaults.model.primary).toBe(REF);
+    // The owner's own pick, not an automatic one.
+    expect(chatBodies.at(-1)).toEqual({ model: REF });
+    expect(standDownChatRuntimesForExternalEngine).toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(startOllamaService).not.toHaveBeenCalled();
+    expect(store.local_ai_provider).toBe("clawext");
+  });
+
+  it("answers 502 primary_not_set when chat/model refuses, and says so", async () => {
+    await POST(req("POST", saveBody()));
+    vi.mocked(chatModelPost).mockResolvedValue(new Response("{}", { status: 409 }) as never);
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("primary_not_set");
+  });
+
+  it("on Hermes selects its block in config.yaml", async () => {
+    vi.mocked(getActiveHarness).mockResolvedValue("hermes");
+    await POST(req("POST", saveBody()));
+    vi.mocked(patchHermesConfig).mockClear();
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "value", value: BASE });
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, harness: "hermes" });
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets).toContainEqual({ "model.provider": "clawext", "model.default": MODEL });
+    expect(chatModelPost).not.toHaveBeenCalled();
+  });
+
+  it("on Hermes refuses an engine under Hermes' window floor rather than select a model Hermes will refuse", async () => {
+    await POST(req("POST", saveBody({ contextWindow: 32768, maxTokens: 4096 })));
+    vi.mocked(getActiveHarness).mockResolvedValue("hermes");
+    vi.mocked(patchHermesConfig).mockClear();
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("context_too_small_for_hermes");
+    expect(patchHermesConfig).not.toHaveBeenCalled();
+  });
+});
+

@@ -197,7 +197,9 @@ All heals are idempotent — a healthy config is left untouched.
 makes an OpenAI-compatible endpoint the owner runs the box's Local AI. The endpoint is
 validated with `GET {base}/models` (8 s, redirects not followed, at most 2 MB of the answer
 read, only up to 50 bounded model ids passed on) before anything is written;
-`POST /setup-api/local-ai/external/test` runs the same check alone. The base URL is http(s)
+`POST /setup-api/local-ai/external/test` runs the same check alone, and
+`POST /setup-api/local-ai/external/select` makes an engine that is already saved the chat's
+model again (the setup wizard's Continue when the engine was connected before setup). The base URL is http(s)
 with no credentials, query or fragment, never the box's own `/setup-api/`, and never a
 link-local or cloud-metadata target (169.254.0.0/16, fe80::/10, `metadata.google.internal`)
 or the unspecified address (0.0.0.0, `::`) — typed as an address in any spelling, or as a

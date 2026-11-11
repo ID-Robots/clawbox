@@ -69,11 +69,13 @@ describe("external engine routes: owner only", () => {
   async function routes() {
     const external = await import("@/app/setup-api/local-ai/external/route");
     const test = await import("@/app/setup-api/local-ai/external/test/route");
+    const select = await import("@/app/setup-api/local-ai/external/select/route");
     return [
       ["GET external", () => external.GET, "GET", "/setup-api/local-ai/external?probe=1"],
       ["POST external (Save)", () => external.POST, "POST", "/setup-api/local-ai/external"],
       ["DELETE external (Remove)", () => external.DELETE, "DELETE", "/setup-api/local-ai/external"],
       ["POST external/test (Test)", () => test.POST, "POST", "/setup-api/local-ai/external/test"],
+      ["POST external/select (the wizard's Continue)", () => select.POST, "POST", "/setup-api/local-ai/external/select"],
     ] as const;
   }
 
