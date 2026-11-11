@@ -205,26 +205,50 @@ describe.skipIf(!hasPython3)("openclaw_is_v2 reads the installed core's manifest
     expect(box.launcherRuns()).toBe("");
   });
 
-  // A bare caller under `set -euo pipefail` must survive every unusable
-  // manifest: the read is quiet and never fails, and the v2 pin answers.
-  it.each<[string, Record<string, unknown> | string | null]>([
+  // The answer is the exit status, so a bare call under `set -euo pipefail`
+  // ends its caller exactly when the answer is "before OpenClaw 2": callers
+  // use it as a condition. The manifest read itself never ends the caller or
+  // prints, whatever state the file is in, so the same unusable manifest gives
+  // "after" under a v2 pin and a quiet status 1 under an older one.
+  const BARE: [string, string, Run][] = [
+    ["a v2 pin", "2026.10.9", { stdout: "after\n", stderr: "", status: 0 }],
+    ["a pre-v2 pin", "2026.7.1", { stdout: "", stderr: "", status: 1 }],
+  ];
+  const UNUSABLE: [string, Record<string, unknown> | string | null][] = [
     ["missing", null],
     ["not JSON", "{ this is not json"],
     ["a version that is not a string", { version: 5 }],
-  ])("called bare under set -euo pipefail with the manifest %s, returns and prints nothing", (_label, content) => {
-    const box = makeBox();
-    box.manifest(content);
-    const r = run(box, "openclaw_is_v2\necho after");
-    expect(r).toEqual({ stdout: "after\n", stderr: "", status: 0 });
-    expect(box.launcherRuns()).toBe("");
-  });
+  ];
+  const bareCases = UNUSABLE.flatMap(([label, content]) =>
+    BARE.map(([pinLabel, pin, want]) => [label, pinLabel, content, pin, want] as const),
+  );
+  it.each(bareCases)(
+    "called bare under set -euo pipefail with the manifest %s and %s, ends the caller only on a pre-v2 answer",
+    (_label, _pinLabel, content, pin, want) => {
+      const box = makeBox();
+      box.pin(pin);
+      box.manifest(content);
+      expect(run(box, "openclaw_is_v2\necho after")).toEqual(want);
+      expect(box.launcherRuns()).toBe("");
+    },
+  );
 
-  it("called bare under set -euo pipefail with a python3 that fails, returns and prints nothing", () => {
+  it.each(BARE)(
+    "called bare under set -euo pipefail with a python3 that fails and %s, ends the caller only on a pre-v2 answer",
+    (_label, pin, want) => {
+      const box = makeBox();
+      box.pin(pin);
+      box.manifest({ name: "openclaw", version: "2026.10.9" });
+      box.python3Shim("echo 'python3: broken' >&2\nexit 1");
+      expect(run(box, "openclaw_is_v2\necho after")).toEqual(want);
+      expect(box.launcherRuns()).toBe("");
+    },
+  );
+
+  it("called bare under set -euo pipefail on a pre-v2 core, returns 1 and ends the caller", () => {
     const box = makeBox();
-    box.manifest({ name: "openclaw", version: "2026.10.9" });
-    box.python3Shim("echo 'python3: broken' >&2\nexit 1");
-    const r = run(box, "openclaw_is_v2\necho after");
-    expect(r).toEqual({ stdout: "after\n", stderr: "", status: 0 });
+    box.manifest({ name: "openclaw", version: "2026.7.1" });
+    expect(run(box, "openclaw_is_v2\necho after")).toEqual({ stdout: "", stderr: "", status: 1 });
     expect(box.launcherRuns()).toBe("");
   });
 
