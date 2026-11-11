@@ -2197,7 +2197,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
 
   useEffect(() => {
-    if (!emailPanelVisible) return;
+    if (!boxReads || !emailPanelVisible) return;
     // The pacing — interval, focus, visible-edge, and never behind a hidden tab
     // — is `installPendingRefresh`, shared with the chat surface's batch card so
     // the two cannot drift into disagreeing about how fresh this list is.
@@ -2209,7 +2209,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // being told nobody can be asked.
       refreshChatApproval();
     });
-  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+  }, [boxReads, emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
 
   /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
   const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
@@ -3331,7 +3331,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // places the badge can appear — and not on every section, since it costs a
   // request that answers nothing anywhere else.
   useEffect(() => {
-    if (activeSection !== "channels" && !isChannelSection(activeSection)) return;
+    if (!boxReads || (activeSection !== "channels" && !isChannelSection(activeSection))) return;
     // `alive` because the answer comes back after an await and a Settings pane
     // is left by clicking another one.
     let alive = true;
@@ -3340,7 +3340,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       if (alive && rows) setPluginRepairs(rows);
     })();
     return () => { alive = false; };
-  }, [activeSection, fetchPluginRepairs]);
+  }, [boxReads, activeSection, fetchPluginRepairs]);
 
   // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".

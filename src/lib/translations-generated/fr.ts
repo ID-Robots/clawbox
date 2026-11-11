@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "Votre mot de passe n’a pas pu être changé. Réessayez.",
   "users.password.errInvalid": "Utilisez entre {min} et {max} caractères, sans caractère de contrôle.",
   "users.password.errMismatch": "Les nouveaux mots de passe ne correspondent pas.",
-  "users.password.errSessions": "Votre mot de passe a été changé, mais vos autres sessions n’ont pas pu être fermées. Changez-le encore une fois ou demandez au propriétaire.",
+  "users.password.errSessions": "Vos autres sessions n’ont pas pu être fermées, votre mot de passe n’a donc pas été changé. Réessayez.",
   "users.password.errTooMany": "Trop de mots de passe erronés. Réessayez dans quelques minutes.",
   "users.password.errUnavailable": "Cette ClawBox ne peut pas encore changer les mots de passe. Demandez au propriétaire de la mettre à jour.",
   "users.password.errWrong": "Votre mot de passe actuel n’est pas correct.",

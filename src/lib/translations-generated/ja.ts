@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "パスワードを変更できませんでした。もう一度お試しください。",
   "users.password.errInvalid": "{min}〜{max} 文字で、制御文字を含めないでください。",
   "users.password.errMismatch": "新しいパスワードが一致しません。",
-  "users.password.errSessions": "パスワードは変更されましたが、他のセッションをサインアウトできませんでした。もう一度変更するか、オーナーに依頼してください。",
+  "users.password.errSessions": "他のセッションをサインアウトできなかったため、パスワードは変更されていません。もう一度お試しください。",
   "users.password.errTooMany": "間違ったパスワードが多すぎます。数分後にもう一度お試しください。",
   "users.password.errUnavailable": "この ClawBox はまだパスワードを変更できません。オーナーにアップデートを依頼してください。",
   "users.password.errWrong": "現在のパスワードが正しくありません。",

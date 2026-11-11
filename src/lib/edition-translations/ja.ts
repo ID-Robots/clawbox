@@ -1846,7 +1846,7 @@ export const ja: Record<string, string> = {
   "users.password.errTooMany": "間違ったパスワードが多すぎます。数分後にもう一度お試しください。",
   "users.password.errUnavailable": "この ClawBox はまだパスワードを変更できません。オーナーにアップデートを依頼してください。",
   "users.password.errFailed": "パスワードを変更できませんでした。もう一度お試しください。",
-  "users.password.errSessions": "パスワードは変更されましたが、他のセッションをサインアウトできませんでした。もう一度変更するか、オーナーに依頼してください。",
+  "users.password.errSessions": "他のセッションをサインアウトできなかったため、パスワードは変更されていません。もう一度お試しください。",
   "users.orgMode.title": "組織モード",
   "users.orgMode.hint": "会社のスタッフが使う ClawBox 向けです。ユーザーが使えるのはチャット、ファイル、自分の設定（言語、パスワード、外観）だけになります。ターミナル、コーディングエージェント、アプリストア、バックアップ、AI プロバイダー、システム、ネットワーク、アップデート、ユーザーはあなただけのものです。ClawBox AI のおすすめは全員に対して表示されません。",
   "users.orgMode.on": "オン — ユーザーにはチャット、ファイル、自分の設定だけが表示されます",

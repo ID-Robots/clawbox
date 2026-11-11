@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "No se pudo cambiar tu contraseña. Inténtalo de nuevo.",
   "users.password.errInvalid": "Usa entre {min} y {max} caracteres, sin caracteres de control.",
   "users.password.errMismatch": "Las contraseñas nuevas no coinciden.",
-  "users.password.errSessions": "Tu contraseña se ha cambiado, pero no se pudieron cerrar tus otras sesiones. Cámbiala una vez más o pide ayuda al propietario.",
+  "users.password.errSessions": "No se pudieron cerrar tus otras sesiones, así que tu contraseña no se ha cambiado. Inténtalo de nuevo.",
   "users.password.errTooMany": "Demasiadas contraseñas incorrectas. Vuelve a intentarlo dentro de unos minutos.",
   "users.password.errUnavailable": "Esta ClawBox todavía no puede cambiar contraseñas. Pide al propietario que la actualice.",
   "users.password.errWrong": "Tu contraseña actual no es correcta.",

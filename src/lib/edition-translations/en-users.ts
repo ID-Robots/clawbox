@@ -84,7 +84,7 @@ export const usersEn: Record<string, string> = {
   "users.password.errTooMany": "Too many wrong passwords. Try again in a few minutes.",
   "users.password.errUnavailable": "This ClawBox cannot change passwords yet. Ask the owner to update it.",
   "users.password.errFailed": "Your password could not be changed. Try again.",
-  "users.password.errSessions": "Your password was changed, but your other sessions could not be signed out. Change it once more, or ask the owner.",
+  "users.password.errSessions": "Your other sessions could not be signed out, so your password was not changed. Try again.",
   "users.orgMode.title": "Organisation mode",
   "users.orgMode.hint": "For a ClawBox that serves a company's staff. Users get only Chat, Files and their own settings (language, password, look). The terminal, the coding agent, the app stores, backups, AI providers, the system, network, updates and users stay yours. ClawBox AI offers are hidden for everyone.",
   "users.orgMode.on": "On — users see Chat, Files and their own settings",

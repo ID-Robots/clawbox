@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "Паролата не можа да бъде сменена. Опитайте отново.",
   "users.password.errInvalid": "Използвайте от {min} до {max} знака, без управляващи символи.",
   "users.password.errMismatch": "Новите пароли не съвпадат.",
-  "users.password.errSessions": "Паролата ви е сменена, но другите ви сесии не можаха да бъдат прекратени. Сменете я още веднъж или помолете собственика.",
+  "users.password.errSessions": "Другите ви сесии не можаха да бъдат прекратени, затова паролата ви не е сменена. Опитайте отново.",
   "users.password.errTooMany": "Твърде много грешни пароли. Опитайте отново след няколко минути.",
   "users.password.errUnavailable": "Този ClawBox все още не може да сменя пароли. Помолете собственика да го обнови.",
   "users.password.errWrong": "Текущата парола не е вярна.",

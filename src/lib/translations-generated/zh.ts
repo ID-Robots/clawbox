@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "无法修改密码，请重试。",
   "users.password.errInvalid": "请使用 {min}–{max} 个字符，且不含控制字符。",
   "users.password.errMismatch": "两次输入的新密码不一致。",
-  "users.password.errSessions": "密码已修改，但无法注销你的其他会话。请再修改一次，或联系所有者。",
+  "users.password.errSessions": "无法注销你的其他会话，因此密码未修改。请重试。",
   "users.password.errTooMany": "错误密码次数过多，请几分钟后再试。",
   "users.password.errUnavailable": "这台 ClawBox 还不能修改密码。请让所有者更新它。",
   "users.password.errWrong": "当前密码不正确。",

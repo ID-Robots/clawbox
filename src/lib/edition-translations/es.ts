@@ -1841,7 +1841,7 @@ export const es: Record<string, string> = {
   "users.password.errTooMany": "Demasiadas contraseñas incorrectas. Vuelve a intentarlo dentro de unos minutos.",
   "users.password.errUnavailable": "Esta ClawBox todavía no puede cambiar contraseñas. Pide al propietario que la actualice.",
   "users.password.errFailed": "No se pudo cambiar tu contraseña. Inténtalo de nuevo.",
-  "users.password.errSessions": "Tu contraseña se ha cambiado, pero no se pudieron cerrar tus otras sesiones. Cámbiala una vez más o pide ayuda al propietario.",
+  "users.password.errSessions": "No se pudieron cerrar tus otras sesiones, así que tu contraseña no se ha cambiado. Inténtalo de nuevo.",
   "users.orgMode.title": "Modo organización",
   "users.orgMode.hint": "Para una ClawBox al servicio del personal de una empresa. Los usuarios solo tienen Chat, Archivos y sus propios ajustes (idioma, contraseña, aspecto). El terminal, el agente de programación, las tiendas de aplicaciones, las copias de seguridad, los proveedores de IA, el sistema, la red, las actualizaciones y los usuarios siguen siendo tuyos. Las ofertas de ClawBox AI se ocultan para todos.",
   "users.orgMode.on": "Activado: los usuarios ven Chat, Archivos y sus propios ajustes",

@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "Ditt lösenord kunde inte bytas. Försök igen.",
   "users.password.errInvalid": "Använd {min}–{max} tecken, utan kontrolltecken.",
   "users.password.errMismatch": "De nya lösenorden stämmer inte överens.",
-  "users.password.errSessions": "Ditt lösenord har bytts, men dina andra sessioner kunde inte loggas ut. Byt det en gång till eller be ägaren.",
+  "users.password.errSessions": "Dina andra sessioner kunde inte loggas ut, så ditt lösenord har inte bytts. Försök igen.",
   "users.password.errTooMany": "För många felaktiga lösenord. Försök igen om några minuter.",
   "users.password.errUnavailable": "Den här ClawBoxen kan inte byta lösenord än. Be ägaren att uppdatera den.",
   "users.password.errWrong": "Ditt nuvarande lösenord stämmer inte.",

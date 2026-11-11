@@ -226,6 +226,40 @@ describe("a spreadsheet built to balloon", () => {
     }
   });
 
+  it("keeps an Excel sheet's row in progress when the budget cuts it, and never writes past the budget", () => {
+    const shared = Array.from({ length: 40 }, (_, i) => `<si><t>${String(i).padStart(2, "0")}${"z".repeat(40_000)}</t></si>`).join("");
+    const cells = Array.from({ length: 40 }, (_, i) => `<c r="${String.fromCharCode(65 + (i % 26))}${i < 26 ? "" : "A"}1" t="s"><v>${i}</v></c>`).join("");
+    const workbook = zip([
+      { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="Wide" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: "xl/sharedStrings.xml", data: Buffer.from(`<sst>${shared}</sst>`) },
+      { name: "xl/worksheets/sheet1.xml", data: Buffer.from(`<worksheet><sheetData><row r="1">${cells}</row></sheetData></worksheet>`) },
+    ]);
+    const result = extractOfficeText(workbook, "wide.xlsx");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
+      // The one row is kept, not dropped for the heading alone.
+      expect(result.text).toContain("00" + "z".repeat(100));
+      expect(result.text.length).toBeGreaterThan(OFFICE_TEXT_MAX_CHARS / 2);
+    }
+  });
+
+  it("checks each OpenDocument field against what is left, so the last one cannot overshoot", () => {
+    const field = "w".repeat(30_000);
+    const result = extractOfficeText(
+      ods(`<table:table table:name="F"><table:table-row table:number-rows-repeated="100"><table:table-cell table:number-columns-repeated="50"><text:p>${field}</text:p></table:table-cell></table:table-row></table:table>`),
+      "fields.ods",
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
+      expect(result.text).toContain(field);
+    }
+  });
+
   it("says so when a run of blank rows was shortened", () => {
     const workbook = zip([
       { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>') },

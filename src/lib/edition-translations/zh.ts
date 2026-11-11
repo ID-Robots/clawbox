@@ -1854,7 +1854,7 @@ export const zh: Record<string, string> = {
   "users.password.errTooMany": "错误密码次数过多，请几分钟后再试。",
   "users.password.errUnavailable": "这台 ClawBox 还不能修改密码。请让所有者更新它。",
   "users.password.errFailed": "无法修改密码，请重试。",
-  "users.password.errSessions": "密码已修改，但无法注销你的其他会话。请再修改一次，或联系所有者。",
+  "users.password.errSessions": "无法注销你的其他会话，因此密码未修改。请重试。",
   "users.orgMode.title": "组织模式",
   "users.orgMode.hint": "适用于为公司员工服务的 ClawBox。用户只能使用聊天、文件和自己的设置（语言、密码、外观）。终端、编程代理、应用商店、备份、AI 提供商、系统、网络、更新和用户仍归你管理。ClawBox AI 的推广信息对所有人隐藏。",
   "users.orgMode.on": "开启——用户只能看到聊天、文件和自己的设置",

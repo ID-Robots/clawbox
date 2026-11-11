@@ -4757,7 +4757,7 @@ const table: Record<string, string> = {
   "users.password.errFailed": "Je wachtwoord kon niet worden gewijzigd. Probeer het opnieuw.",
   "users.password.errInvalid": "Gebruik {min}–{max} tekens, zonder stuurtekens.",
   "users.password.errMismatch": "De nieuwe wachtwoorden komen niet overeen.",
-  "users.password.errSessions": "Je wachtwoord is gewijzigd, maar je andere sessies konden niet worden afgemeld. Wijzig het nog een keer of vraag de eigenaar.",
+  "users.password.errSessions": "Je andere sessies konden niet worden afgemeld, dus je wachtwoord is niet gewijzigd. Probeer het opnieuw.",
   "users.password.errTooMany": "Te veel verkeerde wachtwoorden. Probeer het over een paar minuten opnieuw.",
   "users.password.errUnavailable": "Deze ClawBox kan nog geen wachtwoorden wijzigen. Vraag de eigenaar om hem bij te werken.",
   "users.password.errWrong": "Je huidige wachtwoord klopt niet.",

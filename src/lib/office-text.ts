@@ -588,7 +588,11 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
   let inInline = 0;
   let inCell = false;
   for (const tok of tokens(xml)) {
-    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS || chars >= MAX_SHEET_CHARS) return { rows, cut: true };
+    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS || chars >= MAX_SHEET_CHARS) {
+      // What was read is kept, the row being read included.
+      if (row && row.length > 0) rows.push(row);
+      return { rows, cut: true };
+    }
     if (tok.kind === "text") {
       if (inCell && (inValue > 0 || inInline > 0)) value += tok.text;
       continue;
@@ -625,8 +629,16 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
                 cut = true;
               }
               cells += Math.max(1, cellCol + 1 - row.length);
-              // As the CSV will write it: quoting can double a field.
-              chars += csvField(shown).length + 1;
+              // As the CSV will write it: quoting can double a field. A field
+              // that would take the sheet past its budget is not written.
+              const encoded = csvField(shown).length + 1;
+              if (chars + encoded > MAX_SHEET_CHARS) {
+                chars = MAX_SHEET_CHARS;
+                cut = true;
+                inCell = false;
+                break;
+              }
+              chars += encoded;
               while (row.length < cellCol) row.push("");
               row[cellCol] = shown;
             }
@@ -708,11 +720,20 @@ function odsText(zip: ZipReader, sink: Sink): void {
     const times = Math.min(cellRepeat, shown === "" ? MAX_COLUMNS : MAX_REPEAT);
     // As the CSV will write it: quoting can double a field.
     const encoded = csvField(shown).length + 1;
-    for (let i = 0; i < times && row.length < MAX_COLUMNS && chars < MAX_SHEET_CHARS; i++) {
+    // Each copy is checked against what is left, so the last one cannot take
+    // the CSV past the sheet's budget.
+    let added = 0;
+    for (; added < times && row.length < MAX_COLUMNS && chars + encoded <= MAX_SHEET_CHARS; added++) {
       row.push(shown);
       cells++;
       chars += encoded;
       rowChars += encoded;
+    }
+    // Stopped by the budget, not by the copies or the columns: the sheet is
+    // full, and the next token ends it with what was read.
+    if (added < times && row.length < MAX_COLUMNS && chars + encoded > MAX_SHEET_CHARS) {
+      chars = MAX_SHEET_CHARS;
+      sink.partial = true;
     }
     cell = null;
   };

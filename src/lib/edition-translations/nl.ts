@@ -1846,7 +1846,7 @@ export const nl: Record<string, string> = {
   "users.password.errTooMany": "Te veel verkeerde wachtwoorden. Probeer het over een paar minuten opnieuw.",
   "users.password.errUnavailable": "Deze ClawBox kan nog geen wachtwoorden wijzigen. Vraag de eigenaar om hem bij te werken.",
   "users.password.errFailed": "Je wachtwoord kon niet worden gewijzigd. Probeer het opnieuw.",
-  "users.password.errSessions": "Je wachtwoord is gewijzigd, maar je andere sessies konden niet worden afgemeld. Wijzig het nog een keer of vraag de eigenaar.",
+  "users.password.errSessions": "Je andere sessies konden niet worden afgemeld, dus je wachtwoord is niet gewijzigd. Probeer het opnieuw.",
   "users.orgMode.title": "Organisatiemodus",
   "users.orgMode.hint": "Voor een ClawBox die de medewerkers van een bedrijf bedient. Gebruikers krijgen alleen Chat, Bestanden en hun eigen instellingen (taal, wachtwoord, uiterlijk). De terminal, de codeeragent, de app-winkels, back-ups, AI-aanbieders, het systeem, het netwerk, updates en gebruikers blijven van jou. Aanbiedingen van ClawBox AI worden voor iedereen verborgen.",
   "users.orgMode.on": "Aan — gebruikers zien Chat, Bestanden en hun eigen instellingen",
