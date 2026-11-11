@@ -3439,6 +3439,153 @@ restore_previous_build() {
   done
 }
 
+# "a, b, c and 2 more": the first three lines of $2, each without its first $1
+# characters (a status code or an index tag in front of the path).
+first_paths() {
+  local skip="$1" line out="" n=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    if [ "$n" -le 3 ]; then out="${out:+$out, }${line:$skip}"; fi
+  done <<< "$2"
+  if [ "$n" -gt 3 ]; then out="$out and $((n - 3)) more"; fi
+  printf '%s\n' "$out"
+}
+
+# May this build leave Next's type check to CI? Prints why or why not; yes only
+# for a tree CI has already checked.
+#
+# Next's own check is 77 s of a 113 s `bun run build` on an 8 GB board, with a
+# ~1 GB heap of its own (measured on a beta update). Every pull request merged
+# into beta or main passed the required whole-program tsc (`test`) and
+# `bun run build` (`e2e`) checks against its own base; the merged tip itself is
+# re-checked only by push runs that nothing waits for, so a tip that combines
+# two pull requests can hold code no check type-checked before it landed.
+# So the answer is yes when the checkout is ON beta or main (attached, not
+# detached), HEAD is exactly origin's fetched tip of that branch, and nothing in
+# the tree differs from it. Anything else keeps the check: another branch, a
+# detached HEAD even at the tip, a commit ahead or behind, an edit or a new
+# file, a git that cannot answer, test mode. Nothing has checked THAT tree.
+# Both sync paths (sync_repo_to_update_target, and syncCheckoutToUpstream in
+# updater.ts) leave a box attached to its branch at the tip with a clean tree,
+# and the rebuild step then changes only the executable bits of scripts/*.sh
+# (step_directories_permissions, before it builds), which the status probe
+# below does not count.
+#
+# Every condition is evaluated and every failure named, so the log says exactly
+# why a box type-checked. A command that fails fails its condition, so an empty
+# answer from a failed git is never read as "clean" or "equal".
+#
+# This runs as root inside the dispatched rebuild steps, which run no other git
+# in the tree, so it adds none either: every git call and the read of the pin go
+# through the tree's owner (as_clawbox), and `--no-optional-locks` keeps the
+# status probe from rewriting .git/index. The branch is resolve_update_branch's
+# order — CLAWBOX_BRANCH, the pin, the branch HEAD is on — without calling it,
+# since its git runs as root. Its last rule, recovering the branch of a detached
+# HEAD from the tree's build stamp, is not needed: a detached HEAD keeps the
+# check whichever branch it came from.
+build_type_check_proven_by_ci() {
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  local -a failed=()
+  local branch="" pin="" candidate attached="" head="" tip="" changes="" line odd="" nl=$'\n' reason=""
+  if is_test_mode; then failed+=("a test-mode run"); fi
+
+  # Empty on a detached HEAD.
+  if ! attached="$("${tree_git[@]}" symbolic-ref --short -q HEAD 2>/dev/null)"; then attached=""; fi
+
+  # A name outside is_safe_git_ref's characters is no name, as there (that
+  # function's own grammar check runs git as root; one it would refuse here
+  # only makes the answer no).
+  pin="$(as_clawbox head -n 1 -- "$PROJECT_DIR/.update-branch" 2>/dev/null || true)"
+  pin="${pin//[[:space:]]/}"
+  for candidate in "${CLAWBOX_BRANCH:-}" "$pin" "$attached"; do
+    case "$candidate" in
+      ""|-*|/*|*[!A-Za-z0-9._/-]*) continue ;;
+    esac
+    branch="$candidate"
+    break
+  done
+  if [ -z "$branch" ]; then
+    failed+=("no update branch could be resolved")
+  elif [ "$branch" != "beta" ] && [ "$branch" != "main" ]; then
+    failed+=("the box follows $branch, not beta or main")
+  fi
+
+  if [ -z "$attached" ]; then
+    failed+=("HEAD is not on a branch")
+  elif [ "$attached" != "$branch" ]; then
+    failed+=("HEAD is on $attached, not ${branch:-the update branch}")
+  fi
+
+  # Equality, not ancestry: a commit ahead of origin is one CI never saw.
+  if ! head="$("${tree_git[@]}" rev-parse --verify -q HEAD 2>/dev/null)" || [ -z "$head" ]; then
+    failed+=("git could not read HEAD")
+  elif [ -z "$branch" ]; then
+    failed+=("there is no origin branch to compare HEAD with")
+  elif ! tip="$("${tree_git[@]}" rev-parse --verify -q "refs/remotes/origin/$branch" 2>/dev/null)" || [ -z "$tip" ]; then
+    failed+=("origin/$branch is not in this checkout")
+  elif [ "$head" != "$tip" ]; then
+    failed+=("HEAD ${head:0:12} is not origin/$branch's tip ${tip:0:12}")
+  fi
+
+  # Tracked changes and new files: a new .ts file under src/ is in the program
+  # as much as an edited one, and a new page under src/app/ is a route Next
+  # compiles. An executable bit is not a change here (core.fileMode=false):
+  # step_rebuild_reboot, the step every in-app update dispatches, makes every
+  # scripts/*.sh executable before it builds, some are tracked without the bit,
+  # and the bit changes nothing Next compiles or checks; an edit, a new or
+  # deleted file and a file swapped for a symlink or back still count. What
+  # could keep a change out of `git status` is switched off or checked here:
+  # `--untracked-files=normal` overrides status.showUntrackedFiles,
+  # core.excludesFile=/dev/null drops the owner's global ignore file, a new file
+  # only .git/info/exclude hides is found by listing new files against the
+  # tree's .gitignore files alone, and a tracked file whose index entry tells
+  # git not to look (skip-worktree, assume-unchanged) fails the condition.
+  # Still applied: the .gitignore files themselves (an untracked one can hide a
+  # directory, itself included) and the rest of .git/config. The tree's owner
+  # can edit next.config.ts as well, so this guards against accidents; it is
+  # not a boundary.
+  if ! changes="$("${tree_git[@]}" -c core.excludesFile=/dev/null -c core.fileMode=false --no-optional-locks status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    failed+=("git status could not answer")
+  elif [ -n "$changes" ]; then
+    failed+=("the tree has changes: $(first_paths 3 "$changes")")
+  elif ! changes="$("${tree_git[@]}" ls-files --others --exclude-per-directory=.gitignore 2>/dev/null)"; then
+    failed+=("git could not list new files")
+  elif [ -n "$changes" ]; then
+    failed+=("new files hidden from git status: $(first_paths 0 "$changes")")
+  fi
+
+  # Every tracked entry is a plain `H`: `S` is skip-worktree, a lower-case tag
+  # assume-unchanged, and git reports no edit to either. Decided by one match
+  # over the whole list: a loop over a here-string this size reads it from a
+  # temp file, and with /tmp full the loop would never run and the answer would
+  # read as clean. The loop after the match only names the paths.
+  if ! changes="$("${tree_git[@]}" ls-files -v 2>/dev/null)"; then
+    failed+=("git could not list the tracked files")
+  elif [ -z "$changes" ]; then
+    # A checkout always tracks files: an empty list is a doubt, never "all H".
+    failed+=("git listed no tracked files")
+  else
+    case "$nl$changes" in
+      *"$nl"[!H]*)
+        while IFS= read -r line; do
+          case "$line" in
+            ""|"H "*) ;;
+            *) odd="${odd:+$odd$nl}$line" ;;
+          esac
+        done <<< "$changes" || true
+        failed+=("git does not check these tracked files for changes${odd:+: $(first_paths 2 "$odd")}")
+        ;;
+    esac
+  fi
+
+  if [ "${#failed[@]}" -gt 0 ]; then
+    for line in "${failed[@]}"; do reason="${reason:+$reason; }$line"; done
+    printf '%s\n' "$reason"
+    return 1
+  fi
+  printf '%s\n' "${head:0:12} is origin/$branch's tip on branch $branch; CI type-checks every pull request before it lands on $branch"
+}
+
 # `bun run build`, with ONE retry and only for the mid-build file-trace race.
 #
 # WHAT RACES. Next writes a `.nft.json` beside every server entry and then
@@ -3493,7 +3640,21 @@ restore_previous_build() {
 # so a failing pipeline or a false `[ … ] &&` test outside a condition would
 # kill the script on the first attempt in one caller and not the other.
 run_next_build() {
-  local log log_dir rc attempt
+  local log log_dir rc attempt type_check="" why=""
+  # Asked once, per build, before the first attempt: a retry builds the way the
+  # first attempt did. Inside the command string, because `su -` clears the
+  # environment; never exported, so nothing else this script runs inherits it.
+  # Said both ways, =0 as well as =1: a value on the command is the last word
+  # over an export in the account's login dotfiles, which `su -` sources first,
+  # and over a line in the tree's .env, which Next loads (and a bun release may
+  # load) into the build's environment without replacing a value already there.
+  if why="$(build_type_check_proven_by_ci)"; then
+    type_check="CLAWBOX_BUILD_SKIP_TYPECHECK=1 "
+    echo "  Building without the on-box type check: $why"
+  else
+    type_check="CLAWBOX_BUILD_SKIP_TYPECHECK=0 "
+    echo "  Building with the type check ($why)"
+  fi
   # A PRIVATE directory from `mktemp -d`, never a predictable path. This script
   # runs as root: `: > "$TMPDIR/<fixed name>"` follows a symlink a local user
   # planted there, so root truncates and then `tee`s a build log into whatever
@@ -3511,7 +3672,7 @@ run_next_build() {
   rc=0
   for attempt in 1 2; do
     if [ -n "$log" ]; then
-      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
+      if as_clawbox_login "cd $PROJECT_DIR && ${type_check}$BUN run build" 2>&1 | tee "$log"; then
         rc=0
       else
         # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
@@ -3524,7 +3685,7 @@ run_next_build() {
         break
       fi
     else
-      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
+      if as_clawbox_login "cd $PROJECT_DIR && ${type_check}$BUN run build"; then
         rc=0
       else
         rc=$?
@@ -7607,7 +7768,15 @@ step_openclaw_install() {
     # Complete: the gateway's pre-start retires the copies once every database
     # has passed a compaction's integrity check — compacted by the pre-start
     # itself only when the owner turned nightly maintenance on, otherwise by
-    # the owner's own "Run now"; until then the copies stay.
+    # the owner's own "Run now"; until then the copies stay. The core's own
+    # standalone `doctor --fix` retires its sealed standalone Doctor captures
+    # once they are over 30 days old, and never an incomplete capture or an
+    # update capture (pinned docs, docs/cli/update/repair-and-recovery.md
+    # "Original state captures"), so the pre-start's clean-up is the EARLY path
+    # for the first and the only one for the other two. The run above is one
+    # only on this full path (the fast path skips it while the pin holds); on
+    # the appliance, every update's gateway recovery runs another (the
+    # updater's runOpenclawDoctorFix).
     openclaw_record_migration_verdict complete "$_oc_live_pkg"
 
   fi

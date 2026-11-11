@@ -2899,6 +2899,13 @@ function pluginPayloadsRepairedByPreStart(preStartOutput: string): Set<string> {
   return repaired;
 }
 
+/**
+ * How long the pre-start may run outside the unit: the unit's 600 s
+ * TimeoutStartSec with a little process overhead. Also what the owner is told
+ * when the updater stopped it.
+ */
+const PRE_START_OUTSIDE_UNIT_TIMEOUT_MS = 650_000;
+
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */
 async function runCurrentGatewayPreStart(): Promise<string> {
   if (!existsSync(CURRENT_GATEWAY_PRE_START)) return "";
@@ -2930,19 +2937,19 @@ async function runCurrentGatewayPreStart(): Promise<string> {
   let result: { stdout: string; stderr: string };
   try {
     result = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
-      // Match the unit's 600s TimeoutStartSec with a little process overhead.
       // Killing this halfway through a plugin migration recreates the lock race
       // this maintenance path exists to avoid.
-      timeout: 650_000,
+      timeout: PRE_START_OUTSIDE_UNIT_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
       env,
     });
   } catch (err) {
-    // Rethrown exactly as node built it: its message already carries stderr
-    // and is the step error the owner reads. What it lacks is stdout, the step
-    // the script stopped in, which under `set -euo pipefail` can be all there is.
+    // The owner reads ONE bounded, redacted line: node's message is
+    // `Command failed: …` and every byte of stderr (up to maxBuffer), unredacted.
+    // Everything the script printed goes to this process's journal, tagged and
+    // bounded; node's error rides as the cause, unchanged.
     logPreStartOutput("failed", err);
-    throw err;
+    throw new Error(describePreStartFailure(err), { cause: err });
   }
   logPreStartOutput("succeeded", result);
   // Read whole and unredacted: only the logged copy is cut and redacted.
@@ -2952,7 +2959,7 @@ async function runCurrentGatewayPreStart(): Promise<string> {
 /**
  * The log is a record of the run, never part of its outcome: a fault here must
  * not fail a pre-start that succeeded, nor stand in for the error of one that
- * failed (that error is the step error the owner reads).
+ * failed (the step error the owner reads is built from that error).
  */
 function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): void {
   try {
@@ -2961,10 +2968,7 @@ function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): vo
       console.log(describePreStartOutput("succeeded", detail));
       return;
     }
-    const how = detail.killed
-      ? `killed by ${String(detail.signal ?? "a signal")}`
-      : typeof detail.code === "number" ? `exit ${detail.code}` : String(detail.code ?? "no exit code");
-    console.error(describePreStartOutput(`failed (${how})`, detail));
+    console.error(describePreStartOutput(`failed (${describePreStartExit(detail)})`, detail));
   } catch (logErr) {
     try {
       console.warn("[Updater] pre-start (outside the unit): its output could not be logged:",
@@ -2972,6 +2976,96 @@ function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): vo
     } catch {
       // Nothing left to tell it to; the run's own outcome stands.
     }
+  }
+}
+
+type PreStartRejection = {
+  stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown; syscall?: unknown;
+};
+
+/** node's string code when it could not spawn the script at all (`syscall` "spawn …"). */
+function preStartSpawnFailure(detail: PreStartRejection): string | null {
+  return typeof detail.code === "string" && typeof detail.syscall === "string" && detail.syscall.startsWith("spawn")
+    ? detail.code
+    : null;
+}
+
+/**
+ * How the pre-start outside the unit ended, for its log header and its step
+ * error. The updater's own limit is told apart by `killed` (node sets it only
+ * for a kill it sent), never by the signal: node closes the pipes before that
+ * kill, so a script whose EXIT trap prints dies of SIGPIPE instead. Not
+ * `clientTimedOut`, which also requires a signal: a child that handles the
+ * SIGTERM and exits with its own code was stopped by this limit all the same.
+ */
+export function describePreStartExit(detail: PreStartRejection): string {
+  // node's string code: a spawn that failed, where the script never ran, or a
+  // maxBuffer overflow, worded as the log always had it.
+  const notStarted = preStartSpawnFailure(detail);
+  if (notStarted) return `could not be started: ${notStarted}`;
+  if (typeof detail.code === "string") return detail.code;
+  const signal = typeof detail.signal === "string" ? detail.signal : null;
+  if (detail.killed === true) {
+    const limit = `stopped at the updater's ${Math.round(PRE_START_OUTSIDE_UNIT_TIMEOUT_MS / 1000)} s limit`;
+    return signal ? `${limit}, signal ${signal}` : limit;
+  }
+  if (signal) return `killed by ${signal} from outside the updater`;
+  if (typeof detail.code === "number") return `exit ${detail.code}`;
+  return "no exit code";
+}
+
+/** The EXIT trap's closing line, printed last on every exit that runs it. */
+const PRE_START_TOTAL_LINE = /^Timing: pre-start total \d+ ms/;
+/** The line each step closes with (clawbox_step_mark). */
+const PRE_START_STEP_LINE = /^Timing: (.+) \d+ ms$/;
+const PRE_START_STEP_NAME_MAX_CHARS = 80;
+const PRE_START_FAILURE_MAX_CHARS = 500;
+
+function cutWithEllipsis(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** Non-empty trimmed lines, redacted as a whole first so a cut cannot part a key from its value. */
+function redactedLines(text: unknown): string[] {
+  if (typeof text !== "string") return [];
+  return redactCredentialShapes(text).split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+/**
+ * The step error for a pre-start that failed outside the unit: one line, never
+ * node's `Command failed: …` with all of stderr. It names how the script ended
+ * and where, read from its Timing lines: the step line just before the trap's
+ * total line is the step that was open when it stopped; with no total line (a
+ * kill the trap did not survive) the newest step line is the last one that
+ * finished. Only an exit the script made itself gets its last error output
+ * quoted, and never as the cause: this script's `ERROR:` lines are not all
+ * fatal, and a killed script never reached its own error branch.
+ */
+export function describePreStartFailure(err: unknown): string {
+  try {
+    const detail = (err ?? {}) as PreStartRejection;
+    const notStarted = preStartSpawnFailure(detail);
+    let sentence = notStarted
+      ? `The gateway pre-start could not be started (${notStarted})`
+      : `The gateway pre-start failed (${describePreStartExit(detail)})`;
+    const stdout = redactedLines(detail.stdout);
+    const total = stdout.findLastIndex((line) => PRE_START_TOTAL_LINE.test(line));
+    const stepLine = total >= 0 ? stdout[total - 1] : stdout.findLast((line) => PRE_START_STEP_LINE.test(line));
+    const step = PRE_START_STEP_LINE.exec(stepLine ?? "");
+    if (step) {
+      sentence += ` ${total >= 0 ? "in" : "after"} "${cutWithEllipsis(step[1], PRE_START_STEP_NAME_MAX_CHARS)}"`;
+    }
+    const exitedOnItsOwn = typeof detail.code === "number" && detail.killed !== true
+      && typeof detail.signal !== "string";
+    const lastError = exitedOnItsOwn
+      ? redactedLines(detail.stderr).findLast((line) => !line.startsWith("Command failed:"))
+      : undefined;
+    sentence = lastError
+      ? `${sentence}; last error output: ${cutWithEllipsis(lastError, STEP_WARNING_MAX_CHARS)}`
+      : `${sentence}.`;
+    return cutWithEllipsis(sentence, PRE_START_FAILURE_MAX_CHARS - 1);
+  } catch {
+    return "The gateway pre-start failed.";
   }
 }
 

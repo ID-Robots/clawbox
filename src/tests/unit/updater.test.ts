@@ -3025,13 +3025,17 @@ describe("updater", () => {
       const TOTAL = "  Timing: pre-start total 5912 ms (exit 0); "
         + "reused instead of re-checked: plugin-consent, codex-registry, claude-code";
 
-      /** How node's promisified execFile rejects: stderr in the message, both streams beside it. */
+      /**
+       * How node's promisified execFile rejects: stderr in the message, both
+       * streams beside it. A maxBuffer overflow carries a string `code` and
+       * leaves `killed`/`signal` undefined, so those are passed explicitly.
+       */
       function nodeExecFileError(fields: {
         stdout: string;
         stderr: string;
-        code?: number | null;
-        killed?: boolean;
-        signal?: string | null;
+        code?: number | string | null;
+        killed?: boolean | undefined;
+        signal?: string | null | undefined;
       }) {
         return Object.assign(new Error(`Command failed: /bin/bash ${PRE_START}\n${fields.stderr}`), {
           code: 1, killed: false, signal: null, ...fields,
@@ -3109,7 +3113,7 @@ describe("updater", () => {
         }
       });
 
-      it("logs what a failed run printed on stdout, and rethrows node's error unchanged", async () => {
+      it("logs what a failed run printed on stdout, and fails the step with one line naming where it stopped", async () => {
         // `set -euo pipefail` can stop the script with nothing on stderr; the
         // step and Timing lines on stdout are then the only record of where.
         const logged = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -3131,9 +3135,218 @@ describe("updater", () => {
           `${TAG}:   Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing`,
         );
         expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("exit 1"))).toBe(true);
-        // The owner-facing error is node's own, not a rewrite of it.
+        // node's error rides as the cause, unmutated; the owner reads one line
+        // built from it instead of node's `Command failed: …` and all of stderr.
         expect(failure.message).toBe(original);
-        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(original);
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(
+          'The gateway pre-start failed (exit 1) in "legacy auth sweep"; '
+            + "last error output: ERROR: OpenClaw 2 auth-profile migration failed",
+        );
+      });
+
+      /** The step error the owner reads, and every console.error call the run made, unsplit. */
+      async function failWith(failure: Error) {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        await verifyWithPreStart(failure);
+        const calls = errors.mock.calls.map((call) => call.map(String).join(" "));
+        const state = updater.getUpdateState();
+        logged.mockRestore();
+        errors.mockRestore();
+        expect(state.phase).toBe("failed");
+        return {
+          stepError: state.steps.find((s) => s.id === "gateway_verify")?.error ?? "",
+          runError: state.error ?? "",
+          calls,
+          lines: calls.flatMap((entry) => entry.split("\n")),
+        };
+      }
+
+      it("names a signal sent from outside the updater, and quotes no stderr line for a kill", async () => {
+        const { stepError, lines } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config check 9100 ms\n  Migrating the auth profiles\n",
+          stderr: "  ERROR: the core still refuses this config — the gateway will exit 78 until this is fixed: x\n",
+          code: null,
+          killed: false,
+          signal: "SIGKILL",
+        }));
+
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`)
+          && line.includes("killed by SIGKILL from outside the updater"))).toBe(true);
+        expect(stepError).toBe(
+          'The gateway pre-start failed (killed by SIGKILL from outside the updater) after "config check".',
+        );
+        expect(stepError).not.toContain("core still refuses");
+      });
+
+      it("fails the step with one bounded, redacted line, however much the pre-start printed", async () => {
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n  Timing: auth profiles 4410 ms\n"
+            + "  Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: Array.from({ length: 5_000 }, (_, i) => `  migrated row batch ${i}`).join("\n")
+            + "\n  ERROR: OpenClaw 2 auth-profile migration failed: gateway refused token=abcdef123456ghij\n",
+        });
+        const { stepError, runError, calls } = await failWith(failure);
+
+        const failedLine = calls.find((call) => call.startsWith("[Updater] Failed:"));
+        expect(failedLine).toBeTruthy();
+        for (const text of [stepError, runError, failedLine!]) {
+          expect(text).toContain(
+            'The gateway pre-start failed (exit 1) in "auth profiles"; last error output: '
+              + "ERROR: OpenClaw 2 auth-profile migration failed: gateway refused token=[redacted]",
+          );
+          for (const absent of ["Command failed", "migrated row batch", "abcdef123456ghij", "pre-start total"]) {
+            expect(text).not.toContain(absent);
+          }
+        }
+        expect(stepError.startsWith('The gateway pre-start failed (exit 1) in "auth profiles"; last error output: '))
+          .toBe(true);
+        expect(stepError.length).toBeLessThan(500);
+        expect(runError.length).toBeLessThan(500);
+      });
+
+      it("quotes the last error output, not an earlier non-fatal ERROR line, and never calls it the cause", async () => {
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config check 9100 ms\n  Timing: provider plugin payload and local AI auth 2100 ms\n"
+            + "  Timing: pre-start total 11300 ms (exit 5); reused instead of re-checked: nothing\n",
+          stderr: "  ERROR: the core still refuses this config — the gateway will exit 78 until this is fixed: x\n"
+            + 'jq: error (at <stdin>:0): Cannot index string with "gateway"\n',
+          code: 5,
+        }));
+
+        expect(stepError).toBe(
+          'The gateway pre-start failed (exit 5) in "provider plugin payload and local AI auth"; '
+            + 'last error output: jq: error (at <stdin>:0): Cannot index string with "gateway"',
+        );
+        expect(stepError).not.toContain("core still refuses");
+      });
+
+      it("ends the line at the step when a failed run printed nothing on stderr", async () => {
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n  Timing: legacy auth sweep 4410 ms\n"
+            + "  Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: "",
+        }));
+
+        expect(stepError).toBe('The gateway pre-start failed (exit 1) in "legacy auth sweep".');
+      });
+
+      it("cuts a long last error line to 300 characters", async () => {
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config check 9100 ms\n"
+            + "  Timing: pre-start total 9200 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: `  ERROR: config dump ${"y".repeat(2_000)}\n`,
+        }));
+
+        const marker = "; last error output: ";
+        expect(stepError).toContain(marker);
+        const quoted = stepError.slice(stepError.indexOf(marker) + marker.length);
+        expect(quoted).toHaveLength(300);
+        expect(quoted.endsWith("…")).toBe(true);
+        expect(quoted.startsWith("ERROR: config dump yyy")).toBe(true);
+        expect(stepError.length).toBeLessThan(500);
+      });
+
+      it("tells the updater's own time limit apart by `killed`, whatever signal node reports", async () => {
+        // node 24 destroys the pipes before its kill, so the EXIT trap's echo
+        // dies of SIGPIPE: the signal name cannot say whose limit it was.
+        const { stepError, lines } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config pass 2210 ms\n  Rebuilding the memory index\n",
+          stderr: "  WARN: slow disk\n",
+          code: null,
+          killed: true,
+          signal: "SIGPIPE",
+        }));
+
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`)
+          && line.includes("stopped at the updater's 650 s limit, signal SIGPIPE"))).toBe(true);
+        expect(stepError).toBe(
+          "The gateway pre-start failed (stopped at the updater's 650 s limit, signal SIGPIPE) "
+            + 'after "config pass".',
+        );
+      });
+
+      it("still calls a run the updater stopped its own limit when node reports no signal", async () => {
+        // A child that handles node's SIGTERM and exits with its own code: still
+        // the updater's kill, so no stderr line is quoted as if it explained it.
+        const { stepError, lines } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config pass 2210 ms\n"
+            + "  Timing: plugin scan 640000 ms\n"
+            + "  Timing: pre-start total 650010 ms (exit 143); reused instead of re-checked: nothing\n",
+          stderr: "  WARN: slow disk\n",
+          code: 143,
+          killed: true,
+          signal: null,
+        }));
+
+        expect(lines.some((line) => line.startsWith(`${TAG} failed (stopped at the updater's 650 s limit)`)))
+          .toBe(true);
+        expect(stepError).toBe(
+          "The gateway pre-start failed (stopped at the updater's 650 s limit) in \"plugin scan\".",
+        );
+      });
+
+      it("quotes bash's own notice for a child the kernel killed (exit 137)", async () => {
+        // The realistic OOM shape (measured, node 24): bash survives the kill of
+        // its child, `set -e` exits 137, the EXIT trap runs, and bash's notice
+        // is the last stderr line.
+        const killedNotice = `${PRE_START}: line 5090: 48213 Killed                  `
+          + '"$OPENCLAW_BIN" doctor --fix --non-interactive';
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Migrating legacy auth profiles into OpenClaw 2 SQLite state...\n"
+            + "  Timing: legacy auth sweep 61200 ms\n"
+            + "  Timing: pre-start total 70100 ms (exit 137); reused instead of re-checked: nothing\n",
+          stderr: `  WARN: slow disk\n${killedNotice}\n`,
+          code: 137,
+          killed: false,
+          signal: null,
+        }));
+
+        expect(stepError).toBe(
+          `The gateway pre-start failed (exit 137) in "legacy auth sweep"; last error output: ${killedNotice}`,
+        );
+      });
+
+      it("keeps the maxBuffer header byte-identical and fails the step without a stderr line", async () => {
+        const { stepError, lines } = await failWith(Object.assign(new Error("stdout maxBuffer length exceeded"), {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          killed: undefined,
+          signal: undefined,
+          stdout: "  Timing: config check 9100 ms\n  plugin scan 001\n",
+          stderr: "  WARN: slow disk\n",
+        }));
+
+        expect(lines).toContain(`${TAG} failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)`);
+        expect(stepError).toBe('The gateway pre-start failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) after "config check".');
+      });
+
+      // node's shape when the fork itself fails (measured on node 24): a string
+      // errno code, as a maxBuffer overflow has, but `syscall` names the spawn.
+      it("says the pre-start could not be started when node could not spawn it", async () => {
+        const { stepError, lines } = await failWith(Object.assign(new Error("spawn /bin/bash EAGAIN"), {
+          code: "EAGAIN",
+          errno: -11,
+          syscall: "spawn /bin/bash",
+          path: "/bin/bash",
+          stdout: "",
+          stderr: "",
+        }));
+
+        expect(lines).toContain(`${TAG} failed (could not be started: EAGAIN)`);
+        expect(stepError).toBe("The gateway pre-start could not be started (EAGAIN).");
+      });
+
+      it("describes any rejection without throwing, and falls back to a plain sentence", () => {
+        expect(updater.describePreStartFailure(undefined)).toBe("The gateway pre-start failed (no exit code).");
+        expect(updater.describePreStartFailure(new Error("pre-start failed")))
+          .toBe("The gateway pre-start failed (no exit code).");
+        const hostile = Object.defineProperty({ code: 1 }, "stdout", {
+          get() { throw new Error("unreadable"); },
+        });
+        expect(updater.describePreStartFailure(hostile)).toBe("The gateway pre-start failed.");
+        expect(updater.describePreStartExit({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }))
+          .toBe("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+        expect(updater.describePreStartExit({ code: 2, killed: false, signal: null })).toBe("exit 2");
       });
 
       it("logs the partial output of a run the timeout killed", async () => {
@@ -3152,7 +3365,8 @@ describe("updater", () => {
 
         expect(updater.getUpdateState().phase).toBe("failed");
         expect(lines).toContain(`${TAG}:   Rebuilding the memory index`);
-        expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("SIGTERM"))).toBe(true);
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("SIGTERM")
+          && line.includes("the updater's 650 s limit"))).toBe(true);
       });
 
       it("keeps the tail of a long run, says how much it dropped, and keeps the closing Timing line", async () => {
@@ -3216,7 +3430,7 @@ describe("updater", () => {
           line.includes("could not be logged") && line.includes("stdout write failed"))).toBe(true);
       });
 
-      it("rethrows node's own error when logging a failed run's output throws", async () => {
+      it("still fails the step with the pre-start's own line when logging a failed run's output throws", async () => {
         vi.spyOn(console, "warn").mockImplementation(() => {});
         vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
           if (String(args[0]).startsWith(TAG)) throw new Error("stderr write failed");
@@ -3225,11 +3439,13 @@ describe("updater", () => {
           stdout: "  Migrating the auth profiles\n",
           stderr: "  ERROR: OpenClaw 2 auth-profile migration failed\n",
         });
-        const original = failure.message;
         await verifyWithPreStart(failure);
 
         expect(updater.getUpdateState().phase).toBe("failed");
-        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(original);
+        // Its stdout has no Timing line, so the line names no step.
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(
+          "The gateway pre-start failed (exit 1); last error output: ERROR: OpenClaw 2 auth-profile migration failed",
+        );
       });
 
       it("redacts a credential shape in what it logs and leaves the Timing line intact", async () => {
