@@ -39,11 +39,21 @@ import { DATA_DIR } from "@/lib/config-store";
 const OWNERS_PATH = path.join(DATA_DIR, "chat-media-owners.json");
 
 /**
- * Records kept. Generously above what the media retention leaves on disk at
- * once (a few hundred pictures, thousands of short spoken clips, a week of
- * uploads), so a record never ages out ahead of its file in practice.
+ * Records kept, for everyone together. Generously above what the media
+ * retention leaves on disk at once (a few hundred pictures, thousands of short
+ * spoken clips, a week of uploads), so a record never ages out ahead of its
+ * file in practice. Past it, records whose file is already gone go first, and
+ * only then the oldest.
  */
-export const MAX_MEDIA_OWNER_RECORDS = 10_000;
+export const MAX_MEDIA_OWNER_RECORDS = 20_000;
+
+/**
+ * Records kept for any one person. The uploads' retention bounds bytes, not
+ * files, so without a share of their own one member staging thousands of tiny
+ * files would push everyone else's records out — and with them everyone
+ * else's media. Past it, that person's own oldest record goes.
+ */
+export const MAX_MEDIA_OWNER_RECORDS_PER_USER = 4_000;
 
 /** The username rule (src/lib/username-rules.ts), as chat-scope.ts spells it. */
 const NAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
@@ -76,15 +86,29 @@ function readOwners(): Owners {
   return owners;
 }
 
-function writeOwners(owners: Owners): void {
-  const extra = owners.size - MAX_MEDIA_OWNER_RECORDS;
-  if (extra > 0) {
-    let dropped = 0;
-    for (const file of owners.keys()) {
-      if (dropped++ >= extra) break;
-      owners.delete(file);
-    }
+/** Keep `username` within their share, then everyone within the whole. Oldest first, insertion order. */
+function bound(owners: Owners, username: string): void {
+  let theirs = 0;
+  for (const owner of owners.values()) if (owner === username) theirs++;
+  for (const [file, owner] of owners) {
+    if (theirs <= MAX_MEDIA_OWNER_RECORDS_PER_USER) break;
+    if (owner !== username) continue;
+    owners.delete(file);
+    theirs--;
   }
+  if (owners.size <= MAX_MEDIA_OWNER_RECORDS) return;
+  // A record whose file retention already swept protects nothing.
+  for (const file of owners.keys()) {
+    if (owners.size <= MAX_MEDIA_OWNER_RECORDS) return;
+    if (!fs.existsSync(file)) owners.delete(file);
+  }
+  for (const file of owners.keys()) {
+    if (owners.size <= MAX_MEDIA_OWNER_RECORDS) return;
+    owners.delete(file);
+  }
+}
+
+function writeOwners(owners: Owners): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = untraced(`${OWNERS_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(owners)), { mode: 0o600 });
@@ -123,6 +147,7 @@ export function recordMediaOwner(username: string, files: ReadonlyArray<string |
       owners.delete(real);
       owners.set(real, username);
     }
+    bound(owners, username);
     writeOwners(owners);
   } catch (err) {
     console.warn("[chat-media-owners] could not record media:", err instanceof Error ? err.message : err);

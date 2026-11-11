@@ -159,6 +159,8 @@ describe("the ownership record", () => {
   };
   const root = () => fs.realpathSync(path.join(tmpHome, ".openclaw", "media"));
   const real = (p: string) => fs.realpathSync(p);
+  const ledger = () => path.join(tmpHome, "data", "chat-media-owners.json");
+  const readLedger = (): Record<string, string> => JSON.parse(fs.readFileSync(ledger(), "utf8"));
 
   it("is never reassigned to someone else once made", () => {
     const f = file("one.png");
@@ -188,26 +190,44 @@ describe("the ownership record", () => {
   it("reads a damaged record as empty: a member is then served nothing", () => {
     const f = file("four.png");
     owners.recordMediaOwner("alice", [f]);
-    fs.writeFileSync(path.join(tmpHome, "data", "chat-media-owners.json"), "{not json");
+    fs.writeFileSync(ledger(), "{not json");
     expect(owners.isMediaOwnedBy("alice", real(f), root())).toBe(false);
   });
 
-  it("is bounded, the oldest record going first", () => {
+  it("is bounded for everyone together, records of files already gone going first", () => {
     const first = file("first.png");
     owners.recordMediaOwner("alice", [first]);
-    const map: Record<string, string> = JSON.parse(fs.readFileSync(path.join(tmpHome, "data", "chat-media-owners.json"), "utf8"));
-    for (let i = 0; i < owners.MAX_MEDIA_OWNER_RECORDS; i += 1) map[`/media/filler-${i}.png`] = "bob";
-    fs.writeFileSync(path.join(tmpHome, "data", "chat-media-owners.json"), JSON.stringify(map));
+    const map = readLedger();
+    for (let i = 0; i < owners.MAX_MEDIA_OWNER_RECORDS; i += 1) map[`/gone/filler-${i}.png`] = `user${i % 9}`;
+    fs.writeFileSync(ledger(), JSON.stringify(map));
     const last = file("last.png");
-    owners.recordMediaOwner("alice", [last]);
-    const kept = Object.keys(JSON.parse(fs.readFileSync(path.join(tmpHome, "data", "chat-media-owners.json"), "utf8")));
-    expect(kept).toHaveLength(owners.MAX_MEDIA_OWNER_RECORDS);
-    expect(owners.isMediaOwnedBy("alice", real(first), root())).toBe(false);
-    expect(owners.isMediaOwnedBy("alice", real(last), root())).toBe(true);
+    owners.recordMediaOwner("bob", [last]);
+    const kept = readLedger();
+    expect(Object.keys(kept)).toHaveLength(owners.MAX_MEDIA_OWNER_RECORDS);
+    // Alice's is the oldest record, but its file is still there: a swept one went instead.
+    expect(owners.isMediaOwnedBy("alice", real(first), root())).toBe(true);
+    expect(owners.isMediaOwnedBy("bob", real(last), root())).toBe(true);
+    expect(kept["/gone/filler-0.png"]).toBeUndefined();
+  });
+
+  it("gives each person a share of their own, so one member cannot push out another's records", () => {
+    const alices = file("alices.png");
+    owners.recordMediaOwner("alice", [alices]);
+    const map = readLedger();
+    const bobsFirst = file("bobs-first.png");
+    map[real(bobsFirst)] = "bob";
+    for (let i = 0; i < owners.MAX_MEDIA_OWNER_RECORDS_PER_USER; i += 1) map[`/bob/${i}.png`] = "bob";
+    fs.writeFileSync(ledger(), JSON.stringify(map));
+    owners.recordMediaOwner("bob", [file("bobs-last.png")]);
+    const kept = readLedger();
+    expect(Object.values(kept).filter((u) => u === "bob")).toHaveLength(owners.MAX_MEDIA_OWNER_RECORDS_PER_USER);
+    // Bob's own oldest went; Alice's, older still, did not.
+    expect(owners.isMediaOwnedBy("bob", real(bobsFirst), root())).toBe(false);
+    expect(owners.isMediaOwnedBy("alice", real(alices), root())).toBe(true);
   });
 
   it("keeps the file private to the box's account", () => {
     owners.recordMediaOwner("alice", [file("five.png")]);
-    expect(fs.statSync(path.join(tmpHome, "data", "chat-media-owners.json")).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(ledger()).mode & 0o777).toBe(0o600);
   });
 });

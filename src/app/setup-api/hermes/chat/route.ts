@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
+import fsp from "fs/promises";
 import path from "@/lib/runtime-path";
 import { StringDecoder } from "string_decoder";
 import { HERMES_BIN } from "@/lib/harness";
@@ -54,10 +55,11 @@ import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { chatKeyUser } from "@/lib/chat-scope";
-import { recordMediaOwner } from "@/lib/chat-media-owners";
+import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
+import { orgMemberOf, readOrgMode } from "@/lib/org-mode-server";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
-import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
@@ -424,11 +426,18 @@ async function settleTurn(
   // working. Everything else has to earn its card through adoption.
   const servableRoot = await servableMediaRoot();
   const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
+  // A member of staff's turn on an organisation box: what this turn writes
+  // into the media tree is recorded as theirs (src/lib/chat-media-owners.ts),
+  // so only the pictures the agent's own image tool drew are adopted — never
+  // a path the model merely named, which a member can talk it into naming.
+  const chatUser = chatKeyUser(sessionKey);
+  const memberTurn = chatUser !== null && (await readOrgMode());
   const drawn = await adoptHermesGeneratedImages(
-    [...(record?.generatedImages ?? []), ...mentioned],
+    memberTurn ? [...(record?.generatedImages ?? [])] : [...(record?.generatedImages ?? []), ...mentioned],
     // The SAME root the caption was judged against, so the two halves cannot
     // disagree about which tree is already servable.
     servableRoot,
+    { cacheOnly: memberTurn },
   );
   // A picture the AGENT drew, said the way every other picture in this chat is
   // said. Hermes has no `MEDIA:` convention of its own — the backend saves the
@@ -502,7 +511,6 @@ async function settleTurn(
   // What this turn wrote into the media tree for a ClawBox user other than the
   // owner is theirs: served back to them on an organisation box, and to no
   // other member (src/lib/chat-media-owners.ts).
-  const chatUser = chatKeyUser(sessionKey);
   if (chatUser) recordMediaOwner(chatUser, [...drawn, spokenClip]);
   const answer = [
     caption,
@@ -1423,6 +1431,14 @@ export async function POST(request: Request) {
   // Every path is re-resolved against the staging root here rather than
   // trusted from the body: it is about to become an argv element, and the
   // agent opens any readable absolute path it is handed.
+  // A member of staff on an organisation box hands the agent only files of
+  // their OWN chat: a path in the shared media tree that is recorded as
+  // someone else's — or as nobody's, the owner's — is dropped like a missing
+  // one (src/lib/chat-media-owners.ts). Otherwise naming another person's
+  // upload here would have the agent read it into the member's conversation.
+  const member = await orgMemberOf(request);
+  const memberRootReal = member ? await fsp.realpath(await chatMediaRoot()).catch(() => null) : null;
+  const theirs = (safe: string) => !member || (memberRootReal !== null && isMediaOwnedBy(member.username, safe, memberRootReal));
   const requestedImages = Array.isArray(body.imagePaths)
     ? body.imagePaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)
     : [];
@@ -1433,7 +1449,7 @@ export async function POST(request: Request) {
     // The alternative is worse than it sounds: the staging tree is swept on a
     // retention schedule, so a file that aged out between being attached and
     // being sent would turn an ordinary message into a failed one.
-    if (safe && !imagePaths.includes(safe)) imagePaths.push(safe);
+    if (safe && theirs(safe) && !imagePaths.includes(safe)) imagePaths.push(safe);
   }
   const [firstImage, ...extraImages] = imagePaths;
 
@@ -1453,7 +1469,7 @@ export async function POST(request: Request) {
   const documentPaths: string[] = [];
   for (const requested of requestedDocuments) {
     const safe = await resolveInMediaRoot(requested);
-    if (safe && !documentPaths.includes(safe) && !imagePaths.includes(safe)) documentPaths.push(safe);
+    if (safe && theirs(safe) && !documentPaths.includes(safe) && !imagePaths.includes(safe)) documentPaths.push(safe);
   }
   const documentLines = await hermesDocumentPrompt(documentPaths);
 

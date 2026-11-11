@@ -318,6 +318,55 @@ describe("POST /setup-api/hermes/chat", () => {
     }
   });
 
+  describe("a member of staff on an organisation box", () => {
+    const memberTranscript = () =>
+      fs
+        .readFileSync(path.join(root, "data", "chat-transcripts", "desktop-user-alice.jsonl"), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+
+    beforeEach(async () => {
+      vi.resetModules();
+      await (await import("@/lib/config-store")).set("org_mode", true);
+      session.who.mockResolvedValue({ username: "alice", isOwner: false });
+    });
+    afterEach(() => {
+      session.who.mockResolvedValue(null);
+    });
+
+    it("hands the agent only files of their own chat, never another person's by its path", async () => {
+      fs.writeFileSync(staged("bobs-notes.txt"), "bob's salary is 1234");
+      const owners = await import("@/lib/chat-media-owners");
+      owners.recordMediaOwner("alice", [staged("one.png")]);
+      owners.recordMediaOwner("bob", [staged("two.png"), staged("bobs-notes.txt")]);
+      // three.png carries no record: the owner's.
+      const res = await post({
+        message: "what are these",
+        sessionKey: "desktop-user-alice",
+        imagePaths: [staged("two.png"), staged("one.png"), staged("three.png")],
+        documentPaths: [staged("bobs-notes.txt")],
+      });
+      expect(res.status).toBe(200);
+      const args = lastArgs();
+      expect(args[args.indexOf("--image") + 1]).toBe(fs.realpathSync(staged("one.png")));
+      const all = args.join("\n");
+      for (const other of ["two.png", "three.png", "bobs-notes.txt"]) expect(all).not.toContain(other);
+      expect(all).not.toContain("1234");
+    });
+
+    it("adopts no picture the model merely named, so it cannot copy someone else's into their chat", async () => {
+      const elsewhere = path.join(root, "pic.png");
+      fs.writeFileSync(elsewhere, Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+      stdoutReply = `here you go\n\nMEDIA:${elsewhere}`;
+      const res = await post({ message: "draw", sessionKey: "desktop-user-alice" });
+      expect(res.status).toBe(200);
+      const [, assistant] = memberTranscript();
+      expect(assistant.media).toBeUndefined();
+      expect(fs.existsSync(path.join(root, "data", "chat-media-owners.json"))).toBe(false);
+    });
+  });
+
   it("drops the card when the picture cannot be served, and keeps the sentence", async () => {
     // The old behaviour lifted ANY absolute path the model uttered into a card,
     // with no containment check anywhere, so a file the chat cannot read became
