@@ -19,8 +19,11 @@ import { isRetiredClawboxAiChatModel } from "@/lib/clawbox-ai-retired-models";
 const NAMES: Readonly<Record<string, string>> = {
   "deepseek-v4-flash": "DeepSeek Flash",
   "claude-opus-5-5": "Opus 5.5",
+  "claude-fable-5-2": "Fable 5.2",
   "claude-fable-5-1": "Fable 5.1",
   "claude-opus-5": "Opus 5",
+  "claude-sonnet-5-5": "Sonnet 5.5",
+  "claude-haiku-5-5": "Haiku 5.5",
   "claude-sonnet-5": "Sonnet 5",
   "gpt-6-astra": "GPT 6 Astra",
   "gpt-5.6-sol": "GPT 5.6 Sol",

@@ -168,6 +168,11 @@ async function explainStepFailure(
   kind: "create" | "remove",
   secret?: string,
 ): Promise<UserAdminError> {
+  // A step this PC's install does not have at all (TASK-2418): no command
+  // repairs that, so none is named — the runner's own sentence says so.
+  if ((err as { rootStepNotImplemented?: unknown } | null)?.rootStepNotImplemented === true) {
+    return new UserAdminError("root_step_unavailable", (err as Error).message);
+  }
   // Duck-typed (several suites mock the runner whole): the launcher could not
   // even be asked — not installed, not granted, or too old for the step.
   const unavailable = err as { rootStepUnavailable?: unknown; repairCommand?: unknown } | null;

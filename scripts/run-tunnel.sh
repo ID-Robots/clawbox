@@ -37,7 +37,12 @@ TUNNEL_URL_FILE="$TUNNEL_DIR/tunnel.url"
 # answer it at all.
 TUNNEL_URL_LOG="$TUNNEL_DIR/tunnel-url.log"
 TUNNEL_URL_LOG_MAX=50
-LOCAL_SERVICE_URL="${LOCAL_SERVICE_URL:-http://localhost:80}"
+# Where the running tunnel forwards to, for GET /setup-api/tunnel/status.
+# Erased with tunnel.url on every stop.
+TUNNEL_TARGET_FILE="$TUNNEL_DIR/tunnel.target"
+# The web UI's own unit, the one that sets the PORT the server listens on.
+WEB_UI_UNIT="${WEB_UI_UNIT:-clawbox-setup.service}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-/usr/local/bin/cloudflared}"
 NAMED_CRED_FILE="$TUNNEL_DIR/named-tunnel"
 TUNNEL_MODE_FILE="$TUNNEL_DIR/tunnel.mode"
@@ -87,14 +92,62 @@ ISOLATED_CONFIG="$TUNNEL_DIR/isolated-config.yml"
 # Nothing inherited may pose as the credential; the named run sets its own.
 unset TUNNEL_TOKEN
 
+# An integer in 1-65535, printed without leading zeros: the range envPort() in
+# src/lib/port-probe.ts accepts, as plain decimal digits only (Number() there
+# also takes `0x…`, `1e3` and padding, which no unit writes). Five digits at
+# most before any arithmetic, so a long string can neither overflow nor wrap
+# into range.
+valid_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "${#port}" -le 5 ] || return 1
+  port=$((10#$port))
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  printf '%s\n' "$port"
+}
+
+# The PORT the web UI's unit hands the server. `systemctl show` prints the
+# unit's Environment= assignments on one line, space-separated; as in systemd,
+# the last PORT= wins. An EnvironmentFile= is not in that line, which is safe
+# because install-x64.sh refuses a project .env that sets PORT
+# (validate_reserved_port_env) and the appliance's unit has none.
+web_ui_unit_port() {
+  local line pair port=""
+  local -a pairs
+  line="$(timeout 5 "$SYSTEMCTL_BIN" show -p Environment --value "$WEB_UI_UNIT" 2>/dev/null)" || return 1
+  read -r -a pairs <<< "$line"
+  for pair in "${pairs[@]}"; do
+    case "$pair" in
+      PORT=*) port="${pair#PORT=}" ;;
+    esac
+  done
+  valid_port "$port"
+}
+
+# The port the web UI serves on, from the sources the server and the installers
+# use, in this order: PORT, the installer's CLAWBOX_PORT, the PORT in the web
+# UI's own unit, and only then the appliance's 80 (TASK-2359).
+web_ui_port() {
+  valid_port "${PORT:-}" || valid_port "${CLAWBOX_PORT:-}" || web_ui_unit_port || echo 80
+}
+
+# The local web UI the tunnel forwards to. Both installers name it in the unit:
+# http://localhost:80 on the appliance (config/clawbox-tunnel.service),
+# http://localhost:$PORT on a PC (install-x64.sh). A unit that does not gets the
+# web UI's real port rather than a blind :80 — on a PC install nothing listens
+# there, and the public URL answered 502.
+if [ -z "${LOCAL_SERVICE_URL:-}" ]; then
+  LOCAL_SERVICE_URL="http://localhost:$(web_ui_port)"
+fi
+
 mkdir -p "$TUNNEL_DIR"
 rm -f "$TUNNEL_URL_FILE" "$TUNNEL_MODE_FILE" "$NAMED_REFUSAL_SEEN"
+printf '%s\n' "$LOCAL_SERVICE_URL" > "$TUNNEL_TARGET_FILE"
 # Rewritten on every start, so nothing left in it can steer the tunnel. Should
 # the write fail, /dev/null keeps the isolation at the cost of that ERR line.
 printf '{}\n' > "$ISOLATED_CONFIG" 2>/dev/null || ISOLATED_CONFIG=/dev/null
 
 cleanup() {
-  rm -f "$TUNNEL_URL_FILE" "$TUNNEL_MODE_FILE" "$NAMED_REFUSAL_SEEN"
+  rm -f "$TUNNEL_URL_FILE" "$TUNNEL_MODE_FILE" "$NAMED_REFUSAL_SEEN" "$TUNNEL_TARGET_FILE"
 }
 
 # A stop is not a failure. systemd stops this unit with SIGTERM, which kills
@@ -226,7 +279,11 @@ while IFS= read -r line; do
   # Forward to stdout so systemd journals it.
   printf '%s\n' "$line"
   if [ ! -s "$TUNNEL_URL_FILE" ]; then
-    url=$(printf '%s\n' "$line" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -n 1 || true)
+    # Never api.trycloudflare.com: that is the endpoint cloudflared asks for a
+    # quick tunnel, named in the error it logs when that fails — at boot,
+    # before DNS answers, it was published as the box's URL until the restart.
+    url=$(printf '%s\n' "$line" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' |
+      grep -vx 'https://api\.trycloudflare\.com' | head -n 1 || true)
     if [ -n "${url:-}" ]; then
       record_url "$url"
     fi

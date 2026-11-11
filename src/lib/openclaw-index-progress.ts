@@ -146,19 +146,22 @@ export function ptyHostArgs(argv: string[]): string[] {
 }
 
 /**
- * The agent database `openclaw memory index --agent main` writes.
+ * The agent database `openclaw memory index --agent <agentId>` writes.
  *
  * Not configurable in OpenClaw's memory settings: both versions resolve it as
  * `<state dir>/agents/<id>/agent/openclaw-agent.sqlite`, the state directory
  * being `OPENCLAW_STATE_DIR` or `~/.openclaw` — so the caller hands in the
  * environment the pass is spawned with, which pins `OPENCLAW_STATE_DIR`, and
- * this resolves the same one.
+ * this resolves the same one. The id is the one the pass was started for
+ * (`openclawDefaultAgentId`, already normalised to a safe path segment), never
+ * "main" by assumption: a box whose agent was renamed can still have a stale
+ * `agents/main/` beside the real one.
  */
-export function openclawAgentDbPath(env: Record<string, string | undefined> = process.env): string {
+export function openclawAgentDbPath(agentId: string, env: Record<string, string | undefined> = process.env): string {
   const override = env.CLAWKEEP_MEMORY_AGENT_DB?.trim();
   if (override) return override;
   const stateDir = env.OPENCLAW_STATE_DIR?.trim() || path.join(os.homedir(), ".openclaw");
-  return path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+  return path.join(stateDir, "agents", agentId, "agent", "openclaw-agent.sqlite");
 }
 
 /** mtime slack for a scratch file created in the same second the pass started. */

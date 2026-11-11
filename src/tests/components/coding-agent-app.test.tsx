@@ -153,7 +153,7 @@ function stubFetch(
       : (opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir),
     setupComplete: setupCompletePosted ?? status.setupComplete ?? true,
     effort: "ultracode",
-    effortLevels: ["low", "xhigh", "max", "ultracode"],
+    effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
     reviewPass: false,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {

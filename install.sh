@@ -1899,6 +1899,11 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    # A hand-edited .env can end without a newline: the key must not be glued
+    # onto its last line, which would corrupt that key and leave this one unset.
+    if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
+      printf '\n' >> "$env_file"
+    fi
     printf '%s=%s\n' "$key" "$value" >> "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi
@@ -5633,6 +5638,24 @@ ensure_embed_model_cached() {
     echo "  Memory-search model already cached (${HF_FILE})"
     return 0
   fi
+  # The shipped file is the one whose size and sha256 the catalog knows
+  # (LOCAL_EMBEDDING_MODELS in src/lib/embed-runtime-ids.ts;
+  # local-embedding-models.test.ts pins these literals to it). A file .env
+  # names instead is fetched as before, unverified.
+  local KNOWN_BYTES="" KNOWN_SHA="" free_kb got
+  if [ "$HF_REPO" = "Qwen/Qwen3-Embedding-0.6B-GGUF" ] && [ "$HF_FILE" = "Qwen3-Embedding-0.6B-Q8_0.gguf" ]; then
+    KNOWN_BYTES=639150592
+    KNOWN_SHA=06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439
+  fi
+  # Disk first (TASK-2411): the file plus half a gigabyte, so a full disk is
+  # never what the download leaves behind. The Hub CLI resumes a partial file.
+  if [ -n "$KNOWN_BYTES" ]; then
+    free_kb="$(df -Pk "$MODEL_DIR" 2>/dev/null | awk 'NR == 2 {print $4}')"
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt $(( (KNOWN_BYTES + 536870912) / 1024 )) ]; then
+      echo "Error: not enough disk space for the memory-search model: it needs $(( (KNOWN_BYTES + 536870912) / 1000000 )) MB free, $(( free_kb * 1024 / 1000000 )) MB free" >&2
+      return 1
+    fi
+  fi
   echo "  Downloading the memory-search model (${HF_FILE}, ~639 MB)..."
   if ! as_clawbox_login "hf download \"$HF_REPO\" \"$HF_FILE\" --local-dir \"$MODEL_DIR\""; then
     echo "Error: failed to download the memory-search model" >&2
@@ -5641,6 +5664,17 @@ ensure_embed_model_cached() {
   if [ ! -f "$MODEL_PATH" ]; then
     echo "Error: download completed but ${MODEL_PATH} was not found" >&2
     return 1
+  fi
+  # Verified before anything uses it: a mismatch is deleted, so the next
+  # attempt starts clean instead of "already cached" over a bad file.
+  if [ -n "$KNOWN_SHA" ]; then
+    got="$(sha256sum "$MODEL_PATH" 2>/dev/null | awk '{print $1}')"
+    if [ "$got" != "$KNOWN_SHA" ]; then
+      rm -f "$MODEL_PATH"
+      echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); deleted it" >&2
+      return 1
+    fi
+    echo "  Memory-search model verified (sha256)"
   fi
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
   echo "  Memory-search model cached for offline use"
@@ -7882,19 +7916,65 @@ step_openclaw_patch() {
 # devices half-updated: rebuild_reboot never reached the rebuild, while the
 # updater still reported success (see fix in src/lib/updater.ts). Each retry
 # reloads the config fresh, so a transient conflict resolves itself.
+# OC_CONFIG_LABEL names the change in the messages when $1 is an option.
 oc_config_set() {
-  local attempt
+  local attempt label="${OC_CONFIG_LABEL:-$1}"
   for attempt in 1 2 3; do
     if as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$@"; then
       return 0
     fi
     if [ "$attempt" -lt 3 ]; then
-      echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+      echo "  config set $label failed (attempt $attempt/3) — retrying..."
       sleep 2
     fi
   done
-  echo "  ERROR: config set $1 failed after 3 attempts" >&2
+  echo "  ERROR: config set $label failed after 3 attempts" >&2
   return 1
+}
+
+# oc_config_set for a value that must stay off every argument list, because
+# sudo records its command line. Reads a `config set --batch-file` batch (a
+# JSON array of {"path", "value"}) on stdin, writes it as the service user to a
+# 0600 file in a private directory, applies it with oc_config_set's retries and
+# messages, and removes the directory on every exit, a stopping signal
+# included. Every step on that directory runs as the service user, its removal
+# too. $1 names the change. The body is a subshell, so its traps are its own
+# and the caller's stay as they were.
+oc_config_set_batch() (
+  local label="$1" dir rc=0
+  if ! dir=$(as_clawbox mktemp -d); then
+    echo "  ERROR: config set $label failed: no private directory for its batch file" >&2
+    exit 1
+  fi
+  trap 'as_clawbox rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if as_clawbox sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
+    OC_CONFIG_LABEL="$label" oc_config_set --batch-file "$dir/batch.json" || rc=$?
+  else
+    echo "  ERROR: config set $label failed: its batch file could not be written" >&2
+    rc=1
+  fi
+  exit "$rc"
+)
+
+# True only when the installed core's own `config set --help` answers and does
+# not list --batch-file, which arrived in OpenClaw 2026.3.22. Asked on every
+# run, never remembered: OPENCLAW_PIN_VERSION can put an older core here. No
+# answer, an error or a help that is not `config set`'s is no verdict, and the
+# caller writes as it would.
+openclaw_config_set_lacks_batch_file() {
+  local help
+  help=$(as_clawbox "$OPENCLAW_BIN" config set --help) || return 1
+  case "$help" in
+    *"Usage: openclaw config set"*) ;;
+    *) return 1 ;;
+  esac
+  case "$help" in
+    *--batch-file*) return 1 ;;
+  esac
+  return 0
 }
 
 step_openclaw_config() {
@@ -7937,9 +8017,18 @@ step_openclaw_config() {
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   fi
+  # The provider block below holds the key, and a core without a file form
+  # for `config set` could only take it on a command line. Such a core gets no
+  # ClawBox AI fallback from the installer, and the rest of the step goes on.
+  if [ -n "$CLAWBOX_AI_KEY" ] && openclaw_config_set_lacks_batch_file; then
+    local CORE_VERSION
+    # Read as the service user, and only its version-shaped part is kept: the
+    # answer is text for the line below and nothing else.
+    CORE_VERSION=$(as_clawbox "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
+    echo "  WARN: ClawBox AI fallback not configured: OpenClaw ${CORE_VERSION:-on this box} has no 'config set --batch-file' (2026.3.22 and newer have it) to take its key off the command line" >&2
+    CLAWBOX_AI_KEY=""
+  fi
   if [ -n "$CLAWBOX_AI_KEY" ]; then
-    local CLAWBOX_AI_PROVIDER_JSON
-    CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
     if openclaw_is_v2; then
       # OpenClaw 2 keeps credentials in its sqlite auth store, and recreating
       # the legacy auth-profiles.json poisons it (the gateway refuses with
@@ -7953,7 +8042,11 @@ step_openclaw_config() {
       CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
     fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
-    oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
+    # The provider block holds the key, so the key travels on stdin and the
+    # block reaches the CLI as a batch file, never as an argument.
+    printf '%s' "$CLAWBOX_AI_KEY" \
+      | node -e 'const key=require("fs").readFileSync(0,"utf8"); process.stdout.write(JSON.stringify([{path:"models.providers.deepseek",value:{baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}}]));' \
+      | oc_config_set_batch models.providers.deepseek
     # `fallbacks`, a LIST: the core has no singular `fallback` key and refused
     # this write with "Unrecognized key" on every core since the line was added,
     # which ended the step here under errexit (the harness-contract CI job now
@@ -7996,21 +8089,37 @@ step_openclaw_config() {
 
   # Register Telegram channel (if token exists)
   if [ -f "$CLAWBOX_CONFIG" ]; then
-    local TG_TOKEN
-    TG_TOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
-    if [ -n "$TG_TOKEN" ]; then
-      # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
-      # setTelegramToken for the security rationale. `openclaw config set`
-      # may deep-merge instead of replace, which would leave legacy
-      # `dmPolicy:"open"` / `allowFrom:["*"]` values alive. Do the
-      # read-modify-write ourselves with a destructure-strip so the
-      # installer can't leave insecure values behind, matching what
-      # install-x64.sh and src/lib/openclaw-config.ts:setTelegramToken
-      # do on their paths.
-      as_clawbox env TG_TOKEN="$TG_TOKEN" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
+    # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
+    # setTelegramToken for the security rationale. The read-modify-write is
+    # done here, in one write, with a destructure-strip so the installer can't
+    # leave legacy `dmPolicy:"open"` / `allowFrom:["*"]` values behind,
+    # matching src/lib/openclaw-config.ts:setTelegramToken. OpenClaw's own
+    # `config patch --file|--stdin` (where null deletes a key) is the native
+    # writer for it; moving there needs a device run first, because a CLI
+    # write validates the whole config under errexit and can meet the live
+    # gateway's ConfigMutationConflictError (see oc_config_set).
+    # sudo records its command line, so only paths go on it: the script reads
+    # the token itself, as the service user, which owns data/config.json.
+    as_clawbox env CLAWBOX_CFG="$CLAWBOX_CONFIG" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
 const fs = require("fs");
 const path = require("path");
-const botToken = process.env.TG_TOKEN;
+// Errors are named by class only (code or name), never by message.
+const errorClass = (err) => (err && (err.code || err.name)) || "error";
+// A missing, unreadable or corrupt ClawBox config, or one without a token,
+// skips the step before OpenClaw's file is touched: throwing here would abort
+// the whole step mid-update under errexit.
+let botToken = "";
+let skipped = "ClawBox holds no saved bot token";
+try {
+  const saved = JSON.parse(fs.readFileSync(process.env.CLAWBOX_CFG, "utf8"));
+  if (saved && typeof saved.telegram_bot_token === "string") botToken = saved.telegram_bot_token;
+} catch (err) {
+  skipped = `could not read ClawBox's config (${errorClass(err)})`;
+}
+if (!botToken) {
+  process.stderr.write(`  Telegram registration skipped: ${skipped}\n`);
+  process.exit(0);
+}
 const cfgPath = process.env.CFG;
 let cfg = {};
 try {
@@ -8020,9 +8129,20 @@ try {
   // corrupt JSON, transient IO) must abort, otherwise we'd silently
   // overwrite a real-but-unreadable config with only the Telegram channel,
   // wiping auth profiles, gateway settings, AI provider config, etc.
-  if (!err || err.code !== "ENOENT") throw err;
+  if (!err || err.code !== "ENOENT") {
+    process.stderr.write(`  ERROR: Telegram registration stopped: could not read ${cfgPath} (${errorClass(err)})\n`);
+    process.exit(1);
+  }
 }
-if (!cfg.channels) cfg.channels = {};
+const original = JSON.stringify(cfg);
+// null, an array, or a value that is not an object at all holds no channel
+// this block could add to: say so and write nothing.
+const plainObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+if (plainObject(cfg) && !cfg.channels) cfg.channels = {};
+if (!plainObject(cfg) || !plainObject(cfg.channels)) {
+  process.stderr.write("  Telegram registration skipped: openclaw.json holds no channels object\n");
+  process.exit(0);
+}
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
 // OpenClaw's OWN value wins. This block exists to re-register the channel on a
 // fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
@@ -8058,6 +8178,25 @@ const openclawHasBot =
   holdsBot(rest) ||
   (!!rest.accounts && typeof rest.accounts === "object" && Object.values(rest.accounts).some(holdsBot));
 cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
+// Every update re-runs this step while the gateway is live. A rewrite that
+// changes nothing still replaces the inode, bumps the mtime and drops the
+// trailing newline OpenClaw writes, so an unchanged config is left as it is
+// once it is 0600 (the repair explained below). A file this user cannot
+// chmod takes the rewrite path as before.
+const secured = () => {
+  try {
+    fs.chmodSync(cfgPath, 0o600);
+    return (fs.statSync(cfgPath).mode & 0o777) === 0o600;
+  } catch {
+    return false;
+  }
+};
+if (JSON.stringify(cfg) === original && secured()) {
+  // The rewrite path removes a temp a crashed run left; it may hold a whole config.
+  fs.rmSync(`${cfgPath}.tmp`, { force: true });
+  process.stderr.write("  Telegram channel already registered; openclaw.json unchanged\n");
+  process.exit(0);
+}
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 // `rename` replaces the INODE, so the temp file's mode is the one that
 // survives. openclaw.json holds channels.telegram.botToken and the gateway's
@@ -8084,7 +8223,6 @@ process.stderr.write(
     : "  Telegram channel registered from ClawBox's saved token\n",
 );
 NODE
-    fi
   fi
 
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
@@ -9165,6 +9303,13 @@ step_directories_permissions() {
   # ~5x faster on this hardware, "on" is the only way this model gets
   # weekday arithmetic right. Restart clawbox-llamacpp after changing it.
   ensure_env_setting "$ENV_FILE" "LLAMACPP_REASONING" "off"
+  # How llama-server holds the model: mmap keeps its CPU-side tensors in the
+  # page cache, where newer llama.cpp's own default (auto) pins ~2 GB of them
+  # in host memory on this board. scripts/start-llamacpp.sh passes it as
+  # LLAMA_ARG_LOAD_MODE. Never seed LLAMA_ARG_* itself here:
+  # clawbox-embed.service loads this same file. Jetson only — install-x64.sh
+  # does not seed it, as no PC or DGX Spark has been measured with it.
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_LOAD_MODE" "mmap"
   # 32k window, q8_0 KV cache, 8k answers (src/lib/llamacpp.ts says why).
   # Only the exact values this file used to write are moved, so a device keeps
   # any size an operator chose. Keep in step with src/lib/llamacpp.ts —
@@ -10466,6 +10611,14 @@ step_post_update() {
   # good. Idempotent: a box already on the pin does one `codex --version` and
   # stops.
   optional_step codex_cli step_codex_cli
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a box that
+  # restricts user namespaces (Ubuntu 23.10+). Without this call it would be
+  # fresh-install-only, like the CLI above, and a team's planner or reviewer on
+  # an already-installed box would keep failing with "bwrap: loopback: Failed
+  # RTM_NEWADDR". A no-op wherever it is not needed (no bwrap, restriction off,
+  # no apparmor_parser, another profile on bwrap), and byte-identical after the
+  # first run. Read from $SRC_DIR, the root-owned mirror.
+  optional_step bwrap_userns_profile ensure_bwrap_userns_profile
   # On-device TTS: refreshes the voice scripts and the units of the engines
   # that are PRESENT, and seeds the tts-local-cli provider behind an installed
   # Kokoro. It installs NOTHING — the update used to spend a quarter of an
@@ -11378,7 +11531,69 @@ ensure_local_embeddings() {
   # verdict, not just the bytes: assignment in if-condition position, so a
   # non-zero exit discards output that describes nothing anyone should vouch
   # for, and errexit stays suppressed.
-  local EMBED_JSON EMBED_STATE
+  local EMBED_JSON EMBED_STATE MEMORY_AGENT
+  # About the box's DEFAULT agent, which is not always called `main`: asked
+  # about `main` on a box whose agent was renamed, the core refuses (or reads
+  # a stale `agents/main/` left behind) and this said it could not read an
+  # embedder. The same rule as src/lib/openclaw-default-agent.ts, over the
+  # openclaw.json this block reads (the web server's own on a stock box):
+  # `agents.defaults.systemAgent.agentId` when it is a
+  # configured agent, else the one entry marked `default: true` (not under
+  # explicit ownership), else the sole agent; with several and none named,
+  # `main` if it is one of them, else the first. `main` with no roster, no
+  # readable config or no python3.
+  # `-I` on both parsers here: this runs as root, and a full install reaches it
+  # from inside the clawbox-writable project directory, where a plain
+  # `python3 -` would put the cwd first on sys.path and import a planted
+  # `json.py`/`re.py` as root. Isolated mode drops the cwd, PYTHONPATH and the
+  # user site; the snippets import nothing but the standard library.
+  MEMORY_AGENT="$(python3 -I - "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+import json, re, sys
+def norm(value):
+    s = value.strip() if isinstance(value, str) else ""
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", s, re.I | re.A):
+        return s.lower()
+    return re.sub(r"[^a-z0-9_-]+", "-", s.lower()).lstrip("-").rstrip("-")[:64] or "main"
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except Exception:
+    cfg = None
+agents = cfg.get("agents") if isinstance(cfg, dict) else None
+roster = None
+if isinstance(agents, dict) and "entries" in agents:
+    entries = agents["entries"]
+    # In the order JavaScript walks the object, as the core and the web
+    # server do: integer-like keys first, ascending, then the rest as written.
+    keys = list(entries) if isinstance(entries, dict) else []
+    first = sorted((k for k in keys if re.fullmatch(r"0|[1-9][0-9]*", k) and int(k) < 4294967295), key=int)
+    keys = first + [k for k in keys if k not in first]
+    roster = [(norm(k), entries[k]) for k in keys if isinstance(entries[k], dict)] if isinstance(entries, dict) else []
+elif isinstance(agents, dict) and "list" in agents:
+    listed = agents["list"]
+    roster = [(norm(v.get("id") if isinstance(v, dict) else None), v) for v in listed if isinstance(v, (dict, list))] if isinstance(listed, list) else []
+if roster is None:
+    print("main")
+    raise SystemExit(0)
+ids = list(dict.fromkeys(i for i, _ in roster))
+defaults = agents.get("defaults") if isinstance(agents.get("defaults"), dict) else {}
+system = defaults.get("systemAgent") if isinstance(defaults.get("systemAgent"), dict) else {}
+named = system.get("agentId")
+named = norm(named) if isinstance(named, str) and named.strip() else ""
+marked = [i for i, e in roster if isinstance(e, dict) and e.get("default") is True]
+if named and named in ids:
+    print(named)
+elif agents.get("ownership") != "explicit" and len(marked) == 1:
+    print(marked[0])
+elif len(ids) == 1:
+    print(ids[0])
+elif not ids:
+    print("main")
+else:
+    print("main" if "main" in ids else ids[0])
+PY
+)"
+  case "$MEMORY_AGENT" in ''|*[!a-z0-9_-]*) MEMORY_AGENT=main ;; esac
   # `</dev/null`, and no clock. The CLI is what decides how long this takes —
   # `--deep` walks the whole index, so the 60 s cap this used to carry reported
   # "could not read an embedder" about a healthy one on a box whose index was
@@ -11386,7 +11601,7 @@ ensure_local_embeddings() {
   # invent. What IS closed off is the one way a non-interactive CLI hangs
   # without doing anything: a prompt on stdin, which it would otherwise inherit
   # from the root step and wait on for ever.
-  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
+  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent "$MEMORY_AGENT" --deep --json 2>/dev/null </dev/null)"; then
     EMBED_JSON=""
   fi
   # `command -v` first, and a state of its own: without the interpreter the
@@ -11395,7 +11610,7 @@ ensure_local_embeddings() {
   if ! command -v python3 >/dev/null 2>&1; then
     EMBED_STATE="noparser"
   else
-    EMBED_STATE="$(python3 - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+    EMBED_STATE="$(python3 -I - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" "$MEMORY_AGENT" <<'PY' 2>/dev/null || true
 import json, sys
 from urllib.parse import urlparse
 try:
@@ -11405,7 +11620,7 @@ except Exception:
 rows = doc if isinstance(doc, list) else [doc]
 row = {}
 for entry in rows:
-    if isinstance(entry, dict) and entry.get("agentId") == "main":
+    if isinstance(entry, dict) and entry.get("agentId") == sys.argv[3]:
         row = entry
         break
 if not row and rows and isinstance(rows[0], dict):
@@ -11701,9 +11916,13 @@ LLAMACPP_BUILD_LOCK="/run/lock/clawbox-llamacpp-build.lock"
 LLAMACPP_REPO_URL="https://github.com/ggml-org/llama.cpp.git"
 
 # The commit an installed llama-server says it was built from — the short hash
-# in its own `--version` ("version: 6970 (db7d8b24b)") — or nothing when it
-# cannot say: it does not start, or it was built outside a git checkout and
-# answers "unknown".
+# in its own `--version`, in either form llama.cpp prints:
+#   version: <build> (<hash>)                         (older builds)
+#   version: <semver> (build <build>, commit <hash>)  (newer builds)
+# — or nothing when it cannot say: it does not start, or it was built outside
+# a git checkout and answers "unknown". Reading only the older form would
+# rebuild a box on every update once the pin moves to a newer build, and then
+# refuse the build it made.
 #
 # $1 = the binary, $2 = a directory to load its libraries from instead of the
 # tree its RUNPATH names (a staged build that is not in place yet).
@@ -11718,7 +11937,10 @@ llamacpp_binary_commit() {
   else
     out="$(as_clawbox "$bin" --version 2>&1)" || return 0
   fi
-  printf '%s\n' "$out" | sed -n 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' | head -n 1
+  printf '%s\n' "$out" | sed -n \
+    -e 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    -e 's/^version: [^ ][^ ]* (build [0-9][0-9]*, commit \([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    | head -n 1
 }
 
 # Does the short hash a binary reports ($1) name the pinned commit ($2, the
@@ -11999,10 +12221,17 @@ step_llamacpp_runtime() {
   # Pinned, not tip-of-master. An unpinned --depth 1 clone gave every device
   # whatever upstream happened to be that day — the two boxes here ended up on
   # d2f8305 and db7d8b2, so "the same install" produced different inference
-  # binaries. This commit is the one proven on this hardware; move it
-  # deliberately, with a rebuild to prove the new one — and moving it now
-  # moves every box, on its next update.
-  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-db7d8b24b5197ca39435cf47b3c1ba039b53605b}"
+  # binaries. Move it deliberately, with a rebuild to prove the new one — and
+  # moving it now moves every box, on its next update.
+  #
+  # 5f490d7 (b12233) was measured on an 8 GB Orin Nano against db7d8b2: faster
+  # (decode 33.5 vs 30.1 tok/s, prefill 1144 vs 987) with lowest MemAvailable
+  # 2251 vs 2403 MB, but only with the model memory-mapped. Its default load
+  # mode (auto) pins the model's CPU-side tensors in host memory on this board
+  # and left 390 MB free, so the pin moves only together with
+  # LLAMACPP_LOAD_MODE=mmap (seeded in step_directories_permissions, passed by
+  # scripts/start-llamacpp.sh).
+  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-5f490d7bfe78844e6390c869454c149fd7e003a8}"
 
   # On Jetson, nvcc ships at /usr/local/cuda/bin but isn't on systemd's PATH,
   # so `command -v nvcc` fails and we silently fall back to a CPU-only build.
@@ -13136,6 +13365,118 @@ ensure_codex_cli() {
   return "$rc"
 }
 
+# ── bubblewrap under Ubuntu's user-namespace restriction ─────────────────────
+#
+# Ubuntu 23.10+ ships kernel.apparmor_restrict_unprivileged_userns=1, which
+# refuses /usr/bin/bwrap the user namespace it needs. Codex's read-only sandbox
+# (a team's planner or reviewer, src/lib/coding-codex.ts) IS `bwrap
+# --unshare-net`, so on such a box every command of a read-only run failed with
+# "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+# config/apparmor/bwrap-userns-restrict is upstream AppArmor's own profile for
+# exactly this: bwrap may build the namespace, and everything it starts is
+# stacked with a child profile that denies every capability. The system-wide
+# restriction stays on, and no other profile or sysctl is touched.
+#
+# Loaded only where it is needed AND safe:
+#   - /usr/bin/bwrap is installed;
+#   - the restriction is on (/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+#     reads 1) — everywhere else bwrap already works;
+#   - apparmor_parser exists to load it;
+#   - no OTHER profile under /etc/apparmor.d already attaches to bwrap — a
+#     second one on the same binary would be ambiguous, and the owner's or the
+#     distro's comes first. A file of that name that is not ClawBox's is left
+#     alone for the same reason.
+# Read from $SRC_DIR, the root-owned mirror on a dispatched step: root loads
+# AppArmor policy only from a copy the clawbox user cannot write. Idempotent,
+# and a failure is a warning — the caller never fails the install over it.
+#
+# Write `$2` to `$1`, load it with `$3`, and put the box back as it was when
+# the kernel refuses it: a file left behind would read as "already installed"
+# on every later run and never be retried.
+bwrap_userns_profile_install() {
+  local dest="$1" profile="$2" parser="$3" prev=""
+  if [ -f "$dest" ]; then
+    prev="$(mktemp)" || prev=""
+    if [ -z "$prev" ] || ! cat "$dest" > "$prev"; then
+      echo "  WARN: could not set the current $dest aside; leaving it as it is" >&2
+      [ -z "$prev" ] || rm -f "$prev"
+      return 1
+    fi
+  fi
+  if install -o root -g root -m 0644 "$profile" "$dest" && "$parser" -r "$dest"; then
+    echo "  AppArmor profile for bubblewrap installed and loaded: $dest"
+    [ -z "$prev" ] || rm -f "$prev"
+    return 0
+  fi
+  echo "  WARN: could not install or load $dest; putting back what was there" >&2
+  if [ -n "$prev" ]; then
+    install -o root -g root -m 0644 "$prev" "$dest" || true
+    rm -f "$prev"
+  else
+    rm -f "$dest"
+  fi
+  return 1
+}
+
+ensure_bwrap_userns_profile() {
+  local bwrap_bin=/usr/bin/bwrap
+  local restrict_flag=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+  local profile_dir=/etc/apparmor.d
+  local name=bwrap-userns-restrict
+  local src="$SRC_DIR/config/apparmor/$name"
+  local dest="$profile_dir/$name"
+  # A header line that ATTACHES a profile to a bwrap path, as opposed to a rule
+  # inside some other profile that merely mentions it (`/usr/bin/bwrap ix,`).
+  local attach_re='^[[:space:]]*(profile[[:space:]]+("[^"]*"|[^[:space:]]+)[[:space:]]+)?"?/[^[:space:]]*bwrap[^[:space:]]*"?[[:space:]]*(flags[[:space:]]*=[[:space:]]*\([^)]*\))?[[:space:]]*(\{.*)?$'
+  local parser other first_line=""
+
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the bubblewrap AppArmor profile"
+    return 0
+  fi
+  if [ ! -x "$bwrap_bin" ]; then
+    echo "  bubblewrap AppArmor profile: not needed ($bwrap_bin is not installed)"
+    return 0
+  fi
+  if [ "$(cat "$restrict_flag" 2>/dev/null || true)" != "1" ]; then
+    echo "  bubblewrap AppArmor profile: not needed (unprivileged user namespaces are not restricted here)"
+    return 0
+  fi
+  parser="$(command -v apparmor_parser 2>/dev/null || true)"
+  if [ -z "$parser" ]; then
+    echo "  bubblewrap AppArmor profile: skipped (apparmor_parser is not installed)"
+    return 0
+  fi
+  # `|| true`: no match is grep's exit 1, and this runs under pipefail.
+  other="$(grep -rIlE --exclude="$name" "$attach_re" "$profile_dir" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$other" ]; then
+    echo "  bubblewrap AppArmor profile: skipped ($other already has a profile for bwrap)"
+    return 0
+  fi
+  if [ ! -r "$src" ]; then
+    echo "  WARN: $src is missing; not installing the bubblewrap AppArmor profile" >&2
+    return 1
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
+      echo "  AppArmor profile for bubblewrap already installed: $dest"
+      return 0
+    fi
+    if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+      IFS= read -r first_line < "$dest" || true
+    fi
+    case "$first_line" in
+      "# ClawBox: "*) ;;
+      *)
+        echo "  bubblewrap AppArmor profile: skipped ($dest exists and is not ClawBox's)"
+        return 0
+        ;;
+    esac
+  fi
+  bwrap_userns_profile_install "$dest" "$src" "$parser"
+}
+
 # Dispatchable on its own and called from step_post_update — the same shape
 # step_coding_harness has, and for the same reason: an in-app update has to
 # deliver this without also reinstalling the Gemini CLI on every box that
@@ -13165,6 +13506,11 @@ step_ai_tools_install() {
   # Swallowed here for the same reason as the CLI above — this step must not
   # abort over an optional tool — and reported honestly inside the function.
   ensure_codex_cli || true
+
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a box that
+  # restricts user namespaces. Gated inside, and a warning at worst, like the
+  # CLIs around it.
+  ensure_bwrap_userns_profile || true
 
   # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then

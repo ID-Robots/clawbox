@@ -6,8 +6,11 @@ import { useT } from "@/lib/i18n";
 import { findRunningBackgroundTask } from "@/lib/background-task-client";
 import { EMBED_MODEL_DOWNLOAD_KIND } from "@/lib/background-task-kinds";
 import { BackgroundTaskInline } from "@/components/BackgroundTaskProgress";
-import { CARD, CardHeading, InstallOutcomeView, InstallProgressView, PRIMARY_BUTTON } from "@/components/local-ai/ui";
+import { BUTTON, CARD, CardHeading, InstallOutcomeView, InstallProgressView, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 import { useStreamedInstall } from "@/components/local-ai/use-streamed-install";
+import { parseLocalEmbeddingModelOptions, type LocalEmbeddingModelOption } from "@/lib/local-embedding-gating";
+import { switchLocalEmbeddingModel, unavailableReasonKey } from "@/lib/local-embedding-client";
+import { notifyMemoryShardChanged, onMemoryShardChanged } from "@/lib/ui-events";
 
 /**
  * Settings → Local AI → the memory-search model.
@@ -19,7 +22,15 @@ import { useStreamedInstall } from "@/components/local-ai/use-streamed-install";
  * actually here, how big is it — and the one button that was a terminal job:
  * download it again (a box whose copy is truncated has no other repair).
  * Taking it off is the row's own Uninstall, and the panel draws this card only
- * under a row that is installed and not switched off.
+ * under a row that is installed and not switched off — the cloud's row
+ * included (TASK-2418), so a model can be downloaded while memory search
+ * still runs in the cloud, ready for Memory Shard's "On this box".
+ *
+ * And WHICH model (TASK-2411): one row per model on offer — Qwen3-Embedding-
+ * 0.6B everywhere, the 4B where this box can run it, and the plain reason
+ * where it cannot (a Jetson, a PC without an NVIDIA GPU). A row downloads its
+ * model, switches memory search onto it (which re-embeds every file), or
+ * removes a copy that is not in use: a switch never deletes the other file.
  */
 
 interface EmbedStatus {
@@ -29,6 +40,8 @@ interface EmbedStatus {
   modelBytes: number | null;
   model: string;
   engine: string;
+  /** Every model on offer, from a server that has the choice (TASK-2411). */
+  models: LocalEmbeddingModelOption[];
 }
 
 function isStatus(value: unknown): value is EmbedStatus {
@@ -40,11 +53,19 @@ function isStatus(value: unknown): value is EmbedStatus {
 }
 
 /** The route's answer, or null for anything that is not one. */
+/** Where the index is embedded now, or null when the box could not say. */
+async function readIndexSource(): Promise<"cloud" | "local" | null> {
+  const body = await fetch("/setup-api/clawkeep/memory/provider", { cache: "no-store" })
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null) as { source?: unknown } | null;
+  return body?.source === "cloud" || body?.source === "local" ? body.source : null;
+}
+
 async function readStatus(): Promise<EmbedStatus | null> {
   try {
     const res = await fetch("/setup-api/embed/status", { cache: "no-store" });
     const data = res.ok ? await res.json() : null;
-    return isStatus(data) ? data : null;
+    return isStatus(data) ? { ...data, models: parseLocalEmbeddingModelOptions((data as { models?: unknown }).models) } : null;
   } catch {
     return null;
   }
@@ -94,9 +115,91 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
     await settle(ok);
   };
 
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+  // Where the index is embedded. "Use" points memory search at a model ON THIS
+  // BOX, so over an index in the cloud it would quietly move it off the cloud
+  // too; that move is Memory Shard's switch, which says what it costs.
+  const [indexSource, setIndexSource] = useState<"cloud" | "local" | null>(null);
+  // A read that failed (an unreadable config answers 503) is asked again
+  // every few seconds, with a line saying why "Use" waits meanwhile.
+  const [sourceFailed, setSourceFailed] = useState(false);
+  const [sourceTick, setSourceTick] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    void readIndexSource().then((source) => {
+      if (!alive) return;
+      if (source) {
+        setIndexSource(source);
+        setSourceFailed(false);
+      } else {
+        setSourceFailed(true);
+        retry = setTimeout(() => setSourceTick((n) => n + 1), 5_000);
+      }
+    });
+    return () => {
+      alive = false;
+      if (retry) clearTimeout(retry);
+    };
+  }, [status?.model, sourceTick]);
+  // Memory Shard moved the index (this card now stays under the cloud's row
+  // too, TASK-2418): read where it is again rather than keep the old answer.
+  useEffect(() => onMemoryShardChanged(() => setSourceTick((n) => n + 1)), []);
+  const [rowError, setRowError] = useState<string | null>(null);
+
+  const fetchModel = async (model: LocalEmbeddingModelOption) => {
+    setRowError(null);
+    const ok = await install.run("embed", (signal) => fetch("/setup-api/embed/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: model.id }),
+      signal,
+    }));
+    await settle(ok);
+  };
+
+  const pickModel = async (model: LocalEmbeddingModelOption) => {
+    setRowError(null);
+    setRowBusy(model.id);
+    try {
+      // Asked again at the click: the index may have moved to the cloud since
+      // this card read it (from another tab, or the assistant), and "Use"
+      // points memory search at THIS box — moving it off the cloud is Memory
+      // Shard's switch, which says what it costs, never this button's.
+      const source = await readIndexSource();
+      if (source !== "local") {
+        if (source) setIndexSource(source);
+        setRowError(t(source === "cloud" ? "localModels.embed.cloudInUse" : "localModels.embed.sourceUnknown"));
+        return;
+      }
+      await switchLocalEmbeddingModel(model.id, t("clawkeep.memory.embedder.failed"));
+      notifyMemoryShardChanged();
+    } catch (err) {
+      setRowError(err instanceof Error && err.message ? err.message : t("clawkeep.memory.embedder.failed"));
+    } finally {
+      setRowBusy(null);
+      await settle(true);
+    }
+  };
+
+  const removeModel = async (model: LocalEmbeddingModelOption) => {
+    setRowError(null);
+    setRowBusy(model.id);
+    try {
+      const res = await fetch(`/setup-api/embed/install?model=${encodeURIComponent(model.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        setRowError(typeof body?.error === "string" ? body.error : t("clawkeep.memory.embedder.failed"));
+      }
+    } finally {
+      setRowBusy(null);
+      await settle(true);
+    }
+  };
+
   if (!status) return null;
   const size = formatBytes(status.modelBytes, locale);
-  const busy = install.busy !== null;
+  const busy = install.busy !== null || rowBusy !== null;
 
   return (
     <div className={CARD} data-testid="local-ai-embed-card">
@@ -119,6 +222,74 @@ export default function EmbeddingModelCard({ onChanged }: { onChanged?: () => vo
             : status.modelAvailable ? t("localModels.embed.again") : t("localModels.install.download")}
         </button>
       </div>
+      {status.models.length > 1 && (
+        <ul className="px-4 pb-4 -mt-1 flex flex-col gap-2" data-testid="local-ai-embed-models">
+          {status.models.map((model) => (
+            <li
+              key={model.id}
+              className="rounded-xl border border-[var(--border-subtle)] px-3 py-2"
+              data-testid={`local-ai-embed-model-${model.id}`}
+            >
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-[var(--text-primary)] truncate">
+                    {model.label}
+                    <span className="ml-1.5 text-[10px] text-[var(--text-muted)]">{model.dimensions}d</span>
+                  </p>
+                  <p className="text-[11px] text-[var(--text-muted)]" data-testid={`local-ai-embed-model-${model.id}-state`}>
+                    {/* Not "In use" while memory search runs in the cloud: the
+                        model the box is set to is then only the one "On this
+                        box" would use, and may not even be here yet. */}
+                    {model.active && indexSource !== "cloud"
+                      ? t("localModels.embed.inUse")
+                      : model.installed
+                        ? t("localModels.embed.downloaded", { size: formatBytes(model.bytes, locale) ?? "" })
+                        : t("localModels.embed.notDownloaded")}
+                  </p>
+                </div>
+                {model.available && !model.active && !model.installed && (
+                  <button type="button" className={BUTTON} disabled={busy} onClick={() => void fetchModel(model)}
+                    data-testid={`local-ai-embed-model-${model.id}-download`}>
+                    {t("localModels.install.download")}
+                    {model.bytes ? ` · ${formatBytes(model.bytes, locale)}` : ""}
+                  </button>
+                )}
+                {model.available && !model.active && model.installed && (
+                  <button type="button" className={PRIMARY_BUTTON} disabled={busy || indexSource !== "local"} onClick={() => void pickModel(model)}
+                    data-testid={`local-ai-embed-model-${model.id}-use`}>
+                    {t("localModels.embed.use")}
+                  </button>
+                )}
+                {!model.active && model.installed && (
+                  <button type="button" className={BUTTON} disabled={busy} onClick={() => void removeModel(model)}
+                    data-testid={`local-ai-embed-model-${model.id}-remove`}>
+                    {t("localModels.embed.remove")}
+                  </button>
+                )}
+              </div>
+              {!model.available && (
+                <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid={`local-ai-embed-model-${model.id}-unavailable`}>
+                  {t(unavailableReasonKey(model.reason))}
+                </p>
+              )}
+            </li>
+          ))}
+          <li className="text-[11px] leading-relaxed text-[var(--text-muted)]">{t("localModels.embed.switchHint")}</li>
+          {indexSource === "cloud" && (
+            <li className="text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="local-ai-embed-models-cloud">
+              {t("localModels.embed.cloudInUse")}
+            </li>
+          )}
+          {indexSource === null && sourceFailed && status.models.some((m) => m.available && m.installed && !m.active) && (
+            <li className="text-[11px] leading-relaxed text-[var(--text-muted)]" data-testid="local-ai-embed-models-source-unknown">
+              {t("localModels.embed.sourceUnknown")}
+            </li>
+          )}
+          {rowError && (
+            <li className="text-[11px] text-red-400" role="alert" data-testid="local-ai-embed-models-error">{rowError}</li>
+          )}
+        </ul>
+      )}
       <div className="px-4 pb-4 -mt-2">
         {install.taskId
           ? <BackgroundTaskInline taskId={install.taskId} testId="local-ai-embed-task" />

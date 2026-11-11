@@ -17,7 +17,14 @@
  *    user namespace, which this device class refuses (measured:
  *    `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so the
  *    `workspace-write` sandbox would fail every command a run tried. Claude
- *    runs get `Bash(*)` for the same reason: full access is about commands;
+ *    runs get `Bash(*)` for the same reason: full access is about commands.
+ *    A READ-ONLY run (a team's planner or reviewer, `readOnly` below) is the
+ *    exception and does use Codex's `read-only` sandbox — the same bubblewrap.
+ *    On Ubuntu 23.10+ (kernel.apparmor_restrict_unprivileged_userns=1) that is
+ *    refused the same way, so both installers now ship and load an AppArmor
+ *    profile for /usr/bin/bwrap (config/apparmor/bwrap-userns-restrict, via
+ *    `ensure_bwrap_userns_profile`) wherever it is needed and nothing else
+ *    already covers bwrap; the system-wide restriction stays on;
  *  - config as `-c key=value` rather than flags wherever both exist, because
  *    `codex exec resume` takes neither `--sandbox` nor `--cd` and an unknown
  *    `-c` key is ignored where an unknown flag would end the run.
@@ -152,10 +159,18 @@ export interface CodexArgsOptions {
   /**
    * A run that may only read — a team's planner. Claude Code is held to that by
    * its tool list; Codex has one shell for everything, so the only fence that
-   * holds is its own `read-only` sandbox. Where the box cannot give Codex that
-   * sandbox (no user namespaces) its commands fail rather than run unfenced:
-   * a read-only run that cannot read is a failed run, one that can write is a
-   * broken promise.
+   * holds is its own `read-only` sandbox, which is `/usr/bin/bwrap
+   * --unshare-net`. Where the box cannot give Codex that sandbox (no user
+   * namespaces) its commands fail rather than run unfenced: a read-only run
+   * that cannot read is a failed run, one that can write is a broken promise.
+   *
+   * On Ubuntu 23.10+ (kernel.apparmor_restrict_unprivileged_userns=1) the
+   * installers provide what bwrap needs: install.sh and install-x64.sh load
+   * config/apparmor/bwrap-userns-restrict (`ensure_bwrap_userns_profile`) —
+   * bwrap may build its namespace, everything it starts is stacked with a
+   * profile that denies every capability, and the restriction itself stays on.
+   * Without it every command fails with "bwrap: loopback: Failed RTM_NEWADDR:
+   * Operation not permitted".
    */
   readOnly?: boolean;
 }

@@ -895,6 +895,34 @@ describe("a run", () => {
       await vi.waitFor(() => { expect(lib.getRun(done.id)?.worktree?.removed).toBe(true); }, { timeout: 10_000 });
     });
 
+    it("counts the files a run's own commit changed when no tool confirmed them — and reviews that run", async () => {
+      // run-8lmn0l4c (Opus 5.5 at low effort, 2026-11-10) wrote twelve files
+      // through `python3 - <<EOF` and committed them itself: no Edit or Write
+      // call, so the record said it changed nothing and the automatic review
+      // pass was skipped for a 578-line change.
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      const dir = makeProject("site");
+      const g = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=T", "-c", "user.email=t@example.com", ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
+      g("init", "--quiet"); g("add", "-A"); g("commit", "--quiet", "-m", "before");
+      installFakeWrapper([
+        `echo '${INIT}'`,
+        // Written through the shell: no tool_use event names either file.
+        'if [ ! -f "$PWD/lib/calc.ts" ]; then mkdir -p "$PWD/lib" && echo "export const a = 1;" > "$PWD/lib/calc.ts" && echo "# docs" > "$PWD/NOTES.md"',
+        '  git -C "$PWD" -c user.name=Run -c user.email=run@example.com add -A && git -C "$PWD" -c user.name=Run -c user.email=run@example.com commit -q -m "written through the shell"',
+        "fi",
+        `echo '{"type":"result","subtype":"success","num_turns":2,"result":"Done."}'`,
+        "exit 0",
+      ].join("\n"));
+      const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      expect(done.status).toBe("completed");
+      await vi.waitFor(() => { expect([...(lib.getRun(done.id)?.filesTouched ?? [])].sort()).toEqual(["NOTES.md", "lib/calc.ts"]); }, { timeout: 10_000 });
+      // A run that changed files is a run to review.
+      await vi.waitFor(() => { expect(allRuns().some((r) => r.reviewOf === done.id)).toBe(true); }, { timeout: 10_000 });
+      const pass = allRuns().find((r) => r.reviewOf === done.id)!;
+      await finished(pass.id);
+      expect(await lib.waitForRunSettled(pass.id, 10_000)).toBe(true);
+    });
+
     it("does nothing while the owner's review switch is off", async () => {
       readyDevice();
       makeProject("site");
@@ -2320,7 +2348,8 @@ describe("the report", () => {
     expect(done.status).toBe("completed");
     expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe(`${done.summary}\n`);
     // Renamed into place: nothing half-written is left beside it.
-    expect(fs.readdirSync(path.dirname(reportOf(run.id)))).toEqual(["report.md"]);
+    // The report, beside the box's stop for package installs (ensureArtifactsDir) and nothing else.
+    expect(fs.readdirSync(path.dirname(reportOf(run.id))).sort()).toEqual(["package.json", "report.md"]);
     // The listing the app reads carries it as markdown, which is what opens
     // it rendered rather than as plain text.
     const artifactsLib = await import("@/lib/coding-agent-artifacts");
@@ -2394,7 +2423,8 @@ describe("the report", () => {
     // must still say what the run did.
     installFakeWrapper([
       `echo '${INIT}'`,
-      `rmdir "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
+      // rm -rf, not rmdir: the folder holds the box's stop for package installs (ensureArtifactsDir).
+      `rm -rf "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
       `echo '${RESULT}'`,
       "exit 0",
     ].join("\n"));
@@ -2441,7 +2471,8 @@ describe("the evidence folder at settle", () => {
 
     expect(done.status).toBe("completed");
     const dir = evidenceOf(run.id);
-    expect(fs.readdirSync(dir).sort()).toEqual(["report.md", "tests.txt", "venv-attempt"]);
+    // …beside the box's own stop for package installs (ensureArtifactsDir), which is not the run's and stays.
+    expect(fs.readdirSync(dir).sort()).toEqual(["package.json", "report.md", "tests.txt", "venv-attempt"]);
     expect(fs.readdirSync(path.join(dir, "venv-attempt"))).toEqual([]);
     const line = done.progress.find((l) => l.startsWith("Removed from the evidence folder"));
     expect(line).toBe(RUNNER_STEP.evidencePruned("latest.txt, venv-attempt/venv/"));

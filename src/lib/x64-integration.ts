@@ -43,6 +43,47 @@ function readRootOwnedProjectDir(file: string, label: string): string | null {
 }
 
 /**
+ * The npm prefix the desktop integration's core lives under — the
+ * `NPM_PREFIX` its host file names (build-package.py writes it with
+ * `shlex.quote`) — or null when the file is absent, unreadable, or names no
+ * absolute prefix. The integration's `openclaw` is a wrapper script
+ * (`openclaw-cli`), not npm's own link, so the core's package.json cannot be
+ * found from the binary's location; this is where it is instead.
+ *
+ * Parsed as KEY=VALUE text, never sourced as shell code, and only from a small
+ * plain file (no link, FIFO or device that could block the server). Never
+ * throws: a caller treats null as "no integration to consult" and keeps its
+ * own answer.
+ */
+export function x64IntegrationNpmPrefix(file: string = INTEGRATION_FILE): string | null {
+  let fd: number;
+  try {
+    fd = fs.openSync(/* turbopackIgnore: true */ file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  let text: string;
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4096) return null;
+    text = fs.readFileSync(/* turbopackIgnore: true */ fd, "utf8");
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+  let value: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("NPM_PREFIX=")) value = line.slice("NPM_PREFIX=".length);
+  }
+  if (value === null) return null;
+  // shlex.quote leaves a value of safe characters bare and single-quotes any other.
+  const quoted = /^'([^']*)'$/.exec(value);
+  const prefix = quoted ? quoted[1] : /^[\w@%+=:,./-]+$/.test(value) ? value : null;
+  return prefix && path.isAbsolute(prefix) ? prefix : null;
+}
+
+/**
  * The existing-desktop package owns its gateway maintenance and rollback.
  * Detect that installed contract, not the CPU: ordinary x64/ARM installs
  * still use the appliance updater. Never source the host file as shell code.

@@ -132,6 +132,7 @@ import { buildCommitMessage } from "@/lib/coding-git";
 import { addWorkerWorktree, adoptOwnBranchWork, changedFiles, committableFiles, ensureTeamBranch, gitIn, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, workerBranchName, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { isInside } from "@/lib/file-guard";
+import { healWorktreePaths } from "@/lib/coding-worktree-heal";
 import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, SHELL_REVIEWER_BRIEF, type ReviewCheckout, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, SUITE_GATE_TIMEOUT_MS, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { ciFailureLine, ciFixNotes, goalRefusesPullRequest, goalWantsMerge, goalWantsPullRequest, MAX_TEAM_CI_ROUNDS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
@@ -156,6 +157,7 @@ import {
   loadBoard,
   TEAM_DIR,
   MAX_DIGEST_CHARS,
+  MAX_FINAL_FIX_ROUNDS,
   outsideFolderWriteDenial,
   ownHarnessStateDenial,
   readOnlyDenial,
@@ -1586,8 +1588,14 @@ async function runTeam(team: LiveTeam, source: CodingRunSource, resume: TeamResu
   // The final reviewer the last web server had going, if it got that far.
   let finalAdopt: string | null = null;
   if (resume?.phase === "work" && !board.finalReview) {
-    for (let i = board.runs.length - 1; i >= 0 && !finalAdopt; i--) {
-      if (board.runs[i].role === "reviewer" && board.runs[i].taskId === null) finalAdopt = board.runs[i].id;
+    // Not one that already ruled: a rejected review whose fix round is at
+    // work left the board without a verdict too, and its reviewer is done.
+    const ruledAt = board.log.reduce((at, e) => (e.type === "final_review" && e.actor.kind === "reviewer" ? Math.max(at, e.ts) : at), 0);
+    for (let i = board.runs.length - 1; i >= 0; i--) {
+      if (board.runs[i].role !== "reviewer" || board.runs[i].taskId !== null) continue;
+      const started = getRun(board.runs[i].id)?.startedAt;
+      if (!ruledAt || (typeof started === "number" && started > ruledAt)) finalAdopt = board.runs[i].id;
+      break;
     }
   }
   // Picked back up after a restart: every task the last web server had in
@@ -1709,6 +1717,30 @@ async function runTeam(team: LiveTeam, source: CodingRunSource, resume: TeamResu
       finalAdopt = null;
       if (team.stopRequested || isSettledStatus(board.status)) return;
       if (verdict?.verdict === "rejected") {
+        // Once, the findings go back to the tasks they point at instead of
+        // ending the team: the work is all merged, and what a final review
+        // finds is usually minutes of one worker's time (`finalFixTasks`).
+        // The loop then runs the suite and a review of the fixed result; a
+        // second rejection ends the team here.
+        const fixers = (board.finalFixRounds ?? 0) < MAX_FINAL_FIX_ROUNDS ? finalFixTasks(board.tasks, verdict.notes) : [];
+        const reoffered: string[] = [];
+        const notes = finalFixNotes(verdict.notes);
+        // Dependents first, as the suite gate does.
+        for (const task of [...fixers].reverse()) {
+          if (!underReview(board, task.task_id)) continue;
+          try {
+            bus.send(SYSTEM, { type: "final_reopen", task_id: task.task_id, notes });
+            reoffered.push(task.task_id);
+          } catch {
+            // Refused by the board: already on it as an alert.
+          }
+        }
+        if (reoffered.length) {
+          if (board.dynamic) leadAfter.push(...reoffered);
+          setTeamStatus(board, SYSTEM, "working", `Fixing what the final review found: ${reoffered.join(", ")}`);
+          saveBoard(board);
+          continue;
+        }
         setTeamStatus(board, SYSTEM, "failed", `The final review rejected the merged work: ${verdict.notes}`);
         saveBoard(board);
         return;
@@ -1873,7 +1905,9 @@ async function runAsSingleRun(team: LiveTeam, tasks: readonly TeamTask[], source
     // named folder it emptied (`removedNamed`).
     const removed = await removedByRun(settled, place);
     for (const task of tasks) {
-      const named = namedDeliverables(task.files_hint);
+      // A path outside the project is no file of the task's to judge
+      // (`insidePlace`): never looked for, so never "missing" either.
+      const named = namedDeliverables(task.files_hint).filter((n) => insidePlace(place, n));
       if (!named.length) continue;
       const gone = await removedNamed(settled, place, named, removed);
       const kept = named.filter((n) => !gone.includes(n));
@@ -2027,6 +2061,23 @@ export async function missingDeliverables(place: DeliverablePlace, named: readon
     if (state !== "present") missing.push(`${entry} (${state})`);
   }
   return missing;
+}
+
+/**
+ * Is this named path one the deliverable check can judge — relative, or an
+ * absolute path under the folder or one of the branch's roots? An absolute
+ * path anywhere else is not a file of the project: `namedState` never looks
+ * for it on disk ("a file there is not the run's work"), so it could only
+ * ever be "missing" — and a planner that listed its own run's artifact folder
+ * (`…/data/coding-agent-artifacts/run-…/`, where a run's screenshots go) under
+ * every task failed a team whose single run had done all five of them
+ * (team-g4cfurux). A hint names what a task touches; outside the project
+ * there is nothing of the task's to find.
+ */
+export function insidePlace(place: DeliverablePlace, entry: string): boolean {
+  if (!path.isAbsolute(entry)) return true;
+  const file = path.resolve(entry);
+  return [place.dir, ...(place.branch?.roots ?? [])].some((root) => isInside(file, path.resolve(root)));
 }
 
 /** One named path where a settled run's work is (`missingDeliverables`): in the folder, else on the run's branch. */
@@ -2378,6 +2429,21 @@ async function finishWork(team: LiveTeam, task: TeamTask, source: CodingRunSourc
           result = `${result}\n\n${NO_CHANGE}`;
           bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No change from ${task.task_id} (${run.id}): its branch has no commit, though the worker wrote ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ", …" : ""}` });
         } else {
+          // The worker's folder goes when its branch is merged: its path
+          // inside a file the worker wrote — a README's command, a config —
+          // is said in the project's own folder first (coding-worktree-heal.ts;
+          // the run's settle did this for what it committed, this covers what
+          // the harvest above committed after it).
+          const healed = await healWorktreePaths(worktree.path)
+            .catch((err: unknown): { ok: false; detail: string } => ({ ok: false, detail: err instanceof Error ? err.message : String(err) }));
+          if (healed?.ok && healed.files.length) {
+            const n = healed.files.length;
+            bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} wrote its temporary folder's path into ${n} file${n === 1 ? "" : "s"} (${clipList(healed.files)}); each mention now names the project's own folder.` });
+          } else if (healed && !healed.ok) {
+            // Said, not swallowed: the branch is merged next and the folder
+            // removed, so a path this left in a file is dead from then on.
+            bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id}'s files could not be checked for its temporary folder's path (${firstLine(healed.detail, 200)}); a path it wrote into a file may still name that folder, which is removed once its work is merged.` });
+          }
           const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
           if (!merged.ok) {
             mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
@@ -3273,7 +3339,7 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
   // Right after the task line, ahead of a goal that may be long enough to
   // push it past the cut below.
   if (own) {
-    parts.push(`Your folder: ${own} — your own working copy of the project, and the ONLY folder you work in. Read and write there and nowhere else; the files below are given with their full path in it.`);
+    parts.push(`Your folder: ${own} — your own working copy of the project, and the ONLY folder you work in. Read and write there and nowhere else; the files below are given with their full path in it. It is temporary — it is removed once your work is merged — so inside the files you write (a README's commands, a config, a script) use paths relative to the project's root, never this folder's absolute path.`);
   }
   const files = own ? task.files_hint.map((f) => hintInFolder(f, board.directory, own)) : task.files_hint;
   const hint = files.length ? `Files this task is expected to touch: ${files.join(", ")}` : "";
@@ -3442,6 +3508,54 @@ export function suiteSuspects(tasks: TeamTask[], named: string[], { everyone = t
   return pointed.length || !everyone ? pointed : open;
 }
 
+/** A path as a reviewer writes one in its notes: at least one folder, or a file with an extension. */
+const NOTES_PATH_RE = /(?:[\w.@~-]+\/)+[\w.@-]+|[\w@-]+\.[A-Za-z][\w]{0,7}\b/g;
+
+/** The files a final reviewer's notes name, as the tasks' hints say them (no leading `./`, no trailing dot). */
+export function filesNamedIn(notes: string): string[] {
+  const named = new Set<string>();
+  for (const hit of notes.match(NOTES_PATH_RE) ?? []) {
+    const file = hit.replace(/^\.\//, "").replace(/[.,;:]+$/, "");
+    if (file && !/^\d+(\.\d+)*$/.test(file)) named.add(file);
+  }
+  return [...named];
+}
+
+/**
+ * The task a REJECTING final review goes back to — ONE, never every task as a
+ * red suite does: a final review's findings are a list for one pass over the
+ * merged files, and its notes name files as context as often as files to fix
+ * (a rejection over four paths in one README named three tasks' files).
+ *
+ * It is a task NOTHING ELSE STANDS ON (no task that is not retired depends on
+ * it), so reopening it holds no dependent and costs one worker: the last such
+ * task whose files the findings name, else the last one — the task that
+ * finished the plan and integrated the rest. A file a path in the notes ENDS
+ * with counts too: the reviewer reads the project and writes
+ * `/home/…/mcp/README.md` where the hint says `mcp/README.md`.
+ */
+export function finalFixTasks(tasks: TeamTask[], notes: string): TeamTask[] {
+  const leaves = tasks.filter((t) => t.status === "complete" && !tasks.some((o) => o.status !== "retired" && o.depends_on.includes(t.task_id)));
+  if (!leaves.length) return [];
+  const named = filesNamedIn(notes);
+  const covers = (t: TeamTask, file: string): boolean => {
+    if (!t.files_hint.length) return false;
+    const parts = file.split("/").filter(Boolean);
+    // Every suffix of the named path: the hint is relative to the project.
+    for (let i = 0; i < parts.length; i++) {
+      if (outsideHint([parts.slice(i).join("/")], t.files_hint, { scratch: false }).length === 0) return true;
+    }
+    return false;
+  };
+  const pointed = leaves.filter((t) => named.some((f) => covers(t, f)));
+  return [(pointed.length ? pointed : leaves).at(-1)!];
+}
+
+/** What a task re-offered by the final review tells its next worker. */
+export function finalFixNotes(notes: string): string {
+  return `The team's final review of the MERGED result rejected it. Every task's work is already merged into your folder: fix exactly what the review names below, in the files as they are now, run the checks it names, and change nothing else — do not redo the task.\n\n${notes}`;
+}
+
 /**
  * A task went back — its reviewer rejected it, the suite gate reopened it, or
  * it was itself held — so whatever STARTED on top of it is set back
@@ -3468,7 +3582,9 @@ function holdDependents(team: LiveTeam, delivered: Delivered): void {
       ? { id: m.task_id, reason: `held, because its own dependency ${m.dependency} was reopened` }
       : m.type === "ci_reopen"
         ? { id: m.task_id, reason: `re-offered for the pull request's failing checks — ${firstLine(m.notes, 300)}` }
-        : null;
+        : m.type === "final_reopen"
+          ? { id: m.task_id, reason: `re-offered for the final review's findings — ${firstLine(m.notes, 300)}` }
+          : null;
   if (!reopened) return;
   for (const dependent of startedDependents(board, reopened.id)) {
     if (dependent.status === "in_progress") {

@@ -1,8 +1,9 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, lstatSync, readdirSync } from "fs";
 import path from "./runtime-path";
+import { openclawSkippedLine, openclawUpdateSkip, type OpenclawUpdateSkip } from "./openclaw-update-skip";
 import { get, getKnown, set, setMany } from "./config-store";
 import {
   findOpenclawBin,
@@ -147,6 +148,7 @@ import {
 } from "./harness-downgrade-backup";
 import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
 import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
+import { redactCredentialShapes } from "./incident-sanitize";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -713,6 +715,14 @@ interface UpdateStepDef {
    * full step.
    */
   fastPathStep?: string;
+  /**
+   * On an x64 PC, skip this step outright when the installed core already
+   * equals the pin (see openclawStepSkip). Only the full update's
+   * `openclaw_install` has it. The OpenClaw-only update is the owner's repair
+   * and always runs the step, and on the appliance `fastPathStep` stays the
+   * rule because install.sh's gate asks more than the version.
+   */
+  skipWhenCoreAtPin?: boolean;
 }
 
 /** Thrown by execAsRoot when OUR wait budget expired but the unit runs on. */
@@ -2886,17 +2896,103 @@ async function runCurrentGatewayPreStart(): Promise<string> {
     CLAWBOX_OPENCLAW_HOME: openclawHome,
     OPENCLAW_STATE_DIR: openclawHome,
     OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
+    // This run starts no gateway (the unit's next start runs the pre-start
+    // again), so its start-guard record must not become the "previous start"
+    // that start proves itself against: it would re-run every full check
+    // behind a false "did not reach gateway ready". An explicit marker, since
+    // INVOCATION_ID here is the web server's own unit's.
+    CLAWBOX_PRESTART_OUTSIDE_UNIT: "1",
   };
   delete env.OPENCLAW_HOME;
-  const { stdout } = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
-    // Match the unit's 600s TimeoutStartSec with a little process overhead.
-    // Killing this halfway through a plugin migration recreates the lock race
-    // this maintenance path exists to avoid.
-    timeout: 650_000,
-    maxBuffer: 4 * 1024 * 1024,
-    env,
-  });
-  return stdout ?? "";
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
+      // Match the unit's 600s TimeoutStartSec with a little process overhead.
+      // Killing this halfway through a plugin migration recreates the lock race
+      // this maintenance path exists to avoid.
+      timeout: 650_000,
+      maxBuffer: 4 * 1024 * 1024,
+      env,
+    });
+  } catch (err) {
+    // Rethrown exactly as node built it: its message already carries stderr
+    // and is the step error the owner reads. What it lacks is stdout, the step
+    // the script stopped in, which under `set -euo pipefail` can be all there is.
+    logPreStartOutput("failed", err);
+    throw err;
+  }
+  logPreStartOutput("succeeded", result);
+  // Read whole and unredacted: only the logged copy is cut and redacted.
+  return result.stdout ?? "";
+}
+
+/**
+ * The log is a record of the run, never part of its outcome: a fault here must
+ * not fail a pre-start that succeeded, nor stand in for the error of one that
+ * failed (that error is the step error the owner reads).
+ */
+function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): void {
+  try {
+    const detail = (output ?? {}) as { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown };
+    if (outcome === "succeeded") {
+      console.log(describePreStartOutput("succeeded", detail));
+      return;
+    }
+    const how = detail.killed
+      ? `killed by ${String(detail.signal ?? "a signal")}`
+      : typeof detail.code === "number" ? `exit ${detail.code}` : String(detail.code ?? "no exit code");
+    console.error(describePreStartOutput(`failed (${how})`, detail));
+  } catch (logErr) {
+    try {
+      console.warn("[Updater] pre-start (outside the unit): its output could not be logged:",
+        logErr instanceof Error ? logErr.message : String(logErr));
+    } catch {
+      // Nothing left to tell it to; the run's own outcome stands.
+    }
+  }
+}
+
+/** Per stream: a reuse run's 5-20 lines whole, a full run's tail. */
+const PRE_START_LOG_MAX_LINES = 200;
+const PRE_START_LOG_MAX_CHARS = 16 * 1024;
+
+/**
+ * What the pre-start printed OUTSIDE the gateway unit, for this process's
+ * journal (clawbox-setup's) — the only record of that run, which the in-unit
+ * starts get from clawbox-gateway.service. Every line is tagged, never under
+ * the gateway's unit or identifier: the readers that diagnose a dead gateway
+ * from its journal must not take these lines for a start's.
+ *
+ * Redacted by shape BEFORE the cut, so a cut cannot part a `token=` from its
+ * value. Whole lines from the end: on stdout the last is the script's
+ * "Timing: pre-start total" reuse summary, which survives any bound.
+ */
+function describePreStartOutput(outcome: string, output: { stdout?: unknown; stderr?: unknown }): string {
+  const tag = "[Updater] pre-start (outside the unit)";
+  const lines = [`${tag} ${outcome}`];
+  for (const stream of ["stdout", "stderr"] as const) {
+    const text = output[stream];
+    if (typeof text !== "string" || text.trim() === "") continue;
+    const label = stream === "stdout" ? `${tag}:` : `${tag} stderr:`;
+    const all = redactCredentialShapes(text).trimEnd().split("\n");
+    let start = all.length - 1;
+    let chars = all[start].length;
+    while (
+      start > 0
+      && all.length - start < PRE_START_LOG_MAX_LINES
+      && chars + all[start - 1].length + 1 <= PRE_START_LOG_MAX_CHARS
+    ) {
+      start -= 1;
+      chars += all[start].length + 1;
+    }
+    if (start > 0) lines.push(`${label} … ${start} earlier line${start === 1 ? "" : "s"} dropped`);
+    for (const line of all.slice(start)) {
+      // Only the last line can be over the bound on its own; already redacted, so safe to cut.
+      const kept = line.length > PRE_START_LOG_MAX_CHARS ? `…${line.slice(-PRE_START_LOG_MAX_CHARS)}` : line;
+      lines.push(`${label} ${kept}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -4186,6 +4282,9 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // An update that does not move the pin usually has nothing for this step
     // to do; install.sh says so before the gateway is touched.
     fastPathStep: "openclaw_install_fast",
+    // On an x64 PC there is no such gate, and the step stopped the gateway
+    // and ran `doctor --fix` even with the core already at the pin.
+    skipWhenCoreAtPin: true,
   },
   {
     id: "openclaw_patch",
@@ -4604,6 +4703,79 @@ const VERSION_INFO_GOOD_TTL = 30 * 60_000;
 const openclawBin = (): string => findOpenclawBin();
 const OPENCLAW_PKG = "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json";
 const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
+
+/** `openclaw --version`'s output, or null when the core cannot be run. */
+async function readOpenclawBanner(): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(openclawBin(), ["--version"], { timeout: 10_000 });
+    return String(stdout ?? "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The pin as written: OPENCLAW_PIN_VERSION, else the pin file's text. Null when
+ * neither can be read. Unlike readPinnedOpenclawVersion there is no compiled
+ * fallback here, so a pin that was never read can never make the step skip.
+ */
+async function readOpenclawPinText(): Promise<string | null> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
+  if (envPin) return envPin;
+  try {
+    const raw: unknown = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
+    return typeof raw === "string" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The desktop integration's host file (build-package.py): its owner's home and the core's npm prefix. */
+const X64_INTEGRATION_ENV = "/etc/clawbox/x64-integration.env";
+
+/**
+ * Whether the desktop integration's core step still has an earlier run's core
+ * replacement to settle. That covers a pending marker, a staged core and links
+ * set aside, the same facts clawbox-x64-step.sh::openclaw_core_settled reads.
+ * The step settles them even when the core is already at the pin: a power loss
+ * after the new tree went live and before its state migration finished leaves
+ * exactly that box. Anything that cannot be read answers true, and the step runs.
+ */
+async function desktopCoreReplacementPending(): Promise<boolean> {
+  try {
+    const env: unknown = await readFile(X64_INTEGRATION_ENV, "utf8");
+    if (typeof env !== "string") return true;
+    const value = (key: string) => new RegExp(`^${key}=(/[A-Za-z0-9_./-]+)$`, "m").exec(env)?.[1] ?? null;
+    const prefix = value("NPM_PREFIX");
+    const home = value("INSTALL_HOME");
+    if (!prefix || !home) return true;
+    const present = (p: string) => existsSync(p) || lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+    if (present(path.join(prefix, ".openclaw-migration-pending")) || present(path.join(prefix, ".openclaw-stage"))) {
+      return true;
+    }
+    const points = path.join(home, "backups", "openclaw-core-update");
+    if (!existsSync(points)) return false;
+    return readdirSync(points).some((point) => present(path.join(points, point, "set-aside-links.txt")));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * May the full update skip `openclaw_install` on this x64 PC? Only when the
+ * installed core's `--version` equals the pin exactly (openclawUpdateSkip),
+ * and, on the desktop integration, when no earlier core replacement is left
+ * to settle.
+ */
+async function openclawStepSkip(desktopIntegration: boolean): Promise<OpenclawUpdateSkip> {
+  const [banner, pin] = await Promise.all([readOpenclawBanner(), readOpenclawPinText()]);
+  const decision = openclawUpdateSkip(banner, pin);
+  if (decision.skip && desktopIntegration && await desktopCoreReplacementPending()) {
+    console.log("[Updater] OpenClaw is at the pin, but an earlier core replacement is still to be settled; running the step");
+    return { skip: false, version: null };
+  }
+  return decision;
+}
 
 interface ComponentVersionInfo {
   current: string | null;
@@ -6142,6 +6314,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     code: startFrom === 0 ? X64_ROOT_STEPS_SKIPPED : `${X64_ROOT_STEPS_SKIPPED}:after-restart`,
     labels: [],
   };
+  // The step an interrupted run died in, when this run resumes from it. It is
+  // run again, never skipped as "already at the pin": the work it was doing
+  // when it died may be what is unfinished.
+  let resumedAt = -1;
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -6183,6 +6359,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           return;
         }
         startFrom = at;
+        resumedAt = at;
         for (let i = 0; i < at; i++) runtime.state.steps[i].status = "completed";
         runtime.state.currentStepIndex = at;
         // The interrupted run's own diagnosis (the drift warnings it persisted
@@ -6320,6 +6497,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   }
 
   let failed = false;
+  // The pin `openclaw_install`'s pre-flight read, for the line the appliance's
+  // fast path logs.
+  let corePin: string | null = null;
 
   for (let i = startFrom; i < steps.length; i++) {
     const step = steps[i];
@@ -6360,6 +6540,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // read; one whose authorisation already names this pin goes ahead.
     if (step.id === "openclaw_install") {
       const installing = await readPinnedOpenclawVersion();
+      corePin = installing;
       const refusal = installing === schemaCheckedPin
         ? null
         : await harnessDowngradeRefusal(
@@ -6387,6 +6568,26 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           : { ...refusal.detail, backupFailure: stop.backupFailure };
         failed = true;
         break;
+      }
+    }
+
+    // THE CORE IS ALREADY AT THE PIN, on an x64 PC. AFTER the pre-flight
+    // above, which still refuses (or backs up for) a downgrade first, and
+    // BEFORE any dispatch: a skipped step starts no root unit at all, so there
+    // is no gateway stop, no `doctor --fix`, no npm install and no plugin
+    // reinstall. The steps after it (openclaw_patch, gateway_setup,
+    // post_update, gateway_verify) still run: a ClawBox change to the
+    // OpenClaw patches or config needs them, and they are the safety net.
+    //
+    // x64 PCs only. On the appliance, install.sh's fast path below stays the
+    // rule. It also asks whether the plugins, the last full refresh and the
+    // gateway are healthy, which an equal version alone does not answer.
+    if (step.skipWhenCoreAtPin && (x64Install || desktopIntegration) && i !== resumedAt) {
+      const skip = await openclawStepSkip(desktopIntegration);
+      if (skip.skip && skip.version) {
+        console.log(`[Updater] ${openclawSkippedLine(skip.version)}`);
+        runtime.state.steps[i].status = "completed";
+        continue;
       }
     }
 
@@ -6440,7 +6641,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
               : step.timeoutMs;
         if (step.fastPathStep && !desktopIntegration && !gatewayIsAbsent()
           && await rootStepTookFastPath(step.fastPathStep, timeoutMs)) {
-          // Done, with the gateway never stopped: nothing to recover.
+          // Done, with the gateway never stopped: nothing to recover. The fast
+          // path holds only for a core at the pin, so say it the way the x64
+          // skip above does.
+          if (corePin) console.log(`[Updater] ${openclawSkippedLine(corePin)}`);
         } else if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {

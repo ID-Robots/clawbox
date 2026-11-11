@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The memory-search embedder: Qwen3-Embedding-0.6B on llama.cpp, run as
-# clawbox-embed.service (config/clawbox-embed.service).
+# The memory-search embedder: Qwen3-Embedding-0.6B — or the model the owner
+# picked instead (TASK-2411, scripts/embed-model-select.sh) — on llama.cpp,
+# run as clawbox-embed.service (config/clawbox-embed.service).
 #
 # Every knob is an EMBED_* environment variable — the unit loads the project
 # .env — with the shipped default written beside it, so the unit file carries
@@ -12,6 +13,20 @@
 set -euo pipefail
 
 PROJECT_DIR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
+# WHICH model: the owner's pick in data/config.json, mapped to a file through
+# the catalog in embed-model-select.sh. The default slot (the 0.6B) keeps
+# whatever .env and the defaults below say; another model replaces
+# EMBED_MODEL/EMBED_HF_REPO/EMBED_HF_FILE from the catalog. Without the helper
+# (a checkout older than it) the default slot is all there is.
+EMBED_MODEL_ID="qwen3-embedding-0.6b"
+EMBED_SHA256=""
+EMBED_BYTES=""
+SELECT_LIB="$(dirname "${BASH_SOURCE[0]}")/embed-model-select.sh"
+if [ -f "$SELECT_LIB" ]; then
+  # shellcheck source=scripts/embed-model-select.sh
+  . "$SELECT_LIB"
+  embed_apply_selection "${CLAWBOX_CONFIG_JSON:-$PROJECT_DIR/data/config.json}"
+fi
 MODEL_DIR="${EMBED_MODEL_DIR:-$PROJECT_DIR/data/embed/models}"
 HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
 HF_FILE="${EMBED_HF_FILE:-Qwen3-Embedding-0.6B-Q8_0.gguf}"
@@ -41,13 +56,36 @@ if [ ! -x "$BIN_PATH" ]; then
   exit 1
 fi
 
+# A model other than the default slot is never run on a Jetson: the web
+# server refuses to pick it there (src/lib/local-embedding-gating.ts), and a
+# hand-edited config must not be what takes ~5 GB of the box's one memory
+# pool. The reason is the log's last line, which Settings → Local AI shows.
+if [ "$EMBED_MODEL_ID" != "qwen3-embedding-0.6b" ] && [ -f /etc/nv_tegra_release ]; then
+  echo "[embed] ${MODEL_ALIAS} does not fit on a Jetson: pick Qwen3-Embedding-0.6B in Settings → Local AI."
+  exit 1
+fi
+
 if [ ! -f "$MODEL_PATH" ]; then
+  # The default slot is fetched here on a first start, as it always was. A
+  # picked model is fetched by the owner's own download (resumable, verified,
+  # 2.5-4.3 GB) and never inside a proxied request that gives a batch 120 s.
+  if [ "$EMBED_MODEL_ID" != "qwen3-embedding-0.6b" ]; then
+    echo "[embed] ${HF_FILE} is not on this box: download it from Settings → Local AI, or pick Qwen3-Embedding-0.6B."
+    exit 1
+  fi
   if [ ! -x "$HF_BIN" ]; then
     echo "[embed] Missing local model at ${MODEL_PATH} and Hugging Face CLI at ${HF_BIN}. Run the embed_model step to provision the memory-search model."
     exit 1
   fi
   echo "[embed] Downloading ${HF_REPO}/${HF_FILE}"
-  "$HF_BIN" download "$HF_REPO" "$HF_FILE" --local-dir "$MODEL_DIR"
+  if declare -F embed_fetch_verified >/dev/null; then
+    if ! why="$(embed_fetch_verified "$HF_BIN" "$HF_REPO" "$HF_FILE" "$MODEL_DIR" "$EMBED_BYTES" "$EMBED_SHA256")"; then
+      echo "[embed] The memory-search model download failed: ${why}"
+      exit 1
+    fi
+  else
+    "$HF_BIN" download "$HF_REPO" "$HF_FILE" --local-dir "$MODEL_DIR"
+  fi
 fi
 
 if [ ! -f "$MODEL_PATH" ]; then
@@ -187,5 +225,5 @@ if [ -n "$SUPPORTED" ]; then
   fi
 fi
 
-echo "[embed] Starting llama-server (embedding) with ${MODEL_PATH} ngl=${N_GPU_LAYERS} batch=${BATCH}"
+echo "[embed] Starting llama-server (embedding) ${MODEL_ALIAS} with ${MODEL_PATH} ngl=${N_GPU_LAYERS} batch=${BATCH}"
 exec "$BIN_PATH" "${ARGS[@]}"

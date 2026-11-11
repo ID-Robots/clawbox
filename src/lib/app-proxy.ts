@@ -480,6 +480,15 @@ export function serverAppStubHtml(name: string, id: string): string {
 
 export type RegisterOutcome = { ok: true } | { ok: false; reason: Exclude<ListenerVerdict, "owned"> | "failed"; detail: string };
 
+/** The folder an id's registration names, when it names one that is still a folder on disk; null otherwise. */
+async function registeredFolder(id: string): Promise<string | null> {
+  const meta = await readMeta(id);
+  if (typeof meta?.directory !== "string" || !path.isAbsolute(meta.directory)) return null;
+  const folder = path.resolve(meta.directory);
+  const stat = await fs.promises.stat(folder).catch(() => null);
+  return stat?.isDirectory() ? folder : null;
+}
+
 /**
  * Put a project with a server on the desktop: its icon opens
  * `/apps/<id>/`, and the port and the folder land in meta.json for the
@@ -489,6 +498,21 @@ export type RegisterOutcome = { ok: true } | { ok: false; reason: Exclude<Listen
 export async function registerServerApp(input: { id: string; directory: string; manifest: ClawboxManifest }): Promise<RegisterOutcome> {
   const { id, directory, manifest } = input;
   if (!APP_ID_RE.test(id) || !manifest.port) return { ok: false, reason: "failed", detail: "The manifest names no port." };
+  // The id is ANOTHER folder's, and that folder is still there: not this one's
+  // to take. An app's id is its project folder's name, so a second folder of
+  // the same name anywhere under the owner's projects (a clone made to try
+  // something) answers to the same id — and with the installed app's server
+  // down for a moment, a run in the clone found the port free, started the
+  // clone's server on it and rewrote the registration to the clone's folder:
+  // the desktop's Calculator was a benchmark copy for eight minutes
+  // (2026-11-10). Said BEFORE the listener is looked at, and as `failed`, so
+  // `registerOrStartServerApp` neither stops the app's own server nor starts
+  // this folder's on its port. A registration whose folder is gone (moved,
+  // renamed, removed by hand) is taken over as before.
+  const held = await registeredFolder(id);
+  if (held && held !== path.resolve(directory)) {
+    return { ok: false, reason: "failed", detail: `"${id}" on the desktop is the app in ${held}. This folder has the same name and is not put in its place: rename it, or remove that app first.` };
+  }
   // Asked afresh: a registration is rare, and a verdict cached for the proxy
   // can be up to 30 seconds old — older than the server it vouches for, when
   // the app was removed and installed again in between.

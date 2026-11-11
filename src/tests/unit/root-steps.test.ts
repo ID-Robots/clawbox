@@ -7,6 +7,9 @@ import {
   SELF_UPDATING_ROOT_STEPS,
   UI_ROOT_STEPS,
   WEB_ROOT_STEPS,
+  X64_DESKTOP_ROOT_STEPS,
+  X64_INSTALL_ROOT_STEPS,
+  explainRootStepFailure,
   isUiRootStep,
   maySelfUpdate,
 } from "@/lib/root-steps";
@@ -447,5 +450,69 @@ describe("install_root_libexec: a copy that did not land is never a success", ()
     const vncRefresh = shellFn(sh, "step_vnc_refresh");
     expect(vncRefresh).toContain("install_root_libexec || firstboot_rc=1");
     expect(vncRefresh.trimEnd().endsWith('return "$firstboot_rc"\n}')).toBe(true);
+  });
+});
+
+/**
+ * What each x86 install's root side can run (TASK-2418), pinned to the scripts
+ * that run it: root-step-runner.ts reads these lists to tell a step that PC
+ * does not implement — no repair adds it — from a launcher that is merely out
+ * of step, so a list that drifted from its script would say the wrong one.
+ */
+describe("the x86 installs' root steps", () => {
+  const X64_DIR = path.join(REPO, "scripts", "x64-migration");
+  const words = (text: string) => text.split(/\s+/).filter(Boolean).sort();
+
+  /** The top-level `case "$step" in` labels at the end of a dispatcher, `*` left out. */
+  const caseLabels = (sh: string): string[] => {
+    const at = sh.lastIndexOf('case "$step" in');
+    expect(at).toBeGreaterThan(-1);
+    const labels: string[] = [];
+    for (const line of sh.slice(at).split("\n").slice(1)) {
+      if (/^esac\b/.test(line)) break;
+      const m = /^ {2}([a-z0-9_|]+)\)/.exec(line);
+      if (m) labels.push(...m[1].split("|"));
+    }
+    return labels;
+  };
+
+  it("install-x64.sh's root dispatcher runs exactly X64_INSTALL_ROOT_STEPS", () => {
+    const sh = read(path.join(X64_DIR, "clawbox-x64-root-step.sh"));
+    const installer = /^INSTALLER_STEPS="([^"]*)"/m.exec(sh);
+    expect(installer).not.toBeNull();
+    const own = caseLabels(sh);
+    expect(own).toContain("chpasswd");
+    expect([...new Set([...words(installer![1]), ...own])].sort()).toEqual([...X64_INSTALL_ROOT_STEPS].sort());
+  });
+
+  it("the desktop integration grants and runs exactly X64_DESKTOP_ROOT_STEPS", () => {
+    const allowed = /^\s*allowed='([^']*)'/m.exec(read(path.join(X64_DIR, "build-package.py")));
+    expect(allowed).not.toBeNull();
+    expect(words(allowed![1])).toEqual([...X64_DESKTOP_ROOT_STEPS].sort());
+    const worker = caseLabels(read(path.join(X64_DIR, "clawbox-x64-step.sh")));
+    expect([...new Set(worker)].sort()).toEqual([...X64_DESKTOP_ROOT_STEPS].sort());
+  });
+
+  it("says a step the x86 root side refused in its own words is not on this PC, and names no repair", () => {
+    // What each one's unit prints for a step it does not have (exit 64).
+    const install = explainRootStepFailure("embed_model", "clawbox-root-step: step 'embed_model' has no implementation on the x64 install");
+    expect(install).toMatch(/"embed_model": the x86 install \(install-x64\.sh\) does not implement it/);
+    const desktop = explainRootStepFailure("embed_model", "Error: embed_model is not supported by this desktop integration");
+    expect(desktop).toMatch(/"embed_model": the ClawBox desktop integration does not implement it/);
+    for (const said of [install, desktop]) {
+      expect(said).toMatch(/only on the ClawBox appliance \(Jetson\) install/);
+      expect(said).not.toMatch(/root_step_contract|sudo bash|older than this build/);
+    }
+    // Anything else is the step's own reason, untouched — a line that merely
+    // QUOTES the refusal included.
+    expect(explainRootStepFailure("embed_model", "Error: failed to download the memory-search model")).toBe("Error: failed to download the memory-search model");
+    const quoted = "note: \"clawbox-root-step: step 'x' has no implementation on the x64 install\" seen earlier";
+    expect(explainRootStepFailure("x", quoted)).toBe(quoted);
+  });
+
+  it("neither has embed_model, which only install.sh implements", () => {
+    expect(WEB_ROOT_STEPS).toContain("embed_model");
+    expect(X64_INSTALL_ROOT_STEPS).not.toContain("embed_model");
+    expect(X64_DESKTOP_ROOT_STEPS).not.toContain("embed_model");
   });
 });

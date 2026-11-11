@@ -726,7 +726,13 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const engine = entries.find((e) => e.kind === kind);
     if (!engine || !usable(engine)) return null;
     if (kind === "stt") return <WhisperSizesCard onChanged={afterInstall} />;
-    if (kind === "embedding" && !isCloudEmbedding(engine)) return <EmbeddingModelCard onChanged={afterInstall} />;
+    // Under the cloud's row too (TASK-2418): the row has nothing of this
+    // box's to install or remove, but the models on this box are still
+    // fetched here — a download that can only start once the index has moved
+    // off the cloud left an owner on the cloud no way to get one ready. The
+    // card says that switching onto it is Memory Shard's, and its "Use" waits
+    // for that switch.
+    if (kind === "embedding") return <EmbeddingModelCard onChanged={afterInstall} />;
     return null;
   };
 

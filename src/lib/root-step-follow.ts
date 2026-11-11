@@ -16,6 +16,7 @@ import { startRootStep } from "@/lib/root-step-runner";
 import { monotonicNow } from "@/lib/monotonic-clock";
 import { isJournalNoise } from "@/lib/journal-noise";
 import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import { explainRootStepFailure } from "@/lib/root-steps";
 
 const execFile = promisify(execFileCb);
 
@@ -259,7 +260,10 @@ export function failureReason(lines: readonly string[]): string | null {
 }
 
 async function failureLine(step: string, sinceMs: number): Promise<string | null> {
-  return failureReason(await journalLines(step, sinceMs, 40));
+  const line = failureReason(await journalLines(step, sinceMs, 40));
+  // An x86 root side's refusal of a step it does not have, said as what it is
+  // rather than as its terse journal line (TASK-2418).
+  return line === null ? null : explainRootStepFailure(step, line);
 }
 
 function running(active: string): boolean {

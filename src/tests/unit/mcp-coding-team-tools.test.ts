@@ -453,10 +453,11 @@ describe("coding_team_run effort", () => {
     // The test registrar calls the handler directly; the schema is what the dispatcher refuses with.
     const { z } = await import("zod");
     const schema = z.object(harness().get("coding_team_run").shape);
-    expect(schema.safeParse({ goal: "g", directory: "invoice", effort: "high" }).success).toBe(false);
+    expect(schema.safeParse({ goal: "g", directory: "invoice", effort: "turbo" }).success).toBe(false);
+    expect(schema.safeParse({ goal: "g", directory: "invoice", effort: "high" }).success).toBe(true);
     expect(schema.safeParse({ goal: "g", directory: "invoice", effort: "max" }).success).toBe(true);
-    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "high". Use one of: low, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
+    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "turbo". Use one of: low, medium, high, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
     const route = await refused("coding_team_run", { goal: "g", directory: "invoice", effort: "max" });
-    expect(route).toMatchObject({ code: "BAD_ARGUMENT", message: expect.stringMatching(/Unknown effort/), next: expect.stringMatching(/low, xhigh, max, ultracode/) });
+    expect(route).toMatchObject({ code: "BAD_ARGUMENT", message: expect.stringMatching(/Unknown effort/), next: expect.stringMatching(/low, medium, high, xhigh, max, ultracode/) });
   });
 });

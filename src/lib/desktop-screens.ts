@@ -248,6 +248,55 @@ export function rejoinLayout(rect: DeskRect, wasOn: string | null, next: DeskScr
   return { x: rect.x + to.x, y: rect.y + to.y };
 }
 
+/** How much of `a` lies on `b`, in square CSS pixels. */
+function overlapArea(a: DeskRect, b: DeskRect): number {
+  const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+
+/**
+ * Which of `surfaces` show /updating while an update owns the box: with a row
+ * of monitors, exactly ONE — the surface most on the main (primary) monitor,
+ * the first of them on a tie — and every other one keeps what it shows (on the
+ * desktop's one app window, its other monitors are plain ground). With one
+ * screen, or no layout (a phone, a browser on the LAN, every Jetson), all of
+ * them, exactly as before monitors were known.
+ *
+ * A surface is anything with a rect in the page's CSS pixels: a monitor's
+ * region inside the app window laid over the row (what /updating passes, see
+ * `updatingScreenRect`), or a window. In monitor mode the box draws the
+ * desktop as ONE Chrome `--app` window across the row — the kiosk launcher
+ * reopens that one window, the span script only sizes it, and the kiosk
+ * extension closes a second desktop tab — so no second window is ever sent to
+ * /updating; a caller that had several would ask this the same question.
+ */
+export function updatingSurfaces<T extends DeskRect>(layout: readonly DeskScreen[] | null, surfaces: readonly T[]): T[] {
+  if (!layout || layout.length < 2 || surfaces.length === 0) return [...surfaces];
+  const main = layout.find((s) => s.main) ?? layout[0];
+  let best = surfaces[0];
+  let bestArea = overlapArea(best, main);
+  for (const surface of surfaces.slice(1)) {
+    const area = overlapArea(surface, main);
+    if (area > bestArea) {
+      best = surface;
+      bestArea = area;
+    }
+  }
+  return [best];
+}
+
+/**
+ * Where /updating draws the run inside the window: the main monitor's rect
+ * when the window is laid over a row of monitors — the others stay plain
+ * ground — and null with one screen or none, where it fills the viewport as it
+ * always has.
+ */
+export function updatingScreenRect(layout: readonly DeskScreen[] | null): DeskScreen | null {
+  if (!layout || layout.length < 2) return null;
+  return updatingSurfaces(layout, layout)[0] ?? null;
+}
+
 /** What `/setup-api/monitors` answers, as far as the desktop reads it. */
 export interface MonitorStatusLike {
   available?: boolean;

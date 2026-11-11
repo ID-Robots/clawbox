@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import * as childProcess from "child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "fs/promises";
@@ -2206,6 +2206,9 @@ describe("updater", () => {
         .toBe("/tmp/clawbox-updater-openclaw-home");
       expect(preStartOptions?.env?.OPENCLAW_CONFIG_PATH)
         .toBe("/tmp/clawbox-updater-openclaw-home/openclaw.json");
+      // No gateway runs after this pre-start: its start record must say so, or
+      // the unit's next start takes it for a previous start that never came up.
+      expect(preStartOptions?.env?.CLAWBOX_PRESTART_OUTSIDE_UNIT).toBe("1");
     });
 
     it("records consent for a NON-Codex managed plugin the gateway named", async () => {
@@ -3006,6 +3009,269 @@ describe("updater", () => {
       expect(calls.some((call) => call.includes("systemctl restart clawbox-gateway.service"))).toBe(false);
     });
 
+    /**
+     * B2-02. The pre-start the verify runs OUTSIDE the gateway unit, while the
+     * gateway is stopped, printed its steps, its WARNs and a "Timing:" line per
+     * check, and all of it went nowhere: on the test box three such runs left
+     * no line at all, and their length had to be inferred from the gap between
+     * two other lines. The in-unit runs reach the journal through the unit;
+     * this one reaches it through the updater's own log, or not at all.
+     */
+    describe("what the pre-start outside the unit printed", () => {
+      const PRE_START = `${process.cwd()}/scripts/gateway-pre-start.sh`;
+      const TAG = "[Updater] pre-start (outside the unit)";
+      // The script's EXIT trap prints this last on every exit, with the real
+      // stamp names: it is the reuse hit/miss summary, so no bound may cut it.
+      const TOTAL = "  Timing: pre-start total 5912 ms (exit 0); "
+        + "reused instead of re-checked: plugin-consent, codex-registry, claude-code";
+
+      /** How node's promisified execFile rejects: stderr in the message, both streams beside it. */
+      function nodeExecFileError(fields: {
+        stdout: string;
+        stderr: string;
+        code?: number | null;
+        killed?: boolean;
+        signal?: string | null;
+      }) {
+        return Object.assign(new Error(`Command failed: /bin/bash ${PRE_START}\n${fields.stderr}`), {
+          code: 1, killed: false, signal: null, ...fields,
+        });
+      }
+
+      /** Everything the updater logged, one journal line per array entry. */
+      function loggedLines(...spies: Array<{ mock: { calls: unknown[][] } }>): string[] {
+        return spies.flatMap((spy) => spy.mock.calls.map((call) => call.map(String).join(" ")))
+          .flatMap((entry) => entry.split("\n"));
+      }
+
+      /** Take a box through gateway_verify's quiesced repair with this pre-start answer. */
+      async function verifyWithPreStart(
+        answer: { stdout: string; stderr: string } | Error,
+        journal = "",
+      ) {
+        setupExecFileMock({
+          "scripts/gateway-pre-start.sh": answer,
+          "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: journal, stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        // The pre-start has to exist where the updater looks for it to run at all.
+        const priorRoot = process.env.CLAWBOX_ROOT;
+        process.env.CLAWBOX_ROOT = process.cwd();
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockSet.mockResolvedValue();
+        mockSetMany.mockResolvedValue();
+        mockRebuiltBox();
+        // Down until the recovery's own restart, so the verify reaches the pre-start.
+        mockGatewayUp.mockImplementation(async () =>
+          mockExecFile.mock.calls.some(([cmd, args]) =>
+            cmd === "/usr/bin/sudo"
+              && (args as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
+          ),
+        );
+        updater = await import("@/lib/updater");
+        if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+        else process.env.CLAWBOX_ROOT = priorRoot;
+
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+        expect(mockExecFile.mock.calls.some(([, args]) =>
+          (args as string[]).join(" ").includes("scripts/gateway-pre-start.sh"))).toBe(true);
+      }
+
+      it("logs a successful run's stdout and stderr, every line tagged as run outside the unit", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        await verifyWithPreStart({
+          stdout: [
+            "  Plugin consent: asking the core (the core package changed)",
+            "  Timing: Codex plugin check 812 ms",
+            TOTAL,
+          ].join("\n") + "\n",
+          stderr: "  WARN: could not record the plugin-consent check in /var/lib/clawbox/prestart-stamps.json; "
+            + "the next start runs it in full\n",
+        });
+        const lines = loggedLines(logged);
+        logged.mockRestore();
+
+        expect(updater.getUpdateState().phase).toBe("completed");
+        expect(lines).toContain(`${TAG}:   Plugin consent: asking the core (the core package changed)`);
+        expect(lines).toContain(`${TAG}:   Timing: Codex plugin check 812 ms`);
+        expect(lines).toContain(`${TAG}: ${TOTAL}`);
+        expect(lines.some((line) => line.startsWith(`${TAG} stderr:`)
+          && line.includes("WARN: could not record the plugin-consent check"))).toBe(true);
+        // journald makes each line its own entry: an untagged one is a stray.
+        for (const line of lines.filter((l) => l.includes("Timing:") || l.includes("WARN:"))) {
+          expect(line.startsWith(TAG)).toBe(true);
+        }
+      });
+
+      it("logs what a failed run printed on stdout, and rethrows node's error unchanged", async () => {
+        // `set -euo pipefail` can stop the script with nothing on stderr; the
+        // step and Timing lines on stdout are then the only record of where.
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n  Timing: legacy auth sweep 4410 ms\n"
+            + "  Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: "  ERROR: OpenClaw 2 auth-profile migration failed\n",
+        });
+        const original = failure.message;
+        await verifyWithPreStart(failure);
+        const lines = loggedLines(logged, errors);
+        logged.mockRestore();
+        errors.mockRestore();
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(lines).toContain(`${TAG}:   Migrating the auth profiles`);
+        expect(lines).toContain(
+          `${TAG}:   Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing`,
+        );
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("exit 1"))).toBe(true);
+        // The owner-facing error is node's own, not a rewrite of it.
+        expect(failure.message).toBe(original);
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(original);
+      });
+
+      it("logs the partial output of a run the timeout killed", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        await verifyWithPreStart(nodeExecFileError({
+          stdout: "  Timing: config pass 2210 ms\n  Rebuilding the memory index\n",
+          stderr: "",
+          code: null,
+          killed: true,
+          signal: "SIGTERM",
+        }));
+        const lines = loggedLines(logged, errors);
+        logged.mockRestore();
+        errors.mockRestore();
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(lines).toContain(`${TAG}:   Rebuilding the memory index`);
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("SIGTERM"))).toBe(true);
+      });
+
+      it("keeps the tail of a long run, says how much it dropped, and keeps the closing Timing line", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const body = Array.from({ length: 1_000 }, (_, i) => `  migrated row batch ${i}`);
+        await verifyWithPreStart({ stdout: [...body, TOTAL].join("\n") + "\n", stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        const note = lines.map((line) => /(\d+) earlier lines? dropped/.exec(line)).find(Boolean);
+        expect(note).toBeTruthy();
+        const kept = lines.filter((line) => !/earlier lines? dropped/.test(line));
+        expect(Number(note![1]) + kept.length).toBe(body.length + 1);
+        expect(kept.length).toBeLessThan(body.length);
+        expect(kept.at(-1)).toBe(`${TAG}: ${TOTAL}`);
+        expect(lines.some((line) => line.endsWith("migrated row batch 0"))).toBe(false);
+      });
+
+      it("keeps the tail within 16 KB when fewer than 200 lines already pass it", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        // About 30 KB in 101 lines: under the line bound, over the character one.
+        const body = Array.from({ length: 100 }, (_, i) => `  plugin scan ${String(i).padStart(3, "0")} ${"x".repeat(280)}`);
+        await verifyWithPreStart({ stdout: [...body, TOTAL].join("\n") + "\n", stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        const note = lines.map((line) => /(\d+) earlier lines? dropped/.exec(line)).find(Boolean);
+        expect(note).toBeTruthy();
+        const kept = lines
+          .filter((line) => !/earlier lines? dropped/.test(line))
+          .map((line) => line.slice(`${TAG}: `.length));
+        expect(Number(note![1]) + kept.length).toBe(body.length + 1);
+        expect(kept.length).toBeLessThan(body.length);
+        expect(kept.join("\n").length).toBeLessThanOrEqual(16 * 1024);
+        expect(kept.at(-1)).toBe(TOTAL);
+      });
+
+      it("cuts a last line over 16 KB to its own tail and drops every line before it", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const long = `  Timing: plugin payload list ${"p".repeat(20_000)} end-of-line`;
+        await verifyWithPreStart({ stdout: `  Plugin consent: asking the core\n${long}\n`, stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        expect(lines).toContain(`${TAG}: … 1 earlier line dropped`);
+        expect(lines.some((line) => line.includes("Plugin consent"))).toBe(false);
+        const last = lines.at(-1)!.slice(`${TAG}: `.length);
+        expect(last).toBe(`…${long.slice(-16 * 1024)}`);
+        expect(last.endsWith("end-of-line")).toBe(true);
+      });
+
+      it("still completes a run that succeeded when logging its output throws", async () => {
+        const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+          if (String(args[0]).startsWith(TAG)) throw new Error("stdout write failed");
+        });
+        await verifyWithPreStart({ stdout: `${TOTAL}\n`, stderr: "" });
+
+        expect(updater.getUpdateState().phase).toBe("completed");
+        expect(loggedLines(warned).some((line) =>
+          line.includes("could not be logged") && line.includes("stdout write failed"))).toBe(true);
+      });
+
+      it("rethrows node's own error when logging a failed run's output throws", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+          if (String(args[0]).startsWith(TAG)) throw new Error("stderr write failed");
+        });
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n",
+          stderr: "  ERROR: OpenClaw 2 auth-profile migration failed\n",
+        });
+        const original = failure.message;
+        await verifyWithPreStart(failure);
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(original);
+      });
+
+      it("redacts a credential shape in what it logs and leaves the Timing line intact", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        await verifyWithPreStart({
+          stdout: `  provider check answered 401 for key sk-proj-abcdefgh12345678\n${TOTAL}\n`,
+          stderr: "  WARN: gateway refused token=abcdef123456ghij\n",
+        });
+        const lines = loggedLines(logged);
+        logged.mockRestore();
+
+        expect(lines).toContain(`${TAG}:   provider check answered 401 for key [redacted]`);
+        expect(lines).toContain(`${TAG} stderr:   WARN: gateway refused token=[redacted]`);
+        expect(lines).toContain(`${TAG}: ${TOTAL}`);
+        expect(lines.join("\n")).not.toContain("sk-proj-abcdefgh12345678");
+        expect(lines.join("\n")).not.toContain("abcdef123456ghij");
+      });
+
+      it("still reads every payload it reinstalled from the raw stdout, past the log's bound", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        await verifyWithPreStart(
+          {
+            stdout: [
+              `  discord plugin payload reinstalled (@openclaw/discord@${PINNED_CORE})`,
+              ...Array.from({ length: 1_000 }, (_, i) => `  migrated row batch ${i}`),
+              TOTAL,
+            ].join("\n") + "\n",
+            stderr: "",
+          },
+          '- Plugin "discord": configured plugin payload verification failed '
+            + "(missing-install-path): install path is missing.\n",
+        );
+        const lines = loggedLines(logged);
+        logged.mockRestore();
+
+        // Cut from the log, still read for the repair.
+        expect(lines.some((line) => line.includes("discord plugin payload reinstalled"))).toBe(false);
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+        expect(calls.some((call) => call.includes("plugins install @openclaw/discord"))).toBe(false);
+      });
+    });
+
     it("quarantines known legacy gateway blockers and completes when the gateway recovers", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
@@ -3554,6 +3820,170 @@ describe("updater", () => {
       const calls = commands();
       expect(calls.some((call) => call.includes(FAST_STEP))).toBe(false);
       expect(calls.some(isFullStep)).toBe(true);
+    });
+  });
+
+  /**
+   * The full update skips its OpenClaw step outright on an x64 PC whose core
+   * already IS the pin. Without the skip, install-x64.sh's step_openclaw_install
+   * skips only the npm install and still stops the gateway, runs `doctor --fix`
+   * and starts it again, on every system update.
+   */
+  describe("the OpenClaw step when the core is already at the pin", () => {
+    const SKIPPED_LINE = `OpenClaw already at ${PINNED_CORE}; skipped`;
+    const INTEGRATION_ENV = "/etc/clawbox/x64-integration.env";
+    const DESKTOP_HOME = "/home/desk-owner"; // public-hygiene: allow a made-up account in a test fixture
+    const DESKTOP_PREFIX = `${DESKTOP_HOME}/.nvm/versions/node/v24.0.0`;
+    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    const rootStep = (step: string) => (call: string) => new RegExp(`clawbox-run-root-step\\.sh (--no-block )?${step}$`).test(call);
+    let log: MockInstance<typeof console.log>;
+    const skippedLines = () => log.mock.calls.filter((args: unknown[]) => args.some((a) => String(a).includes("OpenClaw already at")));
+
+    beforeEach(() => {
+      updater.resetUpdateState();
+      log = vi.spyOn(console, "log");
+      // The pin file as it is written in the tree, with text after the version;
+      // and the desktop integration's host file, for the cases that use it.
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("config/openclaw-target.txt")) return `${PINNED_CORE}  # the pin\n`;
+        if (name === INTEGRATION_ENV) {
+          return `INSTALL_USER=desk-owner\nINSTALL_UID=1000\nINSTALL_HOME=${DESKTOP_HOME}\nPROJECT_DIR=${DESKTOP_HOME}/clawbox\nNODE_DIR=/usr/bin\nNPM_PREFIX=${DESKTOP_PREFIX}\n`;
+        }
+        throw new Error("ENOENT");
+      });
+    });
+    afterEach(() => { log.mockRestore(); });
+
+    /** A full update on an install-x64.sh PC, run to the UI restart. */
+    async function runX64Update(banner: string) {
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: banner, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+    }
+
+    it("x64 install: skips the step when the installed core equals the pin, and says so once", async () => {
+      await runX64Update(`OpenClaw ${PINNED_CORE} (3f2a1bc)\n`);
+      const calls = commands();
+      // No root step for it: no gateway stop, no doctor, no npm.
+      expect(calls.some(rootStep("openclaw_install"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(skippedLines()).toHaveLength(1);
+      expect(String(skippedLines()[0][0])).toContain(SKIPPED_LINE);
+      // What a ClawBox change to the patches or the config needs still runs.
+      expect(calls.some(rootStep("openclaw_patch"))).toBe(true);
+      expect(calls.some(rootStep("gateway_setup"))).toBe(true);
+    });
+
+    it("x64 install: runs the step when the installed core differs from the pin", async () => {
+      await runX64Update("OpenClaw 2026.1.1 (3f2a1bc)\n");
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("x64 install: runs the step when the version cannot be read", async () => {
+      await runX64Update("");
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("desktop integration: skips the step at the pin when no core replacement is pending", async () => {
+      mockX64Integration.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(skippedLines()).toHaveLength(1);
+      expect(commands().some(rootStep("openclaw_patch"))).toBe(true);
+    });
+
+    it("desktop integration: runs the step when an interrupted core replacement is pending, even at the pin", async () => {
+      mockX64Integration.mockReturnValue(true);
+      mockExists.mockImplementation((p) => String(p) === `${DESKTOP_PREFIX}/.openclaw-migration-pending`);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      try {
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+        expect(skippedLines()).toHaveLength(0);
+      } finally {
+        const actual = await vi.importActual<typeof import("fs")>("fs");
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    it("appliance: keeps install.sh's fast-path gate and logs the same line when it is taken", async () => {
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: `  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at ${PINNED_CORE}, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall\n`,
+          stderr: "",
+        },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      // The appliance still asks install.sh, whose gate asks more than the version.
+      expect(commands().some((call) => call.includes("clawbox-run-root-step.sh openclaw_install_fast"))).toBe(true);
+      expect(skippedLines()).toHaveLength(1);
+      expect(String(skippedLines()[0][0])).toContain(SKIPPED_LINE);
+    });
+
+    it("appliance: an equal version alone does not skip what install.sh's gate says needs the full step", async () => {
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: `  OpenClaw refresh: full path needed (no full refresh has finished for ${PINNED_CORE}; the last on record is none) — nothing changed here\n`,
+          stderr: "",
+        },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("never skips the OpenClaw-only update, the owner's repair", async () => {
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
     });
   });
 

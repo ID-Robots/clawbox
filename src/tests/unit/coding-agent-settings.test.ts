@@ -279,11 +279,14 @@ describe("what a run is told about the shell", () => {
 
 
 describe("the effort picker", () => {
-  it("offers only the levels that measurably differ on this backend", async () => {
-    // low 82 / medium 94 / high 102 / xhigh 139 / max 414 reasoning tokens,
-    // measured on the box: the first three are within noise of each other.
+  it("offers every level the CLI accepts — medium and high are Claude's own starting points", async () => {
+    // On ClawBox AI's model low, medium and high land within noise of each
+    // other (82 / 94 / 102 reasoning tokens), which is why the list was four.
+    // On Claude models they do not: Opus 5.5 did one task for $1.27 at low and
+    // $4.72 at xhigh (2026-11-10), and medium and high are where Anthropic
+    // says to start.
     const lib = await import("@/lib/coding-agent");
-    expect([...lib.OFFERED_EFFORT_LEVELS]).toEqual(["low", "xhigh", "max", "ultracode"]);
+    expect([...lib.OFFERED_EFFORT_LEVELS]).toEqual(["low", "medium", "high", "xhigh", "max", "ultracode"]);
     // ...while every level the CLI accepts stays valid to store.
     for (const level of lib.EFFORT_LEVELS) {
       await expect(lib.setEffort(level)).resolves.toBe(level);

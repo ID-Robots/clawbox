@@ -13,6 +13,7 @@ import {
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resolveDefaultAgentId } from "@/lib/openclaw-default-agent";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -80,6 +81,21 @@ beforeEach(() => {
       'case "$*" in *startupz*) printf "%s" "${STARTUPZ_CODE:-000}"; exit 0 ;; esac',
       'if [ "${PROXY_UP:-1}" != "1" ]; then exit 7; fi',
       "exit 0",
+    ].join("\n"),
+  );
+
+  // sha256sum: the verify step (scripts/embed-model-select.sh) hashes what hf
+  // wrote. The stub file is not the real GGUF, so this answers the catalog's
+  // own sha256 for it — or a wrong one when a case asks for a bad download.
+  writeStub(
+    "sha256sum",
+    [
+      'if [ "${SHA_BAD:-0}" = "1" ]; then echo "0000000000000000000000000000000000000000000000000000000000000000  $1"; exit 0; fi',
+      'case "$1" in',
+      '  *Qwen3-Embedding-0.6B-Q8_0.gguf) echo "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439  $1" ;;',
+      '  *Qwen3-Embedding-4B-Q8_0.gguf) echo "b60ae5ce2dd6a0b77f82cadf21def1f310a3e10cde380ad0081b07a9d416949d  $1" ;;',
+      '  *) echo "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  $1" ;;',
+      'esac',
     ].join("\n"),
   );
 
@@ -163,6 +179,8 @@ type RunOpts = {
   present?: boolean;
   hfRc?: number;
   hfNoFile?: boolean;
+  /** The downloaded file does not hash to the catalog's sha256. */
+  shaBad?: boolean;
   openclawRc?: number;
   state?: string;
   proxyDown?: boolean;
@@ -259,6 +277,7 @@ function run(opts: RunOpts = {}) {
       CALLS_LOG: callsPath,
       HF_RC: String(opts.hfRc ?? 0),
       HF_NO_FILE: opts.hfNoFile ? "1" : "0",
+      SHA_BAD: opts.shaBad ? "1" : "0",
       OPENCLAW_RC: String(opts.openclawRc ?? 0),
       FAIL_ON: opts.failOn ?? "",
       FLOCK_BIN: opts.flockBin ?? "flock",
@@ -460,6 +479,15 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(r.status).toBe(0);
     expect(downloads(r.calls)).toHaveLength(1);
     expect(r.state).toContain("failures=0");
+  });
+
+  it("deletes a download that does not verify, earns the backoff and leaves memory search untouched (TASK-2411)", () => {
+    const r = run({ present: false, shaBad: true });
+    expect(r.status).toBe(0);
+    expect(downloads(r.calls)).toHaveLength(1);
+    expect(r.stdout).toContain("did not verify");
+    expect(r.state).toContain("failures=1");
+    expect(configSets(r.calls)).toEqual([]);
   });
 
   it("leaves memory search untouched when a download says it succeeded and left no file", () => {
@@ -987,6 +1015,8 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     withoutPython?: boolean;
     /** Whether the GGUF is on disk (default yes). */
     model?: boolean;
+    /** The working directory the block runs from (default: the test runner's). */
+    cwd?: string;
   }): Report {
     if (!BLOCK) throw new Error("install.sh post-run check not found, or extracted truncated");
     const home = path.join(dir, "device", "home", "clawbox");
@@ -1071,7 +1101,7 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     const file = path.join(dir, "post-run-check.sh");
     writeFileSync(file, program);
     chmodSync(file, 0o755);
-    const run = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000 });
+    const run = spawnSync("bash", [file], { encoding: "utf-8", timeout: 30_000, cwd: opts.cwd });
     // Best-effort by contract: the block must never abort the install, whatever
     // it finds — a core that hangs, is absent, or answers nonsense included.
     expect(run.status).toBe(0);
@@ -1125,12 +1155,89 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     // taking its time, which is a verdict this block exists not to invent.
     // Nothing is at risk: the outcome here is a warning line either way, and the
     // if-condition assignment still discards output from a non-zero exit.
-    expect(BLOCK).toContain('"$OPENCLAW_BIN" memory status --agent main --deep --json');
+    expect(BLOCK).toContain('"$OPENCLAW_BIN" memory status --agent "$MEMORY_AGENT" --deep --json');
     expect(BLOCK).not.toMatch(/timeout[^\n]*memory status/);
   });
 
   it("reports ClawBox's own embedder behind the proxy as ready", () => {
     expect(report({ cli: status(PROVIDER) }).out).toContain(READY);
+  });
+
+  // TASK-2248: asked about `main` on a box whose agent is called something
+  // else, the core refuses and this said it could not read an embedder. The
+  // block resolves the agent in Python, so it is held to the TypeScript rule
+  // the web server uses (src/lib/openclaw-default-agent.ts) on the same configs.
+  describe("asks about the box's default agent, by the web server's rule", () => {
+    const search = { provider: PROVIDER, model: MODEL, remote: { baseUrl: LOCAL_PROXY } };
+    const cases: Array<[string, unknown, string]> = [
+      ["no roster", {}, "main"],
+      ["a stock box", { entries: { main: {} } }, "main"],
+      ["a sole agent called default", { entries: { default: {} } }, "default"],
+      ["a custom id", { entries: { "Work Bot": {} } }, "work-bot"],
+      [
+        "the customer's four agents, system agent recorded",
+        { ownership: "explicit", defaults: { systemAgent: { agentId: "default" } }, entries: { research: {}, default: {}, writer: {}, travel: {} } },
+        "default",
+      ],
+      ["several, one marked default", { entries: { research: {}, writer: { default: true } } }, "writer"],
+      ["a marker under explicit ownership", { ownership: "explicit", entries: { research: {}, writer: { default: true } } }, "research"],
+      ["several, none named, main among them", { entries: { travel: {}, main: {} } }, "main"],
+      ["several, none named, no main", { entries: { default: {}, research: {}, writer: {}, travel: {} } }, "default"],
+      ["a legacy agents.list", { list: [{ id: "research" }, { id: "Default", default: true }] }, "default"],
+      ["an empty roster", { entries: {} }, "main"],
+      [
+        "a system agent that is not configured",
+        { defaults: { systemAgent: { agentId: "ghost" } }, entries: { research: {}, writer: {} } },
+        "research",
+      ],
+      ["two entries marked default", { entries: { research: { default: true }, writer: { default: true } } }, "research"],
+      // JavaScript walks integer-like keys first; the Python must too.
+      ["integer-like ids, none named", { entries: { research: {}, "10": {}, "2": {} } }, "2"],
+    ];
+
+    it.each(cases)("%s", (_label, agents, expected) => {
+      const config = { memory: { search }, agents };
+      expect(resolveDefaultAgentId(config)).toBe(expected);
+      const run = report({ cli: JSON.stringify([{ agentId: expected, status: { provider: PROVIDER, model: MODEL } }]), config });
+      expect(run.cliCalls.trim()).toBe(`memory status --agent ${expected} --deep --json`);
+      expect(run.out).toContain(READY);
+    });
+
+    it("reads that agent's row, not a stale main one beside it", () => {
+      const rows = [
+        { agentId: "main", status: { provider: "none", model: "" } },
+        { agentId: "default", status: { provider: PROVIDER, model: MODEL } },
+      ];
+      const run = report({ cli: JSON.stringify(rows), config: { memory: { search }, agents: { entries: { default: {} } } } });
+      expect(run.out).toContain(READY);
+      expect(run.out).not.toMatch(/switched off/);
+    });
+
+    it("asks about main where there is no python3 to read the config with", () => {
+      const run = report({ cli: status(PROVIDER), config: { memory: { search }, agents: { entries: { default: {} } } }, withoutPython: true });
+      expect(run.cliCalls.trim()).toBe("memory status --agent main --deep --json");
+    });
+
+    // The block runs as root, and a full install reaches it from inside the
+    // clawbox-writable project directory. A plain `python3 -` puts the cwd
+    // first on sys.path, so a `json.py` planted there would run as root; the
+    // parsers run isolated (`python3 -I`) and import only the standard library.
+    it("imports nothing from the directory it runs in", () => {
+      const planted = path.join(dir, "device", "project-cwd");
+      const marker = path.join(dir, "device", "planted-module-ran");
+      mkdirSync(planted, { recursive: true });
+      for (const mod of ["json", "re", "sys", "urllib"]) {
+        writeFileSync(path.join(planted, `${mod}.py`), `open(${JSON.stringify(marker)}, "a").write(${JSON.stringify(`${mod}\n`)})\n`);
+      }
+      const run = report({
+        cli: JSON.stringify([{ agentId: "default", status: { provider: PROVIDER, model: MODEL } }]),
+        config: { memory: { search }, agents: { entries: { default: {} } } },
+        cwd: planted,
+      });
+      expect(existsSync(marker) ? readFileSync(marker, "utf-8") : "").toBe("");
+      expect(run.cliCalls.trim()).toBe("memory status --agent default --deep --json");
+      expect(run.out).toContain(READY);
+    });
   });
 
   it("does not call the same provider id at another host ready", () => {

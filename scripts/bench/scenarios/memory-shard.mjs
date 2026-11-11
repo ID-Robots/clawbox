@@ -92,6 +92,10 @@ export async function run({ client, opts, log }) {
     modelAvailable: !!embedFacts.modelAvailable,
     modelBytes: embedFacts.modelBytes ?? null,
     model: embedFacts.model ?? null,
+    // WHICH local model (TASK-2411): its catalog id and quant, from a server
+    // that has the choice; null from one that predates it (the 0.6B).
+    modelId: embedFacts.modelId ?? null,
+    quant: embedFacts.quant ?? null,
     engine: embedFacts.engine ?? null,
     unit: embedFacts.unit ?? null,
   } : null;
@@ -112,7 +116,15 @@ export async function run({ client, opts, log }) {
 
   const provider = await sample(client, "/setup-api/clawkeep/memory/provider", n, 60_000, errors);
   const pv = provider.last?.json ?? null;
-  details.provider = pv ? { source: pv.source, recorded: pv.recorded, cloudAvailable: pv.cloudAvailable, cloudReason: pv.cloudReason ?? null, localInstalled: pv.localInstalled } : null;
+  details.provider = pv ? {
+    source: pv.source, recorded: pv.recorded, cloudAvailable: pv.cloudAvailable, cloudReason: pv.cloudReason ?? null, localInstalled: pv.localInstalled,
+    // The local model and what else this box could run (TASK-2411), so a run
+    // on the 4B is never compared with one on the 0.6B as if they were alike.
+    localModel: pv.localModel ?? null,
+    localModels: Array.isArray(pv.localModels)
+      ? pv.localModels.map((m) => ({ id: m.id, active: !!m.active, installed: !!m.installed, available: !!m.available, reason: m.reason ?? null, quant: m.quant ?? null }))
+      : null,
+  } : null;
   metrics.provider_ms = { value: provider.p50, unit: "ms", dir: "lower", good: 300, bad: 5000, label: "clawkeep/memory/provider (embedder choice; probes the cloud embedder)" };
 
   const sources = await sample(client, "/setup-api/clawkeep/memory/sources", n, 30_000, errors);
@@ -208,7 +220,7 @@ export async function run({ client, opts, log }) {
   details.skipped = skipped;
 
   const parts = Object.entries(skipped).map(([k, v]) => `${k}: ${v}`);
-  log(`embed/status ${embed.p50.toFixed(0)} ms (installed ${localInstalled}), status ${status.p50.toFixed(0)} ms, provider ${provider.p50.toFixed(0)} ms (${pv?.source ?? "?"})${details.vaultSearch ? `, vault search ${details.vaultSearch.firstMs.toFixed(0)}/${details.vaultSearch.warmMs.map((m) => m.toFixed(0)).join(",") || "—"} ms, ${details.vaultSearch.hits} hits` : ""}${details.memorySearch ? `, memory search ${details.memorySearch.firstMs.toFixed(0)} ms, ${details.memorySearch.hits} hits` : ""}`);
+  log(`embed/status ${embed.p50.toFixed(0)} ms (installed ${localInstalled}, local model ${details.embedder?.modelId ?? details.embedder?.model ?? "?"}${details.embedder?.quant ? ` ${details.embedder.quant}` : ""}), status ${status.p50.toFixed(0)} ms, provider ${provider.p50.toFixed(0)} ms (${pv?.source ?? "?"})${details.vaultSearch ? `, vault search ${details.vaultSearch.firstMs.toFixed(0)}/${details.vaultSearch.warmMs.map((m) => m.toFixed(0)).join(",") || "—"} ms, ${details.vaultSearch.hits} hits` : ""}${details.memorySearch ? `, memory search ${details.memorySearch.firstMs.toFixed(0)} ms, ${details.memorySearch.hits} hits` : ""}`);
   if (parts.length) log(`skipped — ${parts.join("; ")}`);
 
   const measured = Object.keys(metrics).filter((k) => k !== "errors");

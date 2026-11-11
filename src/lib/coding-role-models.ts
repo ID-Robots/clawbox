@@ -10,9 +10,10 @@
  * So each role has a model of its own by default (`ROLE_DEFAULT_MODELS`): the
  * planner (and the lead, which is the planner back for a moment) the
  * provider's BEST model, because a bad plan wastes every run after it; a
- * worker and a reviewer the provider's middle one. A planner and a reviewer
- * also run at most at `xhigh` effort — never MORE than the owner's own.
- * Workers keep the owner's effort.
+ * worker and a reviewer a cheaper one (on Anthropic a model each, as
+ * measured). A planner and a reviewer also run at most at `xhigh` effort —
+ * `high` on Anthropic when none is stored (`ROLE_AUTO_EFFORT`) — never MORE
+ * than the owner's own. Workers keep the owner's effort.
  *
  * The owner may override any of three halves per role in the Coding Agent
  * settings (`coding_agent_role_models`): the PROVIDER that pays for the role's
@@ -108,7 +109,7 @@ export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { effortCap: RoleEffort |
 /**
  * The model each role runs on with nothing stored for it, on the provider it
  * runs on: the planner gets the provider's best model, a worker and a
- * reviewer its middle one. ClawBox AI: its flash tier for all three — the one
+ * reviewer a cheaper one (Anthropic: a model each, see below). ClawBox AI: its flash tier for all three — the one
  * model every plan may use; never the pro tier, which is Max-plan only and
  * would fail a role's every run on any other plan.
  *
@@ -116,9 +117,31 @@ export const ROLE_DEFAULTS: Readonly<Record<ModelRole, { effortCap: RoleEffort |
  * stored keeps exactly that, a stored `standard`/`economy` included.
  */
 export const ROLE_DEFAULT_MODELS: Readonly<Record<CodingProvider, Readonly<Record<ModelRole, string>>>> = {
-  anthropic: { planner: "claude-fable-5-1", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+  // Anthropic, measured on this box (2026-11-10, docs/benchmarks/coding-anthropic-models-2026-11.md):
+  // Sonnet 5.5 wrote both benchmark tasks to the same hidden-test score as
+  // Opus 5.5 for a quarter to a half of the cost, so it is the worker; Opus
+  // 5.5 stays the reviewer, a stronger reader than the writer it judges;
+  // Fable 5.2 plans.
+  anthropic: { planner: "claude-fable-5-2", worker: "claude-sonnet-5-5", reviewer: "claude-opus-5-5" },
   openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
   "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
+};
+
+/**
+ * Where a READING role starts with NO effort stored for it, on a provider
+ * whose models repay a lower level — below `ROLE_DEFAULTS`' cap, which stays
+ * the ceiling for an effort the owner did store.
+ *
+ * Anthropic: `high` for the planner and the reviewer. It is the level
+ * Anthropic names as the starting point for Fable 5.2 ("gains above it are
+ * uneven"), and on this box the planner wrote the same four-task plan at
+ * `high` as at `xhigh` in 4 minutes instead of 9, for $2.47 instead of $4.39
+ * (2026-11-10) — the planner was the most expensive run of the team it
+ * planned. An owner who stores `xhigh` for the role still gets `xhigh`.
+ * ClawBox AI and OpenAI are not listed: nothing was measured there.
+ */
+export const ROLE_AUTO_EFFORT: Readonly<Partial<Record<CodingProvider, Readonly<Partial<Record<ModelRole, RoleEffort>>>>>> = {
+  anthropic: { planner: "high", reviewer: "high" },
 };
 
 /** The steps a role's run gets: the owner's ceiling, or the role's cap where it has one. */
@@ -163,10 +186,14 @@ export function isRoleModelId(provider: CodingProvider, value: unknown): value i
  */
 export const RELATIVE_MODEL_COST: Readonly<Record<string, number>> = {
   "deepseek-v4-flash": 1,
+  // Haiku 5.5 lists at a twentieth of Sonnet; 1 is the floor of this scale.
+  "claude-haiku-5-5": 1,
   "claude-sonnet-5": 10,
+  "claude-sonnet-5-5": 10,
   "claude-opus-5": 20,
   "claude-opus-5-5": 20,
-  "claude-fable-5-1": 40,
+  "claude-fable-5-2": 40,
+  "claude-fable-5-1": 50,
   // OpenAI's: TIER ESTIMATES, not list prices — read off the Codex CLI's own
   // catalogue descriptions (flagship, balanced everyday, fast and affordable)
   // and set level with the Anthropic tier each one stands beside. OpenAI's
@@ -384,7 +411,11 @@ export function resolveRoleRun(
   // owner's choice can lower a planner or a reviewer, never lift it past xhigh.
   const cap = ROLE_DEFAULTS[role].effortCap;
   const chosen = own.effort ?? ownerEffort;
-  const effort = cap ? weakerEffort(chosen, cap) : chosen;
+  let effort = cap ? weakerEffort(chosen, cap) : chosen;
+  // Nothing stored for the role's effort: a reading role starts where its
+  // provider's models are best value (ROLE_AUTO_EFFORT), never above it.
+  const start = own.effort === undefined ? ROLE_AUTO_EFFORT[provider]?.[role] : undefined;
+  if (start) effort = weakerEffort(effort, start);
   return { provider, model, effort, tier, auto };
 }
 

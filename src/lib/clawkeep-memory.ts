@@ -46,6 +46,7 @@ import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 import { processStore } from "@/lib/process-store";
 import { memoryReindexAdvice, type MemoryReindexAdvice } from "@/lib/memory-reindex-advice";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { FALLBACK_AGENT_ID, openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
 import {
   countIndexChunks,
   createIndexProgressReader,
@@ -155,6 +156,12 @@ export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid">;
 
 export interface ClawKeepMemoryStatus {
   available: boolean;
+  /**
+   * The OpenClaw agent this reading is about: the box's default agent
+   * (`@/lib/openclaw-default-agent`), which is not always called "main". One
+   * agent's index; a box with several reports the default one.
+   */
+  agentId: string;
   provider: string;
   model: string;
   location: "local" | "cloud" | "disabled" | "unknown";
@@ -527,6 +534,27 @@ function supervisedPass(): { current: SupervisedPass | null } {
   return processStore("clawkeep-memory.supervised-pass", () => ({ current: null as SupervisedPass | null }));
 }
 
+/**
+ * The end of the last pass this process started, through everything its
+ * `finish` does: the settled record, the freed lock and the status refresh
+ * behind it. Process-wide for the same reason as `supervisedPass`.
+ */
+function passSettling(): { current: Promise<void> | null } {
+  return processStore("clawkeep-memory.pass-settling", () => ({ current: null as Promise<void> | null }));
+}
+
+/**
+ * Resolves once the last pass this process started has settled completely,
+ * the status refresh its `finish` starts included. The run-state file reads
+ * "succeeded" before that refresh has even begun, so a caller that must know
+ * nothing the pass set off is still running (a test about to remove the
+ * directory the refresh reads) waits on this, not on the file. Never rejects;
+ * resolves at once when this process started no pass.
+ */
+export function memoryPassSettled(): Promise<void> {
+  return (passSettling().current ?? Promise.resolve()).catch(() => { /* settled either way */ });
+}
+
 function runIsAlive(pid: number): boolean {
   return processIsAlive(pid) || (pid > 0 && settlingPasses().has(pid));
 }
@@ -638,17 +666,22 @@ function terminate(child: ChildProcess): void {
  * offline maintenance (a gateway start, a doctor run): that refusal read as
  * "status unavailable", and a read probe is exactly what may simply ask again.
  * See `@/lib/openclaw-maintenance`.
+ *
+ * About ONE agent, the box's default (`@/lib/openclaw-default-agent`), named
+ * with `--agent`: left out, the core probes every configured agent in turn,
+ * and `--deep` costs seconds per agent on a Jetson.
  */
-function collectMemoryStatusJson(): Promise<unknown> {
+function collectMemoryStatusJson(agentId: string): Promise<unknown> {
   return withOpenclawMaintenanceRetry(
-    (timeoutMs) => collectMemoryStatusJsonOnce(timeoutMs),
+    (timeoutMs) => collectMemoryStatusJsonOnce(timeoutMs, agentId),
     { timeoutMs: STATUS_TIMEOUT_MS, label: "openclaw memory status" },
   );
 }
 
-function collectMemoryStatusJsonOnce(timeoutMs: number): Promise<unknown> {
+/** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
+function collectMemoryStatusJsonOnce(timeoutMs: number, agentId: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const child = spawn(openclawBin(), ["memory", "status", "--agent", "main", "--deep", "--json"], {
+    const child = spawn(openclawBin(), ["memory", "status", "--agent", agentId, "--deep", "--json"], {
       env: openclawEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -908,6 +941,23 @@ function statusVerdict(facts: {
   return { error: "", errorCode: "" };
 }
 
+/**
+ * `agentId`'s row in a `memory status --json` answer, or the first row when
+ * none names it. The core answers a list, one row per agent it was asked
+ * about; asked with `--agent` that is one row, so the first is a fallback for
+ * a core that labels it some other way, never a pick among agents.
+ */
+function agentStatusRow(raw: unknown, agentId: string): Record<string, unknown> {
+  const rows = Array.isArray(raw) ? raw : [raw];
+  return asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === agentId) ?? rows[0]);
+}
+
+/**
+ * The status the panel and the API answer, from the core's `memory status
+ * --json` answer `raw` about `agentId` (its row, see `agentStatusRow`), the
+ * run on record and the schedule. `loadMemoryStatus` reports a parse that
+ * rejects as the unavailable status.
+ */
 export async function parseMemoryStatus(
   raw: unknown,
   run: MemoryRunState,
@@ -917,9 +967,10 @@ export async function parseMemoryStatus(
   // The provider openclaw.json names ("" for none), or null when that is not
   // known — then the core's own `requestedProvider` stands in for it.
   configuredProvider: string | null = null,
+  // The agent the reading was asked about (`openclawDefaultAgentId`).
+  agentId: string = FALLBACK_AGENT_ID,
 ): Promise<ClawKeepMemoryStatus> {
-  const rows = Array.isArray(raw) ? raw : [raw];
-  const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
+  const row = agentStatusRow(raw, agentId);
   const status = asRecord(row.status);
   const vector = asRecord(status.vector);
   const batch = asRecord(status.batch);
@@ -1050,6 +1101,12 @@ export async function parseMemoryStatus(
 
   return {
     available: Boolean(provider || model || files || chunks),
+    // The agent ASKED about, never the label on the row: a fallback row a core
+    // labels some other way (the roster key as written, say) is still the
+    // answer about this agent, and `getMemoryStatus` reloads any reading whose
+    // id is not the default agent's, so the row's label made every read wait
+    // on a cold probe. `rebuildKeywordOnlyIndex` keys its claim on it too.
+    agentId,
     provider,
     model,
     // Where the embedder that did not answer is SUPPOSED to be, rather than
@@ -1086,13 +1143,16 @@ export async function parseMemoryStatus(
   };
 }
 
+/** The status for a probe that failed or could not be read: about `agentId`, with nothing known of its index. */
 function unavailableStatus(
   run: MemoryRunState,
   schedule: MemoryIndexSchedule,
+  agentId: string,
   now = new Date(),
 ): ClawKeepMemoryStatus {
   return {
     available: false,
+    agentId,
     enabled: false,
     setupComplete: false,
     planGate: planGateFor(null),
@@ -1127,14 +1187,25 @@ async function withLiveRunState(base: ClawKeepMemoryStatus): Promise<ClawKeepMem
   return { ...base, run, schedule, nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()) };
 }
 
+/**
+ * One fresh reading about the box's default agent: the core's probe (or the
+ * local index's answer where there is no OpenClaw), then the run state and the
+ * schedule. A probe that fails, or an answer that cannot be parsed, is the
+ * unavailable status rather than a rejection.
+ */
 async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   // Where there is no OpenClaw there is no CLI to probe: ClawBox's own index
   // answers the same shape, and everything below is unchanged.
   const local = openclawIsAbsent();
+  // Which agent is asked about, read from openclaw.json on every probe (a
+  // `stat` while the file is unchanged); `getMemoryStatus` does not answer a
+  // cached reading about another one. The local arm answers under the same
+  // id, so its row is the one picked.
+  const agentId = await openclawDefaultAgentId();
   // The probe first, the run state after it. Read the other way round, a
   // cold answer carried the run state from when the probe STARTED — "running"
   // for a pass that had finished eight seconds before the answer arrived.
-  const probe = await (local ? localMemoryStatusJson() : collectMemoryStatusJson()).then(
+  const probe = await (local ? localMemoryStatusJson(agentId) : collectMemoryStatusJson(agentId)).then(
     (raw) => ({ raw, ok: true as const }),
     () => ({ raw: null, ok: false as const }),
   );
@@ -1157,17 +1228,17 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
       )
       : readEmbeddingConfig(),
   ]);
-  if (!probe.ok) return unavailableStatus(run, schedule);
+  if (!probe.ok) return unavailableStatus(run, schedule, agentId);
   try {
     const status = await parseMemoryStatus(
-      probe.raw, run, schedule, new Date(), embedding?.baseUrl ?? null, embedding ? embedding.provider : null,
+      probe.raw, run, schedule, new Date(), embedding?.baseUrl ?? null, embedding ? embedding.provider : null, agentId,
     );
     noteProviderFallback(status);
     noteEmbedderUnavailable(status, probe.raw);
     noteKeywordOnly(status);
     return status;
   } catch {
-    return unavailableStatus(run, schedule);
+    return unavailableStatus(run, schedule, agentId);
   }
 }
 
@@ -1213,7 +1284,7 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
   if (verdict === loggedEmbedderUnavailable) return;
   loggedEmbedderUnavailable = verdict;
   if (!verdict) return;
-  const reason = coreEmbedderFailure(raw);
+  const reason = coreEmbedderFailure(raw, status.agentId);
   console.warn(
     `[clawkeep-memory] memory search has fallen back to keyword-only: the core could not start the embedder `
     + `openclaw.json names ("${status.requestedProvider}"${status.location === "unknown" ? "" : `, ${status.location}`})`
@@ -1222,10 +1293,8 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
 }
 
 /** The core's own sentence for why no embedder started, made safe for the device log. */
-function coreEmbedderFailure(raw: unknown): string {
-  const rows = Array.isArray(raw) ? raw : [raw];
-  const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
-  const custom = asRecord(asRecord(row.status).custom);
+function coreEmbedderFailure(raw: unknown, agentId: string): string {
+  const custom = asRecord(asRecord(agentStatusRow(raw, agentId).status).custom);
   const said = cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason);
   if (!said) return "";
   return redactCredentialShapes(said, "[redacted]")
@@ -1358,6 +1427,12 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   let base = cachedStatus;
   if (!base) {
     base = await reloadMemoryStatus();
+  } else if (base.agentId !== await openclawDefaultAgentId()) {
+    // The owner renamed or re-pointed the default agent since this reading
+    // (a `stat` while openclaw.json is unchanged): it describes an agent the
+    // box no longer means, while the next pass already indexes the new one,
+    // so the answer waits for a reading about the right one.
+    base = await reloadMemoryStatus();
   } else if (cachedStatusUnsettled && (await readMemoryRunState()).status !== "running") {
     // Bounded by the probe, not by a quiet moment: when a second pass
     // settled under the retry as well, this answers the retry's reading —
@@ -1462,14 +1537,14 @@ const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
  * owner or the assistant asks) asks for it too: the same full pass the
  * embedder's write asks for (`embedderChanged`, which the Memory Shard switch
  * does not govern on this arm — the index is the agent's own memory files),
- * through the same `openclaw memory index --agent main --force`.
+ * through the same `openclaw memory index --agent <default agent> --force`.
  *
  * Only when it can work and only once: a verdict of `index_keyword_only`,
  * which means the core STARTED the configured embedder (one that does not
  * answer is `embedder_unavailable`, where a pass could only fail); no pass
  * running; the lock the gateway's own rebuild and the embeddings check hold
  * free (a pass that met it would end as a failure on the owner's card); no
- * update owning the box; and once per embedder setting per process — a pass
+ * update owning the box; and once per agent and embedder setting per process — a pass
  * that ran and still left text only is not run again until the setting
  * changes or the web server restarts, and the card's "Run a full reindex"
  * stays the owner's way to try again. One that could not start, or started
@@ -1478,7 +1553,15 @@ const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
  */
 export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Promise<boolean> {
   if (status.errorCode !== "index_keyword_only" || openclawIsAbsent()) return false;
-  const setting = `${status.provider}/${status.model}/${status.location}`;
+  // Per agent too: a renamed agent's index is a different index, and one
+  // rebuilt for the old name says nothing about it.
+  const setting = `${status.agentId}/${status.provider}/${status.model}/${status.location}`;
+  // A reading about an agent the box no longer means (renamed or re-pointed
+  // since) is no reason to force the index of the one it means now. It claims
+  // nothing, so it cannot overwrite the claim of the agent the box does mean:
+  // the next reading, about that one, decides. Asked BEFORE the claim is read,
+  // so nothing is awaited between reading the claim and taking it.
+  if (status.agentId !== await openclawDefaultAgentId()) return false;
   const claim = keywordOnlyRebuild;
   if (claim?.setting === setting) {
     // The run the reading carries is the live one (both callers read it after
@@ -1489,8 +1572,9 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
     const retryAtMs = startedPassFailed ? run.finishedAtMs + KEYWORD_ONLY_RETRY_MS : claim.retryAtMs;
     if (Date.now() < retryAtMs) return false;
   }
-  // Claimed before the first await, so two reads that arrive together cannot
-  // both start one; every path that started nothing leaves a retry time.
+  // Claimed with no await since the claim was read, so two reads that arrive
+  // together cannot both start one; every path that started nothing leaves a
+  // retry time.
   keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: null };
   let started = false;
   let askedAtMs = 0;
@@ -1504,7 +1588,7 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
       + "answers; asking OpenClaw for one full rebuild (memory index --force)",
     );
     askedAtMs = Date.now();
-    const result = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true, forAgent: status.agentId });
     started = result.accepted;
     if (started) keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: askedAtMs };
     else console.warn(`[clawkeep-memory] the keyword-only rebuild was not started: ${result.declined ?? "declined"}`);
@@ -1584,7 +1668,9 @@ function providerFellBack(status: Pick<ClawKeepMemoryStatus, "errorCode">): bool
  * Answered from the cached reading when there is one (stale included, and
  * one a run has changed since: the cost of a stale zero is one more pass
  * over an index that was just built, inside the ten seconds before the
- * refresh lands). Only a box that has never been probed waits for the probe —
+ * refresh lands). Only a box that has never been probed — or whose reading is
+ * about another agent than the default, which counts as none (see
+ * planIndexPass) — waits for the probe —
  * `lastMemoryStatus` rather than `getMemoryStatus`, which now waits for the
  * settled reading after a run, and a click of "Index now" seconds after a
  * pass must not sit behind that probe — and `startMemoryIndex` asks this
@@ -1595,7 +1681,7 @@ export async function resolveIndexMode(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
 ): Promise<MemoryIndexMode | null> {
-  const plan = await planIndexPass(requested, trigger);
+  const plan = await planIndexPass(requested, trigger, await openclawDefaultAgentId());
   return plan.heldBack ? null : plan.mode;
 }
 
@@ -1633,10 +1719,23 @@ interface IndexPassPlan {
  * A box in this state has a reading: the panel carrying the button polls the
  * status to draw the banner that names it, and `warmMemoryStatusCache` pays for
  * the first one at boot. Without one the pass is worded the way it always was.
+ *
+ * ONLY A READING ABOUT `agentId`, the agent the pass will index, decides
+ * anything (TASK-2248). A cached reading from before the owner renamed or
+ * re-pointed the default agent is about an index this pass will not touch: its
+ * zero chunks would send `--force` to the new agent's populated index unasked.
+ * Such a reading counts as none — a box never probed for this agent, which
+ * waits for the probe — and if even that answer is about another agent (the
+ * config moved again under it) the pass runs as asked, as for a box we know
+ * nothing about.
  */
-async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTrigger): Promise<IndexPassPlan> {
+async function planIndexPass(
+  requested: MemoryIndexMode,
+  trigger: MemoryIndexTrigger,
+  agentId: string,
+): Promise<IndexPassPlan> {
   if (requested === "full") {
-    const seen = cachedStatus;
+    const seen = cachedStatus?.agentId === agentId ? cachedStatus : null;
     return { mode: "full", fellBack: seen !== null && seen.available && providerFellBack(seen), heldBack: false };
   }
   try {
@@ -1645,7 +1744,9 @@ async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTri
     // a cached zero from before a manual pass filled the index would re-embed
     // that index on a timer. The owner's click keeps the cached reading, for the
     // reasons above.
-    const status = await (trigger === "schedule" ? reloadMemoryStatus() : lastMemoryStatus());
+    let status = await (trigger === "schedule" ? reloadMemoryStatus() : lastMemoryStatus());
+    if (status.agentId !== agentId) status = await reloadMemoryStatus();
+    if (status.agentId !== agentId) return { mode: requested, fellBack: false, heldBack: false };
     // `available` is load-bearing: a failed CLI probe returns the unavailable
     // status, which also reports zero chunks AND an "unknown" identity. Without
     // this check a probe timeout would silently turn a scheduled incremental
@@ -1866,9 +1967,17 @@ function ptyHost(): string | null {
 /** How often the OpenClaw arm reads its progress. `publishProgress` throttles the writes. */
 const OPENCLAW_PROGRESS_POLL_MS = 1_000;
 
-function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgressReporter): IndexPass {
+/**
+ * Starts `openclaw memory index --agent <agentId>` (`--force` for a full pass)
+ * under the lock every `memory index` on the box takes. Where there is a
+ * terminal to run it on, its progress comes from the counts it prints there
+ * and from that agent's own database.
+ */
+function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgressReporter, agentId: string): IndexPass {
   const host = ptyHost();
-  const args = ["memory", "index", "--agent", "main"];
+  // The agent the status reads (`openclawDefaultAgentId`), so the card's
+  // counts and the pass that moves them are about the same index.
+  const args = ["memory", "index", "--agent", agentId];
   if (mode === "full") args.push("--force");
   // `--verbose` is what selects the reporter's `line` face — the one that
   // prints the counts. Only asked for where there is a terminal to print them
@@ -1928,7 +2037,7 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   if (host) {
     // The environment the pass was spawned with, so the database watched is
     // the one its pinned state directory names.
-    const dbPath = openclawAgentDbPath(openclawEnv());
+    const dbPath = openclawAgentDbPath(agentId, openclawEnv());
     const since = Date.now();
     let chunks = 0;
     poll = setInterval(() => {
@@ -2069,16 +2178,43 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * with no regard for the switch, and so does the gateway pre-start's for a
  * change of the index's settings. Where ClawBox is the indexer its index holds
  * only the folders the owner chose, so there the switch still decides.
+ *
+ * `forAgent` is for a caller whose reason to index is a reading about one
+ * agent (the keyword-only rebuild): when the box's default agent is no longer
+ * that one by the time the pass is planned, nothing starts and the answer is
+ * `agent_changed` — a verdict about one agent's index never forces another's.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
-  options: { embedderChanged?: boolean } = {},
-): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" | "full_reindex_required" }> {
+  options: { embedderChanged?: boolean; forAgent?: string } = {},
+): Promise<{
+  accepted: boolean;
+  run: MemoryRunState;
+  declined?: "running" | "disabled" | "full_reindex_required" | "agent_changed";
+}> {
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
-  const { mode, fellBack, heldBack } = await planIndexPass(requested, trigger);
+  // The agent this pass is about, bound before the plan (the read never
+  // rejects): the reading that decides the mode and the pass that runs it
+  // answer for the same agent, so a default re-pointed in between cannot have
+  // the old agent's empty index send `--force` to the new one's populated
+  // index. The plan may wait seconds on a probe, so the id is read again after
+  // it, and a re-point inside that wait is planned once more for the agent
+  // the box means now. Read before the run is on record, too, so nothing
+  // between the state write and the spawn below waits on the disk.
+  let agentId = await openclawDefaultAgentId();
+  let plan = await planIndexPass(requested, trigger, agentId);
+  const repointed = await openclawDefaultAgentId();
+  if (repointed !== agentId) {
+    agentId = repointed;
+    plan = await planIndexPass(requested, trigger, agentId);
+  }
+  const { mode, fellBack, heldBack } = plan;
+  if (options.forAgent !== undefined && options.forAgent !== agentId) {
+    return { accepted: false, declined: "agent_changed", run: await readMemoryRunState() };
+  }
   if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
   if (!await acquireRunLock()) {
     return { accepted: false, declined: "running", run: await readMemoryRunState() };
@@ -2147,7 +2283,7 @@ export async function startMemoryIndex(
   const localArm = openclawIsAbsent();
   const pass = localArm
     ? startLocalPass(mode, publishProgress, trigger !== "schedule")
-    : startOpenclawPass(mode, publishProgress);
+    : startOpenclawPass(mode, publishProgress, agentId);
   if (pass.pid) settlingPasses().add(pass.pid);
   state = { ...state, childPid: pass.pid };
   try {
@@ -2260,9 +2396,11 @@ export async function startMemoryIndex(
     invalidateMemoryStatusCache();
     // Refresh behind the finished run rather than on the next read, so the new
     // counts are there by the time the owner looks, not ten seconds after.
-    reloadMemoryStatus().catch(() => { /* the next read tries again */ });
+    // Awaited only so that `memoryPassSettled` resolves after it: nothing
+    // waits on `finish` itself, and the probe starts at this same moment.
+    await reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  void pass.ended.then(finish);
+  passSettling().current = pass.ended.then(finish);
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }

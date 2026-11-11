@@ -676,6 +676,13 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
   const deps = await installAppDependencies({ directory, searchPath });
   if (!deps.ok) return failed(deps.detail, { stage: "dependencies" });
 
+  // TODO(next release): a start command that BUILDS first (an app whose `serve`
+  // script builds when no build is there) builds inside APP_START_WAIT_MS and, in
+  // the app's scope, under the app's memory cap (buildAppScopeArgv). A build still
+  // running when the wait ends is killed with the start and recorded as a start
+  // nothing answered. It wants a build step of its own here, before the start: its
+  // own time limit, as the dependency install has, and a memory cap sized for a build.
+
   const logFile = appServerLogPath(id);
   await fs.promises.mkdir(path.dirname(logFile), { recursive: true });
   const env = appCommandEnv(searchPath, directory, { PORT: String(port) });

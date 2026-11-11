@@ -56,6 +56,7 @@ import {
 import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
 import { isInside } from "@/lib/file-guard";
 import { readConfig as readOpenclawConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
 import {
   EXTRA_PATHS_CONFIG_PATH,
   INDEXABLE_EXTENSIONS,
@@ -504,12 +505,29 @@ function countOf(db: IndexDb, sql: string, ...params: unknown[]): number {
  * mismatch travels through the untouched `parseMemoryStatus` into the amber
  * "Run a full reindex" the OpenClaw box already shows.
  *
- * The vector dimension is deliberately NOT in it: it is unknowable until the
- * first embedding comes back, and this has to be stampable by the wizard's
- * provisioning step, before anything has been embedded. A dimension change is
- * caught on its own, where it becomes known — see `assertDimension`.
+ * The DECLARED vector width is in it since there is more than one model on
+ * the box (TASK-2411): Qwen3-Embedding-0.6B answers 1,024 dimensions and the
+ * 4B 2,560, and the identity names both the model and the width so a switch
+ * between them reads `mismatched` — the `embedder_changed` full pass — and the
+ * two never share an index. What the endpoint ACTUALLY returns is still
+ * checked per pass (`assertDimension`), because a declared width is a plan.
+ *
+ * An index stamped before the width joined ({@link legacyEmbedderIdentity})
+ * is still THIS embedder's: that stamp names the same provider, model and
+ * endpoint, and each model has exactly one width. It is accepted as valid
+ * and re-stamped by the next pass, rather than costing every box a full
+ * re-embed on the update that added the field.
  */
 export function embedderIdentity(embedder: ResolvedEmbedder): string {
+  return crypto
+    .createHash("sha256")
+    .update(`${embedder.provider}|${embedder.model}|${embedder.baseUrl}|d${embedder.dimensions}|v${SCHEMA_VERSION}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/** The stamp an index carried before the width was part of the identity. */
+export function legacyEmbedderIdentity(embedder: ResolvedEmbedder): string {
   return crypto
     .createHash("sha256")
     .update(`${embedder.provider}|${embedder.model}|${embedder.baseUrl}|v${SCHEMA_VERSION}`)
@@ -569,10 +587,10 @@ function sourceListKey(sources: readonly string[]): string {
   return crypto.createHash("sha256").update(JSON.stringify([...sources].sort())).digest("hex").slice(0, 16);
 }
 
-function identityOf(db: IndexDb, sources: readonly string[], identity: string): "valid" | "missing" | "mismatched" {
+function identityOf(db: IndexDb, sources: readonly string[], embedder: ResolvedEmbedder): "valid" | "missing" | "mismatched" {
   const stored = metaGet(db, "identity");
   if (!stored) return "missing";
-  if (stored !== identity) return "mismatched";
+  if (stored !== embedderIdentity(embedder) && stored !== legacyEmbedderIdentity(embedder)) return "mismatched";
   if (countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) return "valid";
   // ZERO CHUNKS IS TWO DIFFERENT STATES, and only one of them is wrong. An
   // index emptied by a rebuild whose first embed failed must not read `valid`,
@@ -1166,7 +1184,7 @@ export async function runLocalIndexPass(
     const sources = await readLocalSources();
     const scan = await scanSources(sources, signal);
 
-    const identity = identityOf(db, sources, identityNow);
+    const identity = identityOf(db, sources, embedder);
     const schema = metaGet(db, "schema_version");
     const storeDisowned = identity === "mismatched" || schema !== SCHEMA_VERSION;
     let rebuild = mode === "full" || storeDisowned;
@@ -1620,13 +1638,18 @@ function assertDimension(db: IndexDb, sample: Float32Array | undefined): boolean
 // ─── status ──────────────────────────────────────────────────────────────────
 
 /**
- * The same JSON `openclaw memory status --agent main --deep --json` answers.
+ * The same JSON `openclaw memory status --agent <id> --deep --json` answers.
  *
  * Every field here is one `parseMemoryStatus` already reads; nothing is
  * invented, and nothing this shape cannot carry is reported. See the module
  * comment for why it is worth impersonating rather than parallel-implementing.
+ *
+ * Its row is labelled with the agent the reader asks about (the box's default
+ * agent, `openclawDefaultAgentId`, which is "main" where there is no
+ * openclaw.json), so both arms answer under the same id.
  */
-export async function localMemoryStatusJson(): Promise<unknown> {
+export async function localMemoryStatusJson(agentId?: string): Promise<unknown> {
+  const rowAgentId = agentId ?? await openclawDefaultAgentId();
   const [sources, provisioning, embedder] = await Promise.all([
     readLocalSources(),
     getEmbedProvisioningStatus().catch(() => null),
@@ -1659,7 +1682,6 @@ export async function localMemoryStatusJson(): Promise<unknown> {
     embedder.source === "cloud"
       ? embedderUsable(embedder) && clawaiCredentialRefused() === null
       : provisioning?.installed === true;
-  const identityNow = embedderIdentity(embedder);
   // ONE object literal for both cases, so the "there is no index yet" shape and
   // the real one cannot drift into disagreeing about a field name.
   //
@@ -1673,7 +1695,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
   const db = await openIndexForRead();
   try {
     return {
-      agentId: "main",
+      agentId: rowAgentId,
       scan: { totalFiles: db ? Number(metaGet(db, "scan_total_files") ?? 0) : 0 },
       status: {
         provider: embedder.provider,
@@ -1695,7 +1717,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
           // wizard's own stamp leaves too. `identityOf` is what tells an index
           // that is empty because there was nothing to index from one that is
           // empty because the work did not happen.
-          indexIdentity: { status: db ? identityOf(db, sources, identityNow) : "missing" },
+          indexIdentity: { status: db ? identityOf(db, sources, embedder) : "missing" },
         },
       },
     };

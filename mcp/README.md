@@ -825,7 +825,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 
 | Tool | What it does |
 |---|---|
-| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. `effort`: this run's level (`low`, `xhigh`, `max`, `ultracode`) in place of the owner's setting. |
+| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. `effort`: this run's level (`low`, `medium`, `high`, `xhigh`, `max`, `ultracode`) in place of the owner's setting. |
 | `coding_agent_status` | One run in full — its summary, deliverable, pull request, deployment, plan — or, with no `run_id`, the recent ids. `wait_seconds` blocks up to two minutes. |
 | `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says "Delivered" (the run has it, mid-turn after a tool call or as its next turn) or "Queued" and when — the end of the tool call under way, or its next start. |
 | `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
@@ -883,7 +883,7 @@ whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
 
 `coding_agent_run` and `coding_team_run` take an optional `effort` (2026-10-30):
-one of the levels the app offers — `low`, `xhigh`, `max`, `ultracode`
+one of the levels the app offers — `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`
 (`OFFERED_EFFORT_LEVELS` in `src/lib/coding-effort.ts`, mirrored in the
 parameter's enum) — the per-request override of the owner's effort setting
 (Settings → Coding Agent). Omitted, it is NOT sent and the owner's setting
@@ -1167,10 +1167,11 @@ STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 What a team COSTS is on its answer too. By default the planner (and the lead)
 runs on the provider's best model and the workers and reviewers on its middle
-one — `claude-fable-5-1` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
-`gpt-5.6-sol` on OpenAI, the plan's `deepseek-v4-flash` for every role on
-ClawBox AI; the planner and reviewers at no more than `xhigh` effort, workers
-at the owner's effort; the owner may pick
+one — on Anthropic `claude-fable-5-2` plans, `claude-sonnet-5-5` writes and
+`claude-opus-5-5` reviews; `gpt-6-astra` / `gpt-5.6-sol` on OpenAI; the plan's
+`deepseek-v4-flash` for every role on ClawBox AI. The planner and reviewers run
+at no more than `xhigh` effort (on Anthropic they start at `high` unless the
+owner stored a level for the role), workers at the owner's effort; the owner may pick
 the provider, the model and the effort per role
 in the Coding Agent settings (`coding_agent_role_models`,
 `src/lib/coding-role-models.ts`). The planner's
@@ -1292,6 +1293,23 @@ to the picker's rules (inside the Files root, never hidden, never a secret
 store) and answers how many files a pass would read from it. A pass is stopped
 with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to
 report progress from it, not to poll it in a loop.
+
+**Which model on this box (TASK-2411).** `memory_shard_provider_get` reports
+`local_model` — the model the box's embedder runs when the index is on the box
+(`qwen3-embedding-0.6b`, the default, or `qwen3-embedding-4b`) — and
+`local_models`, one row per model with `in_use`, `downloaded`, `size_gb` and
+`runs_on_this_box`, plus `why_not` in plain words where it cannot (a Jetson
+Orin Nano, a PC without an NVIDIA GPU, or under 6 GB of free GPU memory). An
+older server sends neither and is reported as the 0.6B. `memory_shard_provider_set`
+takes an optional `local_model` with `source: "local"` (with `cloud` it is
+`BAD_ARGUMENT`). A change of model re-embeds every file exactly like a change
+of place, so it takes the same estimate-then-`confirm: true` (the answer
+carries `from_model`), and the full pass is started after it. A model this box
+cannot run is refused before anything is posted (`NOT_SUPPORTED_HERE`, the
+reason in the message) and again by the route (409 `local_model_unavailable`);
+one that is not downloaded is 409 `local_not_installed` — the download
+(2.5–4.3 GB) is the owner's, from Settings → Local AI or Memory Shard's
+settings. Switching never deletes the other model's file.
 
 ### Prime Radiant (both editions)
 

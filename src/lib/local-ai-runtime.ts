@@ -16,8 +16,9 @@ import {
 } from "@/lib/llamacpp-server";
 import {
   EMBED_UNIT,
+  embedServedAlias,
+  getActiveEmbedLaunchSpec,
   getEmbedBaseUrl,
-  getEmbedLaunchSpec,
   getEmbedProvisioningStatus,
   getEmbedProxyBaseUrl,
   isEmbedHealthy,
@@ -25,6 +26,8 @@ import {
   isEmbeddingServerArgv,
   type EmbedLaunchSpec,
 } from "@/lib/embed-server";
+
+import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID, isLocalEmbeddingModelId } from "@/lib/embed-runtime-ids";
 
 export { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 
@@ -440,7 +443,7 @@ async function waitForEmbedReady(spec: EmbedLaunchSpec): Promise<void> {
     if (budgetMs === null) {
       // GGUF on disk → a wake (4 s measured); missing → the start script is
       // downloading 640 MB and only the provisioning budget is honest.
-      const provisioning = await getEmbedProvisioningStatus().catch(() => null);
+      const provisioning = await getEmbedProvisioningStatus(spec).catch(() => null);
       budgetMs = provisioning?.modelAvailable ? getLlamaCppWakeTimeoutMs() : spec.startupTimeoutMs;
       deadline = Date.now() + budgetMs;
     }
@@ -467,9 +470,57 @@ async function waitForEmbedReady(spec: EmbedLaunchSpec): Promise<void> {
  * protects the box from the EMBEDDER — it cannot stop a wake from squeezing
  * the gateway or a running build; see DEFAULT_EMBED_WAKE_MIN_AVAILABLE_MB.
  */
+const EMBED_MODEL_RESTART_COOLDOWN_MS = 60_000;
+let lastEmbedModelRestartAt = 0;
+
+/**
+ * Does the running embedder serve a DIFFERENT CATALOG MODEL than the one the
+ * box is set to? Only that is a reason to restart it (TASK-2411).
+ *
+ * The default slot's alias comes from .env, which the web server read when IT
+ * started and the unit reads when IT starts: an owner's edit in between makes
+ * the two names differ for the same model, and treating that as a mismatch
+ * would restart the embedder under every request. So with the default slot
+ * picked, only a server answering as another catalog model (the 4B the owner
+ * just switched away from) is restarted; with another model picked, anything
+ * but that model's id is. A server that does not say is taken at its word.
+ */
+export function embedServesOtherModel(
+  served: string | null,
+  spec: Pick<EmbedLaunchSpec, "alias" | "modelId">,
+): boolean {
+  if (served === null || served === spec.alias) return false;
+  if (spec.modelId === DEFAULT_LOCAL_EMBEDDING_MODEL_ID) {
+    return isLocalEmbeddingModelId(served) && served !== DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
+  }
+  return served !== spec.modelId;
+}
+
+/** For the tests. */
+export function resetEmbedModelRestartCooldownForTests(): void {
+  lastEmbedModelRestartAt = 0;
+}
+
 async function startEmbedIfNeeded(): Promise<void> {
-  const spec = getEmbedLaunchSpec();
-  if (await isEmbedHealthy(spec.healthUrl)) return;
+  const spec = await getActiveEmbedLaunchSpec();
+  if (await isEmbedHealthy(spec.healthUrl)) {
+    // Up, but is it the model this box is set to? A server still holding the
+    // model the owner just switched away from (TASK-2411) must not embed one
+    // more passage: vectors from two models in one index answer nothing. It is
+    // stopped and woken again, and the start script loads the model the box is
+    // set to now. A server that does not say (an older build) is taken at its
+    // word, rather than restarted on every request.
+    const served = await embedServedAlias(spec.baseUrl);
+    if (!embedServesOtherModel(served, spec)) return;
+    // Once per minute at most: a unit that comes back as the same other model
+    // (a config it cannot read, a hand edit) must not be restarted under every
+    // request — the restart is a repair, not a loop.
+    const now = Date.now();
+    if (now - lastEmbedModelRestartAt < EMBED_MODEL_RESTART_COOLDOWN_MS) return;
+    lastEmbedModelRestartAt = now;
+    console.warn(`[local-ai] the memory embedder runs ${served} but this box is set to ${spec.alias}; restarting it`);
+    await stopEmbed();
+  }
 
   const minMb = getEmbedWakeMinAvailableMb();
   if (minMb > 0) {

@@ -14,8 +14,8 @@ export const dynamic = "force-dynamic";
  * effort?, deliverable?, inputs?, experience?, fixCi? } → start a coding run.
  *
  * `effort` is the per-request override of the owner's effort setting
- * (Settings → Coding Agent): one of OFFERED_EFFORT_LEVELS (`low`, `xhigh`,
- * `max`, `ultracode`), validated HERE — 400 `invalid` with `code: "effort"`
+ * (Settings → Coding Agent): one of OFFERED_EFFORT_LEVELS (`low`, `medium`,
+ * `high`, `xhigh`, `max`, `ultracode`), validated HERE — 400 `invalid` with `code: "effort"`
  * naming the levels — and again in `startRun`, where it stands in for the
  * owner's setting and nothing more: a reading role's cap and the read-only
  * clamp still apply after it. The Create card's Ultracode toggle asks the

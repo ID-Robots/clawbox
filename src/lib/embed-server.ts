@@ -25,17 +25,28 @@ import fs from "fs/promises";
 import { accessSync, constants as fsConstants } from "fs";
 import type { FileHandle } from "fs/promises";
 import path from "./runtime-path";
-import { DATA_DIR } from "./config-store";
+import { DATA_DIR, getKnownMany, setMany } from "./config-store";
 import { getLocalAiProxyRootUrl } from "./local-ai-proxy-url";
 import {
   DEFAULT_EMBED_BASE_URL,
   DEFAULT_EMBED_BATCH,
+  DEFAULT_LOCAL_EMBEDDING_MODEL_ID,
   EMBED_HF_FILE,
   EMBED_HF_REPO,
   EMBED_MODEL_ALIAS,
   EMBED_RUNTIME_SUBDIR,
   MIN_EMBED_BATCH,
+  isLocalEmbeddingModelId,
+  localEmbeddingModelSpec,
+  localEmbeddingVariant,
+  type LocalEmbeddingModelId,
+  type LocalEmbeddingQuant,
 } from "./embed-runtime-ids";
+// Literals rather than an import of memory-shard-state.ts: that module is the
+// client-safe end of the graph and this one is server only. Pinned equal by
+// src/tests/unit/local-embedding-models.test.ts.
+const LOCAL_MODEL_KEY = "memory_shard_local_model";
+const LOCAL_QUANT_KEY = "memory_shard_local_model_quant";
 
 export * from "./embed-runtime-ids";
 
@@ -103,7 +114,41 @@ export function getEmbedBatch(): number {
   return Number.isInteger(raw) && raw >= MIN_EMBED_BATCH ? raw : DEFAULT_EMBED_BATCH;
 }
 
+/** Which catalog model, at which quant: what data/config.json records. */
+export interface LocalEmbeddingSelection {
+  id: LocalEmbeddingModelId;
+  quant: LocalEmbeddingQuant;
+}
+
+/** The data/ directory every catalog GGUF lives in. */
+export function getEmbedModelDir(): string {
+  return EMBED_MODEL_DIR;
+}
+
+/**
+ * The model the embedder runs when the index is local (TASK-2411).
+ *
+ * Absent, unreadable or not one of the catalog ids is the 0.6B: that is the
+ * model every box ran before the choice existed, so a store that cannot be
+ * read never moves a box onto a model it did not pick.
+ */
+export async function readActiveLocalEmbeddingModel(): Promise<LocalEmbeddingSelection> {
+  const { values } = await getKnownMany([LOCAL_MODEL_KEY, LOCAL_QUANT_KEY]);
+  const id = isLocalEmbeddingModelId(values[LOCAL_MODEL_KEY]) ? values[LOCAL_MODEL_KEY] : DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
+  return { id, quant: localEmbeddingVariant(id, values[LOCAL_QUANT_KEY] as string | undefined).quant };
+}
+
+/** Record the model the embedder runs. ONE write, so the id and its quant never disagree. */
+export async function writeActiveLocalEmbeddingModel(selection: LocalEmbeddingSelection): Promise<void> {
+  const quant = localEmbeddingVariant(selection.id, selection.quant).quant;
+  await setMany({ [LOCAL_MODEL_KEY]: selection.id, [LOCAL_QUANT_KEY]: quant });
+}
+
 export interface EmbedLaunchSpec {
+  /** The catalog model this spec runs. */
+  modelId: LocalEmbeddingModelId;
+  /** Its vector width (the default slot's 1,024 when .env names another file). */
+  dimensions: number;
   alias: string;
   baseUrl: string;
   healthUrl: string;
@@ -118,13 +163,29 @@ export interface EmbedLaunchSpec {
   startupTimeoutMs: number;
 }
 
-export function getEmbedLaunchSpec(): EmbedLaunchSpec {
-  const hfFile = process.env.EMBED_HF_FILE?.trim() || EMBED_HF_FILE;
+/**
+ * The launch spec for one model; with no selection, the DEFAULT slot.
+ *
+ * The default slot is the 0.6B as it always was, and the EMBED_* lines in .env
+ * still move it (every box carries them, with the shipped values). A catalog
+ * model other than the default is taken from the catalog alone — .env's
+ * EMBED_MODEL/EMBED_HF_* describe the default slot and are not read for it —
+ * the same rule scripts/embed-model-select.sh applies for the unit.
+ */
+export function getEmbedLaunchSpec(selection?: LocalEmbeddingSelection | null): EmbedLaunchSpec {
+  const picked = selection && selection.id !== DEFAULT_LOCAL_EMBEDDING_MODEL_ID ? selection : null;
+  const modelId = picked?.id ?? DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
+  const spec = localEmbeddingModelSpec(modelId);
+  const hfFile = picked
+    ? localEmbeddingVariant(picked.id, picked.quant).file
+    : process.env.EMBED_HF_FILE?.trim() || EMBED_HF_FILE;
   return {
-    alias: process.env.EMBED_MODEL?.trim() || EMBED_MODEL_ALIAS,
+    modelId,
+    dimensions: spec.dimensions,
+    alias: picked ? picked.id : process.env.EMBED_MODEL?.trim() || EMBED_MODEL_ALIAS,
     baseUrl: getEmbedBaseUrl(),
     healthUrl: getEmbedHealthUrl(),
-    hfRepo: process.env.EMBED_HF_REPO?.trim() || EMBED_HF_REPO,
+    hfRepo: picked ? spec.hfRepo : process.env.EMBED_HF_REPO?.trim() || EMBED_HF_REPO,
     hfFile,
     binPath: process.env.LLAMACPP_BIN?.trim() || DEFAULT_LLAMACPP_BIN,
     hfBinPath: process.env.HF_BIN?.trim() || defaultHfBin(),
@@ -134,6 +195,11 @@ export function getEmbedLaunchSpec(): EmbedLaunchSpec {
     batch: getEmbedBatch(),
     startupTimeoutMs: Number(process.env.EMBED_STARTUP_TIMEOUT_MS || DEFAULT_STARTUP_TIMEOUT_MS),
   };
+}
+
+/** The launch spec of the model the embedder runs now. */
+export async function getActiveEmbedLaunchSpec(): Promise<EmbedLaunchSpec> {
+  return getEmbedLaunchSpec(await readActiveLocalEmbeddingModel().catch(() => null));
 }
 
 export interface EmbedProvisioningStatus {
@@ -146,8 +212,9 @@ export interface EmbedProvisioningStatus {
   modelBytes: number | null;
 }
 
-export async function getEmbedProvisioningStatus(): Promise<EmbedProvisioningStatus> {
-  const spec = getEmbedLaunchSpec();
+/** Is the model of `spec` (by default the ACTIVE one) runnable here? */
+export async function getEmbedProvisioningStatus(spec?: EmbedLaunchSpec): Promise<EmbedProvisioningStatus> {
+  spec ??= await getActiveEmbedLaunchSpec();
   const [binaryAvailable, modelStat] = await Promise.all([
     fs.stat(spec.binPath).then(() => true, () => false),
     fs.stat(spec.modelPath).catch(() => null),
@@ -206,6 +273,25 @@ export function embedStopReasonFromLog(text: string): string | null {
   return reason.length > FAILURE_REASON_MAX_CHARS
     ? `${reason.slice(0, FAILURE_REASON_MAX_CHARS - 1).trimEnd()}…`
     : reason;
+}
+
+/**
+ * WHICH model the running llama-server answers as: its `--alias`, from
+ * `/v1/models`. Null when it does not answer. The wake path compares this with
+ * the model the box is set to, so a server still holding the model the owner
+ * just switched away from is restarted rather than asked to embed — vectors
+ * from two models must never land in one index.
+ */
+export async function embedServedAlias(baseUrl = getEmbedBaseUrl(), timeoutMs = 2_000): Promise<string | null> {
+  try {
+    const res = await fetch(`${baseUrl}/models`, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
+    const id = body?.data?.[0]?.id;
+    return typeof id === "string" ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -77,6 +77,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => {
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => "http://127.0.0.1/setup-api/local-ai/embed/v1",
   getEmbedProvisioningStatus: async () => ({ installed: boxState.gguf, binaryAvailable: boxState.gguf, modelAvailable: boxState.gguf, modelBytes: 1, binPath: "", modelPath: "" }),
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
 }));
 // The cloud half of the same index: where the ClawBox AI embedder is, and the
 // box's own credential for it. Both are read per request by the real resolver.
@@ -125,7 +126,12 @@ vi.mock("@/lib/clawai-cloud-defaults", () => ({
   }),
 }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "t".repeat(64) }));
-vi.mock("@/lib/openclaw-config", () => ({ readConfig: async () => openclawConfig.value }));
+vi.mock("@/lib/openclaw-config", () => ({
+  readConfig: async () => openclawConfig.value,
+  // Where the default agent is read from (`@/lib/openclaw-default-agent`): no
+  // file unless a test writes one, so the row is "main" as on a stock box.
+  CONFIG_PATH: `${dataDir}/openclaw.json`,
+}));
 
 import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
@@ -1320,6 +1326,19 @@ describe("the status it hands to the shared parser", () => {
     expect((status.vector as { semanticAvailable: boolean }).semanticAvailable).toBe(true);
     expect((status.batch as { failures: number }).failures).toBe(0);
     expect((status.custom as { providerState: { mode: string } }).providerState.mode).toBe("active");
+  });
+
+  it("labels its row with the box's default agent, which is not always main", async () => {
+    // TASK-2248: the reader picks the row by the id it asked about, so both
+    // arms must answer under the same one.
+    const config = `${dataDir}/openclaw.json`;
+    fs.writeFileSync(config, JSON.stringify({ agents: { entries: { default: {}, travel: {} } } }));
+    try {
+      expect(((await localMemoryStatusJson()) as { agentId: string }).agentId).toBe("default");
+      expect(((await localMemoryStatusJson("travel")) as { agentId: string }).agentId).toBe("travel");
+    } finally {
+      fs.rmSync(config, { force: true });
+    }
   });
 });
 

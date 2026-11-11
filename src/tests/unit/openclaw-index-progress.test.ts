@@ -172,11 +172,17 @@ describe("counting the chunks the pass has written", () => {
 
 describe("where the agent's index lives", () => {
   it("follows OpenClaw's own state directory, and a test's override first", () => {
-    expect(openclawAgentDbPath({ OPENCLAW_STATE_DIR: "/srv/oc" }))
+    expect(openclawAgentDbPath("main", { OPENCLAW_STATE_DIR: "/srv/oc" }))
       .toBe("/srv/oc/agents/main/agent/openclaw-agent.sqlite");
-    expect(openclawAgentDbPath({ CLAWKEEP_MEMORY_AGENT_DB: "/x/y.sqlite", OPENCLAW_STATE_DIR: "/srv/oc" }))
+    expect(openclawAgentDbPath("main", { CLAWKEEP_MEMORY_AGENT_DB: "/x/y.sqlite", OPENCLAW_STATE_DIR: "/srv/oc" }))
       .toBe("/x/y.sqlite");
-    expect(openclawAgentDbPath({}))
+    expect(openclawAgentDbPath("main", {}))
       .toBe(path.join(os.homedir(), ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite"));
+  });
+
+  it("is the database of the agent the pass was started for, not main by assumption", () => {
+    // TASK-2248: a renamed agent leaves agents/main/ behind; the pass writes the real one.
+    expect(openclawAgentDbPath("default", { OPENCLAW_STATE_DIR: "/srv/oc" }))
+      .toBe("/srv/oc/agents/default/agent/openclaw-agent.sqlite");
   });
 });

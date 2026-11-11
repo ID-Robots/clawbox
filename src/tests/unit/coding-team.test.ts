@@ -73,6 +73,12 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
   return { ...actual, ...plumbing };
 });
+// The path heal before a merge is git too (coding-worktree-heal.ts): faked
+// like the rest of the plumbing — a real `git` spawned for a worktree that is
+// not on disk answers after a process's worth of time, and the order two
+// workers settle in must not hang on that.
+const heal = vi.hoisted(() => ({ healWorktreePaths: vi.fn(async (): Promise<{ ok: true; files: string[]; commit: string | null }> => ({ ok: true, files: [], commit: null })) }));
+vi.mock("@/lib/coding-worktree-heal", () => heal);
 // GitHub, faked where the orchestrator reaches it: a team whose goal asks for
 // a pull request opens, reads, pushes and merges through these. A team whose
 // goal asks for none never calls them.
@@ -195,6 +201,7 @@ beforeEach(async () => {
     return { ok: false, conflict: next.conflict === true, detail: next.conflict ? "CONFLICT (content): Merge conflict in index.html" : "Merging failed." };
   });
   plumbing.removeWorktree.mockResolvedValue(undefined);
+  heal.healWorktreePaths.mockImplementation(async () => ({ ok: true, files: [], commit: null }));
   // The normal path: the runner committed the worker's work on its branch. A
   // case that stages an empty branch says so.
   plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => committedOn(branch));
@@ -699,6 +706,23 @@ describe("a worker the owner PAUSED", () => {
     expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]).filter((b: string) => /-t1-1$/.test(b))).toHaveLength(1);
     // …and t2, which depends on t1, ran.
     expect(done.tasks.find((t) => t.task_id === "t2")).toMatchObject({ status: "complete" });
+  });
+});
+
+describe("a worker's temporary folder in the files it wrote", () => {
+  it("is rewritten before its branch is merged, and said on the board", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
+    heal.healWorktreePaths.mockImplementationOnce(async () => ({ ok: true, files: ["mcp/README.md", "config.json"], commit: "abc1234" }));
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Asked of each worker's own worktree, before that worker's merge.
+    expect(heal.healWorktreePaths.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["/home/clawbox/Projects/site/.clawbox/worktrees/t1-1", "/home/clawbox/Projects/site/.clawbox/worktrees/t2-1"]);
+    expect(heal.healWorktreePaths.mock.invocationCallOrder[0]).toBeLessThan(plumbing.mergeWorkerBranch.mock.invocationCallOrder[0]);
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes.filter((m) => /temporary folder/.test(m))).toEqual([
+      "Worker run-00000002 wrote its temporary folder's path into 2 files (mcp/README.md, config.json); each mention now names the project's own folder.",
+    ]);
   });
 });
 
@@ -3028,14 +3052,46 @@ describe("the planner's shape", () => {
     expect(done.runs.filter((r) => r.role === "reviewer")).toEqual([{ id: "run-00000004", role: "reviewer", taskId: null }]);
   });
 
-  it("fails the team with the final reviewer's words when it rejects the merged work", async () => {
-    outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
-    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "app.js never loads the form in index.html." }) }];
+  it("sends a rejected final review's findings back to ONE task, once, and ends done when the review of the fix accepts", async () => {
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) },
+      { summary: "index", filesTouched: ["index.html"] },
+      { summary: "app", filesTouched: ["app.js"] },
+      { summary: "app.js now loads the form.", filesTouched: ["app.js"] },
+    ];
+    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "app.js never loads the form in index.html." }) }, { summary: JSON.stringify({ verdict: "accepted", notes: "The form loads." }) }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The plan's two workers, the review, ONE fixer, the review of the fix.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "worker", "reviewer"]);
+    // t2: the task nothing else stands on — t1, which the notes also name, is not reopened under it.
+    expect(starts[4]).toMatchObject({ team: { id: board.id, role: "worker", taskId: "t2" } });
+    expect(String(starts[4].task)).toContain("A previous attempt was rejected: The team's final review of the MERGED result rejected it.");
+    expect(String(starts[4].task)).toContain("app.js never loads the form in index.html.");
+    expect(done.finalFixRounds).toBe(1);
+    expect(done.finalReview).toMatchObject({ verdict: "accepted", notes: "The form loads." });
+    const t2 = done.tasks.find((t) => t.task_id === "t2")!;
+    expect(t2).toMatchObject({ status: "complete", attempts: 2, reviewReoffers: 1 });
+    expect(done.tasks.find((t) => t.task_id === "t1")).toMatchObject({ status: "complete", attempts: 1, holds: 0 });
+    const said = done.log.map((e) => e.message);
+    expect(said).toContain("Final review rejected: app.js never loads the form in index.html.");
+    expect(said.some((m) => m.startsWith("Task t2 re-offered for the final review's findings:"))).toBe(true);
+    expect(said).toContain("Final review accepted: The form loads.");
+    expect(done.error).toBeNull();
+  });
+
+  it("fails the team with the final reviewer's words when the review of the fix rejects too", async () => {
+    outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }, { summary: "tried", filesTouched: ["app.js"] }];
+    reviews = [{ summary: JSON.stringify({ verdict: "rejected", notes: "app.js never loads the form in index.html." }) }, { summary: JSON.stringify({ verdict: "rejected", notes: "The form still never loads." }) }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toBe("The final review rejected the merged work: app.js never loads the form in index.html.");
-    expect(done.finalReview).toMatchObject({ verdict: "rejected" });
+    expect(done.error).toBe("The final review rejected the merged work: The form still never loads.");
+    expect(done.finalReview).toMatchObject({ verdict: "rejected", notes: "The form still never loads." });
+    expect(done.finalFixRounds).toBe(1);
+    // One fix round, never a second.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "worker", "reviewer"]);
   });
 
   it("accepts by rule, with an alert, when the final reviewer gives no verdict", async () => {
@@ -3055,10 +3111,13 @@ describe("the planner's shape", () => {
     reviews = [{ summary: "The goal is met: index.html and app.js work together." }, { summary: 'Sorry.\n{"verdict": "rejected", "notes": "app.js never loads the form."}' }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
-    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "reviewer"]);
+    // The re-asked verdict is the review's: its rejection opens the one fix
+    // round (a worker, then the review of the fix, which accepts here).
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "reviewer", "worker", "reviewer"]);
     expect(starts[4]).toEqual({ task: REVIEWER_NUDGE, resumeRunId: "run-00000004", source: "owner", team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: FINAL_REVIEWER_BRIEF });
-    expect(done.finalReview).toMatchObject({ verdict: "rejected", notes: "app.js never loads the form." });
-    expect(done.status).toBe("failed");
+    expect(done.log.map((e) => e.message)).toContain("Final review rejected: app.js never loads the form.");
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+    expect(done.status).toBe("done");
     expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
     expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
       'The final reviewer answered without a JSON verdict; asking it once more for the verdict alone. It answered: "The goal is met: index.html and app.js work together."',
@@ -3862,8 +3921,8 @@ describe("the team's effort", () => {
 
   it("refuses a level the app does not offer before anything is made", async () => {
     const { CodingAgentError } = await import("@/lib/coding-agent");
-    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
-    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "medium" })).rejects.toBeInstanceOf(CodingAgentError);
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "turbo" as never })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, medium, high, xhigh, max, ultracode/) });
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner", effort: "turbo" as never })).rejects.toBeInstanceOf(CodingAgentError);
     expect(runner.startRun).not.toHaveBeenCalled();
     expect(team.listTeams()).toEqual([]);
   });
@@ -4216,5 +4275,23 @@ describe("a plan run as a single run: each task's named files", () => {
     const place = { dir: tree, branch: { repo: site, name: "clawbox/run-bbbbbbbb", roots: [tree, site] } };
     expect(await team.missingDeliverables(place, [`${site}/docs/new.md`, `${site}/README.md`, `${site}/gone.md`, "../beside.md", far]))
       .toEqual([`${site}/gone.md (missing)`, "../beside.md (missing)", `${far} (missing)`]);
+  });
+
+  it("judges no absolute path outside the project: a plan that names one names nothing of the task's", () => {
+    // team-g4cfurux: every task's hint ended with the planner's own artifact
+    // folder, /…/data/coding-agent-artifacts/run-…/ — never looked for, so
+    // always "missing", and a single run that did all five tasks failed the team.
+    const tree = path.join(root, "tree");
+    const place = { dir: tree, branch: { repo: site, name: "clawbox/run-cccccccc", roots: [tree, site] } };
+    const artifacts = path.join(root, "data", "coding-agent-artifacts", "run-2kb4fwar");
+    expect(team.insidePlace(place, artifacts)).toBe(false);
+    expect(team.insidePlace(place, `${site}/../beside.md`)).toBe(false);
+    // Inside the folder or one of the branch's roots, and every relative path: judged as before.
+    expect(team.insidePlace(place, `${tree}/docs/new.md`)).toBe(true);
+    expect(team.insidePlace(place, `${site}/docs/new.md`)).toBe(true);
+    expect(team.insidePlace(place, "docs/new.md")).toBe(true);
+    expect(team.insidePlace(place, "../beside.md")).toBe(true);
+    expect(team.insidePlace({ dir: site, branch: null }, artifacts)).toBe(false);
+    expect(team.namedDeliverables(["scripts/", "VERIFICATION.md", `${artifacts}/`]).filter((n) => team.insidePlace(place, n))).toEqual(["scripts", "VERIFICATION.md"]);
   });
 });

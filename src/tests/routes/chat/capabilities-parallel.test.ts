@@ -31,6 +31,14 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 // and left real it takes a genuine I/O turn that no fake timer stands in for,
 // which is what stops "settled without moving the clock" from being provable.
 vi.mock("@/lib/language-persona", () => ({ onboardingRitualArmed: vi.fn(async () => false) }));
+// The same for the route's OpenClaw-only read: on a linked OpenClaw box it
+// reads openclaw.json for the picture route, a real file read that otherwise
+// lands inside one zero-length clock advance only by luck. Partial, so every
+// other export stays real for anything else in the import graph.
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
+  readConfig: vi.fn(async () => ({})),
+}));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
@@ -65,6 +73,7 @@ interface Body {
 let GET: () => Promise<Response>;
 let getActiveHarness: Mock;
 let hasClawaiToken: Mock;
+let readOpenclawConfig: Mock;
 let probes: Record<string, Mock>;
 
 beforeEach(async () => {
@@ -76,6 +85,9 @@ beforeEach(async () => {
   });
   ({ hasClawaiToken } = (await import("@/lib/harness/credentials")) as unknown as {
     hasClawaiToken: Mock;
+  });
+  ({ readConfig: readOpenclawConfig } = (await import("@/lib/openclaw-config")) as unknown as {
+    readConfig: Mock;
   });
   const images = (await import("@/lib/harness/clawai-images")) as unknown as {
     clawaiImageRouteReachable: Mock;
@@ -179,6 +191,8 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
     // request settled and would make this pass whatever the route did.
     await vi.advanceTimersByTimeAsync(0);
     expect(request.settled()).toBe(true);
+    // Still the OpenClaw branch: it did its one picture-route read.
+    expect(readOpenclawConfig).toHaveBeenCalledTimes(1);
     for (const [name, probe] of Object.entries(probes)) {
       expect(probe, name).not.toHaveBeenCalled();
     }
