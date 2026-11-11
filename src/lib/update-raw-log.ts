@@ -44,6 +44,7 @@
  */
 import { spawn as nodeSpawn } from "child_process";
 import fs from "fs";
+import { StringDecoder } from "string_decoder";
 import path, { untraced } from "./runtime-path";
 import { redactCredentialShapes } from "./incident-sanitize";
 import { rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
@@ -757,7 +758,8 @@ async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
     current = new RunLog(meta);
     void current.write(`${BOLD}=== ${redactUpdateLogText(opts.title)}${RESET} ${DIM}(started ${meta.startedAt})${RESET}\n`, { force: true });
     writeLatestPointer(meta.id);
-    void prune(meta.id);
+    // Tracked like any other background log I/O, so a settled log is a pruned one.
+    void track(prune(meta.id));
     return meta.id;
   } catch {
     current = null;
@@ -877,8 +879,20 @@ function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
     }
     writing = track(writing.then(() => writeUpdateLog(lines)).finally(() => settle(bytes)));
   };
+  // One decoder per stream: a character whose bytes arrive in two chunks
+  // (a raw pipe, a progress bar's block characters) is held until it is whole.
+  const decoders = new Map<NodeJS.ReadableStream, StringDecoder>();
+  const decode = (stream: NodeJS.ReadableStream, chunk: Buffer | string): string => {
+    if (typeof chunk === "string") return chunk;
+    let decoder = decoders.get(stream);
+    if (!decoder) {
+      decoder = new StringDecoder("utf8");
+      decoders.set(stream, decoder);
+    }
+    return decoder.write(chunk);
+  };
   const take = (stream: NodeJS.ReadableStream, chunk: Buffer | string) => {
-    const text = (partial.get(stream) ?? "") + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    const text = (partial.get(stream) ?? "") + decode(stream, chunk);
     const cut = text.lastIndexOf("\n");
     partial.set(stream, cut < 0 ? text : text.slice(cut + 1));
     if (cut < 0) return;
@@ -891,6 +905,12 @@ function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
     flush: async () => {
       send();
       await writing;
+      // Whatever a decoder still holds is the end of its stream's last line.
+      for (const [stream, decoder] of decoders) {
+        const held = decoder.end();
+        if (held) partial.set(stream, (partial.get(stream) ?? "") + held);
+      }
+      decoders.clear();
       const rest = [...partial.values()].filter(Boolean).map((line) => `${line}\n`).join("");
       partial.clear();
       if (rest) await writeUpdateLog(rest);

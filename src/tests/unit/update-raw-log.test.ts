@@ -442,6 +442,29 @@ describe("commands the web server runs itself", () => {
     expect(text).not.toContain("ignored");
   });
 
+  it("keeps a character whose bytes arrive in two chunks whole, on stdout and on stderr", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    // Raw pipe chunks (a child without an encoding): ✓, █ and … are three bytes each.
+    const tick = Buffer.from("✓ Compiled\n");
+    const bar = Buffer.from("[█████░░░] 62%\n");
+    const tail = Buffer.from("done …");
+    await logUpdateCommand(["npm", "install"], () => running(async (out, err) => {
+      out.emit("data", tick.subarray(0, 2));
+      err.emit("data", bar.subarray(0, 2));
+      out.emit("data", tick.subarray(2));
+      err.emit("data", bar.subarray(2));
+      // Cut inside the last character, with no newline after it.
+      out.emit("data", tail.subarray(0, 6));
+      out.emit("data", tail.subarray(6));
+    }));
+    await settle();
+    const text = logText(id!);
+    expect(text).toContain("✓ Compiled\n");
+    expect(text).toContain("[█████░░░] 62%\n");
+    expect(text).toContain("done …\n");
+    expect(text).not.toContain("�");
+  });
+
   it("pauses a command that prints faster than the log takes it, and lets it go on once the log caught up", async () => {
     const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
     await settle();
@@ -588,6 +611,27 @@ describe("a restart in the middle of the run", () => {
       ids.push((await openUpdateLog({ fresh: true, flow: "update", title: `run ${i}` }))!);
       await closeUpdateLog("completed");
     }
+    const left = fs.readdirSync(updateLogDir()).filter((n) => n.endsWith(".log")).map((n) => n.slice(0, -4)).sort();
+    expect(left).toEqual(ids.slice(-UPDATE_LOG_KEEP).sort());
+  });
+
+  it("is settled only once the runs it prunes are gone, however slow the disk", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < UPDATE_LOG_KEEP; i++) {
+      now += 1_000;
+      ids.push((await openUpdateLog({ fresh: true, flow: "update", title: `run ${i}` }))!);
+      await closeUpdateLog("completed");
+    }
+    await settle();
+    // A disk that takes its time removing files.
+    const realRm = fs.promises.rm.bind(fs.promises);
+    vi.spyOn(fs.promises, "rm").mockImplementation(async (file, opts) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return realRm(file, opts);
+    });
+    now += 1_000;
+    ids.push((await openUpdateLog({ fresh: true, flow: "update", title: "one too many" }))!);
+    await settle();
     const left = fs.readdirSync(updateLogDir()).filter((n) => n.endsWith(".log")).map((n) => n.slice(0, -4)).sort();
     expect(left).toEqual(ids.slice(-UPDATE_LOG_KEEP).sort());
   });

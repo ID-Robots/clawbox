@@ -24,7 +24,10 @@ if [ -e "$f" ]; then
 elif [ -d "$d" ] && [ -x "$d" ] && [ -r "$d" ]; then echo "POINTER"
 elif [ ! -e "$d" ] && [ -d "$REPO/data" ] && [ -x "$REPO/data" ] && [ -r "$REPO/data" ]; then echo "POINTER"
 else echo "POINTER_UNREADABLE"
-fi' | grep -E '^POINTER( |$)' | tail -n 1)
+fi') || return 1
+  # Only a hop that ended well answers: one that failed after printing a
+  # valid-looking line is a failed read all the same.
+  out=$(printf '%s\n' "$out" | grep -E '^POINTER( |$)' | tail -n 1)
   [ -n "$out" ] || return 1
   out=${out#POINTER}
   printf '%s' "${out# }"
@@ -50,12 +53,13 @@ read_baseline() {
 # new_run_finished — the box has started a run since BEFORE_RUN was read, and
 # that run is marked finished: a completion the test never saw running is this
 # test's run, not an earlier update's "completed". An unchanged pointer, an
-# unfinished run and a pointer that cannot be read all answer no.
+# unfinished run, a pointer that cannot be read and a hop to the board that
+# ended badly (whatever it printed first) all answer no.
 new_run_finished() {
   local id finished
   id=$(latest_run) || return 1
   [ -n "$id" ] && [ "$id" != "$BEFORE_RUN" ] || return 1
   # shellcheck disable=SC2016  # expanded on the board
-  finished=$(board 'python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"finished\") is True)" "$REPO/data/update-logs/$1.json" 2>/dev/null' "$id" | tail -n 1)
-  [ "$finished" = True ]
+  finished=$(board 'python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"finished\") is True)" "$REPO/data/update-logs/$1.json" 2>/dev/null' "$id") || return 1
+  [ "$(printf '%s\n' "$finished" | tail -n 1)" = True ]
 }

@@ -40,11 +40,18 @@ function run(id: string, finished: boolean): void {
   fs.writeFileSync(path.join(logs(), `${id}.json`), JSON.stringify({ id, finished, size: 0, follows: [] }));
 }
 
-/** Runs `script` with the library sourced and `board` running locally; `hop: false` is a hop that failed. */
-function sh(script: string, { hop = true }: { hop?: boolean } = {}): { status: number | null; stdout: string } {
-  const board = hop
-    ? 'board() { local s=$1; shift; REPO="$FIXTURE_REPO" bash -c "$s" bash "$@"; }'
-    : "board() { return 255; }";
+/**
+ * Runs `script` with the library sourced and `board` running locally.
+ * `hop: false` is a hop that failed before the board said anything;
+ * `failsAfter` is a hop that failed after the board script had printed all
+ * of its answer, for the board scripts whose text contains that word.
+ */
+function sh(script: string, { hop = true, failsAfter }: { hop?: boolean; failsAfter?: string } = {}): { status: number | null; stdout: string } {
+  const board = !hop
+    ? "board() { return 255; }"
+    : failsAfter
+      ? `board() { local s=$1; shift; REPO="$FIXTURE_REPO" bash -c "$s" bash "$@"; case $s in *${failsAfter}*) return 255 ;; esac; }`
+      : 'board() { local s=$1; shift; REPO="$FIXTURE_REPO" bash -c "$s" bash "$@"; }';
   const r = spawnSync("bash", ["-c", `set -uo pipefail\n${board}\nsource "${LIB}"\n${script}`], {
     encoding: "utf-8",
     timeout: 20_000,
@@ -108,6 +115,12 @@ describe.skipIf(!canRun)("the latest-run pointer, as 92-update-raw-log reads it"
     expect(sh("latest_run", { hop: false })).toEqual({ status: 1, stdout: "" });
   });
 
+  it("fails when the hop failed after the board had printed a valid pointer", () => {
+    pointTo(OLD);
+    expect(sh("latest_run", { failsAfter: "POINTER" })).toEqual({ status: 1, stdout: "" });
+    expect(sh('if read_baseline 2; then echo "read <$BEFORE_RUN>"; else echo unread; fi', { failsAfter: "POINTER" }).stdout.trim()).toBe("unread");
+  });
+
   it.skipIf(isRoot)("does not start from a baseline it could not read: it retries, then gives up", () => {
     pointTo(OLD);
     fs.chmodSync(path.join(logs(), "latest"), 0o000);
@@ -133,6 +146,17 @@ describe.skipIf(!canRun)("the latest-run pointer, as 92-update-raw-log reads it"
     run(OLD, true);
     pointTo(OLD);
     expect(sh("read_baseline 1; new_run_finished && echo yes || echo no").stdout.trim()).toBe("no");
+  });
+
+  it("refuses a finished new run when the hop that read it failed after printing its answer", () => {
+    run(OLD, true);
+    pointTo(OLD);
+    run(NEW, true);
+    const r = sh(
+      `read_baseline 1; printf '%s\\n' "${NEW}" > "$FIXTURE_REPO/data/update-logs/latest"; new_run_finished && echo yes || echo no`,
+      { failsAfter: "python3" },
+    );
+    expect(r.stdout.trim()).toBe("no");
   });
 
   it("refuses a new run that has not finished", () => {
