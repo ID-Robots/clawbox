@@ -60,9 +60,10 @@ FLOW='SHOTS=$1 DRIVER_TIMEOUT_S=$5 bash "$REPO/scripts/nano-tests/board/update-r
 # whether it checked the panel.
 PANEL_OK=0
 raw_log() {
-  local out line said=0 later=0 driver=""
+  local out rc line said=0 later=0 driver=""
   PANEL_OK=0
   out=$(board "$FLOW" "$SHOTS" "$1" "$RUN_TAG" "$2" "${3:-600}")
+  rc=$?
   while IFS= read -r line; do
     case "$line" in
       "DRIVER_EXIT "*) driver=${line#DRIVER_EXIT } ;;
@@ -77,11 +78,12 @@ raw_log() {
       *) note "$line" ;;
     esac
   done <<<"$out"
-  if [ -z "$driver" ]; then
-    # A hop that failed while the web server restarts is "ask again" for a
-    # live check; for any other it is a failure.
+  if [ -z "$driver" ] || [ "$rc" -ne 0 ]; then
+    # A hop that failed (no DRIVER_EXIT, or the hop itself ended badly) while
+    # the web server restarts is "ask again" for a live check; for any other
+    # it is a failure.
     if [ "$1" = live ]; then return 1; fi
-    not_ok "[$RUNTIME] the $1 check never reached its end on the board"
+    not_ok "[$RUNTIME] the $1 check never reached its end on the board (hop status $rc)"
     return 0
   fi
   if [ "$driver" != 0 ]; then
@@ -91,10 +93,15 @@ raw_log() {
   [ "$said" = 1 ] && [ "$later" = 0 ]
 }
 
-# latest_run — the id of the update log the box started last ("" for none).
+# latest_run — the id of the update log the box started last, after a
+# "POINTER" marker so a read that failed (no marker) is told apart from a box
+# with no pointer yet (an empty id). Returns 1 when it could not be read.
 latest_run() {
+  local out
   # shellcheck disable=SC2016  # expanded on the board
-  board 'cat "$REPO/data/update-logs/latest" 2>/dev/null' | tail -n 1 | tr -d '[:space:]'
+  out=$(board 'printf "POINTER %s\n" "$(cat "$REPO/data/update-logs/latest" 2>/dev/null | tr -d "[:space:]")"' | grep '^POINTER' | tail -n 1)
+  [ -n "$out" ] || return 1
+  printf '%s' "${out#POINTER }" | tr -d '[:space:]'
 }
 
 # new_run_finished — the box started an update log after this test read
@@ -103,7 +110,7 @@ latest_run() {
 # by comparing two machines' clocks.
 new_run_finished() {
   local id finished
-  id=$(latest_run)
+  id=$(latest_run) || return 1
   [ -n "$id" ] && [ "$id" != "$BEFORE_RUN" ] || return 1
   # shellcheck disable=SC2016  # expanded on the board
   finished=$(board 'python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"finished\") is True)" "$REPO/data/update-logs/$1.json" 2>/dev/null' "$id" | tail -n 1)
@@ -123,7 +130,17 @@ trap cleanup EXIT
 
 raw_log reader-start reader 60 || { not_ok "[$RUNTIME] the background log reader did not start"; finish; }
 
-BEFORE_RUN=$(latest_run)
+# The run before this test's, read for certain: a failed read must not leave
+# an empty baseline that makes the previous run look new.
+BEFORE_READ=0
+for _ in 1 2 3; do
+  if BEFORE_RUN=$(latest_run); then BEFORE_READ=1; break; fi
+  sleep 5
+done
+if [ "$BEFORE_READ" != 1 ]; then
+  not_ok "[$RUNTIME] could not read the box's latest update log before the update"
+  finish
+fi
 START=$(date +%s)
 if start_app_update "$NANO_BRANCH"; then
   ok "[$RUNTIME] the owner's update to $NANO_BRANCH started"
