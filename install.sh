@@ -7607,7 +7607,15 @@ step_openclaw_install() {
     # Complete: the gateway's pre-start retires the copies once every database
     # has passed a compaction's integrity check — compacted by the pre-start
     # itself only when the owner turned nightly maintenance on, otherwise by
-    # the owner's own "Run now"; until then the copies stay.
+    # the owner's own "Run now"; until then the copies stay. The core's own
+    # standalone `doctor --fix` retires its sealed standalone Doctor captures
+    # once they are over 30 days old, and never an incomplete capture or an
+    # update capture (pinned docs, docs/cli/update/repair-and-recovery.md
+    # "Original state captures"), so the pre-start's clean-up is the EARLY path
+    # for the first and the only one for the other two. The run above is one
+    # only on this full path (the fast path skips it while the pin holds); on
+    # the appliance, every update's gateway recovery runs another (the
+    # updater's runOpenclawDoctorFix).
     openclaw_record_migration_verdict complete "$_oc_live_pkg"
 
   fi

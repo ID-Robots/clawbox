@@ -569,7 +569,7 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     writeFileSync(path.join(captures, "run-1", ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
     const r = prestart([], { OC_COMPACT_EXIT: "1" });
     expect(existsSync(path.join(captures, "run-1"))).toBe(true);
-    expect(r.out).toMatch(/update capture run-1 kept until agent main has passed a compaction's integrity check/);
+    expect(r.out).toMatch(/update captures: 1 kept \(.*\): 1 waits for a compaction's integrity check \(agent main\)/);
   });
 
   it("never retires an update capture when there are no databases left — it may be the only copy", () => {
@@ -579,6 +579,112 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     writeFileSync(path.join(captures, "run-1", ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
     prestart();
     expect(existsSync(path.join(captures, "run-1"))).toBe(true);
+  });
+
+  /** `n` marked runs `run-1`… of one 5,000-byte file each, the core's marker at the capture root. */
+  function captureRuns(n: number): string[] {
+    const captures = `${stateDir}.update-captures`;
+    mkdirSync(captures, { recursive: true });
+    writeFileSync(path.join(captures, ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
+    return Array.from({ length: n }, (_, i) => {
+      const run = path.join(captures, `run-${i + 1}`);
+      mkdirSync(run, { recursive: true });
+      writeFileSync(path.join(run, "openclaw.sqlite"), "y".repeat(5_000));
+      return run;
+    });
+  }
+
+  /** What the clean-up says about the captures (the compaction plan names them too). */
+  const captureLines = (out: string) => out.split("\n").filter((line) => /\[db-maintenance\] update capture/.test(line));
+
+  it("says in ONE line how many update captures it keeps, never one line per capture", () => {
+    // Off by default, the switch compacts nothing, so a box keeps every capture
+    // until the core retires it — and printed each of them on every start.
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const runs = captureRuns(5);
+
+    const r = prestart([], { OC_COMPACT_EXIT: "1" });
+
+    expect(r.status).toBe(0);
+    for (const run of runs) expect(existsSync(run)).toBe(true);
+    expect(captureLines(r.out)).toEqual([expect.stringMatching(/^ {2}\[db-maintenance\] update captures: 5 kept /)]);
+    expect(r.out).not.toMatch(/update capture run-\d kept until/);
+  });
+
+  it("names the reason, the size and the age in that line, and warns of nothing", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    captureRuns(5);
+
+    const r = prestart([], { OC_COMPACT_EXIT: "1" });
+
+    const [line] = captureLines(r.out);
+    expect(line).toContain("update captures: 5 kept (25 KB, oldest 0 days): 5 wait for a compaction's integrity check (agent main)");
+    expect(line).toContain("OpenClaw's own standalone doctor --fix retires sealed Doctor captures once they are over 30 days old");
+    // Not every host's update runs a standalone doctor (an x64 one at the pin
+    // runs none), so the line names the doctor run, never the update.
+    expect(line).not.toMatch(/at the next update/);
+    expect(r.out.split("\n").filter((l) => /update capture/.test(l) && l.includes("WARN:"))).toEqual([]);
+  });
+
+  // Root reads a mode-000 directory all the same, so only a non-root run can
+  // make one unreadable.
+  it.skipIf(process.getuid?.() === 0)("never reports a capture it could not read as decades old", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const [, unreadable] = captureRuns(2);
+    chmodSync(unreadable, 0o000);
+    try {
+      const r = prestart([], { OC_COMPACT_EXIT: "1" });
+
+      expect(r.status).toBe(0);
+      expect(captureLines(r.out)).toEqual([
+        expect.stringMatching(/update captures: 2 kept \(5 KB, oldest 0 days, 1 of unknown age\): 2 wait for /),
+      ]);
+    } finally {
+      chmodSync(unreadable, 0o755);
+    }
+  });
+
+  it("counts the captures it keeps with no databases left in that one line", () => {
+    rmSync(stateDb());
+    const runs = captureRuns(2);
+
+    const r = prestart();
+
+    expect(r.status).toBe(0);
+    for (const run of runs) expect(existsSync(run)).toBe(true);
+    expect(captureLines(r.out)).toHaveLength(1);
+    expect(captureLines(r.out)[0]).toMatch(/update captures: 2 kept \(10 KB, oldest 0 days\): 2 kept with no databases left \(it may be the only copy there is\)/);
+  });
+
+  it("counts the captures waiting for a gateway start on the migrated databases", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const [run] = captureRuns(1);
+
+    const r = prestart();
+
+    expect(existsSync(run)).toBe(true);
+    expect(captureLines(r.out)).toEqual([
+      expect.stringMatching(/update captures: 1 kept \(5 KB, oldest 0 days\): 1 waits for a gateway start on the migrated databases;/),
+    ]);
+  });
+
+  it("never counts a compaction from before an update capture was written", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 400, deleted: 300 });
+    makeDb(stateDb(), { userVersion: STATE_SCHEMA, rows: 300, deleted: 200 });
+    prestart();
+    expect(record().databases["agent:main"].lastCompact.ok).toBe(true);
+    expect(record().databases.state.lastCompact.ok).toBe(true);
+    // The capture arrives later, carrying OLD mtimes the way a copy that keeps
+    // its source's times would; its ctime still says when it landed.
+    const [run] = captureRuns(1);
+    const past = new Date(Date.now() - 86_400_000);
+    utimesSync(path.join(run, "openclaw.sqlite"), past, past);
+    utimesSync(run, past, past);
+    gatewayStartedSince();
+    // No time for another compaction in this start: the capture must stay.
+    const r = prestart(["--budget-seconds", "70", "--cli-overhead-seconds", "100"]);
+    expect(existsSync(run)).toBe(true);
+    expect(r.out).toMatch(/update captures: 1 kept \(5 KB, oldest 0 days\): 1 waits for a compaction's integrity check \(agent main\)/);
   });
 
   it("retires the core's marked update captures once everything is verified, and nothing unmarked", () => {
