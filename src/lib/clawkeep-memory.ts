@@ -177,9 +177,16 @@ interface PersistedMemoryRunState {
    * that would name the next one is not ordered against that reader.
    */
   supervisorPid: number;
+  /**
+   * Internal only: when that supervisor started (`processStartedAtMs`), 0
+   * where it could not be read. With the pid it is the supervisor's identity,
+   * so a pid a later process has been given — after a power cut — is never
+   * taken for it.
+   */
+  supervisorStartedAtMs: number;
 }
 
-export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid" | "progressAtMs" | "supervisorPid">;
+export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid" | "progressAtMs" | "supervisorPid" | "supervisorStartedAtMs">;
 
 export interface ClawKeepMemoryStatus {
   available: boolean;
@@ -338,6 +345,7 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   childPid: 0,
   progressAtMs: 0,
   supervisorPid: 0,
+  supervisorStartedAtMs: 0,
 };
 
 let writeSeq = 0;
@@ -484,6 +492,7 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     supervisorPid: status === "running" && Number.isSafeInteger(raw.supervisorPid) && Number(raw.supervisorPid) > 0
       ? Number(raw.supervisorPid)
       : 0,
+    supervisorStartedAtMs: status === "running" ? finiteNonNegative(raw.supervisorStartedAtMs) : 0,
   };
 }
 
@@ -644,6 +653,12 @@ function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" 
   const age = now - state.startedAtMs;
   if (state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS) return "going";
   if (supervisedHere(state)) return "going";
+  // A supervisor that is verifiably still the process that started the pass
+  // judges it itself: its watchdog ends a pass that stops moving and settles
+  // the run within ABANDON_SETTLE_MS of that. A reader elsewhere going by a
+  // record whose writes are late — the throttle, a slow disk, the wait
+  // between two OpenClaw attempts — must not take the lock from under it.
+  if (supervisorVerified(state)) return "going";
   return staleRunVerdict(
     { startedAtMs: state.startedAtMs, progressAtMs: state.progressAtMs, alive: runIsAlive(state.childPid) || supervisorAlive(state) },
     now,
@@ -661,11 +676,21 @@ function supervisorAlive(state: PersistedMemoryRunState): boolean {
   return state.supervisorPid > 0 && processIsAlive(state.supervisorPid);
 }
 
+/** The recorded supervisor is alive AND is the same process (its start time matches). */
+function supervisorVerified(state: PersistedMemoryRunState): boolean {
+  if (!state.supervisorStartedAtMs || !supervisorAlive(state)) return false;
+  const started = processStartedAtMs(state.supervisorPid);
+  return started !== null && Math.abs(started - state.supervisorStartedAtMs) <= SUPERVISOR_START_SLACK_MS;
+}
+
+/** Rounding between two readings of one process's start (clock ticks, uptime). */
+const SUPERVISOR_START_SLACK_MS = 3_000;
+
 /**
  * When `pid` started, in epoch ms, from `/proc`: its start in clock ticks
  * since boot against the uptime now. Null off Linux or for a pid that is gone.
  */
-function processStartedAtMs(pid: number): number | null {
+export function processStartedAtMs(pid: number): number | null {
   if (process.platform !== "linux") return null;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -714,7 +739,7 @@ async function stopOrphanedIndexer(state: PersistedMemoryRunState): Promise<void
   if (pid <= 0 || pid === process.pid || settlingPasses().has(pid)) return;
   // Not an orphan while the process supervising it lives: its own watchdog
   // ends it, and settles the run.
-  if (state.supervisorPid !== pid && supervisorAlive(state)) return;
+  if (state.supervisorPid !== pid && (supervisorVerified(state) || supervisorAlive(state))) return;
   if (!isRecordedIndexer(pid, state.startedAtMs)) return;
   console.warn(`[clawkeep-memory] ending the stalled ${state.mode || "index"} pass's indexer, which no ClawBox process supervises any more`);
   try {
@@ -754,6 +779,7 @@ async function markInterrupted(
     childPid: 0,
     progressAtMs: 0,
     supervisorPid: 0,
+    supervisorStartedAtMs: 0,
   };
   await writeRunState(failed);
   await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
@@ -2569,6 +2595,7 @@ export async function startMemoryIndex(
     childPid: 0,
     progressAtMs: 0,
     supervisorPid: process.pid,
+    supervisorStartedAtMs: processStartedAtMs(process.pid) ?? 0,
   };
   try {
     await writeRunState(state);
@@ -2802,6 +2829,7 @@ export async function startMemoryIndex(
       childPid: 0,
       progressAtMs: 0,
       supervisorPid: 0,
+      supervisorStartedAtMs: 0,
     };
     // See `persistState`: no report may still be on its way to the file.
     await progressWritten;
