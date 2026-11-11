@@ -8,10 +8,19 @@
 # everything bwrap starts is stacked with unpriv_bwrap, which denies every
 # capability — so bwrap cannot be used to step around the restriction.
 #
-# Why ClawBox needs it: a read-only Codex coding run (a team's planner or
-# reviewer) is fenced by Codex's read-only sandbox, which is /usr/bin/bwrap
-# with --unshare-net. Without this profile every command fails with
+# Why ClawBox ships it: a read-only Codex coding run (a team's planner or
+# reviewer, src/lib/coding-codex.ts) is fenced by Codex's read-only sandbox,
+# which is /usr/bin/bwrap with --unshare-net. Without this profile every
+# command fails with
 # "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+#
+# Installed by ensure_bwrap_userns_profile (install.sh and install-x64.sh) to
+# /etc/apparmor.d/bwrap-userns-restrict and loaded with apparmor_parser -r —
+# only where /usr/bin/bwrap exists, the restriction is on, and no other
+# profile already attaches to bwrap. The sysctl itself is never changed.
+# The first line of this file is how a later run knows it is ClawBox's own.
+# Editing anything here means updating the sha256 pin in install-x64.sh; the
+# unit test says so.
 
 abi <abi/4.0>,
 

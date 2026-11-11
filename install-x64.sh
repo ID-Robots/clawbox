@@ -467,6 +467,13 @@ step_apt_update() {
     pkg-config openssl ffmpeg ca-certificates sudo \
     poppler-utils libreoffice-writer
   ensure_openclaw_node_engine
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a PC that
+  # restricts user namespaces. This is the root step an update ALWAYS runs on
+  # this install (the dispatcher's own post_update deliberately redeploys
+  # nothing out of the checkout), so an installed PC gets the profile from the
+  # next update once its root-owned installer copy is current. Gated inside,
+  # and never fatal: an update must not fail over an optional sandbox profile.
+  ensure_bwrap_userns_profile || echo "  Warning: the bubblewrap AppArmor profile was not installed"
 }
 
 step_install_bun() {
@@ -1640,6 +1647,143 @@ ensure_codex_cli() {
   return "$rc"
 }
 
+# ── bubblewrap under Ubuntu's user-namespace restriction ─────────────────────
+#
+# Ubuntu 23.10+ ships kernel.apparmor_restrict_unprivileged_userns=1, which
+# refuses /usr/bin/bwrap the user namespace it needs. Codex's read-only sandbox
+# (a team's planner or reviewer, src/lib/coding-codex.ts) IS `bwrap
+# --unshare-net`, so on such a PC every command of a read-only run failed with
+# "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+# config/apparmor/bwrap-userns-restrict is upstream AppArmor's own profile for
+# exactly this: bwrap may build the namespace, and everything it starts is
+# stacked with a child profile that denies every capability. The system-wide
+# restriction stays on, and no other profile or sysctl is touched.
+#
+# Loaded only where it is needed AND safe:
+#   - /usr/bin/bwrap is installed;
+#   - the restriction is on (/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+#     reads 1) — everywhere else bwrap already works;
+#   - apparmor_parser exists to load it;
+#   - no OTHER profile under /etc/apparmor.d already attaches to bwrap — a
+#     second one on the same binary would be ambiguous, and the owner's or the
+#     distro's comes first. A file of that name that is not ClawBox's is left
+#     alone for the same reason.
+# Idempotent, and a failure is a warning — the caller never fails the install
+# over it.
+#
+# Root does not load policy out of a tree the install user can write: this runs
+# as root from the root-owned installer copy on every update (step_apt_update),
+# and a profile is the one file here that could switch the user-namespace
+# restriction off for a binary of the user's choosing. So the profile is copied
+# to a private file first and must hash to the pin below — which lives in this
+# root-owned copy — before anything reads it as policy. A checkout that carries
+# a different profile than this installer was built for is refused with a
+# warning; re-running install-x64.sh (or its root_step_contract step) refreshes
+# the root-owned copy. src/tests/unit/bwrap-userns-profile.test.ts keeps the
+# pin and config/apparmor/bwrap-userns-restrict in step.
+BWRAP_USERNS_PROFILE_SHA256="0b43b07956c5d07c6a8231389b4c78462245a83be47089de966a764a25b268a5"
+
+# Write `$2` to `$1`, load it with `$3`, and put the box back as it was when
+# the kernel refuses it: a file left behind would read as "already installed"
+# on every later run and never be retried.
+bwrap_userns_profile_install() {
+  local dest="$1" profile="$2" parser="$3" prev=""
+  if [ -f "$dest" ]; then
+    prev="$(mktemp)" || prev=""
+    if [ -z "$prev" ] || ! cat "$dest" > "$prev"; then
+      echo "  WARN: could not set the current $dest aside; leaving it as it is" >&2
+      [ -z "$prev" ] || rm -f "$prev"
+      return 1
+    fi
+  fi
+  if install -o root -g root -m 0644 "$profile" "$dest" && "$parser" -r "$dest"; then
+    echo "  AppArmor profile for bubblewrap installed and loaded: $dest"
+    [ -z "$prev" ] || rm -f "$prev"
+    return 0
+  fi
+  echo "  WARN: could not install or load $dest; putting back what was there" >&2
+  if [ -n "$prev" ]; then
+    install -o root -g root -m 0644 "$prev" "$dest" || true
+    rm -f "$prev"
+  else
+    rm -f "$dest"
+  fi
+  return 1
+}
+
+ensure_bwrap_userns_profile() {
+  local bwrap_bin=/usr/bin/bwrap
+  local restrict_flag=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+  local profile_dir=/etc/apparmor.d
+  local name=bwrap-userns-restrict
+  local src="$PROJECT_DIR/config/apparmor/$name"
+  local dest="$profile_dir/$name"
+  # A header line that ATTACHES a profile to a bwrap path, as opposed to a rule
+  # inside some other profile that merely mentions it (`/usr/bin/bwrap ix,`).
+  local attach_re='^[[:space:]]*(profile[[:space:]]+("[^"]*"|[^[:space:]]+)[[:space:]]+)?"?/[^[:space:]]*bwrap[^[:space:]]*"?[[:space:]]*(flags[[:space:]]*=[[:space:]]*\([^)]*\))?[[:space:]]*(\{.*)?$'
+  local parser other first_line="" staged actual rc=0
+
+  if [ ! -x "$bwrap_bin" ]; then
+    echo "  bubblewrap AppArmor profile: not needed ($bwrap_bin is not installed)"
+    return 0
+  fi
+  if [ "$(cat "$restrict_flag" 2>/dev/null || true)" != "1" ]; then
+    echo "  bubblewrap AppArmor profile: not needed (unprivileged user namespaces are not restricted here)"
+    return 0
+  fi
+  parser="$(command -v apparmor_parser 2>/dev/null || true)"
+  if [ -z "$parser" ]; then
+    echo "  bubblewrap AppArmor profile: skipped (apparmor_parser is not installed)"
+    return 0
+  fi
+  # `|| true`: no match is grep's exit 1, and this runs under pipefail.
+  other="$(grep -rIlE --exclude="$name" "$attach_re" "$profile_dir" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$other" ]; then
+    echo "  bubblewrap AppArmor profile: skipped ($other already has a profile for bwrap)"
+    return 0
+  fi
+  # Not a failure: step_apt_update, which also calls this, runs BEFORE the
+  # first install has cloned the checkout. step_ai_tools_install asks again.
+  if [ ! -r "$src" ]; then
+    echo "  bubblewrap AppArmor profile: skipped ($src is not in the checkout yet)"
+    return 0
+  fi
+
+  # A private, root-only copy: what is hashed below is what is installed.
+  staged="$(mktemp)" || { echo "  WARN: could not stage the bubblewrap AppArmor profile" >&2; return 1; }
+  actual=""
+  if cat "$src" > "$staged" 2>/dev/null; then
+    actual="$(sha256sum "$staged" 2>/dev/null | cut -d' ' -f1 || true)"
+  fi
+  if [ "$actual" != "$BWRAP_USERNS_PROFILE_SHA256" ]; then
+    echo "  WARN: $src is not the profile this installer ships (sha256 mismatch); not loading it. Re-run install-x64.sh to refresh the root-owned copy" >&2
+    rm -f "$staged"
+    return 1
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$staged" "$dest"; then
+      echo "  AppArmor profile for bubblewrap already installed: $dest"
+      rm -f "$staged"
+      return 0
+    fi
+    if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+      IFS= read -r first_line < "$dest" || true
+    fi
+    case "$first_line" in
+      "# ClawBox: "*) ;;
+      *)
+        echo "  bubblewrap AppArmor profile: skipped ($dest exists and is not ClawBox's)"
+        rm -f "$staged"
+        return 0
+        ;;
+    esac
+  fi
+  bwrap_userns_profile_install "$dest" "$staged" "$parser" || rc=1
+  rm -f "$staged"
+  return "$rc"
+}
+
 step_ai_tools_install() {
   # Claude Code
   if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
@@ -1651,6 +1795,10 @@ step_ai_tools_install() {
 
   # OpenAI Codex CLI — the pinned native binary, never an npm global (TASK-439).
   ensure_codex_cli || echo "  Warning: Codex install failed"
+
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a PC that
+  # restricts user namespaces (Ubuntu 23.10+). Gated inside; never fatal.
+  ensure_bwrap_userns_profile || echo "  Warning: the bubblewrap AppArmor profile was not installed"
 
   # Google Gemini CLI
   if as_user_login "command -v gemini" &>/dev/null; then

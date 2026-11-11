@@ -10495,6 +10495,14 @@ step_post_update() {
   # good. Idempotent: a box already on the pin does one `codex --version` and
   # stops.
   optional_step codex_cli step_codex_cli
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a box that
+  # restricts user namespaces (Ubuntu 23.10+). Without this call it would be
+  # fresh-install-only, like the CLI above, and a team's planner or reviewer on
+  # an already-installed box would keep failing with "bwrap: loopback: Failed
+  # RTM_NEWADDR". A no-op wherever it is not needed (no bwrap, restriction off,
+  # no apparmor_parser, another profile on bwrap), and byte-identical after the
+  # first run. Read from $SRC_DIR, the root-owned mirror.
+  optional_step bwrap_userns_profile ensure_bwrap_userns_profile
   # On-device TTS: refreshes the voice scripts and the units of the engines
   # that are PRESENT, and seeds the tts-local-cli provider behind an installed
   # Kokoro. It installs NOTHING — the update used to spend a quarter of an
@@ -13234,6 +13242,118 @@ ensure_codex_cli() {
   return "$rc"
 }
 
+# ── bubblewrap under Ubuntu's user-namespace restriction ─────────────────────
+#
+# Ubuntu 23.10+ ships kernel.apparmor_restrict_unprivileged_userns=1, which
+# refuses /usr/bin/bwrap the user namespace it needs. Codex's read-only sandbox
+# (a team's planner or reviewer, src/lib/coding-codex.ts) IS `bwrap
+# --unshare-net`, so on such a box every command of a read-only run failed with
+# "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+# config/apparmor/bwrap-userns-restrict is upstream AppArmor's own profile for
+# exactly this: bwrap may build the namespace, and everything it starts is
+# stacked with a child profile that denies every capability. The system-wide
+# restriction stays on, and no other profile or sysctl is touched.
+#
+# Loaded only where it is needed AND safe:
+#   - /usr/bin/bwrap is installed;
+#   - the restriction is on (/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+#     reads 1) — everywhere else bwrap already works;
+#   - apparmor_parser exists to load it;
+#   - no OTHER profile under /etc/apparmor.d already attaches to bwrap — a
+#     second one on the same binary would be ambiguous, and the owner's or the
+#     distro's comes first. A file of that name that is not ClawBox's is left
+#     alone for the same reason.
+# Read from $SRC_DIR, the root-owned mirror on a dispatched step: root loads
+# AppArmor policy only from a copy the clawbox user cannot write. Idempotent,
+# and a failure is a warning — the caller never fails the install over it.
+#
+# Write `$2` to `$1`, load it with `$3`, and put the box back as it was when
+# the kernel refuses it: a file left behind would read as "already installed"
+# on every later run and never be retried.
+bwrap_userns_profile_install() {
+  local dest="$1" profile="$2" parser="$3" prev=""
+  if [ -f "$dest" ]; then
+    prev="$(mktemp)" || prev=""
+    if [ -z "$prev" ] || ! cat "$dest" > "$prev"; then
+      echo "  WARN: could not set the current $dest aside; leaving it as it is" >&2
+      [ -z "$prev" ] || rm -f "$prev"
+      return 1
+    fi
+  fi
+  if install -o root -g root -m 0644 "$profile" "$dest" && "$parser" -r "$dest"; then
+    echo "  AppArmor profile for bubblewrap installed and loaded: $dest"
+    [ -z "$prev" ] || rm -f "$prev"
+    return 0
+  fi
+  echo "  WARN: could not install or load $dest; putting back what was there" >&2
+  if [ -n "$prev" ]; then
+    install -o root -g root -m 0644 "$prev" "$dest" || true
+    rm -f "$prev"
+  else
+    rm -f "$dest"
+  fi
+  return 1
+}
+
+ensure_bwrap_userns_profile() {
+  local bwrap_bin=/usr/bin/bwrap
+  local restrict_flag=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+  local profile_dir=/etc/apparmor.d
+  local name=bwrap-userns-restrict
+  local src="$SRC_DIR/config/apparmor/$name"
+  local dest="$profile_dir/$name"
+  # A header line that ATTACHES a profile to a bwrap path, as opposed to a rule
+  # inside some other profile that merely mentions it (`/usr/bin/bwrap ix,`).
+  local attach_re='^[[:space:]]*(profile[[:space:]]+("[^"]*"|[^[:space:]]+)[[:space:]]+)?"?/[^[:space:]]*bwrap[^[:space:]]*"?[[:space:]]*(flags[[:space:]]*=[[:space:]]*\([^)]*\))?[[:space:]]*(\{.*)?$'
+  local parser other first_line=""
+
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the bubblewrap AppArmor profile"
+    return 0
+  fi
+  if [ ! -x "$bwrap_bin" ]; then
+    echo "  bubblewrap AppArmor profile: not needed ($bwrap_bin is not installed)"
+    return 0
+  fi
+  if [ "$(cat "$restrict_flag" 2>/dev/null || true)" != "1" ]; then
+    echo "  bubblewrap AppArmor profile: not needed (unprivileged user namespaces are not restricted here)"
+    return 0
+  fi
+  parser="$(command -v apparmor_parser 2>/dev/null || true)"
+  if [ -z "$parser" ]; then
+    echo "  bubblewrap AppArmor profile: skipped (apparmor_parser is not installed)"
+    return 0
+  fi
+  # `|| true`: no match is grep's exit 1, and this runs under pipefail.
+  other="$(grep -rIlE --exclude="$name" "$attach_re" "$profile_dir" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$other" ]; then
+    echo "  bubblewrap AppArmor profile: skipped ($other already has a profile for bwrap)"
+    return 0
+  fi
+  if [ ! -r "$src" ]; then
+    echo "  WARN: $src is missing; not installing the bubblewrap AppArmor profile" >&2
+    return 1
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
+      echo "  AppArmor profile for bubblewrap already installed: $dest"
+      return 0
+    fi
+    if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+      IFS= read -r first_line < "$dest" || true
+    fi
+    case "$first_line" in
+      "# ClawBox: "*) ;;
+      *)
+        echo "  bubblewrap AppArmor profile: skipped ($dest exists and is not ClawBox's)"
+        return 0
+        ;;
+    esac
+  fi
+  bwrap_userns_profile_install "$dest" "$src" "$parser"
+}
+
 # Dispatchable on its own and called from step_post_update — the same shape
 # step_coding_harness has, and for the same reason: an in-app update has to
 # deliver this without also reinstalling the Gemini CLI on every box that
@@ -13263,6 +13383,11 @@ step_ai_tools_install() {
   # Swallowed here for the same reason as the CLI above — this step must not
   # abort over an optional tool — and reported honestly inside the function.
   ensure_codex_cli || true
+
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a box that
+  # restricts user namespaces. Gated inside, and a warning at worst, like the
+  # CLIs around it.
+  ensure_bwrap_userns_profile || true
 
   # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then
