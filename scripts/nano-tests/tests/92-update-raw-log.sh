@@ -93,29 +93,10 @@ raw_log() {
   [ "$said" = 1 ] && [ "$later" = 0 ]
 }
 
-# latest_run — the id of the update log the box started last, after a
-# "POINTER" marker so a read that failed (no marker) is told apart from a box
-# with no pointer yet (an empty id). Returns 1 when it could not be read.
-latest_run() {
-  local out
-  # shellcheck disable=SC2016  # expanded on the board
-  out=$(board 'printf "POINTER %s\n" "$(cat "$REPO/data/update-logs/latest" 2>/dev/null | tr -d "[:space:]")"' | grep '^POINTER' | tail -n 1)
-  [ -n "$out" ] || return 1
-  printf '%s' "${out#POINTER }" | tr -d '[:space:]'
-}
-
-# new_run_finished — the box started an update log after this test read
-# BEFORE_RUN, and that run is marked finished: the completion is this test's
-# run, not a previous update's synthesised "completed". By run identity, never
-# by comparing two machines' clocks.
-new_run_finished() {
-  local id finished
-  id=$(latest_run) || return 1
-  [ -n "$id" ] && [ "$id" != "$BEFORE_RUN" ] || return 1
-  # shellcheck disable=SC2016  # expanded on the board
-  finished=$(board 'python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"finished\") is True)" "$REPO/data/update-logs/$1.json" 2>/dev/null' "$id" | tail -n 1)
-  [ "$finished" = True ]
-}
+# latest_run, read_baseline, new_run_finished: which run is which, by the
+# box's own latest-run pointer.
+# shellcheck source=scripts/nano-tests/update-raw-log-runs.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 
 # The board is left as it was found: the reader stopped, its folder gone. Run
 # once at the end, and from the EXIT trap when the test stops early.
@@ -130,14 +111,8 @@ trap cleanup EXIT
 
 raw_log reader-start reader 60 || { not_ok "[$RUNTIME] the background log reader did not start"; finish; }
 
-# The run before this test's, read for certain: a failed read must not leave
-# an empty baseline that makes the previous run look new.
-BEFORE_READ=0
-for _ in 1 2 3; do
-  if BEFORE_RUN=$(latest_run); then BEFORE_READ=1; break; fi
-  sleep 5
-done
-if [ "$BEFORE_READ" != 1 ]; then
+# The run before this test's, read for certain (read_baseline says why).
+if ! read_baseline 3; then
   not_ok "[$RUNTIME] could not read the box's latest update log before the update"
   finish
 fi
