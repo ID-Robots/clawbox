@@ -2102,6 +2102,8 @@ const WORKSPACE_LOCK_HELD_RE = /Timed out waiting for memory workspace lock/;
 const DEFAULT_WORKSPACE_LOCK_RETRY_MS = 65_000;
 /** Retries after the first attempt, before the pass is let fail. */
 const WORKSPACE_LOCK_RETRIES = 2;
+/** How often the wait between two attempts tells the stall watchdog it is waiting on purpose. */
+const WORKSPACE_LOCK_WAIT_BEAT_MS = 1_000;
 
 /** Overridable for tests only: nothing a test can wait out takes 65 s. */
 function workspaceLockRetryMs(): number {
@@ -2145,18 +2147,33 @@ function startOpenclawPass(
         + ` (a pass that ended without releasing it, or the gateway's own memory work);`
         + ` running it again in ${Math.round(waitMs / 1000)} s (${retry}/${WORKSPACE_LOCK_RETRIES})`,
       );
+      // Told to the watchdog all through the wait, not only at its two ends: a
+      // window shorter than the wait would otherwise fire inside it.
       onWaiting();
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, waitMs);
-        wake = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-      });
-      wake = null;
+      const beat = setInterval(onWaiting, WORKSPACE_LOCK_WAIT_BEAT_MS);
+      beat.unref?.();
+      try {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, waitMs);
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      } finally {
+        clearInterval(beat);
+        wake = null;
+      }
       if (abandoned) return outcome;
       onWaiting();
-      current = startOpenclawAttempt(mode, onProgress, agentId);
+      try {
+        current = startOpenclawAttempt(mode, onProgress, agentId);
+      } catch (error) {
+        // `spawn` throws at once for some failures (ENOMEM, E2BIG) rather
+        // than emitting "error". The pass ends on it like on any other end,
+        // so `finish` still settles the record and frees the lock.
+        return { kind: "threw", error };
+      }
       onRespawn(current.pid);
     }
   })();
@@ -2530,11 +2547,13 @@ export async function startMemoryIndex(
   const pass = localArm
     ? startLocalPass(mode, publishProgress, noteMoved, trigger !== "schedule")
     : startOpenclawPass(mode, publishProgress, agentId, (pid) => {
-      if (settled) return;
-      if (pid) {
-        passPids.add(pid);
-        settlingPasses().add(pid);
-      }
+      // An attempt whose spawn failed has no pid (its "error" ends it at
+      // once): the record keeps the last real one, which stays in
+      // `settlingPasses` until `finish`, so no reader takes the run for lost
+      // in between.
+      if (settled || !pid) return;
+      passPids.add(pid);
+      settlingPasses().add(pid);
       state = { ...state, childPid: pid };
       void persistState();
     }, noteMoved);
@@ -2696,7 +2715,10 @@ export async function startMemoryIndex(
     // waits on `finish` itself, and the probe starts at this same moment.
     await reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  passSettling().current = Promise.race([pass.ended, abandonedEnd]).then(finish);
+  // A pass that rejected instead of ending is settled the same way: left
+  // unhandled, the record would say "running" and the lock stay for good.
+  passSettling().current = Promise.race([pass.ended, abandonedEnd])
+    .then(finish, (error: unknown) => finish({ kind: "threw", error }));
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }

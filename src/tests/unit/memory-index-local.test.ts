@@ -137,6 +137,7 @@ import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
   EMBED_RETRY_MIN_WAIT_MS,
   EmbeddingUnavailableError,
+  IndexPassAbortedError,
   IndexRebuildRequiredError,
   embedDocumentsWithShardEmbedder,
   LOCAL_INDEX_PATH,
@@ -1421,6 +1422,32 @@ describe("chunking", () => {
  * it has to be telling the truth about both — a fraction over 1, or a
  * denominator that grows, is worse than the nothing this replaces.
  */
+/**
+ * TASK-2431: a run that gives up on a pass — its stall watchdog, an owner's
+ * stop — can settle it and free the lock before the pass has noticed, and a
+ * newer pass may be writing the store by the time it does. One that was inside
+ * its LAST file then went on to flush its `touched` rows, sweep the store
+ * against its own old scan and stamp the identity: every write of a pass that
+ * is no longer the current one.
+ */
+describe("a pass given up on inside its last file", () => {
+  it("stops before the bookkeeping that follows the walk", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    const controller = new AbortController();
+    const embed = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      // The stop lands while the file's batch is in flight (not the rebuild's
+      // probe before it); the embedder still answers it.
+      if (String((args[1] as { body?: string } | undefined)?.body).includes("deposit")) controller.abort();
+      return embed(...args);
+    }));
+    await expect(runLocalIndexPass("incremental", controller.signal)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    // The file itself was committed — that is per file — but nothing after the walk ran.
+    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(status.status.custom.indexIdentity.status).not.toBe("valid");
+  });
+});
+
 describe("what a pass reports about its own progress", () => {
   function reports() {
     const seen: { filesDone: number; filesTotal: number; chunks: number }[] = [];

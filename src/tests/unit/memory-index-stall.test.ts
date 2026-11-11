@@ -134,7 +134,9 @@ async function readState(): Promise<Record<string, unknown>> {
  * fake clock: `setImmediate` is not faked, and yields to the threadpool.
  */
 async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string): Promise<T> {
-  for (let i = 0; i < 5_000; i += 1) {
+  // Real time, which the fake clock does not move: `performance` is not faked.
+  const deadline = performance.now() + 20_000;
+  while (performance.now() < deadline) {
     const value = await read();
     if (done(value)) return value;
     await new Promise((resolve) => setImmediate(resolve));
@@ -325,7 +327,13 @@ describe("a pass that keeps moving", () => {
     pass.impl = async (_mode, signal, onProgress) => {
       onProgress({ filesDone: 0, filesTotal: 2, chunks: 0 });
       await sleep(10 * MIN);
-      onProgress({ filesDone: 1, filesTotal: 2, chunks: 5 });
+      // Moved once, then the same reading again every 30 s, the way the
+      // OpenClaw arm's poll repeats itself: a repeat is not progress, but it
+      // is what carries a write the throttle held back.
+      while (!signal.aborted) {
+        onProgress({ filesDone: 1, filesTotal: 2, chunks: 5 });
+        await Promise.race([sleep(30_000), new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }))]);
+      }
       return untilAborted(signal);
     };
     const { startMemoryIndex, readMemoryRunState, stopMemoryIndex } = await lib();

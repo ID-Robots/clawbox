@@ -211,6 +211,50 @@ describe("the pass after one that died holding OpenClaw's memory workspace lock"
     expect(failed).not.toMatch(/clean-close receipt/);
   });
 
+  it("is not taken for stalled while it waits, even with a window shorter than the wait", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "2000";
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "4000";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 1 });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(await fake.attempts()).toBe(2);
+  });
+
+  it("is settled, and its lock freed, when the next attempt cannot even be spawned", async () => {
+    // `spawn` throws at once for some failures (E2BIG, ENOMEM) instead of
+    // emitting "error". Unhandled, the run said "running" until a restart.
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "100";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 99 });
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    let indexSpawns = 0;
+    vi.doMock("node:child_process", () => ({
+      ...actual,
+      spawn: (cmd: string, args: readonly string[], opts: object) => {
+        if (args.includes("index") && ++indexSpawns === 2) {
+          throw Object.assign(new Error("spawn E2BIG"), { code: "E2BIG" });
+        }
+        return actual.spawn(cmd, args, opts);
+      },
+    }));
+    vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+      expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+      expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "index_failed" });
+      expect(indexSpawns).toBe(2);
+      expect(await fake.attempts()).toBe(1);
+      expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(false);
+      expect((await readMemoryRunState()).status).toBe("failed");
+    } finally {
+      vi.doUnmock("node:child_process");
+    }
+  });
+
   it("is stopped at once while it waits to try again, and does not try again", async () => {
     process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "60000";
     noTerminal();

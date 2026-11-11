@@ -1406,6 +1406,11 @@ export async function runLocalIndexPass(
       chunkCount = chunkCount - replaced + pieces.length;
       wrote = true;
     }
+    // A pass given up on while it was inside its last file stops here, before
+    // the bookkeeping below: the run it belonged to may already be settled and
+    // a newer pass writing the store, and this one's stale sweep, `touched`
+    // flush and identity stamp are all about a scan that is no longer current.
+    throwIfAborted(signal);
     // The last file's own outcome, which the loop's top-of-body report could
     // not carry. Everything after this is bookkeeping over a walk that is
     // finished, so this is the reading the bar rests on while it happens.
