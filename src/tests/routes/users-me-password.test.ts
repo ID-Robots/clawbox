@@ -23,8 +23,8 @@ const h = vi.hoisted(() => ({
   change: vi.fn(async (): Promise<string> => "ok"),
   rotate: vi.fn(async (): Promise<string | null> => "f".repeat(32)),
   order: [] as string[],
-  locked: vi.fn(async () => ({ locked: false, retryAfterSeconds: 0 })),
-  failure: vi.fn(async () => ({ locked: false, retryAfterSeconds: 0 })),
+  locked: vi.fn<(key: string, opts?: unknown) => Promise<{ locked: boolean; retryAfterSeconds: number }>>(async () => ({ locked: false, retryAfterSeconds: 0 })),
+  failure: vi.fn<(key: string, opts?: unknown) => Promise<{ locked: boolean; retryAfterSeconds: number }>>(async () => ({ locked: false, retryAfterSeconds: 0 })),
   success: vi.fn(async () => undefined),
 }));
 
@@ -188,6 +188,49 @@ describe("guessing", () => {
     expect(await res.json()).toMatchObject({ code: "too_many_attempts" });
     expect(h.verify).not.toHaveBeenCalled();
     expect(h.locked).toHaveBeenCalledWith("user:alice");
+  });
+
+  it("is charged to sign-in's buckets as well — the shared one, and the tunnel client's when Cloudflare names one", async () => {
+    h.verify.mockResolvedValue("wrong");
+    const res = await POST(new Request("http://box.local/setup-api/users/me/password", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: "clawbox_session=old.cookie", "cf-connecting-ip": "203.0.113.7" },
+      body: JSON.stringify(BODY),
+    }));
+    expect(res.status).toBe(400);
+    expect(h.failure).toHaveBeenCalledWith("user:alice", { maxLockMs: 300_000 });
+    expect(h.failure).toHaveBeenCalledWith("global", { maxLockMs: 300_000 });
+    expect(h.failure).toHaveBeenCalledWith("cf:203.0.113.7", { maxLockMs: undefined });
+  });
+
+  it("a right one clears every bucket it was charged to, as sign-in does", async () => {
+    await post(BODY);
+    expect(h.success).toHaveBeenCalledWith("user:alice");
+    expect(h.success).toHaveBeenCalledWith("global");
+  });
+
+  it("checks no password while sign-in's shared or tunnel-client bucket is locked", async () => {
+    for (const lockedKey of ["global", "cf:203.0.113.7"]) {
+      h.locked.mockImplementation(async (key: string) => ({ locked: key === lockedKey, retryAfterSeconds: key === lockedKey ? 60 : 0 }));
+      const res = await POST(new Request("http://box.local/setup-api/users/me/password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: "clawbox_session=old.cookie", "cf-connecting-ip": "203.0.113.7" },
+        body: JSON.stringify(BODY),
+      }));
+      expect(res.status, lockedKey).toBe(429);
+      expect(await res.json(), lockedKey).toMatchObject({ code: "too_many_attempts" });
+    }
+    expect(h.verify).not.toHaveBeenCalled();
+    expect(h.change).not.toHaveBeenCalled();
+  });
+
+  it("a lock of the shared bucket is not held against the account in memory", async () => {
+    h.verify.mockResolvedValue("wrong");
+    h.failure.mockImplementation(async (key: string) => ({ locked: key === "global", retryAfterSeconds: key === "global" ? 300 : 0 }));
+    expect((await post(BODY)).status).toBe(400);
+    // The shared bucket has cleared since: the account itself was never locked.
+    h.verify.mockResolvedValue("ok");
+    expect((await post(BODY)).status).toBe(200);
   });
 
   it("holds a lock the shared bucket reported but could not store", async () => {

@@ -59,6 +59,33 @@ const heldLocks = new Map<string, number>();
 /** The login's per-account bucket (src/app/login-api/route.ts), shared on purpose. */
 const bucketOf = (username: string) => `user:${username}`;
 
+/**
+ * The buckets a guess at the current password is charged to: EXACTLY the
+ * sign-in's (src/app/login-api/route.ts) — the shared `global` one (capped),
+ * the tunnel client's `cf:<ip>` when Cloudflare names one, and the account's
+ * own (capped). All must be clear before a password is checked, a wrong one
+ * is charged to each, and a right one clears them, as at sign-in. Otherwise a
+ * signed-in member could keep guessing here while sign-in was locked.
+ */
+function attemptBuckets(req: Request, username: string): Array<{ key: string; maxLockMs?: number }> {
+  const cf = req.headers.get("cf-connecting-ip")?.trim();
+  return [
+    { key: bucketOf(username), maxLockMs: SHARED_BUCKET_MAX_LOCK_MS },
+    ...(cf ? [{ key: `cf:${cf}` }] : []),
+    { key: "global", maxLockMs: SHARED_BUCKET_MAX_LOCK_MS },
+  ];
+}
+
+/** Charge a wrong guess to every bucket; what the ACCOUNT's own bucket now says. */
+async function chargeWrongGuess(buckets: ReadonlyArray<{ key: string; maxLockMs?: number }>, username: string) {
+  let account = { locked: false, retryAfterSeconds: 0 };
+  for (const bucket of buckets) {
+    const after = await recordFailure(bucket.key, { maxLockMs: bucket.maxLockMs });
+    if (bucket.key === bucketOf(username)) account = after;
+  }
+  return account;
+}
+
 /** Plain HTTP on the LAN cannot keep a Secure cookie; the tunnel is HTTPS. As /login-api decides it. */
 function requestIsHttps(req: Request): boolean {
   const xfp = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
@@ -177,7 +204,10 @@ export async function POST(req: Request) {
     const held = heldLocks.get(username);
     if (held !== undefined && held > Date.now()) return TOO_MANY();
     if (held !== undefined) heldLocks.delete(username);
-    if ((await checkLockout(bucketOf(username))).locked) return TOO_MANY();
+    const buckets = attemptBuckets(req, username);
+    for (const bucket of buckets) {
+      if ((await checkLockout(bucket.key)).locked) return TOO_MANY();
+    }
 
     // 1. The current password.
     const verdict = await checkUserPassword(username, currentPassword);
@@ -185,7 +215,7 @@ export async function POST(req: Request) {
       return refuse(503, "password_change_unavailable", "This box cannot change passwords yet — the owner needs to update it first.");
     }
     if (verdict === "wrong") {
-      const lock = await recordFailure(bucketOf(username), { maxLockMs: SHARED_BUCKET_MAX_LOCK_MS });
+      const lock = await chargeWrongGuess(buckets, username);
       if (lock.locked) heldLocks.set(username, Date.now() + lock.retryAfterSeconds * 1000);
       return refuse(400, "wrong_password", "Your current password is not right.");
     }
@@ -200,12 +230,12 @@ export async function POST(req: Request) {
     const result = await changeUserPassword(username, currentPassword, password);
     switch (result) {
       case "ok":
-        await recordSuccess(bucketOf(username));
+        for (const bucket of buckets) await recordSuccess(bucket.key);
         console.log(`[users] ${username} changed their own password`);
         return withCookie(NextResponse.json({ ok: true }, { headers: NO_STORE }), ended.cookie);
       case "wrong":
         // Changed between the check and the change: charged like any wrong guess.
-        await recordFailure(bucketOf(username), { maxLockMs: SHARED_BUCKET_MAX_LOCK_MS });
+        await chargeWrongGuess(buckets, username);
         return withCookie(refuse(400, "wrong_password", "Your current password is not right."), ended.cookie);
       case "invalid":
         return withCookie(INVALID(), ended.cookie);

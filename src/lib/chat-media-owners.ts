@@ -63,27 +63,37 @@ type Owners = Map<string, string>;
 let cache: { ino: number; mtimeMs: number; size: number; owners: Owners } | null = null;
 
 function readOwners(): Owners {
-  let stat: fs.Stats;
+  // One descriptor for the stat and the read, so the cache is keyed on
+  // exactly the bytes that were parsed (no check-then-use window).
+  let fd: number;
   try {
-    stat = fs.statSync(OWNERS_PATH);
+    fd = fs.openSync(OWNERS_PATH, "r");
   } catch {
     cache = null;
     return new Map();
   }
-  if (cache && cache.ino === stat.ino && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) return cache.owners;
-  const owners: Owners = new Map();
   try {
-    const parsed = JSON.parse(fs.readFileSync(OWNERS_PATH, "utf8")) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const [file, user] of Object.entries(parsed as Record<string, unknown>)) {
-        if (path.isAbsolute(file) && typeof user === "string" && NAME_RE.test(user)) owners.set(file, user);
+    const stat = fs.fstatSync(fd);
+    if (cache && cache.ino === stat.ino && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) return cache.owners;
+    const owners: Owners = new Map();
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fd, "utf8")) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [file, user] of Object.entries(parsed as Record<string, unknown>)) {
+          if (path.isAbsolute(file) && typeof user === "string" && NAME_RE.test(user)) owners.set(file, user);
+        }
       }
+    } catch {
+      // A damaged map is an empty one: a member is then served nothing, never more.
     }
+    cache = { ino: stat.ino, mtimeMs: stat.mtimeMs, size: stat.size, owners };
+    return owners;
   } catch {
-    // A damaged map is an empty one: a member is then served nothing, never more.
+    cache = null;
+    return new Map();
+  } finally {
+    fs.closeSync(fd);
   }
-  cache = { ino: stat.ino, mtimeMs: stat.mtimeMs, size: stat.size, owners };
-  return owners;
 }
 
 /** Keep `username` within their share, then everyone within the whole. Oldest first, insertion order. */
