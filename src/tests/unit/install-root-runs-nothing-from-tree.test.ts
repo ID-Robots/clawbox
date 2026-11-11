@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { blankSingleQuoted, functionDefs, type Line, logicalLines, sudoWrappers } from "../helpers/shell-reader";
+import {
+  blankSingleQuoted,
+  functionDefs,
+  type Line,
+  logicalLines,
+  singleQuotedSpans,
+  sudoWrappers,
+} from "../helpers/shell-reader";
 
-// This file starts no process, but one MUST MISS row holds a `node -e` program
+// This file starts no process, but one sample row holds a `node -e` program
 // that names child_process, and test-timeout-hygiene reads that text as a spawn.
 // The ceilings cost nothing here and keep that guard's reader simple.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -12,47 +19,56 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * Root runs nothing from the tree (docs/agents/update-and-install.md): no line
  * of install.sh, which runs as root top to bottom, runs a program out of the
  * service account's directories, its home (the npm prefix and bun live there)
- * or the checkout. The account can rewrite those files, so root running one is
- * the account's code running as root. Ask it as the service account, or read
- * the file as data.
+ * or the checkout. Those files belong to the service account. Ask it as the
+ * service account, or read the file as data.
  *
- * Read: install.sh only. install-x64.sh is left for later, and the scripts root
- * runs from config/ and scripts/ have tests of their own.
+ * Read: install.sh only; the scripts root runs from config/ and scripts/ have
+ * tests of their own.
  *
  * Tainted: CLAWBOX_HOME, PROJECT_DIR, NPM_PREFIX and the literal /home/clawbox;
  * every standalone assignment (bare, local, export, readonly, declare) whose
- * value BEGINS with a tainted expansion, `${a:-$b}` when either side is; an
- * array whose first element is; a for-loop variable over a tainted word; and a
- * function's `$N` when a call passes it a tainted word. A `NAME=value` before a
- * command or after `env` taints nothing, and neither does a value that is a
- * command substitution. `local` and parameter taint stay in their function.
+ * value BEGINS with a tainted expansion, `${a:-$b}` when either side is, or
+ * with a substitution, `$(…)` or backquoted, that keeps a tainted path
+ * (`dirname`, `readlink`, `realpath`, `cd … && pwd`); an array whose first
+ * element is; a for-loop variable over a tainted word; and a function's `$N`
+ * when a call passes it a tainted word. A `NAME=value` before a command or
+ * after `env` taints nothing, and neither does any other command substitution.
+ * `local` and parameter taint stay in their function.
  *
  * A run: a tainted word as a command (after `NAME=value` words, keywords,
- * `exec`, `time`, `command`, `env …`, a root `sudo`, or a runuser, su or
- * `sudo -u` whose target is root), as the script of
- * bash/sh/dash/node/python3/perl, as a module node preloads (`-r`, `--require`,
- * `--import`), or as the file of `source`/`.`. Every `$(…)`, backquote and
- * `<(…)` is read as root's own command text, inside a wrapper's arguments and
- * in the body of an unquoted heredoc too: root's shell expands it before the
- * wrapper starts, and while it writes the heredoc.
+ * `exec`, `time`, `command`, `builtin`, `env …`, a root `sudo`, or a runuser,
+ * su or `sudo -u` whose target is root), as the script of bash/sh/dash/node/python3/perl,
+ * as a module node preloads (`-r`, `--require`, `--import`), or as the file of
+ * `source`/`.`. A program handed over as text (`bash -c`, `node -e`/`-p`,
+ * `python3 -c`, `perl -e`, a root `su -c`, glued or after other options) is a
+ * run when it names the account's directories: a `$NAME` of one outside single
+ * quotes (escaped or not), or the literal home anywhere in it. The guard does
+ * not read that text as its language, so it cannot tell a run there from a
+ * read. A trap's text is read as shell where the trap is set, with the `$…`
+ * that the setting shell expands judged as expansions even between single
+ * quotes inside double ones. Every `$(…)`, backquote and `<(…)` is read as
+ * root's own command text, inside a wrapper's arguments and in the body of an
+ * unquoted heredoc too: root's shell expands it before the wrapper starts, and
+ * while it writes the heredoc.
  *
  * Not a run: a command whose own command word switches to the service account
  * (as_clawbox, as_clawbox_login, as_user*, runuser, su and `sudo -u` with a
  * target other than root, the git runner, or a function that forwards its
- * arguments through one), which covers that command's own words only;
- * arguments and redirection targets; a script operand after `-`, `-c`, `-e`,
- * `-p`, `-s` or `-m`, where the program is stdin or text root chose; tests;
- * case patterns; comments; single-quoted text; the text of a heredoc body that
- * is not fed to a shell, and all of a quoted one (`<<'EOF'`).
+ * arguments through one), which covers that command's own words only; arguments
+ * and redirection targets; a program on stdin (`-`, `-s`) or a module (`-m`); a
+ * program given as text that names none of the account's directories; tests;
+ * case patterns; comments; other single-quoted text; the text of a heredoc body
+ * that is not fed to a shell, and all of a quoted one (`<<'EOF'`).
  *
  * Known limits: a wrapper or launcher this file does not name (`nohup`,
- * `xargs`, `find -exec`, `systemd-run`), `eval`, a heredoc fed to a shell
- * under a wrapper, which reads as root (the safe direction), a switch target
- * known only at run time, which is taken to be the account it names (a name
- * the file ever sets to root, or a `${X:-root}` default, reads as root), and a
- * file root copies out of these directories (`install`, `cp`) and then runs
- * from its new place: judging that needs the path followed through the copy,
- * which this reader does not do.
+ * `xargs`, `find -exec`, `systemd-run`), `eval`, what a program given as text
+ * does with its arguments or environment, program text held in a variable whose
+ * value does not begin with the account's path, a heredoc fed to a shell under
+ * a wrapper, which reads as root (the safe direction), a switch target known
+ * only at run time, which is taken to be the account it names (a name the file
+ * ever sets to root, or a `${X:-root}` default, reads as root), and a path is
+ * judged where it is run: the guard does not follow it through a copy
+ * (`install`, `cp`).
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -79,22 +95,66 @@ const ACCOUNT_SWITCHES = [
   "su",
 ];
 const GIT_RUNNER = /^"?\$\{GIT_RUNNER\[[@*]\]\}"?$/;
-/** Interpreters, and the option letters after which the program is text or stdin rather than a file. */
-const INTERPRETERS: Record<string, { text: RegExp; takesArg: string; long?: string[] }> = {
-  bash: { text: /[cs]/, takesArg: "oO" },
-  sh: { text: /[cs]/, takesArg: "oO" },
-  dash: { text: /[cs]/, takesArg: "oO" },
-  node: { text: /[ep]/, takesArg: "r", long: ["--eval", "--print"] },
-  python3: { text: /[cm]/, takesArg: "WX" },
-  perl: { text: /[eE]/, takesArg: "" },
+interface Interpreter {
+  /** Option letters whose operand is the program as text (a shell's `-c` takes its first operand). */
+  program: string;
+  /** Option letters after which there is no script file: stdin, a module. */
+  none: string;
+  /** Option letters that take a value. */
+  takesArg: string;
+  /** Long options whose value is the program as text. */
+  long?: string[];
+  /** Long options that take a value, as the next word unless glued with `=`. */
+  longArgs?: string[];
+  /** A shell: `-c` takes no value of its own; the program is the first operand. */
+  shell?: boolean;
+  /** The program letter takes the rest of its word when there is any (`python3 -cTEXT`, `perl -eTEXT`). */
+  glues?: boolean;
+}
+
+const SHELL: Interpreter = {
+  program: "c",
+  none: "s",
+  takesArg: "oO",
+  longArgs: ["--rcfile", "--init-file"],
+  shell: true,
+};
+const INTERPRETERS: Record<string, Interpreter> = {
+  bash: SHELL,
+  sh: SHELL,
+  dash: SHELL,
+  node: {
+    program: "ep",
+    none: "",
+    takesArg: "rC",
+    long: ["--eval", "--print"],
+    longArgs: [
+      "--require",
+      "--import",
+      "--loader",
+      "--experimental-loader",
+      "--env-file",
+      "--title",
+      "--conditions",
+      "--input-type",
+    ],
+  },
+  python3: { program: "c", none: "m", takesArg: "WX", glues: true },
+  perl: { program: "eE", none: "", takesArg: "", glues: true },
 };
 const PREFIX_KEYWORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!"]);
 const DECLARATIONS = new Set(["local", "export", "readonly", "declare", "typeset"]);
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=([\s\S]*)$/;
+const RULE = 'Rule: docs/agents/update-and-install.md, "Root runs nothing from the tree".';
 const REMEDY =
   'Run it as the service account (runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" …, or as_clawbox), ' +
-  'or read the file as data. Rule: docs/agents/update-and-install.md, "Root runs nothing from the tree".';
+  `or read the file as data. ${RULE}`;
+/** This guard does not read the program's language, so it cannot tell a run from a read there. */
+const PROGRAM_REMEDY =
+  "If the program only reads the file as data, pass the path to it as an argument; if it runs or loads " +
+  `it, run the program as the service account (runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" …, ` +
+  `or as_clawbox). ${RULE}`;
 
 /** The reader lost its place: fail closed rather than read "nothing found", and say what to do. */
 const lost = (where: string, what: string): Error =>
@@ -134,6 +194,8 @@ interface Hit {
   lineNo: number;
   word: string;
   text: string;
+  /** The word is a program handed over as text, not a file run by name. */
+  program: boolean;
 }
 
 /**
@@ -497,6 +559,10 @@ interface Shape {
   candidate?: Word;
   /** Modules node loads before its program: `-r`, `--require`, `--import`. */
   preloads: Word[];
+  /** A program root hands an interpreter, or a root `su -c`, as text. */
+  programs: Word[];
+  /** Text a trap hands root's own shell, read as shell where it is set. */
+  shellText: Word[];
   wrapped: boolean;
   assigns: { name: string; value: string; local: boolean }[];
   /** Names a `local` declares, assigned or not. */
@@ -504,24 +570,124 @@ interface Shape {
   call?: { name: string; args: Word[] };
 }
 
-/** The script operand of an interpreter's argv, or nothing when the program is text or stdin. */
-function scriptOperand(spec: (typeof INTERPRETERS)[string], args: Word[]): Word | undefined {
+/** The script file an interpreter's argv names, or the program it hands it as text; neither for stdin or a module. */
+function operands(spec: Interpreter, args: Word[]): { script?: Word; program?: Word } {
+  let text = false;
+  const operand = (w: Word | undefined): { script?: Word; program?: Word } => (text ? { program: w } : { script: w });
   for (let j = 0; j < args.length; j += 1) {
     const r = bare(args[j].raw);
-    if (r === "-") return undefined;
-    if (r === "--") return args[j + 1];
+    if (r === "-") return {};
+    if (r === "--") return operand(args[j + 1]);
     if (r.startsWith("--")) {
-      if (spec.long?.includes(r.split("=")[0])) return undefined;
+      const name = r.split("=")[0];
+      if (spec.long?.includes(name)) return { program: r.includes("=") ? gluedValue(args[j]) : args[j + 1] };
+      if (spec.longArgs?.includes(name) && !r.includes("=")) j += 1;
       continue;
     }
-    if (/^[-+][A-Za-z]+$/.test(r)) {
-      if (spec.text.test(r.slice(1))) return undefined;
-      if (spec.takesArg.includes(r[r.length - 1])) j += 1;
+    if (/^[-+][A-Za-z]/.test(r)) {
+      // A cluster of option letters, read the way the interpreter reads it: the
+      // first letter that takes a value or the program takes the rest of the
+      // word (`-cTEXT`, `-i.bak`), or the next word when nothing follows.
+      const word = /^[-+]/.test(args[j].raw) ? args[j].raw : r;
+      const letters = /^[-+]([A-Za-z]*)/.exec(word)?.[1] ?? "";
+      for (let n = 0; n < letters.length; n += 1) {
+        const l = letters[n];
+        const glued = word.slice(n + 2);
+        if (spec.none.includes(l)) return {};
+        if (spec.program.includes(l) && !spec.shell) {
+          return { program: glued && spec.glues ? { raw: glued, subs: [] } : args[j + 1] };
+        }
+        if (spec.program.includes(l)) text = true;
+        else if (spec.takesArg.includes(l)) {
+          if (!glued) j += 1;
+          break;
+        }
+      }
       continue;
     }
-    return args[j];
+    return operand(args[j]);
+  }
+  return {};
+}
+
+/** The value of a glued `--option=value` word, as written. */
+const gluedValue = (w: Word): Word => ({ raw: w.raw.slice(w.raw.indexOf("=") + 1), subs: [] });
+
+/** The text of `su -c TEXT`, `-lc TEXT`, `-cTEXT` or `--command TEXT` (runuser's su form too). */
+function commandOption(args: Word[]): Word | undefined {
+  for (let j = 0; j < args.length; j += 1) {
+    const r = bare(args[j].raw);
+    if (r === "--command" || r === "--session-command") return args[j + 1];
+    if (/^--(?:session-)?command=/.test(r)) return gluedValue(args[j]);
+    const cluster = /^-[lmpfP]*c/.exec(args[j].raw);
+    if (cluster) {
+      const glued = args[j].raw.slice(cluster[0].length);
+      return glued ? { raw: glued, subs: [] } : args[j + 1];
+    }
   }
   return undefined;
+}
+
+/** The account's home written out anywhere in a word, not only at its start. */
+const LITERAL_ANYWHERE = /\/home\/clawbox(?![A-Za-z0-9_.-])/;
+
+/**
+ * Whether a program handed over as text names the service account's
+ * directories: the literal home anywhere in it, or a tainted expansion where
+ * root's shell expands it (outside single quotes; a `'` inside `"…"` is a
+ * character). The guard does not read node, python or a `-c` shell program as
+ * its language, so naming the path there counts as running it.
+ */
+function namesTainted(raw: string, fn: string | null, taint: Taint): boolean {
+  if (LITERAL_ANYWHERE.test(raw)) return true;
+  const expanded = blankSingleQuoted(raw);
+  for (let i = expanded.indexOf("$"); i >= 0; i = expanded.indexOf("$", i + 1)) {
+    if (beginsTainted(expanded.slice(i), fn, taint)) return true;
+  }
+  return false;
+}
+
+/**
+ * Double-quoted text with its `'…'` pairs read as `"…"`. To the shell that
+ * sets a trap they are characters, and what it expands lands between them
+ * (`trap "'$BIN' x" EXIT` runs the value of BIN), so the `$…` inside must stay
+ * expansions for the reader. A pair that holds a `"`, or a lone `'`, is left
+ * as written.
+ */
+function openSingleQuotes(text: string): string {
+  const out = text.split("");
+  for (const [start, end] of singleQuotedSpans(text)) {
+    if (end >= text.length || text.slice(start, end).includes('"')) continue;
+    out[start - 1] = '"';
+    out[end] = '"';
+  }
+  return out.join("");
+}
+
+/** A word's text as the shell that runs it reads it: quotes removed, escapes resolved, `$…` kept as written. */
+function unquote(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c === "'" || (c === "$" && raw[i + 1] === "'")) {
+      const from = c === "'" ? i + 1 : i + 2;
+      const end = raw.indexOf("'", from);
+      out += raw.slice(from, end < 0 ? raw.length : end);
+      i = end < 0 ? raw.length : end + 1;
+    } else if (c === '"') {
+      const end = skip(raw, i + 1, '"', null);
+      out += openSingleQuotes(raw.slice(i + 1, end - 1).replace(/\\([$`"\\])/g, "$1"));
+      i = end;
+    } else if (c === "\\") {
+      out += raw[i + 1] ?? "";
+      i += 2;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  return out;
 }
 
 /** node's preload operands: they run at startup even when the program is `-e` text. */
@@ -564,8 +730,9 @@ function isRootTarget(target: string, rootNames: Set<string>): boolean {
   const m = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)(?::?[-=](root|#?0))?\}?$/.exec(target);
   return !!m && (rootNames.has(m[1]) || m[2] !== undefined);
 }
-/** runuser and su options that take a value. */
-const SWITCH_VALUE_OPTION = /^(?:-[gGcsw]|--(?:group|supp-group|command|session-command|shell|whitelist-environment))$/;
+/** runuser and su options that take a value, alone or after their flags that take none (`-lc`). */
+const SWITCH_VALUE_OPTION =
+  /^(?:-[lmpfP]*[gGcsw]|--(?:group|supp-group|command|session-command|shell|whitelist-environment))$/;
 
 /**
  * Who runuser or su runs as, and where its command starts. `-u USER [--] cmd`
@@ -595,7 +762,7 @@ function switchOf(args: Word[]): { target?: string; command?: number } {
 }
 
 function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>, rootNames: Set<string>): Shape {
-  const shape: Shape = { wrapped: false, assigns: [], locals: [], preloads: [] };
+  const shape: Shape = { wrapped: false, assigns: [], locals: [], preloads: [], programs: [], shellText: [] };
   const { words } = command;
   if (command.loopVar) return shape;
   let k = 0;
@@ -610,7 +777,7 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
   }
   for (;;) {
     const word = bare(words[k]?.raw ?? "");
-    if (word === "exec" || word === "time" || word === "command") {
+    if (word === "exec" || word === "time" || word === "command" || word === "builtin") {
       k += 1;
       if (word === "command" && /^-[vV]/.test(words[k]?.raw ?? "")) return shape;
       while (/^-[pP]$/.test(words[k]?.raw ?? "")) k += 1;
@@ -648,13 +815,18 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
       continue;
     }
     if (word === "runuser" || word === "su") {
-      const { target, command: at } = switchOf(words.slice(k + 1));
+      const args = words.slice(k + 1);
+      const { target, command: at } = switchOf(args);
       if (target !== undefined && !isRootTarget(target, rootNames)) {
         shape.wrapped = true;
         return shape;
       }
-      // Root after all: read the command it runs, when it names one.
-      if (at === undefined) return shape;
+      // Root after all: read the command it runs, or the `-c` text it hands a shell.
+      if (at === undefined) {
+        const text = commandOption(args);
+        if (text) shape.programs.push(text);
+        return shape;
+      }
       k += 1 + at;
       continue;
     }
@@ -682,9 +854,19 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
     }
     return shape;
   }
+  if (name === "trap") {
+    const args = words.slice(k + 1);
+    const from = bare(args[0]?.raw ?? "") === "--" ? 1 : 0;
+    const text = args[from];
+    // `trap - SIG`, `trap -p` and a lone operand set no text.
+    if (text && args.length > from + 1 && !text.raw.startsWith("-")) shape.shellText.push(text);
+    return shape;
+  }
   const interpreter = INTERPRETERS[name.replace(/^.*\//, "")];
   if (interpreter) {
-    shape.candidate = scriptOperand(interpreter, words.slice(k + 1));
+    const { script, program } = operands(interpreter, words.slice(k + 1));
+    shape.candidate = script;
+    if (program) shape.programs.push(program);
     if (interpreter === INTERPRETERS.node) shape.preloads = preloadOperands(words.slice(k + 1));
     return shape;
   }
@@ -714,11 +896,44 @@ function isTainted(name: string, fn: string | null, taint: Taint): boolean {
   return SEEDS.has(name) || taint.global.has(name);
 }
 
+/**
+ * Commands whose output is a path made from their operand: its directory, its
+ * resolved form. Taken as the account's path when the operand is one, which
+ * errs toward a hit (`dirname "$CLAWBOX_HOME"` is /home).
+ */
+const PATH_KEEPERS = new Set(["dirname", "readlink", "realpath"]);
+
+/**
+ * Whether a command substitution prints a path made from one in the service
+ * account's directories: `dirname`, `readlink` or `realpath` of a tainted
+ * path, or `cd` into one and then `pwd`.
+ */
+function keepsPath(command: string, fn: string | null, taint: Taint): boolean {
+  const tokens = tokenize(command);
+  const words: Word[] = [];
+  let k = 0;
+  for (; k < tokens.length; k += 1) {
+    const tok = tokens[k];
+    if (tok.t === "op") break;
+    if (tok.t === "redir") k += 1;
+    else words.push(tok);
+  }
+  const name = bare(words[0]?.raw ?? "");
+  const operand = words.slice(1).find((w) => !bare(w.raw).startsWith("-"));
+  if (!operand || !beginsTainted(operand.raw, fn, taint)) return false;
+  if (PATH_KEEPERS.has(name)) return true;
+  // `cd DIR && pwd`, `cd DIR; pwd`, `cd DIR || exit; pwd`: a later command is pwd.
+  const later = tokens.slice(k);
+  return name === "cd" && later.some((t, n) => t.t === "word" && bare(t.raw) === "pwd" && later[n - 1]?.t === "op");
+}
+
 /** Whether a word, as written, begins with the service account's directory. */
 function beginsTainted(raw: string, fn: string | null, taint: Taint): boolean {
   const text = raw.replace(/^["']/, "");
   if (LITERAL.test(text)) return true;
   if (raw.startsWith("'")) return false;
+  if (text.startsWith("$(") && text[2] !== "(") return keepsPath(text.slice(2, skip(text, 2, ")", null) - 1), fn, taint);
+  if (text.startsWith("`")) return keepsPath(text.slice(1, skip(text, 1, "`", null) - 1), fn, taint);
   const plain = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|([1-9@*]))/.exec(text);
   if (plain) return isTainted(plain[1] ?? positional(plain[2]), fn, taint);
   if (!text.startsWith("${")) return false;
@@ -738,6 +953,15 @@ function valueTainted(value: string, fn: string | null, taint: Taint): boolean {
   if (!value.startsWith("(")) return beginsTainted(value, fn, taint);
   const first = value.slice(1).trimStart();
   return !!first && beginsTainted(readWord(first, 0).raw, fn, taint);
+}
+
+/** Shell text read as lines in `at`'s function, its commands added to `out`; it fails closed like a file. */
+function readText(text: string, at: Command, out: Command[], file: string): void {
+  const state: ParseState = { frames: [], pendingFn: null };
+  const lines = joinArrays(logicalLines(text, file, at.lineNo - 1, { heredocSubstitutions: true }), file);
+  for (const line of lines) parse(line.text, line.lineNo, state, at.fn, out, file);
+  const open = state.frames[0];
+  if (open) throw lost(`${file}:${open.lineNo}`, `${open.kind} never closes`);
 }
 
 function scan(sources: { file: string; text: string }[]): {
@@ -761,7 +985,13 @@ function scan(sources: { file: string; text: string }[]): {
     if (open) throw lost(`${file}:${open.lineNo}`, `${open.kind} never closes`);
     const functions = new Set(commands.map((c) => c.fn).filter((f): f is string => !!f));
     const rootNames = rootValued(logical);
-    const shapes = commands.map((c) => shapeOf(c, wrappers, functions, rootNames));
+    const shapes: Shape[] = [];
+    // A trap's text is root's shell too, run later in the same function: its
+    // commands join the list, read like any other line.
+    for (let n = 0; n < commands.length; n += 1) {
+      shapes.push(shapeOf(commands[n], wrappers, functions, rootNames));
+      for (const text of shapes[n].shellText) readText(unquote(text.raw), commands[n], commands, file);
+    }
     const taint: Taint = { global: new Set(), local: new Map(), declared: new Map() };
     const fnSet = (map: Map<string, Set<string>>, fn: string): Set<string> =>
       map.get(fn) ?? map.set(fn, new Set()).get(fn)!;
@@ -803,12 +1033,13 @@ function scan(sources: { file: string; text: string }[]): {
     shapes.forEach((s, n) => {
       const { fn, lineNo, text: line } = commands[n];
       if (s.wrapped) wrapped += 1;
-      for (const run of [s.candidate, ...s.preloads]) {
-        if (!run || !beginsTainted(run.raw, fn, taint)) continue;
+      const runs = [s.candidate, ...s.preloads].filter((w): w is Word => !!w && beginsTainted(w.raw, fn, taint));
+      const programs = s.programs.filter((w) => namesTainted(w.raw, fn, taint));
+      for (const [run, program] of [...runs.map((w) => [w, false] as const), ...programs.map((w) => [w, true] as const)]) {
         const key = `${lineNo} ${run.raw}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        hits.push({ file, lineNo, word: run.raw, text: line.trim() });
+        hits.push({ file, lineNo, word: run.raw, text: line.trim(), program });
       }
     });
   }
@@ -822,7 +1053,10 @@ const allowedFor = (hit: Hit): Allowed | undefined =>
   ALLOWED.find((a) => a.file === hit.file && a.word === hit.word && hit.text.includes(a.line));
 
 const message = (h: Hit): string =>
-  `${h.file}:${h.lineNo}: root runs ${h.word} from the service account's directories. ${REMEDY}`;
+  h.program
+    ? `${h.file}:${h.lineNo}: root hands ${h.word} to a program as text, and it names the service account's ` +
+      `directories. ${PROGRAM_REMEDY}`
+    : `${h.file}:${h.lineNo}: root runs ${h.word} from the service account's directories. ${REMEDY}`;
 
 /** Assignments the rows lean on, made the way install.sh makes them. */
 const PREAMBLE = [
@@ -969,6 +1203,59 @@ const MUST_HIT: [string, string[], number, string][] = [
   ],
   ["a target the file sets to root", ["target=root", 'runuser -u "$target" -- "$OPENCLAW_BIN" --version'], 2, '"$OPENCLAW_BIN"'],
   ["a sudo target that defaults to root", ['sudo -u "${RUN_AS:-root}" "$OPENCLAW_BIN" x'], 1, '"$OPENCLAW_BIN"'],
+  ["a double-quoted bash -c program", ['bash -c "\\"$OPENCLAW_BIN\\" --version"'], 1, '"\\"$OPENCLAW_BIN\\" --version"'],
+  ["a root sudo's sh -c program", ['sudo sh -c "$OPENCLAW_BIN --version"'], 1, '"$OPENCLAW_BIN --version"'],
+  ["su to root with a -c program", ['su root -c "$OPENCLAW_BIN x"'], 1, '"$OPENCLAW_BIN x"'],
+  ["su with no user and a glued program", ['su --command="$BUN x"'], 1, '"$BUN x"'],
+  ["su -lc to root", ['su -lc "\\"$OPENCLAW_BIN\\" x"'], 1, '"\\"$OPENCLAW_BIN\\" x"'],
+  ["runuser -lc to root", ['runuser -lc "\\"$OPENCLAW_BIN\\" x"'], 1, '"\\"$OPENCLAW_BIN\\" x"'],
+  ["su - -c to root", ['su - -c "$BUN x"'], 1, '"$BUN x"'],
+  ["su with -c glued to its program", ['su -c"\\"$OPENCLAW_BIN\\" x"'], 1, '"\\"$OPENCLAW_BIN\\" x"'],
+  [
+    "a node -e program after --require and its value",
+    [`node --require /usr/lib/a.js -e "require('$PROJECT_DIR/x.js')"`],
+    1,
+    `"require('$PROJECT_DIR/x.js')"`,
+  ],
+  ["a node script after --import and its value", ['node --import /usr/lib/a.mjs "$PROJECT_DIR/app.js"'], 1, '"$PROJECT_DIR/app.js"'],
+  ["a bash -c program after --rcfile and its value", ['bash --rcfile /etc/bash.bashrc -c "\\"$OPENCLAW_BIN\\" x"'], 1, '"\\"$OPENCLAW_BIN\\" x"'],
+  ["a perl -e program after -i.bak", [`perl -i.bak -e "do '$PROJECT_DIR/x.pl'" /etc/x`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a python3 program glued to -c", [`python3 -c"exec(open('$PROJECT_DIR/x').read())"`], 1, `"exec(open('$PROJECT_DIR/x').read())"`],
+  ["a perl program glued to -e", [`perl -e"do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a glued node --eval program", [`node --eval="require('$PROJECT_DIR/x.js')"`], 1, `"require('$PROJECT_DIR/x.js')"`],
+  ["a node -p program", [`node -p "require('$NPM_PREFIX/lib/x.js')"`], 1, `"require('$NPM_PREFIX/lib/x.js')"`],
+  ["a perl -e program", [`perl -e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["an unquoted -c operand", ["bash -c $OPENCLAW_BIN"], 1, "$OPENCLAW_BIN"],
+  [
+    "a parameter inside a double-quoted program",
+    ['probe() { bash -c "\\"$1\\" --version"; }', 'probe "$OPENCLAW_BIN"'],
+    1,
+    '"\\"$1\\" --version"',
+  ],
+  ["a node -e program that loads a path", [`node -e "require('$PROJECT_DIR/x.js')"`], 1, `"require('$PROJECT_DIR/x.js')"`],
+  [
+    "a python3 -c program that runs a file",
+    [`python3 -c "exec(open('$PROJECT_DIR/x.py').read())"`],
+    1,
+    `"exec(open('$PROJECT_DIR/x.py').read())"`,
+  ],
+  [
+    "the literal home inside a single-quoted node program",
+    [`node -e 'require("child_process").execFileSync("/home/clawbox/.npm-global/bin/openclaw")'`],
+    1,
+    `'require("child_process").execFileSync("/home/clawbox/.npm-global/bin/openclaw")'`,
+  ],
+  ["single-quoted trap text", [`trap '"$OPENCLAW_BIN" x' EXIT`], 1, '"$OPENCLAW_BIN"'],
+  ["double-quoted trap text", ['trap -- "\\"$BUN\\" x" EXIT'], 1, '"$BUN"'],
+  ["a path in single quotes inside double-quoted trap text", [`trap "'$OPENCLAW_BIN' x" EXIT`], 1, '"$OPENCLAW_BIN"'],
+  ["a script in single quotes inside double-quoted trap text", [`trap "bash '$PROJECT_DIR/a.sh'" EXIT`], 1, '"$PROJECT_DIR/a.sh"'],
+  ["trap text through builtin", [`builtin trap '"$OPENCLAW_BIN" x' EXIT`], 1, '"$OPENCLAW_BIN"'],
+  ["a value from dirname", ['V="$(dirname "$PROJECT_DIR")"', '"$V/bin/x"'], 2, '"$V/bin/x"'],
+  ["a value from readlink -f", ['B="$(readlink -f "$OPENCLAW_BIN")"', '"$B" x'], 2, '"$B"'],
+  ["a value from realpath", ['R="$(realpath "$NPM_PREFIX/bin/openclaw")"', '"$R" --version'], 2, '"$R"'],
+  ["a value from a backquoted dirname", ['V=`dirname "$PROJECT_DIR"`', '"$V/bin/x"'], 2, '"$V/bin/x"'],
+  ["a value from cd, a fallback and pwd", ['D="$(cd "$PROJECT_DIR" || exit 1; pwd)"', 'bash "$D/a.sh"'], 2, '"$D/a.sh"'],
+  ["a value from cd and pwd", ['D="$(cd "$PROJECT_DIR/scripts" && pwd)"', 'bash "$D/a.sh"'], 2, '"$D/a.sh"'],
 ];
 
 /** Rows that run nothing from the service account's directories as root. */
@@ -984,6 +1271,8 @@ const MUST_MISS: [string, string[]][] = [
   ["as_user_runtime", ['as_user_runtime "$OPENCLAW_BIN" x']],
   ["sudo -u", ['sudo -u "$CLAWBOX_USER" "$OPENCLAW_BIN" x', 'sudo -E -H -u "$CLAWBOX_USER" "$BUN" x']],
   ["su", ['su - "$CLAWBOX_USER" -c "$OPENCLAW_BIN x"']],
+  ["su -lc to the account", ['su -lc "\\"$OPENCLAW_BIN\\" x" "$CLAWBOX_USER"', 'su -l "$CLAWBOX_USER" -c "$BUN x"']],
+  ["node with a root-held --require value", ["node --require /usr/lib/a.js /usr/lib/app.js"]],
   ["a forwarding function", ['as_owner() { runuser -u "$CLAWBOX_USER" -- "$@"; }', 'as_owner "$OPENCLAW_BIN" x']],
   ["the git runner", ['"${GIT_RUNNER[@]}" git -C "$PROJECT_DIR" status']],
   [
@@ -1004,9 +1293,6 @@ const MUST_MISS: [string, string[]][] = [
     ['SRC_DIR="$PROJECT_DIR"', 'bash "$SRC_DIR/scripts/a.sh"', 'P="$SRC_DIR/scripts/b.sh"', 'bash "$P"']],
   ["a function on a path", ['ENV_FILE="$PROJECT_DIR/.env"', 'HF=$(get_env "$ENV_FILE" K)']],
   [
-    "a path inside a single-quoted node program",
-    [`node -e 'require("child_process").execFileSync("/home/clawbox/.npm-global/bin/openclaw")'`]],
-  [
     "a manifest read by a program from stdin",
     [
       `    v=$(python3 -I - "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null <<'PY' || true`,
@@ -1020,6 +1306,17 @@ const MUST_MISS: [string, string[]][] = [
   ["python3 -c", ['X_FILE="$PROJECT_DIR/x.json"', `python3 -c 'import sys; print(sys.argv[1])' "$X_FILE"`]],
   ["node -e", [`node -e 'console.log(process.argv[1])' "$PROJECT_DIR/x"`]],
   ["bash -c", [`bash -c 'cat "$1"' sh "$PROJECT_DIR/x"`]],
+  ["a double-quoted program that names no path", [`python3 -c "import sys; print(sys.argv[1])" "$PROJECT_DIR/x"`]],
+  ["a -c program as the account", ['runuser -u "$CLAWBOX_USER" -- bash -c "\\"$OPENCLAW_BIN\\" x"']],
+  [
+    "trap text that runs as the account, resets or names a function",
+    [
+      `trap 'as_clawbox rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT`,
+      "trap - EXIT",
+      "trap cleanup EXIT",
+      `trap "rm -rf '$tmp'" RETURN`,
+    ],
+  ],
   ["a case pattern", ['case "$d" in', '  "$CLAWBOX_HOME"/*) echo inside ;;', "  *) echo outside ;;", "esac"]],
   [
     "the TTS probe's own assignment",
@@ -1093,7 +1390,7 @@ const MUST_MISS: [string, string[]][] = [
     "a loop variable read as data",
     ['for stamp in "$PROJECT_DIR/.next/build-info.json"; do [ -f "$stamp" ] && cat "$stamp"; done']],
   ["an array used as data", ['paths=("$NPM_PREFIX/bin/openclaw" "$NPM_PREFIX/lib")', 'rm -rf "${paths[@]}"']],
-  ["a value from a substitution", ['V="$(dirname "$PROJECT_DIR")"', '"$V/bin/x"']],
+  ["a value from a substitution that keeps no path", ['V="$(stat -c %U "$PROJECT_DIR")"', '"$V" --version']],
   ["a quoted heredoc", ["cat <<'EOF'", 'v=$("$OPENCLAW_BIN" --version)', "EOF"]],
   ["an escaped substitution in a heredoc", ["cat <<EOF", 'v=\\$("$OPENCLAW_BIN" --version)', "EOF"]],
   ["a heredoc's own text, quotes and all", ["cat <<EOF", `it's "$OPENCLAW_BIN", not run`, "EOF"]],
@@ -1110,8 +1407,16 @@ describe("root runs nothing from the service account's directories in install.sh
   it("reads install.sh whole, so an empty result means something", () => {
     const { lines, tainted, wrapped } = tree();
     expect(lines).toBeGreaterThan(1000);
-    for (const name of ["OPENCLAW_BIN", "BUN", "GATEWAY_DIST", "project_dir"]) {
-      expect(tainted.has(name), name).toBe(true);
+    // One name per way a path travels, so a reader that stops following it
+    // fails here: an assignment from NPM_PREFIX, one from CLAWBOX_HOME, a
+    // function parameter (verify_build_present's) and a `readlink -f` of a
+    // tainted path.
+    for (const name of ["OPENCLAW_BIN", "BUN", "project_dir", "managed_real"]) {
+      expect(
+        tainted.has(name),
+        `${name}: this self-check expects install.sh to hold a path under the service account's directories in ` +
+          `${name}. If a change renamed or removed ${name}, put a name here that install.sh still sets the same way.`,
+      ).toBe(true);
     }
     // Commands run through a switch to the service account: install.sh had 160
     // when this was written.
@@ -1135,12 +1440,25 @@ describe("root runs nothing from the service account's directories in install.sh
     );
   });
 
+  it("says what to do when a program's text names the service account's directories", () => {
+    const [hit] = scan([{ file: "sample.sh", text: `python3 -c "print(open('$PROJECT_DIR/x').read())"` }]).hits;
+    expect(message(hit)).toBe(
+      `sample.sh:1: root hands "print(open('$PROJECT_DIR/x').read())" to a program as text, and it names the ` +
+        "service account's directories. If the program only reads the file as data, pass the path to it as an " +
+        "argument; if it runs or loads it, run the program as the service account " +
+        '(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" …, or as_clawbox). ' +
+        'Rule: docs/agents/update-and-install.md, "Root runs nothing from the tree".',
+    );
+  });
+
   it.each([
     ["an unclosed quote", "echo 'never closed\n", /sample\.sh:1: ' never closes for this reader: check the quoting there/],
     ["an unclosed heredoc", "cat <<'EOF'\nnever closed\n", /sample\.sh:1: heredoc EOF never closes for this reader: check/],
     ["a heredoc fed to a shell with an unclosed quote", "bash <<EOF\necho 'never closed\nEOF\n", /' never closes .*: check/],
     ["an unclosed brace", "f() {\n  true\n", /sample\.sh:1: \{ never closes for this reader: check the quoting there/],
     ["a stray closer", "true\n}\n", /sample\.sh:2: \} closes nothing open for this reader/],
+    ["trap text with an unclosed quote", "trap 'echo \"never closed' EXIT\n", /sample\.sh:1: " never closes for this reader: check/],
+    ["trap text with an unclosed brace", "trap '{ true' EXIT\n", /sample\.sh:1: \{ never closes for this reader: check/],
   ])("fails closed on %s", (_name, text, error) => {
     expect(() => scan([{ file: "sample.sh", text }])).toThrow(error);
   });
