@@ -94,8 +94,8 @@ raw_log() {
 }
 
 # latest_run, read_baseline, new_run_finished: which run is which, by the
-# box's own latest-run pointer; log_limit_ok: journald's limit for the root
-# update unit.
+# box's own latest-run pointer; log_limit_ok and rebuild_unit_shown:
+# journald's limit for the root update unit.
 # shellcheck source=scripts/nano-tests/update-raw-log-runs.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 
@@ -137,21 +137,11 @@ root_unit_limit "before the update"
 # The same, at the moment rebuild_reboot runs — the step whose build output
 # journald dropped — including what systemd handed journald for the running
 # unit (a limit loaded after it started never reaches it). Asked every poll of
-# the update until the unit is seen active.
+# the update until the unit is seen running (rebuild_unit_shown).
 REBUILD_LIMIT=0
-# shellcheck disable=SC2016  # expanded on the board
-RUNNING_SHOW='u=clawbox-root-update@rebuild_reboot.service
-[ "$(systemctl is-active "$u" 2>/dev/null)" = active ] || exit 0
-echo RUNNING
-systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p DropInPaths "$u"
-if [ -r /run/systemd/units ] && [ -x /run/systemd/units ]; then
-  for k in interval burst; do printf "Exported_%s=%s\n" "$k" "$(readlink "/run/systemd/units/log-rate-limit-$k:$u" 2>/dev/null || echo none)"; done
-else
-  echo "Exported=unreadable"
-fi'
 rebuild_unit_limit() {
   local shown why
-  shown=$(board "$RUNNING_SHOW") || return 0
+  shown=$(rebuild_unit_shown) || return 0
   case "$shown" in RUNNING*) ;; *) return 0 ;; esac
   REBUILD_LIMIT=1
   note "rebuild_reboot running: $(printf '%s' "$shown" | sed 1d | tr '\n' ' ')"

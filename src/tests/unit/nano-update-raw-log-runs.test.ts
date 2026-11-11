@@ -169,6 +169,29 @@ describe.skipIf(!canRun)("the latest-run pointer, as 92-update-raw-log reads it"
     expect(verdict("NeedDaemonReload=no")).toMatch(/^no: LogRateLimitIntervalUSec=unset/);
   });
 
+  it("sees the rebuild running while its oneshot unit is activating, and only then", () => {
+    // A fake systemctl on the board: is-active answers $FAKE_STATE, show the loaded limit.
+    const bin = path.join(repo, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "systemctl"), [
+      "#!/usr/bin/env bash",
+      'case "$1" in',
+      '  is-active) echo "$FAKE_STATE"; [ "$FAKE_STATE" = active ] ;;',
+      "  show) printf 'ActiveState=%s\\nLogRateLimitIntervalUSec=1s\\nLogRateLimitBurst=1000000\\nNeedDaemonReload=no\\n' \"$FAKE_STATE\" ;;",
+      "esac",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const probe = (state: string) => sh(`export PATH="${bin}:$PATH" FAKE_STATE=${state}; rebuild_unit_shown; echo "rc=$?"`).stdout;
+    // What systemd reports for a oneshot whose ExecStart is still running.
+    const running = probe("activating");
+    expect(running).toMatch(/^RUNNING\nActiveState=activating\nLogRateLimitIntervalUSec=1s\n/);
+    expect(running).toMatch(/^Exported(_interval=\S+\nExported_burst=\S+|=unreadable)$/m);
+    expect(running.trim().endsWith("rc=0")).toBe(true);
+    expect(probe("active")).toMatch(/^RUNNING\n/);
+    for (const idle of ["inactive", "failed", "deactivating"]) expect(probe(idle).trim()).toBe("rc=0");
+    expect(sh("rebuild_unit_shown; echo \"rc=$?\"", { hop: false }).stdout.trim()).toBe("rc=255");
+  });
+
   it("for the running rebuild, also wants the limit systemd handed journald, not only the loaded one", () => {
     const verdict = (shown: string) => sh(`if why=$(printf '%s\\n' '${shown}' | log_limit_ok); then echo "ok"; else echo "no: $why"; fi`).stdout.trim();
     const loaded = "LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=1000000\nNeedDaemonReload=no";

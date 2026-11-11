@@ -123,3 +123,25 @@ log_limit_ok() {
     return 1
   fi
 }
+
+# rebuild_unit_shown — asks the board about clawbox-root-update@rebuild_reboot:
+# while it runs, prints RUNNING, then its `systemctl show` lines for
+# log_limit_ok and what systemd handed journald for it (Exported_*; or
+# `Exported=unreadable`); prints nothing while it does not run. A oneshot unit
+# is "activating" for as long as its step runs — it is never "active" — so both
+# count. Fails when the hop to the board failed.
+rebuild_unit_shown() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'u=clawbox-root-update@rebuild_reboot.service
+case "$(systemctl is-active "$u" 2>/dev/null)" in
+  active | activating | reloading) ;;
+  *) exit 0 ;;
+esac
+echo RUNNING
+systemctl show -p ActiveState -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p DropInPaths "$u"
+if [ -r /run/systemd/units ] && [ -x /run/systemd/units ]; then
+  for k in interval burst; do printf "Exported_%s=%s\n" "$k" "$(readlink "/run/systemd/units/log-rate-limit-$k:$u" 2>/dev/null || echo none)"; done
+else
+  echo "Exported=unreadable"
+fi'
+}
