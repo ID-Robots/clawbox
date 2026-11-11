@@ -7698,6 +7698,33 @@ step_clawkeep_install() {
   # and ~/.local/bin/clawkeepd; without a forced reinstall, an existing
   # install with the same version string ("0.1.0") would skip the upgrade
   # and leave stale code on disk after a `git pull`.
+  #
+  # One forced install per update, though, not two (UPD-04: 9 s in
+  # rebuild_reboot, then 8 s more in post_update with the gateway down).
+  # A verified forced install records the git tree id of clawkeep/ in a
+  # root-owned file on /run (tmpfs: gone at every boot, so the reboot arm's
+  # post_update forces). post_update alone passes --reuse-this-update, and
+  # skips only when that record names the tree HEAD has NOW, with no local
+  # change, clawkeepd is there and the CLI still answers. The skip spends
+  # the record. git runs as the tree's owner and its answer is only compared.
+  local record="${CLAWBOX_CLAWKEEP_INSTALLED_RECORD:-/run/clawbox/clawkeep-installed}"
+  local tree="" kept="" dirty="" tmp=""
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  if [ "${1:-}" = "--reuse-this-update" ] && [ -f "$record" ] && [ ! -L "$record" ] \
+    && IFS= read -r kept < "$record" \
+    && tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" \
+    && [ -n "$tree" ] && [ "$tree" = "$kept" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && [ -x "$CLAWBOX_HOME/.local/bin/clawkeepd" ] \
+    && as_clawbox_login 'clawkeep --help' >/dev/null 2>&1; then
+    rm -f "$record" 2>/dev/null || true
+    echo "  ClawKeep CLI: the same code (clawkeep tree ${tree:0:12}) was installed and verified earlier in this update; not reinstalled"
+    return 0
+  fi
+  # Every forced run drops the record first: a failed, partial, pip --user or
+  # skipped install must never leave an older one for post_update to trust.
+  rm -f "$record" 2>/dev/null || true
+
   if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
     echo "  ClawKeep source missing; skipping"
     return 0
@@ -7736,6 +7763,19 @@ step_clawkeep_install() {
     return 1
   fi
   echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
+  # The record, for this update's post_update. Root writes it in root's
+  # /run/clawbox through a fresh mktemp file renamed into place, so it never
+  # writes through a link. A tree with local changes is never recorded.
+  if tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" && [ -n "$tree" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && mkdir -p "$(dirname "$record")" \
+    && tmp="$(mktemp "$(dirname "$record")/.clawkeep-installed.XXXXXX" 2>/dev/null)" \
+    && printf '%s\n' "$tree" > "$tmp" && mv -f "$tmp" "$record"; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  echo "  ClawKeep CLI install not recorded (local changes under clawkeep/, or git or /run/clawbox could not answer); post_update will reinstall it"
+  return 0
 }
 
 # Legacy path, used only when pipx could not be provisioned. Still the
@@ -10598,8 +10638,12 @@ step_post_update() {
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
-  # we have to force-reinstall.
-  optional_step clawkeep_install step_clawkeep_install
+  # we have to force-reinstall. Unless step_rebuild_reboot already did, in
+  # this boot, from the same clean clawkeep/ tree and the CLI still answers
+  # (UPD-04): it is the one forced install of the update. This step cannot
+  # simply drop the call: it fetches and resets the tree before it runs, so
+  # the code may have moved since; the tree id comparison catches that.
+  optional_step clawkeep_install step_clawkeep_install --reuse-this-update
   # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
   # step_post_update never ran step_ai_tools_install, which is exactly why no
   # already-shipped box has `claude` on it today. Idempotent — a present
@@ -14426,7 +14470,8 @@ step_rebuild_reboot() {
   step_openclaw_patch
   step_openclaw_config
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
-  # sees the new restore.py / scheduler logic.
+  # sees the new restore.py / scheduler logic. Always forced: this is the
+  # update's one ClawKeep install, which post_update reuses (UPD-04).
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
   # HOW THE UPDATE ENDS, decided here (update_reboot_reasons): after the redeploy
   # above, so a marker one of those steps leaves counts, and before the rebuild,

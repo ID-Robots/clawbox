@@ -686,6 +686,15 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    // Who is signed in: the owner of a home box, as a real box answers. The
+    // desktop waits for this before it draws the offer and the update cards
+    // (TASK-2435); a spec that needs someone else routes it itself, and a
+    // route registered later wins.
+    if (path === "/setup-api/users/me") {
+      await fulfillJson(route, { username: "clawbox", isOwner: true, multiUser: false, openclawShared: false, orgMode: false });
+      return;
+    }
+
     if (path === "/setup-api/desktop/state") {
       if (method === "PUT") {
         const payload = await readRequestJson<{ state?: unknown }>(route);

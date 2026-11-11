@@ -273,7 +273,9 @@ function LoginForm() {
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={t("login.passwordPlaceholder")}
+                // "System password" is the owner's word for a single-user box;
+                // where several people sign in, each types their own password.
+                placeholder={t(loginUsers.multiUser ? "login.password" : "login.passwordPlaceholder")}
                 autoFocus
                 autoComplete="current-password"
                 className="w-full h-12 px-4 pr-12 bg-white/[0.06] border border-white/10 rounded-xl text-base text-white outline-none focus:border-[var(--coral-bright)] focus:bg-white/[0.08] transition-colors placeholder-white/30"

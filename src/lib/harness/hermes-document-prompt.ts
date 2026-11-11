@@ -1,5 +1,6 @@
 import fsp from "fs/promises";
 import path from "@/lib/runtime-path";
+import { isOfficeDocumentName, isSpreadsheetName, officeTextPath } from "@/lib/office-documents";
 
 /**
  * How a staged document is put in front of a Hermes agent.
@@ -10,6 +11,11 @@ import path from "@/lib/runtime-path";
  * handed the path, never called a tool, and answered from imagination
  * (measured on a lab board, 2026-10-13). So a SMALL TEXT file is also quoted
  * under its line, where no tool call is needed to read it.
+ *
+ * An OFFICE document (.docx, .xlsx, .pptx, .odt, .ods) is a ZIP of XML, not
+ * text: the staging route left its text beside it (src/lib/office-documents.ts),
+ * and that text is what is quoted — under the same budget — or, past it,
+ * named for the agent to open.
  *
  * Bounded on purpose. The local model's window is small and a turn that
  * quotes a megabyte of CSV answers nothing; past the budget the file is named
@@ -64,6 +70,35 @@ async function readAtMost(file: string, limit: number): Promise<Buffer | null> {
 }
 
 /**
+ * The first `limit` bytes of a text file as text, and whether it goes on; null
+ * for nothing to show (unreadable, empty, binary). A cut through a character
+ * drops the broken tail rather than the whole quote.
+ */
+async function readTextHead(file: string, limit: number): Promise<{ text: string; more: boolean } | null> {
+  if (limit <= 0) return null;
+  let handle: fsp.FileHandle | undefined;
+  try {
+    handle = await fsp.open(file, "r");
+    const buffer = Buffer.alloc(limit + 1);
+    let read = 0;
+    while (read < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    const more = read > limit;
+    const bytes = buffer.subarray(0, Math.min(read, limit));
+    if (bytes.length === 0 || bytes.includes(0)) return null;
+    const text = new TextDecoder("utf-8").decode(bytes).replace(/\uFFFD+$/, "");
+    return text ? { text, more } : null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
  * The lines that go ahead of the owner's message for `documentPaths`, which
  * the caller has ALREADY resolved against the staging root. Never throws: a
  * file that cannot be read is still named.
@@ -72,8 +107,25 @@ export async function hermesDocumentPrompt(documentPaths: readonly string[]): Pr
   const blocks: string[] = [];
   let budget = INLINE_DOCUMENTS_TOTAL_BYTES;
   for (const file of documentPaths) {
-    const line = `[Attached file: ${file}]`;
     const name = path.basename(file);
+    if (isOfficeDocumentName(file)) {
+      const textFile = officeTextPath(file);
+      const what = isSpreadsheetName(file) ? "its sheets as CSV" : "its text";
+      const line = `[Attached file: ${file} — ClawBox saved ${what} in ${textFile}]`;
+      // The BEGINNING of a long document is quoted rather than nothing: the
+      // box's small model answers from what is in front of it.
+      const head = await readTextHead(textFile, Math.min(INLINE_DOCUMENT_MAX_BYTES, budget));
+      if (head) budget -= Buffer.byteLength(head.text);
+      blocks.push(
+        head === null
+          ? `${line}\n(Not shown here. Open ${textFile} to read it.)`
+          : `${line}\n----- ${what} of ${name} -----\n${head.text.replace(/\s+$/, "")}\n`
+            + (head.more ? `[… it goes on: open ${textFile} for the rest]\n` : "")
+            + `----- end of ${name} -----`,
+      );
+      continue;
+    }
+    const line = `[Attached file: ${file}]`;
     let quoted: string | null = null;
     if (TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) {
       const limit = Math.min(INLINE_DOCUMENT_MAX_BYTES, budget);

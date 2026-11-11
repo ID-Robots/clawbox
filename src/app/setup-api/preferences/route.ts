@@ -17,6 +17,8 @@ import { logSafe } from "@/lib/log-safe";
 import { requireSession, sessionIdentity } from "@/lib/route-auth";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 import { languageFor, setUserLanguage } from "@/lib/user-language";
+import { readOrgMode } from "@/lib/org-mode-server";
+import { MAX_USER_PREFERENCES, setUserPreferences, userPreferencesFor } from "@/lib/user-preferences";
 
 export const dynamic = "force-dynamic";
 
@@ -149,6 +151,36 @@ async function answerLanguageFor(
   if (lang) result[LANGUAGE_KEY] = lang;
 }
 
+/**
+ * The member of staff asking, on an organisation box (src/lib/org-mode.ts) —
+ * whose preferences are their own (src/lib/user-preferences.ts) — or null for
+ * the owner, the agent's bearer, nobody, and every user on a home box. The
+ * switch first, so a home box's writes pay for no cookie verification.
+ */
+async function orgMemberOf(req: Request): Promise<string | null> {
+  if (!(await readOrgMode())) return null;
+  const who = await sessionIdentity(req);
+  return who && !who.isOwner ? who.username : null;
+}
+
+/**
+ * Lay a member of staff's own values over the box's in an answer about to go
+ * out: the names they asked for (`keys`), or every one of theirs (`null`, an
+ * `all=1` read).
+ */
+function answerOwnPreferences(
+  member: string | null,
+  keys: readonly string[] | null,
+  result: Record<string, unknown>,
+  store: Record<string, unknown>,
+): void {
+  if (member === null) return;
+  const own = userPreferencesFor(member, store);
+  for (const [key, value] of Object.entries(own)) {
+    if (keys === null || keys.includes(key)) result[key] = value;
+  }
+}
+
 /** The answer differs by cookie, so no cache may hand one person's to another. */
 function preferencesJson(body: Record<string, unknown>): NextResponse {
   return NextResponse.json(body, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie" } });
@@ -189,6 +221,7 @@ export async function GET(req: Request) {
         result[key.slice(PREFERENCE_KEY_PREFIX.length)] = value;
       }
     }
+    answerOwnPreferences(await orgMemberOf(req), null, result, allConfig);
     await answerLanguageFor(req, true, result, allConfig);
     return preferencesJson(sanitizePreferences(result));
   }
@@ -217,6 +250,8 @@ export async function GET(req: Request) {
   // The read /login and the desktop both make (UI_LANGUAGE_READ) lands here
   // too: with no cookie it is the box default, with a user's cookie it is
   // theirs, so each signed-in person's desktop renders in their own language.
+  // Not for the anonymous language read: nobody is asking.
+  if (!isAnonymousReadable(allParam, keysParam)) answerOwnPreferences(await orgMemberOf(req), keys, result, allConfig);
   await answerLanguageFor(req, keys.includes(LANGUAGE_KEY), result, allConfig);
   return preferencesJson(sanitizePreferences(result));
 }
@@ -249,6 +284,15 @@ export async function POST(req: Request) {
     // that suite expects; it is not a per-request saving — a module import is
     // paid once per process either way.
     const writesInstalled = Object.keys(body).some((key) => key.startsWith(OWNER_ONLY_WRITE_PREFIX));
+    // On an organisation box a member of staff writes only their own
+    // preferences (src/lib/user-preferences.ts) and has no installed apps.
+    const member = await orgMemberOf(req);
+    if (member !== null && writesInstalled) {
+      return NextResponse.json(
+        { error: "Only the box owner can change the installed apps", code: "owner_only" },
+        { status: 403 },
+      );
+    }
     if (writesInstalled && !(await (await import("@/lib/owner-session")).hasPersonSession(req))) {
       return NextResponse.json(
         { error: "Installed apps can only be changed from a signed-in person's own session", code: "owner_only" },
@@ -271,8 +315,8 @@ export async function POST(req: Request) {
     // the agent's bearer, the setup wizard before a password exists, the e2e
     // harness — set the box default exactly as before. Asked only when the
     // body names the key, so the desktop's other writes pay for no cookie check.
-    const picker = Object.prototype.hasOwnProperty.call(body, LANGUAGE_KEY) ? await sessionIdentity(req) : null;
-    const pickerUsername = picker && !picker.isOwner ? picker.username : null;
+    const picker = member === null && Object.prototype.hasOwnProperty.call(body, LANGUAGE_KEY) ? await sessionIdentity(req) : null;
+    const pickerUsername = member ?? (picker && !picker.isOwner ? picker.username : null);
     let userLanguage: unknown;
     // Null-prototype accumulator, like every other one that takes a name from
     // outside: the key written below is `pref:` + a rebuilt name, so it cannot
@@ -318,7 +362,18 @@ export async function POST(req: Request) {
       }
       entries[`${PREFERENCE_KEY_PREFIX}${safeKey}`] = value;
     }
-    if (Object.keys(entries).length > 0) {
+    if (member !== null) {
+      // A member of staff's own map, never the box's `pref:` names.
+      const own: Record<string, unknown> = Object.create(null);
+      for (const [key, value] of Object.entries(entries)) own[key.slice(PREFERENCE_KEY_PREFIX.length)] = value;
+      if (Object.keys(own).length > 0 && (await setUserPreferences(member, own)) === "full") {
+        console.error("[preferences] Rejected write: the user already holds the most preferences they may");
+        return NextResponse.json(
+          { error: `each user stores at most ${MAX_USER_PREFERENCES} preferences` },
+          { status: 400 },
+        );
+      }
+    } else if (Object.keys(entries).length > 0) {
       // One read of the store before the write, and only for a body that
       // actually stores something: `setMany` is about to read the same file
       // anyway (read-modify-rewrite), so this costs one extra parse on the

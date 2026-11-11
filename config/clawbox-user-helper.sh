@@ -13,6 +13,15 @@
 #                 only, which is how the owner's login has always worked.
 #                 Exits 0 for a match and 7 (PAM_AUTH_ERR) for everything else.
 #
+#   passwd        A ClawBox user changes their OWN password (Settings →
+#                 Account): the username, the current password and the new
+#                 one as three lines on STDIN. The current password is checked
+#                 with unix_chkpwd exactly as `verify` checks it, and only then
+#                 is ONE `user:password` record piped to chpasswd. Exits 0 for
+#                 a change, 7 (PAM_AUTH_ERR) for a wrong current password or
+#                 an account outside `clawbox-users`, 65 for a new password
+#                 outside the rules, 66 when chpasswd itself failed.
+#
 #   shell <user>  The Terminal app for a signed-in ClawBox user: a login shell
 #                 AS that user (runuser), in their home folder, with a clean
 #                 environment. scripts/terminal-server.mjs runs this inside the
@@ -30,6 +39,7 @@
 #
 # Usage (root, from the sudoers grant in config/clawbox-sudoers):
 #   clawbox-user-helper.sh verify        < "user\npassword\n"
+#   clawbox-user-helper.sh passwd        < "user\ncurrent\nnew\n"
 #   clawbox-user-helper.sh shell <user>
 #
 # Installed by install.sh::install_root_libexec to
@@ -42,6 +52,13 @@ readonly USERS_GROUP="clawbox-users"
 readonly UNIX_CHKPWD=/usr/sbin/unix_chkpwd
 readonly RUNUSER=/usr/sbin/runuser
 readonly PAM_AUTH_ERR=7
+readonly BAD_NEW_PASSWORD=65
+readonly CHPASSWD_FAILED=66
+readonly CHPASSWD=/usr/sbin/chpasswd
+# The rules src/lib/username-rules.ts holds the web side to
+# (USER_PASSWORD_MIN / USER_PASSWORD_MAX).
+readonly NEW_PASSWORD_MIN=8
+readonly NEW_PASSWORD_MAX=256
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "clawbox-user-helper: must run as root" >&2
@@ -95,6 +112,38 @@ do_verify() {
   exit "$PAM_AUTH_ERR"
 }
 
+# 0 when "$1" may become a password: the length rules above, and no control
+# character (a newline cannot arrive — `read` ends at one — but a CR or a tab
+# would reach chpasswd's record as part of the password).
+new_password_ok() {
+  [ "${#1}" -ge "$NEW_PASSWORD_MIN" ] && [ "${#1}" -le "$NEW_PASSWORD_MAX" ] && [[ "$1" != *[[:cntrl:]]* ]]
+}
+
+do_passwd() {
+  local user="" current="" next=""
+  IFS= read -r user || true
+  IFS= read -r current || true
+  IFS= read -r next || true
+  if ! is_clawbox_user "$user" || [ -z "$current" ]; then
+    exit "$PAM_AUTH_ERR"
+  fi
+  if ! new_password_ok "$next"; then
+    exit "$BAD_NEW_PASSWORD"
+  fi
+  local rc=0
+  printf '%s\0' "$current" | "$UNIX_CHKPWD" "$user" nonull || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    exit "$PAM_AUTH_ERR"
+  fi
+  # ONE record, the name checked above and the password checked for control
+  # characters — chpasswd splits on the FIRST colon, so a colon in the
+  # password is the password's.
+  if ! printf '%s:%s\n' "$user" "$next" | "$CHPASSWD"; then
+    exit "$CHPASSWD_FAILED"
+  fi
+  exit 0
+}
+
 do_shell() {
   if [ "$#" -ne 1 ]; then
     echo "usage: $0 shell <user>" >&2
@@ -134,11 +183,18 @@ case "$verb" in
     fi
     do_verify
     ;;
+  passwd)
+    if [ "$#" -ne 0 ]; then
+      echo "usage: $0 passwd" >&2
+      exit 64
+    fi
+    do_passwd
+    ;;
   shell)
     do_shell "$@"
     ;;
   *)
-    echo "usage: $0 verify | shell <user>" >&2
+    echo "usage: $0 verify | passwd | shell <user>" >&2
     exit 64
     ;;
 esac
