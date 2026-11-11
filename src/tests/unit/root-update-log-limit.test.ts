@@ -11,9 +11,12 @@
  *     inside it is too late for it.
  *
  * So the shipped units carry a positive limit no step reaches, and install.sh's
- * refresh_root_update_log_limit installs it as a drop-in at the start of
- * step_apt_update, before the rebuild of every update. The helper is lifted out
- * of install.sh and run against a fixture unit folder with systemctl stubbed.
+ * refresh_root_update_log_limit bridges an installed unit that lacks it with a
+ * drop-in at the start of step_apt_update (before the rebuild of every update),
+ * and takes the drop-in down in step_systemd_services once the unit itself
+ * carries the limit — so a box left on an older build has that build's unit and
+ * no leftover of this one's. The helper is lifted out of install.sh and run
+ * against a fixture unit folder with systemctl stubbed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -113,46 +116,81 @@ describe.skipIf(!canRun)("refresh_root_update_log_limit", () => {
     return { status: r.status, reloads: calls.length, stderr: r.stderr };
   }
 
-  it("installs the unit's own LogRateLimit lines as a drop-in and daemon-reloads", () => {
+  /** The unit as an older build installed it: no journald limit of its own. */
+  const OLD_UNIT = "[Unit]\nDescription=ClawBox Root Update Step (%i)\n\n[Service]\nType=oneshot\nExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i\n";
+  const installed = () => path.join(units, "clawbox-root-update@.service");
+  const limitLines = (text: string) => text.split("\n").filter((l) => /^LogRateLimit(IntervalSec|Burst)=/.test(l));
+
+  it("bridges an installed unit without the limit: the unit's own LogRateLimit lines as a drop-in, then a daemon-reload", () => {
+    fs.writeFileSync(installed(), OLD_UNIT);
     const r = refresh();
-    expect(r.status).toBe(0);
-    expect(r.reloads).toBe(1);
+    expect(r).toMatchObject({ status: 0, reloads: 1 });
     const conf = fs.readFileSync(dropIn(), "utf8");
     expect(conf).toContain("\n[Service]\n");
-    const wanted = fs.readFileSync(UNIT, "utf8").split("\n").filter((l) => /^LogRateLimit(IntervalSec|Burst)=/.test(l));
+    const wanted = limitLines(fs.readFileSync(UNIT, "utf8"));
     expect(wanted).toHaveLength(2);
-    expect(conf.split("\n").filter((l) => /^LogRateLimit/.test(l))).toEqual(wanted);
+    expect(limitLines(conf)).toEqual(wanted);
     // Logging only: never what the unit runs.
     expect(conf).not.toMatch(/^Exec/m);
     expectNoLimitReached(unitSettings(conf), "the drop-in");
+    // The installed unit itself is left alone.
+    expect(fs.readFileSync(installed(), "utf8")).toBe(OLD_UNIT);
   });
 
-  it("writes and reloads nothing when the drop-in is already the unit's", () => {
+  it("bridges a box with no unit installed yet, and an installed unit whose limit is 0", () => {
+    expect(refresh()).toMatchObject({ status: 0, reloads: 1 });
+    expect(fs.existsSync(dropIn())).toBe(true);
+    fs.rmSync(path.dirname(dropIn()), { recursive: true });
+    fs.writeFileSync(installed(), `${OLD_UNIT}LogRateLimitIntervalSec=0\n`);
+    expect(refresh()).toMatchObject({ status: 0, reloads: 1 });
+    expectNoLimitReached(unitSettings(fs.readFileSync(dropIn(), "utf8")), "the drop-in");
+  });
+
+  it("writes and reloads nothing when the bridge is already in place", () => {
+    fs.writeFileSync(installed(), OLD_UNIT);
     refresh();
     const before = fs.statSync(dropIn()).mtimeMs;
-    const again = refresh();
-    expect(again).toMatchObject({ status: 0, reloads: 0 });
+    expect(refresh()).toMatchObject({ status: 0, reloads: 0 });
     expect(fs.statSync(dropIn()).mtimeMs).toBe(before);
   });
 
-  it("replaces a stale drop-in — one from a unit with a limit of 0 — and reloads", () => {
+  it("replaces a stale drop-in — one with a limit of 0 — and reloads", () => {
+    fs.writeFileSync(installed(), OLD_UNIT);
     fs.mkdirSync(path.dirname(dropIn()), { recursive: true });
     fs.writeFileSync(dropIn(), "[Service]\nLogRateLimitIntervalSec=0\n");
-    const r = refresh();
-    expect(r).toMatchObject({ status: 0, reloads: 1 });
+    expect(refresh()).toMatchObject({ status: 0, reloads: 1 });
     expectNoLimitReached(unitSettings(fs.readFileSync(dropIn(), "utf8")), "the refreshed drop-in");
   });
 
-  it("removes its drop-in when the unit no longer sets a limit, and never fails the step it runs in", () => {
+  it("takes the bridge down once the installed unit carries the limit itself, and then leaves nothing behind", () => {
+    fs.writeFileSync(installed(), OLD_UNIT);
+    refresh();
+    expect(fs.existsSync(dropIn())).toBe(true);
+    // step_systemd_services has copied the new unit.
+    fs.copyFileSync(UNIT, installed());
+    expect(refresh()).toMatchObject({ status: 0, reloads: 1 });
+    expect(fs.existsSync(dropIn())).toBe(false);
+    expect(fs.existsSync(path.dirname(dropIn()))).toBe(false);
+    // A later downgrade copies the older unit: nothing of this build is left to mask it.
+    fs.writeFileSync(installed(), OLD_UNIT);
+    expect(fs.existsSync(path.dirname(dropIn()))).toBe(false);
+    // And with the unit current and no bridge, nothing to do.
+    fs.copyFileSync(UNIT, installed());
+    expect(refresh()).toMatchObject({ status: 0, reloads: 0 });
+  });
+
+  it("removes its drop-in when this build sets no limit, and never fails the step it runs in", () => {
+    fs.writeFileSync(installed(), OLD_UNIT);
     refresh();
     fs.writeFileSync(path.join(src, "config", "clawbox-root-update@.service"), "[Service]\nType=oneshot\n");
-    expect(refresh()).toMatchObject({ status: 0, reloads: 0 });
+    expect(refresh()).toMatchObject({ status: 0, reloads: 1 });
     expect(fs.existsSync(dropIn())).toBe(false);
     // A drop-in folder it cannot write: a warning, not a failed apt_update.
+    fs.writeFileSync(path.join(src, "config", "clawbox-root-update@.service"), fs.readFileSync(UNIT));
     const folder = path.dirname(dropIn());
+    fs.mkdirSync(folder, { recursive: true });
     fs.chmodSync(folder, 0o500);
     try {
-      fs.writeFileSync(path.join(src, "config", "clawbox-root-update@.service"), fs.readFileSync(UNIT));
       const r = refresh();
       if (process.getuid?.() !== 0) {
         expect(r).toMatchObject({ status: 0, reloads: 0 });
