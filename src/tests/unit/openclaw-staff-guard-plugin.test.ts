@@ -150,6 +150,8 @@ describe("a member of staff's files", () => {
     // No owner record at all (not written, or unreadable): fail closed.
     expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), MARIA, { ...opts, mediaOwners: undefined })).toMatch(/not theirs/);
     expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), MARIA, { ...opts, mediaOwners: path.join(root, "missing.json") })).toMatch(/not theirs/);
+    // The shared staging root itself is nobody's: no reading everyone's uploads through it.
+    expect(staffToolCallDenyReason(call("read", { path: staged() }), MARIA, opts)).toMatch(/not theirs/);
     // The owner is not judged at all.
     expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), OWNER, opts)).toBeNull();
   });

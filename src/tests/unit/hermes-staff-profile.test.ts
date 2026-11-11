@@ -267,6 +267,10 @@ d("the Hermes staff guard (clawbox_staff_guard)", () => {
       expect(judge("read_file", { path: path.join(attachments, "batch1", "q3.txt") }, staff.home, undefined, { attachments })).toMatchObject({ action: "block" });
       // Through Tool Search too.
       expect(judge("tool_call", { name: "read_file", arguments: { path: path.join(attachments, "payroll.txt") } }, staff.home, undefined, paths)).toMatchObject({ action: "block" });
+      // The shared staging root itself is nobody's: no searching or listing everyone's uploads.
+      expect(judge("search_files", { pattern: "salary", path: attachments }, staff.home, undefined, paths))
+        .toMatchObject({ action: "block", message: expect.stringMatching(/not theirs/) });
+      expect(judge("search_files", { pattern: "q3", path: path.join(attachments, "batch1") }, staff.home, undefined, paths)).toBeNull();
     } finally {
       fs.rmSync(stage, { recursive: true, force: true });
     }
