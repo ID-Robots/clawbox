@@ -282,8 +282,9 @@ async function seedStaffWorkspace(dir: string, username: string, ownerWorkspace:
   await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
   await fsp.chmod(dir, 0o700).catch(() => undefined);
   const userMd = path.join(dir, "USER.md");
-  if (!fs.existsSync(userMd)) {
-    await fsp.writeFile(
+  // Created only when absent (`wx`): a member's own USER.md is theirs to grow.
+  await fsp
+    .writeFile(
       userMd,
       [
         "# USER.md",
@@ -295,17 +296,19 @@ async function seedStaffWorkspace(dir: string, username: string, ownerWorkspace:
         "- Whenever you write to MEMORY.md or a file under memory/, say in the same reply which file you wrote, that it is kept across chats, and that they can ask you to remove it.",
         "",
       ].join("\n"),
-      { mode: 0o600 },
-    );
-  }
+      { mode: 0o600, flag: "wx" },
+    )
+    .catch((err: NodeJS.ErrnoException) => {
+      if (err?.code !== "EEXIST") throw err;
+    });
   for (const name of ["SOUL.md", "IDENTITY.md"]) {
     const target = path.join(dir, name);
-    if (fs.existsSync(target)) continue;
     try {
-      await fsp.copyFile(path.join(ownerWorkspace, name), target);
+      // COPYFILE_EXCL: copied only when the member's workspace has none yet.
+      await fsp.copyFile(path.join(ownerWorkspace, name), target, fs.constants.COPYFILE_EXCL);
       await fsp.chmod(target, 0o600).catch(() => undefined);
     } catch {
-      // The owner's workspace has none yet: the core seeds its own template.
+      // Theirs already, or the owner's workspace has none yet: the core seeds its own template.
     }
   }
 }

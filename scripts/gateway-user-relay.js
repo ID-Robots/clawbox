@@ -631,13 +631,23 @@ function staffReadyReader(configPath, agentId) {
   let ready = false;
   return () => {
     try {
-      const mtimeMs = fs.statSync(configPath).mtimeMs;
-      if (seen !== mtimeMs) {
-        seen = mtimeMs;
-        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        ready = staffAgentConfigured(config, agentId) && staffGuardEnabled(config);
+      // ONE descriptor for the stat and the read, so the mtime remembered is
+      // the mtime of the bytes judged (no check-then-use race on the path).
+      const fd = fs.openSync(configPath, "r");
+      try {
+        const mtimeMs = fs.fstatSync(fd).mtimeMs;
+        if (seen !== mtimeMs) {
+          const config = JSON.parse(fs.readFileSync(fd, "utf-8"));
+          seen = mtimeMs;
+          ready = staffAgentConfigured(config, agentId) && staffGuardEnabled(config);
+        }
+      } finally {
+        fs.closeSync(fd);
       }
-      return ready && fs.existsSync(guard);
+      if (!ready) return false;
+      // The guard's own entry point, opened rather than looked for.
+      fs.closeSync(fs.openSync(guard, "r"));
+      return true;
     } catch {
       seen = null;
       return false;

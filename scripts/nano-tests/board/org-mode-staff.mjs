@@ -18,7 +18,7 @@
 // Cookies arrive in the environment, never on a command line; nothing it
 // prints names a host or an address.
 
-import { createHash } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -56,7 +56,10 @@ const grepTree = (dir, needle) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, entry.name);
       if (entry.isDirectory()) hits = hits.concat(grepTree(p, needle));
-      else if (entry.isFile() && /\.(md|txt|json)$/.test(entry.name) && fs.statSync(p).size < 2_000_000 && fs.readFileSync(p, "utf-8").includes(needle)) hits.push(p);
+      else if (entry.isFile() && /\.(md|txt|json)$/.test(entry.name)) {
+        const text = fs.readFileSync(p, "utf-8");
+        if (text.length < 2_000_000 && text.includes(needle)) hits.push(p);
+      }
     }
   } catch {
     /* absent */
@@ -191,7 +194,7 @@ async function openclawTurn(sock, key, text) {
     if (!runId) { early.push(f); return; }
     handle(f);
   });
-  const sent = await sock.request("chat.send", { sessionKey: key, message: text, deliver: false, idempotencyKey: `${MARK}-${Date.now()}-${Math.random()}` });
+  const sent = await sock.request("chat.send", { sessionKey: key, message: text, deliver: false, idempotencyKey: `${MARK}-${randomUUID()}` });
   if (!sent.ok) { off(); return { refused: sent.error, tools, text: "" }; }
   runId = sent.payload && typeof sent.payload.runId === "string" ? sent.payload.runId : "";
   for (const f of early.splice(0)) {
@@ -283,7 +286,7 @@ async function openclawRun() {
   // Memory: A stores, B cannot read it back, the owner's memory is unchanged.
   const ownerWs = path.join(OPENCLAW_HOME, "workspace");
   const ownerMem = [sha(path.join(ownerWs, "MEMORY.md")), grepTree(path.join(ownerWs, "memory"), "").length];
-  const secret = `${Math.floor(100000 + Math.random() * 899999)}`;
+  const secret = `${randomInt(100000, 1000000)}`;
   const store = await openclawTurn(a, aMain, `Please remember this permanently in your memory file: my locker code is ${secret}. Save it now.`);
   showTurn("staff A", { id: "remember", text: `remember locker code ${secret}` }, store);
   const aWs = path.join(OPENCLAW_HOME, "staff", A_NAME);
@@ -473,7 +476,7 @@ async function hermesRun() {
   // Memory.
   const ownerMem = sha(path.join(HERMES_HOME, "memories", "MEMORY.md"));
   const ownerUser = sha(path.join(HERMES_HOME, "memories", "USER.md"));
-  const secret = `${Math.floor(100000 + Math.random() * 899999)}`;
+  const secret = `${randomInt(100000, 1000000)}`;
   const store = await hermesPost(A_COOKIE, { message: `Please remember this permanently in your memory: my locker code is ${secret}. Save it now.` });
   note(`[${RUNTIME}] staff A asked to remember ${secret}: ${String(store.json.text || store.json.error).slice(0, 400)}`);
   const aHits = grepTree(path.join(aHome, "memories"), secret);
