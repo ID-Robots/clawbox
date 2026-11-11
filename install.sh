@@ -7958,6 +7958,24 @@ oc_config_set_batch() (
   exit "$rc"
 )
 
+# True only when the installed core's own `config set --help` answers and does
+# not list --batch-file, which arrived in OpenClaw 2026.3.22. Asked on every
+# run, never remembered: OPENCLAW_PIN_VERSION can put an older core here. No
+# answer, an error or a help that is not `config set`'s is no verdict, and the
+# caller writes as it would.
+openclaw_config_set_lacks_batch_file() {
+  local help
+  help=$(as_clawbox "$OPENCLAW_BIN" config set --help) || return 1
+  case "$help" in
+    *"Usage: openclaw config set"*) ;;
+    *) return 1 ;;
+  esac
+  case "$help" in
+    *--batch-file*) return 1 ;;
+  esac
+  return 0
+}
+
 step_openclaw_config() {
   is_hermes_edition && return 0
   local CLAWBOX_CONFIG="$PROJECT_DIR/data/config.json"
@@ -7997,6 +8015,15 @@ step_openclaw_config() {
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fi
+  # The provider block below holds the key, and a core without a file form
+  # for `config set` could only take it on a command line. Such a core gets no
+  # ClawBox AI fallback from the installer, and the rest of the step goes on.
+  if [ -n "$CLAWBOX_AI_KEY" ] && openclaw_config_set_lacks_batch_file; then
+    local CORE_VERSION
+    CORE_VERSION=$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
+    echo "  WARN: ClawBox AI fallback not configured: OpenClaw ${CORE_VERSION:-on this box} has no 'config set --batch-file' (2026.3.22 and newer have it) to take its key off the command line" >&2
+    CLAWBOX_AI_KEY=""
   fi
   if [ -n "$CLAWBOX_AI_KEY" ]; then
     if openclaw_is_v2; then

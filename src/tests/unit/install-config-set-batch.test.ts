@@ -49,9 +49,10 @@ function shellFunction(text: string, name: string): string {
   return "";
 }
 
-/** From the line `open` to the first two-space-indented `fi` after it. */
-function block(text: string, open: string): string {
+/** From the line `open` to the first two-space-indented `fi` after it; "" for an `optional` one the file lacks. */
+function block(text: string, open: string, optional = false): string {
   const from = text.indexOf(`${open}\n`);
+  if (from < 0 && optional) return "";
   if (from < 0) throw new Error(`no block opening with ${open}`);
   const close = text.indexOf("\n  fi\n", from);
   if (close < 0) throw new Error(`block ${open} never closes`);
@@ -93,6 +94,21 @@ function harness(env: Record<string, string>): NodeJS.ProcessEnv {
       `printf '%s\\0' openclaw "$@" >> "$ARGV_LOG"; printf '\\n' >> "$ARGV_LOG"`,
       'if [ "$1 $2" = "models auth" ]; then cat > /dev/null; exit 0; fi',
       'if [ "$1 $2" = "config get" ]; then exit 0; fi',
+      // FAKE_CORE=old answers as OpenClaw 2026.2.26 does (its help verbatim,
+      // less the banner), mute gives no help at all, and the default answers
+      // as the pinned core does.
+      'if [ "$1" = "--version" ]; then',
+      '  [ "${FAKE_CORE:-}" = old ] && echo "OpenClaw 2026.2.26 (bc50708)" || echo "OpenClaw 2026.10.9 (0000000)"; exit 0',
+      "fi",
+      'if [ "$1 $2 $3" = "config set --help" ]; then',
+      '  case "${FAKE_CORE:-}" in',
+      '    mute) exit 1 ;;',
+      "    old) printf 'Usage: openclaw config set [options] <path> <value>\\n\\nOptions:\\n  --json  Legacy alias for --strict-json\\n' ;;",
+      "    *) printf 'Usage: openclaw config set [options] [path] [value]\\n\\nOptions:\\n  --batch-file <path>  Batch mode\\n' ;;",
+      "  esac",
+      "  exit 0",
+      "fi",
+      'if [ "${FAKE_CORE:-}" = old ] && [ "$3" = "--batch-file" ]; then echo "error: unknown option \'--batch-file\'" >&2; exit 1; fi',
       'if [ "$1 $2 $3" = "config set --batch-file" ]; then',
       '  f="$4"; cat "$f" >> "$BATCHES"; printf "\\n" >> "$BATCHES"',
       '  printf "%s %s\\n" "$(stat -c %a "$f")" "$(stat -c %a "$(dirname "$f")")" >> "$MODES"',
@@ -188,8 +204,10 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
       "openclaw_is_v2() { return 0; }",
       shellFunction(text, "oc_config_set"),
       shellFunction(text, "oc_config_set_batch"),
+      shellFunction(text, "openclaw_config_set_lacks_batch_file"),
       "provider() {",
       `  local CLAWBOX_AI_KEY="${KEY_MARKER}" AUTH_PROFILES="${path.join(dir, "auth-profiles.json")}"`,
+      block(text, '  if [ -n "$CLAWBOX_AI_KEY" ] && openclaw_config_set_lacks_batch_file; then', true),
       block(text, '  if [ -n "$CLAWBOX_AI_KEY" ]; then'),
       "}",
       "provider",
@@ -233,6 +251,32 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
 
     expect(r.status).toBe(0);
     expect(r.stdout.trimEnd().endsWith("caller-exit-trap")).toBe(true);
+  });
+
+  // A rollback override can install a core older than `config set
+  // --batch-file`. Its only other way to take the block is the key on a
+  // command line, so the installer leaves the fallback out and finishes.
+  it("on a core without config set --batch-file, writes no fallback and puts the key on no command line", () => {
+    const r = runProvider({ FAKE_CORE: "old" });
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(
+      "  WARN: ClawBox AI fallback not configured: OpenClaw 2026.2.26 has no 'config set --batch-file' (2026.3.22 and newer have it) to take its key off the command line\n",
+    );
+    expectNoMarker(r, KEY_MARKER);
+    const cli = r.argv.filter((args) => args[0] === "openclaw").map((args) => args.join(" "));
+    expect(cli).toEqual(["openclaw config set --help", "openclaw --version"]);
+    expect(r.batches).toEqual([]);
+    expect(r.stdout).not.toContain("ClawBox AI fallback model configured");
+  });
+
+  it("takes a help it cannot read as no verdict, and writes through the batch file", () => {
+    const r = runProvider({ FAKE_CORE: "mute" });
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("WARN");
+    expect(r.batches).toEqual([[{ path: "models.providers.deepseek", value: PROVIDER }]]);
+    expectNoMarker(r, KEY_MARKER);
   });
 });
 

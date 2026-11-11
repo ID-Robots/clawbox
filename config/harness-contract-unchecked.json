@@ -5,6 +5,7 @@
  "install.sh": {
   "config get: the key is computed at runtime": 2,
   "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
+  "config set: no key on the line": 1,
   "config set: the key is computed at runtime": 4
  },
  "scripts/ensure-local-embeddings.sh": {
