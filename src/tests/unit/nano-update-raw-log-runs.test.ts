@@ -9,11 +9,15 @@
  * the previous run (stale completion), an unfinished new run, and a pointer
  * that cannot be read — which must never become an empty baseline.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Every case starts real bash (and python3) processes: both ceilings, as the
+// suite's timeout hygiene asks of any file that does.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const LIB = path.join(process.cwd(), "scripts/nano-tests/update-raw-log-runs.sh");
 const canRun = process.platform === "linux"
@@ -43,6 +47,8 @@ function sh(script: string, { hop = true }: { hop?: boolean } = {}): { status: n
     : "board() { return 255; }";
   const r = spawnSync("bash", ["-c", `set -uo pipefail\n${board}\nsource "${LIB}"\n${script}`], {
     encoding: "utf-8",
+    timeout: 20_000,
+    killSignal: "SIGKILL",
     env: { ...process.env, FIXTURE_REPO: repo, BASELINE_RETRY_S: "0" },
   });
   return { status: r.status, stdout: r.stdout };
