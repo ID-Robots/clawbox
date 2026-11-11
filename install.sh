@@ -1899,6 +1899,11 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    # A hand-edited .env can end without a newline: the key must not be glued
+    # onto its last line, which would corrupt that key and leave this one unset.
+    if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
+      printf '\n' >> "$env_file"
+    fi
     printf '%s=%s\n' "$key" "$value" >> "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi
@@ -9194,6 +9199,13 @@ step_directories_permissions() {
   # ~5x faster on this hardware, "on" is the only way this model gets
   # weekday arithmetic right. Restart clawbox-llamacpp after changing it.
   ensure_env_setting "$ENV_FILE" "LLAMACPP_REASONING" "off"
+  # How llama-server holds the model: mmap keeps its CPU-side tensors in the
+  # page cache, where newer llama.cpp's own default (auto) pins ~2 GB of them
+  # in host memory on this board. scripts/start-llamacpp.sh passes it as
+  # LLAMA_ARG_LOAD_MODE. Never seed LLAMA_ARG_* itself here:
+  # clawbox-embed.service loads this same file. Jetson only — install-x64.sh
+  # does not seed it, as no PC or DGX Spark has been measured with it.
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_LOAD_MODE" "mmap"
   # 32k window, q8_0 KV cache, 8k answers (src/lib/llamacpp.ts says why).
   # Only the exact values this file used to write are moved, so a device keeps
   # any size an operator chose. Keep in step with src/lib/llamacpp.ts —
@@ -12105,10 +12117,17 @@ step_llamacpp_runtime() {
   # Pinned, not tip-of-master. An unpinned --depth 1 clone gave every device
   # whatever upstream happened to be that day — the two boxes here ended up on
   # d2f8305 and db7d8b2, so "the same install" produced different inference
-  # binaries. This commit is the one proven on this hardware; move it
-  # deliberately, with a rebuild to prove the new one — and moving it now
-  # moves every box, on its next update.
-  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-db7d8b24b5197ca39435cf47b3c1ba039b53605b}"
+  # binaries. Move it deliberately, with a rebuild to prove the new one — and
+  # moving it now moves every box, on its next update.
+  #
+  # 5f490d7 (b12233) was measured on an 8 GB Orin Nano against db7d8b2: faster
+  # (decode 33.5 vs 30.1 tok/s, prefill 1144 vs 987) with lowest MemAvailable
+  # 2251 vs 2403 MB, but only with the model memory-mapped. Its default load
+  # mode (auto) pins the model's CPU-side tensors in host memory on this board
+  # and left 390 MB free, so the pin moves only together with
+  # LLAMACPP_LOAD_MODE=mmap (seeded in step_directories_permissions, passed by
+  # scripts/start-llamacpp.sh).
+  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-5f490d7bfe78844e6390c869454c149fd7e003a8}"
 
   # On Jetson, nvcc ships at /usr/local/cuda/bin but isn't on systemd's PATH,
   # so `command -v nvcc` fails and we silently fall back to a CPU-only build.
