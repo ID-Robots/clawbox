@@ -79,11 +79,18 @@ staff_on_roster() {
   python3 -c "import json,sys; a=json.load(open(sys.argv[1])).get(\"agents\") or {}; ids=list((a.get(\"entries\") or {}).keys())+[x.get(\"id\") for x in (a.get(\"list\") or []) if isinstance(x,dict)]; print(len([k for k in ids if isinstance(k,str) and k.startswith(\"clawbox-staff-\")]))" "$HOME/.openclaw/openclaw.json" 2>/dev/null || echo "?"
 }
 
+# Switch off and remove both users; what each step answered is kept in
+# CLEANUP_STATUS ("org-off:200 delete-<name>:200 ..."), so the flow can check
+# it. Safe to run twice: a second run answers for users already gone.
 cleanup() {
   CLEANUP_SINCE=$(date +%s)
-  call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}" >/dev/null 2>&1 || true
-  call DELETE /setup-api/users "$OWNER" "{\"username\":\"$A_NAME\"}" >/dev/null 2>&1 || true
-  call DELETE /setup-api/users "$OWNER" "{\"username\":\"$B_NAME\"}" >/dev/null 2>&1 || true
+  local r u
+  r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}" 2>/dev/null || true)
+  CLEANUP_STATUS="org-off:$(status_of "$r")"
+  for u in "$A_NAME" "$B_NAME"; do
+    r=$(call DELETE /setup-api/users "$OWNER" "{\"username\":\"$u\"}" 2>/dev/null || true)
+    CLEANUP_STATUS="$CLEANUP_STATUS delete-$u:$(status_of "$r")"
+  done
 }
 
 if [ ! -r "$SECRET_FILE" ]; then say "not ok - $SECRET_FILE is not readable as the box account"; exit 0; fi
@@ -115,9 +122,26 @@ grep -E "^(RESULT|NOTE) " "$DRIVER_OUT" || say "not ok - [$RUNTIME] the chat dri
 [ "$DRIVER_RC" = 0 ] || say "not ok - [$RUNTIME] the chat driver ended with status $DRIVER_RC (124: it ran out of time)"
 rm -f "$DRIVER_OUT"
 
-# 5. Off, and the users gone.
+# 5. Off, and the users gone — both of them, by what the box answered and by
+# what it now lists.
 trap - EXIT
 cleanup
+bad=""
+for step in $CLEANUP_STATUS; do [ "${step##*:}" = 200 ] || bad="$bad $step"; done
+if [ -z "$bad" ]; then
+  say "ok - [$RUNTIME] the switch goes off and both members are removed"
+else
+  say "not ok - [$RUNTIME] cleanup answered:$bad"
+fi
+listed=$(call GET /setup-api/users "$OWNER" | tail -n +2 | python3 -c "import json,sys; print(\" \".join(u.get(\"username\",\"\") for u in (json.load(sys.stdin).get(\"users\") or [])))" 2>/dev/null || echo "?")
+if [ "$listed" = "?" ]; then
+  say "not ok - [$RUNTIME] the user list could not be read after cleanup"
+else
+  case " $listed " in
+    *" $A_NAME "*|*" $B_NAME "*) say "not ok - [$RUNTIME] a test member is still listed: $listed" ;;
+    *) say "ok - [$RUNTIME] neither test member is listed any more" ;;
+  esac
+fi
 if [ "$RUNTIME" = openclaw ]; then
   left=$(staff_on_roster)
   if [ "$left" = 0 ]; then
@@ -128,18 +152,26 @@ if [ "$RUNTIME" = openclaw ]; then
     journalctl -u clawbox-setup.service --since "@$CLEANUP_SINCE" --no-pager -o cat 2>/dev/null \
       | grep -E "\[org-staff\]|\[openclaw-config\]" | tail -n 20 | sed "s/^/NOTE [$RUNTIME] server: /"
   fi
-  [ ! -e "$HOME/.openclaw/staff/$A_NAME" ] && say "ok - [$RUNTIME] a removed member'"'"'s workspace goes with them" || say "not ok - [$RUNTIME] the removed member'"'"'s workspace is still there"
+  if [ ! -e "$HOME/.openclaw/staff/$A_NAME" ] && [ ! -e "$HOME/.openclaw/staff/$B_NAME" ]; then
+    say "ok - [$RUNTIME] a removed member'"'"'s workspace goes with them (both members)"
+  else
+    say "not ok - [$RUNTIME] a removed member'"'"'s workspace is still there"
+  fi
 else
   # Their memory, folder and config go. The dashboard may seed a bare state.db
   # back into a profile it still serves (tui_gateway/server.py
   # _bootstrap_served_profile_store) — an empty store, listed here as evidence.
-  P="$HOME/.hermes/profiles/clawbox-staff-$A_NAME"
-  if [ ! -e "$P/memories" ] && [ ! -e "$P/workspace" ] && [ ! -e "$P/config.yaml" ] && [ ! -e "$P/.env" ]; then
-    say "ok - [$RUNTIME] a removed member'"'"'s memory, folder and profile config go with them"
+  left=""
+  for u in "$A_NAME" "$B_NAME"; do
+    P="$HOME/.hermes/profiles/clawbox-staff-$u"
+    if [ -e "$P/memories" ] || [ -e "$P/workspace" ] || [ -e "$P/config.yaml" ] || [ -e "$P/.env" ]; then left="$left $u"; fi
+    [ -e "$P" ] && find "$P" -maxdepth 2 -printf "NOTE [$RUNTIME] left in the removed profile of $u: %P (%s bytes)\n" 2>/dev/null | head -n 10
+  done
+  if [ -z "$left" ]; then
+    say "ok - [$RUNTIME] a removed member'"'"'s memory, folder and profile config go with them (both members)"
   else
-    say "not ok - [$RUNTIME] the removed member'"'"'s memory, folder or profile config is still there"
+    say "not ok - [$RUNTIME] memory, folder or profile config still there for:$left"
   fi
-  [ -e "$P" ] && find "$P" -maxdepth 2 -printf "NOTE [$RUNTIME] left in the removed profile: %P (%s bytes)\n" 2>/dev/null | head -n 10
 fi
 echo "FLOW-END"
 '
