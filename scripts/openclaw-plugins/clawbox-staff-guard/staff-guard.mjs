@@ -21,7 +21,7 @@
 // Every other agent — the owner's above all — is not this plugin's business:
 // it answers `null` ("no opinion") for them without looking further.
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -62,18 +62,28 @@ function mediaOwnersFile() {
   }
 }
 
-let ownersCache = { file: "", mtimeMs: -1, owners: {} };
-/** `{ realpath: username }`, re-read when the file changes; `{}` when it cannot be read. */
+let ownersCache = { file: "", ino: -1, mtimeMs: -1, size: -1, owners: {} };
+/**
+ * `{ realpath: username }`, re-read when the file changes; `{}` when it cannot
+ * be read. ONE open: the stat and the read are both of that descriptor, so
+ * what is judged is the file that was looked at, never a path read twice.
+ * ClawBox replaces the record by rename (chat-media-owners.ts `writeOwners`),
+ * so each write is a new inode, whatever the clock's granularity.
+ */
 function readMediaOwners(file) {
+  let fd;
   try {
-    const { mtimeMs } = statSync(file);
-    if (ownersCache.file === file && ownersCache.mtimeMs === mtimeMs) return ownersCache.owners;
-    const parsed = JSON.parse(readFileSync(file, "utf-8"));
+    fd = openSync(file, "r");
+    const { ino, mtimeMs, size } = fstatSync(fd);
+    if (ownersCache.file === file && ownersCache.ino === ino && ownersCache.mtimeMs === mtimeMs && ownersCache.size === size) return ownersCache.owners;
+    const parsed = JSON.parse(readFileSync(fd, "utf-8"));
     const owners = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    ownersCache = { file, mtimeMs, owners };
+    ownersCache = { file, ino, mtimeMs, size, owners };
     return owners;
   } catch {
     return {};
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

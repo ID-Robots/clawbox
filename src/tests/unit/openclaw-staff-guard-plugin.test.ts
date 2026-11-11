@@ -150,6 +150,13 @@ describe("a member of staff's files", () => {
     // No owner record at all (not written, or unreadable): fail closed.
     expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), MARIA, { ...opts, mediaOwners: undefined })).toMatch(/not theirs/);
     expect(staffToolCallDenyReason(call("read", { path: staged("batch1", "q3.xlsx.txt") }), MARIA, { ...opts, mediaOwners: path.join(root, "missing.json") })).toMatch(/not theirs/);
+    // The record is read afresh when it changes: a file re-recorded as maria's opens for her.
+    const changed = path.join(root, "owners-changing.json");
+    const ownersOf = (who: string) => JSON.stringify({ [staged("batch2", "payroll.txt")]: who });
+    fs.writeFileSync(changed, ownersOf("ivan"));
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), MARIA, { ...opts, mediaOwners: changed })).toMatch(/not theirs/);
+    fs.writeFileSync(changed, ownersOf("maria"));
+    expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), MARIA, { ...opts, mediaOwners: changed })).toBeNull();
     // The shared staging root itself is nobody's: no reading everyone's uploads through it.
     expect(staffToolCallDenyReason(call("read", { path: staged() }), MARIA, opts)).toMatch(/not theirs/);
     // The owner is not judged at all.
