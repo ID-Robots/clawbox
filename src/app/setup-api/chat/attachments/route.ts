@@ -11,6 +11,8 @@ import { getActiveHarness } from "@/lib/harness";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isImageMedia } from "@/lib/chat-media";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_DROP_BATCH_RE, CHAT_DROP_MAX_DEPTH } from "@/lib/chat-attachments";
+import { isOfficeDocumentName, officeTextPath } from "@/lib/office-documents";
+import { extractOfficeText, type OfficeTextResult } from "@/lib/office-text";
 
 export const dynamic = "force-dynamic";
 
@@ -97,10 +99,44 @@ const RETENTION: MediaRetention = {
 
 /** Raised for input the client got wrong (400) as opposed to a failure of ours (500). */
 class BadUpload extends Error {
-  constructor(message: string, readonly status = 400) {
+  constructor(message: string, readonly status = 400, readonly code?: string) {
     super(message);
     this.name = "BadUpload";
   }
+}
+
+/** Why an office document's text could not be had, in the customer's words (the composer shows it under its own line). */
+const UNREADABLE_DOCUMENT: Record<Extract<OfficeTextResult, { ok: false }>["reason"], string> = {
+  encrypted: "The file is password-protected, so its text cannot be read. Save a copy without a password and attach that.",
+  too_large: "The file unpacks to more than the box reads from one document. Split it, or save the part you need on its own.",
+  unreadable: "The file is damaged or is not really a Word, Excel, PowerPoint or OpenDocument file.",
+};
+
+/**
+ * An office document (src/lib/office-documents.ts) is a ZIP of XML no model
+ * reads by itself, on either runtime: its text is taken out once, here, and
+ * left beside it as `<path>.txt` — which the Hermes prompt quotes and the
+ * OpenClaw turn names. A file whose text cannot be had is refused (422
+ * `unreadable_document`) rather than handed to an agent that would answer
+ * from the name alone. Returns the text's path, or undefined when a file of
+ * that name already sits there (a dropped folder that carries its own).
+ */
+async function stageOfficeText(staged: string): Promise<string | undefined> {
+  // At most CHAT_ATTACHMENT_MAX_BYTES: busboy's limit already held the file to it.
+  const bytes = await fsp.readFile(staged);
+  const result = extractOfficeText(bytes, staged);
+  if (!result.ok) throw new BadUpload(UNREADABLE_DOCUMENT[result.reason], 422, "unreadable_document");
+  const body = (result.text || "(This document holds no text — only pictures or empty pages.)")
+    + (result.truncated ? "\n\n[… the document goes on; only its beginning was kept here]" : "")
+    + "\n";
+  const textPath = officeTextPath(staged);
+  try {
+    await fsp.writeFile(textPath, body, { flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "EEXIST") return undefined;
+    throw err;
+  }
+  return textPath;
 }
 
 /**
@@ -538,9 +574,14 @@ export async function POST(req: NextRequest) {
     if (!documentsAllowed && !looksLikeImage(await readHead(result.path))) {
       throw new BadUpload(IMAGE_ONLY_MESSAGE, 415);
     }
-    return NextResponse.json(result.root
-      ? { ok: true, name: result.name, path: result.path, root: result.root }
-      : { ok: true, name: result.name, path: result.path });
+    const textPath = documentsAllowed && isOfficeDocumentName(result.path) ? await stageOfficeText(result.path) : undefined;
+    return NextResponse.json({
+      ok: true,
+      name: result.name,
+      path: result.path,
+      ...(result.root ? { root: result.root } : {}),
+      ...(textPath ? { textPath } : {}),
+    });
   } catch (err) {
     // A rejected upload must not leave a partial file behind: the composer
     // would be told nothing, but a later request reusing the name would
@@ -558,6 +599,10 @@ export async function POST(req: NextRequest) {
     // The same relative path twice in one batch: "wx" refused to clobber the
     // first copy, which is the caller's doing, not the box's.
     const status = err instanceof BadUpload ? err.status : (err as NodeJS.ErrnoException)?.code === "EEXIST" ? 409 : 500;
+    // A refusal with a code is a sentence written for the customer: shown as is.
+    if (err instanceof BadUpload && err.code) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status });
+    }
     return NextResponse.json(
       { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}` },
       { status },

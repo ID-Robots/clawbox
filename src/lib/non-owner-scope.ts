@@ -41,6 +41,17 @@
 // surfaces a non-owner had: the exceptions are what is named, and a route
 // added later is the owner's desktop for every user, like everything else.
 //
+// UPDATES ARE THE OWNER'S. "Update available", the update itself and every
+// action around it (the dismissal, the OpenClaw-only update, the weekly
+// check, the update branch, the System Update app) answer a user 403 on every
+// box: an update rebuilds and reboots the whole box as root. The one read left
+// to them is `update/status`, which the lock screen every user is sent to
+// during an update polls (src/app/updating).
+//
+// AN ORGANISATION BOX (`org_mode`, src/lib/org-mode.ts) narrows all of this to
+// an ALLOW-list: a member of staff gets Chat, Files and their own Settings,
+// and nothing the owner shares (OpenClaw included) reaches them.
+//
 // THE OWNER MAY SHARE OPENCLAW. "Share OpenClaw with all users" (Settings →
 // Users, `OPENCLAW_SHARED_KEY`, off unless the owner turns it on) hands the
 // first exception's OpenClaw half to every signed-in user: its desktop app,
@@ -54,13 +65,15 @@
 // judge exactly the table middleware uses.
 
 import { mayUseChatKey } from "./chat-scope";
+import { orgMemberVerdict } from "./org-mode";
 
 /**
  * Desktop apps that are the owner's alone: the harnesses' own consoles, which
- * list (and open) every conversation on the box. Every other app is every
- * signed-in user's.
+ * list (and open) every conversation on the box, and System Update (updating
+ * the box is the owner's call). Every other app is every signed-in user's —
+ * on a home box; an organisation box narrows that (src/lib/org-mode.ts).
  */
-export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes"];
+export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes", "system_update"];
 
 /** The one owner-only app the owner can share (see the header). */
 export const SHAREABLE_OPENCLAW_APP_ID = "openclaw";
@@ -88,6 +101,12 @@ export function openclawSharedFrom(value: unknown): boolean {
 export function ownerOnlyAppIds(openclawShared: boolean): readonly string[] {
   return openclawShared ? OWNER_ONLY_APP_IDS.filter((id) => id !== SHAREABLE_OPENCLAW_APP_ID) : OWNER_ONLY_APP_IDS;
 }
+
+/** Every update action is the owner's (the header): this tree and the update branch it pulls from. */
+const UPDATE_API_TREE = "/setup-api/update";
+const UPDATE_API_PATHS: ReadonlySet<string> = new Set(["/setup-api/system/update-branch"]);
+/** The one update read left to a user: the lock screen's progress poll. */
+const UPDATE_STATUS_API = "/setup-api/update/status";
 
 /** The owner's account: its password, and the factory reset that wipes it. */
 const OWNER_ACCOUNT_API: ReadonlySet<string> = new Set([
@@ -202,6 +221,8 @@ export interface NonOwnerRequest {
   username: string;
   /** The owner shares OpenClaw (`OPENCLAW_SHARED_KEY`); absent is not shared. */
   openclawShared?: boolean;
+  /** An organisation box (`ORG_MODE_KEY`, src/lib/org-mode.ts); absent is a home box. */
+  orgMode?: boolean;
 }
 
 const SHARED_OPENCLAW_PAGE = `/app/${SHAREABLE_OPENCLAW_APP_ID}`;
@@ -258,6 +279,30 @@ function canonicalPath(pathname: string): string | null {
   return path.length > 1 ? path.replace(/\/+$/, "") || "/" : path;
 }
 
+/** A path with a `.` or `..` segment once decoded: never one the allow-list grants. */
+function hasDotSegment(canon: string): boolean {
+  return canon.split("/").some((seg) => seg === "." || seg === "..");
+}
+
+/**
+ * A member of staff on an organisation box (src/lib/org-mode.ts), after the
+ * exceptions every user is held to. Nothing is shared with them: the
+ * gateway's trees give them their own chat's pictures and nothing else.
+ */
+function orgMember(req: NonOwnerRequest, canon: string, method: string, isRead: boolean): NonOwnerVerdict {
+  // An allow-list must not be reached by spelling: `files%2f..%2fterminal`
+  // decodes under an allowed tree, so a dot segment is refused outright.
+  if (hasDotSegment(canon)) return "deny";
+  if (GATEWAY_PREFIXES.some((p) => underPrefix(canon, p))) {
+    return isRead && isOwnChatMedia(req.pathname, req.username) ? "allow" : "deny";
+  }
+  if (underPrefix(canon, "/setup-api")) return orgMemberVerdict(canon, method) === "allow" ? "allow" : "deny";
+  if (STATIC_MEDIA_RE.test(req.pathname) || CLAWBOX_PUBLIC_FILES.has(req.pathname)) return isRead ? "allow" : "deny";
+  if (orgMemberVerdict(canon, method) === "allow") return "allow";
+  if (!looksLikePage(req.pathname)) return "deny";
+  return ownerPage(req);
+}
+
 export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const { pathname } = req;
   const method = req.method.toUpperCase();
@@ -271,6 +316,10 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   if (!isRead && (BOX_AI_SETTINGS_API.has(canon) || BOX_AI_SETTINGS_PREFIXES.some((p) => underPrefix(canon, p)))) {
     return "deny";
   }
+  if ((underPrefix(canon, UPDATE_API_TREE) || UPDATE_API_PATHS.has(canon)) && !(isRead && canon === UPDATE_STATUS_API)) {
+    return "deny";
+  }
+  if (req.orgMode === true) return orgMember(req, canon, method, isRead);
   // The Control UI page with the token in it: shared with the rest of OpenClaw.
   if (OWNER_SECRET_API.has(canon)) return shared ? "allow" : "deny";
   // API trees answer code, so they answer 403 JSON however they are asked.

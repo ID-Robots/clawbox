@@ -21,6 +21,7 @@ import {
   requestIntent,
 } from "@/lib/non-owner-scope";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
+import { ORG_MODE_KEY, orgModeFrom } from "@/lib/org-mode";
 import { APP_PROXY_NEXT_URL_HEADER, APP_REOPEN_PAGE_CSP, appReopenPage } from "@/lib/app-window";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
@@ -54,6 +55,8 @@ interface ConfigSnapshot {
   users: ReadonlyMap<string, string>;
   /** The owner shares OpenClaw with every signed-in user (src/lib/non-owner-scope.ts). */
   openclawShared: boolean;
+  /** An organisation box: a user gets Chat, Files and their own Settings (src/lib/org-mode.ts). */
+  orgMode: boolean;
 }
 
 const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
@@ -101,6 +104,7 @@ function readConfigCached(): ConfigSnapshot {
       [UPDATE_LOCK_KEY]?: unknown;
       [USERS_CONFIG_KEY]?: unknown;
       [OPENCLAW_SHARED_KEY]?: unknown;
+      [ORG_MODE_KEY]?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -114,6 +118,7 @@ function readConfigCached(): ConfigSnapshot {
       publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
       users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
       openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
+      orgMode: orgModeFrom(parsed[ORG_MODE_KEY]),
     };
     return configCache;
   } catch (err) {
@@ -142,6 +147,9 @@ function readConfigCached(): ConfigSnapshot {
       users: NO_USERS,
       // Closed like the users: an unreadable switch shares nothing.
       openclawShared: false,
+      // A home box: no user can sign in on an unreadable config anyway (users
+      // above), and this is the reading that hides nothing from the owner.
+      orgMode: false,
     };
     return configCache;
   } finally {
@@ -793,7 +801,9 @@ export async function middleware(request: NextRequest) {
     // that" — `requestIntent`, not `isDocumentRequest`, because the box is
     // reached over plain HTTP, where browsers send no Sec-Fetch-Dest at all.
     // The owner's "Share OpenClaw with all users" switch rides in from the same
-    // cached config.json read, so turning it off holds from the next request.
+    // cached config.json read, so turning it off holds from the next request —
+    // and so does `org_mode` (src/lib/org-mode.ts), which narrows a user to
+    // Chat, Files and their own Settings on an organisation box.
     if (!identity.isOwner) {
       const verdict = nonOwnerVerdict({
         pathname: request.nextUrl.pathname,
@@ -802,6 +812,7 @@ export async function middleware(request: NextRequest) {
         intent: requestIntent(request.headers),
         username: identity.username,
         openclawShared: readConfigCached().openclawShared,
+        orgMode: readConfigCached().orgMode,
       });
       if (verdict === "redirect-home") {
         return NextResponse.redirect(new URL(NON_OWNER_HOME, request.url), {

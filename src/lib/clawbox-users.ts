@@ -42,6 +42,7 @@ import { USERS_CONFIG_KEY, parseUserRegistry, type ClawboxUserRecord } from "@/l
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 import { removeDesktopState } from "@/lib/desktop-state-store";
 import { forgetUserLanguage } from "@/lib/user-language";
+import { forgetUserPreferences } from "@/lib/user-preferences";
 
 const execFile = promisify(execFileCb);
 
@@ -422,6 +423,11 @@ export async function removeUser(username: string, opts: { currentUser: string }
     await forgetUserLanguage(removable).catch((err) => {
       console.error("[clawbox-users] could not forget the user's language:", err instanceof Error ? err.message : err);
     });
+    // And their own desktop preferences on an organisation box
+    // (src/lib/user-preferences.ts), for the same reason.
+    await forgetUserPreferences(removable).catch((err) => {
+      console.error("[clawbox-users] could not forget the user's preferences:", err instanceof Error ? err.message : err);
+    });
     // And their chat (src/lib/user-chats.ts): the same name later starts with
     // an empty conversation, never this one's. Loaded here: it reaches the
     // harness's stores, which nothing else in this module needs.
@@ -483,6 +489,65 @@ export async function userHelperAvailable(): Promise<boolean> {
       child.stdin?.end("\n\n");
     } catch {
       resolve(false);
+    }
+  });
+}
+
+/**
+ * What changing a ClawBox user's own password came to:
+ *   - `ok` — changed;
+ *   - `wrong` — the current password is not theirs (or the account is not a
+ *     ClawBox user's, which the helper answers the same way);
+ *   - `invalid` — the new password is outside the rules
+ *     (`USER_PASSWORD_MIN`–`USER_PASSWORD_MAX`, no control characters);
+ *   - `unavailable` — the helper could not be asked (no grant: sudo's 1), or
+ *     is one from before the `passwd` verb (it refuses an unknown verb with
+ *     its usage, 64): the box needs an update for its root-owned helper;
+ *   - `failed` — the helper checked everything and chpasswd still refused.
+ * Never throws.
+ */
+export type UserPasswordChange = "ok" | "wrong" | "invalid" | "unavailable" | "failed";
+
+/** The helper's answers for a new password outside the rules, and for chpasswd refusing (config/clawbox-user-helper.sh). */
+const HELPER_BAD_NEW_PASSWORD = 65;
+const HELPER_CHPASSWD_FAILED = 66;
+
+/**
+ * Change a ClawBox user's OWN Linux password (Settings → Account), through the
+ * root-owned helper's `passwd` verb: the current password is checked as root
+ * with unix_chkpwd before chpasswd runs, and both travel on STDIN only.
+ * Never the owner's — their password is `system/credentials`'.
+ */
+export async function changeUserPassword(username: string, current: string, next: string): Promise<UserPasswordChange> {
+  if (checkUsername(username) !== "ok" || username === getSystemUsername()) return "wrong";
+  if (typeof current !== "string" || !current || !isSafePasswordChars(current)) return "wrong";
+  if (
+    typeof next !== "string"
+    || next.length < USER_PASSWORD_MIN
+    || next.length > USER_PASSWORD_MAX
+    || !isSafePasswordChars(next)
+  ) {
+    return "invalid";
+  }
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "passwd"], {
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+      child.on("error", () => resolve("unavailable"));
+      child.on("close", (code) => {
+        if (code === HELPER_OK) resolve("ok");
+        else if (code === HELPER_AUTH_ERR) resolve("wrong");
+        else if (code === HELPER_BAD_NEW_PASSWORD) resolve("invalid");
+        else if (code === HELPER_CHPASSWD_FAILED) resolve("failed");
+        else resolve("unavailable");
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${username}\n${current}\n${next}\n`);
+    } catch {
+      resolve("unavailable");
     }
   });
 }

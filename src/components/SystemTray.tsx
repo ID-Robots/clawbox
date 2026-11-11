@@ -3,6 +3,7 @@
 import { memo, useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { useSessionUser } from "@/lib/use-session-user";
+import { isOrgMember } from "@/lib/org-mode";
 import { announceSessionSwitch } from "@/lib/session-switch";
 import CrabWaitMark from "./CrabWaitMark";
 import { mainInsets } from "@/lib/desktop-screens";
@@ -50,6 +51,9 @@ function SystemTray({
   const sessionUser = useSessionUser();
   const isOwner = sessionUser?.isOwner !== false;
   const showUser = !!sessionUser && (sessionUser.multiUser || !sessionUser.isOwner);
+  // Restarting and shutting the box down is the owner's on an organisation box
+  // (src/lib/org-mode.ts): a member of staff's tray keeps only "Switch user".
+  const powerButtons = !isOrgMember(sessionUser);
   const [closing, setClosing] = useState(false);
   // Above the power button on the main monitor when the desktop is spread over several.
   const deskScreens = useDeskScreens();
@@ -349,6 +353,7 @@ function SystemTray({
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">
             {powerError && <p role="alert" className="text-xs text-red-400">{powerError}</p>}
+            {powerButtons && (
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handlePower("restart")}
@@ -369,6 +374,7 @@ function SystemTray({
                 <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? t("tray.confirm") : t("tray.shutDown")}</span>
               </button>
             </div>
+            )}
             <button
               onClick={async () => {
                 await fetch("/login-api/logout", { method: "POST" }).catch(() => {});

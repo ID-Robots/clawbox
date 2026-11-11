@@ -28,6 +28,7 @@ const {
 } = require("./scripts/upgrade-session-watch.js");
 const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
+const { ORG_MODE_KEY, orgModeFrom, orgModeRefusesUpgrade } = require("./scripts/org-mode.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -168,11 +169,12 @@ function readSessionConfig() {
       gen,
       users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()),
       openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
+      orgMode: orgModeFrom(parsed[ORG_MODE_KEY]),
     };
     sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    const value = { gen: 0, users: new Map(), openclawShared: false };
+    const value = { gen: 0, users: new Map(), openclawShared: false, orgMode: false };
     sessionConfigCache = { mtimeMs: -1, value };
     return value;
   }
@@ -206,6 +208,10 @@ function authorizeUpgrade(gate, req) {
   const identity = upgradeSession(req.headers.cookie);
   if (!identity) return { ok: false, status: 401 };
   if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };
+  // An organisation box (scripts/org-mode.js): a member of staff's only socket
+  // is their own chat — never the Terminal, the remote desktop or the
+  // gateway's Control UI, whether or not the owner shares OpenClaw.
+  if (orgModeRefusesUpgrade(gate, identity, readSessionConfig().orgMode)) return { ok: false, status: 403 };
   return { ok: true, identity };
 }
 
@@ -227,14 +233,30 @@ const sharedGatewayWatch = createUpgradeSessionWatch({
   verify: (cookieHeader) => {
     const session = upgradeSession(cookieHeader);
     if (!session) return null;
-    return session.isOwner || readSessionConfig().openclawShared ? session : null;
+    if (session.isOwner) return session;
+    const { openclawShared, orgMode } = readSessionConfig();
+    return openclawShared && !orgMode ? session : null;
+  },
+  recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
+});
+
+// A non-owner's Terminal or remote desktop holds for as long as the session
+// AND the box is not an organisation box: the owner turning `org_mode` on
+// closes it on the next recheck, as a revoked session would be.
+const orgMemberWatch = createUpgradeSessionWatch({
+  verify: (cookieHeader) => {
+    const session = upgradeSession(cookieHeader);
+    if (!session) return null;
+    return session.isOwner || !readSessionConfig().orgMode ? session : null;
   },
   recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
 });
 
 /** The watch an admitted socket is held to. */
 function sessionWatchFor(gate, identity) {
-  return gate.gateway && identity && !identity.isOwner ? sharedGatewayWatch : upgradeSessionWatch;
+  if (!identity || identity.isOwner) return upgradeSessionWatch;
+  if (gate.gateway) return sharedGatewayWatch;
+  return gate.userChat ? upgradeSessionWatch : orgMemberWatch;
 }
 
 /**
@@ -286,7 +308,10 @@ const userChatWss = new WebSocket.Server({ noServer: true });
  */
 function relayedChatUser(gate, identity) {
   if (!gate.gateway || !identity || identity.isOwner) return null;
-  if (!gate.userChat && readSessionConfig().openclawShared) return null;
+  // An organisation box shares nothing (and refuses the root socket to a user
+  // before this is asked — authorizeUpgrade); relaying is the safe reading.
+  const { openclawShared, orgMode } = readSessionConfig();
+  if (!gate.userChat && openclawShared && !orgMode) return null;
   return identity.username;
 }
 

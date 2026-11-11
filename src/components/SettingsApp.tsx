@@ -51,6 +51,8 @@ import PathGuardPanel from "./PathGuardPanel";
 import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
 import { useSettledSessionUser } from "@/lib/use-session-user";
+import { isOrgMember, ORG_USER_SETTINGS_SECTIONS } from "@/lib/org-mode";
+import OwnPasswordCard from "./OwnPasswordCard";
 import MonitorsPanel from "./MonitorsPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
@@ -241,7 +243,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "account", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
 
 /**
  * Users is a part of System now — System → Users, beside the device's own
@@ -362,6 +364,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // not by history: the brain and the ways to reach it first, the box's own
   // machinery next, the once-a-year pages last.
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
+  // A signed-in user other than the owner: their own password. Drawn for
+  // them alone (`sectionShown`); the owner's password is System's.
+  { id: "account", icon: "person", labelKey: "users.account" },
   // Monitor mode: the monitors the desktop is spread over. Only on a box that
   // has a monitor session (`monitorsAvailable` below) — every other box never
   // shows the row.
@@ -681,6 +686,20 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
   const sessionUser = useSettledSessionUser();
   const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
+  // Which sections this person is drawn. Until /users/me answers, the owner's
+  // set (as the desktop draws), minus Account, which is a user's alone. A
+  // user never gets System Update — updating the box is the owner's on every
+  // box — and on an organisation box (src/lib/org-mode.ts) gets only their
+  // own: Appearance (language, wallpaper, look) and Account (password). The
+  // routes behind every other section answer them 403 whatever is drawn.
+  const nonOwner = sessionUser != null && sessionUser.isOwner === false;
+  const orgMember = isOrgMember(sessionUser);
+  const sectionShown = useCallback((id: Section): boolean => {
+    if (id === "account") return nonOwner;
+    if (id === "update" && nonOwner) return false;
+    if (orgMember) return ORG_USER_SETTINGS_SECTIONS.includes(id === "localModels" ? "localAi" : id);
+    return true;
+  }, [nonOwner, orgMember]);
   const systemShows: SystemView | null = systemView === "device" ? "device" : usersAllowed === null ? null : usersAllowed ? "users" : "device";
   useEffect(() => {
     let alive = true;
@@ -3284,7 +3303,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
   }, []);
 
-  const activeSection = isMobile ? (mobileSection ?? section) : section;
+  const requestedSection = isMobile ? (mobileSection ?? section) : section;
+  // A section this person is not drawn (a deep link from an older page, a
+  // channel pane on an organisation box) opens on Appearance instead.
+  const activeSection: Section = isChannelSection(requestedSection)
+    ? (sectionShown("channels") ? requestedSection : DEFAULT_SECTION)
+    : sectionShown(requestedSection) ? requestedSection : DEFAULT_SECTION;
 
   // Read when the Channels list or a channel pane is on screen — the two
   // places the badge can appear — and not on every section, since it costs a
@@ -3306,7 +3330,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const navSection: Section = isChannelSection(activeSection)
     ? "channels"
     : activeSection === "localModels" ? "localAi" : activeSection;
-  const visibleNavItems = monitorsAvailable ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id !== "monitors");
+  const visibleNavItems = NAV_ITEMS.filter((item) => (monitorsAvailable || item.id !== "monitors") && sectionShown(item.id));
   // The panel's own heading. Taken from the entry that already names it — the
   // channels list for a channel pane, the sidebar for every other section — so
   // a heading needs no new translation key and cannot drift from the row the
@@ -3888,6 +3912,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         )}
 
         {/* ─── Network ─── */}
+        {activeSection === "account" && (
+          <div className="max-w-xl space-y-5">
+            <OwnPasswordCard />
+          </div>
+        )}
+
         {activeSection === "wifi" && (
           <div className="max-w-xl space-y-5">
 
@@ -6618,7 +6648,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 It is about the box, not the assistant, so it lives with the box's
                 figures (owner, 2026-09-16); Desktop & power stays on Harness.
                 Rendered outside the stats ternary: a box whose stats call fails
-                must still let the owner change its password. */}
+                must still let the owner change its password. The OWNER's
+                password: another user changes their own under Account. */}
+            {!nonOwner && (
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
@@ -6724,6 +6756,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
             </div>
+            )}
           </div>
         )}
 

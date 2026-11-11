@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSystemUsername } from "@/lib/auth";
 import { listUsers } from "@/lib/clawbox-users";
 import { isTunnelRequest } from "@/lib/host-allowlist";
+import { readOrgMode } from "@/lib/org-mode-server";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,11 @@ export const dynamic = "force-dynamic";
 //   * on the LAN a multi-user box lists its usernames, owner first;
 //   * over the remote-access tunnel (CF-Connecting-IP, which only survives
 //     scripts/proxy-peer.js on a loopback peer) it lists NOBODY — the page asks
-//     for a username instead, so the internet is not handed the account names.
+//     for a username instead, so the internet is not handed the account names;
+//   * an organisation box (`org_mode`, src/lib/org-mode.ts) lists nobody on
+//     the LAN either: its users are a company's staff, whose names are not
+//     for whoever walks up to a screen, and a list of dozens is no picker.
+//     Everyone types their username (the owner may leave it empty).
 //
 // Never a password hint, a creation date or anything else from the registry.
 export async function GET(request: Request) {
@@ -31,7 +36,7 @@ export async function GET(request: Request) {
   if (users.length === 0) {
     return NextResponse.json({ multiUser: false }, { headers });
   }
-  if (isTunnelRequest(request.headers)) {
+  if (isTunnelRequest(request.headers) || (await readOrgMode())) {
     return NextResponse.json({ multiUser: true, users: null }, { headers });
   }
   return NextResponse.json(
