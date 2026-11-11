@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { functionDefs, type Line, logicalLines, sudoWrappers } from "../helpers/shell-reader";
+
+// This file starts no process, but one MUST MISS row holds a `node -e` program
+// that names child_process, and test-timeout-hygiene reads that text as a spawn.
+// The ceilings cost nothing here and keep that guard's reader simple.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
  * Root runs nothing from the tree (docs/agents/update-and-install.md): no line
