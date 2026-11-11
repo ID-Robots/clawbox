@@ -179,6 +179,45 @@ describe("install-x64.sh: the local model a workstation gets", () => {
     expect(SOURCE).toMatch(/^LLAMACPP_WORKSTATION_CONTEXT_WINDOW=65536$/m);
   });
 
+  // TASK-2387: every chat on a workstation shares its one local engine, so the
+  // box is single-engine and gateway-pre-start.sh keeps the background review
+  // and dreaming off there by default.
+  it("marks a fresh workstation single-engine", () => {
+    gpu("[N/A]");
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "");
+    expect(seed(envFile, 128).status).toBe(0);
+    expect(readEnv(envFile).CLAWBOX_SINGLE_ENGINE).toBe("1");
+  });
+
+  it("marks an updated workstation that already has its model single-engine too", () => {
+    // Outside the model guard: an update keeps the model AND gets the flag.
+    gpu("[N/A]");
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "LLAMACPP_MODEL=qwen3.6-35b-a3b-mtp\n");
+    seed(envFile, 128);
+    const env = readEnv(envFile);
+    expect(env.LLAMACPP_MODEL).toBe("qwen3.6-35b-a3b-mtp");
+    expect(env.CLAWBOX_SINGLE_ENGINE).toBe("1");
+  });
+
+  it("does not mark a host without the memory for it", () => {
+    gpu("12282");
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "");
+    seed(envFile, 32);
+    expect(readEnv(envFile).CLAWBOX_SINGLE_ENGINE).toBeUndefined();
+  });
+
+  it("keeps an owner's own CLAWBOX_SINGLE_ENGINE, 0 included", () => {
+    gpu("[N/A]");
+    const envFile = path.join(dir, ".env");
+    writeFileSync(envFile, "CLAWBOX_SINGLE_ENGINE=0\n");
+    seed(envFile, 128);
+    expect(readFileSync(envFile, "utf8").match(/^CLAWBOX_SINGLE_ENGINE=/gm)).toHaveLength(1);
+    expect(readEnv(envFile).CLAWBOX_SINGLE_ENGINE).toBe("0");
+  });
+
   it("is what step_directories_permissions seeds .env with", () => {
     expect(sliceFunction("step_directories_permissions")).toContain('seed_llamacpp_env "$ENV_FILE"');
   });

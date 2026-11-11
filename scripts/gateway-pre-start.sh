@@ -6667,7 +6667,9 @@ fi
 # WHAT ONE BOOT DOES, by what the record says:
 #   generation 2       DONE. One small file read and nothing else — this is a
 #                      blocking ExecStartPre and a CLI cold start is 10-12 s on
-#                      a Jetson.
+#                      a Jetson. (Plus a read of `.env` while the record does
+#                      not name the single-engine rows, and one pass for them
+#                      on a single-engine box: see A SINGLE-ENGINE BOX below.)
 #   generation absent  the previous build's record, so the opt-outs were
 #                      ClawBox's: every key still AT its opt-out literal is
 #                      flipped ON — check-ins by REMOVING the key, dreaming to
@@ -6711,9 +6713,31 @@ fi
 # same verb the panel's ON uses (`runOpenclawConfigUnset`) — because a batch
 # entry must carry a value and the CLI has no batch form that removes one. At
 # most two CLI starts, and only on the one boot that migrates.
+#
+# A SINGLE-ENGINE BOX (TASK-2387) is the one exception to "on by default".
+# `CLAWBOX_SINGLE_ENGINE=1` in `.env` (process environment first, then
+# `$CLAWBOX_ROOT/.env`, read like the Local AI repair's reader above — no gateway
+# unit loads that file; install-x64.sh seeds it on a workstation-class host)
+# says every chat on the box shares ONE local or cluster engine, and a
+# background review or a dreaming sweep is a turn on the engine every user is
+# waiting on. On such a box:
+#   - self-learning and dreaming are NEVER flipped on here — not off->auto, not
+#     false->true — whatever the record says; the check-ins flip is unchanged;
+#   - ONCE PER BOX each of the two keys is judged: an ABSENT key (the core's
+#     default, ON) gets the off value, `off` / `false`, and either way the row
+#     `single-engine:<key>` is added to `seeded`. A key that is already there
+#     — an owner's explicit `auto`, a restored `off` — is left exactly as it is.
+#     From then on the keys are the owner's: Settings → Harness switches them
+#     on, and no boot takes that back, because the row is the "done".
+#   - a generation-2 box (done before the flag was set) gets ONE more pass for
+#     the two rows, and on that pass nothing of the generation-2 migration is
+#     redone — a check-in or a job the owner switched off since stays off.
+# Hermes keys are not touched: `register-mcp.sh` judges its own harness and
+# keeps the rows it does not know.
 CLAWBOX_OPTOUT_STATE="$CLAWBOX_ROOT/data/background-optouts.json"
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-  CLAWBOX_JOBS_PLAN="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
+  CLAWBOX_JOBS_PLAN="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" CLAWBOX_DOTENV="$CLAWBOX_ROOT/.env" \
+    python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
 import json, os, sys
 
 # path -> the opt-out literal TASK-609 seeded, and what brings the key to the
@@ -6727,6 +6751,57 @@ WANTED = [
 ]
 GENERATION = 2
 KEYS = [".".join(path) for path, _, _ in WANTED]
+
+# TASK-2387: path -> the value a SINGLE-ENGINE box seeds into the key once,
+# only while it is absent. Keys of OpenClaw 2026.10.9 (the version the
+# installers pin): `docs/reference/memory-config.md` and the memory-core
+# plugin's own configSchema (`dreaming.enabled`, boolean, default true), and
+# `docs/tools/self-learning.md` (`auto` | `off`).
+SINGLE_ENGINE_OFF = [
+    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False),
+    (("skills", "workshop", "autonomous", "mode"), "off"),
+]
+SINGLE_ENGINE_ROW = "single-engine:"
+SINGLE_ENGINE_KEYS = {".".join(path) for path, _ in SINGLE_ENGINE_OFF}
+SINGLE_ENGINE_ROWS = [SINGLE_ENGINE_ROW + ".".join(path) for path, _ in SINGLE_ENGINE_OFF]
+
+
+def setting(name):
+    """`name` from the process environment first, then `$CLAWBOX_ROOT/.env`.
+
+    Read the way the Local AI repair's `.env` reader reads it: `export ` and
+    one pair of matching quotes stripped, the last assignment wins. The truth
+    test below is `isSingleEngineBox` in `src/lib/background-jobs.ts`. errors="replace" and a broad except
+    for the reason that reader gives: `.env` is clawbox-writable, and a stray
+    byte must not cost a blocking ExecStartPre its gateway — an unreadable
+    file is simply no setting.
+    """
+    value = (os.environ.get(name) or "").strip()
+    if value:
+        return value
+    try:
+        with open(os.environ.get("CLAWBOX_DOTENV") or "", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, raw = line.partition("=")
+                key = key.strip()
+                if key.startswith("export "):
+                    key = key[len("export "):].strip()
+                if key != name:
+                    continue
+                raw = raw.strip()
+                if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+                    raw = raw[1:-1]
+                value = raw.strip()
+    except Exception:
+        return ""
+    return value
+
+
+def single_engine():
+    return setting("CLAWBOX_SINGLE_ENGINE").lower() in ("1", "true", "yes", "on")
 
 
 def read_record(path):
@@ -6774,9 +6849,17 @@ if record is None:
     print("")
     raise SystemExit(0)
 seeded, generation = record
-if generation >= GENERATION and all(key in seeded for key in KEYS):
-    # Done. This is the cost of every boot after the first, and it has to stay
-    # one small file read: nothing below is reached.
+# The generation-2 migration of THESE keys has happened: from here they are the
+# owner's, and a later pass (the single-engine one) must not flip any of them.
+migrated = generation >= GENERATION and all(key in seeded for key in KEYS)
+# Done. This is the cost of every boot after the first, and it has to stay
+# small file reads — the record, and `.env` unless the record already names
+# the single-engine rows: nothing below either exit is reached.
+if migrated and all(row in seeded for row in SINGLE_ENGINE_ROWS):
+    print("")
+    raise SystemExit(0)
+quiet = single_engine()
+if migrated and not quiet:
     print("")
     raise SystemExit(0)
 
@@ -6799,6 +6882,25 @@ def current(path):
     return node
 
 
+def absent(path):
+    """True only when the walk ends at an object that lacks the next key.
+
+    The single-engine seed writes into an ABSENT key and nowhere else. A path
+    that runs into something that is not an object (`"config": null`, a
+    `workshop` that is a string) is a shape ClawBox did not write and the core's
+    schema rejects: `config set` would have to replace it to land the key, so
+    it is left for the owner exactly as it is.
+    """
+    node = cfg
+    for part in path:
+        if not isinstance(node, dict):
+            return False
+        if part not in node:
+            return True
+        node = node[part]
+    return False
+
+
 def at_optout(value, literal):
     # The panel's own reading of each key: a cadence is off at `0m`, the mode
     # at `off` (case aside), dreaming at a real JSON `false` — never at `0`,
@@ -6819,6 +6921,14 @@ batch = []
 unset_heartbeat = False
 flipped = []
 for path, literal, default in WANTED:
+    # A box whose generation 2 is recorded is here only for the single-engine
+    # rows: its three keys are the owner's, and a check-in they switched off since
+    # must not be switched back on by a pass that came for something else.
+    if migrated:
+        break
+    # A single-engine box never has these two switched ON by ClawBox.
+    if quiet and ".".join(path) in SINGLE_ENGINE_KEYS:
+        continue
     if not at_optout(current(path), literal):
         continue
     flipped.append(".".join(path))
@@ -6826,7 +6936,22 @@ for path, literal, default in WANTED:
         unset_heartbeat = True
     else:
         batch.append({"path": ".".join(path), "value": default})
-print(json.dumps({"batch": batch, "unsetHeartbeat": unset_heartbeat, "flipped": flipped, "settled": KEYS}))
+
+# The single-engine seed: once per box, into an absent key only. The row is
+# recorded whatever the key held — the box has been judged, and an `auto` the
+# owner sets later (or a key they remove) is theirs — and a row already there is
+# never acted on again.
+quieted = []
+settled = list(KEYS)
+if quiet:
+    for (path, value), row in zip(SINGLE_ENGINE_OFF, SINGLE_ENGINE_ROWS):
+        settled.append(row)
+        if row in seeded or not absent(path):
+            continue
+        quieted.append(".".join(path))
+        batch.append({"path": ".".join(path), "value": value})
+print(json.dumps({"batch": batch, "unsetHeartbeat": unset_heartbeat, "flipped": flipped,
+                  "quieted": quieted, "settled": settled}))
 SEEDPY
 )"
   if [ -n "$CLAWBOX_JOBS_PLAN" ]; then
@@ -6879,9 +7004,22 @@ SEEDPY
       if [ "$CLAWBOX_JOBS_OK" != "1" ]; then
         echo "  WARN: could not bring the OpenClaw 2 background jobs to their defaults; the box keeps its opt-outs until the next boot or until Settings is used" >&2
       else
-        if [ "$CLAWBOX_JOBS_WRITES" != "[]" ] || [ "$CLAWBOX_JOBS_UNSET" = "1" ]; then
-          echo "  Brought the OpenClaw 2 background jobs (check-ins, memory dreaming, self-learning) to their defaults — on; Settings → Harness switches any of them off"
-        fi
+        # What the writes WERE, for the log only: a batch can now carry a
+        # single-engine box's `off` as well as a flip's `on`, and the line that
+        # says "on" must not be printed over a write that switched things off.
+        # Read off the plan like the two above and checked by shape; a reader
+        # that fails says nothing rather than something untrue.
+        CLAWBOX_JOBS_SAY="$(printf %s "$CLAWBOX_JOBS_PLAN" | python3 -c 'import json,sys; p=json.load(sys.stdin); print(("on" if p["flipped"] else "") + ("off" if p["quieted"] else "") or "none")' || true)"
+        case "$CLAWBOX_JOBS_SAY" in
+          on|onoff)
+            echo "  Brought the OpenClaw 2 background jobs ClawBox had switched off back to their defaults — on; Settings → Harness switches any of them off"
+            ;;
+        esac
+        case "$CLAWBOX_JOBS_SAY" in
+          off|onoff)
+            echo "  Single-engine box (CLAWBOX_SINGLE_ENGINE): self-learning's background review and memory dreaming are off by default — every chat shares one AI engine; Settings → Harness switches them on"
+            ;;
+        esac
         # RECORDED ONLY AFTER THE WRITES LANDED, and merged with what is there:
         # a flip that failed must be tried again next boot, and on a dual box
         # `register-mcp.sh` keeps its own keys in this file.

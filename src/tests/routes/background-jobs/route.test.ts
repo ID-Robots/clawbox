@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+
+import { saveEnv } from "@/tests/helpers/env";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
@@ -100,6 +102,49 @@ describe("background-jobs — reading the box", () => {
     expect(byId.get("skillLearning")?.key).toBe("curator.enabled");
     // Hermes' own defaults for both are `true`.
     expect(byId.get("memoryReview")?.enabled).toBe(true);
+  });
+});
+
+// TASK-2387: the panel says why dreaming and the background review are off on
+// a box whose chats share one engine. Only on OpenClaw: the flag does not touch
+// Hermes' keys, so saying "off by default" there would be untrue.
+describe("background-jobs — a single-engine box", () => {
+  async function singleEngine(): Promise<unknown> {
+    return ((await (await GET()).json()) as { singleEngine?: unknown }).singleEngine;
+  }
+
+  let restore: () => void;
+  beforeEach(() => {
+    restore = saveEnv("CLAWBOX_SINGLE_ENGINE");
+  });
+  afterEach(() => restore());
+
+  it("says so on OpenClaw when CLAWBOX_SINGLE_ENGINE is set", async () => {
+    process.env.CLAWBOX_SINGLE_ENGINE = "1";
+    expect(await singleEngine()).toBe(true);
+    process.env.CLAWBOX_SINGLE_ENGINE = " TRUE ";
+    expect(await singleEngine()).toBe(true);
+  });
+
+  it("does not on a box without the flag, or with it off", async () => {
+    delete process.env.CLAWBOX_SINGLE_ENGINE;
+    expect(await singleEngine()).toBe(false);
+    process.env.CLAWBOX_SINGLE_ENGINE = "0";
+    expect(await singleEngine()).toBe(false);
+  });
+
+  it("never does on Hermes, whose keys the flag leaves alone", async () => {
+    process.env.CLAWBOX_SINGLE_ENGINE = "1";
+    getActiveHarness.mockResolvedValue("hermes");
+    expect(await singleEngine()).toBe(false);
+  });
+
+  it("still says so on OpenClaw when the config cannot be read", async () => {
+    process.env.CLAWBOX_SINGLE_ENGINE = "1";
+    readConfigStrict.mockRejectedValue(new Error("EACCES"));
+    const body = (await (await GET()).json()) as { degraded: boolean; singleEngine: boolean };
+    expect(body.degraded).toBe(true);
+    expect(body.singleEngine).toBe(true);
   });
 });
 

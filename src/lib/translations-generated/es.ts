@@ -3326,6 +3326,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "Repaso de memoria en segundo plano",
   "settings.bgMemoryHint": "Consolida lo que recuerda, con tu propio modelo, entre conversaciones.",
   "settings.bgPending": "Guardado: se aplica cuando el asistente se reinicie.",
+  "settings.bgSingleEngine": "Desactivado por defecto en esta caja: comparte un único motor de IA con todos los usuarios.",
   "settings.bgTitle": "Trabaja por su cuenta",
   "settings.bgUnsupported": "Esta edición no lo tiene",
   "settings.botConnected": "Bot conectado",

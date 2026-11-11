@@ -16,8 +16,15 @@ type BackgroundJobId = "checkIns" | "memoryReview" | "skillLearning";
 interface BackgroundJobsStatus {
   harness: string;
   degraded: boolean;
+  /** Absent from an older server, which never kept these off: read as false. */
+  singleEngine?: boolean;
   jobs: { id: BackgroundJobId; enabled: boolean; supported: boolean; key: string | null }[];
 }
+
+// TASK-2387: on a single-engine box (every chat shares one AI engine) the boot
+// script keeps these two off by default, and the row says why — an owner who
+// finds them off should not have to guess whether something is broken.
+const SINGLE_ENGINE_ROWS: ReadonlySet<BackgroundJobId> = new Set(["memoryReview", "skillLearning"]);
 
 // The three things the box does on its own initiative — ON by default (owner
 // ruling 2026-09-15; TASK-609's opt-outs of 2026-09-03 are taken back once at
@@ -169,6 +176,14 @@ export default function BackgroundJobsPanel() {
                 <span className="block text-[11px] text-[var(--text-secondary)] leading-relaxed">
                   {t(row.hintKey)}
                 </span>
+                {status.singleEngine === true && SINGLE_ENGINE_ROWS.has(row.id) && (
+                  <span
+                    className="block text-[11px] text-[var(--text-secondary)] leading-relaxed mt-0.5"
+                    data-testid={`bg-job-single-engine-${row.id}`}
+                  >
+                    {t("settings.bgSingleEngine")}
+                  </span>
+                )}
                 {job.key && (
                   <span className="block text-[10px] text-[var(--text-muted)] font-mono mt-0.5 break-all">
                     {job.key}

@@ -3326,6 +3326,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "Background memory review",
   "settings.bgMemoryHint": "Consolidating what it remembers, on your own model, between conversations.",
   "settings.bgPending": "Saved — it takes effect when the assistant next restarts.",
+  "settings.bgSingleEngine": "Off by default on this box: it shares one AI engine with all users.",
   "settings.bgTitle": "Working on its own",
   "settings.bgUnsupported": "This edition has no such job",
   "settings.botConnected": "Bot Connected",

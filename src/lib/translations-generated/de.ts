@@ -3326,6 +3326,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "Gedächtnis im Hintergrund",
   "settings.bgMemoryHint": "Verdichtet Erinnerungen mit deinem eigenen Modell, zwischen den Gesprächen.",
   "settings.bgPending": "Gespeichert — wirkt beim nächsten Neustart des Assistenten.",
+  "settings.bgSingleEngine": "Auf dieser Box standardmäßig aus: Sie teilt eine KI-Engine mit allen Nutzern.",
   "settings.bgTitle": "Arbeitet von selbst",
   "settings.bgUnsupported": "Diese Edition hat das nicht",
   "settings.botConnected": "Bot verbunden",
