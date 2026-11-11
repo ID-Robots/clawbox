@@ -32,6 +32,7 @@ import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path from "./runtime-path";
 import { CONFIG_ROOT, DATA_DIR, get, set } from "./config-store";
+import { x64IntegrationNpmPrefix } from "./x64-integration";
 
 /** Where the owner's schedule lives in the device store. */
 export const DB_MAINTENANCE_KEY = "openclaw_db_maintenance";
@@ -159,9 +160,27 @@ async function helperPaths(): Promise<string[]> {
   ];
   const bin = findOpenclawBin();
   if (path.isAbsolute(bin)) {
-    args.push("--openclaw-bin", bin, "--core-pkg", path.join(path.dirname(bin), "..", "lib", "node_modules", "openclaw", "package.json"));
+    args.push("--openclaw-bin", bin, "--core-pkg", corePackageJson(bin));
   }
   return args;
+}
+
+/**
+ * The installed core's package.json, which the helper reads the version and
+ * schema from. Next to the binary's npm prefix — `<bin>/../lib/node_modules/
+ * openclaw/package.json`, the appliance's and install-x64.sh's layout — and
+ * only when nothing is there, the desktop integration's: its `openclaw` is a
+ * wrapper script that runs the core from the `NPM_PREFIX` its host file names.
+ */
+function corePackageJson(bin: string): string {
+  const derived = path.join(path.dirname(bin), "..", "lib", "node_modules", "openclaw", "package.json");
+  if (fs.existsSync(/* turbopackIgnore: true */ derived)) return derived;
+  const prefix = x64IntegrationNpmPrefix();
+  if (prefix) {
+    const integrated = path.join(prefix, "lib", "node_modules", "openclaw", "package.json");
+    if (fs.existsSync(/* turbopackIgnore: true */ integrated)) return integrated;
+  }
+  return derived;
 }
 
 async function noOpenclaw(): Promise<boolean> {
