@@ -7937,15 +7937,16 @@ oc_config_set() {
 # JSON array of {"path", "value"}) on stdin, writes it as the service user to a
 # 0600 file in a private directory, applies it with oc_config_set's retries and
 # messages, and removes the directory on every exit, a stopping signal
-# included. $1 names the change. The body is a subshell, so its traps are its
-# own and the caller's stay as they were.
+# included. Every step on that directory runs as the service user, its removal
+# too. $1 names the change. The body is a subshell, so its traps are its own
+# and the caller's stay as they were.
 oc_config_set_batch() (
   local label="$1" dir rc=0
   if ! dir=$(as_clawbox mktemp -d); then
     echo "  ERROR: config set $label failed: no private directory for its batch file" >&2
     exit 1
   fi
-  trap 'rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'as_clawbox rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -8021,7 +8022,9 @@ step_openclaw_config() {
   # ClawBox AI fallback from the installer, and the rest of the step goes on.
   if [ -n "$CLAWBOX_AI_KEY" ] && openclaw_config_set_lacks_batch_file; then
     local CORE_VERSION
-    CORE_VERSION=$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
+    # Read as the service user, and only its version-shaped part is kept: the
+    # answer is text for the line below and nothing else.
+    CORE_VERSION=$(as_clawbox "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
     echo "  WARN: ClawBox AI fallback not configured: OpenClaw ${CORE_VERSION:-on this box} has no 'config set --batch-file' (2026.3.22 and newer have it) to take its key off the command line" >&2
     CLAWBOX_AI_KEY=""
   fi

@@ -75,6 +75,8 @@ interface Run {
   modes: string[];
   /** The directory each batch file sat in. */
   batchDirs: string[];
+  /** Every `openclaw` or `rm` run outside the service-user wrapper: what root would have run. */
+  rootRuns: string[];
 }
 
 const log = (name: string): string => path.join(dir, name);
@@ -85,6 +87,23 @@ const lines = (name: string): string[] =>
 function harness(env: Record<string, string>): NodeJS.ProcessEnv {
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.join(dir, "tmp"), { recursive: true });
+  // `rm` and `mktemp` are recorded, and `rm` deletes only inside this test's
+  // own directory, whatever path it is handed.
+  executable(
+    path.join(bin, "rm"),
+    [
+      "#!/bin/bash",
+      '[ -n "${AS_SERVICE_USER:-}" ] || printf "rm %s\\n" "$*" >> "$ROOT_RUNS"',
+      `printf '%s\\0' rm "$@" >> "$ARGV_LOG"; printf '\\n' >> "$ARGV_LOG"`,
+      'for a in "$@"; do case "$a" in -*) ;; "$SANDBOX"/*) /bin/rm -rf -- "$a" ;; esac; done',
+      "",
+    ].join("\n"),
+  );
+  executable(
+    path.join(bin, "mktemp"),
+    `#!/bin/bash\nif [ -n "\${FAKE_MKTEMP+x}" ]; then printf '%s\\n' "$FAKE_MKTEMP"; exit 0; fi\nexec /usr/bin/mktemp "$@"\n`,
+  );
   executable(path.join(bin, "node"), `#!/bin/bash\nprintf '%s\\0' node "$@" >> "$ARGV_LOG"\nprintf '\\n' >> "$ARGV_LOG"\nexec "${process.execPath}" "$@"\n`);
   executable(path.join(bin, "openssl"), `#!/bin/bash\nprintf '%s\\0' openssl "$@" >> "$ARGV_LOG"\nprintf '\\n' >> "$ARGV_LOG"\necho "${TOKEN_MARKER}"\n`);
   executable(
@@ -92,6 +111,7 @@ function harness(env: Record<string, string>): NodeJS.ProcessEnv {
     [
       "#!/bin/bash",
       `printf '%s\\0' openclaw "$@" >> "$ARGV_LOG"; printf '\\n' >> "$ARGV_LOG"`,
+      '[ -n "${AS_SERVICE_USER:-}" ] || printf "openclaw %s\\n" "$*" >> "$ROOT_RUNS"',
       'if [ "$1 $2" = "models auth" ]; then cat > /dev/null; exit 0; fi',
       'if [ "$1 $2" = "config get" ]; then exit 0; fi',
       // FAKE_CORE=old answers as OpenClaw 2026.2.26 does (its help verbatim,
@@ -130,12 +150,15 @@ function harness(env: Record<string, string>): NodeJS.ProcessEnv {
     BATCHES: log("batches"),
     MODES: log("modes"),
     BATCH_DIRS: log("batch-dirs"),
+    ROOT_RUNS: log("root-runs"),
+    SANDBOX: dir,
+    TMPDIR: path.join(dir, "tmp"),
     ...env,
   };
 }
 
 function run(script: string, env: Record<string, string>): Run {
-  const res = spawnSync("bash", ["-c", script], { env: harness(env), encoding: "utf-8" });
+  const res = spawnSync("bash", ["-c", script], { env: harness(env), encoding: "utf-8", cwd: dir });
   return {
     status: res.status,
     stdout: res.stdout,
@@ -144,6 +167,7 @@ function run(script: string, env: Record<string, string>): Run {
     batches: lines("batches").map((l) => JSON.parse(l) as unknown),
     modes: lines("modes"),
     batchDirs: lines("batch-dirs"),
+    rootRuns: lines("root-runs"),
   };
 }
 
@@ -161,7 +185,7 @@ const until = async (done: () => boolean, ms: number): Promise<boolean> => {
  * return the batch directories left once the dust settles.
  */
 async function runKilled(script: string): Promise<{ seen: string[]; left: string[] }> {
-  const child = spawn("bash", ["-c", script], { env: harness({ HANG: "1" }), detached: true, stdio: "ignore" });
+  const child = spawn("bash", ["-c", script], { env: harness({ HANG: "1" }), detached: true, stdio: "ignore", cwd: dir });
   const exited = new Promise((resolve) => child.on("exit", resolve));
   if (!(await until(() => lines("batch-dirs").length > 0, 10_000))) throw new Error("the batch file never reached the CLI");
   process.kill(-(child.pid as number), "SIGTERM");
@@ -199,7 +223,7 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
     const text = source("install.sh");
     return [
       "set -euo pipefail",
-      'as_clawbox() { printf \'%s\\0\' as_clawbox "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; [ "$1" = "-H" ] && shift; "$@"; }',
+      'as_clawbox() { printf \'%s\\0\' as_clawbox "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; [ "$1" = "-H" ] && shift; AS_SERVICE_USER=1 "$@"; }',
       "sleep() { :; }",
       "openclaw_is_v2() { return 0; }",
       shellFunction(text, "oc_config_set"),
@@ -224,6 +248,7 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
     expect(r.batches).toEqual([[{ path: "models.providers.deepseek", value: PROVIDER }]]);
     expect(r.modes).toEqual(["600 700"]);
     expect(r.batchDirs.filter((d) => fs.existsSync(d))).toEqual([]);
+    expect(r.rootRuns).toEqual([]);
   });
 
   it("keeps the retries, the messages and the abort when the write fails, and still removes the file", () => {
@@ -266,6 +291,8 @@ describe("install.sh writes the ClawBox AI provider block without the key on a c
     expectNoMarker(r, KEY_MARKER);
     const cli = r.argv.filter((args) => args[0] === "openclaw").map((args) => args.join(" "));
     expect(cli).toEqual(["openclaw config set --help", "openclaw --version"]);
+    // Both questions go to the service user: the CLI lives in its tree.
+    expect(r.rootRuns).toEqual([]);
     expect(r.batches).toEqual([]);
     expect(r.stdout).not.toContain("ClawBox AI fallback model configured");
   });
@@ -285,7 +312,7 @@ describe("install-x64.sh seeds the gateway token without it on a command line", 
     const text = source("install-x64.sh");
     return [
       "set -euo pipefail",
-      'as_user() { printf \'%s\\0\' as_user "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; "$@"; }',
+      'as_user() { printf \'%s\\0\' as_user "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; AS_SERVICE_USER=1 "$@"; }',
       shellFunction(text, "as_user_config_set_batch"),
       "seed() {",
       "  local GW_TOKEN_STRONG=0 GW_TOKEN",
@@ -305,6 +332,7 @@ describe("install-x64.sh seeds the gateway token without it on a command line", 
     expect(r.batches).toEqual([[{ path: "gateway.auth.token", value: TOKEN_MARKER }]]);
     expect(r.modes).toEqual(["600 700"]);
     expect(r.batchDirs.filter((d) => fs.existsSync(d))).toEqual([]);
+    expect(r.rootRuns).toEqual([]);
   });
 
   it("stays non-fatal when the write fails, and still removes the file", () => {
@@ -321,5 +349,58 @@ describe("install-x64.sh seeds the gateway token without it on a command line", 
 
     expect(seen).toHaveLength(1);
     expect(left).toEqual([]);
+  });
+});
+
+/**
+ * The batch directory is named by `mktemp` run as the service user, so every
+ * step on it, its removal included, runs as that user too: whatever path comes
+ * back, the installer removes nothing as root. Here `mktemp` answers with
+ * paths it never made; `rm` is a recorder that deletes only inside this test's
+ * own directory.
+ */
+describe.skipIf(process.getuid?.() === 0)("the batch helpers remove only as the service user", () => {
+  const HOSTILE: [string, string][] = [
+    ["the root directory", "/"],
+    ["a system directory", "/etc"],
+    ["a path with a newline", "/tmp/x\n/etc"],
+    ["a relative path", "relative-dir"],
+  ];
+
+  const rawArgv = (): string => (fs.existsSync(log("argv")) ? fs.readFileSync(log("argv"), "utf-8") : "");
+
+  it.each(HOSTILE)("install.sh, for %s", (_name, hostile) => {
+    const text = source("install.sh");
+    const script = [
+      "set -euo pipefail",
+      'as_clawbox() { printf \'%s\\0\' as_clawbox "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; [ "$1" = "-H" ] && shift; AS_SERVICE_USER=1 "$@"; }',
+      "sleep() { :; }",
+      shellFunction(text, "oc_config_set"),
+      shellFunction(text, "oc_config_set_batch"),
+      `printf '[]' | oc_config_set_batch models.providers.deepseek`,
+    ].join("\n");
+
+    const r = run(script, { FAKE_MKTEMP: hostile });
+
+    expect(r.rootRuns).toEqual([]);
+    expect(rawArgv()).toContain(`as_clawbox\0rm\0-rf\0--\0${hostile}\0`);
+    expect(r.batches).toEqual([]);
+  });
+
+  it.each(HOSTILE)("install-x64.sh, for %s", (_name, hostile) => {
+    const text = source("install-x64.sh");
+    const script = [
+      "set -euo pipefail",
+      'as_user() { printf \'%s\\0\' as_user "$@" >> "$ARGV_LOG"; printf \'\\n\' >> "$ARGV_LOG"; AS_SERVICE_USER=1 "$@"; }',
+      shellFunction(text, "as_user_config_set_batch"),
+      `printf '[]' | as_user_config_set_batch || true`,
+    ].join("\n");
+
+    const r = run(script, { FAKE_MKTEMP: hostile });
+
+    expect(r.status).toBe(0);
+    expect(r.rootRuns).toEqual([]);
+    expect(rawArgv()).toContain(`as_user\0rm\0-rf\0--\0${hostile}\0`);
+    expect(r.batches).toEqual([]);
   });
 });

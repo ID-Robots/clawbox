@@ -124,12 +124,13 @@ as_user() { sudo -u "$CLAWBOX_USER" "$@"; }
 # because sudo records its command line. Reads a `--batch-file` batch (a JSON
 # array of {"path", "value"}) on stdin, writes it as the service user to a 0600
 # file in a private directory, applies it, and removes the directory on every
-# exit, a stopping signal included. Returns the CLI's status. The body is a
+# exit, a stopping signal included. Every step on that directory runs as the
+# service user, its removal too. Returns the CLI's status. The body is a
 # subshell, so its traps are its own and the caller's stay as they were.
 as_user_config_set_batch() (
   local dir rc=0
   dir=$(as_user mktemp -d) || exit 1
-  trap 'rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'as_user rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
