@@ -186,6 +186,37 @@ export async function ensureStaffHermesProfile(username: string, root: string = 
   }
 }
 
+/** The last time a staff turn asked the dashboard to load the guard (process-local). */
+let lastGuardReload = 0;
+/** Asked at most this often, so a guard that will not load cannot have members restart the owner's chat backend in a loop. */
+export const STAFF_GUARD_RELOAD_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * Has the RUNNING dashboard loaded the staff guard? Installed and enabled is
+ * not loaded: Hermes scans for plugins once per process, and register-mcp.sh
+ * installs it from the web server's own boot, which can be after the
+ * dashboard's (measured on a board: a member's `patch` reached openclaw.json
+ * through a dashboard started before the plugin was there). `false` asks the
+ * dashboard to reload its plugins — the shared door every caller uses
+ * (src/lib/hermes-plugin-reload.ts), at most once per cooldown — and the
+ * member's turn is refused until it has. `null`: the dashboard could not say
+ * (it is down; a turn then runs on the CLI, which loads plugins afresh).
+ */
+export async function staffGuardLoaded(now: () => number = Date.now): Promise<boolean | null> {
+  const { readLoadedHermesPlugins } = await import("@/lib/hermes-plugin-set");
+  const loaded = await readLoadedHermesPlugins().catch(() => null);
+  if (loaded === null) return null;
+  if (loaded.includes(STAFF_GUARD_HERMES_PLUGIN)) return true;
+  if (now() - lastGuardReload >= STAFF_GUARD_RELOAD_COOLDOWN_MS) {
+    lastGuardReload = now();
+    const { reloadHermesPlugins } = await import("@/lib/hermes-plugin-reload");
+    void reloadHermesPlugins("the organisation's staff guard is installed but not loaded").catch((err: unknown) => {
+      console.error("[org-staff] could not reload the dashboard's plugins:", err instanceof Error ? err.message : err);
+    });
+  }
+  return false;
+}
+
 /** A removed member's profile goes with them: their memory, sessions and folder. Never throws. */
 export async function forgetStaffHermesProfile(username: string, root: string = hermesHome()): Promise<void> {
   const paths = staffHermesProfilePaths(username, root);

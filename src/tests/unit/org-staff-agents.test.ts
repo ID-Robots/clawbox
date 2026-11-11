@@ -83,23 +83,24 @@ describe("a box with no roster, the switch turned on with two members of staff",
     expect(fix.writes).toEqual([{ path: 'agents.entries["clawbox-staff-maria"]', value: staffAgentEntry(HOME, "maria") }]);
   });
 
-  it("turned off again, has no roster at all — the box it was", () => {
+  it("turned off again, loses every staff agent and keeps the owner's agent exactly where it was", () => {
     const off = sync(on.config, [], on.marks);
-    expect(off.config).toEqual({ agents: { defaults: { model: { primary: "clawai/flash" } } }, tools: { profile: "full" } });
-    expect(off.marks).toEqual(NO_MARKS);
+    expect(off.writes).toEqual([
+      { path: 'agents.entries["clawbox-staff-maria"]' },
+      { path: 'agents.entries["clawbox-staff-ivan"]' },
+    ]);
+    const agents = off.config.agents as { entries: Record<string, unknown>; ownership: string; defaults: { systemAgent: { agentId: string } } };
+    // The same agent, the same workspace the core resolved before the switch:
+    // nothing the owner's assistant does changes, and no write takes the
+    // roster away from under a running gateway.
+    expect(agents.entries).toEqual({ main: { workspace: OWNER_WS } });
+    expect(agents.ownership).toBe("explicit");
+    expect(agents.defaults.systemAgent.agentId).toBe("main");
+    expect(off.marks).toEqual(on.marks);
+    // And it settles: the same switch again writes nothing, and on again only adds staff.
     expect(sync(off.config, [], off.marks).writes).toEqual([]);
-  });
-
-  it("turned off after the owner changed their own agent's entry, keeps that entry and the fleet's owner", () => {
-    const edited = structuredClone(on.config) as { agents: { entries: Record<string, Record<string, unknown>> } };
-    edited.agents.entries.main.model = "clawai/pro";
-    const off = sync(edited, [], on.marks);
-    const agents = off.config.agents as { entries: Record<string, unknown>; ownership?: string; defaults: { systemAgent?: unknown } };
-    expect(Object.keys(agents.entries)).toEqual(["main"]);
-    expect(agents.entries.main).toEqual({ workspace: OWNER_WS, model: "clawai/pro" });
-    // A one-agent roster needs no fleet owner; what ClawBox named goes.
-    expect(agents.ownership).toBeUndefined();
-    expect(agents.defaults.systemAgent).toBeUndefined();
+    const again = sync(off.config, ["maria"], off.marks);
+    expect(again.writes).toEqual([{ path: 'agents.entries["clawbox-staff-maria"]', value: staffAgentEntry(HOME, "maria") }]);
   });
 });
 

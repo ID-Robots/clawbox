@@ -34,8 +34,10 @@
  * "explicit"` (Doctor would add it anyway), and the owner's agent's own entry
  * with its workspace pinned where it already is. Only what is ABSENT is
  * written, and what ClawBox wrote is recorded in the device store
- * (`org_staff_roster`), so turning the switch off — or removing the last
- * member of staff — takes back exactly that and nothing the owner set.
+ * (`org_staff_roster`). Turning the switch off — or removing the last member
+ * of staff — removes the staff agents through the core's own `agents.delete`
+ * and leaves those three: they name the agent the core already resolved, with
+ * the workspace it already had, so the owner's assistant is unchanged.
  *
  * Applied through the running gateway (`agents.*` is hot in the core's reload
  * table, src/lib/gateway-hot-apply.ts): no restart, no dropped chat.
@@ -214,33 +216,38 @@ export function planStaffRoster(config: unknown, input: StaffRosterInput): Staff
     return { writes, marks };
   }
 
-  // No staff: take back what ClawBox added, where it is still what it wrote.
-  const remaining = view.ids.filter((id) => !isStaffAgentId(id));
-  let rosterGone = false;
-  if (
-    marks.ownerEntry !== null
-    && view.shape === "entries"
-    && remaining.length === 1
-    && remaining[0] === marks.ownerEntry.id
-    && isDeepStrictEqual(view.entryOf(marks.ownerEntry.id), { workspace: marks.ownerEntry.workspace })
-  ) {
-    // The roster is back to the one entry ClawBox added for the owner: the box
-    // had no roster before, and has none again (staff entries included).
-    writes.length = 0;
-    writes.push({ path: "agents.entries" });
-    rosterGone = true;
+  // No staff: the staff agents go (the loop above). What ClawBox wrote around
+  // them — the owner's agent's entry with its workspace pinned where it
+  // already was, `agents.ownership: "explicit"`, `systemAgent` = the owner's
+  // agent — STAYS: it names the same agent with the same workspace the core
+  // resolved before, so the owner's assistant behaves exactly as it did, and a
+  // write that tried to take the roster away again is one more thing that can
+  // fail half-way on a running gateway. The marks are kept so the next switch
+  // knows the roster is ClawBox's.
+  return { writes, marks };
+}
+
+/** The staff agent id an `agents.entries["<id>"]` path removes, or null. */
+function staffIdOfEntryPath(configPath: string): string | null {
+  const m = /^agents\.entries\["([^"]+)"\]$/.exec(configPath);
+  return m && isStaffAgentId(m[1]) ? m[1] : null;
+}
+
+/**
+ * Remove one agent the way the core removes agents (`agents.delete`, which
+ * `openclaw agents delete` itself routes through the running gateway), its
+ * files kept. False when the gateway could not be asked — the caller then
+ * edits the config instead; a refusal throws.
+ */
+async function deleteAgentThroughGateway(agentId: string): Promise<boolean> {
+  const { gatewayWsCall, GatewayWsUnavailableError } = await import("@/lib/openclaw-gateway-ws");
+  try {
+    await gatewayWsCall("agents.delete", { agentId, deleteFiles: false });
+    return true;
+  } catch (err) {
+    if (err instanceof GatewayWsUnavailableError) return false;
+    throw err;
   }
-  // An owner who has since made a fleet of their own keeps the ownership it
-  // needs; otherwise the two keys ClawBox named go, where they still say what
-  // it wrote.
-  if (rosterGone || remaining.length <= 1) {
-    if (marks.systemAgent !== null && systemAgentNow === marks.systemAgent) {
-      const others = isRecord(defaults.systemAgent) ? Object.keys(defaults.systemAgent).filter((k) => k !== "agentId") : [];
-      writes.push({ path: others.length ? "agents.defaults.systemAgent.agentId" : "agents.defaults.systemAgent" });
-    }
-    if (marks.ownership && agents.ownership === "explicit") writes.push({ path: "agents.ownership" });
-  }
-  return { writes, marks: { ...NO_MARKS } };
 }
 
 /** The plan's writes, for the journal. */
@@ -334,23 +341,40 @@ async function syncStaffAgentsNow(): Promise<boolean> {
     for (const username of staff) {
       await seedStaffWorkspace(staffWorkspaceDir(OPENCLAW_HOME, username), username, ownerWorkspace);
     }
+    let ok = true;
     if (plan.writes.length > 0) {
-      // Record the marks FIRST when adding (a crash after the write must not
-      // leave a roster nobody remembers making), LAST when taking back.
-      const adding = plan.writes.some((w) => w.value !== undefined);
-      if (adding) await set(ORG_STAFF_ROSTER_KEY, plan.marks);
+      // Record the marks FIRST (a crash after the write must not leave a
+      // roster nobody remembers making).
+      if (!isDeepStrictEqual(marksBefore ?? NO_MARKS, plan.marks)) await set(ORG_STAFF_ROSTER_KEY, plan.marks);
       const sets = plan.writes.filter((w) => w.value !== undefined);
-      const unsets = plan.writes.filter((w) => w.value === undefined);
-      for (const write of unsets) await runOpenclawConfigUnset(write.path);
-      if (sets.length > 0) {
-        await runOpenclawConfigSetBatch(sets.map((w) => [w.path, JSON.stringify(w.value), "--json"]));
+      const removals = plan.writes.filter((w) => w.value === undefined);
+      // Each removal on its own, so one the gateway refuses cannot keep the
+      // others: a staff agent goes through the core's own `agents.delete`
+      // (config entry, bindings and session-store rows together — the files
+      // are kept, their memory is theirs if the switch comes back), the
+      // config unset only when the gateway cannot be asked.
+      for (const write of removals) {
+        try {
+          const id = staffIdOfEntryPath(write.path);
+          if (!id || !(await deleteAgentThroughGateway(id))) await runOpenclawConfigUnset(write.path);
+        } catch (err) {
+          ok = false;
+          console.error(`[org-staff] could not remove ${write.path}:`, err instanceof Error ? err.message : err);
+        }
       }
-      if (!adding) await set(ORG_STAFF_ROSTER_KEY, plan.marks);
-      console.log(`[org-staff] roster: ${describe(plan.writes)}`);
+      if (sets.length > 0) {
+        try {
+          await runOpenclawConfigSetBatch(sets.map((w) => [w.path, JSON.stringify(w.value), "--json"]));
+        } catch (err) {
+          ok = false;
+          console.error("[org-staff] could not write the staff agents:", err instanceof Error ? err.message : err);
+        }
+      }
+      console.log(`[org-staff] roster: ${describe(plan.writes)}${ok ? "" : " (not all of it landed)"}`);
     } else if (!isDeepStrictEqual(marksBefore ?? NO_MARKS, plan.marks)) {
       await set(ORG_STAFF_ROSTER_KEY, plan.marks);
     }
-    return true;
+    return ok;
   } catch (err) {
     console.error("[org-staff] could not update the staff agents:", err instanceof Error ? err.message : err);
     return false;

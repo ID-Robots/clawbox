@@ -78,6 +78,7 @@ staff_on_roster() {
 }
 
 cleanup() {
+  CLEANUP_SINCE=$(date +%s)
   call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}" >/dev/null 2>&1 || true
   call DELETE /setup-api/users "$OWNER" "{\"username\":\"$A_NAME\"}" >/dev/null 2>&1 || true
   call DELETE /setup-api/users "$OWNER" "{\"username\":\"$B_NAME\"}" >/dev/null 2>&1 || true
@@ -110,7 +111,14 @@ trap - EXIT
 cleanup
 if [ "$RUNTIME" = openclaw ]; then
   left=$(staff_on_roster)
-  [ "$left" = 0 ] && say "ok - [$RUNTIME] the switch off takes every staff agent off the roster" || say "not ok - [$RUNTIME] $left staff agent(s) still on the roster"
+  if [ "$left" = 0 ]; then
+    say "ok - [$RUNTIME] the switch off takes every staff agent off the roster"
+  else
+    say "not ok - [$RUNTIME] $left staff agent(s) still on the roster"
+    # Why: what the web server said about the roster and its config writes.
+    journalctl -u clawbox-setup.service --since "@$CLEANUP_SINCE" --no-pager -o cat 2>/dev/null \
+      | grep -E "\[org-staff\]|\[openclaw-config\]" | tail -n 20 | sed "s/^/NOTE [$RUNTIME] server: /"
+  fi
   [ ! -e "$HOME/.openclaw/staff/$A_NAME" ] && say "ok - [$RUNTIME] a removed member'"'"'s workspace goes with them" || say "not ok - [$RUNTIME] the removed member'"'"'s workspace is still there"
 else
   [ ! -e "$HOME/.hermes/profiles/clawbox-staff-$A_NAME" ] && say "ok - [$RUNTIME] a removed member'"'"'s profile goes with them" || say "not ok - [$RUNTIME] the removed member'"'"'s profile is still there"

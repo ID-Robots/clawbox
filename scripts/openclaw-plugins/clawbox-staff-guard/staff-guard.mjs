@@ -145,11 +145,39 @@ function patchPaths(params) {
  * `opts.openclawHome` is OpenClaw's state directory; the folder and the
  * attachment directory hang off it.
  */
+/**
+ * Tool Search's controls (docs/tools/tool-search.md in the pinned core): with
+ * `tools.toolSearch` on, a deferred tool — memory search among them — is
+ * reached only through these. The catalog they search and describe is already
+ * the agent's policy-filtered one, and the final call returns to OpenClaw's
+ * normal policy and hooks; `tool_call` is judged here by the tool it names too.
+ */
+const TOOL_SEARCH_READS = new Set(["tool_search", "tool_describe"]);
+const TOOL_SEARCH_CALL = "tool_call";
+
+/** The tool a `tool_call` names (`openclaw:core:memory_search` → `memory_search`), or "". */
+function calledTool(params) {
+  const id = params && typeof params === "object" ? params.id ?? params.name ?? params.tool : undefined;
+  if (typeof id !== "string" || !id.trim()) return "";
+  const parts = id.trim().split(":");
+  return parts[parts.length - 1];
+}
+
 export function staffToolCallDenyReason(event, ctx, opts = {}) {
   const username = staffMemberOf(ctx);
   if (!username) return null;
   const policy = staffPolicyTable().openclaw;
-  const toolName = typeof event?.toolName === "string" ? event.toolName : "";
+  let toolName = typeof event?.toolName === "string" ? event.toolName : "";
+  if (TOOL_SEARCH_READS.has(toolName)) return null;
+  let params = event?.params;
+  if (toolName === TOOL_SEARCH_CALL) {
+    const inner = calledTool(params);
+    if (!inner) return `\`tool_call\` without a tool it names`;
+    toolName = inner;
+    const args = params && typeof params === "object" ? params.args : undefined;
+    params = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+    event = { ...event, toolName, params, derivedPaths: undefined };
+  }
   if (!policy.allow.includes(toolName)) return `\`${toolName || "this tool"}\` is not available to members of staff`;
 
   const home = opts.home ?? os.homedir();
@@ -157,7 +185,6 @@ export function staffToolCallDenyReason(event, ctx, opts = {}) {
   const folder = path.join(openclawHome, "staff", username);
   const folderReal = realish(folder);
   const attachmentsReal = realish(path.join(openclawHome, "media", "chat-attachments"));
-  const params = event?.params;
 
   const writing = policy.writeTools.includes(toolName);
   const reading = policy.readTools.includes(toolName);

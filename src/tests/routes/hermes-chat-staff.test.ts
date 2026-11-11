@@ -47,7 +47,8 @@ vi.mock("@/lib/org-mode-server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/org-mode-server")>()),
   orgMemberStrictOf: memberMock,
 }));
-vi.mock("@/lib/hermes-staff-profile", () => ({ ensureStaffHermesProfile: profileMock }));
+const guardLoadedMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/hermes-staff-profile", () => ({ ensureStaffHermesProfile: profileMock, staffGuardLoaded: guardLoadedMock }));
 vi.mock("@/lib/chat-scope-server", () => ({
   transcriptKeyFor: vi.fn(async () => ({ ok: true, key: "desktop-user-maria", principal: { username: "maria", isOwner: false } })),
   hermesSessionFor: vi.fn((_who: unknown, id: string) => id),
@@ -87,6 +88,8 @@ beforeEach(() => {
   profileMock.mockReset();
   memberMock.mockResolvedValue({ username: "maria" });
   profileMock.mockResolvedValue(STAFF);
+  guardLoadedMock.mockReset();
+  guardLoadedMock.mockResolvedValue(true);
   openTurnMock.mockResolvedValue(fakeTurn());
   slashMock.mockResolvedValue({ output: "ok", sessionId: "20261111_100000_abcdef", sessionModel: "", sessionProvider: "" });
 });
@@ -132,6 +135,21 @@ describe("a member of staff's turn", () => {
     expect(spawnMock).toHaveBeenCalled();
     const argv = spawnMock.mock.calls[0][1] as string[];
     expect(argv.slice(0, 2)).toEqual(["--profile=clawbox-staff-maria", "chat"]);
+  });
+
+  it("is refused, fail closed, while the running dashboard has not loaded the staff guard", async () => {
+    guardLoadedMock.mockResolvedValue(false);
+    const res = await POST(post({ message: "hello" }));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("staff_profile_unavailable");
+    expect(openTurnMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("runs on the CLI's fresh plugins when the dashboard cannot say what it loaded", async () => {
+    guardLoadedMock.mockResolvedValue(null);
+    const res = await POST(post({ message: "hello" }));
+    expect(res.status).toBe(200);
   });
 
   it("is refused, fail closed, when their profile cannot be prepared", async () => {

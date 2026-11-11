@@ -5,12 +5,19 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "js-yaml";
 import {
+  STAFF_GUARD_RELOAD_COOLDOWN_MS,
   ensureStaffHermesProfile,
   forgetStaffHermesProfile,
+  staffGuardLoaded,
   staffHermesConfig,
   staffHermesProfilePaths,
 } from "@/lib/hermes-staff-profile";
 import { STAFF_HERMES_TOOLS } from "@/lib/org-staff-policy";
+
+const loadedMock = vi.hoisted(() => vi.fn());
+const reloadMock = vi.hoisted(() => vi.fn(async () => ({})));
+vi.mock("@/lib/hermes-plugin-set", () => ({ readLoadedHermesPlugins: loadedMock }));
+vi.mock("@/lib/hermes-plugin-reload", () => ({ reloadHermesPlugins: reloadMock }));
 
 // A member of staff's own Hermes profile (src/lib/hermes-staff-profile.ts) and
 // the pre_tool_call hook that guards it (scripts/hermes-plugins/
@@ -126,6 +133,24 @@ describe("ensureStaffHermesProfile", () => {
   it("refuses a name that is not a username", async () => {
     expect(await ensureStaffHermesProfile("../owner", root)).toBeNull();
     expect(staffHermesProfilePaths("Maria", root)).toBeNull();
+  });
+});
+
+describe("staffGuardLoaded", () => {
+  it("answers what the running dashboard loaded, and asks it to reload a missing guard once per cooldown", async () => {
+    loadedMock.mockResolvedValue(["basic", "clawbox_staff_guard"]);
+    expect(await staffGuardLoaded(() => 1)).toBe(true);
+    expect(reloadMock).not.toHaveBeenCalled();
+    loadedMock.mockResolvedValue(["basic"]);
+    const t0 = STAFF_GUARD_RELOAD_COOLDOWN_MS * 10;
+    expect(await staffGuardLoaded(() => t0)).toBe(false);
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+    expect(await staffGuardLoaded(() => t0 + 1000)).toBe(false);
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+    expect(await staffGuardLoaded(() => t0 + STAFF_GUARD_RELOAD_COOLDOWN_MS)).toBe(false);
+    expect(reloadMock).toHaveBeenCalledTimes(2);
+    loadedMock.mockResolvedValue(null);
+    expect(await staffGuardLoaded(() => t0)).toBeNull();
   });
 });
 

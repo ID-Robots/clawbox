@@ -71,6 +71,16 @@ describe("a member of staff's tools", () => {
     expect(staffToolCallDenyReason(call(tool), MARIA, opts)).toMatch(/not available to members of staff/);
   });
 
+  it("lets Tool Search's controls through and judges a tool_call by the tool it names", () => {
+    expect(staffToolCallDenyReason(call("tool_search", { query: "memory" }), MARIA, opts)).toBeNull();
+    expect(staffToolCallDenyReason(call("tool_describe", { id: "openclaw:core:memory_search" }), MARIA, opts)).toBeNull();
+    expect(staffToolCallDenyReason(call("tool_call", { id: "openclaw:core:memory_search", args: { query: "locker" } }), MARIA, opts)).toBeNull();
+    expect(staffToolCallDenyReason(call("tool_call", { id: "openclaw:core:automations", args: {} }), MARIA, opts)).toMatch(/`automations` is not available/);
+    expect(staffToolCallDenyReason(call("tool_call", { id: "web_fetch", args: { url: "https://example.com" } }), MARIA, opts)).toMatch(/`web_fetch` is not available/);
+    expect(staffToolCallDenyReason(call("tool_call", { id: "openclaw:core:write", args: { path: path.join(openclawHome, "openclaw.json"), content: "x" } }), MARIA, opts)).toMatch(/outside/);
+    expect(staffToolCallDenyReason(call("tool_call", { args: {} }), MARIA, opts)).toMatch(/without a tool/);
+  });
+
   it("allows memory search and the clarifying question", () => {
     for (const tool of ["memory_search", "memory_get", "ask_user", "progress_card"]) {
       expect(STAFF_OPENCLAW_TOOLS.allow).toContain(tool);

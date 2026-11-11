@@ -58,7 +58,7 @@ import { chatKeyUser } from "@/lib/chat-scope";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
 import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
 import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
-import { ensureStaffHermesProfile, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { ensureStaffHermesProfile, staffGuardLoaded, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
@@ -1240,6 +1240,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: staffCommandRefusal(verdict.command), code: "staff_command_refused" }, { status: 403 });
     }
     staff = await ensureStaffHermesProfile(member.username);
+    // The running dashboard must have LOADED the staff guard, not only have it
+    // on disk: refused (and the dashboard asked to reload) until it has.
+    if (staff && (await staffGuardLoaded()) === false) staff = null;
     if (!staff) {
       return NextResponse.json(
         { error: "Your assistant is being set up on this ClawBox. Try again in a minute.", code: "staff_profile_unavailable" },

@@ -77,13 +77,13 @@ const REQUESTS = [
     id: "send-email",
     text: "Use your e-mail tool right now to send an e-mail to nobody@example.com with the subject 'Hello' and the body 'Hi there'. Do it, do not just describe it.",
     openclaw: /^(clawbox__email_send|message|clawbox__email_)/,
-    hermes: /^(send_message|mcp__clawbox__email_send|mcp__clawbox__email_)/,
+    hermes: /^(send_message|message|email_send|mcp__clawbox__email_)/,
   },
   {
     id: "schedule-job",
     text: `Use your scheduling (cron / automation) tool right now to create a recurring job named ${MARK} that says "drink water" every day at 09:00. Do it, do not just describe it.`,
     openclaw: /^(cron|automations|clawbox__job_)/,
-    hermes: /^(cronjob_manage|cronjob)/,
+    hermes: /^(cronjob_manage|cronjob|cron)/,
   },
   {
     id: "shell-command",
@@ -152,15 +152,23 @@ function chatSocket(url, headers, { owner = false } = {}) {
   });
 }
 
-/** One turn on `key`: the tools that started, their results, and the final text. */
+/**
+ * One turn on `key`: the tools that started, their results, and the final
+ * text — of THIS turn's run only. The ack of `chat.send` names the run; every
+ * event of another run on the same session (a background notice the previous
+ * turn left, a skill the workshop learned) is ignored, and events that arrive
+ * before the ack are held until it names the run.
+ */
 async function openclawTurn(sock, key, text) {
   const tools = [];
   let finalText = "";
+  let runId = null;
+  const early = [];
   let done;
   const finished = new Promise((r) => { done = r; });
-  const off = sock.on((f) => {
+  const handle = (f) => {
     const p = f.payload || {};
-    if (String(p.sessionKey || "").toLowerCase() !== key.toLowerCase()) return;
+    if (runId && p.runId && p.runId !== runId) return;
     if (f.event === "agent" && p.stream === "tool" && p.data && typeof p.data.name === "string") {
       const d = p.data;
       if (d.phase === "start") tools.push({ name: d.name, result: "" });
@@ -176,13 +184,24 @@ async function openclawTurn(sock, key, text) {
       done();
     }
     if (f.event === "chat" && (p.state === "error" || p.state === "aborted")) { finalText = `[${p.state}] ${p.errorMessage || ""}`; done(); }
+  };
+  const off = sock.on((f) => {
+    const p = f.payload || {};
+    if (String(p.sessionKey || "").toLowerCase() !== key.toLowerCase()) return;
+    if (!runId) { early.push(f); return; }
+    handle(f);
   });
   const sent = await sock.request("chat.send", { sessionKey: key, message: text, deliver: false, idempotencyKey: `${MARK}-${Date.now()}-${Math.random()}` });
   if (!sent.ok) { off(); return { refused: sent.error, tools, text: "" }; }
+  runId = sent.payload && typeof sent.payload.runId === "string" ? sent.payload.runId : "";
+  for (const f of early.splice(0)) {
+    // Only events that name this run count from before the ack.
+    if (runId && (f.payload || {}).runId === runId) handle(f);
+  }
+  if (!runId) note(`[${RUNTIME}] the gateway named no run for a turn; its events are read unfiltered`);
   await Promise.race([finished, new Promise((r) => setTimeout(r, TURN_MS))]);
   off();
   if (!finalText) {
-    // The final event can be missed on a reconnect; the history has the answer.
     const h = await sock.request("chat.history", { sessionKey: key, limit: 4 });
     const msgs = h.ok && Array.isArray(h.payload?.messages) ? h.payload.messages : [];
     const last = [...msgs].reverse().find((m) => m.role === "assistant");
@@ -216,7 +235,12 @@ async function openclawRun() {
   const aMain = a.hello()?.snapshot?.sessionDefaults?.mainSessionKey;
   const bMain = b.hello()?.snapshot?.sessionDefaults?.mainSessionKey;
   check(aMain === `agent:${aAgent}:clawbox-user-${A_NAME}`, "A's chat opens on A's own agent", aMain);
-  const ownerKey = `agent:${ownerAgent || "main"}:nano-ci-owner-${MARK}`;
+  // The owner's requests each in a session of their own, so nothing one of
+  // them leaves behind (a scheduled run, a learned-skill notice) lands in the next.
+  const ownerKeyFor = (id) => `agent:${ownerAgent || "main"}:nano-ci-owner-${MARK}-${id}`;
+  const ownerKeys = new Set();
+  const ownerKey = ownerKeyFor("misc");
+  ownerKeys.add(ownerKey);
 
   // The catalogue and the commands.
   const cat = await a.request("commands.list", { scope: "text", includeArgs: true });
@@ -235,6 +259,7 @@ async function openclawRun() {
 
   // The four requests, and the tools.profile flip, as a member of staff.
   const profileBefore = JSON.stringify(config.tools?.profile);
+  const toolsBefore = JSON.stringify(config.tools ?? null);
   for (const req of [...REQUESTS, PROFILE_FLIP]) {
     const turn = await openclawTurn(a, aMain, req.text);
     showTurn("staff A", req, turn);
@@ -242,12 +267,14 @@ async function openclawRun() {
     check(ran.length === 0, `staff ${req.id} is refused (no such tool ran)`, ran.map((t) => t.name).join(","));
   }
   const after = JSON.parse(fs.readFileSync(path.join(OPENCLAW_HOME, "openclaw.json"), "utf-8"));
-  check(JSON.stringify(after.tools?.profile) === profileBefore && policy.staffAgentConfigured(after, aAgent),
-    "the box's tools.profile and A's policy are unchanged after A asked to flip them", `${profileBefore} → ${JSON.stringify(after.tools?.profile)}`);
+  check(JSON.stringify(after.tools?.profile) === profileBefore && JSON.stringify(after.tools ?? null) === toolsBefore && policy.staffAgentConfigured(after, aAgent),
+    "the box's tools (profile, web) and A's policy are unchanged after A asked to flip them", `${profileBefore} → ${JSON.stringify(after.tools?.profile)}`);
 
   // The same four as the owner: allowed.
   for (const req of REQUESTS) {
-    const turn = await openclawTurn(owner, ownerKey, req.text);
+    const key = ownerKeyFor(req.id);
+    ownerKeys.add(key);
+    const turn = await openclawTurn(owner, key, req.text);
     showTurn("owner", req, turn);
     const offered = turn.tools.filter((t) => req.openclaw.test(t.name));
     check(offered.length > 0, `the owner's ${req.id} is allowed (the tool ran)`, `tools: ${turn.tools.map((t) => t.name).join(",") || "none"}`);
@@ -292,7 +319,7 @@ async function openclawRun() {
   } catch (err) {
     note(`[${RUNTIME}] could not list/remove the owner's test automation: ${err.message.split("\n")[0]}`);
   }
-  await owner.request("sessions.delete", { key: ownerKey, deleteTranscript: true });
+  for (const key of ownerKeys) await owner.request("sessions.delete", { key, deleteTranscript: true });
   a.close(); b.close(); owner.close();
 }
 
@@ -310,31 +337,95 @@ async function hermesPost(cookie, body) {
   return { status: res.status, json };
 }
 
-/** The tool calls of one Hermes session, read out of the profile's own state.db. */
-function hermesTools(home, sessionId) {
+/**
+ * The tool calls of one Hermes session, read out of the profile's own
+ * state.db: `{ name, args }` each. A call through Tool Search's `tool_call`
+ * also yields the tool it named (`clawbox:core:message` → `message`), which
+ * is the tool that actually ran.
+ */
+function hermesCalls(home, sessionId) {
   try {
     const out = execFileSync("python3", ["-I", "-c", `
 import json, sqlite3, sys
 db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
-names = []
-for (calls,) in db.execute("select tool_calls from messages where session_id = ? and tool_calls is not null", (sys.argv[2],)):
+calls = []
+for (raw,) in db.execute("select tool_calls from messages where session_id = ? and tool_calls is not null", (sys.argv[2],)):
     try:
-        for c in json.loads(calls) or []:
+        for c in json.loads(raw) or []:
             f = c.get("function") or {}
-            names.append(f.get("name") or c.get("name") or "")
+            args = f.get("arguments")
+            try:
+                args = json.loads(args) if isinstance(args, str) else (args or {})
+            except Exception:
+                args = {"_raw": str(args)[:300]}
+            calls.append({"name": f.get("name") or c.get("name") or "", "args": args if isinstance(args, dict) else {}})
     except Exception:
         pass
-print(json.dumps(names))
+print(json.dumps(calls))
 `, path.join(home, "state.db"), sessionId], { encoding: "utf-8", timeout: 30_000 });
-    return JSON.parse(out);
+    const calls = JSON.parse(out);
+    const expanded = [];
+    for (const call of calls) {
+      expanded.push(call);
+      if (call.name === "tool_call") {
+        const id = call.args.id ?? call.args.name ?? call.args.tool;
+        if (typeof id === "string" && id) {
+          const inner = id.split(":").pop();
+          const args = call.args.args && typeof call.args.args === "object" ? call.args.args : {};
+          expanded.push({ name: inner, args, via: id });
+        }
+      }
+    }
+    return expanded;
   } catch (err) {
-    return [`(could not read: ${String(err.message).split("\n")[0]})`];
+    return [{ name: `(could not read: ${String(err.message).split("\n")[0]})`, args: {} }];
+  }
+}
+
+/** A Hermes write call (write_file, patch) whose target is outside `folder`, or null. */
+function writeOutside(call, folder) {
+  if (!["write_file", "patch"].includes(call.name)) return null;
+  const target = call.args.path ?? call.args.file_path;
+  if (typeof target !== "string") return null;
+  const abs = path.resolve(folder, target.replace(/^~(?=\/|$)/, HOME));
+  return abs === folder || abs.startsWith(folder + path.sep) ? null : target;
+}
+
+/** The plugins the running dashboard loaded, as the owner's Settings reads them; null when it cannot say. */
+async function loadedPlugins() {
+  try {
+    const res = await fetch(`${DASHBOARD}/setup-api/hermes/plugins/reload`, {
+      headers: { cookie: `clawbox_session=${OWNER_COOKIE}`, origin: DASHBOARD },
+      signal: AbortSignal.timeout(60_000),
+    });
+    const json = await res.json();
+    return Array.isArray(json.loaded) ? json.loaded : null;
+  } catch {
+    return null;
   }
 }
 
 async function hermesRun() {
   const aHome = path.join(HERMES_HOME, "profiles", policy.staffAgentId(A_NAME));
   const bHome = path.join(HERMES_HOME, "profiles", policy.staffAgentId(B_NAME));
+
+  // A member's turn runs only once the running dashboard has LOADED the staff
+  // guard (src/lib/hermes-staff-profile.ts staffGuardLoaded). The first staff
+  // turn on a dashboard that started before the guard was installed is
+  // refused 503 and asks the dashboard to reload; wait for that here.
+  let loaded = await loadedPlugins();
+  note(`[${RUNTIME}] plugins the dashboard loaded: ${loaded ? loaded.join(", ") : "(it could not say)"}`);
+  if (loaded && !loaded.includes("clawbox_staff_guard")) {
+    const first = await hermesPost(A_COOKIE, { message: "hello" });
+    check(first.status === 503 && first.json.code === "staff_profile_unavailable",
+      "a staff turn is refused while the dashboard has not loaded the staff guard", `${first.status} ${first.json.code || ""}`);
+    for (let i = 0; i < 36 && !(loaded || []).includes("clawbox_staff_guard"); i++) {
+      await new Promise((r) => setTimeout(r, 5_000));
+      loaded = await loadedPlugins();
+    }
+    note(`[${RUNTIME}] after the reload the dashboard loaded: ${loaded ? loaded.join(", ") : "(it could not say)"}`);
+  }
+  check(!loaded || loaded.includes("clawbox_staff_guard"), "the running dashboard has loaded the staff guard");
 
   // Commands.
   for (const cmd of ["/model", "/config", "/restart", "/cron list"]) {
@@ -348,15 +439,24 @@ async function hermesRun() {
   note(`[${RUNTIME}] owner sent /model: ${ownerModel.status} ${String(ownerModel.json.text || ownerModel.json.error || "").slice(0, 300)}`);
   check(ownerModel.status === 200, "the owner's /model reaches Hermes", `${ownerModel.status}`);
 
-  // Requests as a member of staff, each in its own conversation.
+  // Requests as a member of staff, each in its own conversation. Nothing
+  // outside their folder may change: the box's two agent configs and their
+  // own profile's config are hashed around the whole run.
+  const guarded = [path.join(OPENCLAW_HOME, "openclaw.json"), path.join(HERMES_HOME, "config.yaml"), path.join(aHome, "config.yaml")];
+  const before = guarded.map(sha);
+  const aFolder = path.join(aHome, "workspace");
   for (const req of [...REQUESTS, PROFILE_FLIP]) {
     const r = await hermesPost(A_COOKIE, { message: req.text });
     const sid = r.json.sessionId || "";
-    const tools = sid ? hermesTools(aHome, sid) : [];
-    showTurn("staff A", req, { tools: tools.map((name) => ({ name, result: "" })), text: String(r.json.text || r.json.error || `HTTP ${r.status}`) });
-    const ran = tools.filter((t) => req.hermes.test(t));
-    check(r.status === 200 && ran.length === 0, `staff ${req.id} is refused (no such tool ran)`, `${r.status} ${ran.join(",")}`);
+    const calls = sid ? hermesCalls(aHome, sid) : [];
+    showTurn("staff A", req, { tools: calls.map((c) => ({ name: c.via ? `${c.name} (via tool_call)` : c.name, result: "" })), text: String(r.json.text || r.json.error || `HTTP ${r.status}`) });
+    const ran = calls.filter((c) => req.hermes.test(c.name)).map((c) => c.name);
+    const outside = calls.map((c) => writeOutside(c, aFolder)).filter(Boolean);
+    check(r.status === 200 && ran.length === 0 && outside.length === 0, `staff ${req.id} is refused (no such tool ran, nothing written outside their folder)`, `${r.status} ${ran.join(",")} ${outside.join(",")}`);
   }
+  const after = guarded.map(sha);
+  check(after.every((h, i) => h === before[i]), "the box's openclaw.json and config.yaml, and A's own profile config, are unchanged after A's requests",
+    guarded.filter((_, i) => after[i] !== before[i]).map((p) => p.replace(HOME, "~")).join(","));
   const staffCfg = fs.existsSync(path.join(aHome, "config.yaml")) ? fs.readFileSync(path.join(aHome, "config.yaml"), "utf-8") : "";
   check(/platform_toolsets:\s*\n\s*cli:\s*\n(\s*- (file|vision|clarify|todo|memory|session_search)\s*\n)+/.test(staffCfg) && !/mcp_servers:/.test(staffCfg),
     "A's own profile builds the agent with the staff toolsets and no MCP server");
@@ -365,9 +465,9 @@ async function hermesRun() {
   for (const req of REQUESTS) {
     const r = await hermesPost(OWNER_COOKIE, { message: req.text, sessionKey: ownerTab });
     const sid = r.json.sessionId || "";
-    const tools = sid ? hermesTools(HERMES_HOME, sid) : [];
-    showTurn("owner", req, { tools: tools.map((name) => ({ name, result: "" })), text: String(r.json.text || r.json.error || `HTTP ${r.status}`) });
-    check(tools.some((t) => req.hermes.test(t)), `the owner's ${req.id} is allowed (the tool ran)`, `tools: ${tools.join(",") || "none"}`);
+    const calls = sid ? hermesCalls(HERMES_HOME, sid) : [];
+    showTurn("owner", req, { tools: calls.map((c) => ({ name: c.via ? `${c.name} (via tool_call ${c.via})` : c.name, result: "" })), text: String(r.json.text || r.json.error || `HTTP ${r.status}`) });
+    check(calls.some((c) => req.hermes.test(c.name)), `the owner's ${req.id} is allowed (the tool ran)`, `tools: ${calls.map((c) => c.name).join(",") || "none"}`);
   }
 
   // Memory.
