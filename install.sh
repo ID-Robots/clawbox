@@ -1396,20 +1396,39 @@ GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 
-# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
-# answers when it can — it is the process that parses whatever we write — and
-# the pinned target only fills in before the first install. Used to route the
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED core
+# answers when there is one — it is what parses whatever we write — and the
+# pinned target only fills in before the first install. Used to route the
 # steps that speak different config dialects per generation.
 # The generation rule itself, callable with any version string, so the
-# installed-binary probe below and the freshly-pinned TARGET gate in
+# installed-core read below and the freshly-pinned TARGET gate in
 # step_openclaw_install cannot drift apart.
 openclaw_version_is_v2() {
   [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
 }
+# The installed core is asked through its package.json, read as data, not by
+# running `openclaw --version` as root. It is the file the gateway's pre-start
+# (scripts/gateway-pre-start.sh) and the web server
+# (src/lib/openclaw-core-generation.ts) read for the same question, so when it
+# is readable and its version is a date, all three agree on the generation.
+# The launcher still decides whether there is an installed core at all. An
+# unusable manifest is an empty answer and takes the pin, then OPENCLAW_VERSION.
+# Quiet and never failing, so a bare caller under `set -euo pipefail` cannot
+# abort its step; the program comes from a heredoc, so a `while read` caller's
+# input is left alone.
 openclaw_is_v2() {
   local v=""
   if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
-    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+    v=$(python3 -I - "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null <<'PY' || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("version")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")
+PY
+)
+    v=$(printf '%s\n' "$v" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
   fi
   if [ -z "$v" ] && [ -f "$SRC_DIR/config/openclaw-target.txt" ]; then
     v=$(head -1 "$SRC_DIR/config/openclaw-target.txt" | awk '{print $1}')
