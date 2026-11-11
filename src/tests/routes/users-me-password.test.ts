@@ -204,9 +204,15 @@ describe("guessing", () => {
   });
 
   it("a right one clears every bucket it was charged to, as sign-in does", async () => {
-    await post(BODY);
+    const res = await POST(new Request("http://box.local/setup-api/users/me/password", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: "clawbox_session=old.cookie", "cf-connecting-ip": "203.0.113.7" },
+      body: JSON.stringify(BODY),
+    }));
+    expect(res.status).toBe(200);
     expect(h.success).toHaveBeenCalledWith("user:alice");
     expect(h.success).toHaveBeenCalledWith("global");
+    expect(h.success).toHaveBeenCalledWith("cf:203.0.113.7");
   });
 
   it("checks no password while sign-in's shared or tunnel-client bucket is locked", async () => {
