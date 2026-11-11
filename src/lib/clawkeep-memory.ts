@@ -653,6 +653,12 @@ function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" 
   const age = now - state.startedAtMs;
   if (state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS) return "going";
   if (supervisedHere(state)) return "going";
+  // This process is the supervisor on record and holds no such pass: the pass
+  // is over. Its settled record never reached the disk (a full one — `finish`
+  // gives up on it after SETTLED_WRITE_ATTEMPTS and frees the lock all the
+  // same), or this is a new process that was handed the pid. Either way
+  // nothing is running, and no later pass may be refused over it.
+  if (state.supervisorPid === process.pid) return "lost";
   // A supervisor that is verifiably still the process that started the pass
   // judges it itself: its watchdog ends a pass that stops moving and settles
   // the run within ABANDON_SETTLE_MS of that. A reader elsewhere going by a

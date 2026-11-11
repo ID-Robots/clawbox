@@ -563,44 +563,75 @@ describe("a running record this process is not supervising", () => {
     }
   });
 
+  /** Another process, standing in for a web server that supervises a pass this reader does not. */
+  function otherSupervisor() {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    return { pid: child.pid as number, stop: () => child.kill("SIGKILL") };
+  }
+
   it("keeps a run going while the process supervising it lives, though the pid it names has exited", async () => {
     // The wait between two OpenClaw attempts: the record still names the
     // attempt that exited on the lock, and the write naming the next one is
     // not ordered against a reader elsewhere. The supervisor's own pid,
     // written before any spawn, is what that reader goes by.
+    const supervisor = otherSupervisor();
+    try {
+      await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: supervisor.pid });
+      const { readMemoryRunState } = await lib();
+      expect((await readMemoryRunState()).status).toBe("running");
+      expect(fs.existsSync(lockPath())).toBe(true);
+    } finally {
+      supervisor.stop();
+    }
+  });
+
+  it("calls a run this process is on record as supervising, and does not hold, over", async () => {
+    // Its settled record never reached the disk, or the pid is this process's
+    // only by reuse: either way nothing is running here.
     await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: process.pid });
     const { readMemoryRunState } = await lib();
-    expect((await readMemoryRunState()).status).toBe("running");
-    expect(fs.existsSync(lockPath())).toBe(true);
+    expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "interrupted" });
   });
 
   it("never takes the lock from a supervisor that is verifiably still the same process, however late its record", async () => {
-    // A reader elsewhere sees only the record, which can be far behind the
-    // pass — a slow disk, the wait between two attempts. While the process
-    // that started the pass lives, its own watchdog judges it.
-    const { readMemoryRunState, processStartedAtMs } = await lib();
-    await writeRunning({
-      startedAtMs: Date.now() - 3 * HOUR,
-      progressAtMs: Date.now() - 2 * HOUR,
-      childPid: deadPid(),
-      supervisorPid: process.pid,
-      supervisorStartedAtMs: processStartedAtMs(process.pid),
-    });
-    expect((await readMemoryRunState()).status).toBe("running");
-    expect(fs.existsSync(lockPath())).toBe(true);
+    // A reader in another process sees only the record, which can be far
+    // behind the pass — a slow disk, the wait between two attempts. While the
+    // process that started the pass lives, its own watchdog judges it.
+    const supervisor = otherSupervisor();
+    try {
+      const { readMemoryRunState, processStartedAtMs } = await lib();
+      await until(async () => processStartedAtMs(supervisor.pid), (v) => v !== null, "the supervisor's start time");
+      await writeRunning({
+        startedAtMs: Date.now() - 3 * HOUR,
+        progressAtMs: Date.now() - 2 * HOUR,
+        childPid: deadPid(),
+        supervisorPid: supervisor.pid,
+        supervisorStartedAtMs: processStartedAtMs(supervisor.pid),
+      });
+      expect((await readMemoryRunState()).status).toBe("running");
+      expect(fs.existsSync(lockPath())).toBe(true);
+    } finally {
+      supervisor.stop();
+    }
   });
 
   it("does not take a pid another process has been given for that supervisor", async () => {
-    const { readMemoryRunState, processStartedAtMs } = await lib();
-    await writeRunning({
-      startedAtMs: Date.now() - 3 * HOUR,
-      progressAtMs: Date.now() - 2 * HOUR,
-      childPid: deadPid(),
-      supervisorPid: process.pid,
-      // The pid's process started an hour away from the recorded supervisor.
-      supervisorStartedAtMs: Number(processStartedAtMs(process.pid)) - HOUR,
-    });
-    expect((await readMemoryRunState()).errorCode).toBe("stalled");
+    const supervisor = otherSupervisor();
+    try {
+      const { readMemoryRunState, processStartedAtMs } = await lib();
+      await until(async () => processStartedAtMs(supervisor.pid), (v) => v !== null, "the supervisor's start time");
+      await writeRunning({
+        startedAtMs: Date.now() - 3 * HOUR,
+        progressAtMs: Date.now() - 2 * HOUR,
+        childPid: deadPid(),
+        supervisorPid: supervisor.pid,
+        // The pid's process started an hour away from the recorded supervisor.
+        supervisorStartedAtMs: Number(processStartedAtMs(supervisor.pid)) - HOUR,
+      });
+      expect((await readMemoryRunState()).errorCode).toBe("stalled");
+    } finally {
+      supervisor.stop();
+    }
   });
 
   it("calls it lost once the supervisor is gone as well", async () => {
