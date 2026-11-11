@@ -2,6 +2,7 @@
 # timeout: 900
 # covers: src/lib/background-task*.ts src/lib/root-step-follow.ts src/lib/embed-model-download.ts src/app/setup-api/embed/install/* src/app/setup-api/background-jobs/tasks/*
 # covers: src/components/BackgroundTask*.tsx src/components/local-ai/* src/components/LocalAiPanel.tsx scripts/nano-tests/board/background-task-card.*
+# covers: src/lib/ui-events.ts src/app/setup-api/desktop/state/*
 #
 # A long process started from Settings keeps running once Settings is closed,
 # and the desktop's corner card shows its progress to the end — on the real
@@ -16,13 +17,16 @@
 #      draws it inline (steps, percentage, log). Local AI offers the model
 #      only where memory search embeds on the box, so a board whose ClawBox AI
 #      plan has it in the cloud is moved onto the box first (Memory Shard's
-#      "On this box").
+#      "On this box"). Settings is opened on Local AI the way the box's own
+#      links open it, so a Settings window the owner's saved desktop brings
+#      back on load is moved there too, not left on Appearance (TASK-2379).
 #   2. The Settings window is closed. The download must keep running, the
 #      desktop's corner card must draw it with a rising percentage, and both
 #      the card and the box's own record must end `succeeded`.
 #   3. The board is left as it was found: a model that was not there is
 #      removed again; one that was there was replaced by a fresh copy; memory
-#      search moved off the cloud goes back to it.
+#      search moved off the cloud goes back to it; the owner's saved desktop,
+#      which the test's browser saves again, is put back as it was.
 #
 # The flow runs on the board from its own checkout of the commit under test
 # (scripts/nano-tests/board/background-task-card.sh, which drives

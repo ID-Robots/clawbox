@@ -2,6 +2,7 @@
 # timeout: 900
 # covers: src/lib/background-task*.ts src/lib/root-step-follow.ts src/lib/embed-model-download.ts src/app/setup-api/embed/install/* src/app/setup-api/background-jobs/tasks/*
 # covers: src/components/BackgroundTask*.tsx src/components/local-ai/* src/components/LocalAiPanel.tsx scripts/nano-tests/board/background-task-card.*
+# covers: src/lib/ui-events.ts src/app/setup-api/desktop/state/*
 # covers: src/app/setup-api/harness/select/* src/app/setup-api/harness/swap/*
 #
 # 66-background-task-card again, under the HERMES agent runtime: the agent
