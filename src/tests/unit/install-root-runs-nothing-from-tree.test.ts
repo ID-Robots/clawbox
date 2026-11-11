@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { functionDefs, type Line, logicalLines, sudoWrappers } from "../helpers/shell-reader";
+import { blankSingleQuoted, functionDefs, type Line, logicalLines, sudoWrappers } from "../helpers/shell-reader";
 
 // This file starts no process, but one MUST MISS row holds a `node -e` program
 // that names child_process, and test-timeout-hygiene reads that text as a spawn.
@@ -47,10 +47,12 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  *
  * Known limits: a wrapper or launcher this file does not name (`nohup`,
  * `xargs`, `find -exec`, `systemd-run`), `eval`, a heredoc fed to a shell
- * under a wrapper, which reads as root (the safe direction), and a file root
- * copies out of these directories (`install`, `cp`) and then runs from its new
- * place: judging that needs the path followed through the copy, which this
- * reader does not do.
+ * under a wrapper, which reads as root (the safe direction), a switch target
+ * known only at run time, which is taken to be the account it names (a name
+ * the file ever sets to root, or a `${X:-root}` default, reads as root), and a
+ * file root copies out of these directories (`install`, `cp`) and then runs
+ * from its new place: judging that needs the path followed through the copy,
+ * which this reader does not do.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -541,6 +543,27 @@ function preloadOperands(args: Word[]): Word[] {
 
 /** A switch target that is root after all: `-u root`, `-u 0`, sudo's `-u '#0'`. */
 const ROOT_TARGET = /^(?:root|#?0)$/;
+/** `NAME=root`, `local NAME="0"`: a name the file sets to root somewhere. */
+const ROOT_ASSIGNMENT = /(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=(["']?)(?:root|#?0)\2(?=$|[\s;&|)])/g;
+
+/** The names a file ever assigns a literal root to. */
+function rootValued(lines: Line[]): Set<string> {
+  const names = new Set<string>();
+  for (const { text } of lines) for (const m of blankSingleQuoted(text).matchAll(ROOT_ASSIGNMENT)) names.add(m[1]);
+  return names;
+}
+
+/**
+ * Whether a switch target is root: the literal, a variable the file ever sets
+ * to root, or a default that is root (`${RUN_AS:-root}`). A target known only
+ * at run time (`$owner` from stat, checked against root before use) is taken
+ * to be the account it names.
+ */
+function isRootTarget(target: string, rootNames: Set<string>): boolean {
+  if (ROOT_TARGET.test(target)) return true;
+  const m = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)(?::?[-=](root|#?0))?\}?$/.exec(target);
+  return !!m && (rootNames.has(m[1]) || m[2] !== undefined);
+}
 /** runuser and su options that take a value. */
 const SWITCH_VALUE_OPTION = /^(?:-[gGcsw]|--(?:group|supp-group|command|session-command|shell|whitelist-environment))$/;
 
@@ -571,7 +594,7 @@ function switchOf(args: Word[]): { target?: string; command?: number } {
   return { target };
 }
 
-function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>): Shape {
+function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>, rootNames: Set<string>): Shape {
   const shape: Shape = { wrapped: false, assigns: [], locals: [], preloads: [] };
   const { words } = command;
   if (command.loopVar) return shape;
@@ -618,7 +641,7 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
         } else if (/^-[A-Za-z]*[gCDhprtUT]$/.test(r)) k += 1;
       }
       // `sudo -u <user>` switches; a bare sudo, or `-u root`, runs its command as root.
-      if (target !== undefined && !ROOT_TARGET.test(target)) {
+      if (target !== undefined && !isRootTarget(target, rootNames)) {
         shape.wrapped = true;
         return shape;
       }
@@ -626,7 +649,7 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
     }
     if (word === "runuser" || word === "su") {
       const { target, command: at } = switchOf(words.slice(k + 1));
-      if (target !== undefined && !ROOT_TARGET.test(target)) {
+      if (target !== undefined && !isRootTarget(target, rootNames)) {
         shape.wrapped = true;
         return shape;
       }
@@ -737,7 +760,8 @@ function scan(sources: { file: string; text: string }[]): {
     const open = state.frames[0];
     if (open) throw lost(`${file}:${open.lineNo}`, `${open.kind} never closes`);
     const functions = new Set(commands.map((c) => c.fn).filter((f): f is string => !!f));
-    const shapes = commands.map((c) => shapeOf(c, wrappers, functions));
+    const rootNames = rootValued(logical);
+    const shapes = commands.map((c) => shapeOf(c, wrappers, functions, rootNames));
     const taint: Taint = { global: new Set(), local: new Map(), declared: new Map() };
     const fnSet = (map: Map<string, Set<string>>, fn: string): Set<string> =>
       map.get(fn) ?? map.set(fn, new Set()).get(fn)!;
@@ -943,6 +967,8 @@ const MUST_HIT: [string, string[], number, string][] = [
     1,
     '"$@"',
   ],
+  ["a target the file sets to root", ["target=root", 'runuser -u "$target" -- "$OPENCLAW_BIN" --version'], 2, '"$OPENCLAW_BIN"'],
+  ["a sudo target that defaults to root", ['sudo -u "${RUN_AS:-root}" "$OPENCLAW_BIN" x'], 1, '"$OPENCLAW_BIN"'],
 ];
 
 /** Rows that run nothing from the service account's directories as root. */
@@ -1074,6 +1100,10 @@ const MUST_MISS: [string, string[]][] = [
   ["a substitution in a heredoc that runs as the account", ["cat <<EOF", '$(as_clawbox "$OPENCLAW_BIN" --version)', "EOF"]],
   ["a node preload root holds", ["node -r /usr/lib/clawbox/hook.cjs -e 0"]],
   ["runuser and sudo to a named account", ['runuser -u clawbox -- "$OPENCLAW_BIN" x', 'sudo -u "$u_user" "$BUN" x']],
+  [
+    "a target known only at run time",
+    ['owner="$(stat -c %U "$dir")"', '[ "$owner" != root ] || exit 0', 'runuser -u "$owner" -- "$OPENCLAW_BIN" x']],
+  ["a word root in quoted text", ["echo 'target=root'", 'runuser -u "$target" -- "$OPENCLAW_BIN" x']],
 ];
 
 describe("root runs nothing from the service account's directories in install.sh", () => {
