@@ -53,12 +53,15 @@ function ownerCookie() {
   return `${payload}.${crypto.createHmac("sha256", secret).update(payload).digest("hex")}`;
 }
 
-/** The newest run's log and record on disk. */
+/** The run the box started last (its `latest` pointer, else the newest id), with its record. */
 function newestRun() {
   let names = [];
   try { names = fs.readdirSync(LOG_DIR); } catch { return null; }
-  const ids = names.filter((n) => n.endsWith(".log")).map((n) => n.slice(0, -4)).sort();
-  const id = ids.at(-1);
+  let id = null;
+  try { id = fs.readFileSync(path.join(LOG_DIR, "latest"), "utf8").trim() || null; } catch { /* none yet */ }
+  if (!id || !names.includes(`${id}.log`)) {
+    id = names.filter((n) => n.endsWith(".log")).map((n) => n.slice(0, -4)).sort().at(-1) ?? null;
+  }
   if (!id) return null;
   let meta = null;
   try { meta = JSON.parse(fs.readFileSync(path.join(LOG_DIR, `${id}.json`), "utf8")); } catch { /* none */ }
@@ -352,7 +355,10 @@ async function openPanel(page, { settle, attempts = 1 }) {
       const panel = await page.evaluate(READ_PANEL);
       if (!panel || panel.left) throw new Error("the update screen left before the panel was read");
       const jpeg = await shot(page, panel.clip);
-      return { ...panel, jpeg, attempt };
+      // The rows as the picture has them: the stream may have moved the
+      // panel on between the first read and the shot.
+      const shown = await page.evaluate(READ_PANEL).catch(() => null);
+      return { ...panel, ...(shown && !shown.left ? { rows: shown.rows } : {}), jpeg, attempt };
     } catch (err) {
       lastError = err;
       note(`panel attempt ${attempt}: ${err instanceof Error ? err.message : err}`);

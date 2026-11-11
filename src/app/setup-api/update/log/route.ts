@@ -43,6 +43,9 @@ const HEARTBEAT_MS = 15_000;
 const SESSION_RECHECK_MS = 5_000;
 /** Per event: the client writes each into the terminal as it comes. */
 const CHUNK_BYTES = 64 * 1024;
+/** Events queued for a reader before the drain waits for it (about 1 MiB of log). */
+const QUEUED_CHUNKS = 16;
+const BACKLOG_RETRY_MS = 50;
 
 function frame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -136,6 +139,8 @@ export async function GET(req: Request) {
       let run: string | null = null;
       let offset = 0;
       let saidNone = false;
+      /** The reader's queue was full at the last drain. */
+      let backlogged = false;
 
       const announce = (info: UpdateLogInfo, from: number) => {
         run = info.id;
@@ -149,6 +154,7 @@ export async function GET(req: Request) {
       const step = async () => {
         timer = null;
         if (closed) return;
+        backlogged = false;
         try {
           const info = await pick();
           if (closed) return;
@@ -166,8 +172,14 @@ export async function GET(req: Request) {
               announce(info, 0);
             }
             // Everything there is, a chunk at a time — up to the recorded
-            // size only (updateLogInfo says why).
+            // size only (updateLogInfo says why), and only as fast as the
+            // reader takes it: a slow one (a phone on WiFi, a tunnel) must not
+            // make this server hold a whole rebuild's log in memory.
             for (;;) {
+              if ((controller.desiredSize ?? 1) <= 0) {
+                backlogged = true;
+                break;
+              }
               const chunk = await readUpdateLogChunk(info.id, offset, CHUNK_BYTES, info.size);
               if (closed) return;
               if (!chunk || chunk.next === offset) break;
@@ -178,7 +190,7 @@ export async function GET(req: Request) {
             // late write slip past: re-read it after the drain.
             const after = await updateLogInfo(info.id);
             if (closed) return;
-            if (after && after.finished && offset >= after.size) {
+            if (!backlogged && after && after.finished && offset >= after.size) {
               send(frame("end", { id: info.id, outcome: after.outcome ?? null }));
               close();
               return;
@@ -187,7 +199,8 @@ export async function GET(req: Request) {
         } catch {
           // A read that failed is tried again on the next tick.
         }
-        if (!closed) timer = setTimeout(() => void step(), POLL_MS);
+        // A full queue is asked about again soon; a quiet log at the poll.
+        if (!closed) timer = setTimeout(() => void step(), backlogged ? BACKLOG_RETRY_MS : POLL_MS);
       };
 
       send("retry: 3000\n\n");
@@ -213,7 +226,7 @@ export async function GET(req: Request) {
       // The reader went away: stop the follow loop too, not only its timers.
       stop();
     },
-  });
+  }, new CountQueuingStrategy({ highWaterMark: QUEUED_CHUNKS }));
 
   return new Response(stream, {
     status: 200,

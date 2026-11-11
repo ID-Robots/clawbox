@@ -187,6 +187,17 @@ describe("GET /setup-api/update/log", () => {
     expect(text(seen)).toContain("ClawBox update");
   });
 
+  it("hands a log far bigger than its queue to a reader that keeps up, byte for byte", async () => {
+    const id = (await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" }))!;
+    const line = `${"compiling ".repeat(12)}✓\n`;
+    for (let i = 0; i < 24; i++) await writeUpdateLog(line.repeat(1000));
+    await closeUpdateLog("completed");
+    expect(Buffer.byteLength(fileOf(id))).toBeGreaterThan(2 * 1024 * 1024);
+    const seen = await events(await GET(request()), ended, undefined, 20_000);
+    expect(text(seen)).toBe(fileOf(id));
+    expect(seen.at(-1)).toMatchObject({ event: "end" });
+  });
+
   it("downloads the whole log as a file", async () => {
     const id = await finishedRun(["\x1b[31mred\x1b[0m\n"]);
     const res = await GET(request("?download=1"));

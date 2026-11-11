@@ -59,6 +59,9 @@ export const UPDATE_LOG_LINGER_MS = 3_000;
 const JOURNAL_READ_TIMEOUT_MS = 15_000;
 const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
 const JOURNAL_TAIL_BYTES = 8 * 1024;
+/** How long a streamed command's whole lines wait to be written together. */
+const STREAM_BATCH_MS = 250;
+const STREAM_BATCH_BYTES = 64 * 1024;
 /** Reads that fail in a row, with a cursor, before the follow moves on to the unit's newest entry. */
 const CURSOR_FAILURES_BEFORE_SKIP = 3;
 
@@ -143,6 +146,14 @@ const realDeps: Deps = {
 };
 let deps: Deps = realDeps;
 
+/** Work in flight (journal reads, streamed command output), so tests can wait for quiet. */
+const inFlight = new Set<Promise<unknown>>();
+function track<T>(work: Promise<T>): Promise<T> {
+  inFlight.add(work);
+  void work.finally(() => inFlight.delete(work)).catch(() => {});
+  return work;
+}
+
 /** Test seam: the journal reader, the clock and the timers. Pass nothing to restore. */
 export function setUpdateLogDepsForTests(overrides?: Partial<Deps>): void {
   deps = overrides ? { ...realDeps, ...overrides } : realDeps;
@@ -161,6 +172,36 @@ function logPath(id: string): string {
 
 function metaPath(id: string): string {
   return untraced(path.join(updateLogDir(), `${id}.json`));
+}
+
+/**
+ * `data/update-logs/latest`: the id of the run started last. Kept apart from
+ * the ids' own order, which is a wall-clock stamp — a box without an RTC can
+ * have its clock stepped back between two runs, and the newer run's id then
+ * sorts first.
+ */
+function latestPointerPath(): string {
+  return untraced(path.join(updateLogDir(), "latest"));
+}
+
+async function readLatestPointer(): Promise<string | null> {
+  try {
+    const id = (await fs.promises.readFile(latestPointerPath(), "utf8")).trim();
+    return UPDATE_LOG_ID_RE.test(id) && fs.existsSync(logPath(id)) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeLatestPointer(id: string): Promise<void> {
+  const tmp = untraced(`${latestPointerPath()}.${process.pid}.tmp`);
+  await fs.promises.writeFile(tmp, `${id}\n`, { mode: 0o600 });
+  await fs.promises.rename(tmp, latestPointerPath());
+}
+
+/** The run started last: the pointer, or (no pointer yet) the newest id. */
+async function latestRunId(): Promise<string | null> {
+  return (await readLatestPointer()) ?? (await listRunIds())[0] ?? null;
 }
 
 /** Redacted a line at a time, so a rule never sees half a credential. */
@@ -393,7 +434,7 @@ class JournalFollow {
       this.polling = null;
     });
     this.polling = reading;
-    return reading;
+    return track(reading);
   }
 
   /**
@@ -633,7 +674,7 @@ async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
     }
     current = null;
     await fs.promises.mkdir(updateLogDir(), { recursive: true, mode: 0o700 });
-    const [latest] = await listRunIds();
+    const latest = await latestRunId();
     const last = latest ? await readMeta(latest) : null;
     if (last && !last.finished) {
       if (!opts.fresh) {
@@ -657,6 +698,7 @@ async function openNow(opts: OpenUpdateLogOptions): Promise<string | null> {
     };
     current = new RunLog(meta);
     await current.write(`${BOLD}=== ${redactUpdateLogText(opts.title)}${RESET} ${DIM}(started ${meta.startedAt})${RESET}\n`, { force: true });
+    await writeLatestPointer(meta.id);
     await prune(meta.id);
     return meta.id;
   } catch {
@@ -698,17 +740,20 @@ export function currentUpdateLogId(): string | null {
 }
 
 /** Text the runner writes itself (redacted). */
-export async function writeUpdateLog(text: string): Promise<void> {
+export async function writeUpdateLog(text: string, opts: { force?: boolean } = {}): Promise<void> {
   if (!current || current.meta.finished) return;
   try {
-    await current.write(redactUpdateLogText(text));
+    await current.write(redactUpdateLogText(text), opts);
   } catch { /* the log, not the update */ }
 }
 
 /** `==> [n/total] Label` — where a step's output starts. */
 export async function logUpdateStepStart(step: { id: string; label: string }, index: number, total: number): Promise<void> {
+  // Past the size cap too: where each step starts is what a reader of a cut
+  // log needs most.
   await writeUpdateLog(
     `\n${CYAN}==> [${index + 1}/${total}] ${step.label}${RESET} ${DIM}${step.id} · ${clock(deps.now())}${RESET}\n`,
+    { force: true },
   );
 }
 
@@ -721,7 +766,8 @@ export async function logUpdateStepEnd(
 ): Promise<void> {
   const tone = outcome === "completed" ? GREEN : outcome === "failed" ? RED : YELLOW;
   const took = startedMs === undefined ? "" : ` ${DIM}(${Math.max(0, Math.round((deps.now() - startedMs) / 1000))}s)${RESET}`;
-  await writeUpdateLog(`${tone}==> ${step.label}: ${outcome}${detail ? ` — ${detail}` : ""}${RESET}${took}\n`);
+  // Past the size cap too: how each step ended is the point of the log.
+  await writeUpdateLog(`${tone}==> ${step.label}: ${outcome}${detail ? ` — ${detail}` : ""}${RESET}${took}\n`, { force: true });
 }
 
 /** The streams of a child process, as `util.promisify(execFile)` hands it out on `.child`. */
@@ -738,23 +784,38 @@ interface ChildStreams {
 function streamCommand(child: ChildStreams): { flush: () => Promise<void> } {
   const partial = new Map<NodeJS.ReadableStream, string>();
   let writing: Promise<void> = Promise.resolve();
+  // Whole lines wait here for at most STREAM_BATCH_MS (or STREAM_BATCH_BYTES),
+  // then go to the log as ONE write: a chatty build is a few writes a second,
+  // not one write and one record per line.
+  let batch = "";
+  let timer: unknown = null;
+  const send = () => {
+    if (timer !== null) deps.clearTimer(timer);
+    timer = null;
+    if (!batch) return;
+    const lines = batch;
+    batch = "";
+    writing = track(writing.then(() => writeUpdateLog(lines)));
+  };
   const take = (stream: NodeJS.ReadableStream, chunk: Buffer | string) => {
     const text = (partial.get(stream) ?? "") + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
     const cut = text.lastIndexOf("\n");
     partial.set(stream, cut < 0 ? text : text.slice(cut + 1));
-    if (cut >= 0) {
-      const lines = text.slice(0, cut + 1);
-      writing = writing.then(() => writeUpdateLog(lines));
-    }
+    if (cut < 0) return;
+    batch += text.slice(0, cut + 1);
+    if (batch.length >= STREAM_BATCH_BYTES) send();
+    else if (timer === null) timer = deps.setTimer(send, STREAM_BATCH_MS);
   };
   for (const stream of [child.stdout, child.stderr]) {
     if (stream && typeof stream.on === "function") stream.on("data", (chunk: Buffer | string) => take(stream, chunk));
   }
   return {
     flush: async () => {
+      send();
       await writing;
-      for (const rest of partial.values()) if (rest) await writeUpdateLog(`${rest}\n`);
+      const rest = [...partial.values()].filter(Boolean).map((line) => `${line}\n`).join("");
       partial.clear();
+      if (rest) await writeUpdateLog(rest);
     },
   };
 }
@@ -853,6 +914,24 @@ export function closeUpdateLog(outcome: "completed" | "failed", error?: string):
 }
 
 /**
+ * Test seam: resolves once nothing is in flight — no journal read, no
+ * streamed output, no queued write — however long the disk takes.
+ */
+export async function settleUpdateLogForTests(): Promise<void> {
+  for (let round = 0; round < 1000; round++) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (inFlight.size === 0) {
+      await current?.flushed();
+      await closing;
+      await new Promise((resolve) => setImmediate(resolve));
+      if (inFlight.size === 0) return;
+    } else {
+      await Promise.allSettled([...inFlight]);
+    }
+  }
+}
+
+/**
  * Test seam: forget the run this process was writing, as a process that died
  * would — its files stay exactly as the last write left them.
  */
@@ -870,7 +949,7 @@ export async function resetUpdateLogForTests(): Promise<void> {
 
 /** The newest run's log, or null when no update has written one. */
 export async function latestUpdateLog(): Promise<UpdateLogInfo | null> {
-  const [latest] = await listRunIds();
+  const latest = await latestRunId();
   return latest ? updateLogInfo(latest) : null;
 }
 

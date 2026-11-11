@@ -54,11 +54,17 @@ FLOW='SHOTS=$1 DRIVER_TIMEOUT_S=$5 bash "$REPO/scripts/nano-tests/board/update-r
 
 # raw_log MODE LABEL [TIMEOUT_S] — run a board check and relay its lines.
 # Returns 1 when it only said "not yet" (or nothing), so the caller asks again.
+# A check that ended badly (the driver timed out, the hop failed) is a failure
+# whatever it printed first. PANEL_OK says whether it checked the panel.
+PANEL_OK=0
 raw_log() {
-  local out line said=0 later=0
+  local out rc line said=0 later=0
+  PANEL_OK=0
   out=$(board "$FLOW" "$SHOTS" "$1" "$RUN_TAG" "$2" "${3:-600}")
+  rc=$?
   while IFS= read -r line; do
     case "$line" in
+      "RESULT ok - "*"rows the panel shows"*) ok "[$RUNTIME] ${line#RESULT ok - }"; said=1; PANEL_OK=1 ;;
       "RESULT ok - "*) ok "[$RUNTIME] ${line#RESULT ok - }"; said=1 ;;
       "RESULT not ok - "*) not_ok "[$RUNTIME] ${line#RESULT not ok - }"; said=1 ;;
       "RESULT skip - not yet"*) later=1 ;;
@@ -69,10 +75,30 @@ raw_log() {
       *) note "$line" ;;
     esac
   done <<<"$out"
+  # 1 is grep finding no line to keep: "said nothing", the callers' own case.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ] && [ "$later" = 0 ]; then
+    not_ok "[$RUNTIME] the $1 check on the board ended with status $rc"
+    return 0
+  fi
   [ "$said" = 1 ] && [ "$later" = 0 ]
 }
 
+# run_started_since EPOCH — the update log the box started last began at or
+# after EPOCH (less a little clock slack): the run that ended is this test's,
+# not a previous update's synthesised "completed".
+run_started_since() {
+  local started
+  # shellcheck disable=SC2016  # expanded on the board
+  started=$(board 'd="$REPO/data/update-logs"; id=$(cat "$d/latest" 2>/dev/null); [ -n "$id" ] && python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[\"startedAt\"])" "$d/$id.json" 2>/dev/null' | tail -n 1)
+  [ -n "$started" ] && [ "$(date -d "$started" +%s 2>/dev/null || echo 0)" -ge $(( $1 - 10 )) ]
+}
+
+# The board is left as it was found: the reader stopped, its folder gone. Run
+# once at the end, and from the EXIT trap when the test stops early.
+CLEANED=0
 cleanup() {
+  [ "$CLEANED" = 1 ] && return 0
+  CLEANED=1
   # shellcheck disable=SC2016  # expanded on the board
   board 'd=$HOME/.cache/nano-update-raw-log-$1; [ -s "$d/reader.pid" ] && kill "$(cat "$d/reader.pid")" 2>/dev/null; rm -rf -- "$d"' "$RUN_TAG" >/dev/null 2>&1
 }
@@ -94,14 +120,16 @@ fi
 # log rather than the step list where the update is; each answers "not yet"
 # until it can say something. (wait_app_update polls every 15 s, which a fast
 # box outruns.)
-LIVE_BEFORE=0
-LIVE_AFTER=0
+# LIVE_*: that check has answered (a panel check, or "too late" for it);
+# LIVE_*_PANEL: it checked the panel, which is what the test is for.
+LIVE_BEFORE=0 LIVE_BEFORE_PANEL=0
+LIVE_AFTER=0 LIVE_AFTER_PANEL=0
 follow_update() {
   local deadline=$(( $(date +%s) + $1 )) phase step seen_running=0 last=""
   UPDATE_PHASE=timeout UPDATE_ERROR=
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if [ "$LIVE_BEFORE" = 0 ] && raw_log live before-restart; then LIVE_BEFORE=1; fi
-    if [ "$LIVE_BEFORE" = 1 ] && [ "$LIVE_AFTER" = 0 ] && raw_log live after-restart; then LIVE_AFTER=1; fi
+    if [ "$LIVE_BEFORE" = 0 ] && raw_log live before-restart; then LIVE_BEFORE=1 LIVE_BEFORE_PANEL=$PANEL_OK; fi
+    if [ "$LIVE_AFTER" = 0 ] && raw_log live after-restart; then LIVE_AFTER=1 LIVE_AFTER_PANEL=$PANEL_OK; fi
     API_MAX_TIME=20 board_api GET /setup-api/update/status
     if [ "$API_STATUS" = 200 ]; then
       phase=$(api_json '.phase // empty')
@@ -110,7 +138,9 @@ follow_update() {
       case "$phase" in
         running) seen_running=1 ;;
         completed|failed)
-          if [ "$seen_running" = 1 ] || [ "$phase" = failed ]; then
+          # A completion this test never saw running is still this run's
+          # when the box's newest update log began after the test started it.
+          if [ "$seen_running" = 1 ] || [ "$phase" = failed ] || run_started_since "$START"; then
             UPDATE_PHASE=$phase
             UPDATE_ERROR=$(api_json '(.error // ([.steps[]? | select(.status == "failed") | .error] | first) // "") | tostring | .[0:300]')
             return 0
@@ -129,10 +159,13 @@ case "$UPDATE_PHASE" in
   failed) not_ok "[$RUNTIME] the update failed: $UPDATE_ERROR (its log is checked all the same)" ;;
   *) not_ok "[$RUNTIME] the update did not end within 60 minutes"; finish ;;
 esac
-[ "$LIVE_BEFORE" = 1 ] || note "no panel check ran on a root step before the restart (the steps went by between two polls)"
-[ "$LIVE_AFTER" = 1 ] || note "no panel check ran on a root step after the restart (the steps went by between two polls)"
+# The panel while the log is still being written is what this test is for: a
+# phase whose check never ran is a failure, not a footnote.
+[ "$LIVE_BEFORE_PANEL" = 1 ] || not_ok "[$RUNTIME] no live panel check ran before the web server's restart"
+[ "$LIVE_AFTER_PANEL" = 1 ] || not_ok "[$RUNTIME] no live panel check ran after the web server's restart"
 
 if [ "$(board_head)" = "$NANO_SHA" ]; then ok "[$RUNTIME] the board is on ${NANO_SHA:0:12} after the update"; else not_ok "[$RUNTIME] the board is on $(board_head | cut -c1-12), not ${NANO_SHA:0:12}"; fi
 
 raw_log after after-reload 900 || not_ok "[$RUNTIME] the after-update checks said nothing"
+cleanup
 finish

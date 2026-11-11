@@ -15,6 +15,7 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   UPDATE_LOG_KEEP,
+  UPDATE_LOG_MAX_BYTES,
   closeUpdateLog,
   currentUpdateLogId,
   finishUpdateUnitFollows,
@@ -28,6 +29,7 @@ import {
   readUpdateLogChunk,
   resetUpdateLogForTests,
   setUpdateLogDepsForTests,
+  settleUpdateLogForTests,
   splitCursor,
   updateLogDir,
   updateLogInfo,
@@ -84,9 +86,9 @@ function fakeSpawn(command: string, args: readonly string[]) {
   return fakeChild(mine.map((e) => `${e.message}\n`).join("") + `-- cursor: ${mine[mine.length - 1].cursor}\n`);
 }
 
-/** Let every spawned child answer and every write land. */
+/** Let every spawned child answer and every write land, however slow the disk. */
 async function settle(): Promise<void> {
-  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+  await settleUpdateLogForTests();
 }
 
 /** Run the timers due within `ms`, then settle. */
@@ -350,6 +352,35 @@ describe("capture, when things go wrong", () => {
   });
 });
 
+describe("the run started last, and a full log", () => {
+  it("follows the run started last even when the clock was stepped back before it", async () => {
+    const first = await openUpdateLog({ fresh: true, flow: "update", title: "first" });
+    await closeUpdateLog("completed");
+    now -= 3_600_000; // timesyncd stepped the clock back an hour
+    const second = await openUpdateLog({ fresh: true, flow: "update", title: "second" });
+    expect(second! < first!).toBe(true); // its id sorts before the older run's
+    expect(await latestUpdateLog()).toMatchObject({ id: second, finished: false });
+    // The second half of the update goes on in ITS file, not the older one.
+    await resetUpdateLogForTests();
+    expect(await openUpdateLog({ fresh: false, flow: "update", title: "ClawBox restarted" })).toBe(second);
+  });
+
+  it("still writes where each step starts and how it ended once the log is full", async () => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    const { size } = (await updateLogInfo(id!))!;
+    await writeUpdateLog(`${"x".repeat(UPDATE_LOG_MAX_BYTES - size - 6)}\n`); // five bytes short of full
+    await writeUpdateLog("dropped output\n");
+    await logUpdateStepStart({ id: "post_update", label: "Applying system fixups" }, 6, 9);
+    await writeUpdateLog("more dropped output\n");
+    await logUpdateStepEnd({ id: "post_update", label: "Applying system fixups" }, "failed", "exit 1");
+    const tail = fs.readFileSync(path.join(updateLogDir(), `${id}.log`), "utf8").slice(-600);
+    expect(tail).toContain("further output is in the journal");
+    expect(tail).not.toContain("dropped output");
+    expect(tail).toContain("==> [7/9] Applying system fixups");
+    expect(tail).toContain("==> Applying system fixups: failed — exit 1");
+  });
+});
+
 describe("commands the web server runs itself", () => {
   /** A promise that carries its child, the way util.promisify(execFile) hands it out. */
   function running(script: (out: EventEmitter, err: EventEmitter) => Promise<void>, fail = false) {
@@ -372,7 +403,8 @@ describe("commands the web server runs itself", () => {
       out.emit("data", "Creating an optimized production build ...\n");
       err.emit("data", "warn: a deprecat");
       out.emit("data", "✓ Compiled succ");
-      await settle();
+      // Whole lines go out together, at most a quarter second after the first.
+      await advance(300);
       seenMidway = logText(id!);
       err.emit("data", "ion\n");
       out.emit("data", "essfully\n");
