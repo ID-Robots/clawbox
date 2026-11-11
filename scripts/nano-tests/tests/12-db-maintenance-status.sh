@@ -24,19 +24,31 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 RUNTIME=$(board_runtime)
 note "runtime: $RUNTIME"
 
-# "<package version or -> <baseline JSON or ->", from the board.
+# "<package version or -> <baseline JSON or -> <desktop integration: yes|no>",
+# from the board.
 # shellcheck disable=SC2016  # expanded on the board
 BASE=$(board '
+  : "${HOME:?HOME is not set on the board}" "${REPO:?REPO is not set on the board}"
+  integration=no
+  [ -e /etc/clawbox/x64-integration.env ] && integration=yes
   bin=$HOME/.npm-global/bin/openclaw
   pkg=$(dirname "$bin")/../lib/node_modules/openclaw/package.json
   version=$(python3 -I -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"version\") or \"\")" "$pkg" 2>/dev/null)
   report=$(python3 -I "$REPO/scripts/openclaw-db-maintenance.py" status --json \
       --data-dir "$REPO/data" --openclaw-bin "$bin" --core-pkg "$pkg" 2>/dev/null \
     | python3 -I -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({\"core\": d.get(\"core\"), \"supported\": d.get(\"supported\")}, separators=(\",\", \":\")))" 2>/dev/null)
-  echo "${version:--} ${report:--}"
+  echo "${version:--} ${report:--} $integration"
 ')
-read -r PKG_VERSION BASELINE <<<"$BASE"
-note "core package beside the binary: ${PKG_VERSION:--}; helper status with that --core-pkg: ${BASELINE:--}"
+read -r PKG_VERSION BASELINE INTEGRATION <<<"$BASE"
+note "core package beside the binary: ${PKG_VERSION:--}; helper status with that --core-pkg: ${BASELINE:--}; desktop integration: ${INTEGRATION:-unknown}"
+
+if [ "${PKG_VERSION:--}" = - ] && [ "${INTEGRATION:-}" = yes ]; then
+  # The x86 desktop integration's core lives under the NPM_PREFIX its host file
+  # names, not beside the binary: the unit tests cover that layout, and this
+  # test's baseline is the appliance's.
+  skip "this board runs the x86 desktop integration, whose core is not beside the binary; this test checks the appliance layout"
+  finish
+fi
 
 if [ "${PKG_VERSION:--}" != - ]; then
   ok "the core's package.json is beside the binary's npm prefix (OpenClaw $PKG_VERSION)"

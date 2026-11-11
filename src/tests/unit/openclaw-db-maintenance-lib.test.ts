@@ -409,6 +409,18 @@ describe("the core package.json the helper reads (--core-pkg)", () => {
     expect(x64IntegrationNpmPrefix(path.join(h.root, "absent.env"))).toBeNull();
   });
 
+  it.skipIf(!hasPython3)("reads back what the integration package's writer emits (build-package.py: k=shlex.quote(v))", async () => {
+    const { x64IntegrationNpmPrefix } = await vi.importActual<typeof import("@/lib/x64-integration")>("@/lib/x64-integration");
+    const writer = "import shlex, sys\nhost = dict(INSTALL_USER='fixture', NPM_PREFIX=sys.argv[1], NODE_DIR='/opt/node/bin')\n"
+      + "open(sys.argv[2], 'w').write(''.join(f'{k}={shlex.quote(v)}\\n' for k, v in host.items()))\n";
+    const file = path.join(h.root, "written.env");
+    for (const prefix of ["/home/fixture/.npm-global", "/home/fixture user/.npm-global", "/srv/a+b@c/.npm-global"]) {
+      const run = spawnSync("python3", ["-I", "-c", writer, prefix, file], { encoding: "utf8" });
+      expect(run.status, run.stderr).toBe(0);
+      expect(x64IntegrationNpmPrefix(file), prefix).toBe(prefix);
+    }
+  });
+
   it.skipIf(!hasPython3)("lets the helper see a 2026.10 core on the desktop integration: supported", async () => {
     const prefix = path.join(h.root, "desktop-prefix");
     writePkg(prefix, "2026.10.9");
