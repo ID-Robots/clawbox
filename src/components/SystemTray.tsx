@@ -2,7 +2,7 @@
 
 import { memo, useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
-import { useSessionUser } from "@/lib/use-session-user";
+import { useSessionUser, useSettledSessionUser } from "@/lib/use-session-user";
 import { isOrgMember } from "@/lib/org-mode";
 import { announceSessionSwitch } from "@/lib/session-switch";
 import CrabWaitMark from "./CrabWaitMark";
@@ -60,8 +60,11 @@ function SystemTray({
   const mainIns = deskScreens ? mainInsets() : null;
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
   const [internet, setInternet] = useState<{ online: boolean; latencyMs: number | null } | null>(null);
+  // The box's network is the owner's on an organisation box (src/lib/org-mode.ts):
+  // a member of staff's tray asks nothing about it, and draws no internet line.
+  const viewer = useSettledSessionUser();
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || viewer === undefined || isOrgMember(viewer)) return;
     let alive = true;
     const tick = async () => {
       try {
@@ -74,7 +77,7 @@ function SystemTray({
     void tick();
     const id = setInterval(tick, 15_000);
     return () => { alive = false; clearInterval(id); };
-  }, [isOpen]);
+  }, [isOpen, viewer]);
   const [rebootState, setRebootState] = useState<RebootState>(null);
   const [powerError, setPowerError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);

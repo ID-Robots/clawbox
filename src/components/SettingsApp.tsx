@@ -726,12 +726,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       monitorsLink.current = false;
     };
+    // The monitors are the box's: not asked for a member of staff on an
+    // organisation box, nor before it is known who is looking.
+    if (!boxReads) return () => { alive = false; };
     fetch("/setup-api/monitors", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body: { available?: boolean } | null) => answer(body?.available === true))
       .catch(() => answer(false));
     return () => { alive = false; };
-  }, []);
+  }, [boxReads]);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status

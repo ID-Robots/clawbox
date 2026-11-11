@@ -60,6 +60,59 @@ const MEMBER_ROUTES: [string, string][] = [
   ["GET", "/setup-api/update/status"],
 ];
 
+/**
+ * Every box-wide control a member of staff must be refused on an organisation
+ * box — the audit's list, route by route: a member's cookie gets 403
+ * `owner_only`, the owner's passes. Preference WRITES are the preferences
+ * route's own (a member's land in their own map, `installed_*` is refused 403:
+ * preferences-org-mode.test.ts), so the route itself is not on this list.
+ */
+const BOX_WIDE: [string, string][] = [
+  ["POST", "/setup-api/tunnel/enable"],
+  ["POST", "/setup-api/tunnel/disable"],
+  ["GET", "/setup-api/tunnel/status"],
+  ["GET", "/setup-api/wifi/scan"],
+  ["GET", "/setup-api/wifi/status"],
+  ["GET", "/setup-api/wifi/saved"],
+  ["POST", "/setup-api/wifi/connect"],
+  ["GET", "/setup-api/wifi/ethernet"],
+  ["GET", "/setup-api/network/internet"],
+  ["GET", "/setup-api/email/status"],
+  ["GET", "/setup-api/email/messages"],
+  ["POST", "/setup-api/email/send"],
+  ["GET", "/setup-api/email/pending"],
+  ["POST", "/setup-api/email/configure"],
+  ["GET", "/setup-api/telegram/status"],
+  ["POST", "/setup-api/telegram/configure"],
+  ["GET", "/setup-api/whatsapp/status"],
+  ["GET", "/setup-api/discord/status"],
+  ["GET", "/setup-api/clawkeep/snapshots"],
+  ["POST", "/setup-api/clawkeep/backup"],
+  ["GET", "/setup-api/prime-radiant/status"],
+  ["GET", "/setup-api/clawkeep/memory/status"],
+  ["GET", "/setup-api/embed/status"],
+  ["POST", "/setup-api/apps/install"],
+  ["POST", "/setup-api/apps/uninstall"],
+  ["GET", "/setup-api/apps/store"],
+  ["GET", "/setup-api/plugins"],
+  ["GET", "/setup-api/webapps"],
+  ["GET", "/setup-api/vnc"],
+  ["POST", "/setup-api/vnc/resolution"],
+  ["GET", "/setup-api/kiosk/tabs"],
+  ["GET", "/setup-api/monitors"],
+  ["POST", "/setup-api/monitors"],
+  ["POST", "/setup-api/system/power"],
+  ["GET", "/setup-api/system/power-profile"],
+  ["POST", "/setup-api/system/power-profile"],
+  ["GET", "/setup-api/background-jobs"],
+  ["GET", "/setup-api/background-jobs/tasks"],
+  ["GET", "/setup-api/browser/status"],
+  ["POST", "/setup-api/browser/launch"],
+  ["POST", "/setup-api/update/run"],
+  ["GET", "/setup-api/update/versions"],
+  ["POST", "/setup-api/system/update-branch"],
+];
+
 describe("middleware — organisation mode", () => {
   let middleware: typeof import("@/middleware").middleware;
   let tmpRoot: string;
@@ -121,6 +174,15 @@ describe("middleware — organisation mode", () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const [group, method, p] of GROUPS) {
       await expectOwnerOnly(await middleware(request(p, { cookie: alice, method })), `${group}: ${method} ${p}`);
+    }
+  });
+
+  it("refuses a member of staff every box-wide control on the audit's list — 403 owner_only — and lets the owner through", async () => {
+    const alice = await sign({ u: "alice", sv: ALICE_SV });
+    const owner = await sign({ u: "clawbox" });
+    for (const [method, p] of BOX_WIDE) {
+      await expectOwnerOnly(await middleware(request(p, { cookie: alice, method })), `member: ${method} ${p}`);
+      expect(passes(await middleware(request(p, { cookie: owner, method }))), `owner: ${method} ${p}`).toBe(true);
     }
   });
 

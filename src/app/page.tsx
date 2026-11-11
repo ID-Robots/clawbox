@@ -740,7 +740,8 @@ function ChromeDesktopInner() {
   // notices live on the MAIN monitor; windows maximize on the one they are on.
   // Every signed-in user's desktop, once it is known who is signed in: the
   // route answers another user a positions-only view.
-  useMonitorLayoutSync(ownerApiAccess !== null);
+  // Not a member of staff's on an organisation box: the monitors are the box's.
+  useMonitorLayoutSync(ownerApiAccess !== null && viewerKnown && !orgMember);
   const deskScreens = useDeskScreens();
   const mainRect = deskScreens ? mainScreen() : null;
   const mainIns = deskScreens ? mainInsets() : { left: 0, top: 0, right: 0, bottom: 0 };
