@@ -44,6 +44,8 @@ export interface MemoryReindexAdvice {
 /** The fields of `ClawKeepMemoryStatus` this reads; every one optional, so an older reading still answers. */
 export interface MemoryStatusFacts {
   available?: boolean;
+  /** The model the index is embedded with now. */
+  model?: string;
   location?: string;
   indexIdentity?: string;
   indexIdentityCode?: string;
@@ -190,6 +192,17 @@ export const TOKENS_PER_CHUNK = 300;
  */
 const ROUGH_CHUNKS_PER_SECOND = { local: 8, cloud: 25 } as const;
 
+/**
+ * The on-box models that are not the default, at the rate measured for them
+ * (TASK-2411). The 4B runs only on an x86 PC with an NVIDIA GPU; its figure is
+ * below the GPU-offloaded rate measured on an RTX 2080 with the unit's
+ * 1024-token batch (8.7 passages a second at Q8_0, 8.9 at Q4_K_M; the 0.6B
+ * did 17 on the same card), because a 6 GB card is the floor, not the norm.
+ */
+const ROUGH_LOCAL_CHUNKS_PER_SECOND_BY_MODEL: Readonly<Record<string, number>> = {
+  "qwen3-embedding-4b": 6,
+};
+
 export interface MemoryReindexEstimate {
   /** Files the pass reads: those indexed plus those waiting. Null when the box has not scanned yet. */
   files: number | null;
@@ -225,14 +238,19 @@ export function estimateFullReindex(
   let minutes: MemoryReindexEstimate["minutes"] = null;
   let basis: string;
   const lastFull = s.run?.status === "succeeded" && s.run.mode === "full" && (s.run.durationMs ?? 0) > 0 ? s.run.durationMs as number : null;
-  if (lastFull !== null && embedder === current) {
+  // The box's own timing is for the model it timed: a pass on the 0.6B says
+  // nothing about the 4B, which is several times slower per passage.
+  const sameModel = !model || !s.model || s.model === model;
+  if (lastFull !== null && embedder === current && sameModel) {
     // The box's own measure. ±30% for whatever has been added or removed since.
     minutes = { low: roundMinutes(lastFull * 0.7), high: roundMinutes(lastFull * 1.3) };
     basis = `this box's last full pass took about ${roundMinutes(lastFull)} min`;
   } else if (chunks !== null) {
-    const ms = (chunks / ROUGH_CHUNKS_PER_SECOND[embedder]) * 1000;
+    const modelRate = embedder === "local" && model ? ROUGH_LOCAL_CHUNKS_PER_SECOND_BY_MODEL[model] : undefined;
+    const ms = (chunks / (modelRate ?? ROUGH_CHUNKS_PER_SECOND[embedder])) * 1000;
     minutes = { low: roundMinutes(ms * 0.5), high: roundMinutes(ms * 2) };
-    basis = `a rough rate for the ${embedder === "cloud" ? "ClawBox AI cloud" : "on-box"} embedder over ${count(chunks, "passage")}; no full pass on it has been timed here yet`;
+    const who = embedder === "cloud" ? "ClawBox AI cloud" : modelRate !== undefined ? `on-box ${model}` : "on-box";
+    basis = `a rough rate for the ${who} embedder over ${count(chunks, "passage")}; no full pass on it has been timed here yet`;
   } else {
     basis = "nothing is indexed yet, so the box has no measure of how much text the folders hold";
   }

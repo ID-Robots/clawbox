@@ -24,7 +24,13 @@ const h = vi.hoisted(() => ({
   factsThrow: false,
   token: "claw_test_token" as string | null,
   installed: false,
-  switchLocal: vi.fn(async () => {}),
+  /** The model the box is set to, as data/config.json holds it (TASK-2411). */
+  active: { id: "qwen3-embedding-0.6b", quant: "Q8_0" } as { id: string; quant: string },
+  /** What the gate says about the 4B on this box. */
+  gate4b: { available: true, quant: "Q8_0", reason: null, detail: null } as { available: boolean; quant: string | null; reason: string | null; detail: string | null },
+  /** The 4B quant on disk, or null when it is not downloaded. */
+  installed4b: null as string | null,
+  switchLocal: vi.fn(async (..._a: unknown[]) => {}),
   switchCloud: vi.fn(async (..._a: unknown[]) => {}),
   note: vi.fn(async (..._a: unknown[]) => {}),
   invalidate: vi.fn(() => {}),
@@ -37,7 +43,11 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   openclawIsAbsent: () => h.absent,
 }));
 vi.mock("@/lib/memory-shard", () => ({
-  switchToLocalEmbeddings: () => h.switchLocal(),
+  switchToLocalEmbeddings: (...a: unknown[]) => {
+    const selection = a[0] as { id: string; quant: string } | undefined;
+    if (selection) h.active = selection;
+    return h.switchLocal(...a);
+  },
   switchToCloudEmbeddings: (...a: unknown[]) => h.switchCloud(...a),
   readEmbeddingPlacement: async (fallback?: unknown) => {
     if (h.choiceThrows) throw new Error("EACCES: permission denied, open 'openclaw.json'");
@@ -47,7 +57,19 @@ vi.mock("@/lib/memory-shard", () => ({
 }));
 vi.mock("@/lib/clawai-cloud-choice", () => ({ noteOwnerChoice: (...a: unknown[]) => h.note(...a) }));
 vi.mock("@/lib/clawkeep-memory", () => ({ invalidateMemoryStatusCache: () => h.invalidate() }));
-vi.mock("@/lib/embed-server", () => ({ getEmbedProvisioningStatus: async () => ({ installed: h.installed }) }));
+vi.mock("@/lib/embed-server", () => ({
+  getEmbedProvisioningStatus: async () => ({ installed: h.installed }),
+  readActiveLocalEmbeddingModel: async () => h.active,
+}));
+vi.mock("@/lib/local-embedding-model", () => ({
+  gateLocalModel: async (id: string) =>
+    id === "qwen3-embedding-0.6b" ? { available: true, quant: "Q8_0", reason: null, detail: null } : h.gate4b,
+  selectionForSwitch: async (id: string) => (h.installed4b ? { id, quant: h.installed4b } : null),
+  localEmbeddingModelOptions: async () => [
+    { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", dimensions: 1024, active: h.active.id === "qwen3-embedding-0.6b", installed: h.installed, bytes: 639150592, quant: "Q8_0", available: true, reason: null, detail: null },
+    { id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", dimensions: 2560, active: h.active.id === "qwen3-embedding-4b", installed: h.installed4b !== null, bytes: 4279660224, ...h.gate4b, quant: h.installed4b ?? h.gate4b.quant },
+  ],
+}));
 vi.mock("@/lib/clawai-cloud-defaults", () => ({ readCloudDefaultsFacts: () => h.facts() }));
 vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken: async () => h.token }));
 vi.mock("@/lib/clawai-cloud-embeddings", () => ({
@@ -78,6 +100,9 @@ beforeEach(() => {
   h.factsThrow = false;
   h.token = "claw_test_token";
   h.installed = false;
+  h.active = { id: "qwen3-embedding-0.6b", quant: "Q8_0" };
+  h.gate4b = { available: true, quant: "Q8_0", reason: null, detail: null };
+  h.installed4b = null;
   for (const fn of [h.switchLocal, h.switchCloud, h.note, h.invalidate]) fn.mockClear();
   h.facts.mockReset().mockImplementation(async () => {
     if (h.factsThrow) throw new Error("probe failed");
@@ -88,7 +113,7 @@ beforeEach(() => {
 describe("GET", () => {
   it("answers the model on this box, the cloud on offer, and whether the GGUF is here", async () => {
     const res = await (await route()).GET();
-    expect(await res.json()).toEqual({ source: "local", recorded: true, cloudSupported: true, cloudAvailable: true, cloudReason: null, localInstalled: false });
+    expect(await res.json()).toMatchObject({ source: "local", recorded: true, cloudSupported: true, cloudAvailable: true, cloudReason: null, localInstalled: false, localModel: "qwen3-embedding-0.6b" });
   });
 
   it("calls an index pointed off the box the cloud", async () => {
@@ -104,7 +129,7 @@ describe("GET", () => {
     // ClawBox AI one as well, so the switch is the same switch on both SKUs.
     h.absent = true;
     const body = await (await (await route()).GET()).json();
-    expect(body).toEqual({ source: "local", recorded: true, cloudSupported: true, cloudAvailable: true, cloudReason: null, localInstalled: false });
+    expect(body).toMatchObject({ source: "local", recorded: true, cloudSupported: true, cloudAvailable: true, cloudReason: null, localInstalled: false });
   });
 
   it("hands an unpinned box the same verdict as the default, so the card cannot offer what it already uses", async () => {
@@ -207,6 +232,68 @@ describe("POST — the model on this box", () => {
     const res = await (await route()).POST(post({ source: "local" }));
     expect(res.status).toBe(200);
     expect(h.switchLocal).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST — which model on this box (TASK-2411)", () => {
+  it("GET names the model the box is set to and every model it offers, with why one cannot run", async () => {
+    h.gate4b = { available: false, quant: null, reason: "jetson", detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." };
+    const body = await (await (await route()).GET()).json();
+    expect(body.localModel).toBe("qwen3-embedding-0.6b");
+    expect(body.localModels.map((m: { id: string }) => m.id)).toEqual(["qwen3-embedding-0.6b", "qwen3-embedding-4b"]);
+    expect(body.localModels[1]).toMatchObject({ available: false, reason: "jetson" });
+  });
+
+  it("refuses an id that is not in the catalog, and a local model beside the cloud, before anything is written", async () => {
+    for (const body of [{ source: "local", localModel: "qwen3-embedding-8b" }, { localModel: "../../etc/passwd" }, { source: "cloud", localModel: "qwen3-embedding-4b" }]) {
+      const res = await (await route()).POST(post(body));
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(h.switchLocal).not.toHaveBeenCalled();
+    expect(h.switchCloud).not.toHaveBeenCalled();
+    expect(h.note).not.toHaveBeenCalled();
+  });
+
+  it("refuses the 4B where this box cannot run it, with the gate's reason, for the owner too", async () => {
+    h.gate4b = { available: false, quant: null, reason: "jetson", detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." };
+    h.installed4b = "Q8_0";
+    const res = await (await route()).POST(post({ source: "local", localModel: "qwen3-embedding-4b" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ kind: "local_model_unavailable", reason: "jetson", error: expect.stringMatching(/Jetson/) });
+    expect(h.switchLocal).not.toHaveBeenCalled();
+    expect(h.note).not.toHaveBeenCalled();
+  });
+
+  it("refuses the 4B while it is not downloaded", async () => {
+    const res = await (await route()).POST(post({ source: "local", localModel: "qwen3-embedding-4b" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ kind: "local_not_installed", model: "qwen3-embedding-4b" });
+    expect(h.switchLocal).not.toHaveBeenCalled();
+  });
+
+  it("switches onto the 4B copy on disk, and names it", async () => {
+    h.installed4b = "Q4_K_M";
+    const res = await (await route()).POST(post({ source: "local", localModel: "qwen3-embedding-4b" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ source: "local", model: "qwen3-embedding-4b", provider: "openai-compatible" });
+    expect(h.switchLocal).toHaveBeenCalledWith({ id: "qwen3-embedding-4b", quant: "Q4_K_M" });
+  });
+
+  it("switches back to the 0.6B, which keeps the name it always had", async () => {
+    h.active = { id: "qwen3-embedding-4b", quant: "Q8_0" };
+    h.installed = true;
+    const res = await (await route()).POST(post({ source: "local", localModel: "qwen3-embedding-0.6b" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ model: "qwen3-embedding-0.6b" });
+    expect(h.switchLocal).toHaveBeenCalledWith({ id: "qwen3-embedding-0.6b", quant: "Q8_0" });
+  });
+
+  it("keeps the model the box is set to when no model is named", async () => {
+    h.active = { id: "qwen3-embedding-4b", quant: "Q8_0" };
+    const res = await (await route()).POST(post({ source: "local" }));
+    expect(res.status).toBe(200);
+    expect(h.switchLocal).toHaveBeenCalledWith(undefined);
+    expect(await res.json()).toMatchObject({ model: "qwen3-embedding-4b" });
   });
 });
 

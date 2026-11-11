@@ -6,6 +6,13 @@ import ScreenshotEditor, { type EditorImage } from "@/components/ScreenshotEdito
 import ScreenshotOverlay from "@/components/ScreenshotOverlay";
 import { displayCaptureSupported, prepareDisplayCapture } from "@/components/screenshot/display-capture";
 import { blobToBitmap, resizeBitmap } from "@/components/screenshot/render";
+import {
+  DEFAULT_SCREENSHOT_SETTINGS,
+  type ScreenshotSettings,
+  cachedScreenshotSettings,
+  loadScreenshotSettings,
+  saveScreenshotSettings,
+} from "@/components/screenshot/settings";
 import { useT } from "@/lib/i18n";
 import { SCREENSHOTS_DIR, formatByteSize, isValidScreenshotName, screenshotUrl } from "@/lib/screenshot/files";
 import { MAX_IMAGE_SIDE, resizeDimensions } from "@/lib/screenshot/geometry";
@@ -110,10 +117,39 @@ export default function ScreenshotApp() {
   const [queued, setQueued] = useState<EditorImage | null>(null);
 
   const [delay, setDelay] = useState<number>(0);
-  const [hideWindow, setHideWindow] = useState(true);
-  const [engine, setEngine] = useState<CaptureEngineId>("dom");
+  // "Capture with" and "Hide this window", remembered in the desktop's
+  // preferences (screenshot/settings.ts). The defaults stand until a valid
+  // saved value arrives, and a choice made before it arrives wins over it.
+  const [options, setOptions] = useState<ScreenshotSettings>(() => cachedScreenshotSettings() ?? DEFAULT_SCREENSHOT_SETTINGS);
+  const optionsRef = useRef(options);
+  const ownerChanged = useRef(false);
+  useEffect(() => {
+    let live = true;
+    void loadScreenshotSettings().then((saved) => {
+      if (!live || !saved || ownerChanged.current) return;
+      optionsRef.current = saved;
+      setOptions(saved);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const changeOptions = useCallback((patch: Partial<ScreenshotSettings>) => {
+    const next = { ...optionsRef.current, ...patch };
+    ownerChanged.current = true;
+    optionsRef.current = next;
+    setOptions(next);
+    // Fire and forget: a save that fails costs the memory of the choice, never the capture.
+    void saveScreenshotSettings(next);
+  }, []);
+  const setEngine = useCallback((engine: CaptureEngineId) => changeOptions({ engine }), [changeOptions]);
+  const setHideWindow = useCallback((hideWindow: boolean) => changeOptions({ hideWindow }), [changeOptions]);
+  const hideWindow = options.hideWindow;
   // Whether the browser's own capture exists here: a fact of the page's context, read on the client.
   const browserCapture = useSyncExternalStore(noSubscription, displayCaptureSupported, () => false);
+  // A saved "Browser" where this page cannot offer it captures with Built-in,
+  // and stays saved for the page that can.
+  const engine: CaptureEngineId = browserCapture ? options.engine : "dom";
   // Whether the DESKTOP has its overlay up. Followed, not read once: a window
   // restored on a refresh can draw before the desktop has learnt its user is
   // the owner and mounted the overlay. Reading it once left this window with
@@ -214,7 +250,10 @@ export default function ScreenshotApp() {
     }
   }, []);
 
+  // The list's first read: the window has no other moment to ask, and the
+  // answer is one render after the request returns.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadRecent();
   }, [loadRecent]);
 

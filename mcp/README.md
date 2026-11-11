@@ -1294,6 +1294,23 @@ store) and answers how many files a pass would read from it. A pass is stopped
 with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to
 report progress from it, not to poll it in a loop.
 
+**Which model on this box (TASK-2411).** `memory_shard_provider_get` reports
+`local_model` — the model the box's embedder runs when the index is on the box
+(`qwen3-embedding-0.6b`, the default, or `qwen3-embedding-4b`) — and
+`local_models`, one row per model with `in_use`, `downloaded`, `size_gb` and
+`runs_on_this_box`, plus `why_not` in plain words where it cannot (a Jetson
+Orin Nano, a PC without an NVIDIA GPU, or under 6 GB of free GPU memory). An
+older server sends neither and is reported as the 0.6B. `memory_shard_provider_set`
+takes an optional `local_model` with `source: "local"` (with `cloud` it is
+`BAD_ARGUMENT`). A change of model re-embeds every file exactly like a change
+of place, so it takes the same estimate-then-`confirm: true` (the answer
+carries `from_model`), and the full pass is started after it. A model this box
+cannot run is refused before anything is posted (`NOT_SUPPORTED_HERE`, the
+reason in the message) and again by the route (409 `local_model_unavailable`);
+one that is not downloaded is 409 `local_not_installed` — the download
+(2.5–4.3 GB) is the owner's, from Settings → Local AI or Memory Shard's
+settings. Switching never deletes the other model's file.
+
 ### Prime Radiant (both editions)
 
 `mcp/tools/prime-radiant.ts` — the owner's wiki, everything the desktop app does

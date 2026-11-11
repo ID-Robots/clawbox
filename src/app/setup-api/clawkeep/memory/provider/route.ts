@@ -16,6 +16,15 @@ import {
   type EmbedderChoiceStatus,
   type EmbeddingSource,
 } from "@/lib/memory-shard-state";
+import {
+  DEFAULT_LOCAL_EMBEDDING_MODEL_ID,
+  isLocalEmbeddingModelId,
+  localEmbeddingModelSpec,
+  localEmbeddingVariant,
+  type LocalEmbeddingModelId,
+} from "@/lib/embed-runtime-ids";
+import type { LocalEmbeddingSelection } from "@/lib/embed-server";
+import type { LocalEmbeddingModelOption } from "@/lib/local-embedding-gating";
 
 export const dynamic = "force-dynamic";
 
@@ -61,16 +70,22 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
   // Loaded here rather than at the top: they pull the cloud-defaults resolver,
   // the embedder probe and the provisioning check, and the POST's local path —
   // the one every older caller takes — needs none of them.
-  const [{ getEmbedProvisioningStatus }, { readCloudDefaultsFacts }] = await Promise.all([
+  const [{ getEmbedProvisioningStatus, readActiveLocalEmbeddingModel }, { readCloudDefaultsFacts }, { localEmbeddingModelOptions }] = await Promise.all([
     import("@/lib/embed-server"),
     import("@/lib/clawai-cloud-defaults"),
+    import("@/lib/local-embedding-model"),
   ]);
-  const [provisioning, facts] = await Promise.all([
+  const [provisioning, facts, active, localModels] = await Promise.all([
     getEmbedProvisioningStatus().catch(() => null),
     // The resolver's own facts, so "the cloud model is on offer here" means the
     // same thing it means to the default that puts a box on it: linked, a paid
     // plan, and a probe the cloud embedder answered.
     readCloudDefaultsFacts().catch(() => null),
+    // Which model on this box, and what else this box could run (TASK-2411).
+    // A failed read names the default rather than failing the whole answer:
+    // the 0.6B is what every box ran before the choice existed.
+    readActiveLocalEmbeddingModel().catch(() => null),
+    localEmbeddingModelOptions().catch((): LocalEmbeddingModelOption[] => []),
   ]);
   // The SAME verdict the automatic default acts on, reasons and all, rather
   // than a second reading of one of its facts: `embeddingsRouteReady` alone
@@ -103,13 +118,25 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
     // Null, never a guess, when the facts could not be read at all.
     cloudReason: verdict?.reason ?? null,
     localInstalled: provisioning?.installed === true,
+    localModel: active?.id ?? DEFAULT_LOCAL_EMBEDDING_MODEL_ID,
+    localModels,
   };
 }
 
 /**
- * POST `{ source?: "cloud" | "local", confirm?: true }` → point the index
- * there. No body, or no `source`, is the model on this box — the call every
- * caller made before the cloud half existed.
+ * POST `{ source?: "cloud" | "local", localModel?: id, confirm?: true }` →
+ * point the index there. No body, or no `source`, is the model on this box —
+ * the call every caller made before the cloud half existed.
+ *
+ * `localModel` (TASK-2411) picks WHICH model on this box: one of the catalog
+ * ids in embed-runtime-ids.ts, and only with `source: "local"`. Refused with
+ * 409 `local_model_unavailable` where this box cannot run it (a Jetson, a PC
+ * without an NVIDIA GPU or without 6 GB of free GPU memory — the reason is in
+ * `reason` and `error`), and with 409 `local_not_installed` while its GGUF is
+ * not on disk: the owner downloads it first (embed/install with `model`). A
+ * change of model is a change of embedder: from the assistant it takes the
+ * same estimate-then-`confirm: true` as a change of place, and every caller
+ * posts the full pass after it.
  *
  * WHO: a signed-in person or the box's assistant (`memoryShardWriter`). It
  * changes where the owner's memories are embedded, and a change of place means
@@ -142,8 +169,16 @@ export async function POST(request: Request) {
   const { source } = change;
 
   try {
+    // Which model on this box, checked for EVERY writer: the owner's page
+    // never offers a model this box cannot run, but the route is the boundary.
+    let selection: LocalEmbeddingSelection | undefined;
+    if (change.localModel) {
+      const picked = await localModelSelection(change.localModel);
+      if (picked instanceof NextResponse) return picked;
+      selection = picked;
+    }
     if (writer.by === "assistant") {
-      const refused = await assistantGate(source, change.confirm);
+      const refused = await assistantGate(source, change.confirm, selection);
       if (refused) return refused;
     }
     if (source === "cloud") return await switchCloud(writer.by);
@@ -155,15 +190,17 @@ export async function POST(request: Request) {
     // one the next boot could undo. Both halves are idempotent, so the 500 a
     // failure here answers asks for a retry that costs nothing.
     await noteOwnerChoice("embeddings");
-    await switchToLocalEmbeddings();
+    await switchToLocalEmbeddings(selection);
     invalidateMemoryStatusCache();
+    const { readActiveLocalEmbeddingModel } = await import("@/lib/embed-server");
+    const model = localModelName((await readActiveLocalEmbeddingModel()).id);
     console.error(
-      `[memory-shard] embedding provider set to ${LOCAL_EMBEDDING_PROVIDER}/${LOCAL_EMBEDDING_MODEL} (${LOCAL_EMBEDDING_ENGINE}) by the ${writer.by}`,
+      `[memory-shard] embedding provider set to ${LOCAL_EMBEDDING_PROVIDER}/${model} (${LOCAL_EMBEDDING_ENGINE}) by the ${writer.by}`,
     );
     return NextResponse.json({
       source: "local",
       provider: LOCAL_EMBEDDING_PROVIDER,
-      model: LOCAL_EMBEDDING_MODEL,
+      model,
       engine: LOCAL_EMBEDDING_ENGINE,
     });
   } catch (err) {
@@ -177,7 +214,14 @@ export async function POST(request: Request) {
   }
 }
 
-async function requestedChange(request: Request): Promise<{ source: EmbeddingSource; confirm: boolean } | null> {
+interface RequestedChange {
+  source: EmbeddingSource;
+  confirm: boolean;
+  /** Which model on this box; absent keeps the one the box is set to. */
+  localModel?: LocalEmbeddingModelId;
+}
+
+async function requestedChange(request: Request): Promise<RequestedChange | null> {
   const text = await request.text().catch(() => "");
   if (!text.trim()) return { source: "local", confirm: false };
   try {
@@ -185,11 +229,52 @@ async function requestedChange(request: Request): Promise<{ source: EmbeddingSou
     if (!body || typeof body !== "object" || Array.isArray(body)) return null;
     const value = (body as { source?: unknown }).source;
     const confirm = (body as { confirm?: unknown }).confirm === true;
-    if (value === undefined) return { source: "local", confirm };
-    return value === "cloud" || value === "local" ? { source: value, confirm } : null;
+    const model = (body as { localModel?: unknown }).localModel;
+    if (model !== undefined && !isLocalEmbeddingModelId(model)) return null;
+    const source = value === undefined ? "local" : value;
+    if (source !== "cloud" && source !== "local") return null;
+    // A model on this box with the cloud as the place is a contradiction, not
+    // a request to guess which half was meant.
+    if (source === "cloud" && model !== undefined) return null;
+    return model === undefined ? { source, confirm } : { source, confirm, localModel: model };
   } catch {
     return null;
   }
+}
+
+/** The name OpenClaw and the index know a local model by. */
+function localModelName(id: LocalEmbeddingModelId): string {
+  return id === DEFAULT_LOCAL_EMBEDDING_MODEL_ID ? LOCAL_EMBEDDING_MODEL : id;
+}
+
+/**
+ * The selection a switch onto `id` records, or the refusal: a model this box
+ * cannot run (the gate's own reason), or one whose GGUF is not on disk yet.
+ * The default 0.6B keeps every rule it had — its download is the owner's
+ * card, and the assistant's refusal below still applies to it.
+ */
+async function localModelSelection(id: LocalEmbeddingModelId): Promise<LocalEmbeddingSelection | NextResponse> {
+  const { gateLocalModel, selectionForSwitch } = await import("@/lib/local-embedding-model");
+  const gate = await gateLocalModel(id);
+  if (!gate.available) {
+    return NextResponse.json(
+      { error: gate.detail ?? "This box cannot run that embedding model.", kind: "local_model_unavailable", reason: gate.reason, model: id },
+      { status: 409 },
+    );
+  }
+  if (id === DEFAULT_LOCAL_EMBEDDING_MODEL_ID) return { id, quant: "Q8_0" };
+  const selection = await selectionForSwitch(id);
+  if (selection) return selection;
+  const spec = localEmbeddingModelSpec(id);
+  const bytes = localEmbeddingVariant(id, gate.quant).bytes;
+  return NextResponse.json(
+    {
+      error: `${spec.label} is not downloaded yet (about ${(bytes / 1e9).toFixed(1)} GB). The owner downloads it from Settings → Local AI or Memory Shard's settings.`,
+      kind: "local_not_installed",
+      model: id,
+    },
+    { status: 409 },
+  );
 }
 
 /**
@@ -198,7 +283,11 @@ async function requestedChange(request: Request): Promise<{ source: EmbeddingSou
  * switch may go ahead — including a "switch" to where the index already is,
  * which re-embeds nothing.
  */
-async function assistantGate(source: EmbeddingSource, confirm: boolean): Promise<NextResponse | null> {
+async function assistantGate(
+  source: EmbeddingSource,
+  confirm: boolean,
+  selection?: LocalEmbeddingSelection,
+): Promise<NextResponse | null> {
   const current = await readEmbedderChoice();
   if (source === "cloud" && !current.cloudAvailable) {
     // switchCloud's own refusal, said before the estimate rather than after
@@ -212,7 +301,13 @@ async function assistantGate(source: EmbeddingSource, confirm: boolean): Promise
       { status: 409 },
     );
   }
-  if (source === "local" && current.source !== "local" && !current.localInstalled) {
+  // A different model on this box is a different embedder just as a different
+  // place is: every file is embedded again, so it needs the owner's yes too.
+  const modelChange = source === "local" && selection !== undefined && selection.id !== current.localModel;
+  const targetInstalled = modelChange
+    ? current.localModels.find((m) => m.id === selection?.id)?.installed === true
+    : current.localInstalled;
+  if (source === "local" && (current.source !== "local" || modelChange) && !targetInstalled) {
     return NextResponse.json(
       {
         error: `The embedding model for this box is not downloaded yet (about ${Math.round(LOCAL_EMBEDDING_BYTES / 1_000_000)} MB). The owner chooses "On this box" in Memory Shard's settings, which downloads it.`,
@@ -221,12 +316,23 @@ async function assistantGate(source: EmbeddingSource, confirm: boolean): Promise
       { status: 409 },
     );
   }
-  if (current.source === source || confirm) return null;
+  if ((current.source === source && !modelChange) || confirm) return null;
   const [status, cloud] = await Promise.all([getMemoryStatus(), import("@/lib/clawai-cloud-embeddings")]);
-  const model = source === "cloud" ? await cloudModelForThisBox(cloud) : LOCAL_EMBEDDING_MODEL;
+  const model = source === "cloud"
+    ? await cloudModelForThisBox(cloud)
+    : localModelName(selection?.id ?? current.localModel);
+  const what = current.source === source
+    ? `Switching the model on this box to ${model}`
+    : `Moving the index ${source === "cloud" ? "to the ClawBox AI cloud" : "onto this box"}`;
   return confirmRequired(
-    `Moving the index ${source === "cloud" ? "to the ClawBox AI cloud" : "onto this box"} embeds every file again. Ask the owner first; nothing was changed.`,
-    { from: current.source, to: source, model, estimate: estimateFullReindex(status, source, model) },
+    `${what} embeds every file again. Ask the owner first; nothing was changed.`,
+    {
+      from: current.source,
+      to: source,
+      ...(source === "local" ? { fromModel: localModelName(current.localModel) } : {}),
+      model,
+      estimate: estimateFullReindex(status, source, model),
+    },
   );
 }
 

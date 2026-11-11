@@ -84,6 +84,20 @@ HF_BIN="${HF_BIN:-$(command -v hf 2>/dev/null || true)}"
 HF_BIN="${HF_BIN:-${HOME:-/home/clawbox}/.local/bin/hf}"
 LOCAL_AI_TOKEN_FILE="${LOCAL_AI_TOKEN_FILE:-/home/clawbox/clawbox/data/.local-ai-token}"
 EMBED_STATE_FILE="${EMBED_STATE_FILE:-/home/clawbox/clawbox/data/local-embeddings.state}"
+# WHICH model the unit serves (TASK-2411): the owner's pick in
+# data/config.json, through the same catalog the unit's start script reads
+# (scripts/embed-model-select.sh). This script must name exactly that model:
+# naming the 0.6B over a box set to the 4B would "repair" memory.search.model
+# at every gateway start and throw the index away each time. The default slot
+# (the 0.6B) keeps the EMBED_* values above.
+EMBED_SHA256=""
+EMBED_BYTES=""
+EMBED_SELECT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/embed-model-select.sh"
+if [ -f "$EMBED_SELECT_LIB" ]; then
+  # shellcheck source=scripts/embed-model-select.sh
+  . "$EMBED_SELECT_LIB"
+  embed_apply_selection "${CLAWBOX_CONFIG_JSON:-$(dirname "$EMBED_STATE_FILE")/config.json}"
+fi
 FLOCK_BIN="${FLOCK_BIN:-flock}"
 # Don't retry a failed ~640MB download on every gateway restart.
 EMBED_RETRY_SECONDS="${EMBED_RETRY_SECONDS:-21600}"
@@ -152,7 +166,7 @@ fi
 # Read straight from openclaw.json rather than `openclaw config get`: this runs
 # before/around the gateway and a CLI round-trip costs ~10s on a Jetson.
 read_path() {
-  python3 - "$OPENCLAW_CONFIG" "$1" <<'PY' 2>/dev/null || true
+  python3 -I - "$OPENCLAW_CONFIG" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     node = json.load(open(sys.argv[1]))
@@ -293,9 +307,17 @@ if [ ! -f "$MODEL_PATH" ]; then
   state_write "$NOW" "$FAILURES"
   log "downloading $EMBED_HF_REPO/$EMBED_HF_FILE (local embeddings, no API key needed) — this can take a few minutes"
   mkdir -p "$EMBED_MODEL_DIR" 2>/dev/null || true
-  if ! "$HF_BIN" download "$EMBED_HF_REPO" "$EMBED_HF_FILE" --local-dir "$EMBED_MODEL_DIR" >/dev/null 2>&1; then
+  # Disk checked first, a partial file resumed by the CLI, and a file the
+  # catalog knows hashed before it is trusted (embed-model-select.sh).
+  FETCH_WHY=""
+  if declare -F embed_fetch_verified >/dev/null; then
+    FETCH_WHY="$(embed_fetch_verified "$HF_BIN" "$EMBED_HF_REPO" "$EMBED_HF_FILE" "$EMBED_MODEL_DIR" "$EMBED_BYTES" "$EMBED_SHA256")" || FETCH_WHY="${FETCH_WHY:-download failed}"
+  elif ! "$HF_BIN" download "$EMBED_HF_REPO" "$EMBED_HF_FILE" --local-dir "$EMBED_MODEL_DIR" >/dev/null 2>&1; then
+    FETCH_WHY="download failed"
+  fi
+  if [ -n "$FETCH_WHY" ]; then
     state_write "$NOW" "$((FAILURES + 1))"
-    log "WARN: could not download $EMBED_HF_FILE (attempt $((FAILURES + 1))); semantic memory stays on lexical FTS"
+    log "WARN: could not download $EMBED_HF_FILE (attempt $((FAILURES + 1)): $FETCH_WHY); semantic memory stays on lexical FTS"
     exit 0
   fi
   state_write "$NOW" 0

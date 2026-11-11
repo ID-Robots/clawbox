@@ -329,6 +329,84 @@ describe("the embedder", () => {
     expect(JSON.parse(out.text)).toMatchObject({ embedded: "the model on this box", cloud_on_offer: true, on_box_model_downloaded: true });
   });
 
+  describe("which model on this box (TASK-2411)", () => {
+    const ROWS = [
+      { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", dimensions: 1024, active: true, installed: true, bytes: 639150592, available: true, reason: null, detail: null },
+      { id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", dimensions: 2560, active: false, installed: true, bytes: 4279660224, available: true, reason: null, detail: null },
+    ];
+    const jetsonRows = [ROWS[0], { ...ROWS[1], installed: false, available: false, reason: "jetson", detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super: its 8 GB is shared." }];
+
+    it("reports the model on this box and what else runs here", async () => {
+      routes({ [`GET ${BASE}/provider`]: { ...PROVIDER, localModel: "qwen3-embedding-0.6b", localModels: jetsonRows } });
+      const out = await harness().call("memory_shard_provider_get", {});
+      if (out.isError) throw new Error(JSON.stringify(out.error));
+      const body = JSON.parse(out.text);
+      expect(body.local_model).toBe("qwen3-embedding-0.6b");
+      expect(body.local_models[1]).toMatchObject({ model: "qwen3-embedding-4b", in_use: false, runs_on_this_box: false, why_not: expect.stringMatching(/Jetson/) });
+    });
+
+    it("names the 0.6B for a server that predates the choice", async () => {
+      routes({ [`GET ${BASE}/provider`]: PROVIDER });
+      const out = await harness().call("memory_shard_provider_get", {});
+      if (out.isError) throw new Error(JSON.stringify(out.error));
+      expect(JSON.parse(out.text).local_model).toBe("qwen3-embedding-0.6b");
+    });
+
+    it("refuses a model this box cannot run before it posts anything", async () => {
+      routes({ [`GET ${BASE}/provider`]: { ...PROVIDER, localModel: "qwen3-embedding-0.6b", localModels: jetsonRows } });
+      const out = await harness().call("memory_shard_provider_set", { source: "local", local_model: "qwen3-embedding-4b", confirm: true });
+      expect(out.isError && out.error.code).toBe("NOT_SUPPORTED_HERE");
+      expect(out.isError && out.error.message).toMatch(/Jetson/);
+      expect(api).toHaveBeenCalledTimes(1);
+    });
+
+    it("passes the route's own refusal through when it is the one that says no", async () => {
+      routes({
+        [`GET ${BASE}/provider`]: { ...PROVIDER, localModel: "qwen3-embedding-0.6b" },
+        [`POST ${BASE}/provider`]: refusal(409, { kind: "local_model_unavailable", reason: "jetson", error: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." }),
+      });
+      const out = await harness().call("memory_shard_provider_set", { source: "local", local_model: "qwen3-embedding-4b", confirm: true });
+      expect(out.isError && out.error.code).toBe("NOT_SUPPORTED_HERE");
+    });
+
+    it("refuses a local model beside the cloud", async () => {
+      routes({ [`GET ${BASE}/provider`]: PROVIDER });
+      const out = await harness().call("memory_shard_provider_set", { source: "cloud", local_model: "qwen3-embedding-4b" });
+      expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+      expect(api).not.toHaveBeenCalled();
+    });
+
+    it("prices a change of model like a change of place, and changes it with the owner's yes", async () => {
+      routes({
+        [`GET ${BASE}/provider`]: { ...PROVIDER, localModel: "qwen3-embedding-0.6b", localModels: ROWS },
+        [`POST ${BASE}/provider`]: refusal(409, { kind: "confirm_required", from: "local", to: "local", fromModel: "qwen3-embedding-0.6b", model: "qwen3-embedding-4b", estimate: ESTIMATE }),
+      });
+      let out = await harness().call("memory_shard_provider_set", { source: "local", local_model: "qwen3-embedding-4b" });
+      if (out.isError) throw new Error(JSON.stringify(out.error));
+      expect(sent(1)[1].body).toEqual({ source: "local", localModel: "qwen3-embedding-4b" });
+      expect(JSON.parse(out.text)).toMatchObject({ switched: false, from_model: "qwen3-embedding-0.6b", model: "qwen3-embedding-4b" });
+
+      api.mockClear();
+      routes({
+        [`GET ${BASE}/provider`]: { ...PROVIDER, localModel: "qwen3-embedding-0.6b", localModels: ROWS },
+        [`POST ${BASE}/provider`]: { source: "local", model: "qwen3-embedding-4b" },
+        [`POST ${BASE}/index`]: { accepted: true, run: { status: "running", mode: "full" } },
+      });
+      out = await harness().call("memory_shard_provider_set", { source: "local", local_model: "qwen3-embedding-4b", confirm: true });
+      if (out.isError) throw new Error(JSON.stringify(out.error));
+      expect(sent(1)[1].body).toEqual({ source: "local", localModel: "qwen3-embedding-4b", confirm: true });
+      expect(out.text).toMatch(/\(qwen3-embedding-4b\)\. Started the full pass/);
+    });
+
+    it("changes nothing when the box already runs that model", async () => {
+      routes({ [`GET ${BASE}/provider`]: { ...PROVIDER, localModel: "qwen3-embedding-4b", localModels: ROWS } });
+      const out = await harness().call("memory_shard_provider_set", { source: "local", local_model: "qwen3-embedding-4b" });
+      if (out.isError) throw new Error(JSON.stringify(out.error));
+      expect(out.text).toMatch(/nothing changed\. The model on this box is qwen3-embedding-4b/);
+      expect(api).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("changes nothing when the index is already there", async () => {
     routes({ [`GET ${BASE}/provider`]: PROVIDER });
     const out = await harness().call("memory_shard_provider_set", { source: "local" });

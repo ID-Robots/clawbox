@@ -522,6 +522,16 @@ function barColor(pct: number): string {
   return pct >= 90 ? "#ef4444" : pct >= 70 ? "#f97316" : pct >= 50 ? "#eab308" : "#06b6d4";
 }
 
+/** The temperature row's colour: red over 80 °C, orange over 60 °C, cyan below. */
+function temperatureColor(celsius: number): string {
+  return celsius > 80 ? "#ef4444" : celsius > 60 ? "#f97316" : "#22d3ee";
+}
+
+/** …and its caption, on the same thresholds. */
+function temperatureLevelKey(celsius: number): "settings.critical" | "settings.warm" | "settings.normal" {
+  return celsius > 80 ? "settings.critical" : celsius > 60 ? "settings.warm" : "settings.normal";
+}
+
 function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) => void; label: string }) {
   return (
     <div className="flex items-center justify-between">
@@ -6325,8 +6335,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
             <div className="spinner" role="status" aria-label={t("loading")} />
           </div>
         )}
+        {/* `max-w-xl` like the switch above and the Device panel below: the
+            column centres each of its direct children at its OWN width, and
+            without one this spanned the whole column, so the Users panel
+            inside started ~90 px left of the switch (x64 test, 2026-11-10). */}
         {activeSection === "system" && systemShows === "users" && (
-          <div {...systemPanelProps("users")}>
+          <div className="max-w-xl" {...systemPanelProps("users")}>
             <UsersPanel />
           </div>
         )}
@@ -6350,8 +6364,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   </div>
                 </div>
 
-                {/* CPU + Memory card */}
-                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                {/* Resources card: CPU, Memory, Swap, GPU, Temperature and
+                    each disk, one row style. Temperature and Storage were
+                    cards of their own until the x64 test (2026-11-10). */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-resources">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>speed</span>
                     <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</h3>
@@ -6410,58 +6426,45 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                       </div>
                     </div>
                   )}
-                </div>
 
-                {/* Temperature card */}
-                {stats.temperature?.value != null && (
-                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>thermostat</span>
-                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</h3>
-                    </div>
-                    <div className="flex items-end gap-3">
-                      <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
-                        {localeFixed(stats.temperature.value, 1, locale)}°C
-                      </span>
-                      <span className="text-xs text-[var(--text-muted)] opacity-50 mb-1.5">
-                        {stats.temperature.value > 80 ? t("settings.critical") : stats.temperature.value > 60 ? t("settings.warm") : t("settings.normal")}
-                      </span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden mt-3">
-                      <div
-                        className="h-full rounded-full transition-all duration-700"
-                        style={{
-                          width: `${Math.min(100, (stats.temperature.value / 100) * 100)}%`,
-                          backgroundColor: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee",
-                        }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-[10px] text-[var(--text-muted)] opacity-40 mt-1.5 font-mono">
-                      <span>0°C</span><span>50°C</span><span>100°C</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Storage card */}
-                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                  <div className="flex items-center gap-2 mb-4">
-                    <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>hard_drive</span>
-                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</h3>
-                  </div>
-                  <div className="space-y-3">
-                    {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
-                      <div key={m.mountpoint}>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-xs text-[var(--text-secondary)] font-mono">{m.mountpoint}</span>
-                          <span className="text-xs text-white/35 font-mono">{diskFigure(m.used, locale)} / {diskFigure(m.size, locale)}</span>
-                        </div>
-                        <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
-                        </div>
-                        <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {t("settings.freeAmount", { amount: diskFigure(m.avail, locale) })}</div>
+                  {/* Temperature row: the reading on a 0–100 °C bar, in the
+                      colour its level is (red over 80, orange over 60). */}
+                  {stats.temperature?.value != null && (
+                    <div className="mt-4" data-testid="settings-resource-temperature">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-xs text-[var(--text-muted)]">{t("settings.temperature")}</span>
+                        <span className="text-xs font-mono font-semibold" style={{ color: temperatureColor(stats.temperature.value) }}>
+                          {localeFixed(stats.temperature.value, 1, locale)}°C
+                        </span>
                       </div>
-                    ))}
-                  </div>
+                      <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all duration-700"
+                          style={{
+                            width: `${Math.min(100, Math.max(0, stats.temperature.value))}%`,
+                            backgroundColor: temperatureColor(stats.temperature.value),
+                          }}
+                        />
+                      </div>
+                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{t(temperatureLevelKey(stats.temperature.value))}</div>
+                    </div>
+                  )}
+
+                  {/* Storage rows: one per disk, the EFI partition left out. */}
+                  {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
+                    <div key={m.mountpoint} className="mt-4" data-testid="settings-resource-storage">
+                      <div className="flex items-center justify-between gap-3 mb-1.5">
+                        <span className="text-xs text-[var(--text-muted)] min-w-0 truncate">
+                          {t("settings.storage")} <span className="font-mono text-[var(--text-secondary)]">{m.mountpoint}</span>
+                        </span>
+                        <span className="text-xs font-mono text-[var(--text-muted)] shrink-0">{diskFigure(m.used, locale)} / {diskFigure(m.size, locale)}</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
+                      </div>
+                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {t("settings.freeAmount", { amount: diskFigure(m.avail, locale) })}</div>
+                    </div>
+                  ))}
                 </div>
 
                 {/* Per core, and the busiest processes — the two things an

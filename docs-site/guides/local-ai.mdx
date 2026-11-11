@@ -18,7 +18,8 @@ installed when you ask for it.
 | **Gemma 4** — the agent model (the provider pickers list it as *Gemma 4 (on-device)*) | installed | included |
 | **Kokoro** — the voice | install from this panel | downloaded on request |
 | **Whisper** — speech to text | install from this panel, in your choice of size | downloaded on request |
-| **Memory search model** — Qwen3 embeddings | only if you point [Memory Shard](/guides/memory-shard) at the box rather than the cloud | about 640 MB |
+| **Memory search model** — Qwen3-Embedding-0.6B | only if you point [Memory Shard](/guides/memory-shard) at the box rather than the cloud | about 640 MB |
+| **Larger memory search model** — Qwen3-Embedding-4B | optional, on a PC with an NVIDIA GPU only ([see below](#memory-search-model-06b-or-4b)) | 2.5 GB or 4.3 GB |
 
 <Note>
 This is why updates are quick. Nothing heavy is installed behind your back: an install or
@@ -89,6 +90,41 @@ update puts it back: it is the one model ClawBox installs on every box.
   use the ClawBox AI cloud voice.
 - **Whisper** comes in several sizes. Bigger is more accurate and slower, and the box keeps
   using the current one until the new one has finished downloading.
+
+## Memory search model: 0.6B or 4B
+
+Memory search on the box runs **Qwen3-Embedding-0.6B** unless you pick otherwise. On a PC
+with an NVIDIA GPU you can pick **Qwen3-Embedding-4B** instead: a larger model from the same
+family (Apache-2.0, 2,560-dimensional vectors instead of 1,024) that finds the right passage
+more often, and costs more memory and time per file. The choice is in two places — the
+**Memory search model** card in this panel, and **Settings → Embedding model → Model on this
+box** in [Memory Shard](/guides/memory-shard#where-the-index-is-built) — and both do the same
+thing.
+
+| Where | Qwen3-Embedding-0.6B | Qwen3-Embedding-4B |
+|---|---|---|
+| **ClawBox** (Jetson Orin Nano Super, 8 GB) | yes | no — shown as unavailable |
+| **PC with an NVIDIA GPU, 6 GB or more free** | yes | yes — Q8_0 (4.3 GB) with 8 GB free, Q4_K_M (2.5 GB) below that |
+| **PC without an NVIDIA GPU** | yes | no — shown as unavailable |
+
+- **On a ClawBox** the 4B does not fit: the Jetson's 8 GB is one pool shared by the system,
+  the assistant and every model, and the 4B alone needs about 5 GB while it runs. The card
+  says so, and the box refuses it however it is asked — from the panel, from Memory Shard,
+  or by the assistant.
+- **On a PC without an NVIDIA GPU** it is refused as well. On the processor alone it embeds a
+  passage several times slower than the 0.6B: rebuilding an index of a few thousand
+  passages takes hours and keeps the processor busy the whole time, and every search waits
+  on it. The 0.6B is the model for such a PC.
+- **Free** GPU memory is what counts, so a Gemma or Ollama model holding the GPU can make the
+  4B unavailable for the moment; stop it and the card offers the 4B again.
+
+The card downloads the model when you pick it — resumable if the connection drops, checked
+for disk space first, and verified against the checksum the model's publisher lists before
+it is used. **Switching rebuilds the whole index**: vectors from two models cannot be
+searched together, so every file is embedded again by the new one (search keeps working on
+the old index until then). Switching back to the 0.6B, or to the cloud, works the same way.
+A switch never deletes the other model's file; **Remove** on its row takes it off when you
+want the disk back.
 
 ## Local-only mode
 

@@ -86,7 +86,7 @@ Two harnesses can sit under the OS: OpenClaw (the gateway at `127.0.0.1:18789`, 
 - Remote access tunnel: `clawbox-tunnel.service` → `scripts/run-tunnel.sh`. A provisioned box runs its NAMED tunnel (`<boxHandle>.clawbox.tech`, credential from the portal heartbeat's `boxTunnel` in `data/cloudflared/named-tunnel`, 0600, token via `TUNNEL_TOKEN` only — `src/lib/named-tunnel.ts`); no credential, a refused token or a named run that dies inside 60 s falls back to the quick tunnel; `data/cloudflared/tunnel.mode` says which
 - Terminal WebSocket: port `3006`
 - Ollama: `http://127.0.0.1:11434` (chat-provider backend only; no Local AI row)
-- Memory embedder: system unit `clawbox-embed.service` (`EMBED_UNIT`), llama-server at `http://127.0.0.1:8081/v1`, reached by OpenClaw through `/setup-api/local-ai/embed/v1`; woken on demand, stopped after `LOCAL_AI_IDLE_TIMEOUT_MS` (10 min) idle; GGUF in `data/embed/models/`
+- Memory embedder: system unit `clawbox-embed.service` (`EMBED_UNIT`), llama-server at `http://127.0.0.1:8081/v1`, reached by OpenClaw through `/setup-api/local-ai/embed/v1`; woken on demand, stopped after `LOCAL_AI_IDLE_TIMEOUT_MS` (10 min) idle; GGUF in `data/embed/models/`; which model is `memory_shard_local_model` in `data/config.json` (0.6B default, 4B on x86 + NVIDIA only; catalog in `embed-runtime-ids.ts`, bash copy `scripts/embed-model-select.sh`)
 - Kokoro TTS: user unit `kokoro-server.service` (`KOKORO_UNIT`), socket `/tmp/kokoro-server.sock`, model freed after `IDLE_TIMEOUT` (300 s) idle
 
 ### Environment Variables
