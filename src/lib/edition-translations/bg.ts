@@ -1970,7 +1970,9 @@ export const bg: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "Външен двигател",
   "localModels.external.hint": "Използвайте съвместим с OpenAI сървър, който поддържате — клъстер за изводи или vLLM, SGLang или llama.cpp на компютър във вашата мрежа — като локален AI вместо модела на тази кутия.",
-  "localModels.external.notConfigured": "Не е настроен. Локалният AI използва модела на тази кутия.",
+  "localModels.external.notConfigured": "Не е настроен външен двигател.",
+  "localModels.external.readFailed": "Настройките на външния двигател не можаха да бъдат прочетени.",
+  "localModels.external.retry": "Опитай отново",
   "localModels.external.setUp": "Настрой",
   "localModels.external.baseUrl": "Базов адрес (URL)",
   "localModels.external.baseUrlHint": "Адресът на съвместимия с OpenAI API, обикновено завършва на /v1.",
@@ -1999,6 +2001,7 @@ export const bg: Record<string, string> = {
   "localModels.external.window": "Контекстен прозорец {context} токена, отговори до {max} токена.",
   "localModels.external.windowOnly": "Контекстен прозорец {context} токена.",
   "localModels.external.status.checking": "Двигателят се проверява…",
+  "localModels.external.status.unread": "Двигателят не можа да бъде проверен в момента.",
   "localModels.external.status.ok": "Двигателят отговаря и изброява модела ({ms} ms).",
   "localModels.external.status.problem": "В момента има проблем с двигателя: {problem}",
   "localModels.external.onDeviceIdle": "Моделът на тази кутия не се стартира за чат, докато е избран този двигател.",

@@ -15,15 +15,8 @@ import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
-import { hermesProviderValues, reconcileExternalEngineWithHermes } from "@/lib/external-engine-hermes";
-import {
-  EXTERNAL_ENGINE_PROVIDER,
-  EXTERNAL_ENGINE_STORE_KEY,
-  HERMES_MIN_CONTEXT_WINDOW,
-  externalEngineModelRef,
-  isExternalEngineRef,
-  type ExternalEngineSettings,
-} from "@/lib/external-engine-shared";
+import { forgetExternalEngineHermesReconcile, hermesProviderValues, reconcileExternalEngineWithHermes } from "@/lib/external-engine-hermes";
+import { EXTERNAL_ENGINE_PROVIDER, EXTERNAL_ENGINE_STORE_KEY, externalEngineModelRef, externalEngineOrigin, HERMES_MIN_CONTEXT_WINDOW, isExternalEngineRef, type ExternalEngineSettings } from "@/lib/external-engine-shared";
 import {
   LOCAL_AI_STORE_KEYS,
   NO_KEY_PLACEHOLDER,
@@ -99,13 +92,6 @@ async function reRegisterOnDevice(previous: PreviousLocalAiState, makeDefault: b
   }
 }
 
-function originOf(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return "";
-  }
-}
 
 /**
  * Which key the probe and the harness get. A key typed now wins; "clear"
@@ -120,7 +106,7 @@ function resolveKey(
 ): string | null {
   if (input.apiKey) return input.apiKey;
   if (input.clearApiKey) return null;
-  if (!existing || originOf(existing.baseUrl) !== originOf(baseUrl)) return null;
+  if (!existing || externalEngineOrigin(existing.baseUrl) !== externalEngineOrigin(baseUrl)) return null;
   const stored = readExternalEngineKey();
   return stored && stored !== NO_KEY_PLACEHOLDER ? stored : null;
 }
@@ -498,7 +484,20 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
 
   // From here the store names the engine — which is also what turns the
   // llama.cpp / Ollama start gates on — and the on-device runtimes go down.
-  await setMany(selectedStoreEntries(record));
+  try {
+    await setMany(selectedStoreEntries(record));
+  } catch (err) {
+    // The harness names the engine but the store could not: put the key and
+    // the harness back, so no engine is left that Settings cannot see or remove.
+    await rollBackUnrecordedSave({ record, existing, harness, keyBefore }).catch((undoErr) => {
+      console.error("[external-engine] undoing the unrecorded save failed:", scrub(undoErr, key));
+    });
+    throw new ExternalEngineRefusal(
+      "write_failed",
+      scrub(err, key) || "The engine could not be recorded on this box, so it was not saved.",
+      502,
+    );
+  }
   await stopLocalAiProvider("llamacpp").catch((err) => {
     console.error("[external-engine] stopping llama.cpp failed:", err instanceof Error ? err.message : err);
   });
@@ -513,6 +512,29 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
     warning = "The engine is saved, but the chat could not be switched to it. Pick it in the chat header.";
   }
   return { record, harness, models: probe.models, ...(warning ? { warning } : {}) };
+}
+
+/**
+ * A save whose store write failed after the harness took the engine: the key
+ * file goes back, and so does the harness — out again on a first save, the
+ * previous engine's definition on a re-save (whose record the store still holds).
+ */
+async function rollBackUnrecordedSave({ record, existing, harness, keyBefore }: {
+  record: ExternalEngineRecord;
+  existing: ExternalEngineRecord | null;
+  harness: Harness;
+  keyBefore: string | null;
+}): Promise<void> {
+  if (existing === null || keyBefore === null) deleteExternalEngineKey();
+  else writeExternalEngineKey(keyBefore);
+  if (existing === null) {
+    if (harness === "hermes") await removeFromHermes(record);
+    else await removeFromOpenclaw(record, harness);
+    return;
+  }
+  const keyOfExisting = keyBefore && keyBefore !== NO_KEY_PLACEHOLDER ? keyBefore : null;
+  if (harness === "hermes") await applyToHermes(existing, keyOfExisting, existing.previous, !existing.previous.hermes);
+  else await applyToOpenclaw(existing, keyOfExisting, existing.previous, !existing.previous.openclaw);
 }
 
 /**
@@ -538,8 +560,15 @@ export async function selectExternalEngine(): Promise<{ modelRef: string; harnes
         409,
       );
     }
-    // A dual box may have saved the engine on OpenClaw: register its block first.
-    await reconcileExternalEngineWithHermes();
+    // A dual box may have saved the engine on OpenClaw: register its block
+    // first, and never name a provider Hermes has no block for.
+    if (!(await reconcileExternalEngineWithHermes({ force: true }))) {
+      throw new ExternalEngineRefusal(
+        "hermes_write_failed",
+        "The engine could not be registered in Hermes' config.",
+        502,
+      );
+    }
     try {
       await withProviderMcpRefresh(() => patchHermesConfig({
         set: { "model.provider": EXTERNAL_ENGINE_PROVIDER, "model.default": record.modelId },
@@ -607,6 +636,7 @@ export async function removeExternalEngine(): Promise<{ removed: boolean; warnin
   }
   await setMany({ [EXTERNAL_ENGINE_STORE_KEY]: undefined });
   deleteExternalEngineKey();
+  forgetExternalEngineHermesReconcile();
   // Ollama back as the engine found it: running, when it was.
   if (record.previous.ollamaRunning === true) {
     await startOllamaService().catch((err) => {

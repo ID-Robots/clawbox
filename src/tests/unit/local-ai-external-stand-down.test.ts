@@ -86,3 +86,13 @@ describe("standDownChatRuntimesForExternalEngine", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe("the boot timer that runs it", () => {
+  it("takes the Local AI transition lock, so a Remove that starts Ollama again is never undone by a check that read 'selected' first", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const source = readFileSync(join(process.cwd(), "src", "instrumentation.ts"), "utf8");
+    expect(source).toMatch(/withLocalAiTransitionLock\(\(\) => standDownChatRuntimesForExternalEngine\(\)\)/);
+    expect(source).not.toMatch(/void standDownChatRuntimesForExternalEngine\(\)/);
+  });
+});

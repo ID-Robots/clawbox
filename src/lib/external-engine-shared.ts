@@ -63,6 +63,18 @@ export type ValidationResult =
   | { ok: false; code: ExternalEngineErrorCode; field: keyof ExternalEngineSettings | "apiKey"; error: string };
 
 /** `clawext/<model id>` — the reference OpenClaw's primary and the chat picker carry. */
+/**
+ * The origin a saved key belongs to: the save path reuses a stored key only
+ * for the same origin, and Settings says "kept" only then. "" for a bad URL.
+ */
+export function externalEngineOrigin(url: string): string {
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return "";
+  }
+}
+
 export function externalEngineModelRef(modelId: string): string {
   return `${EXTERNAL_ENGINE_PROVIDER}/${modelId}`;
 }

@@ -235,3 +235,34 @@ describe("HermesProviderConfig ClawBox AI plan on an unpaired box", () => {
     expect(freeChecked).toBe("true");
   });
 });
+
+describe("HermesProviderConfig under the wizard's external engine (TASK-2376)", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("offers the local-only skip without a footer, as before", async () => {
+    stubFetch();
+    render(<HermesProviderConfig onNext={vi.fn()} testId="hermes-ai" />);
+    expect(await screen.findByRole("button", { name: "Skip — I'll use only local AI" })).toBeInTheDocument();
+  });
+
+  it("puts the way back to the engine in place of the skip, and holds it while a save is out", async () => {
+    stubFetch();
+    render(
+      <HermesProviderConfig
+        onNext={vi.fn()}
+        testId="hermes-ai"
+        footer={<button type="button">Use echo-1 (external engine) instead</button>}
+      />,
+    );
+    const back = await screen.findByRole("button", { name: "Use echo-1 (external engine) instead" });
+    expect(back).toBeInTheDocument();
+    // The skip would turn the on-device model on beside the engine.
+    expect(screen.queryByRole("button", { name: "Skip — I'll use only local AI" })).toBeNull();
+    fireEvent.click(await saveButton());
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
+    // A provider save landing after Continue would take the chat from the engine.
+    expect(screen.queryByRole("button", { name: "Use echo-1 (external engine) instead" })).toBeNull();
+  }, 10_000);
+});

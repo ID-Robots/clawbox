@@ -1980,7 +1980,9 @@ export const sv: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "Extern AI-motor",
   "localModels.external.hint": "Använd en OpenAI-kompatibel server som du själv driver — ett inferenskluster, eller vLLM, SGLang eller llama.cpp på en dator i ditt nätverk — som lokal AI i stället för modellen på den här boxen.",
-  "localModels.external.notConfigured": "Inte konfigurerad. Lokal AI använder modellen på den här boxen.",
+  "localModels.external.notConfigured": "Ingen extern motor är konfigurerad.",
+  "localModels.external.readFailed": "Den externa motorns inställningar kunde inte läsas.",
+  "localModels.external.retry": "Försök igen",
   "localModels.external.setUp": "Konfigurera",
   "localModels.external.baseUrl": "Bas-URL",
   "localModels.external.baseUrlHint": "Adressen till det OpenAI-kompatibla API:et, slutar oftast med /v1.",
@@ -2009,6 +2011,7 @@ export const sv: Record<string, string> = {
   "localModels.external.window": "Kontextfönster {context} tokens, svar på upp till {max} tokens.",
   "localModels.external.windowOnly": "Kontextfönster {context} tokens.",
   "localModels.external.status.checking": "Kontrollerar motorn…",
+  "localModels.external.status.unread": "Motorn kunde inte kontrolleras just nu.",
   "localModels.external.status.ok": "Motorn svarar och listar modellen ({ms} ms).",
   "localModels.external.status.problem": "Motorn har ett problem just nu: {problem}",
   "localModels.external.onDeviceIdle": "Modellen på den här boxen startas inte för chatten medan den här motorn är vald.",

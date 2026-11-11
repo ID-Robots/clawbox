@@ -439,18 +439,30 @@ export default function AIModelsStep({
   );
   const [useOtherProvider, setUseOtherProvider] = useState(false);
   const [engineBusy, setEngineBusy] = useState(false);
-  const [engineError, setEngineError] = useState(false);
+  // null: no detail; a string: the select route's own words, shown beside ours.
+  const [engineError, setEngineError] = useState<string | null | false>(false);
   useEffect(() => {
     if (!wizardScope) return;
     let alive = true;
-    fetch("/setup-api/local-ai/external", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!alive) return;
-        const ok = data && data.configured === true && typeof data.displayName === "string" && typeof data.modelRef === "string";
-        setWizardEngine(ok ? { displayName: data.displayName, modelRef: data.modelRef } : null);
-      })
-      .catch(() => { if (alive) setWizardEngine(null); });
+    // An answer settles it (an engine, or none). A failed read is asked again
+    // twice before the step goes on without the engine, so a server still
+    // coming up does not hide an engine the owner connected.
+    const read = async () => {
+      for (let attempt = 0; attempt < 3 && alive; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+        try {
+          const res = await fetch("/setup-api/local-ai/external", { cache: "no-store" });
+          if (res.status >= 500) continue;
+          const data = res.ok ? await res.json() : null;
+          const ok = data && data.configured === true && typeof data.displayName === "string" && typeof data.modelRef === "string";
+          return ok ? { displayName: data.displayName as string, modelRef: data.modelRef as string } : null;
+        } catch {
+          // asked again
+        }
+      }
+      return null;
+    };
+    void read().then((engine) => { if (alive) setWizardEngine(engine); });
     return () => { alive = false; };
   }, [wizardScope]);
 
@@ -459,11 +471,16 @@ export default function AIModelsStep({
     setEngineError(false);
     try {
       const res = await fetch("/setup-api/local-ai/external/select", { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // The route says what to do (a window too small for Hermes, say).
+        const data = await res.json().catch(() => null) as { error?: unknown } | null;
+        setEngineError(typeof data?.error === "string" && data.error.trim() ? data.error.trim().slice(0, 300) : null);
+        return;
+      }
       notifyProvidersChanged();
       onNext?.();
     } catch {
-      setEngineError(true);
+      setEngineError(null);
     } finally {
       setEngineBusy(false);
     }
@@ -2307,9 +2324,10 @@ export default function AIModelsStep({
             </div>
           </div>
           <p className="mt-4 text-[length:var(--t-3)] leading-[1.6] text-[var(--text-secondary)]">{t("localModels.external.wizard.hint")}</p>
-          {engineError && (
+          {engineError !== false && (
             <p role="alert" data-testid="setup-external-engine-error" className="mt-3 text-[length:var(--t-3)] text-red-300">
               {t("localModels.external.wizard.failed", { model: wizardEngine.displayName })}
+              {engineError && <span className="block mt-1 text-[var(--text-secondary)]">{engineError}</span>}
             </p>
           )}
           <div className="mt-5">
@@ -2341,7 +2359,9 @@ export default function AIModelsStep({
   }
 
   // Back to the engine, for an owner who looked at the other providers first.
-  const backToEngine = wizardScope && wizardEngine ? (
+  // Not while a provider's save is out: it would land after Continue and take
+  // the chat back from the engine.
+  const backToEngine = wizardScope && wizardEngine && !saving && !configuringState ? (
     <button
       type="button"
       data-testid="setup-external-engine-back"
@@ -2798,7 +2818,7 @@ export default function AIModelsStep({
           // engine replaces (and its configure is refused while it is selected).
           <div className="mt-3 text-center">{backToEngine}</div>
         )}
-        {!embedded && !backToEngine && (
+        {!embedded && !(wizardScope && wizardEngine) && (
           <div className="mt-3 text-center">
             <button
               type="button"

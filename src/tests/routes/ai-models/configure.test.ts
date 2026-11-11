@@ -1130,6 +1130,22 @@ describe("POST /setup-api/ai-models/configure", () => {
     )).toBe(false);
   });
 
+  it("turns the on-device model on only after an external engine transition in flight (TASK-2376)", async () => {
+    // Its "no engine selected" check and its writes must not interleave with
+    // an engine's save or remove, which hold this lock.
+    const { withLocalAiTransitionLock } = await import("@/lib/local-ai-transition-lock");
+    let release!: () => void;
+    const held = withLocalAiTransitionLock(() => new Promise<void>((resolve) => { release = resolve; }));
+    let settled = false;
+    const pending = configurePost(jsonRequest({ provider: "llamacpp" })).then((res) => { settled = true; return res; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    expect(configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))).toEqual([]);
+    release();
+    await held;
+    expect((await pending).status).toBe(200);
+  });
+
   it("promotes local AI to the active default when no primary AI provider was configured", async () => {
     const res = await configurePost(jsonRequest({
       provider: "llamacpp",

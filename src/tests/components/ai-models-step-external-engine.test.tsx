@@ -78,14 +78,15 @@ let calls: Call[] = [];
 
 const ENGINE = { configured: true, displayName: "echo-1", modelRef: "clawext/nano-ci/echo-1", activeHarness: "openclaw" };
 
-function stub({ engine = ENGINE as unknown, engineStatus = 200, selectStatus = 200 } = {}) {
+function stub({ engine = ENGINE as unknown, engineStatus = 200, engineStatuses = [] as number[], selectStatus = 200, selectBody = null as unknown } = {}) {
   calls = [];
+  const statuses = [...engineStatuses];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
     calls.push({ url, method: init?.method ?? "GET" });
     const j = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body });
-    if (url === "/setup-api/local-ai/external/select") return j({ success: true, modelRef: ENGINE.modelRef }, selectStatus);
-    if (url === "/setup-api/local-ai/external") return j(engine, engineStatus);
+    if (url === "/setup-api/local-ai/external/select") return j(selectBody ?? { success: true, modelRef: ENGINE.modelRef }, selectStatus);
+    if (url === "/setup-api/local-ai/external") return j(engine, statuses.shift() ?? engineStatus);
     if (url.includes("/setup-api/providers/status")) {
       return j({ harness: "openclaw", defaultProvider: "clawext", unrunnable: [], degraded: false, providers: [
         { id: "clawai", label: "ClawBox AI", state: "disconnected", isDefault: false, section: "ai", enabled: true },
@@ -131,6 +132,10 @@ describe("the wizard's AI step with an external engine connected", () => {
     expect(choice.textContent).toContain("echo-1 (external engine)");
     // No other provider is offered as selected, Gemma least of all.
     expect(getByRole("radiogroup", { name: "AI Provider" }).querySelectorAll('[role="radio"]')).toHaveLength(1);
+    // As the owner (and a screen reader) finds them: by role and name.
+    expect(getByRole("radio", { name: /echo-1 \(external engine\)/ }).getAttribute("aria-checked")).toBe("true");
+    expect(getByRole("button", { name: "Continue with echo-1" })).toBe(await findByTestId("setup-external-engine-continue"));
+    expect(getByRole("button", { name: "Connect a different AI provider instead" })).toBeTruthy();
 
     fireEvent.click(await findByTestId("setup-external-engine-continue"));
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1));
@@ -145,6 +150,26 @@ describe("the wizard's AI step with an external engine connected", () => {
     expect((await findByRole("alert")).textContent).toContain("echo-1 could not be made the chat's model");
     expect(onNext).not.toHaveBeenCalled();
     neverInstalled();
+  });
+
+  it("says what the route said when it refuses, so the owner knows what to change", async () => {
+    const said = "Hermes needs a model with a context window of at least 64,000 tokens; edit the engine in Settings → Local AI.";
+    stub({ selectStatus: 409, selectBody: { error: said, code: "context_too_small_for_hermes" } });
+    const { findByTestId, findByRole, onNext } = wizard();
+    fireEvent.click(await findByTestId("setup-external-engine-continue"));
+    const alert = await findByRole("alert");
+    expect(alert.textContent).toContain("echo-1 could not be made the chat's model");
+    expect(alert.textContent).toContain(said);
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("asks again when the engine cannot be read at first, and still offers it", async () => {
+    stub({ engineStatuses: [503] });
+    const { findByTestId, queryByText } = wizard();
+    const choice = await findByTestId("setup-external-engine-choice", {}, { timeout: 5000 });
+    expect(choice.getAttribute("aria-checked")).toBe("true");
+    expect(calls.filter((c) => c.url === "/setup-api/local-ai/external")).toHaveLength(2);
+    expect(queryByText("Skip — I'll use only local AI")).toBeNull();
   });
 
   it("offers the other providers on request, without the llama.cpp skip, and a way back", async () => {
@@ -193,6 +218,10 @@ describe("the wizard's AI step with no external engine (unchanged)", () => {
     expect(await findByText("Skip — I'll use only local AI")).toBeTruthy();
     expect(queryByTestId("setup-external-engine-choice")).toBeNull();
     expect(queryByTestId("setup-external-engine-back")).toBeNull();
+    // A failing read is asked three times in all before the step goes on without it.
+    if ((opts as { engineStatus?: number }).engineStatus === 500) {
+      expect(calls.filter((c) => c.url === "/setup-api/local-ai/external")).toHaveLength(3);
+    }
   });
 
   it("Settings (embedded) never asks for the engine and never shows the wizard choice", async () => {

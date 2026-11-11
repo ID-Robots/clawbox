@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { externalEngineSelected } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, runOpenclawConfigSet, openclawIsAbsent } from "@/lib/openclaw-config";
 import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
 import { getActiveHarness } from "@/lib/harness";
@@ -72,6 +73,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
   }
 
+  // A Local AI transition (TASK-2376): the engine check below and the writes
+  // after it run under the lock an engine's save and remove take.
+  return withLocalAiTransitionLock(disableLocalAi);
+}
+
+async function disableLocalAi(): Promise<NextResponse> {
   // While an external AI engine is the Local AI (TASK-2376) its own Remove
   // is "turn Local AI off": it puts back what the box had before, which this
   // path cannot — it would clear the store keys that remember it.

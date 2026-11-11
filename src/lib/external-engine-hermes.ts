@@ -35,23 +35,34 @@ export function hermesProviderValues(settings: ExternalEngineSettings, key: stri
  * Register the engine with Hermes when the store names it and config.yaml
  * does not — a dual box that switched to Hermes after the engine was saved on
  * OpenClaw. Registers the provider only; the selection stays the owner's.
- * Once per process, like `reconcileLocalAiWithHermes`.
+ *
+ * Latched once the block is in place (registered here or found), like
+ * `reconcileLocalAiWithHermes`; not latched when there is no record yet or
+ * config.yaml could not be read, so a later save or read tries again. Remove
+ * forgets the latch. `force` skips it: the wizard's selection must know the
+ * block is there before it names the provider. Answers whether it is.
  */
 let hermesReconciled = false;
-export async function reconcileExternalEngineWithHermes(): Promise<void> {
-  if (hermesReconciled) return;
-  hermesReconciled = true;
+export async function reconcileExternalEngineWithHermes(opts: { force?: boolean } = {}): Promise<boolean> {
+  if (hermesReconciled && !opts.force) return true;
   try {
     const record = externalEngineFromState(await getAll());
-    if (!record) return;
+    if (!record) return false;
     // Hermes refuses a session under its window floor: a provider it cannot
     // run is not registered; Settings tells the owner to save it again here.
     if (record.contextWindow < HERMES_MIN_CONTEXT_WINDOW) {
-      console.warn(`[external-engine] not registered with Hermes: its ${record.contextWindow}-token window is under Hermes' ${HERMES_MIN_CONTEXT_WINDOW} floor`);
-      return;
+      if (!hermesReconciled) {
+        console.warn(`[external-engine] not registered with Hermes: its ${record.contextWindow}-token window is under Hermes' ${HERMES_MIN_CONTEXT_WINDOW} floor`);
+      }
+      hermesReconciled = true;
+      return false;
     }
     const declared = await resolveHermesConfigValue("providers.clawext.base_url");
-    if (declared.state !== "absent") return;
+    if (declared.state === "value" || declared.state === "present") {
+      hermesReconciled = true;
+      return true;
+    }
+    if (declared.state !== "absent") return false;
     const key = readExternalEngineKey();
     const v = hermesProviderValues(record, key === NO_KEY_PLACEHOLDER ? null : key);
     await patchHermesConfig({
@@ -64,14 +75,19 @@ export async function reconcileExternalEngineWithHermes(): Promise<void> {
         "providers.clawext.context_length": v.contextLength,
       },
     });
+    hermesReconciled = true;
     invalidateModelOptions();
+    return true;
   } catch (err) {
-    hermesReconciled = false;
     console.error("[external-engine] Hermes reconcile failed:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
-/** For tests: forget the once-per-process latch. */
-export function resetExternalEngineReconcileForTests(): void {
+/** The engine was removed: the next save may need registering again. */
+export function forgetExternalEngineHermesReconcile(): void {
   hermesReconciled = false;
 }
+
+/** For tests: forget the once-per-process latch. */
+export const resetExternalEngineReconcileForTests = forgetExternalEngineHermesReconcile;

@@ -1983,7 +1983,9 @@ export const de: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "Externe Engine",
   "localModels.external.hint": "Nutzen Sie einen OpenAI-kompatiblen Server, den Sie selbst betreiben — einen Inferenz-Cluster oder vLLM, SGLang oder llama.cpp auf einem Rechner in Ihrem Netzwerk — als lokale KI statt des Modells auf dieser Box.",
-  "localModels.external.notConfigured": "Nicht eingerichtet. Die lokale KI nutzt das Modell auf dieser Box.",
+  "localModels.external.notConfigured": "Keine externe Engine eingerichtet.",
+  "localModels.external.readFailed": "Die Einstellungen der externen Engine konnten nicht gelesen werden.",
+  "localModels.external.retry": "Erneut versuchen",
   "localModels.external.setUp": "Einrichten",
   "localModels.external.baseUrl": "Basis-URL",
   "localModels.external.baseUrlHint": "Die Adresse der OpenAI-kompatiblen API, meist mit /v1 am Ende.",
@@ -2012,6 +2014,7 @@ export const de: Record<string, string> = {
   "localModels.external.window": "Kontextfenster {context} Tokens, Antworten bis {max} Tokens.",
   "localModels.external.windowOnly": "Kontextfenster {context} Tokens.",
   "localModels.external.status.checking": "Die Engine wird geprüft…",
+  "localModels.external.status.unread": "Die Engine konnte gerade nicht geprüft werden.",
   "localModels.external.status.ok": "Die Engine antwortet und listet das Modell ({ms} ms).",
   "localModels.external.status.problem": "Die Engine hat gerade ein Problem: {problem}",
   "localModels.external.onDeviceIdle": "Das Modell auf dieser Box wird für den Chat nicht gestartet, solange diese Engine ausgewählt ist.",

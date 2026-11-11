@@ -144,7 +144,10 @@ interface Props {
   providerSelectionRequest?: number;
   /**
    * Drawn under the panel's card: the setup wizard's way back to an external
-   * engine that was already connected (AIModelsStep, TASK-2376).
+   * engine that was already connected (AIModelsStep, TASK-2376). It replaces
+   * the local-only Skip — the engine is the local choice, and Skip would turn
+   * the on-device model on — and waits while a save or a connect is out, which
+   * would otherwise land after the engine was chosen.
    */
   footer?: ReactNode;
 }
@@ -1831,7 +1834,7 @@ export default function HermesProviderConfig({
           )}
         </div>
 
-        {!embedded && (
+        {!embedded && !footer && (
           <button
             type="button"
             onClick={handleSkipLocalOnly}
@@ -1844,7 +1847,7 @@ export default function HermesProviderConfig({
         {!embedded && statusLine(localStatus)}
         </div>
       </div>
-      {footer && <div className="mt-3 text-center">{footer}</div>}
+      {footer && !saving && !configuring && <div className="mt-3 text-center">{footer}</div>}
     </div>
   );
 }

@@ -1979,7 +1979,9 @@ export const es: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "Motor externo",
   "localModels.external.hint": "Usa un servidor compatible con OpenAI que gestiones tú — un clúster de inferencia, o vLLM, SGLang o llama.cpp en un ordenador de tu red — como IA local en lugar del modelo de esta caja.",
-  "localModels.external.notConfigured": "Sin configurar. La IA local usa el modelo de esta caja.",
+  "localModels.external.notConfigured": "No hay ningún motor externo configurado.",
+  "localModels.external.readFailed": "No se pudo leer la configuración del motor externo.",
+  "localModels.external.retry": "Reintentar",
   "localModels.external.setUp": "Configurar",
   "localModels.external.baseUrl": "URL base",
   "localModels.external.baseUrlHint": "La dirección de la API compatible con OpenAI; suele terminar en /v1.",
@@ -2008,6 +2010,7 @@ export const es: Record<string, string> = {
   "localModels.external.window": "Ventana de contexto de {context} tokens, respuestas de hasta {max} tokens.",
   "localModels.external.windowOnly": "Ventana de contexto de {context} tokens.",
   "localModels.external.status.checking": "Comprobando el motor…",
+  "localModels.external.status.unread": "No se pudo comprobar el motor en este momento.",
   "localModels.external.status.ok": "El motor responde y muestra el modelo ({ms} ms).",
   "localModels.external.status.problem": "El motor tiene un problema ahora mismo: {problem}",
   "localModels.external.onDeviceIdle": "El modelo de esta caja no se inicia para el chat mientras este motor esté seleccionado.",

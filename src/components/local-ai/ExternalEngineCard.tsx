@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyProvidersChanged } from "@/lib/ui-events";
-import { EXTERNAL_ENGINE_DEFAULTS } from "@/lib/external-engine-shared";
+import { EXTERNAL_ENGINE_DEFAULTS, externalEngineOrigin } from "@/lib/external-engine-shared";
 import { BUTTON, CARD, CardHeading, FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
 
 /**
@@ -54,7 +54,8 @@ interface Form {
  */
 type Message = { key: string; params?: Record<string, string | number> } | { raw: string };
 
-type Outcome = { kind: "ok" | "error"; message: Message; models?: string[] };
+// "warn": done, but not all of it (the chat could not be switched, say).
+type Outcome = { kind: "ok" | "warn" | "error"; message: Message; models?: string[] };
 
 const INPUT = `w-full rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] ${FOCUS_RING}`;
 const LABEL = "block text-xs font-medium text-[var(--text-secondary)] mb-1";
@@ -101,8 +102,11 @@ export function sendsKeyInClear(form: Pick<Form, "baseUrl" | "apiKey" | "clearAp
     return false;
   }
   if (url.protocol !== "http:") return false;
+  // The URL parser has already normalised the host (127.1 and 2130706433 read
+  // 127.0.0.1), so loopback is the whole dotted quad, never a name that merely
+  // starts with "127." such as 127.engine.example.
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
+  if (host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host)) return false;
   return form.apiKey.trim() !== "" || (keyOnFile && !form.clearApiKey);
 }
 
@@ -127,6 +131,9 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [httpConfirmed, setHttpConfirmed] = useState(false);
+  // The last read failed: with nothing shown yet, the card offers Retry; with
+  // a view already shown, its status line says the check failed.
+  const [readFailed, setReadFailed] = useState(false);
   const alive = useRef(true);
   // Set on every mount, not only at creation: React's Strict Mode runs the
   // cleanup and the effect again, and a ref left false would drop every answer.
@@ -152,17 +159,26 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
     const seq = ++loadSeq.current;
     try {
       const res = await fetch(`/setup-api/local-ai/external${probe ? "?probe=1" : ""}`, { cache: "no-store" });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as EngineView;
-      if (alive.current && seq === loadSeq.current) setView(data);
+      if (alive.current && seq === loadSeq.current) {
+        setView(data);
+        setReadFailed(false);
+      }
     } catch {
-      // The card simply keeps what it showed; the panel above has its own retry.
+      // Keeps what it showed, and says the read failed.
+      if (alive.current && seq === loadSeq.current) setReadFailed(true);
     }
   }, []);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
+    setReadFailed(false);
     void load(false).then(() => load(true));
   }, [load]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
 
   // Every reset of the form — Set up, Edit, Cancel, a save or a removal —
   // also drops the owner's yes to plain HTTP: a yes is for the address and
@@ -213,12 +229,9 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
       if (res.ok && data.success) {
         setEditing(false);
         setHttpConfirmed(false);
-        setOutcome({
-          kind: "ok",
-          message: typeof data.warning === "string" && data.warning
-            ? { raw: data.warning }
-            : { key: "localModels.external.saved", params: { model: data.displayName ?? form.modelId.trim() } },
-        });
+        setOutcome(typeof data.warning === "string" && data.warning
+          ? { kind: "warn", message: { raw: data.warning } }
+          : { kind: "ok", message: { key: "localModels.external.saved", params: { model: data.displayName ?? form.modelId.trim() } } });
         notifyProvidersChanged();
         onChanged?.();
         await load(true);
@@ -240,10 +253,9 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         setConfirmRemove(false);
-        setOutcome({
-          kind: "ok",
-          message: typeof data.warning === "string" && data.warning ? { raw: data.warning } : { key: "localModels.external.removed" },
-        });
+        setOutcome(typeof data.warning === "string" && data.warning
+          ? { kind: "warn", message: { raw: data.warning } }
+          : { kind: "ok", message: { key: "localModels.external.removed" } });
         resetForm(formFrom(null));
         notifyProvidersChanged();
         onChanged?.();
@@ -261,7 +273,11 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   const configured = view?.configured === true;
   // A key that would go unencrypted to another machine waits for the owner's
   // explicit yes; Test and Save stay disabled until then.
-  const inClear = sendsKeyInClear(form, view?.apiKeySet === true);
+  // A saved key is only ever sent back to its own origin (the save path's rule).
+  const keyForThisAddress = view?.apiKeySet === true
+    && externalEngineOrigin(form.baseUrl) !== ""
+    && externalEngineOrigin(form.baseUrl) === externalEngineOrigin(view?.baseUrl ?? "");
+  const inClear = sendsKeyInClear(form, keyForThisAddress);
   const sendBlocked = inClear && !httpConfirmed;
   const onHermes = view?.activeHarness === "hermes";
   const localOnly = view?.localOnlyMode === true;
@@ -272,7 +288,9 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
       data-testid="local-ai-external-result"
       className={`mx-4 mb-3 rounded-lg px-3 py-2 text-xs ${outcome.kind === "ok"
         ? "border border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200"
-        : "border border-red-500/20 bg-red-500/[0.06] text-red-300"}`}
+        : outcome.kind === "warn"
+          ? "border border-amber-500/25 bg-amber-500/[0.06] text-amber-200"
+          : "border border-red-500/20 bg-red-500/[0.06] text-red-300"}`}
     >
       {say(outcome.message)}
       {outcome.models && outcome.models.length > 0 && editing && (
@@ -303,7 +321,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
           </p>
           <p data-testid="local-ai-external-status">
             {!view?.status
-              ? t("localModels.external.status.checking")
+              ? t(readFailed ? "localModels.external.status.unread" : "localModels.external.status.checking")
               : view.status.modelListed
                 ? t("localModels.external.status.ok", { ms: n(view.status.latencyMs) })
                 : t("localModels.external.status.problem", { problem: say(describe(view.status)) })}
@@ -331,6 +349,16 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               </>
             )}
           </div>
+        </div>
+      )}
+
+      {view === null && readFailed && !editing && (
+        <div className="px-4 pb-4 flex items-center justify-between gap-3" data-testid="local-ai-external-read-failed">
+          {/* A status, not an alert: a background read of this card, not the owner's action. */}
+          <p role="status" className="text-xs text-red-300">{t("localModels.external.readFailed")}</p>
+          <button type="button" className={BUTTON} data-testid="local-ai-external-retry" onClick={reload}>
+            {t("localModels.external.retry")}
+          </button>
         </div>
       )}
 
@@ -378,7 +406,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
             <label className={LABEL} htmlFor="ext-api-key">{t("localModels.external.apiKey")}</label>
             <input id="ext-api-key" className={INPUT} data-testid="local-ai-external-api-key" type="password"
               autoComplete="new-password" spellCheck={false}
-              placeholder={view?.apiKeySet && !form.clearApiKey ? t("localModels.external.apiKeyKeep") : t("localModels.external.apiKeyHint")}
+              placeholder={keyForThisAddress && !form.clearApiKey ? t("localModels.external.apiKeyKeep") : t("localModels.external.apiKeyHint")}
               value={form.apiKey} onChange={(e) => set("apiKey", e.target.value)} />
             {view?.apiKeySet && (
               <label className="mt-1 flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">

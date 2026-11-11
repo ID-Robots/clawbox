@@ -166,7 +166,9 @@ export const localModelsEn: Record<string, string> = {
   // owner runs, used as Local AI instead of the model on the box.
   "localModels.external.title": "External engine",
   "localModels.external.hint": "Use an OpenAI-compatible server you run — an inference cluster, or vLLM, SGLang or llama.cpp on a computer on your network — as Local AI instead of the model on this box.",
-  "localModels.external.notConfigured": "Not set up. Local AI uses the model on this box.",
+  "localModels.external.notConfigured": "No external engine is set up.",
+  "localModels.external.readFailed": "The external engine's settings could not be read.",
+  "localModels.external.retry": "Retry",
   "localModels.external.setUp": "Set up",
   "localModels.external.baseUrl": "Base URL",
   "localModels.external.baseUrlHint": "The address of the OpenAI-compatible API, usually ending in /v1.",
@@ -195,6 +197,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.external.window": "Context window {context} tokens, replies up to {max} tokens.",
   "localModels.external.windowOnly": "Context window {context} tokens.",
   "localModels.external.status.checking": "Checking the engine…",
+  "localModels.external.status.unread": "The engine could not be checked just now.",
   "localModels.external.status.ok": "The engine answers and lists the model ({ms} ms).",
   "localModels.external.status.problem": "The engine has a problem right now: {problem}",
   "localModels.external.onDeviceIdle": "The model on this box is not started for chat while this engine is selected.",

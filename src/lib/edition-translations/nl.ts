@@ -1984,7 +1984,9 @@ export const nl: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "Externe engine",
   "localModels.external.hint": "Gebruik een OpenAI-compatibele server die u zelf beheert — een inferentiecluster, of vLLM, SGLang of llama.cpp op een computer in uw netwerk — als lokale AI in plaats van het model op deze box.",
-  "localModels.external.notConfigured": "Niet ingesteld. De lokale AI gebruikt het model op deze box.",
+  "localModels.external.notConfigured": "Er is geen externe engine ingesteld.",
+  "localModels.external.readFailed": "De instellingen van de externe engine konden niet worden gelezen.",
+  "localModels.external.retry": "Opnieuw proberen",
   "localModels.external.setUp": "Instellen",
   "localModels.external.baseUrl": "Basis-URL",
   "localModels.external.baseUrlHint": "Het adres van de OpenAI-compatibele API, meestal eindigend op /v1.",
@@ -2013,6 +2015,7 @@ export const nl: Record<string, string> = {
   "localModels.external.window": "Contextvenster {context} tokens, antwoorden tot {max} tokens.",
   "localModels.external.windowOnly": "Contextvenster {context} tokens.",
   "localModels.external.status.checking": "De engine wordt gecontroleerd…",
+  "localModels.external.status.unread": "De engine kon nu niet worden gecontroleerd.",
   "localModels.external.status.ok": "De engine antwoordt en vermeldt het model ({ms} ms).",
   "localModels.external.status.problem": "De engine heeft nu een probleem: {problem}",
   "localModels.external.onDeviceIdle": "Het model op deze box wordt niet gestart voor de chat zolang deze engine is gekozen.",

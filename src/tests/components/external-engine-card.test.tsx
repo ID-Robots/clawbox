@@ -129,6 +129,60 @@ describe("ExternalEngineCard", () => {
     }
   });
 
+  it("says a saved key is kept only for its own address", async () => {
+    stub({ get: () => CONFIGURED });
+    renderCard();
+    fireEvent.click(await screen.findByTestId("local-ai-external-edit"));
+    const keyInput = screen.getByTestId("local-ai-external-api-key") as HTMLInputElement;
+    expect(keyInput.placeholder).toBe("A key is saved — leave empty to keep it");
+    // Another origin never gets the saved key, so the field must not promise it.
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://engine.example/v1" } });
+    expect(keyInput.placeholder).toBe("Leave empty if the engine needs none");
+    // The same origin with another path keeps it.
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "http://192.0.2.10:8000/api/v1" } });
+    expect(keyInput.placeholder).toBe("A key is saved — leave empty to keep it");
+  });
+
+  it("shows a save that could not switch the chat as a warning, not a success", async () => {
+    const warning = "The engine is saved, but the chat could not be switched to it. Pick it in the chat header.";
+    stub({ save: () => json({ success: true, ...CONFIGURED, warning }) });
+    renderCard();
+    await fillForm();
+    fireEvent.click(screen.getByTestId("local-ai-external-save"));
+    expect(await screen.findByText(warning)).toBeTruthy();
+    expect(screen.getByTestId("local-ai-external-result").className).toContain("amber");
+    expect(screen.getByTestId("local-ai-external-result").className).not.toContain("emerald");
+  });
+
+  it("offers Retry when the engine's settings cannot be read", async () => {
+    let fail = true;
+    calls = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      calls.push({ url: input.toString(), method: "GET", body: null });
+      return fail ? json({ error: "boom" }, 500) : json(NOT_CONFIGURED);
+    }));
+    renderCard();
+    expect(await screen.findByText("The external engine's settings could not be read.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Set up" })).toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("button", { name: "Set up" })).toBeTruthy();
+    expect(screen.getByText("No external engine is set up.")).toBeTruthy();
+    expect(screen.queryByText("The external engine's settings could not be read.")).toBeNull();
+  });
+
+  it("says the check failed rather than checking forever when the probe read fails", async () => {
+    calls = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      calls.push({ url, method: "GET", body: null });
+      return url.includes("probe=1") ? json({ error: "boom" }, 500) : json(CONFIGURED);
+    }));
+    renderCard();
+    expect(await screen.findByText("Local AI answers with Qwen3-32B.")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("local-ai-external-status").textContent).toBe("The engine could not be checked just now."));
+  });
+
   it("removes only on the second tap", async () => {
     let configured = true;
     stub({ get: () => (configured ? CONFIGURED : NOT_CONFIGURED), remove: () => { configured = false; return json({ success: true, removed: true }); } });
@@ -204,6 +258,12 @@ describe("ExternalEngineCard", () => {
     expect(sendsKeyInClear(form("http://localhost:8000/v1"), false)).toBe(false);
     expect(sendsKeyInClear(form("http://[::1]:8000/v1"), false)).toBe(false);
     expect(sendsKeyInClear(form("not a url"), false)).toBe(false);
+    // Loopback is the whole address, in any spelling the URL parser folds to it,
+    // never a public name that merely starts with "127.".
+    expect(sendsKeyInClear(form("http://127.1:8000/v1"), false)).toBe(false);
+    expect(sendsKeyInClear(form("http://2130706433:8000/v1"), false)).toBe(false);
+    expect(sendsKeyInClear(form("http://127.engine.example/v1"), false)).toBe(true);
+    expect(sendsKeyInClear(form("http://127.0.0.1.example.com/v1"), false)).toBe(true);
   });
 
   it("will not save while Local-only mode is on", async () => {

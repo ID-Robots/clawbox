@@ -729,8 +729,12 @@ export async function register() {
     // every few minutes. Nothing happens on a box with no engine.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { standDownChatRuntimesForExternalEngine, EXTERNAL_ENGINE_STAND_DOWN_MS } = require('./lib/local-ai-runtime')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { withLocalAiTransitionLock } = require('./lib/local-ai-transition-lock')
     const standDown = () => {
-      void standDownChatRuntimesForExternalEngine().then((stopped: { ollama: boolean; llamacpp: boolean }) => {
+      // Under the engine's own transition lock: a Remove that starts Ollama
+      // again must not be undone by a check that read "selected" before it.
+      void withLocalAiTransitionLock(() => standDownChatRuntimesForExternalEngine()).then((stopped: { ollama: boolean; llamacpp: boolean }) => {
         if (stopped.ollama || stopped.llamacpp) {
           console.log(`[instrumentation] external AI engine selected: stopped ${[stopped.ollama && 'ollama', stopped.llamacpp && 'llama.cpp'].filter(Boolean).join(' and ')}`)
         }

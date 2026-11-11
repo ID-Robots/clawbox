@@ -65,6 +65,16 @@ note "ollama before: $OLLAMA_BEFORE"
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
 # shellcheck disable=SC2016,SC2317
 cleanup() {
+  if [ "$SAVED" != 1 ]; then
+    # A Save whose answer was lost (a timeout) may still have stored the
+    # engine: removed when it is this test's own fixture, never anything else.
+    board_owner_api GET /setup-api/local-ai/external
+    if [ "$(api_json '.configured')" = true ] && [ "$(api_json '.baseUrl')" = "http://127.0.0.1:$PORT/v1" ] \
+      && [ "$(api_json '.modelId')" = "$MODEL" ]; then
+      SAVED=1
+      note "cleanup: this test's engine is saved although Save did not say so"
+    fi
+  fi
   if [ "$SAVED" = 1 ]; then
     board_owner_api DELETE /setup-api/local-ai/external
     note "cleanup: engine removal answered HTTP $API_STATUS"

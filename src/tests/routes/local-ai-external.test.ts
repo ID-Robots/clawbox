@@ -534,3 +534,52 @@ describe("select: the wizard's Continue with an engine already connected", () =>
   });
 });
 
+
+describe("a save the store could not record, and Hermes' provider block", () => {
+  it("puts the key and OpenClaw back when the store write fails on a first save", async () => {
+    const { setMany } = await import("@/lib/config-store");
+    const real = vi.mocked(setMany).getMockImplementation()!;
+    vi.mocked(setMany).mockImplementation(async (entries: Record<string, unknown>) => {
+      if ("external_engine" in entries) throw new Error("ENOSPC: no space left on device");
+      return real(entries);
+    });
+    const res = await POST(req("POST", saveBody()));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("write_failed");
+    // No engine left that Settings cannot see or remove.
+    expect(store.external_engine).toBeUndefined();
+    expect(store.local_ai_provider).toBe("llamacpp");
+    expect(keyFile()).toBeNull();
+    const providers = (openclaw.models as { providers: Record<string, unknown> }).providers;
+    expect(providers.clawext).toBeUndefined();
+    expect((openclaw.agents as { defaults: { model: { primary: string } } }).defaults.model.primary).toBe("llamacpp/gemma4-e2b-it-q4_0");
+    expect(logs.join("\n")).not.toContain(KEY);
+  });
+
+  it("select on Hermes names no provider whose block could not be put in place", async () => {
+    vi.mocked(getActiveHarness).mockResolvedValue("hermes");
+    await POST(req("POST", saveBody()));
+    vi.mocked(patchHermesConfig).mockClear();
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "unreadable" });
+    const res = await SELECT(req("POST"));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("hermes_write_failed");
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets.some((set) => "model.provider" in set)).toBe(false);
+  });
+
+  it("registers the block again after Remove, for an engine saved on OpenClaw and read on Hermes", async () => {
+    const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
+    resetExternalEngineReconcileForTests();
+    await POST(req("POST", saveBody()));
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "absent" });
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    await DELETE(req("DELETE"));
+    // Saved again on OpenClaw; the Hermes read path must not skip it on a latch.
+    await POST(req("POST", saveBody()));
+    vi.mocked(patchHermesConfig).mockClear();
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets.some((set) => set["providers.clawext.base_url"] === BASE)).toBe(true);
+  });
+});

@@ -1992,7 +1992,9 @@ export const zh: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "外部引擎",
   "localModels.external.hint": "使用您自己运行的 OpenAI 兼容服务器（推理集群，或您网络中某台计算机上的 vLLM、SGLang、llama.cpp）作为本地 AI，代替这台设备上的模型。",
-  "localModels.external.notConfigured": "尚未设置。本地 AI 使用这台设备上的模型。",
+  "localModels.external.notConfigured": "尚未设置外部引擎。",
+  "localModels.external.readFailed": "无法读取外部引擎的设置。",
+  "localModels.external.retry": "重试",
   "localModels.external.setUp": "设置",
   "localModels.external.baseUrl": "基础 URL",
   "localModels.external.baseUrlHint": "OpenAI 兼容 API 的地址，通常以 /v1 结尾。",
@@ -2021,6 +2023,7 @@ export const zh: Record<string, string> = {
   "localModels.external.window": "上下文窗口 {context} 个 token，回复最多 {max} 个 token。",
   "localModels.external.windowOnly": "上下文窗口 {context} 个 token。",
   "localModels.external.status.checking": "正在检查引擎…",
+  "localModels.external.status.unread": "暂时无法检查引擎。",
   "localModels.external.status.ok": "引擎有响应并列出了该模型（{ms} ms）。",
   "localModels.external.status.problem": "引擎目前有问题：{problem}",
   "localModels.external.onDeviceIdle": "选中此引擎期间，这台设备上的模型不会为聊天启动。",

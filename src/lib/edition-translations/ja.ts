@@ -1984,7 +1984,9 @@ export const ja: Record<string, string> = {
   // === External engine (TASK-2376) ===
   "localModels.external.title": "外部エンジン",
   "localModels.external.hint": "ご自身で運用している OpenAI 互換サーバー（推論クラスター、またはネットワーク上のコンピューターで動く vLLM・SGLang・llama.cpp）を、この本体のモデルの代わりにローカルAIとして使います。",
-  "localModels.external.notConfigured": "未設定です。ローカルAIはこの本体のモデルを使います。",
+  "localModels.external.notConfigured": "外部エンジンは設定されていません。",
+  "localModels.external.readFailed": "外部エンジンの設定を読み込めませんでした。",
+  "localModels.external.retry": "再試行",
   "localModels.external.setUp": "設定する",
   "localModels.external.baseUrl": "ベース URL",
   "localModels.external.baseUrlHint": "OpenAI 互換 API のアドレスです。通常は /v1 で終わります。",
@@ -2013,6 +2015,7 @@ export const ja: Record<string, string> = {
   "localModels.external.window": "コンテキストウィンドウ {context} トークン、応答は最大 {max} トークン。",
   "localModels.external.windowOnly": "コンテキストウィンドウ {context} トークン。",
   "localModels.external.status.checking": "エンジンを確認しています…",
+  "localModels.external.status.unread": "現在エンジンを確認できませんでした。",
   "localModels.external.status.ok": "エンジンは応答し、モデルを表示しています（{ms} ms）。",
   "localModels.external.status.problem": "現在エンジンに問題があります: {problem}",
   "localModels.external.onDeviceIdle": "このエンジンを選択している間、この本体のモデルはチャット用に起動しません。",
