@@ -106,7 +106,8 @@ beforeEach(() => {
     `printf 'git %s\\n' "$*" >> ${log}`,
     'case " $* " in',
     `  *" rev-parse "*) [ -f ${at("tree")} ] || exit 128; cat ${at("tree")} ;;`,
-    `  *" status "*) cat ${at("dirty")} 2>/dev/null; exit 0 ;;`,
+    // A failing `status` prints nothing: empty output must not read as clean.
+    `  *" status "*) [ -f ${at("status-fails")} ] && exit 128; cat ${at("dirty")} 2>/dev/null; exit 0 ;;`,
     "  *) exit 1 ;;",
     "esac",
     "",
@@ -196,6 +197,7 @@ describe("step_clawkeep_install: one forced install per update", () => {
     ["a record of another tree", () => keepRecord(`${OTHER_TREE}\n`)],
     ["a tree with local edits", () => { keepRecord(`${TREE}\n`); flag("dirty", " M clawkeep/clawkeep/cli.py\n"); }],
     ["a git that cannot answer", () => { keepRecord(`${TREE}\n`); rmSync(path.join(dir, "tree")); }],
+    ["a git status that fails", () => { keepRecord(`${TREE}\n`); flag("status-fails"); }],
     ["a missing clawkeepd", () => { keepRecord(`${TREE}\n`); rmSync(path.join(home, ".local", "bin", "clawkeepd")); }],
     ["a CLI that no longer answers", () => { keepRecord(`${TREE}\n`); flag("clawkeep-broken"); }],
     ["a symlinked record", () => {
@@ -222,6 +224,14 @@ describe("step_clawkeep_install: one forced install per update", () => {
     rmSync(path.join(dir, "tree"));
     const r = runStep([]);
     expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(record)).toBe(false);
+  });
+
+  it("never records when git status fails, though it printed nothing", () => {
+    flag("status-fails");
+    const r = runStep([]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(pipxRuns()).toBe(1);
     expect(existsSync(record)).toBe(false);
   });
 
