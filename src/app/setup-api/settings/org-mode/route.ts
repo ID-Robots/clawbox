@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 
 import { readFailureKind } from "@/lib/config-store";
 import { readOrgMode, writeOrgMode } from "@/lib/org-mode-server";
+import { syncStaffAgents } from "@/lib/org-staff-agents";
 import { personSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
@@ -62,5 +63,11 @@ export async function POST(req: Request) {
     return refuse(500, "store_write_failed", "The switch could not be saved — the ClawBox settings file could not be written. Nothing was changed.");
   }
   console.log(`[org-mode] the owner turned organisation mode ${orgMode ? "on" : "off"}`);
+  // Each member of staff's own OpenClaw agent — their limited tools and their
+  // own memory — arrives with the switch and goes with it
+  // (src/lib/org-staff-agents.ts). Awaited, so a member's next turn finds it;
+  // best effort, because the switch is saved either way and the relay refuses
+  // a member's turn until their agent is there.
+  await syncStaffAgents();
   return NextResponse.json({ orgMode: await readOrgMode(), canChange: true }, { headers: NO_STORE });
 }

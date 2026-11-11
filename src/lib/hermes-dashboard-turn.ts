@@ -419,6 +419,18 @@ export interface DashboardTurnRequest {
   readonly providerIsUserDefined?: boolean;
   /** A stored session id to resume, or empty to start a new conversation. */
   readonly sessionId?: string;
+  /**
+   * The Hermes profile the conversation lives in — a member of staff's own on
+   * an organisation box (src/lib/hermes-staff-profile.ts), with `cwd` their
+   * folder. Absent: the dashboard's launch profile, the owner's.
+   */
+  readonly profile?: string;
+  readonly cwd?: string;
+  /**
+   * Answer every approval the agent asks for with `deny` instead of `once`.
+   * A member of staff approves nothing on the box's behalf.
+   */
+  readonly denyApprovals?: boolean;
   readonly signal?: AbortSignal;
   /**
    * Told WHY, when the turn could not be opened and null comes back.
@@ -1064,8 +1076,11 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
               // would be a large payload nothing reads.
               omit_messages: true,
               source: "clawbox-chat",
+              ...(req.profile ? { profile: req.profile } : {}),
             }
           : {
+              ...(req.profile ? { profile: req.profile } : {}),
+              ...(req.cwd ? { cwd: req.cwd, cwd_explicit: true } : {}),
               ...(req.model ? { model: req.model } : {}),
               ...(req.provider ? { provider: req.provider } : {}),
               ...(req.reasoning ? { reasoning_effort: req.reasoning } : {}),
@@ -1663,7 +1678,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                     method: "approval.respond",
                     params: {
                       session_id: transportSid,
-                      choice: APPROVAL_CHOICE,
+                      choice: req.denyApprovals ? "deny" : APPROVAL_CHOICE,
                       ...(typeof requestId === "string" && requestId ? { request_id: requestId } : {}),
                     },
                   }),

@@ -39,6 +39,9 @@ const PLUGIN = "clawbox_email_directives";
 // enables after this one (scripts/hermes-plugins/clawbox_local_lean) — its own
 // suite is register-mcp-local-lean.test.ts.
 const LEAN = "clawbox_local_lean";
+// …and the staff guard after it (scripts/hermes-plugins/clawbox_staff_guard,
+// TASK-2444), merged into the same list the same way.
+const STAFF = "clawbox_staff_guard";
 
 function have(bin: string, args: string[]): boolean {
   return spawnSync(bin, args, { stdio: "ignore" }).status === 0;
@@ -171,7 +174,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml", "update_commands.py"]);
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
   });
 
   it("copies the real plugin, not a placeholder", () => {
@@ -232,13 +235,13 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // customer's picture-drawing away as a side effect of a directive strip.
     fs.writeFileSync(configPath, "plugins:\n  enabled:\n    - clawai\n");
     run();
-    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN, STAFF]);
   });
 
   it("reads back the JSON-string list form `hermes config set` writes", () => {
     fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai"]'\n`);
     run();
-    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN, STAFF]);
   });
 
   it("changes nothing on a second run", () => {
@@ -287,7 +290,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // Provoked the way the OpenClaw twin's test does it: make one of the three
     // targets a directory, which `cp -f` cannot overwrite.
     run();
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
     const third = path.join(pluginsDir, PLUGIN, "email_directives.py");
     fs.rmSync(third);
     fs.mkdirSync(third);
@@ -297,7 +300,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     expect(r.stdout).toContain("has been removed rather than left for Hermes to import");
     expect(installedFiles()).toEqual([]);
     // And the config still names it — which is exactly why the files must go.
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
   });
 
   it.skipIf(process.getuid?.() === 0)("says so when it could NOT remove the partial copy", () => {
@@ -638,7 +641,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     fs.chmodSync(hermesBin, 0o755);
     const r = run();
     expect(r.status).toBe(0);
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
     expect(r.stdout).toMatch(/NOTE: could not verify/);
     expect(r.stdout).not.toMatch(/WARNING/);
   });
@@ -672,7 +675,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // bound would have slept and then reported SUCCESS.
     expect(r.stdout).toContain("could not disable the built-in browser toolset");
     // And the box still got its device tools and its plugin.
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
     expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
   });
   it("a CLI that IGNORES SIGTERM is still bounded AND still reads as UNKNOWN", () => {
@@ -725,7 +728,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // hides bash's misleading "Killed" notice threw away the only other trace.
     expect(r.stdout).toContain("could not disable the built-in browser toolset (exit 137)");
     // And the box still got its device tools and its plugin.
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
     expect((readConfig().mcp_servers as Record<string, unknown>).clawbox).toBeTruthy();
     // ...and NOTHING said the script itself was killed. `-k 5` makes `timeout`
     // die by a signal, and bash announces a signal-killed foreground child on
@@ -793,7 +796,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     fs.chmodSync(hermesBin, 0o755);
     const r = run();
     expect(r.status).toBe(0);
-    expect(enabledPlugins()).toEqual([PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual([PLUGIN, LEAN, STAFF]);
     expect(r.stdout).toMatch(/NOTE: .*answered 124/);
     expect(r.stdout).not.toMatch(/WARNING/);
   });
@@ -817,7 +820,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
   it("reads the JSON forms `hermes config set` actually writes", () => {
     fs.writeFileSync(configPath, `plugins:\n  enabled: '["clawai", "other"]'\n`);
     run();
-    expect(enabledPlugins()).toEqual(["clawai", "other", PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual(["clawai", "other", PLUGIN, LEAN, STAFF]);
   });
 
   it("normalises a stored-as-text plugins.enabled even when this hook is NOT installed", () => {
@@ -850,7 +853,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     installImageBackend();
     const r = run();
     expect(r.status).toBe(0);
-    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN]);
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN, STAFF]);
     expect(imageProvider()).toBe("clawai");
   });
 
@@ -877,7 +880,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     installImageBackend();
     const r = run();
     expect(r.status).toBe(0);
-    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN]); // the type repair still happens
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN, STAFF]); // the type repair still happens
     expect(imageProvider()).toBeUndefined();
     expect(r.stdout).toMatch(/disabled/);
   });
@@ -897,7 +900,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     installImageBackend();
     const r = run();
     expect(r.status).toBe(0);
-    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN]); // the type repair still happens
+    expect(enabledPlugins()).toEqual(["clawai", PLUGIN, LEAN, STAFF]); // the type repair still happens
     expect(imageProvider()).toBeUndefined();
   });
 

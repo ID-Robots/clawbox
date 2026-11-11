@@ -322,6 +322,34 @@ else
   log "WARNING: could not install the $LEAN_PLUGIN plugin into $LEAN_PLUGIN_DST AND could not remove what is there — Hermes may import a partial copy"
 fi
 
+# ── 2c. Install the staff guard (TASK-2444, TASK-2445). ──────────────────────
+# scripts/hermes-plugins/clawbox_staff_guard: a `pre_tool_call` hook that, on a
+# member of staff's own profile (~/.hermes/profiles/clawbox-staff-<name>,
+# src/lib/hermes-staff-profile.ts), refuses every tool config/org-staff-policy.json
+# does not allow and holds the file tools to that member's folder. Every other
+# profile — the owner's — is never judged. Installed on every box, so turning
+# the organisation switch on needs no restart; the policy table is copied in
+# beside it, and the chat's staging directory is recorded for it, because the
+# dashboard process does not know where ClawBox keeps its data. The same rules as
+# the plugins above: sources read first, half-written copies removed, never fatal.
+STAFF_GUARD_PLUGIN="clawbox_staff_guard"
+STAFF_GUARD_SRC="$PROJECT_DIR/scripts/hermes-plugins/$STAFF_GUARD_PLUGIN"
+STAFF_GUARD_DST="$HERMES_PLUGINS_DIR/$STAFF_GUARD_PLUGIN"
+STAFF_GUARD_SOURCES=("$STAFF_GUARD_SRC/__init__.py" "$STAFF_GUARD_SRC/plugin.yaml" "$STAFF_GUARD_SRC/staff_guard.py" "$PROJECT_DIR/config/org-staff-policy.json")
+STAFF_GUARD_INSTALLED=0
+
+if ! cat "${STAFF_GUARD_SOURCES[@]}" >/dev/null 2>&1; then
+  log "WARNING: $STAFF_GUARD_SRC is not a complete, readable plugin — leaving whatever is already installed in place; a member of staff's file tools are held only by their profile's toolsets"
+elif mkdir -p "$STAFF_GUARD_DST" 2>/dev/null && cp -f "${STAFF_GUARD_SOURCES[@]}" "$STAFF_GUARD_DST/" 2>/dev/null \
+  && printf '{"attachments": %s}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$PROJECT_DIR/data/chat-media/chat-attachments")" > "$STAFF_GUARD_DST/clawbox-paths.json" 2>/dev/null; then
+  rm -rf "$STAFF_GUARD_DST/__pycache__" 2>/dev/null || true
+  STAFF_GUARD_INSTALLED=1
+elif rm -rf "$STAFF_GUARD_DST" 2>/dev/null; then
+  log "WARNING: could not install the $STAFF_GUARD_PLUGIN plugin into $STAFF_GUARD_DST — anything partial there has been removed; a member of staff's file tools are held only by their profile's toolsets until the next boot repairs it"
+else
+  log "WARNING: could not install the $STAFF_GUARD_PLUGIN plugin into $STAFF_GUARD_DST AND could not remove what is there — Hermes may import a partial copy"
+fi
+
 # ── 3. Reconcile mcp_servers.clawbox in ~/.hermes/config.yaml. ──────────────
 # Done in Python/PyYAML for the same reason gateway-pre-start.sh does its
 # openclaw.json pass in Python: read-modify-write with an atomic rename, and a
@@ -347,6 +375,9 @@ export CLAWBOX_EMAIL_HOOK_PLUGIN=""
 # Likewise for the lean-mode plugin (2b).
 export CLAWBOX_LOCAL_LEAN_PLUGIN=""
 [ "$LEAN_PLUGIN_INSTALLED" = "1" ] && export CLAWBOX_LOCAL_LEAN_PLUGIN="$LEAN_PLUGIN"
+# And for the staff guard (2c).
+export CLAWBOX_STAFF_GUARD_PLUGIN=""
+[ "$STAFF_GUARD_INSTALLED" = "1" ] && export CLAWBOX_STAFF_GUARD_PLUGIN="$STAFF_GUARD_PLUGIN"
 # The ClawAI image backend, for the re-arm below. Its files are written by the
 # LINK path (src/lib/hermes-image-plugin.ts), not by this script — this is only
 # where they would be if the box has ever been linked.
@@ -843,12 +874,14 @@ def config_name_list(value):
 hook_plugin = os.environ.get("CLAWBOX_EMAIL_HOOK_PLUGIN") or ""
 # The on-device model's lean-mode plugin (2b), merged the same way, after the hook.
 lean_plugin = os.environ.get("CLAWBOX_LOCAL_LEAN_PLUGIN") or ""
+# The staff guard (2c), merged the same way.
+staff_guard_plugin = os.environ.get("CLAWBOX_STAFF_GUARD_PLUGIN") or ""
 # Set only where a STRING became a real list — the state a withdrawn image
 # claim is paired with. See the re-arm below.
 repaired_enabled = False
 names = None
 plugins_cfg = cfg.get("plugins")
-if plugins_cfg is None and (hook_plugin or lean_plugin):
+if plugins_cfg is None and (hook_plugin or lean_plugin or staff_guard_plugin):
     # Created only when there is a name to write into it; an absent key with
     # nothing to add is not a repair, it is a needless config rewrite.
     plugins_cfg = {}
@@ -903,6 +936,13 @@ elif isinstance(plugins_cfg, dict):
         repaired_enabled = repaired_enabled or isinstance(raw_enabled, str)
         print("[register-mcp] enabled the " + lean_plugin
               + " plugin — model calls on the box's own model get the lean prompt and tools")
+    if names is not None and staff_guard_plugin and staff_guard_plugin not in names:
+        names = names + [staff_guard_plugin]
+        plugins_cfg["enabled"] = names
+        changed = True
+        repaired_enabled = repaired_enabled or isinstance(raw_enabled, str)
+        print("[register-mcp] enabled the " + staff_guard_plugin
+              + " plugin — a member of staff's profile is held to the staff tools and their own folder")
 
 # ── Re-arm the ClawAI image backend the repair above made loadable. ─────────
 # `enableHermesImageGeneration` (src/lib/hermes-clawai.ts) unsets

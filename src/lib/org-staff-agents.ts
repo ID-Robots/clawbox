@@ -1,0 +1,378 @@
+/**
+ * A member of staff's own OpenClaw agent on an organisation box (TASK-2444,
+ * TASK-2445). SERVER ONLY.
+ *
+ * WHY AN AGENT EACH. The pinned core's own rule for people who must not reach
+ * each other's tools, sessions or files is "give them separate agents"
+ * (docs/concepts/multi-user.md, "Trust boundary"), and an agent is exactly the
+ * unit both halves of the task need:
+ *
+ *   * its TOOLS — `agents.entries.<id>.tools.allow` / `.deny`, which the core
+ *     intersects with every other policy layer and applies before a model sees
+ *     a tool (docs/tools/multi-agent-sandbox-tools.md, "Tool restrictions").
+ *     The lists are config/org-staff-policy.json's; no web, no browser, no
+ *     messages, no automations or sub-agents, no generation, no shell, none of
+ *     the device's MCP tools, no gateway/config/plugin/update tools;
+ *   * its MEMORY — its own workspace (`MEMORY.md`, `memory/`) and its own
+ *     memory index in its own agent database, so "remember X" said to one
+ *     member's assistant can only be read back by that member's assistant, and
+ *     never lands in the owner's MEMORY.md.
+ *
+ * The workspace is `<OpenClaw home>/staff/<name>`: under the state directory,
+ * where the Files app's carve-out (`workspace` / `workspace-<x>`,
+ * src/lib/file-guard.ts) does NOT reach, so no other user opens it in Files.
+ * It is also the member's own folder for anything the assistant writes for
+ * them; clawbox-staff-guard (scripts/openclaw-plugins/) holds the file tools
+ * to it.
+ *
+ * THE ROSTER. A box that never had more than the owner's agent has no roster
+ * at all — the core's implicit `main`. Adding a second agent makes it a fleet,
+ * and the core then routes nothing to an agent nobody named
+ * (docs/concepts/multi-agent.md, "Routing rules"), so the same write names the
+ * owner's agent: `agents.defaults.systemAgent.agentId` (which catches every
+ * unbound channel message and owns heartbeats), `agents.ownership:
+ * "explicit"` (Doctor would add it anyway), and the owner's agent's own entry
+ * with its workspace pinned where it already is. Only what is ABSENT is
+ * written, and what ClawBox wrote is recorded in the device store
+ * (`org_staff_roster`), so turning the switch off — or removing the last
+ * member of staff — takes back exactly that and nothing the owner set.
+ *
+ * Applied through the running gateway (`agents.*` is hot in the core's reload
+ * table, src/lib/gateway-hot-apply.ts): no restart, no dropped chat.
+ */
+
+import fs from "fs";
+import { promises as fsp } from "fs";
+import path from "@/lib/runtime-path";
+import { isDeepStrictEqual } from "node:util";
+import { get, set } from "@/lib/config-store";
+import { listUsers } from "@/lib/clawbox-users";
+import { readOrgMode } from "@/lib/org-mode-server";
+import { resolveDefaultAgentId } from "@/lib/openclaw-default-agent";
+import {
+  STAFF_OPENCLAW_TOOLS,
+  isStaffAgentId,
+  staffAgentId,
+} from "@/lib/org-staff-policy";
+
+/** The device-store key recording what ClawBox added to the roster to make room for staff. */
+export const ORG_STAFF_ROSTER_KEY = "org_staff_roster";
+
+/** What ClawBox wrote around the staff agents, so it can take exactly that back. */
+export interface StaffRosterMarks {
+  /** The owner's agent's entry `{ workspace }`, written because the box had no roster. */
+  ownerEntry: { id: string; workspace: string } | null;
+  /** `agents.ownership: "explicit"`. */
+  ownership: boolean;
+  /** `agents.defaults.systemAgent.agentId` = the owner's agent. */
+  systemAgent: string | null;
+}
+
+export const NO_MARKS: StaffRosterMarks = Object.freeze({ ownerEntry: null, ownership: false, systemAgent: null });
+
+/** One write of a plan: a set (`value`) or an unset (`value` undefined). */
+export interface RosterWrite {
+  path: string;
+  value?: unknown;
+}
+
+export interface StaffRosterPlan {
+  writes: RosterWrite[];
+  marks: StaffRosterMarks;
+}
+
+type Json = Record<string, unknown>;
+
+function isRecord(value: unknown): value is Json {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A config path segment, bracket-quoted: agent ids carry `-`. */
+function entryPath(id: string): string {
+  return `agents.entries[${JSON.stringify(id)}]`;
+}
+
+/** A member of staff's workspace — their memory and their own folder. */
+export function staffWorkspaceDir(openclawHome: string, username: string): string {
+  return path.join(openclawHome, "staff", username);
+}
+
+/** The roster entry of one member of staff's agent. */
+export function staffAgentEntry(openclawHome: string, username: string): Json {
+  return {
+    name: `${username} (staff)`,
+    workspace: staffWorkspaceDir(openclawHome, username),
+    // No skills: a skill is instructions that may lean on tools staff do not have.
+    skills: [],
+    // No sub-agents of any agent, its own included (`sessions_spawn` is denied too).
+    subagents: { allowAgents: [] },
+    tools: {
+      // The allow-list below is the whole selection, whatever the box-wide
+      // `tools.profile` says: a global profile the owner (or the owner's
+      // agent) flips to `full` or `coding` neither widens nor starves it.
+      profile: "full",
+      allow: [...STAFF_OPENCLAW_TOOLS.allow],
+      deny: [...STAFF_OPENCLAW_TOOLS.deny],
+      elevated: { enabled: false },
+    },
+  };
+}
+
+interface RosterView {
+  shape: "none" | "entries" | "list";
+  ids: string[];
+  entryOf(id: string): Json | null;
+}
+
+function viewRoster(config: unknown): RosterView {
+  const agents = isRecord(config) && isRecord(config.agents) ? config.agents : null;
+  if (agents && agents.entries !== undefined) {
+    const entries = isRecord(agents.entries) ? agents.entries : {};
+    return {
+      shape: "entries",
+      ids: Object.keys(entries).map((id) => id.toLowerCase()),
+      entryOf: (id) => {
+        for (const [key, value] of Object.entries(entries)) if (key.toLowerCase() === id && isRecord(value)) return value;
+        return null;
+      },
+    };
+  }
+  if (agents && Array.isArray(agents.list)) {
+    const list = agents.list.filter(isRecord);
+    return {
+      shape: "list",
+      ids: list.map((entry) => String(entry.id ?? "").toLowerCase()).filter(Boolean),
+      entryOf: (id) => list.find((entry) => String(entry.id ?? "").toLowerCase() === id) ?? null,
+    };
+  }
+  return { shape: "none", ids: [], entryOf: () => null };
+}
+
+export interface StaffRosterInput {
+  /** The members of staff who get an agent: everyone in `clawbox_users` while `org_mode` is on, else none. */
+  staff: readonly string[];
+  /** Where OpenClaw keeps its state (`~/.openclaw`). */
+  openclawHome: string;
+  /** The owner's agent's workspace as the gateway resolves it today. */
+  ownerWorkspace: string;
+  /** What an earlier sync recorded, or null. */
+  marks: StaffRosterMarks | null;
+}
+
+/**
+ * The writes that make `config`'s roster hold exactly the staff agents of
+ * `input.staff`, and the marks to record after. Pure.
+ */
+export function planStaffRoster(config: unknown, input: StaffRosterInput): StaffRosterPlan {
+  const view = viewRoster(config);
+  const agents = isRecord(config) && isRecord(config.agents) ? config.agents : {};
+  const defaults = isRecord(agents.defaults) ? agents.defaults : {};
+  const marks: StaffRosterMarks = { ...NO_MARKS, ...(input.marks ?? {}) };
+  const writes: RosterWrite[] = [];
+
+  const wanted = new Map<string, Json>();
+  for (const username of input.staff) {
+    const id = staffAgentId(username);
+    if (id) wanted.set(id, staffAgentEntry(input.openclawHome, username));
+  }
+  const present = view.ids.filter((id) => isStaffAgentId(id));
+  const others = view.ids.filter((id) => !isStaffAgentId(id));
+  // The owner's agent — never a member of staff's, even on a roster that (by
+  // hand) holds nothing else.
+  const resolved = resolveDefaultAgentId(config);
+  const owner = isStaffAgentId(resolved) ? others[0] ?? "main" : resolved;
+
+  if (view.shape === "list") {
+    // A legacy roster is one array: rewritten whole, the owner's entries as they are.
+    const list = (agents.list as unknown[]).filter((entry) => !(isRecord(entry) && isStaffAgentId(String(entry.id ?? "").toLowerCase())));
+    const next = [...list, ...[...wanted].map(([id, entry]) => ({ id, ...entry }))];
+    if (!isDeepStrictEqual(next, agents.list)) writes.push({ path: "agents.list", value: next });
+  } else {
+    for (const id of present) {
+      if (!wanted.has(id)) writes.push({ path: entryPath(id) });
+    }
+    for (const [id, entry] of wanted) {
+      if (!isDeepStrictEqual(view.entryOf(id), entry)) writes.push({ path: entryPath(id), value: entry });
+    }
+  }
+
+  const systemAgentNow = isRecord(defaults.systemAgent) ? defaults.systemAgent.agentId : undefined;
+  if (wanted.size > 0) {
+    // Make room for a fleet, naming only what is absent.
+    if (view.shape === "none" || (view.shape === "entries" && others.length === 0)) {
+      writes.unshift({ path: entryPath(owner), value: { workspace: input.ownerWorkspace } });
+      marks.ownerEntry = { id: owner, workspace: input.ownerWorkspace };
+    }
+    if (view.shape !== "list" && agents.ownership === undefined) {
+      writes.push({ path: "agents.ownership", value: "explicit" });
+      marks.ownership = true;
+    }
+    if (systemAgentNow === undefined) {
+      writes.push({ path: "agents.defaults.systemAgent.agentId", value: owner });
+      marks.systemAgent = owner;
+    }
+    return { writes, marks };
+  }
+
+  // No staff: take back what ClawBox added, where it is still what it wrote.
+  const remaining = view.ids.filter((id) => !isStaffAgentId(id));
+  let rosterGone = false;
+  if (
+    marks.ownerEntry !== null
+    && view.shape === "entries"
+    && remaining.length === 1
+    && remaining[0] === marks.ownerEntry.id
+    && isDeepStrictEqual(view.entryOf(marks.ownerEntry.id), { workspace: marks.ownerEntry.workspace })
+  ) {
+    // The roster is back to the one entry ClawBox added for the owner: the box
+    // had no roster before, and has none again (staff entries included).
+    writes.length = 0;
+    writes.push({ path: "agents.entries" });
+    rosterGone = true;
+  }
+  // An owner who has since made a fleet of their own keeps the ownership it
+  // needs; otherwise the two keys ClawBox named go, where they still say what
+  // it wrote.
+  if (rosterGone || remaining.length <= 1) {
+    if (marks.systemAgent !== null && systemAgentNow === marks.systemAgent) {
+      const others = isRecord(defaults.systemAgent) ? Object.keys(defaults.systemAgent).filter((k) => k !== "agentId") : [];
+      writes.push({ path: others.length ? "agents.defaults.systemAgent.agentId" : "agents.defaults.systemAgent" });
+    }
+    if (marks.ownership && agents.ownership === "explicit") writes.push({ path: "agents.ownership" });
+  }
+  return { writes, marks: { ...NO_MARKS } };
+}
+
+/** The plan's writes, for the journal. */
+function describe(writes: readonly RosterWrite[]): string {
+  return writes.map((w) => `${w.value === undefined ? "unset" : "set"} ${w.path}`).join(", ");
+}
+
+// ─── The server side ────────────────────────────────────────────────────────
+
+let syncChain: Promise<unknown> = Promise.resolve();
+
+function readMarks(raw: unknown): StaffRosterMarks | null {
+  if (!isRecord(raw)) return null;
+  const owner = isRecord(raw.ownerEntry) && typeof raw.ownerEntry.id === "string" && typeof raw.ownerEntry.workspace === "string"
+    ? { id: raw.ownerEntry.id, workspace: raw.ownerEntry.workspace }
+    : null;
+  return {
+    ownerEntry: owner,
+    ownership: raw.ownership === true,
+    systemAgent: typeof raw.systemAgent === "string" ? raw.systemAgent : null,
+  };
+}
+
+/**
+ * Seed a member of staff's workspace once: their own USER.md (so the core
+ * does not start its first-conversation ritual, and so the assistant knows
+ * whom it serves) and the assistant's persona copied from the owner's
+ * workspace. Their MEMORY.md is theirs to grow; nothing of the owner's is
+ * copied into it. 0700: their folder is no other account's business.
+ */
+async function seedStaffWorkspace(dir: string, username: string, ownerWorkspace: string): Promise<void> {
+  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fsp.chmod(dir, 0o700).catch(() => undefined);
+  const userMd = path.join(dir, "USER.md");
+  if (!fs.existsSync(userMd)) {
+    await fsp.writeFile(
+      userMd,
+      [
+        "# USER.md",
+        "",
+        `- **Name:** ${username}`,
+        "- **Role:** a member of staff on this organisation's ClawBox. The box's owner is the administrator.",
+        "- This assistant is theirs alone: what they ask you to remember stays in this workspace.",
+        "- Files you write for them belong in this folder.",
+        "- Whenever you write to MEMORY.md or a file under memory/, say in the same reply which file you wrote, that it is kept across chats, and that they can ask you to remove it.",
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+  }
+  for (const name of ["SOUL.md", "IDENTITY.md"]) {
+    const target = path.join(dir, name);
+    if (fs.existsSync(target)) continue;
+    try {
+      await fsp.copyFile(path.join(ownerWorkspace, name), target);
+      await fsp.chmod(target, 0o600).catch(() => undefined);
+    } catch {
+      // The owner's workspace has none yet: the core seeds its own template.
+    }
+  }
+}
+
+/**
+ * Make the OpenClaw roster match the organisation switch and the users: one
+ * staff agent per member while `org_mode` is on, none otherwise. Serialised,
+ * best effort, never throws — the switch and the users exist either way, and
+ * the relay refuses a member's turn until their agent is there
+ * (scripts/gateway-user-relay.js `staffReady`). Answers whether the roster now
+ * says what it should.
+ */
+export function syncStaffAgents(): Promise<boolean> {
+  const run = syncChain.then(() => syncStaffAgentsNow(), () => syncStaffAgentsNow());
+  syncChain = run.catch(() => undefined);
+  return run;
+}
+
+async function syncStaffAgentsNow(): Promise<boolean> {
+  try {
+    const { getActiveHarness } = await import("@/lib/harness");
+    if ((await getActiveHarness()) !== "openclaw") return true;
+    const { OPENCLAW_HOME, openclawIsAbsent, readConfigStrict, runOpenclawConfigSetBatch, runOpenclawConfigUnset } = await import("@/lib/openclaw-config");
+    if (openclawIsAbsent()) return true;
+    const { openclawWorkspaceDir } = await import("@/lib/language-persona");
+    const orgMode = await readOrgMode();
+    const staff = orgMode ? (await listUsers()).map((user) => user.username) : [];
+    const ownerWorkspace = openclawWorkspaceDir();
+    const config = await readConfigStrict();
+    const marksBefore = readMarks(await get(ORG_STAFF_ROSTER_KEY));
+    const plan = planStaffRoster(config, { staff, openclawHome: OPENCLAW_HOME, ownerWorkspace, marks: marksBefore });
+
+    for (const username of staff) {
+      await seedStaffWorkspace(staffWorkspaceDir(OPENCLAW_HOME, username), username, ownerWorkspace);
+    }
+    if (plan.writes.length > 0) {
+      // Record the marks FIRST when adding (a crash after the write must not
+      // leave a roster nobody remembers making), LAST when taking back.
+      const adding = plan.writes.some((w) => w.value !== undefined);
+      if (adding) await set(ORG_STAFF_ROSTER_KEY, plan.marks);
+      const sets = plan.writes.filter((w) => w.value !== undefined);
+      const unsets = plan.writes.filter((w) => w.value === undefined);
+      for (const write of unsets) await runOpenclawConfigUnset(write.path);
+      if (sets.length > 0) {
+        await runOpenclawConfigSetBatch(sets.map((w) => [w.path, JSON.stringify(w.value), "--json"]));
+      }
+      if (!adding) await set(ORG_STAFF_ROSTER_KEY, plan.marks);
+      console.log(`[org-staff] roster: ${describe(plan.writes)}`);
+    } else if (!isDeepStrictEqual(marksBefore ?? NO_MARKS, plan.marks)) {
+      await set(ORG_STAFF_ROSTER_KEY, plan.marks);
+    }
+    return true;
+  } catch (err) {
+    console.error("[org-staff] could not update the staff agents:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * A removed member of staff's agent goes with them, and so does their
+ * workspace — their memory and their folder — and the agent's own state
+ * directory, so a user created later under the same name starts empty. Best
+ * effort, never throws. Their sessions were deleted through the gateway first
+ * (src/lib/user-chats.ts).
+ */
+export async function forgetStaffAgent(username: string): Promise<void> {
+  const id = staffAgentId(username);
+  if (!id) return;
+  await syncStaffAgents();
+  try {
+    const { OPENCLAW_HOME } = await import("@/lib/openclaw-config");
+    await fsp.rm(staffWorkspaceDir(OPENCLAW_HOME, username), { recursive: true, force: true });
+    await fsp.rm(path.join(OPENCLAW_HOME, "agents", id), { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[org-staff] could not remove ${username}'s workspace:`, err instanceof Error ? err.message : err);
+  }
+}

@@ -5,6 +5,8 @@ import { commandsFromHermesCatalog } from "@/lib/chat-slash-commands";
 import { getActiveHarness } from "@/lib/harness";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 import { requireSession } from "@/lib/route-auth";
+import { orgMemberOf } from "@/lib/org-mode-server";
+import { isStaffCatalogueCommand } from "@/lib/org-staff-policy";
 
 /**
  * Hermes' own slash-command catalogue, for the chat composer's popover.
@@ -44,5 +46,13 @@ export async function GET(request: Request) {
   if (catalog === null || catalog === undefined) {
     return NextResponse.json({ commands: [], available: false });
   }
-  return NextResponse.json({ commands: commandsFromHermesCatalog(catalog), available: true });
+  // A member of staff on an organisation box is offered what they may send:
+  // /new and /reasoning (config/org-staff-policy.json; the chat route refuses
+  // the rest).
+  const commands = commandsFromHermesCatalog(catalog);
+  const member = await orgMemberOf(request);
+  return NextResponse.json({
+    commands: member ? commands.filter((command) => isStaffCatalogueCommand(command.id)) : commands,
+    available: true,
+  });
 }

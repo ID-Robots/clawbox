@@ -100,6 +100,12 @@ export interface HermesSlashRequest {
    * connection and the resume are this module's; the result comes back whole.
    */
   readonly rpc?: string;
+  /**
+   * The Hermes profile the conversation lives in — a member of staff's own on
+   * an organisation box (src/lib/hermes-staff-profile.ts). Absent: the
+   * dashboard's launch profile, the owner's.
+   */
+  readonly profile?: string;
 }
 
 interface RpcFrame {
@@ -381,8 +387,10 @@ export async function runHermesSlashCommand(
             // command back to the model.
             omit_messages: true,
             source: SOURCE,
+            ...(req.profile ? { profile: req.profile } : {}),
           }
         : {
+            ...(req.profile ? { profile: req.profile } : {}),
             // `session.create` takes the pairing as per-session options; a
             // command still needs an agent behind it, and one built on the
             // box's default pairing is the same agent the next turn would get.
@@ -406,7 +414,7 @@ export async function runHermesSlashCommand(
     if (!transportSid || !sessionId) return null;
 
     if (req.rpc) {
-      const answered = await call(req.rpc, { session_id: transportSid }, COMMAND_TIMEOUT_MS);
+      const answered = await call(req.rpc, { session_id: transportSid, ...(req.profile ? { profile: req.profile } : {}) }, COMMAND_TIMEOUT_MS);
       if (answered === TIMED_OUT) return { output: STILL_RUNNING, sessionId, ...announcedFields(announced) };
       if (!answered) return null;
       if (answered.error) return { output: errorText(answered) || NO_OUTPUT, sessionId, ...announcedFields(announced) };
@@ -415,7 +423,7 @@ export async function runHermesSlashCommand(
 
     let frame = await call(
       "slash.exec",
-      { session_id: transportSid, command },
+      { session_id: transportSid, command, ...(req.profile ? { profile: req.profile } : {}) },
       COMMAND_TIMEOUT_MS,
     );
     // Hermes' own instruction, followed rather than second-guessed.

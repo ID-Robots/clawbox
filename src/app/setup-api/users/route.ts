@@ -3,6 +3,7 @@ import { getSystemUsername } from "@/lib/auth";
 import { UserAdminError, createUser, listUsers, removeUser, userHelperAvailable } from "@/lib/clawbox-users";
 import { rootStepRepairCommand } from "@/lib/root-step-runner";
 import { isolateUserChats } from "@/lib/user-chats";
+import { syncStaffAgents } from "@/lib/org-staff-agents";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { sessionIdentity } from "@/lib/route-auth";
@@ -87,6 +88,9 @@ export async function POST(request: Request) {
     // awaited — the account exists either way, and the native config write
     // can take a few seconds when the gateway is not up to take it.
     void isolateUserChats();
+    // On an organisation box the new member of staff gets their own agent
+    // (src/lib/org-staff-agents.ts); a home box's sync changes nothing.
+    void syncStaffAgents();
     return NextResponse.json(
       { user: { username: created.username, createdAt: created.createdAt }, ...(await listing(request)) },
       { status: 201 },
