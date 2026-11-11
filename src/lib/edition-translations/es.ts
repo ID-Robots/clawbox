@@ -1845,7 +1845,7 @@ export const es: Record<string, string> = {
   "users.orgMode.title": "Modo organización",
   "users.orgMode.hint": "Para una ClawBox al servicio del personal de una empresa. Los usuarios solo tienen Chat, Archivos y sus propios ajustes (idioma, contraseña, aspecto). El terminal, el agente de programación, las tiendas de aplicaciones, las copias de seguridad, los proveedores de IA, el sistema, la red, las actualizaciones y los usuarios siguen siendo tuyos. Las ofertas de ClawBox AI se ocultan para todos.",
   "users.orgMode.on": "Activado: los usuarios ven Chat, Archivos y sus propios ajustes",
-  "users.orgMode.off": "Desactivado: los usuarios tienen las mismas aplicaciones que tú",
+  "users.orgMode.off": "Desactivado: los usuarios tienen todas las aplicaciones salvo Actualización del sistema y las consolas propias del asistente",
   "users.orgMode.applies": "Se aplica al momento: el escritorio de cada usuario cambia la próxima vez que se carga, y se cierra su terminal o escritorio remoto abierto.",
   "users.orgMode.failed": "No se pudo guardar el interruptor.",
 

@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 
 import { createSessionCookie, getSessionGeneration, getSessionSigningSecret, readSessionClaims } from "@/lib/auth";
 import { changeUserPassword, rotateUserSessionVersion } from "@/lib/clawbox-users";
+import { checkLockout, recordFailure, recordSuccess, SHARED_BUCKET_MAX_LOCK_MS } from "@/lib/login-rate-limit";
 import { personSession } from "@/lib/owner-session";
 import { sessionRequiredResponse } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -19,8 +20,11 @@ import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
  * another site's page riding the cookie. The current password is checked as
  * root by the helper before anything changes (src/lib/clawbox-users.ts
  * `changeUserPassword`), so a session left open on a shared screen cannot be
- * used to take the account over; a few wrong guesses in a row are then
- * refused for a while, so the check cannot be ground through either.
+ * used to take the account over. Wrong guesses are charged to the SAME
+ * durable per-account bucket as the login's (`user:<name>`,
+ * src/lib/login-rate-limit.ts), so this door and /login-api share one limit
+ * that outlives a restart, and only one guess per account is in flight at a
+ * time, so parallel requests cannot slip past it either.
  *
  * Never a 401 for a wrong current password: the desktop reads a 401 as
  * "signed out".
@@ -32,19 +36,11 @@ import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
-/** Wrong current passwords one user may give in a window before the route stops asking the helper. */
-const MAX_WRONG = 5;
-const WRONG_WINDOW_MS = 15 * 60 * 1000;
-const wrongAttempts = new Map<string, number[]>();
-/** Attempts still waiting on the helper, per user: counted against the limit before they answer. */
-const inFlight = new Map<string, number>();
+/** Accounts with a guess waiting on the helper: one at a time per account. */
+const inFlight = new Set<string>();
 
-function recentWrong(username: string, now: number): number[] {
-  const kept = (wrongAttempts.get(username) ?? []).filter((t) => now - t < WRONG_WINDOW_MS);
-  if (kept.length) wrongAttempts.set(username, kept);
-  else wrongAttempts.delete(username);
-  return kept;
-}
+/** The login's per-account bucket (src/app/login-api/route.ts), shared on purpose. */
+const bucketOf = (username: string) => `user:${username}`;
 
 /** Plain HTTP on the LAN cannot keep a Secure cookie; the tunnel is HTTPS. As /login-api decides it. */
 function requestIsHttps(req: Request): boolean {
@@ -138,26 +134,25 @@ export async function POST(req: Request) {
     return refuse(400, "invalid_password", `Passwords must be ${USER_PASSWORD_MIN}–${USER_PASSWORD_MAX} characters with no control characters.`);
   }
 
-  const now = Date.now();
-  const pending = inFlight.get(who.username) ?? 0;
-  // Attempts still waiting on the helper count too, so guesses sent side by
-  // side cannot all slip under the limit before the first one is answered.
-  if (recentWrong(who.username, now).length + pending >= MAX_WRONG) {
+  // One guess per account at a time, decided before anything is awaited, so
+  // guesses sent side by side cannot all pass the lockout check below.
+  if (inFlight.has(who.username)) {
     return refuse(429, "too_many_attempts", "Too many wrong passwords. Try again in a few minutes.");
   }
-
-  inFlight.set(who.username, pending + 1);
+  inFlight.add(who.username);
   let result: Awaited<ReturnType<typeof changeUserPassword>>;
   try {
+    if ((await checkLockout(bucketOf(who.username))).locked) {
+      return refuse(429, "too_many_attempts", "Too many wrong passwords. Try again in a few minutes.");
+    }
     result = await changeUserPassword(who.username, currentPassword, password);
+    if (result === "wrong") await recordFailure(bucketOf(who.username), { maxLockMs: SHARED_BUCKET_MAX_LOCK_MS });
+    else if (result === "ok") await recordSuccess(bucketOf(who.username));
   } finally {
-    const left = (inFlight.get(who.username) ?? 1) - 1;
-    if (left > 0) inFlight.set(who.username, left);
-    else inFlight.delete(who.username);
+    inFlight.delete(who.username);
   }
   switch (result) {
     case "ok": {
-      wrongAttempts.delete(who.username);
       console.log(`[users] ${who.username} changed their own password`);
       const res = NextResponse.json({ ok: true }, { headers: NO_STORE });
       if (!(await keepOnlyThisSession(req, who.username, res))) {
@@ -166,7 +161,6 @@ export async function POST(req: Request) {
       return res;
     }
     case "wrong":
-      wrongAttempts.set(who.username, [...recentWrong(who.username, Date.now()), Date.now()]);
       return refuse(400, "wrong_password", "Your current password is not right.");
     case "invalid":
       return refuse(400, "invalid_password", `Passwords must be ${USER_PASSWORD_MIN}–${USER_PASSWORD_MAX} characters with no control characters.`);

@@ -1858,7 +1858,7 @@ export const zh: Record<string, string> = {
   "users.orgMode.title": "组织模式",
   "users.orgMode.hint": "适用于为公司员工服务的 ClawBox。用户只能使用聊天、文件和自己的设置（语言、密码、外观）。终端、编程代理、应用商店、备份、AI 提供商、系统、网络、更新和用户仍归你管理。ClawBox AI 的推广信息对所有人隐藏。",
   "users.orgMode.on": "开启——用户只能看到聊天、文件和自己的设置",
-  "users.orgMode.off": "关闭——用户拥有和你相同的应用",
+  "users.orgMode.off": "关闭——用户可以使用除系统更新和助手自己的控制台之外的所有应用",
   "users.orgMode.applies": "立即生效：每位用户的桌面会在下次加载时改变，其已打开的终端或远程桌面会被关闭。",
   "users.orgMode.failed": "无法保存该开关。",
 

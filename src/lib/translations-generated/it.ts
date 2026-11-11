@@ -4745,7 +4745,7 @@ const table: Record<string, string> = {
   "users.orgMode.applies": "Vale subito: il desktop di ogni utente cambia al prossimo caricamento, e il suo terminale o desktop remoto aperto si chiude.",
   "users.orgMode.failed": "Non è stato possibile salvare l’interruttore.",
   "users.orgMode.hint": "Per una ClawBox al servizio del personale di un’azienda. Gli utenti hanno solo Chat, File e le proprie impostazioni (lingua, password, aspetto). Il terminale, l’agente di programmazione, gli store di app, i backup, i fornitori di IA, il sistema, la rete, gli aggiornamenti e gli utenti restano tuoi. Le offerte di ClawBox AI sono nascoste per tutti.",
-  "users.orgMode.off": "Disattiva — gli utenti hanno le stesse app che hai tu",
+  "users.orgMode.off": "Disattiva — gli utenti hanno tutte le app tranne Aggiornamento di sistema e le console dell’assistente",
   "users.orgMode.on": "Attiva — gli utenti vedono Chat, File e le proprie impostazioni",
   "users.orgMode.title": "Modalità organizzazione",
   "users.ownerBadge": "Proprietario",

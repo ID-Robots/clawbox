@@ -4745,7 +4745,7 @@ const table: Record<string, string> = {
   "users.orgMode.applies": "S’applique aussitôt : le bureau de chaque utilisateur change à son prochain chargement, et son terminal ou bureau à distance ouvert se ferme.",
   "users.orgMode.failed": "Le réglage n’a pas pu être enregistré.",
   "users.orgMode.hint": "Pour une ClawBox au service du personnel d’une entreprise. Les utilisateurs n’ont que Chat, Fichiers et leurs propres réglages (langue, mot de passe, apparence). Le terminal, l’agent de code, les boutiques d’applications, les sauvegardes, les fournisseurs d’IA, le système, le réseau, les mises à jour et les utilisateurs restent à vous. Les offres ClawBox AI sont masquées pour tout le monde.",
-  "users.orgMode.off": "Désactivé — les utilisateurs ont les mêmes applications que vous",
+  "users.orgMode.off": "Désactivé — les utilisateurs ont toutes les applications sauf Mise à jour système et les consoles propres de l’assistant",
   "users.orgMode.on": "Activé — les utilisateurs voient Chat, Fichiers et leurs propres réglages",
   "users.orgMode.title": "Mode organisation",
   "users.ownerBadge": "Propriétaire",

@@ -206,6 +206,23 @@ describe("a spreadsheet built to balloon", () => {
     if (result.ok) {
       expect(result.truncated).toBe(true);
       expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
+      // What was read is kept: the sheet's first cells, not only its heading.
+      expect(result.text.startsWith("=== Sheet: S ===\n" + "y".repeat(1000))).toBe(true);
+      expect(result.text.length).toBeGreaterThan(OFFICE_TEXT_MAX_CHARS / 2);
+    }
+  });
+
+  it("counts a field as the CSV writes it: quotes double", () => {
+    const quoted = '"'.repeat(30_000);
+    const result = extractOfficeText(
+      ods(`<table:table table:name="Q"><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="100"><text:p>${quoted}</text:p></table:table-cell></table:table-row></table:table>`),
+      "quotes.ods",
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
+      expect(result.text).toContain('""""');
     }
   });
 

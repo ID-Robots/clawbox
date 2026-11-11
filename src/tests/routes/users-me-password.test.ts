@@ -16,6 +16,15 @@ const h = vi.hoisted(() => ({
   sameOrigin: vi.fn(() => true),
   change: vi.fn(async (): Promise<string> => "ok"),
   rotate: vi.fn(async (): Promise<string | null> => "f".repeat(32)),
+  locked: vi.fn(async () => ({ locked: false, retryAfterSeconds: 0 })),
+  failure: vi.fn(async () => ({ locked: false, retryAfterSeconds: 0 })),
+  success: vi.fn(async () => undefined),
+}));
+vi.mock("@/lib/login-rate-limit", () => ({
+  checkLockout: h.locked,
+  recordFailure: h.failure,
+  recordSuccess: h.success,
+  SHARED_BUCKET_MAX_LOCK_MS: 300_000,
 }));
 
 vi.mock("@/lib/owner-session", () => ({ personSession: h.who }));
@@ -48,6 +57,10 @@ beforeEach(async () => {
   h.change.mockResolvedValue("ok");
   h.rotate.mockReset();
   h.rotate.mockResolvedValue("f".repeat(32));
+  h.locked.mockReset();
+  h.locked.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
+  h.failure.mockClear();
+  h.success.mockClear();
 });
 
 describe("who may change a password here", () => {
@@ -79,7 +92,7 @@ describe("who may change a password here", () => {
     expect(h.rotate).toHaveBeenCalledTimes(2);
   });
 
-  it("counts guesses still waiting on the helper: six at once reach it five times", async () => {
+  it("takes one guess per account at a time: six sent at once reach the helper once", async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
     h.change.mockImplementation(async () => { await gate; return "wrong"; });
@@ -87,8 +100,12 @@ describe("who may change a password here", () => {
     await new Promise((r) => setTimeout(r, 20));
     release();
     const statuses = (await Promise.all(replies)).map((r) => r.status).sort();
-    expect(statuses).toEqual([400, 400, 400, 400, 400, 429]);
-    expect(h.change).toHaveBeenCalledTimes(5);
+    expect(statuses).toEqual([400, 429, 429, 429, 429, 429]);
+    expect(h.change).toHaveBeenCalledTimes(1);
+    // Another account is not held by alice's guess.
+    h.change.mockResolvedValue("ok");
+    as({ username: "bob", isOwner: false });
+    expect((await post(BODY)).status).toBe(200);
   });
 
   it("rotates nothing when the password did not change", async () => {
@@ -128,17 +145,22 @@ describe("what it answers", () => {
     expect(await res.json()).toMatchObject({ code: "wrong_password" });
   });
 
-  it("stops asking the helper after five wrong passwords in a row", async () => {
+  it("charges a wrong guess to the login's own per-account bucket, and clears it on success", async () => {
     h.change.mockResolvedValue("wrong");
-    for (let i = 0; i < 5; i++) expect((await post(BODY)).status).toBe(400);
+    await post(BODY);
+    expect(h.failure).toHaveBeenCalledWith("user:alice", { maxLockMs: 300_000 });
+    h.change.mockResolvedValue("ok");
+    await post(BODY);
+    expect(h.success).toHaveBeenCalledWith("user:alice");
+  });
+
+  it("asks the helper nothing while the account is locked out — by this route or by sign-in", async () => {
+    h.locked.mockResolvedValue({ locked: true, retryAfterSeconds: 60 });
     const res = await post(BODY);
     expect(res.status).toBe(429);
     expect(await res.json()).toMatchObject({ code: "too_many_attempts" });
-    expect(h.change).toHaveBeenCalledTimes(5);
-    // Another user is not held to alice's guesses.
-    as({ username: "bob", isOwner: false });
-    h.change.mockResolvedValue("ok");
-    expect((await post(BODY)).status).toBe(200);
+    expect(h.change).not.toHaveBeenCalled();
+    expect(h.locked).toHaveBeenCalledWith("user:alice");
   });
 
   it("maps the helper's other answers", async () => {

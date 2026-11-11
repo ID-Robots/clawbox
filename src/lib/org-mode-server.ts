@@ -7,7 +7,7 @@
  * user had before.
  */
 
-import { get, set } from "@/lib/config-store";
+import { get, getKnown, set } from "@/lib/config-store";
 import { ORG_MODE_KEY, orgModeFrom } from "@/lib/org-mode";
 
 /** The switch as stored. A store that cannot be read is a home box. */
@@ -25,8 +25,10 @@ export async function readOrgMode(): Promise<boolean> {
  * (the login screen, which would otherwise list an organisation's staff).
  */
 export async function readOrgModeStrict(): Promise<boolean | null> {
+  // `get` reads an unreadable store as an empty one; `getKnown` says so.
   try {
-    return orgModeFrom(await get(ORG_MODE_KEY));
+    const { value, known } = await getKnown(ORG_MODE_KEY);
+    return known ? orgModeFrom(value) : null;
   } catch {
     return null;
   }

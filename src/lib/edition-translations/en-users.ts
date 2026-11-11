@@ -88,7 +88,7 @@ export const usersEn: Record<string, string> = {
   "users.orgMode.title": "Organisation mode",
   "users.orgMode.hint": "For a ClawBox that serves a company's staff. Users get only Chat, Files and their own settings (language, password, look). The terminal, the coding agent, the app stores, backups, AI providers, the system, network, updates and users stay yours. ClawBox AI offers are hidden for everyone.",
   "users.orgMode.on": "On — users see Chat, Files and their own settings",
-  "users.orgMode.off": "Off — users get the same apps as you",
+  "users.orgMode.off": "Off — users get every app but System Update and the assistant's own consoles",
   "users.orgMode.applies": "Takes effect at once: each user's desktop changes the next time it loads, and their open Terminal or remote desktop closes.",
   "users.orgMode.failed": "The switch could not be saved.",
 };

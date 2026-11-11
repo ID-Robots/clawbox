@@ -1510,7 +1510,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean; clawaiConfigured?: boolean } | null>(null);
   useEffect(() => {
-    if (orgMember || (section !== "ai" && !isMobile)) return;
+    if (!boxReads || (section !== "ai" && !isMobile)) return;
     const load = () => {
       fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
     };
@@ -1521,7 +1521,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // while the card underneath still named the old one — until the section was
     // left and re-entered. Seen on a live box, in the same window.
     return onProvidersChanged(load);
-  }, [orgMember, section, isMobile]);
+  }, [boxReads, section, isMobile]);
 
   // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
   // tracks its own copy — seeded from the immutable cache, then confirmed once.
@@ -1801,21 +1801,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // claiming the question is unanswerable while it is being asked. The other
   // three status effects below do the same, for the same reason.
   useEffect(() => {
-    if (orgMember || (!isMobile && section !== "telegram" && section !== "channels")) return;
+    if (!boxReads || (!isMobile && section !== "telegram" && section !== "channels")) return;
     unsettleChannel("telegram");
     refreshTelegramStatus();
-  }, [orgMember, section, isMobile, refreshTelegramStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshTelegramStatus, unsettleChannel]);
 
   // Pane-only detail — the approved list and the streaming toggle have no
   // reader on the hub, so the hub must not pay for them.
   useEffect(() => {
-    if (orgMember || (section !== "telegram" && !isMobile)) return;
+    if (!boxReads || (section !== "telegram" && !isMobile)) return;
     refreshPairing();
     fetch("/setup-api/telegram/streaming", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
-  }, [orgMember, section, isMobile, refreshPairing]);
+  }, [boxReads, section, isMobile, refreshPairing]);
 
   // Refresh the approved/pending lists when an approval happens anywhere (e.g.
   // the desktop popup) so the Settings list updates without a manual reload.
@@ -2155,17 +2155,17 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // The status the hub's dot and the pane's card both read. Unsettle-then-read,
   // as on the Telegram effect above.
   useEffect(() => {
-    if (orgMember || (!isMobile && section !== "email" && section !== "channels")) return;
+    if (!boxReads || (!isMobile && section !== "email" && section !== "channels")) return;
     unsettleChannel("email");
     refreshEmailStatus();
-  }, [orgMember, section, isMobile, refreshEmailStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshEmailStatus, unsettleChannel]);
 
   // Pane-only detail — the approvals strip and the chat-approval bot.
   useEffect(() => {
-    if (orgMember || (section !== "email" && !isMobile)) return;
+    if (!boxReads || (section !== "email" && !isMobile)) return;
     refreshEmailPending();
     refreshChatApproval();
-  }, [orgMember, section, isMobile, refreshEmailPending, refreshChatApproval]);
+  }, [boxReads, section, isMobile, refreshEmailPending, refreshChatApproval]);
 
   /**
    * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
@@ -2546,10 +2546,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (orgMember || (!isMobile && section !== "whatsapp" && section !== "channels")) return;
+    if (!boxReads || (!isMobile && section !== "whatsapp" && section !== "channels")) return;
     unsettleChannel("whatsapp");
     refreshWhatsapp();
-  }, [orgMember, section, isMobile, refreshWhatsapp, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshWhatsapp, unsettleChannel]);
 
   const saveWhatsapp = useCallback(
     async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
@@ -2922,10 +2922,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (orgMember || (!isMobile && section !== "discord" && section !== "channels")) return;
+    if (!boxReads || (!isMobile && section !== "discord" && section !== "channels")) return;
     unsettleChannel("discord");
     refreshDiscordStatus();
-  }, [orgMember, section, isMobile, refreshDiscordStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshDiscordStatus, unsettleChannel]);
 
   useEffect(() => {
     if (section !== "discord") return;

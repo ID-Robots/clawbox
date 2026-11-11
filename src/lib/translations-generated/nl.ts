@@ -4745,7 +4745,7 @@ const table: Record<string, string> = {
   "users.orgMode.applies": "Geldt meteen: het bureaublad van elke gebruiker verandert de volgende keer dat het laadt, en een open terminal of extern bureaublad wordt gesloten.",
   "users.orgMode.failed": "De schakelaar kon niet worden opgeslagen.",
   "users.orgMode.hint": "Voor een ClawBox die de medewerkers van een bedrijf bedient. Gebruikers krijgen alleen Chat, Bestanden en hun eigen instellingen (taal, wachtwoord, uiterlijk). De terminal, de codeeragent, de app-winkels, back-ups, AI-aanbieders, het systeem, het netwerk, updates en gebruikers blijven van jou. Aanbiedingen van ClawBox AI worden voor iedereen verborgen.",
-  "users.orgMode.off": "Uit — gebruikers krijgen dezelfde apps als jij",
+  "users.orgMode.off": "Uit — gebruikers krijgen elke app behalve Systeemupdate en de eigen consoles van de assistent",
   "users.orgMode.on": "Aan — gebruikers zien Chat, Bestanden en hun eigen instellingen",
   "users.orgMode.title": "Organisatiemodus",
   "users.ownerBadge": "Eigenaar",

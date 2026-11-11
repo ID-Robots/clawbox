@@ -11,6 +11,7 @@ const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: `/tmp/clawbox-users-test-${process.pid}`,
   get: vi.fn(async (key: string) => store.get(key)),
+  getKnown: vi.fn(async (key: string) => (store.has("__unreadable__") ? { value: undefined, known: false } : { value: store.get(key), known: true })),
   set: vi.fn(async (key: string, value: unknown) => { store.set(key, value); }),
 }));
 vi.mock("@/lib/root-step-runner", () => ({ startRootStep: vi.fn() }));
@@ -209,6 +210,29 @@ describe("clawbox-users", () => {
       expect(await lib.verifyUserPassword("root", "x")).toBe(false);
       expect(await lib.verifyUserPassword("alice", "pw\nroot")).toBe(false);
       expect(spawn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("rotateUserSessionVersion", () => {
+    beforeEach(() => {
+      store.set("clawbox_users", [{ username: "alice", createdAt: "2026-10-01T09:00:00.000Z", sv: "a".repeat(32) }]);
+    });
+
+    it("gives the user a new session version, so every older cookie is dead", async () => {
+      const before = (await lib.listUsers())[0];
+      const sv = await lib.rotateUserSessionVersion("alice");
+      expect(sv).toMatch(/^[0-9a-f]{32}$/);
+      expect(sv).not.toBe(before.sv);
+      expect((await lib.listUsers())[0].sv).toBe(sv);
+    });
+
+    it("answers null for a name the registry does not hold", async () => {
+      expect(await lib.rotateUserSessionVersion("nobody")).toBeNull();
+    });
+
+    it("throws, rather than answer 'no such user', when the registry cannot be read", async () => {
+      store.set("__unreadable__", true);
+      await expect(lib.rotateUserSessionVersion("alice")).rejects.toThrow(/could not be read/);
     });
   });
 

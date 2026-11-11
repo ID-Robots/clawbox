@@ -33,7 +33,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import { promisify } from "util";
 import path from "@/lib/runtime-path";
-import { DATA_DIR, get, set } from "@/lib/config-store";
+import { DATA_DIR, get, getKnown, set } from "@/lib/config-store";
 import { getSystemUsername, isSafePasswordChars } from "@/lib/auth";
 import { DISPATCH_VERDICT_LINE, rootStepJournalArgs } from "@/lib/root-step-journal";
 import { rootStepRepairCommand, startRootStep } from "@/lib/root-step-runner";
@@ -243,7 +243,11 @@ function newSessionVersion(): string {
  */
 export async function rotateUserSessionVersion(username: string): Promise<string | null> {
   return withUsersLock(async () => {
-    const users = await listUsers();
+    // An unreadable store is not "no such user": `listUsers` would read it as
+    // empty and the caller would take the old cookies for revoked.
+    const { value, known } = await getKnown(USERS_CONFIG_KEY);
+    if (!known) throw new Error("the user registry could not be read");
+    const users = parseUserRegistry(value, getSystemUsername());
     if (!users.some((u) => u.username === username)) return null;
     const sv = newSessionVersion();
     await writeRegistry(users.map((u) => (u.username === username ? { ...u, sv } : u)));

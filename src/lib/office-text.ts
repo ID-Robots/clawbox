@@ -625,7 +625,8 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
                 cut = true;
               }
               cells += Math.max(1, cellCol + 1 - row.length);
-              chars += shown.length + 1;
+              // As the CSV will write it: quoting can double a field.
+              chars += csvField(shown).length + 1;
               while (row.length < cellCol) row.push("");
               row[cellCol] = shown;
             }
@@ -705,11 +706,13 @@ function odsText(zip: ZipReader, sink: Sink): void {
     }
     // A run of empty cells is only blank space; a run of the same value is kept, bounded.
     const times = Math.min(cellRepeat, shown === "" ? MAX_COLUMNS : MAX_REPEAT);
+    // As the CSV will write it: quoting can double a field.
+    const encoded = csvField(shown).length + 1;
     for (let i = 0; i < times && row.length < MAX_COLUMNS && chars < MAX_SHEET_CHARS; i++) {
       row.push(shown);
       cells++;
-      chars += shown.length + 1;
-      rowChars += shown.length + 1;
+      chars += encoded;
+      rowChars += encoded;
     }
     cell = null;
   };
@@ -723,8 +726,10 @@ function odsText(zip: ZipReader, sink: Sink): void {
   for (const tok of tokens(xml)) {
     if (sink.full) return;
     if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS || chars >= MAX_SHEET_CHARS) {
-      // The rest of this document is left out; what was read is kept.
+      // The rest of this document is left out; what was read is kept — the
+      // row being read included.
       sink.partial = true;
+      if (row && row.length > 0) rows.push(row);
       finishSheet();
       return;
     }

@@ -1846,7 +1846,7 @@ export const sv: Record<string, string> = {
   "users.orgMode.title": "Organisationsläge",
   "users.orgMode.hint": "För en ClawBox som betjänar ett företags personal. Användare får bara Chatt, Filer och sina egna inställningar (språk, lösenord, utseende). Terminalen, kodagenten, appbutikerna, säkerhetskopior, AI-leverantörer, systemet, nätverket, uppdateringar och användare förblir dina. Erbjudanden om ClawBox AI döljs för alla.",
   "users.orgMode.on": "På — användare ser Chatt, Filer och sina egna inställningar",
-  "users.orgMode.off": "Av — användare får samma appar som du",
+  "users.orgMode.off": "Av — användare får alla appar utom Systemuppdatering och assistentens egna konsoler",
   "users.orgMode.applies": "Gäller direkt: varje användares skrivbord ändras nästa gång det laddas, och en öppen terminal eller ett fjärrskrivbord stängs.",
   "users.orgMode.failed": "Reglaget kunde inte sparas.",
 

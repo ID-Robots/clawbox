@@ -1849,7 +1849,7 @@ export const de: Record<string, string> = {
   "users.orgMode.title": "Organisationsmodus",
   "users.orgMode.hint": "Für eine ClawBox, die die Mitarbeitenden eines Unternehmens bedient. Benutzer erhalten nur Chat, Dateien und ihre eigenen Einstellungen (Sprache, Passwort, Aussehen). Terminal, Coding-Agent, App-Stores, Backups, KI-Anbieter, System, Netzwerk, Updates und Benutzer bleiben Ihnen vorbehalten. ClawBox-AI-Angebote werden für alle ausgeblendet.",
   "users.orgMode.on": "An — Benutzer sehen Chat, Dateien und ihre eigenen Einstellungen",
-  "users.orgMode.off": "Aus — Benutzer erhalten dieselben Apps wie Sie",
+  "users.orgMode.off": "Aus — Benutzer erhalten jede App außer der Systemaktualisierung und den eigenen Konsolen des Assistenten",
   "users.orgMode.applies": "Gilt sofort: Der Desktop jedes Benutzers ändert sich beim nächsten Laden, und ein geöffnetes Terminal oder ein Remote-Desktop wird geschlossen.",
   "users.orgMode.failed": "Der Schalter konnte nicht gespeichert werden.",
 
