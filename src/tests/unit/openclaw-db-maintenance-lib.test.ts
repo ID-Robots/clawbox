@@ -387,6 +387,28 @@ describe("the core package.json the helper reads (--core-pkg)", () => {
     expect(opt(await statusArgs(), "--core-pkg")).toBe(pkg);
   });
 
+  it("parses the host file as text: the last NPM_PREFIX, CRLF lines, shlex's two forms, and nothing else", async () => {
+    const { x64IntegrationNpmPrefix } = await vi.importActual<typeof import("@/lib/x64-integration")>("@/lib/x64-integration");
+    const file = path.join(h.root, "parse.env");
+    const read = (text: string) => {
+      writeFileSync(file, text);
+      return x64IntegrationNpmPrefix(file);
+    };
+    expect(read("NPM_PREFIX=/opt/a\nNPM_PREFIX=/opt/b\n")).toBe("/opt/b");
+    expect(read("INSTALL_USER=fixture\r\nNPM_PREFIX=/opt/crlf\r\n")).toBe("/opt/crlf");
+    expect(read("NPM_PREFIX='/opt/with space'\n")).toBe("/opt/with space");
+    expect(read("NPM_PREFIX=/opt/with space\n")).toBeNull();
+    expect(read("NPM_PREFIX='/opt/it'\"'\"'s'\n")).toBeNull();
+    expect(read("NPM_PREFIX=\"/opt/double\"\n")).toBeNull();
+    expect(read("NPM_PREFIX=\n")).toBeNull();
+    expect(read(" NPM_PREFIX=/opt/indented\n")).toBeNull();
+    expect(read(`NPM_PREFIX=/opt/${"x".repeat(5000)}\n`)).toBeNull();
+    symlinkSync(file, path.join(h.root, "link.env"));
+    writeFileSync(file, "NPM_PREFIX=/opt/through-a-link\n");
+    expect(x64IntegrationNpmPrefix(path.join(h.root, "link.env"))).toBeNull();
+    expect(x64IntegrationNpmPrefix(path.join(h.root, "absent.env"))).toBeNull();
+  });
+
   it.skipIf(!hasPython3)("lets the helper see a 2026.10 core on the desktop integration: supported", async () => {
     const prefix = path.join(h.root, "desktop-prefix");
     writePkg(prefix, "2026.10.9");

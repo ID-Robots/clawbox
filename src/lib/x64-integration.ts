@@ -50,15 +50,29 @@ function readRootOwnedProjectDir(file: string, label: string): string | null {
  * (`openclaw-cli`), not npm's own link, so the core's package.json cannot be
  * found from the binary's location; this is where it is instead.
  *
- * Parsed as KEY=VALUE text, never sourced as shell code. Never throws: a
- * caller treats null as "no integration to consult" and keeps its own answer.
+ * Parsed as KEY=VALUE text, never sourced as shell code, and only from a small
+ * plain file (no link, FIFO or device that could block the server). Never
+ * throws: a caller treats null as "no integration to consult" and keeps its
+ * own answer.
  */
 export function x64IntegrationNpmPrefix(file: string = INTEGRATION_FILE): string | null {
   let text: string;
+  let fd: number | null = null;
   try {
-    text = fs.readFileSync(/* turbopackIgnore: true */ file, "utf8");
+    fd = fs.openSync(/* turbopackIgnore: true */ file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4096) return null;
+    text = fs.readFileSync(fd, "utf8");
   } catch {
     return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already gone; nothing to release.
+      }
+    }
   }
   let value: string | null = null;
   for (const line of text.split(/\r?\n/)) {
