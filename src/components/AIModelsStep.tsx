@@ -2363,7 +2363,7 @@ export default function AIModelsStep({
   // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
   // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
   if (edition === "hermes" && configureScope !== "local") {
-    const hermesPanel = <HermesProviderConfig
+    return <HermesProviderConfig
       embedded={embedded}
       onNext={onNext}
       testId={testId}
@@ -2373,13 +2373,8 @@ export default function AIModelsStep({
       description={embedded ? undefined : resolvedDescription}
       requestedProviderId={requestedProviderId}
       providerSelectionRequest={providerSelectionRequest}
+      footer={backToEngine}
     />;
-    return backToEngine ? (
-      <>
-        {hermesPanel}
-        <div className="w-full max-w-[520px] mt-3 text-center">{backToEngine}</div>
-      </>
-    ) : hermesPanel;
   }
 
   return (

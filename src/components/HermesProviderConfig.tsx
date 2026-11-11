@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ProviderRadioRow from "./ProviderRadioRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
@@ -142,6 +142,11 @@ interface Props {
    * has moved to another row in the meantime.
    */
   providerSelectionRequest?: number;
+  /**
+   * Drawn under the panel's card: the setup wizard's way back to an external
+   * engine that was already connected (AIModelsStep, TASK-2376).
+   */
+  footer?: ReactNode;
 }
 
 // The OpenClaw AI-models step advances the wizard after a successful configure
@@ -186,6 +191,7 @@ export default function HermesProviderConfig({
   description,
   requestedProviderId,
   providerSelectionRequest = 0,
+  footer,
 }: Props) {
   const { t } = useT();
   const uid = useId();
@@ -1838,6 +1844,7 @@ export default function HermesProviderConfig({
         {!embedded && statusLine(localStatus)}
         </div>
       </div>
+      {footer && <div className="mt-3 text-center">{footer}</div>}
     </div>
   );
 }

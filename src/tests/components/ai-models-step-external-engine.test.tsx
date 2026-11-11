@@ -48,7 +48,10 @@ vi.mock("@/lib/client-harness", () => ({
 }));
 
 vi.mock("@/components/HermesProviderConfig", () => ({
-  default: ({ testId }: { testId?: string }) => <div data-testid={`${testId}-hermes-panel`}>Hermes providers</div>,
+  // Draws the footer it is handed, as the real panel does under its card.
+  default: ({ testId, footer }: { testId?: string; footer?: ReactNode }) => (
+    <div data-testid={`${testId}-hermes-panel`}>Hermes providers{footer}</div>
+  ),
 }));
 
 vi.mock("@/hooks/useOllamaModels", () => ({
