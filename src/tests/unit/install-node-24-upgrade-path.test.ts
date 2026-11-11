@@ -300,6 +300,8 @@ const AMBIENT = [
   'systemctl() { printf "systemctl %s\\n" "$*" >> "$ST/calls"; }',
   // `as_clawbox -H cmd …` runs cmd as the service user; here it just runs it.
   'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+  // The probes install.sh asks as the service account (runuser -u … -- cmd…).
+  'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
   // #818 stops both gateway units before the core install and restores them at
   // the end. Stubbed, not lifted: it is systemd and user-manager bookkeeping,
   // nothing to do with which Node the core lands on, and lifting it would drag

@@ -113,8 +113,10 @@ function makeBox(opts: {
   const target = opts.target ?? TARGET;
   // The pin, read from the mirror's config/openclaw-target.txt as on the box.
   write("src/config/openclaw-target.txt", `${target}\n`);
+  // Sourced by every launcher here, live or staged: who ran it, which one, with what.
+  write("said-who", `[ -n "\${AS_SERVICE_USER:-}" ] && who=service || who=root\necho "$who $0 $*" >> "${dir}/launcher-runs"\n`);
   // The managed core, answering --version the way the real launcher does.
-  write("npm-global/bin/openclaw", `#!/bin/sh\necho 'OpenClaw ${opts.core ?? target} (abc1234)'\n`, 0o755);
+  write("npm-global/bin/openclaw", `#!/bin/sh\n. "${dir}/said-who"\necho 'OpenClaw ${opts.core ?? target} (abc1234)'\n`, 0o755);
   write("npm-global/lib/node_modules/openclaw/package.json", JSON.stringify({ name: "openclaw", version: opts.core ?? target }));
   // The checkout clawbox-email-directives is copied out of.
   write("checkout/scripts/openclaw-plugins/clawbox-email-directives/package.json",
@@ -194,7 +196,7 @@ const AS_CLAWBOX = `as_clawbox() {
         before="$b"
       done
       mkdir -p "$prefix/bin" "$prefix/lib/node_modules/openclaw"
-      printf '#!/bin/sh\\necho "OpenClaw %s (def5678)"\\n' "$want" > "$prefix/bin/openclaw"
+      printf '#!/bin/sh\\n. "%s"\\necho "OpenClaw %s (def5678)"\\n' "$BOX/said-who" "$want" > "$prefix/bin/openclaw"
       chmod 755 "$prefix/bin/openclaw"
       return 0 ;;
     *) echo "UNEXPECTED as_clawbox $*" >&2; return 99 ;;
@@ -251,6 +253,9 @@ function program(box: Box, entry: string, lift: string[] = []): string {
 }`,
     'gateway_port_listening() { [ "${GW_LISTENING:-1}" = 1 ]; }',
     AS_CLAWBOX,
+    // `runuser -u <account> -- env HOME=… cmd…`: cmd… as this user, marked as
+    // the service account's run.
+    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
     shellFunction("openclaw_version_is_v2"),
     shellFunction("openclaw_is_v2"),
     shellFunction("openclaw_migration_complete"),
@@ -273,7 +278,9 @@ function program(box: Box, entry: string, lift: string[] = []): string {
 
 function run(box: Box, entry = "step_openclaw_install", env: Record<string, string> = {}, lift: string[] = []) {
   const eventsFile = path.join(box.dir, "events");
+  const runsFile = path.join(box.dir, "launcher-runs");
   rmSync(eventsFile, { force: true });
+  rmSync(runsFile, { force: true });
   const r = spawnSync("bash", ["-c", program(box, entry, lift)], {
     encoding: "utf-8",
     timeout: 25_000,
@@ -286,6 +293,8 @@ function run(box: Box, entry = "step_openclaw_install", env: Record<string, stri
     stderr: r.stderr,
     events: existsSync(eventsFile) ? readFileSync(eventsFile, "utf8").trim().split("\n") : [],
     marker: existsSync(markerFile) ? readFileSync(markerFile, "utf8") : null,
+    /** Every launcher run, in order: `<root|service> <launcher> <args>`. */
+    launcherRuns: existsSync(runsFile) ? readFileSync(runsFile, "utf8").trim().split("\n") : [],
   };
 }
 
@@ -347,8 +356,14 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
   });
 
   it("leaves the gateway running when the core, plugins, marker and gateway are all current", () => {
-    const r = run(makeBox());
+    const box = makeBox();
+    const r = run(box);
     expectFastPath(r);
+    // The core is asked its version as the service account, whose npm prefix
+    // it sits in — the only launcher run on this path, and never root's.
+    expect(r.launcherRuns).toEqual([`service ${box.dir}/npm-global/bin/openclaw --version`]);
+    expect(r.stdout).toContain(`  Installed: OpenClaw ${TARGET} (abc1234), Target: ${TARGET}\n`);
+    expect(r.stdout).toContain(`OpenClaw core is already at ${TARGET}; skipping npm install`);
     expect(pathLine(r)).toContain(`all at ${TARGET}, and the gateway is serving`);
     // The plugin list is asked once, by the check — not by a refresh.
     expect(r.events.filter((e) => e === "PLUGINS_LIST")).toHaveLength(1);
@@ -372,9 +387,18 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
   });
 
   it("still takes the full path, unchanged, when the pin moved", () => {
-    const r = run(makeBox({ core: OLDER }));
+    const box = makeBox({ core: OLDER });
+    const r = run(box);
     expectFullPath(r, `the core on the box answers ${OLDER}, not ${TARGET}`);
     expect(r.events).toContain("NPM");
+    expect(r.stdout).toContain(`  Installed: OpenClaw ${OLDER} (abc1234), Target: ${TARGET}\n`);
+    // This step's two questions — the live core's version, then the staged
+    // core's gate — go to the service account. Later runs are not this step's:
+    // the plugin refresh's generation check and this suite's record-doctor.
+    const prefix = `${box.dir}/npm-global`;
+    expect(r.launcherRuns[0]).toBe(`service ${prefix}/bin/openclaw --version`);
+    expect(r.launcherRuns.filter((l) => l.includes("/.openclaw-stage/")))
+      .toEqual([`service ${prefix}/.openclaw-stage/bin/openclaw --version`]);
     // Not a single fast-path question was asked of a core that is not current.
     expect(r.events.indexOf("PLUGINS_LIST")).toBeGreaterThan(r.events.indexOf("DOCTOR"));
   });

@@ -146,6 +146,8 @@ const AMBIENT = [
   // which is also what lets `env VAR=… cmd` through unchanged — the shape the
   // call sites now use, because `sudo -u` resets the environment.
   'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+  // The probes install.sh asks as the service account (runuser -u … -- cmd…).
+  'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
   'stop_openclaw_gateways_for_migration() { printf "stop-gateways-for-migration\\n" >> "$ST/calls"; }',
 ];
 

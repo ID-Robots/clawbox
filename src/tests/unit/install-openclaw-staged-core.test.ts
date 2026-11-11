@@ -41,6 +41,13 @@ function assignment(name: string): string {
 
 type Prefix = { dir: string; prefix: string; calls: () => string[] };
 
+/**
+ * Every launcher's first line here: who ran it, which one, with what. Logged
+ * only where the step's own run names a $LAUNCHER_RUNS, so a case that runs the
+ * live core afterwards to see what it is adds nothing to the record.
+ */
+const SAID_WHO = '[ -n "${AS_SERVICE_USER:-}" ] && who=service || who=root; echo "$who $0 $*" >> "${LAUNCHER_RUNS:-/dev/null}"';
+
 /** A live prefix holding an OLD core, laid out the way npm lays a global install out. */
 function makePrefix(opts: { oldCore?: boolean }): Prefix {
   const dir = mkdtempSync(path.join(tmpdir(), "clawbox-staged-core-"));
@@ -51,7 +58,7 @@ function makePrefix(opts: { oldCore?: boolean }): Prefix {
   if (opts.oldCore !== false) {
     const old = path.join(prefix, "lib", "node_modules", "openclaw");
     mkdirSync(old, { recursive: true });
-    writeFileSync(path.join(old, "openclaw.mjs"), "#!/usr/bin/env bash\necho 'OpenClaw 2026.7.1 (old)'\n");
+    writeFileSync(path.join(old, "openclaw.mjs"), `#!/usr/bin/env bash\n${SAID_WHO}\necho 'OpenClaw 2026.7.1 (old)'\n`);
     chmodSync(path.join(old, "openclaw.mjs"), 0o755);
     writeFileSync(path.join(old, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.7.1" }));
     symlinkSync("../lib/node_modules/openclaw/openclaw.mjs", path.join(prefix, "bin", "openclaw"));
@@ -259,7 +266,7 @@ describe("recover_parked_openclaw_core", () => {
 
 describe("step_openclaw_install stages the core", () => {
   /** The step, driven with a stub npm that lays npm's layout down at the prefix it is handed. */
-  function runStep(p: Prefix, opts: { npm: "ok" | "empty-launcher" | "wrong-version" | "nothing"; pin?: string }) {
+  function runStep(p: Prefix, opts: { npm: "ok" | "empty-launcher" | "wrong-version" | "stderr-first" | "nothing"; pin?: string }) {
     const calls = JSON.stringify(path.join(p.dir, "calls"));
     const bin = path.join(p.dir, "bin");
     mkdirSync(bin, { recursive: true });
@@ -277,10 +284,13 @@ case ${JSON.stringify(opts.npm)} in
   wrong-version) want="2026.1.1" ;;
 esac
 mkdir -p "$prefix/bin" "$prefix/lib/node_modules/openclaw"
+said_who='${SAID_WHO}'
+first=""
+[ ${JSON.stringify(opts.npm)} = stderr-first ] && first='echo "a line on stderr before the banner" >&2'
 if [ ${JSON.stringify(opts.npm)} = empty-launcher ]; then
   : > "$prefix/lib/node_modules/openclaw/openclaw.mjs"
 else
-  printf '#!/usr/bin/env bash\\necho "OpenClaw %s (new)"\\n' "$want" > "$prefix/lib/node_modules/openclaw/openclaw.mjs"
+  printf '#!/usr/bin/env bash\\n%s\\n%s\\necho "OpenClaw %s (new)"\\n' "$said_who" "$first" "$want" > "$prefix/lib/node_modules/openclaw/openclaw.mjs"
 fi
 chmod 755 "$prefix/lib/node_modules/openclaw/openclaw.mjs"
 printf '{"name":"openclaw","version":"%s"}' "$want" > "$prefix/lib/node_modules/openclaw/package.json"
@@ -312,7 +322,8 @@ exit 0
       // Everything after the install is the migration and the plugin refresh,
       // which this suite is not about: the step is cut off after the install.
       "openclaw_version_is_v2() { return 1; }",
-      'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+      'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; AS_SERVICE_USER=1 "$@"; }',
+      'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
       shellFunction("recover_parked_openclaw_core"),
       shellFunction("promote_staged_openclaw_core"),
       // Stubbed, never lifted: the step calls it with no arguments, which means
@@ -334,9 +345,17 @@ exit 0
     return spawnSync("bash", ["-c", program], {
       encoding: "utf-8",
       timeout: 20_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, LAUNCHER_RUNS: path.join(p.dir, "launcher-runs") },
     });
   }
+
+  /** The step's launcher runs, in order: `<root|service> <launcher> <args>`. */
+  const launcherRuns = (p: Prefix) => {
+    const file = path.join(p.dir, "launcher-runs");
+    return existsSync(file) ? readFileSync(file, "utf-8").split("\n").filter(Boolean) : [];
+  };
+  const live = (p: Prefix) => `${p.prefix}/bin/openclaw --version`;
+  const staged = (p: Prefix) => `${p.prefix}/.openclaw-stage/bin/openclaw --version`;
 
   it("installs into the stage, never the live prefix, and promotes only a launcher that answers", () => {
     const p = makePrefix({});
@@ -350,6 +369,9 @@ exit 0
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.4");
       expect(existsSync(path.join(p.prefix, ".openclaw-stage"))).toBe(false);
       expect(p.calls().filter((c) => c.startsWith("flush ")).length).toBe(2);
+      // Both launchers sit in the service account's npm prefix, so both are
+      // asked as that account: the live core's version, then the staged gate.
+      expect(launcherRuns(p)).toEqual([`service ${live(p)}`, `service ${staged(p)}`]);
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
@@ -361,6 +383,8 @@ exit 0
       const r = runStep(p, { npm: "empty-launcher" });
       expect(r.status).not.toBe(0);
       expect(r.stderr).toMatch(/answers nothing to --version/);
+      // An empty launcher logs nothing of its own; the live core's run does.
+      expect(launcherRuns(p)).toEqual([`service ${live(p)}`]);
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
       expect(p.calls().some((c) => c.startsWith("flush "))).toBe(false);
     } finally {
@@ -400,6 +424,24 @@ exit 0
       const r = runStep(p, { npm: "wrong-version" });
       expect(r.status).not.toBe(0);
       expect(r.stderr).toMatch(/not 2026\.9\.4 — leaving the core on the box as it is/);
+      expect(launcherRuns(p)).toEqual([`service ${live(p)}`, `service ${staged(p)}`]);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("compares the first line of everything the staged launcher said, stderr included", () => {
+    // The gate captures stdout AND stderr: a line ahead of the banner is not
+    // the pinned core answering, and that core does not go live.
+    const p = makePrefix({});
+    try {
+      const r = runStep(p, { npm: "stderr-first" });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain(
+        "Error: the staged openclaw answers 'a line on stderr before the banner\nOpenClaw 2026.9.4 (new)' to --version, not 2026.9.4 — leaving the core on the box as it is",
+      );
+      expect(launcherRuns(p)).toEqual([`service ${live(p)}`, `service ${staged(p)}`]);
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
