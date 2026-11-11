@@ -42,7 +42,94 @@ interface Pending {
   strip: boolean;
   at: number;
   feedsShell: boolean;
+  /** `<<'EOF'`, `<<"EOF"` or `<<\EOF`: the body is not expanded. */
+  quoted: boolean;
   body: string[];
+}
+
+export interface ReadOptions {
+  /**
+   * Also yield the command substitutions in the body of an unquoted heredoc that
+   * no shell reads (`cat <<EOF … $(cmd) … EOF`): the shell that opens the heredoc
+   * runs them as it expands the body. Off by default; the root-runs guard turns
+   * it on.
+   */
+  heredocSubstitutions?: boolean;
+}
+
+/** Where `$(…)` opened before `from` closes: the index of its `)`, or -1. */
+function substitutionEnd(text: string, from: number): number {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let j = from; j < text.length; j += 1) {
+    const c = text[j];
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (c === "\\") {
+      j += 1;
+      continue;
+    }
+    if (c === "$" && text[j + 1] === "(") {
+      const end = substitutionEnd(text, j + 2);
+      if (end < 0) return -1;
+      j = end;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "(") depth += 1;
+    else if (c === ")") {
+      if (!depth) return j;
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The command substitutions in an unquoted heredoc body, each as the logical
+ * lines of its command. The body's own text is data, quotes included; only
+ * `$(…)` and backquotes run, and a backslash before `$` or a backquote keeps it
+ * literal. `$((…))` is arithmetic and is passed over.
+ */
+function heredocSubstitutions(body: string, file: string, firstLine: number, options: ReadOptions): Line[] {
+  const out: Line[] = [];
+  const lineOf = (at: number): number => firstLine + (body.slice(0, at).match(/\n/g)?.length ?? 0);
+  for (let j = 0; j < body.length; j += 1) {
+    const c = body[j];
+    if (c === "\\") {
+      j += 1;
+      continue;
+    }
+    if (c === "$" && body[j + 1] === "(" && body[j + 2] === "(") {
+      j += 2;
+      continue;
+    }
+    let inner: string | null = null;
+    let end = j;
+    if (c === "$" && body[j + 1] === "(") {
+      end = substitutionEnd(body, j + 2);
+      if (end >= 0) inner = body.slice(j + 2, end);
+    } else if (c === "`") {
+      end = body.indexOf("`", j + 1);
+      while (end > 0 && body[end - 1] === "\\") end = body.indexOf("`", end + 1);
+      if (end >= 0) inner = body.slice(j + 1, end);
+    } else continue;
+    if (inner === null) {
+      throw new Error(
+        `${file}:${lineOf(j)}: ${c === "`" ? "`" : "$("} in a heredoc never closes for this reader: ` +
+          "check the quoting there, or teach src/tests/helpers/shell-reader.ts the construct",
+      );
+    }
+    out.push(...logicalLines(inner, file, lineOf(j) - 1, options));
+    j = end;
+  }
+  return out;
 }
 
 /**
@@ -51,10 +138,11 @@ interface Pending {
  * joined, comments dropped. Quoting nests the way bash nests it, so `'…"…'`
  * inside `"$(…)"` does not end the outer string, and `<<` inside arithmetic is
  * a shift. A heredoc body is dropped, unless its command is a shell: then it is
- * read as shell too. A reader that loses its place throws rather than skipping
- * the rest of the file, which would read as "nothing found".
+ * read as shell too (see ReadOptions for the substitutions of the rest). A
+ * reader that loses its place throws rather than skipping the rest of the
+ * file, which would read as "nothing found".
  */
-export function logicalLines(text: string, file: string, offset = 0): Line[] {
+export function logicalLines(text: string, file: string, offset = 0, options: ReadOptions = {}): Line[] {
   const out: Line[] = [];
   const lines = text.split("\n");
   const stack: Context[] = [];
@@ -67,7 +155,10 @@ export function logicalLines(text: string, file: string, offset = 0): Line[] {
       const [next] = heredocs;
       if ((next.strip ? raw.replace(/^\t+/, "") : raw) === next.word) {
         heredocs.shift();
-        if (next.feedsShell) out.push(...logicalLines(next.body.join("\n"), file, offset + next.at));
+        if (next.feedsShell) out.push(...logicalLines(next.body.join("\n"), file, offset + next.at, options));
+        else if (options.heredocSubstitutions && !next.quoted) {
+          out.push(...heredocSubstitutions(next.body.join("\n"), file, offset + next.at + 1, options));
+        }
       } else {
         next.body.push(raw);
       }
@@ -162,7 +253,14 @@ export function logicalLines(text: string, file: string, offset = 0): Line[] {
         const opener = HEREDOC.exec(raw.slice(j));
         if (opener) {
           const word = opener[2] ?? opener[3] ?? opener[4];
-          opened.push({ word, strip: opener[1] === "-", at: i + 1, feedsShell: FEEDS_SHELL.test(buf + code), body: [] });
+          opened.push({
+            word,
+            strip: opener[1] === "-",
+            at: i + 1,
+            feedsShell: FEEDS_SHELL.test(buf + code),
+            quoted: opener[4] === undefined || opener[0].includes("\\"),
+            body: [],
+          });
           code += opener[0];
           j += opener[0].length - 1;
           continue;

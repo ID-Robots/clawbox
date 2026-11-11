@@ -26,8 +26,9 @@ import {
  * secret, password, key, auth, cookie and the like, unless the name ends in
  * _FILE, _PATH or _DIR and only the path goes on the line: a credential path
  * whose contents are read in place (`"$(cat "$TOKEN_FILE")"`) still counts.
- * A name part TOKENS counts tokens, and NOT_A_CREDENTIAL lists the names read
- * and found to hold no secret, each with what it holds.
+ * A name part TOKENS right after a count word (MAX_TOKENS, PROMPT_TOKENS)
+ * counts tokens; API_TOKENS is still a credential. NOT_A_CREDENTIAL lists the
+ * names read and found to hold no secret, each with what it holds.
  * Every sudo call on a line is read, chained ones included. A value under a
  * name that says nothing is out of its reach, so review still matters. systemd
  * units are not shell and are not read.
@@ -42,8 +43,26 @@ const WEAK_PARTS = new Set(["KEY", "AUTH", "PASS", "PSK", "CRED", "CREDS"]);
 /** A name for where a credential lives, which is what belongs on a command line. */
 const PATH_NAME = /_(?:FILE|PATH|DIR)$|[a-z0-9](?:File|Path|Dir)$/i;
 
-/** A whole name part that counts tokens rather than holding one: `MAX_TOKENS`, `PROMPT_TOKENS`. */
+/**
+ * A TOKENS part counts tokens rather than holding them only after a word that
+ * says how many or which ones: `MAX_TOKENS`, `PROMPT_TOKENS`. `API_TOKENS` and
+ * `ACCESS_TOKENS` are still credentials.
+ */
 const COUNT_PART = "TOKENS";
+const COUNT_QUALIFIERS = new Set([
+  "MAX",
+  "MIN",
+  "NUM",
+  "TOTAL",
+  "PROMPT",
+  "COMPLETION",
+  "INPUT",
+  "OUTPUT",
+  "CONTEXT",
+  "CTX",
+  "REPLY",
+  "RESPONSE",
+]);
 /**
  * Names that sound like a credential but were read and hold none. Unlike an
  * ALLOWED entry these never expire: each reason says what the name holds, so
@@ -59,7 +78,7 @@ const NOT_A_CREDENTIAL = new Map([
 function credentialWords(name: string): boolean {
   if (NOT_A_CREDENTIAL.has(name)) return false;
   const parts = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase().split("_");
-  const named = parts.filter((part) => part !== COUNT_PART);
+  const named = parts.filter((part, j) => !(part === COUNT_PART && COUNT_QUALIFIERS.has(parts[j - 1])));
   if (STRONG_FRAGMENT.test(named.length === parts.length ? name : named.join("_"))) return true;
   return named.some((part) => WEAK_PARTS.has(part));
 }
@@ -358,9 +377,16 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       'as_clawbox llama-server --n-predict "$MAX_TOKENS"',
       'oc_config_set "$MEMORY_SEARCH_KEY" x',
       'as_clawbox x "$API_TOKEN"',
+      'as_clawbox tool "$API_TOKENS"',
+      'as_clawbox tool "$ACCESS_TOKENS"',
+      'as_clawbox tool "$TOKENS"',
+      'as_clawbox llama-server --n-predict "$OUTPUT_TOKENS"',
     ].join("\n");
     expect(scan([{ file: "sample.sh", text: sample }]).hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
       [3, "as_clawbox", ["API_TOKEN"]],
+      [4, "as_clawbox", ["API_TOKENS"]],
+      [5, "as_clawbox", ["ACCESS_TOKENS"]],
+      [6, "as_clawbox", ["TOKENS"]],
     ]);
   });
 

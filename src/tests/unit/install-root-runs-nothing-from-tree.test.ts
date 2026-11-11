@@ -28,22 +28,29 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * command substitution. `local` and parameter taint stay in their function.
  *
  * A run: a tainted word as a command (after `NAME=value` words, keywords,
- * `exec`, `time`, `command`, `env …` or a root `sudo`), as the script of
- * bash/sh/dash/node/python3/perl, or as the file of `source`/`.`. Every `$(…)`,
- * backquote and `<(…)` is read as root's own command text, inside a wrapper's
- * arguments too: root's shell expands it before the wrapper starts.
+ * `exec`, `time`, `command`, `env …`, a root `sudo`, or a runuser, su or
+ * `sudo -u` whose target is root), as the script of
+ * bash/sh/dash/node/python3/perl, as a module node preloads (`-r`, `--require`,
+ * `--import`), or as the file of `source`/`.`. Every `$(…)`, backquote and
+ * `<(…)` is read as root's own command text, inside a wrapper's arguments and
+ * in the body of an unquoted heredoc too: root's shell expands it before the
+ * wrapper starts, and while it writes the heredoc.
  *
  * Not a run: a command whose own command word switches to the service account
- * (as_clawbox, as_clawbox_login, as_user*, runuser, su, `sudo -u`, the git
- * runner, or a function that forwards its arguments through one), which covers
- * that command's own words only; arguments and redirection targets; a script
- * operand after `-`, `-c`, `-e`, `-p`, `-s` or `-m`, where the program is stdin
- * or text root chose; tests; case patterns; comments; single-quoted text;
- * heredoc bodies that are not fed to a shell.
+ * (as_clawbox, as_clawbox_login, as_user*, runuser, su and `sudo -u` with a
+ * target other than root, the git runner, or a function that forwards its
+ * arguments through one), which covers that command's own words only;
+ * arguments and redirection targets; a script operand after `-`, `-c`, `-e`,
+ * `-p`, `-s` or `-m`, where the program is stdin or text root chose; tests;
+ * case patterns; comments; single-quoted text; the text of a heredoc body that
+ * is not fed to a shell, and all of a quoted one (`<<'EOF'`).
  *
  * Known limits: a wrapper or launcher this file does not name (`nohup`,
- * `xargs`, `find -exec`, `systemd-run`), `eval`, and a heredoc fed to a shell
- * under a wrapper, which reads as root (the safe direction).
+ * `xargs`, `find -exec`, `systemd-run`), `eval`, a heredoc fed to a shell
+ * under a wrapper, which reads as root (the safe direction), and a file root
+ * copies out of these directories (`install`, `cp`) and then runs from its new
+ * place: judging that needs the path followed through the copy, which this
+ * reader does not do.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -486,6 +493,8 @@ const bare = (raw: string): string => raw.replace(/["'\\]/g, "");
 interface Shape {
   /** The word in run position: the command, an interpreter's script, the file of `source`. */
   candidate?: Word;
+  /** Modules node loads before its program: `-r`, `--require`, `--import`. */
+  preloads: Word[];
   wrapped: boolean;
   assigns: { name: string; value: string; local: boolean }[];
   /** Names a `local` declares, assigned or not. */
@@ -513,8 +522,57 @@ function scriptOperand(spec: (typeof INTERPRETERS)[string], args: Word[]): Word 
   return undefined;
 }
 
+/** node's preload operands: they run at startup even when the program is `-e` text. */
+function preloadOperands(args: Word[]): Word[] {
+  const out: Word[] = [];
+  for (let j = 0; j < args.length; j += 1) {
+    const r = bare(args[j].raw);
+    if (r === "--" || !r.startsWith("-")) break;
+    if (r === "-r" || r === "--require" || r === "--import") {
+      if (args[j + 1]) out.push(args[j + 1]);
+      j += 1;
+    } else {
+      const glued = /^(?:-r|--require=|--import=)(.+)$/.exec(args[j].raw.replace(/^["']/, ""));
+      if (glued) out.push({ raw: glued[1], subs: [] });
+    }
+  }
+  return out;
+}
+
+/** A switch target that is root after all: `-u root`, `-u 0`, sudo's `-u '#0'`. */
+const ROOT_TARGET = /^(?:root|#?0)$/;
+/** runuser and su options that take a value. */
+const SWITCH_VALUE_OPTION = /^(?:-[gGcsw]|--(?:group|supp-group|command|session-command|shell|whitelist-environment))$/;
+
+/**
+ * Who runuser or su runs as, and where its command starts. `-u USER [--] cmd`
+ * names both. su's positional USER is followed by arguments to a shell, so
+ * there is no command word to read. No target at all means root.
+ */
+function switchOf(args: Word[]): { target?: string; command?: number } {
+  let target: string | undefined;
+  let byOption = false;
+  for (let j = 0; j < args.length; j += 1) {
+    const r = bare(args[j].raw);
+    if (r === "-u" || r === "--user") {
+      target = bare(args[j + 1]?.raw ?? "");
+      byOption = true;
+      j += 1;
+    } else if (/^-u./.test(r) || r.startsWith("--user=")) {
+      target = r.replace(/^(?:-u|--user=)/, "");
+      byOption = true;
+    } else if (r === "--") {
+      if (byOption) return { target, command: j + 1 };
+    } else if (SWITCH_VALUE_OPTION.test(r)) j += 1;
+    else if (r.startsWith("-")) continue;
+    else if (byOption) return { target, command: j };
+    else return { target: r };
+  }
+  return { target };
+}
+
 function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>): Shape {
-  const shape: Shape = { wrapped: false, assigns: [], locals: [] };
+  const shape: Shape = { wrapped: false, assigns: [], locals: [], preloads: [] };
   const { words } = command;
   if (command.loopVar) return shape;
   let k = 0;
@@ -547,22 +605,34 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
     }
     if (word === "sudo") {
       k += 1;
-      let user = false;
+      let target: string | undefined;
       while (k < words.length && bare(words[k].raw).startsWith("-")) {
         const r = bare(words[k].raw);
         k += 1;
         if (r === "--") break;
         if (/^-[A-Za-z]*u$/.test(r) || r === "--user") {
-          user = true;
+          target = bare(words[k]?.raw ?? "");
           k += 1;
-        } else if (/^-[A-Za-z]*u./.test(r) || r.startsWith("--user=")) user = true;
-        else if (/^-[A-Za-z]*[gCDhprtUT]$/.test(r)) k += 1;
+        } else if (/^-[A-Za-z]*u./.test(r) || r.startsWith("--user=")) {
+          target = r.replace(/^(?:-[A-Za-z]*u|--user=)/, "");
+        } else if (/^-[A-Za-z]*[gCDhprtUT]$/.test(r)) k += 1;
       }
-      // `sudo -u <user>` switches; a bare sudo runs its command as root.
-      if (user) {
+      // `sudo -u <user>` switches; a bare sudo, or `-u root`, runs its command as root.
+      if (target !== undefined && !ROOT_TARGET.test(target)) {
         shape.wrapped = true;
         return shape;
       }
+      continue;
+    }
+    if (word === "runuser" || word === "su") {
+      const { target, command: at } = switchOf(words.slice(k + 1));
+      if (target !== undefined && !ROOT_TARGET.test(target)) {
+        shape.wrapped = true;
+        return shape;
+      }
+      // Root after all: read the command it runs, when it names one.
+      if (at === undefined) return shape;
+      k += 1 + at;
       continue;
     }
     break;
@@ -592,6 +662,7 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
   const interpreter = INTERPRETERS[name.replace(/^.*\//, "")];
   if (interpreter) {
     shape.candidate = scriptOperand(interpreter, words.slice(k + 1));
+    if (interpreter === INTERPRETERS.node) shape.preloads = preloadOperands(words.slice(k + 1));
     return shape;
   }
   if (name === "source" || name === ".") {
@@ -657,7 +728,7 @@ function scan(sources: { file: string; text: string }[]): {
   let lines = 0;
   let wrapped = 0;
   for (const { file, text } of sources) {
-    const logical = logicalLines(text, file);
+    const logical = logicalLines(text, file, 0, { heredocSubstitutions: true });
     lines += logical.length;
     const wrappers = sudoWrappers(functionDefs(logical), ACCOUNT_SWITCHES);
     const commands: Command[] = [];
@@ -708,11 +779,13 @@ function scan(sources: { file: string; text: string }[]): {
     shapes.forEach((s, n) => {
       const { fn, lineNo, text: line } = commands[n];
       if (s.wrapped) wrapped += 1;
-      if (!s.candidate || !beginsTainted(s.candidate.raw, fn, taint)) return;
-      const key = `${lineNo} ${s.candidate.raw}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      hits.push({ file, lineNo, word: s.candidate.raw, text: line.trim() });
+      for (const run of [s.candidate, ...s.preloads]) {
+        if (!run || !beginsTainted(run.raw, fn, taint)) continue;
+        const key = `${lineNo} ${run.raw}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        hits.push({ file, lineNo, word: run.raw, text: line.trim() });
+      }
     });
   }
   return { lines, tainted, wrapped, hits };
@@ -852,6 +925,24 @@ const MUST_HIT: [string, string[], number, string][] = [
   ["an array's first element", ['probe=("$OPENCLAW_BIN" --version)', '"${probe[@]}"'], 2, '"${probe[@]}"'],
   ["a loop variable", ['for bin in "$NPM_PREFIX"/bin/*; do "$bin" --version; done'], 1, '"$bin"'],
   ["in a case arm", ['case "$x" in', '  a) "$OPENCLAW_BIN" --version ;;', "esac"], 2, '"$OPENCLAW_BIN"'],
+  [
+    "a substitution in an unquoted heredoc nothing runs",
+    ["cat > /tmp/v <<EOF", 'v=$("$OPENCLAW_BIN" --version)', "EOF"],
+    2,
+    '"$OPENCLAW_BIN"',
+  ],
+  ["a backquote in an unquoted heredoc", ["cat <<EOF", 'v=`"$OPENCLAW_BIN" --version`', "EOF"], 2, '"$OPENCLAW_BIN"'],
+  ["a node preload before -e text", [`node -r "$PROJECT_DIR/hook.cjs" -e '0'`], 1, '"$PROJECT_DIR/hook.cjs"'],
+  ["a glued node preload", ['node --require="$PROJECT_DIR/hook.cjs" -e 0'], 1, '"$PROJECT_DIR/hook.cjs"'],
+  ["runuser to root", ['runuser -u root -- "$OPENCLAW_BIN" --version'], 1, '"$OPENCLAW_BIN"'],
+  ["runuser to uid 0, through env", ['runuser -u 0 -- env HOME=/root "$OPENCLAW_BIN" x'], 1, '"$OPENCLAW_BIN"'],
+  ["sudo -u root", ['sudo -u root "$OPENCLAW_BIN" --version'], 1, '"$OPENCLAW_BIN"'],
+  [
+    "a function that forwards to root",
+    ['as_root() { runuser -u root -- "$@"; }', 'as_root "$OPENCLAW_BIN" x'],
+    1,
+    '"$@"',
+  ],
 ];
 
 /** Rows that run nothing from the service account's directories as root. */
@@ -977,6 +1068,12 @@ const MUST_MISS: [string, string[]][] = [
     ['for stamp in "$PROJECT_DIR/.next/build-info.json"; do [ -f "$stamp" ] && cat "$stamp"; done']],
   ["an array used as data", ['paths=("$NPM_PREFIX/bin/openclaw" "$NPM_PREFIX/lib")', 'rm -rf "${paths[@]}"']],
   ["a value from a substitution", ['V="$(dirname "$PROJECT_DIR")"', '"$V/bin/x"']],
+  ["a quoted heredoc", ["cat <<'EOF'", 'v=$("$OPENCLAW_BIN" --version)', "EOF"]],
+  ["an escaped substitution in a heredoc", ["cat <<EOF", 'v=\\$("$OPENCLAW_BIN" --version)', "EOF"]],
+  ["a heredoc's own text, quotes and all", ["cat <<EOF", `it's "$OPENCLAW_BIN", not run`, "EOF"]],
+  ["a substitution in a heredoc that runs as the account", ["cat <<EOF", '$(as_clawbox "$OPENCLAW_BIN" --version)', "EOF"]],
+  ["a node preload root holds", ["node -r /usr/lib/clawbox/hook.cjs -e 0"]],
+  ["runuser and sudo to a named account", ['runuser -u clawbox -- "$OPENCLAW_BIN" x', 'sudo -u "$u_user" "$BUN" x']],
 ];
 
 describe("root runs nothing from the service account's directories in install.sh", () => {
