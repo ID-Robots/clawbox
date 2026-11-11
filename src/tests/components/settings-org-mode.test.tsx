@@ -63,6 +63,19 @@ function jsonResponse(data: unknown, status = 200) {
 
 let passwordAnswer: { status: number; body: unknown } = { status: 200, body: { ok: true } };
 
+const GiB = 1024 ** 3;
+/** What System's figures read — About asks for it on a home box. */
+const STATS = {
+  overview: { hostname: "clawbox", os: "Ubuntu", kernel: "5.15", uptime: "1h", arch: "arm64", platform: "linux" },
+  cpu: { usage: 12, model: "ARMv8", cores: 6, loadAvg: ["2.69", "2.10", "1.90"], speed: 1800 },
+  memory: { total: 7.4 * GiB, used: 5.8 * GiB, free: 1.6 * GiB, usedPercent: 78, swap: { used: 0, total: 0, percent: 0 } },
+  temperature: { value: 56.1, display: "56.1°C" },
+  gpu: { usage: 0 },
+  storage: [],
+  network: [],
+  timestamp: 0,
+};
+
 function serve() {
   calls = [];
   vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined, init?: RequestInit) => {
@@ -72,6 +85,7 @@ function serve() {
     if (url === "/setup-api/users/me") return jsonResponse(me);
     if (url === "/setup-api/users/me/password") return jsonResponse(passwordAnswer.body, passwordAnswer.status);
     if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
+    if (url.startsWith("/setup-api/system/stats")) return jsonResponse(STATS);
     if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: true });
     if (url === "/setup-api/harness/active") return jsonResponse({ active: "openclaw", edition: "openclaw", activeKnown: true });
     if (url === "/setup-api/ai-models/status") return jsonResponse({ connected: true, provider: "openai", clawaiConfigured: false });

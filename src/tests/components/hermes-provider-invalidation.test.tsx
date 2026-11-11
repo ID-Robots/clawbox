@@ -149,7 +149,7 @@ describe("who emits the signal and who listens", () => {
     // strip — new default above, old one still named below — until the section
     // was left and re-entered.
     const SETTINGS = read("src", "components", "SettingsApp.tsx");
-    expect(between(SETTINGS, 'fetch("/setup-api/ai-models/status"', "}, [section, isMobile]);")).toContain(
+    expect(between(SETTINGS, 'fetch("/setup-api/ai-models/status"', "}, [boxReads, section, isMobile]);")).toContain(
       "return onProvidersChanged(load);",
     );
   });
