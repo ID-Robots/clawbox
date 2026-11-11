@@ -1809,7 +1809,7 @@ export const nl: Record<string, string> = {
   "users.copied": "Gekopieerd",
   "users.errCannotRemove": "De eigenaar en de gebruiker waarmee je bent aangemeld kunnen niet worden verwijderd.",
   "users.scopeTitle": "Wat andere gebruikers kunnen",
-  "users.scopeNote": "Andere gebruikers melden zich aan met hun eigen wachtwoord en krijgen dezelfde ClawBox: elke app, Bestanden, de browser, de codeeragent, de app store, het externe bureaublad en Instellingen. Iedereen heeft een eigen chat met de assistent en ziet nooit die van een ander. Hun Terminal draait als hun eigen Linux-account. Sleutels en wachtwoorden blijven voor hen verborgen, en alleen de eigenaar kan het eigen account van de eigenaar wijzigen. Het bijwerken van de box en de eigen consoles van de assistent (OpenClaw, tenzij je het deelt, en Hermes) blijven van jou.",
+  "users.scopeNote": "Andere gebruikers melden zich aan met hun eigen wachtwoord en krijgen dezelfde ClawBox: elke app, Bestanden, de browser, de codeeragent, de app store, het externe bureaublad en Instellingen. Iedereen heeft een eigen chat met de assistent en ziet nooit die van een ander. Hun Terminal draait als hun eigen Linux-account. Sleutels en wachtwoorden blijven voor hen verborgen, en alleen de eigenaar kan het eigen account van de eigenaar wijzigen. Het bijwerken van de box en de eigen consoles van de assistent blijven van jou — maar zolang je OpenClaw deelt, toont de console ervan iedereen elk gesprek op deze box.",
   "users.scopeNoteOrg": "Op deze box in organisatiemodus melden andere gebruikers zich aan met hun eigen wachtwoord en krijgen ze Chat, Bestanden en hun eigen instellingen — taal, wachtwoord en uiterlijk. Iedereen heeft een eigen chat met de assistent en ziet nooit die van een ander. Al het andere op de box blijft van de eigenaar.",
   "users.trustNote": "De assistent, Bestanden en de codeeragent werken voor iedereen die zich aanmeldt met het eigen account van deze box, dus voeg alleen mensen toe aan wie je de box toevertrouwt.",
   "users.shareOpenclaw.title": "OpenClaw delen met alle gebruikers",
@@ -1850,7 +1850,7 @@ export const nl: Record<string, string> = {
   "users.orgMode.title": "Organisatiemodus",
   "users.orgMode.hint": "Voor een ClawBox die de medewerkers van een bedrijf bedient. Gebruikers krijgen alleen Chat, Bestanden en hun eigen instellingen (taal, wachtwoord, uiterlijk). De terminal, de codeeragent, de app-winkels, back-ups, AI-aanbieders, het systeem, het netwerk, updates en gebruikers blijven van jou. Aanbiedingen van ClawBox AI worden voor iedereen verborgen.",
   "users.orgMode.on": "Aan — gebruikers zien Chat, Bestanden en hun eigen instellingen",
-  "users.orgMode.off": "Uit — gebruikers krijgen elke app behalve Systeemupdate en de eigen consoles van de assistent",
+  "users.orgMode.off": "Uit — gebruikers krijgen elke app behalve Systeemupdate en de consoles van de assistent; die van OpenClaw is ook van hen zolang je hem deelt",
   "users.orgMode.applies": "Geldt meteen: het bureaublad van elke gebruiker verandert de volgende keer dat het laadt, en een open terminal of extern bureaublad wordt gesloten.",
   "users.orgMode.failed": "De schakelaar kon niet worden opgeslagen.",
 

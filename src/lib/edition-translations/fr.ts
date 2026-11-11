@@ -1809,7 +1809,7 @@ export const fr: Record<string, string> = {
   "users.copied": "Copié",
   "users.errCannotRemove": "Le propriétaire et l’utilisateur avec lequel vous êtes connecté ne peuvent pas être supprimés.",
   "users.scopeTitle": "Ce que peuvent faire les autres utilisateurs",
-  "users.scopeNote": "Les autres utilisateurs se connectent avec leur propre mot de passe et disposent de la même ClawBox : toutes les apps, Fichiers, le navigateur, l’agent de code, la boutique d’apps, le bureau à distance et les réglages. Chacun a sa propre conversation avec l’assistant et ne voit jamais celle d’un autre. Leur Terminal s’exécute sous leur propre compte Linux. Les clés et mots de passe restent masqués pour eux, et seul le propriétaire peut modifier son propre compte. La mise à jour de la box et les consoles propres de l’assistant (OpenClaw, sauf si vous le partagez, et Hermes) restent à vous.",
+  "users.scopeNote": "Les autres utilisateurs se connectent avec leur propre mot de passe et disposent de la même ClawBox : toutes les apps, Fichiers, le navigateur, l’agent de code, la boutique d’apps, le bureau à distance et les réglages. Chacun a sa propre conversation avec l’assistant et ne voit jamais celle d’un autre. Leur Terminal s’exécute sous leur propre compte Linux. Les clés et mots de passe restent masqués pour eux, et seul le propriétaire peut modifier son propre compte. La mise à jour de la box et les consoles propres de l’assistant restent à vous — mais tant que vous partagez OpenClaw, sa console montre à tous chaque conversation de cette box.",
   "users.scopeNoteOrg": "Sur cette box en mode organisation, les autres utilisateurs se connectent avec leur propre mot de passe et ont Chat, Fichiers et leurs propres réglages — langue, mot de passe et apparence. Chacun a sa propre discussion avec l’assistant et ne voit jamais celle des autres. Tout le reste de la box reste au propriétaire.",
   "users.trustNote": "L’assistant, Fichiers et l’agent de code agissent avec le compte de cette box pour toutes les personnes qui se connectent : n’ajoutez que des personnes à qui vous confiez la box.",
   "users.shareOpenclaw.title": "Partager OpenClaw avec tous les utilisateurs",
@@ -1850,7 +1850,7 @@ export const fr: Record<string, string> = {
   "users.orgMode.title": "Mode organisation",
   "users.orgMode.hint": "Pour une ClawBox au service du personnel d’une entreprise. Les utilisateurs n’ont que Chat, Fichiers et leurs propres réglages (langue, mot de passe, apparence). Le terminal, l’agent de code, les boutiques d’applications, les sauvegardes, les fournisseurs d’IA, le système, le réseau, les mises à jour et les utilisateurs restent à vous. Les offres ClawBox AI sont masquées pour tout le monde.",
   "users.orgMode.on": "Activé — les utilisateurs voient Chat, Fichiers et leurs propres réglages",
-  "users.orgMode.off": "Désactivé — les utilisateurs ont toutes les applications sauf Mise à jour système et les consoles propres de l’assistant",
+  "users.orgMode.off": "Désactivé — les utilisateurs ont toutes les applications sauf Mise à jour système et les consoles de l’assistant ; celle d’OpenClaw est aussi la leur tant que vous la partagez",
   "users.orgMode.applies": "S’applique aussitôt : le bureau de chaque utilisateur change à son prochain chargement, et son terminal ou bureau à distance ouvert se ferme.",
   "users.orgMode.failed": "Le réglage n’a pas pu être enregistré.",
 

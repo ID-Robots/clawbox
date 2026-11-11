@@ -1820,7 +1820,7 @@ export const it: Record<string, string> = {
   "users.copied": "Copiato",
   "users.errCannotRemove": "Non è possibile rimuovere il proprietario né l’utente con cui hai effettuato l’accesso.",
   "users.scopeTitle": "Cosa possono fare gli altri utenti",
-  "users.scopeNote": "Gli altri utenti accedono con la propria password e ottengono lo stesso ClawBox: tutte le app, File, il browser, l’agente di programmazione, l’app store, il desktop remoto e le impostazioni. Ognuno ha la propria chat con l’assistente e non vede mai quella degli altri. Il loro Terminale funziona con il proprio account Linux. Chiavi e password restano nascoste per loro, e solo il proprietario può modificare il proprio account. L’aggiornamento del dispositivo e le console dell’assistente (OpenClaw, a meno che tu non lo condivida, e Hermes) restano tuoi.",
+  "users.scopeNote": "Gli altri utenti accedono con la propria password e ottengono lo stesso ClawBox: tutte le app, File, il browser, l’agente di programmazione, l’app store, il desktop remoto e le impostazioni. Ognuno ha la propria chat con l’assistente e non vede mai quella degli altri. Il loro Terminale funziona con il proprio account Linux. Chiavi e password restano nascoste per loro, e solo il proprietario può modificare il proprio account. L’aggiornamento del dispositivo e le console dell’assistente restano tuoi, ma finché condividi OpenClaw la sua console mostra a tutti ogni conversazione su questo dispositivo.",
   "users.scopeNoteOrg": "Su questo dispositivo in modalità organizzazione, gli altri utenti accedono con la propria password e hanno Chat, File e le proprie impostazioni: lingua, password e aspetto. Ognuno ha la propria chat con l’assistente e non vede mai quella degli altri. Tutto il resto del dispositivo resta al proprietario.",
   "users.trustNote": "L’assistente, File e l’agente di programmazione lavorano con l’account di questo dispositivo per chiunque acceda, quindi aggiungi solo persone a cui affideresti il dispositivo.",
   "users.shareOpenclaw.title": "Condividi OpenClaw con tutti gli utenti",
@@ -1861,7 +1861,7 @@ export const it: Record<string, string> = {
   "users.orgMode.title": "Modalità organizzazione",
   "users.orgMode.hint": "Per una ClawBox al servizio del personale di un’azienda. Gli utenti hanno solo Chat, File e le proprie impostazioni (lingua, password, aspetto). Il terminale, l’agente di programmazione, gli store di app, i backup, i fornitori di IA, il sistema, la rete, gli aggiornamenti e gli utenti restano tuoi. Le offerte di ClawBox AI sono nascoste per tutti.",
   "users.orgMode.on": "Attiva — gli utenti vedono Chat, File e le proprie impostazioni",
-  "users.orgMode.off": "Disattiva — gli utenti hanno tutte le app tranne Aggiornamento di sistema e le console dell’assistente",
+  "users.orgMode.off": "Disattiva — gli utenti hanno tutte le app tranne Aggiornamento di sistema e le console dell’assistente; quella di OpenClaw è anche loro finché la condividi",
   "users.orgMode.applies": "Vale subito: il desktop di ogni utente cambia al prossimo caricamento, e il suo terminale o desktop remoto aperto si chiude.",
   "users.orgMode.failed": "Non è stato possibile salvare l’interruttore.",
 

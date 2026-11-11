@@ -1804,7 +1804,7 @@ export const es: Record<string, string> = {
   "users.copied": "Copiado",
   "users.errCannotRemove": "No se puede eliminar al propietario ni al usuario con el que has iniciado sesión.",
   "users.scopeTitle": "Qué pueden hacer los demás usuarios",
-  "users.scopeNote": "Los demás usuarios inician sesión con su propia contraseña y obtienen el mismo ClawBox: todas las apps, Archivos, el navegador, el agente de programación, la tienda de apps, el escritorio remoto y la configuración. Cada uno tiene su propio chat con el asistente y nunca ve el de otra persona. Su Terminal se ejecuta con su propia cuenta de Linux. Las claves y contraseñas quedan ocultas para ellos, y solo el propietario puede cambiar su propia cuenta. Actualizar la caja y las consolas propias del asistente (OpenClaw, salvo que lo compartas, y Hermes) siguen siendo tuyos.",
+  "users.scopeNote": "Los demás usuarios inician sesión con su propia contraseña y obtienen el mismo ClawBox: todas las apps, Archivos, el navegador, el agente de programación, la tienda de apps, el escritorio remoto y la configuración. Cada uno tiene su propio chat con el asistente y nunca ve el de otra persona. Su Terminal se ejecuta con su propia cuenta de Linux. Las claves y contraseñas quedan ocultas para ellos, y solo el propietario puede cambiar su propia cuenta. Actualizar la caja y las consolas propias del asistente siguen siendo tuyos, pero mientras compartas OpenClaw, su consola muestra a todos cada conversación de esta caja.",
   "users.scopeNoteOrg": "En esta caja en modo organización, los demás usuarios inician sesión con su propia contraseña y tienen Chat, Archivos y sus propios ajustes: idioma, contraseña y aspecto. Cada uno tiene su propio chat con el asistente y nunca ve el de los demás. Todo lo demás de la caja queda para el propietario.",
   "users.trustNote": "El asistente, Archivos y el agente de programación trabajan con la propia cuenta de esta caja para todas las personas que inician sesión, así que añade solo a personas a las que confíes la caja.",
   "users.shareOpenclaw.title": "Compartir OpenClaw con todos los usuarios",
@@ -1845,7 +1845,7 @@ export const es: Record<string, string> = {
   "users.orgMode.title": "Modo organización",
   "users.orgMode.hint": "Para una ClawBox al servicio del personal de una empresa. Los usuarios solo tienen Chat, Archivos y sus propios ajustes (idioma, contraseña, aspecto). El terminal, el agente de programación, las tiendas de aplicaciones, las copias de seguridad, los proveedores de IA, el sistema, la red, las actualizaciones y los usuarios siguen siendo tuyos. Las ofertas de ClawBox AI se ocultan para todos.",
   "users.orgMode.on": "Activado: los usuarios ven Chat, Archivos y sus propios ajustes",
-  "users.orgMode.off": "Desactivado: los usuarios tienen todas las aplicaciones salvo Actualización del sistema y las consolas propias del asistente",
+  "users.orgMode.off": "Desactivado: los usuarios tienen todas las aplicaciones salvo Actualización del sistema y las consolas del asistente; la de OpenClaw también es suya mientras la compartas",
   "users.orgMode.applies": "Se aplica al momento: el escritorio de cada usuario cambia la próxima vez que se carga, y se cierra su terminal o escritorio remoto abierto.",
   "users.orgMode.failed": "No se pudo guardar el interruptor.",
 

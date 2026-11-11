@@ -204,8 +204,12 @@ describe("guessing", () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
     h.verify.mockImplementation(async () => { await gate; return "wrong"; });
-    const replies = Array.from({ length: 6 }, () => post(BODY));
-    await new Promise((r) => setTimeout(r, 20));
+    // A barrier, not a timer: the gate opens only once the other five have
+    // been answered, so every request reached the lock while it was held.
+    let answered = 0;
+    const replies = Array.from({ length: 6 }, () => post(BODY).then((r) => { answered++; return r; }));
+    await vi.waitFor(() => expect(answered).toBe(5));
+    expect(h.verify).toHaveBeenCalledTimes(1);
     release();
     const statuses = (await Promise.all(replies)).map((r) => r.status).sort();
     expect(statuses).toEqual([400, 429, 429, 429, 429, 429]);
@@ -231,6 +235,13 @@ describe("guessing", () => {
       expect(res.status, result).toBe(status);
       expect(await res.json(), result).toMatchObject({ code });
     }
+  });
+
+  it("refuses a large body before it takes the lock or asks anything", async () => {
+    const res = await post({ currentPassword: "old secret", password: "new secret 1", pad: "x".repeat(64 * 1024) });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ code: "body_too_large" });
+    expect(h.verify).not.toHaveBeenCalled();
   });
 
   it("refuses a body that is not the two strings", async () => {

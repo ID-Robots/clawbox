@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 
 import { createSessionCookie, getSessionGeneration, getSessionSigningSecret, isSafePasswordChars, readSessionClaims } from "@/lib/auth";
+import { readJsonObject } from "@/lib/bounded-json";
 import { changeUserPassword, checkUserPassword, rotateUserSessionVersion } from "@/lib/clawbox-users";
 import { checkLockout, recordFailure, recordSuccess, SHARED_BUCKET_MAX_LOCK_MS } from "@/lib/login-rate-limit";
 import { personSession } from "@/lib/owner-session";
@@ -44,6 +45,13 @@ import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
  */
 
 const NO_STORE = { "Cache-Control": "no-store" };
+
+/**
+ * Two passwords of at most 256 characters and their JSON: a few KB at most.
+ * Read under this cap BEFORE anything else, so requests sent side by side
+ * cannot each make the box hold a large body (src/lib/bounded-json.ts).
+ */
+const MAX_BODY_BYTES = 8 * 1024;
 
 /** Locks the shared limiter reported but could not store (a full table): held here until they end. */
 const heldLocks = new Map<string, number>();
@@ -141,15 +149,13 @@ export async function POST(req: Request) {
     return refuse(403, "cross_origin", "Passwords can only be changed from this ClawBox's own pages.");
   }
 
-  let currentPassword: unknown;
-  let password: unknown;
-  try {
-    const body: unknown = await req.json();
-    if (typeof body !== "object" || body === null || Array.isArray(body)) throw new Error("not an object");
-    ({ currentPassword, password } = body as { currentPassword?: unknown; password?: unknown });
-  } catch {
-    return refuse(400, "bad_body", "Invalid JSON.");
+  const read = await readJsonObject(req, MAX_BODY_BYTES);
+  if (!read.ok) {
+    return read.reason === "too_long"
+      ? refuse(413, "body_too_large", "That request body is too large.")
+      : refuse(400, "bad_body", "Invalid JSON.");
   }
+  const { currentPassword, password } = read.body as { currentPassword?: unknown; password?: unknown };
   if (typeof currentPassword !== "string" || !currentPassword) {
     return refuse(400, "wrong_password", "Your current password is not right.");
   }
