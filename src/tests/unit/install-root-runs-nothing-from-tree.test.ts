@@ -37,19 +37,22 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  *
  * A run: a tainted word as a command (after `NAME=value` words, keywords,
  * `exec`, `time`, `command`, `builtin`, `env …`, a root `sudo`, or a runuser,
- * su or `sudo -u` whose target is root), as the script of bash/sh/dash/node/python3/perl,
- * as a module node preloads (`-r`, `--require`, `--import`), or as the file of
- * `source`/`.`. A program handed over as text (`bash -c`, `node -e`/`-p`,
- * `python3 -c`, `perl -e`, a root `su -c`, glued or after other options) is a
- * run when it names the account's directories: a `$NAME` of one outside single
- * quotes (escaped or not), or the literal home anywhere in it. The guard does
- * not read that text as its language, so it cannot tell a run there from a
- * read. A trap's text is read as shell where the trap is set, with the `$…`
- * that the setting shell expands judged as expansions even between single
- * quotes inside double ones. Every `$(…)`, backquote and `<(…)` is read as
- * root's own command text, inside a wrapper's arguments and in the body of an
- * unquoted heredoc too: root's shell expands it before the wrapper starts, and
- * while it writes the heredoc.
+ * su or `sudo -u` whose target is root), as the script of
+ * bash/sh/dash/node/python3/perl, as a module node preloads (`-r`, `--require`,
+ * `--import`), or as the file of `source`/`.`. Before the script, any word that
+ * starts with `-` is an option (`-0777`, `-i.bak`); a value-taking option's
+ * value is skipped when it is a letter this file lists or one of the long
+ * options it lists for node and bash. A program handed over as text (`bash -c`,
+ * `node -e`/`-p`, `python3 -c`, `perl -e`, a root `su -c`/`-lc`, and
+ * `python3 -cTEXT`/`perl -eTEXT` glued) is a run when it names the account's
+ * directories: a `$NAME` of one outside single quotes (escaped or not), or the
+ * literal home anywhere in it. The guard does not read that text as its
+ * language, so it cannot tell a run there from a read. A trap's text is read as
+ * shell where the trap is set, with the `$…` that the setting shell expands
+ * judged as expansions even between single quotes inside double ones. Every
+ * `$(…)`, backquote and `<(…)` is read as root's own command text, inside a
+ * wrapper's arguments and in the body of an unquoted heredoc too: root's shell
+ * expands it before the wrapper starts, and while it writes the heredoc.
  *
  * Not a run: a command whose own command word switches to the service account
  * (as_clawbox, as_clawbox_login, as_user*, runuser, su and `sudo -u` with a
@@ -62,13 +65,14 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  *
  * Known limits: a wrapper or launcher this file does not name (`nohup`,
  * `xargs`, `find -exec`, `systemd-run`), `eval`, what a program given as text
- * does with its arguments or environment, program text held in a variable whose
- * value does not begin with the account's path, a heredoc fed to a shell under
- * a wrapper, which reads as root (the safe direction), a switch target known
- * only at run time, which is taken to be the account it names (a name the file
- * ever sets to root, or a `${X:-root}` default, reads as root), and a path is
- * judged where it is run: the guard does not follow it through a copy
- * (`install`, `cp`).
+ * does with its arguments or environment, a long option this file does not list
+ * whose value is the next word (that value is read as the script), program text
+ * held in a variable whose value does not begin with the account's path, a
+ * heredoc fed to a shell under a wrapper, which reads as root (the safe
+ * direction), a switch target known only at run time, which is taken to be the
+ * account it names (a name the file ever sets to root, or a `${X:-root}`
+ * default, reads as root), and a path is judged where it is run: the guard does
+ * not follow it through a copy (`install`, `cp`).
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -584,10 +588,11 @@ function operands(spec: Interpreter, args: Word[]): { script?: Word; program?: W
       if (spec.longArgs?.includes(name) && !r.includes("=")) j += 1;
       continue;
     }
-    if (/^[-+][A-Za-z]/.test(r)) {
-      // A cluster of option letters, read the way the interpreter reads it: the
-      // first letter that takes a value or the program takes the rest of the
-      // word (`-cTEXT`, `-i.bak`), or the next word when nothing follows.
+    if (/^-./.test(r) || /^\+[A-Za-z]/.test(r)) {
+      // An option, never the script, whatever follows its dash (`-0777`). Its
+      // leading letters are read the way the interpreter reads them: the first
+      // letter that takes a value or the program takes the rest of the word
+      // (`-cTEXT`, `-i.bak`), or the next word when nothing follows.
       const word = /^[-+]/.test(args[j].raw) ? args[j].raw : r;
       const letters = /^[-+]([A-Za-z]*)/.exec(word)?.[1] ?? "";
       for (let n = 0; n < letters.length; n += 1) {
@@ -1222,6 +1227,14 @@ const MUST_HIT: [string, string[], number, string][] = [
   ["a perl -e program after -i.bak", [`perl -i.bak -e "do '$PROJECT_DIR/x.pl'" /etc/x`], 1, `"do '$PROJECT_DIR/x.pl'"`],
   ["a python3 program glued to -c", [`python3 -c"exec(open('$PROJECT_DIR/x').read())"`], 1, `"exec(open('$PROJECT_DIR/x').read())"`],
   ["a perl program glued to -e", [`perl -e"do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a perl -e program after an option that starts with a digit", [`perl -0777 -e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  [
+    "a python3 -c program after an option that starts with a digit",
+    [`python3 -1 -c "exec(open('$PROJECT_DIR/x').read())"`],
+    1,
+    `"exec(open('$PROJECT_DIR/x').read())"`,
+  ],
+  ["a script after an option that starts with a digit", ['perl -00 "$PROJECT_DIR/x.pl"'], 1, '"$PROJECT_DIR/x.pl"'],
   ["a glued node --eval program", [`node --eval="require('$PROJECT_DIR/x.js')"`], 1, `"require('$PROJECT_DIR/x.js')"`],
   ["a node -p program", [`node -p "require('$NPM_PREFIX/lib/x.js')"`], 1, `"require('$NPM_PREFIX/lib/x.js')"`],
   ["a perl -e program", [`perl -e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
@@ -1273,6 +1286,7 @@ const MUST_MISS: [string, string[]][] = [
   ["su", ['su - "$CLAWBOX_USER" -c "$OPENCLAW_BIN x"']],
   ["su -lc to the account", ['su -lc "\\"$OPENCLAW_BIN\\" x" "$CLAWBOX_USER"', 'su -l "$CLAWBOX_USER" -c "$BUN x"']],
   ["node with a root-held --require value", ["node --require /usr/lib/a.js /usr/lib/app.js"]],
+  ["a perl program that only reads a path after -0777", [`perl -0777 -ne 'print' "$PROJECT_DIR/x"`]],
   ["a forwarding function", ['as_owner() { runuser -u "$CLAWBOX_USER" -- "$@"; }', 'as_owner "$OPENCLAW_BIN" x']],
   ["the git runner", ['"${GIT_RUNNER[@]}" git -C "$PROJECT_DIR" status']],
   [
