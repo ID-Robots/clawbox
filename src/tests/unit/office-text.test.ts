@@ -160,6 +160,34 @@ describe("a file whose text cannot be had", () => {
   });
 });
 
+describe("a hostile part", () => {
+  it("is walked in linear time, however its tags are broken", () => {
+    for (const body of ["<".repeat(400_000), "<a" + "x".repeat(400_000), "<w:t " + "a=\"".repeat(100_000)]) {
+      const started = Date.now();
+      const result = extractOfficeText(docx(body), "hostile.docx");
+      expect(result.ok, body.slice(0, 8)).toBe(true);
+      expect(Date.now() - started, body.slice(0, 8)).toBeLessThan(3_000);
+    }
+  });
+
+  it("bounds a sheet whose rows jump far ahead, rather than fill the heap with blank rows", () => {
+    const rows = Array.from({ length: 30_000 }, (_, i) => `<row r="${(i + 1) * 1000}"><c r="A${(i + 1) * 1000}"><v>${i}</v></c></row>`).join("");
+    const workbook = zip([
+      { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: "xl/worksheets/sheet1.xml", data: Buffer.from(`<worksheet><sheetData>${rows}</sheetData></worksheet>`) },
+    ]);
+    const started = Date.now();
+    const result = extractOfficeText(workbook, "jumps.xlsx");
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.text.split("\n").length).toBeLessThanOrEqual(20_002);
+    }
+  });
+});
+
 describe("bounds", () => {
   it("keeps the beginning of a document past the text bound, and says it was cut", () => {
     const run = "<w:p><w:r><w:t>" + "x".repeat(1000) + "</w:t></w:r></w:p>";

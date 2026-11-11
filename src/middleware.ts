@@ -690,6 +690,19 @@ export async function middleware(request: NextRequest) {
   // page it navigates to is not, and is reopened by the desktop instead
   // (appWindowReopen, step 5).
   if (isAppProxyPath(request.nextUrl.pathname) && (!isDocumentRequest(request.headers) || isOpaqueFrameRequest(request.headers))) {
+    // An organisation box's member of staff has no apps (src/lib/org-mode.ts):
+    // a request that carries THEIR cookie is refused. The sandboxed document's
+    // own requests carry none, so the owner's apps are untouched.
+    const appCookie = request.cookies.get("clawbox_session")?.value;
+    if (appCookie && readConfigCached().orgMode) {
+      const who = await verifySessionCookie(appCookie, currentSessionGeneration());
+      if (who && !who.isOwner) {
+        return NextResponse.json(
+          { error: "Only the box owner can open this.", code: "owner_only" },
+          { status: 403, headers: { "cache-control": "no-store" } },
+        );
+      }
+    }
     return passToAppProxy(request);
   }
 

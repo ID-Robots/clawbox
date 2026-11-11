@@ -15,11 +15,18 @@ const h = vi.hoisted(() => ({
   who: vi.fn(async (): Promise<{ username: string; isOwner: boolean } | null> => ({ username: "alice", isOwner: false })),
   sameOrigin: vi.fn(() => true),
   change: vi.fn(async (): Promise<string> => "ok"),
+  rotate: vi.fn(async (): Promise<string | null> => "f".repeat(32)),
 }));
 
 vi.mock("@/lib/owner-session", () => ({ personSession: h.who }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
-vi.mock("@/lib/clawbox-users", () => ({ changeUserPassword: h.change }));
+vi.mock("@/lib/clawbox-users", () => ({ changeUserPassword: h.change, rotateUserSessionVersion: h.rotate }));
+vi.mock("@/lib/auth", () => ({
+  getSessionSigningSecret: vi.fn(async () => "test-secret"),
+  getSessionGeneration: vi.fn(async () => 0),
+  readSessionClaims: vi.fn(() => ({ exp: Math.floor(Date.now() / 1000) + 3_600 })),
+  createSessionCookie: vi.fn((duration: number, _s: string, _g: number, who: { u: string; sv?: string }) => `fresh.${who.u}.${who.sv}.${duration}`),
+}));
 
 let POST: (req: Request) => Promise<Response>;
 
@@ -47,6 +54,25 @@ describe("who may change a password here", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(h.change).toHaveBeenCalledWith("alice", "old secret", "new secret 1");
+  });
+
+  it("ends the user's other sessions and keeps this one: a new session version, this browser re-signed", async () => {
+    const res = await POST(new Request("http://box.local/setup-api/users/me/password", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: "clawbox_session=old.cookie" },
+      body: JSON.stringify(BODY),
+    }));
+    expect(res.status).toBe(200);
+    expect(h.rotate).toHaveBeenCalledWith("alice");
+    const cookie = res.headers.get("set-cookie") ?? "";
+    expect(cookie).toContain(`clawbox_session=fresh.alice.${"f".repeat(32)}.`);
+    expect(cookie.toLowerCase()).toContain("httponly");
+  });
+
+  it("rotates nothing when the password did not change", async () => {
+    h.change.mockResolvedValue("wrong");
+    await post(BODY);
+    expect(h.rotate).not.toHaveBeenCalled();
   });
 
   it("sends the owner to their own password route, and changes nothing", async () => {

@@ -22,3 +22,18 @@ export async function readOrgMode(): Promise<boolean> {
 export async function writeOrgMode(on: boolean): Promise<void> {
   await set(ORG_MODE_KEY, on);
 }
+
+/**
+ * Is a member of staff on an organisation box asking? The switch first, so a
+ * home box pays for no cookie verification; never the owner, never the
+ * agent's bearer.
+ */
+export async function isOrgMemberRequest(request: Request): Promise<boolean> {
+  if (!(await readOrgMode())) return false;
+  // Loaded here, not at the top: owner-session pulls auth.ts, which builds its
+  // secret path from config-store's DATA_DIR at import, and the routes that
+  // import this module only for the switch must not carry that chain.
+  const { personSession } = await import("@/lib/owner-session");
+  const who = await personSession(request);
+  return !!who && !who.isOwner;
+}

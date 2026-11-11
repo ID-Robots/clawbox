@@ -6,6 +6,7 @@ import { Readable } from "stream";
 import { chatMediaRoot } from "@/lib/harness/media-root";
 import { getActiveHarness } from "@/lib/harness";
 import { openclawWorkspaceDir } from "@/lib/language-persona";
+import { isOrgMemberRequest } from "@/lib/org-mode-server";
 
 export const dynamic = "force-dynamic";
 
@@ -109,13 +110,15 @@ interface Root {
  * `~`, the whole home — so every dot-segment below it is refused, which keeps
  * `~/.openclaw`, `.ssh`, `.env` and `.git` out of reach.
  */
-async function allowedRoots(): Promise<{ roots: Root[]; workspace: string | null }> {
+async function allowedRoots(withWorkspace = true): Promise<{ roots: Root[]; workspace: string | null }> {
   const roots: Root[] = [];
   const mediaLogical = await chatMediaRoot();
   const mediaReal = await resolvedRoot(mediaLogical);
   if (mediaReal) roots.push({ logical: mediaLogical, real: mediaReal, hideDotfiles: false });
   let workspace: string | null = null;
-  if ((await getActiveHarness()) !== "hermes") {
+  // The agent's workspace is the owner's notes and memory: on an organisation
+  // box (src/lib/org-mode.ts) a member of staff is served the media tree only.
+  if (withWorkspace && (await getActiveHarness()) !== "hermes") {
     workspace = openclawWorkspaceDir();
     const wsReal = await resolvedRoot(workspace);
     if (wsReal) roots.push({ logical: workspace, real: wsReal, hideDotfiles: true });
@@ -213,7 +216,7 @@ async function resolveRequest(req: NextRequest): Promise<Resolved> {
   const inline = Boolean(inlineType) && !forceDownload;
   const contentType = inlineType ?? "application/octet-stream";
 
-  const { roots, workspace } = await allowedRoots();
+  const { roots, workspace } = await allowedRoots(!(await isOrgMemberRequest(req)));
 
   // TWO containment tests. The first is purely lexical and runs before any
   // filesystem call touches the query string: the request is reduced to a

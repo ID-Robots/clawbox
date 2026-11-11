@@ -2,7 +2,8 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 
-import { changeUserPassword } from "@/lib/clawbox-users";
+import { createSessionCookie, getSessionGeneration, getSessionSigningSecret, readSessionClaims } from "@/lib/auth";
+import { changeUserPassword, rotateUserSessionVersion } from "@/lib/clawbox-users";
 import { personSession } from "@/lib/owner-session";
 import { sessionRequiredResponse } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -23,6 +24,10 @@ import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
  *
  * Never a 401 for a wrong current password: the desktop reads a 401 as
  * "signed out".
+ *
+ * A change ends every OTHER session of theirs, as the owner's change does: the
+ * user's session version is rotated, and this browser is handed a fresh
+ * cookie for the rest of its session's time.
  */
 
 const NO_STORE = { "Cache-Control": "no-store" };
@@ -37,6 +42,55 @@ function recentWrong(username: string, now: number): number[] {
   if (kept.length) wrongAttempts.set(username, kept);
   else wrongAttempts.delete(username);
   return kept;
+}
+
+/** Plain HTTP on the LAN cannot keep a Secure cookie; the tunnel is HTTPS. As /login-api decides it. */
+function requestIsHttps(req: Request): boolean {
+  const xfp = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  if (xfp) return xfp === "https";
+  try {
+    return new URL(req.url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** The seconds this request's own session has left (at least a minute), read from its verified cookie. */
+async function secondsLeft(req: Request, secret: string): Promise<number> {
+  const raw = /(?:^|;\s*)clawbox_session=([^;]*)/.exec(req.headers.get("cookie") ?? "")?.[1];
+  let cookie = raw ?? "";
+  try {
+    cookie = decodeURIComponent(cookie);
+  } catch {
+    // as sent
+  }
+  const exp = cookie ? readSessionClaims(cookie, secret)?.exp : undefined;
+  const left = typeof exp === "number" ? exp - Math.floor(Date.now() / 1000) : 0;
+  return Math.max(60, left);
+}
+
+/**
+ * End every other session of theirs and keep this one: a new session version,
+ * and this browser's cookie re-minted under it. Best effort — the password has
+ * changed either way, and a failure here is logged, never the change's.
+ */
+async function keepOnlyThisSession(req: Request, username: string, res: NextResponse): Promise<void> {
+  try {
+    const sv = await rotateUserSessionVersion(username);
+    if (!sv) return;
+    const secret = await getSessionSigningSecret();
+    const left = await secondsLeft(req, secret);
+    const cookie = createSessionCookie(left, secret, await getSessionGeneration(), { u: username, sv });
+    res.cookies.set("clawbox_session", cookie, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: left,
+      secure: requestIsHttps(req),
+    });
+  } catch (err) {
+    console.error("[users] could not end the user's other sessions:", err instanceof Error ? err.message : err);
+  }
 }
 
 function refuse(status: number, code: string, error: string): NextResponse {
@@ -76,10 +130,13 @@ export async function POST(req: Request) {
 
   const result = await changeUserPassword(who.username, currentPassword, password);
   switch (result) {
-    case "ok":
+    case "ok": {
       wrongAttempts.delete(who.username);
       console.log(`[users] ${who.username} changed their own password`);
-      return NextResponse.json({ ok: true }, { headers: NO_STORE });
+      const res = NextResponse.json({ ok: true }, { headers: NO_STORE });
+      await keepOnlyThisSession(req, who.username, res);
+      return res;
+    }
     case "wrong":
       wrongAttempts.set(who.username, [...recentWrong(who.username, now), now]);
       return refuse(400, "wrong_password", "Your current password is not right.");

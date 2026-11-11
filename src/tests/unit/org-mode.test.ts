@@ -105,9 +105,9 @@ describe("the notice cards", () => {
     expect(desktopNoticePolicy({ isOwner: false, orgMode: false }).clawAiOffer).toBe(true);
   });
 
-  it("draws as the owner's until /users/me answers, as a single-user box always has", () => {
-    expect(desktopNoticePolicy(null)).toEqual({ update: true, whatsNew: true, clawAiOffer: true });
-    expect(desktopNoticePolicy(undefined)).toEqual({ update: true, whatsNew: true, clawAiOffer: true });
+  it("draws the update cards as the owner's until /users/me answers, and holds the offer: the box may be an organisation's", () => {
+    expect(desktopNoticePolicy(null)).toEqual({ update: true, whatsNew: true, clawAiOffer: false });
+    expect(desktopNoticePolicy(undefined)).toEqual({ update: true, whatsNew: true, clawAiOffer: false });
   });
 });
 

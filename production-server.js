@@ -204,7 +204,16 @@ function upgradeSession(cookieHeader) {
  * null on an ungated route), or `{ ok: false, status }` to refuse it.
  */
 function authorizeUpgrade(gate, req) {
-  if (!gate.requireAuth) return { ok: true, identity: null };
+  if (!gate.requireAuth) {
+    // A project's own app (/apps/<id>) is answered without a session: its
+    // sandboxed document carries no cookie. One that DOES carry a member of
+    // staff's cookie on an organisation box is refused — their apps are three.
+    if (req.headers.cookie && readSessionConfig().orgMode) {
+      const who = upgradeSession(req.headers.cookie);
+      if (who && !who.isOwner) return { ok: false, status: 403 };
+    }
+    return { ok: true, identity: null };
+  }
   const identity = upgradeSession(req.headers.cookie);
   if (!identity) return { ok: false, status: 401 };
   if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };

@@ -133,7 +133,13 @@ async function stageOfficeText(staged: string): Promise<string | undefined> {
   try {
     await fsp.writeFile(textPath, body, { flag: "wx" });
   } catch (err) {
+    // A file of that name was there before us — only a dropped folder that
+    // carries its own `<name>.txt` can do that: it is theirs, left alone.
     if ((err as NodeJS.ErrnoException)?.code === "EEXIST") return undefined;
+    // A write that failed part-way (a full disk) leaves nothing behind: the
+    // staged file goes too (the caller's cleanup), and a later upload of the
+    // same name must not find a half-written text and trust it.
+    await fsp.unlink(textPath).catch(() => {});
     throw err;
   }
   return textPath;

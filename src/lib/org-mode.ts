@@ -78,9 +78,11 @@ export function isOrgMember(viewer: DesktopViewer | null | undefined): boolean {
  *   - `clawAiOffer` — "Free backup with ClawBox AI / Login with ClawBox AI",
  *     and the other ClawBox AI upsells: nobody's on an organisation box.
  *
- * Until /users/me answers (`viewer` null/undefined) the desktop draws as the
- * owner's, exactly as a single-user box always has; the cards that depend on
- * the answer are held until then by the desktop's own `noticesHeld`.
+ * Until /users/me answers (`viewer` null/undefined) the update and What's new
+ * cards are the owner's, exactly as a single-user box always has; the desktop
+ * holds every card until then (`noticesHeld`). The offer fails closed: a
+ * viewer the box could not name may be on an organisation box, and an upsell
+ * can wait for a box that answers.
  */
 export function desktopNoticePolicy(viewer: DesktopViewer | null | undefined): {
   update: boolean;
@@ -88,8 +90,7 @@ export function desktopNoticePolicy(viewer: DesktopViewer | null | undefined): {
   clawAiOffer: boolean;
 } {
   const owner = !viewer || viewer.isOwner;
-  const orgMode = !!viewer && viewer.orgMode;
-  return { update: owner, whatsNew: owner, clawAiOffer: !orgMode };
+  return { update: owner, whatsNew: owner, clawAiOffer: !!viewer && !viewer.orgMode };
 }
 
 // ─── The server's allow-list for a member of staff ──────────────────────────

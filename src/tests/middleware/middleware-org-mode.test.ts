@@ -181,6 +181,18 @@ describe("middleware — organisation mode", () => {
     expect(passes(await middleware(request("/setup-api/update/status", { cookie: alice })))).toBe(true);
   });
 
+  it("refuses a project app's requests that carry a member of staff's cookie, and passes the owner's and the sandbox's", async () => {
+    const alice = await sign({ u: "alice", sv: ALICE_SV });
+    const asset = (cookie?: string) => middleware(request("/apps/weather/main.js", { cookie }));
+    await expectOwnerOnly(await asset(alice), "member's app request");
+    expect((await asset(await sign({ u: "clawbox" }))).status).not.toBe(403);
+    // The sandboxed document's own requests carry no cookie at all.
+    expect((await asset()).status).not.toBe(403);
+    // A home box's user keeps the apps they had.
+    writeConfig({});
+    expect((await asset(alice)).status).not.toBe(403);
+  });
+
   it("takes the switch from config.json on the next request, both ways", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     const terminal = () => middleware(request("/setup-api/terminal/shells", { cookie: alice }));

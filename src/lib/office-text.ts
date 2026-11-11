@@ -49,6 +49,14 @@ const RATIO_CHECK_FROM = 8 * 1024 * 1024;
 const MAX_REPEAT = 1_000;
 /** Columns kept per spreadsheet row. */
 const MAX_COLUMNS = 1_024;
+/**
+ * Rows and cells read from one sheet. Past either the rest of the sheet is
+ * left out and the text says it was cut: a sheet is materialised before it is
+ * written out, so the text's own bound comes too late to keep a hostile one
+ * (every row jumping a thousand blank rows ahead) from filling the heap.
+ */
+const MAX_SHEET_ROWS = 20_000;
+const MAX_SHEET_CELLS = 400_000;
 
 export type OfficeTextResult =
   | { ok: true; text: string; truncated: boolean }
@@ -173,7 +181,6 @@ type Token =
   | { kind: "open" | "close" | "self"; name: string; attrs: string }
   | { kind: "text"; text: string };
 
-const TOKEN_RE = /<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<!DOCTYPE[^>]*>|<(\/)?([^\s/>!?]+)([^>]*?)(\/)?>|([^<]+)/g;
 
 function decodeEntities(s: string): string {
   if (!s.includes("&")) return s;
@@ -192,19 +199,60 @@ function decodeEntities(s: string): string {
   });
 }
 
+/**
+ * The XML's tags and text, in order. A hand-written scanner rather than a
+ * regex: every step moves forward by `indexOf`, so the walk is linear in the
+ * part's size whatever the part holds — a backtracking pattern over a part a
+ * stranger wrote can be made to spin the web server's one thread. A tag that
+ * never closes ends the walk. A `>` inside an attribute value ends its tag
+ * early; office writers escape it, and the worst it does is lose that tag.
+ */
 function* tokens(xml: string): Generator<Token> {
-  // A regex of its own per walk: a /g regex carries its position, and these
-  // walks nest (a workbook's sheets are read while its list is walked).
-  const re = new RegExp(TOKEN_RE.source, "g");
-  for (let m = re.exec(xml); m !== null; m = re.exec(xml)) {
-    if (m[1] !== undefined) {
-      yield { kind: "text", text: m[1] };
-    } else if (m[3] !== undefined) {
-      const kind = m[2] ? "close" : m[5] ? "self" : "open";
-      yield { kind, name: m[3], attrs: m[4] ?? "" };
-    } else if (m[6] !== undefined) {
-      yield { kind: "text", text: decodeEntities(m[6]) };
+  const n = xml.length;
+  let i = 0;
+  while (i < n) {
+    const lt = xml.indexOf("<", i);
+    if (lt < 0) {
+      yield { kind: "text", text: decodeEntities(xml.slice(i)) };
+      return;
     }
+    if (lt > i) yield { kind: "text", text: decodeEntities(xml.slice(i, lt)) };
+    if (xml.startsWith("<!--", lt)) {
+      const end = xml.indexOf("-->", lt + 4);
+      if (end < 0) return;
+      i = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<![CDATA[", lt)) {
+      const end = xml.indexOf("]]>", lt + 9);
+      if (end < 0) return;
+      yield { kind: "text", text: xml.slice(lt + 9, end) };
+      i = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<?", lt)) {
+      const end = xml.indexOf("?>", lt + 2);
+      if (end < 0) return;
+      i = end + 2;
+      continue;
+    }
+    const gt = xml.indexOf(">", lt + 1);
+    if (gt < 0) return;
+    i = gt + 1;
+    if (xml.charCodeAt(lt + 1) === 33 /* ! — a DOCTYPE or another declaration */) continue;
+    let inner = xml.slice(lt + 1, gt);
+    let kind: "open" | "close" | "self" = "open";
+    if (inner.startsWith("/")) {
+      kind = "close";
+      inner = inner.slice(1);
+    } else if (inner.endsWith("/")) {
+      kind = "self";
+      inner = inner.slice(0, -1);
+    }
+    const space = inner.search(/\s/);
+    const name = space < 0 ? inner : inner.slice(0, space);
+    if (!name) continue;
+    yield { kind, name, attrs: space < 0 ? "" : inner.slice(space) };
   }
 }
 
@@ -219,6 +267,8 @@ class Sink {
   private parts: string[] = [];
   private length = 0;
   truncated = false;
+  /** A sheet past its row or cell bound was cut, though the text itself had room. */
+  partial = false;
 
   push(s: string): void {
     if (this.truncated || !s) return;
@@ -516,8 +566,9 @@ function sharedStrings(zip: ZipReader): string[] {
   return out;
 }
 
-function xlsxSheet(xml: string, shared: readonly string[]): string[][] {
+function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; cut: boolean } {
   const rows: string[][] = [];
+  let cells = 0;
   let row: string[] | null = null;
   let rowIndex = 0;
   let col = 0;
@@ -528,6 +579,7 @@ function xlsxSheet(xml: string, shared: readonly string[]): string[][] {
   let inInline = 0;
   let inCell = false;
   for (const tok of tokens(xml)) {
+    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS) return { rows, cut: true };
     if (tok.kind === "text") {
       if (inCell && (inValue > 0 || inInline > 0)) value += tok.text;
       continue;
@@ -542,7 +594,7 @@ function xlsxSheet(xml: string, shared: readonly string[]): string[][] {
         const r = rowOf(attr(tok.attrs, "r"));
         const next = r !== null ? r : rowIndex + 1;
         // Rows the file leaves out are blank in the sheet: kept as blank lines, a bounded run of them.
-        for (let gap = rowIndex + 1; gap < next && gap - rowIndex <= MAX_REPEAT; gap++) rows.push([]);
+        for (let gap = rowIndex + 1; gap < next && gap - rowIndex <= MAX_REPEAT && rows.length < MAX_SHEET_ROWS; gap++) rows.push([]);
         rowIndex = next;
         col = 0;
         if (tok.kind === "self") rows.push([]);
@@ -556,6 +608,7 @@ function xlsxSheet(xml: string, shared: readonly string[]): string[][] {
             if (cellType === "s") shown = shared[Number(value)] ?? "";
             else if (cellType === "b") shown = value === "1" ? "TRUE" : value === "0" ? "FALSE" : value;
             if (cellCol < MAX_COLUMNS) {
+              cells += Math.max(1, cellCol + 1 - row.length);
               while (row.length < cellCol) row.push("");
               row[cellCol] = shown;
             }
@@ -581,7 +634,7 @@ function xlsxSheet(xml: string, shared: readonly string[]): string[][] {
         break;
     }
   }
-  return rows;
+  return { rows, cut: false };
 }
 
 function xlsxText(zip: ZipReader, sink: Sink): void {
@@ -596,7 +649,9 @@ function xlsxText(zip: ZipReader, sink: Sink): void {
     const part = rels.get(attr(tok.attrs, "r:id") ?? "");
     const xml = part ? zip.text(part) : null;
     if (xml === null) continue;
-    sink.push(`=== Sheet: ${name} ===\n${csvSheet(xlsxSheet(xml, shared))}\n\n`);
+    const sheet = xlsxSheet(xml, shared);
+    if (sheet.cut) sink.partial = true;
+    sink.push(`=== Sheet: ${name} ===\n${csvSheet(sheet.rows)}\n\n`);
   }
 }
 
@@ -619,22 +674,33 @@ function odsText(zip: ZipReader, sink: Sink): void {
   let cellValue: string | null = null;
   let paragraphs = 0;
   let sheets = 0;
+  let cells = 0;
   let depth = 0; // nested tables inside a cell are read as that cell's text
   const finishCell = () => {
     if (!row || cell === null) return;
     const shown = cell.trim() ? cell.replace(/\n$/, "") : cellValue ?? "";
     // A run of empty cells is only blank space; a run of the same value is kept, bounded.
     const times = Math.min(cellRepeat, shown === "" ? MAX_COLUMNS : MAX_REPEAT);
-    for (let i = 0; i < times && row.length < MAX_COLUMNS; i++) row.push(shown);
+    for (let i = 0; i < times && row.length < MAX_COLUMNS; i++) {
+      row.push(shown);
+      cells++;
+    }
     cell = null;
   };
   const finishSheet = () => {
     if (sheetName !== null) sink.push(`=== Sheet: ${sheetName} ===\n${csvSheet(rows)}\n\n`);
     sheetName = null;
     rows = [];
+    cells = 0;
   };
   for (const tok of tokens(xml)) {
     if (sink.full) return;
+    if (rows.length >= MAX_SHEET_ROWS || cells >= MAX_SHEET_CELLS) {
+      // The rest of this document is left out; what was read is kept.
+      sink.partial = true;
+      finishSheet();
+      return;
+    }
     if (tok.kind === "text") {
       if (cell !== null && paragraphs > 0) cell += tok.text;
       continue;
@@ -667,7 +733,7 @@ function odsText(zip: ZipReader, sink: Sink): void {
         const done = row ?? [];
         // A sheet's trailing blank rows are repeated by the million: bounded
         // here, and dropped from the end of the CSV anyway.
-        for (let i = 0; i < Math.min(rowRepeat, MAX_REPEAT); i++) rows.push(done);
+        for (let i = 0; i < Math.min(rowRepeat, MAX_REPEAT) && rows.length < MAX_SHEET_ROWS; i++) rows.push(done);
         row = null;
       }
       continue;
@@ -744,5 +810,5 @@ export function extractOfficeText(bytes: Buffer, name: string): OfficeTextResult
   }
   // A spreadsheet's blank rows are its data; a document's empty paragraphs are not.
   const text = ext === ".xlsx" || ext === ".ods" ? sink.toString().trim() : tidy(sink.toString());
-  return { ok: true, text, truncated: sink.truncated };
+  return { ok: true, text, truncated: sink.truncated || sink.partial };
 }

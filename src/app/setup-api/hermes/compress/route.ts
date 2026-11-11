@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { runHermesSlashCommand } from "@/lib/hermes-slash-exec";
 import { requireSession } from "@/lib/route-auth";
+import { chatPrincipalOf, hermesSessionFor } from "@/lib/chat-scope-server";
 
 /**
  * Shorten a Hermes conversation now — the chat's "Shorten this conversation
@@ -42,6 +43,11 @@ export async function POST(request: Request) {
   const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (!SESSION_ID.test(sessionId)) {
     return NextResponse.json({ error: "A Hermes session id is required." }, { status: 400 });
+  }
+  // Only the caller's own conversation (src/lib/chat-scope-server.ts): a
+  // ClawBox user may not compress the owner's, nor another user's.
+  if (hermesSessionFor(await chatPrincipalOf(request), sessionId) !== sessionId) {
+    return NextResponse.json({ error: "That conversation belongs to someone else on this ClawBox.", code: "not_your_chat" }, { status: 403 });
   }
   const ran = await runHermesSlashCommand({ command: "/compress", sessionId, rpc: "session.compress", signal: request.signal });
   if (!ran) return NextResponse.json({ error: "Hermes could not be reached." }, { status: 503 });

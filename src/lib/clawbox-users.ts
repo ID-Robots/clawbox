@@ -236,6 +236,22 @@ function newSessionVersion(): string {
 }
 
 /**
+ * Give `username` a new session version, so every cookie minted for them
+ * before is dead — what a password change does to the owner's sessions with
+ * `session_generation`. The new version, or null for a name the registry does
+ * not hold.
+ */
+export async function rotateUserSessionVersion(username: string): Promise<string | null> {
+  return withUsersLock(async () => {
+    const users = await listUsers();
+    if (!users.some((u) => u.username === username)) return null;
+    const sv = newSessionVersion();
+    await writeRegistry(users.map((u) => (u.username === username ? { ...u, sv } : u)));
+    return sv;
+  });
+}
+
+/**
  * Does a Linux account OR group of this name exist? `useradd --user-group`
  * creates a same-named group, so a free login name over a taken group name
  * would fail halfway. `null` when getent itself could not answer — the caller
