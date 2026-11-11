@@ -213,6 +213,23 @@ d("the Hermes staff guard (clawbox_staff_guard)", () => {
     expect(judge("patch", { patch: "*** Begin Patch\n*** Add File: a.md\n+x\n*** End Patch" }, staff.home)).toMatchObject({ action: "block" });
   });
 
+  it("lets Tool Search's controls through and judges a tool_call by the tool it names", async () => {
+    const staff = (await ensureStaffHermesProfile("maria", root))!;
+    expect(judge("tool_search", { query: "session" }, staff.home)).toBeNull();
+    expect(judge("tool_describe", { id: "hermes:core:session_search" }, staff.home)).toBeNull();
+    expect(judge("tool_call", { id: "hermes:core:session_search", args: { query: "invoice" } }, staff.home)).toBeNull();
+    expect(judge("tool_call", { id: "clawbox:core:message", args: {} }, staff.home)).toMatchObject({ action: "block", message: expect.stringMatching(/`message` is not available/) });
+    expect(judge("tool_call", { id: "cronjob_manage", args: {} }, staff.home)).toMatchObject({ action: "block" });
+    expect(judge("tool_call", { id: "write_file", args: { path: path.join(root, "config.yaml"), content: "x" } }, staff.home)).toMatchObject({ action: "block" });
+    expect(judge("tool_call", { id: "write_file", args: { path: "out.md", content: "x" } }, staff.home))
+      .toEqual({ action: "modify", args: { id: "write_file", args: { path: path.join(staff.folder, "out.md"), content: "x" } } });
+    expect(judge("tool_call", { args: {} }, staff.home)).toMatchObject({ action: "block" });
+    // The flat form a small model sends: the target's fields beside the id.
+    expect(judge("tool_call", { id: "read_file", path: "/etc/passwd" }, staff.home)).toMatchObject({ action: "block" });
+    expect(judge("tool_call", { id: "write_file", path: "notes.md", content: "x" }, staff.home))
+      .toEqual({ action: "modify", args: { id: "write_file", path: path.join(staff.folder, "notes.md"), content: "x" } });
+  });
+
   it("never reaches the web through vision or a file URL elsewhere", async () => {
     const staff = (await ensureStaffHermesProfile("maria", root))!;
     expect(judge("vision_analyze", { image_url: "https://example.com/x.png", question: "?" }, staff.home)).toMatchObject({ action: "block", message: expect.stringMatching(/nothing on the web/) });

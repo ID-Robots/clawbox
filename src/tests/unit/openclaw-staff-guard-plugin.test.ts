@@ -79,6 +79,9 @@ describe("a member of staff's tools", () => {
     expect(staffToolCallDenyReason(call("tool_call", { id: "web_fetch", args: { url: "https://example.com" } }), MARIA, opts)).toMatch(/`web_fetch` is not available/);
     expect(staffToolCallDenyReason(call("tool_call", { id: "openclaw:core:write", args: { path: path.join(openclawHome, "openclaw.json"), content: "x" } }), MARIA, opts)).toMatch(/outside/);
     expect(staffToolCallDenyReason(call("tool_call", { args: {} }), MARIA, opts)).toMatch(/without a tool/);
+    // The flat form: the target's fields beside the id.
+    expect(staffToolCallDenyReason(call("tool_call", { id: "read", path: path.join(openclawHome, "openclaw.json") }), MARIA, opts)).toMatch(/outside/);
+    expect(staffToolCallDenyReason(call("tool_call", { id: "write", path: "notes.md", content: "x" }), MARIA, opts)).toBeNull();
   });
 
   it("allows memory search and the clarifying question", () => {

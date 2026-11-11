@@ -174,8 +174,11 @@ export function staffToolCallDenyReason(event, ctx, opts = {}) {
     const inner = calledTool(params);
     if (!inner) return `\`tool_call\` without a tool it names`;
     toolName = inner;
-    const args = params && typeof params === "object" ? params.args : undefined;
-    params = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+    // The target's arguments: nested under `args`, or flat beside the id (the
+    // core repairs flattened arguments from small models, docs/tools/tool-search.md).
+    const outer = params && typeof params === "object" ? params : {};
+    const nested = outer.args && typeof outer.args === "object" && !Array.isArray(outer.args);
+    params = nested ? outer.args : Object.fromEntries(Object.entries(outer).filter(([k]) => !["id", "name", "tool"].includes(k)));
     event = { ...event, toolName, params, derivedPaths: undefined };
   }
   if (!policy.allow.includes(toolName)) return `\`${toolName || "this tool"}\` is not available to members of staff`;

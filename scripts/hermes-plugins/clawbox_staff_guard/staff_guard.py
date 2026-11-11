@@ -108,6 +108,14 @@ def _candidates(tool_name: str, args: dict) -> list[tuple[str, str]]:
     return out
 
 
+# Tool Search's controls: with tool search on, a deferred tool (session_search
+# and todo_list on a staff profile) is reached only through these. What they
+# search and describe is the profile's own tool list, already the staff one; a
+# tool_call is judged by the tool it names, its own arguments rewritten in place.
+TOOL_SEARCH_READS = ("tool_search", "tool_describe")
+TOOL_SEARCH_CALL = "tool_call"
+
+
 def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] = None) -> Optional[dict]:
     """The pre_tool_call directive for one call: ``None`` to let it run,
     ``{"action": "block", "message"}`` to refuse it, or ``{"action": "modify",
@@ -115,6 +123,23 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
     username = staff_member_of(hermes_home)
     if username is None:
         return None
+    if tool_name in TOOL_SEARCH_READS:
+        return None
+    if tool_name == TOOL_SEARCH_CALL:
+        outer = args if isinstance(args, dict) else {}
+        target = outer.get("id") or outer.get("name") or outer.get("tool")
+        if not isinstance(target, str) or not target.strip():
+            return block("`tool_call` without a tool it names")
+        # The target's arguments: nested under `args`, or flat beside the id
+        # (Hermes' bridge takes both; a small model drops the nesting).
+        nested = isinstance(outer.get("args"), dict)
+        inner_args = outer["args"] if nested else {k: v for k, v in outer.items() if k not in ("id", "name", "tool")}
+        verdict = judge(target.strip().split(":")[-1], inner_args, hermes_home, user_home)
+        if verdict is not None and verdict.get("action") == "modify":
+            if nested:
+                return {"action": "modify", "args": {**outer, "args": {**inner_args, **verdict["args"]}}}
+            return {"action": "modify", "args": {**outer, **verdict["args"]}}
+        return verdict
     policy = policy_table()["hermes"]
     if tool_name not in policy["allowTools"]:
         return block(f"`{tool_name}` is not available to members of staff")
