@@ -32,3 +32,10 @@ ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i
 # offline Gemma 4" hung until it failed. Other steps finish in seconds — this
 # is a ceiling, not a wait, so raising it costs nothing.
 TimeoutStartSec=7200
+# Every line a step prints is kept. The update screen's raw log is this unit's
+# journal (src/lib/update-raw-log.ts), and journald's default per-service rate
+# limit dropped a rebuild's build output by the thousand ("Suppressed 1147
+# messages from clawbox-root-update@rebuild_reboot.service", measured on a lab
+# board, TASK-2428). A step's output is bounded by the step; nothing here can
+# flood the journal for longer than the step runs.
+LogRateLimitIntervalSec=0

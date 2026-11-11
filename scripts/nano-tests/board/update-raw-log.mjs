@@ -575,6 +575,12 @@ async function after() {
   else if (checks.length === 0) say("not ok - the log holds no root-step journal section");
   else say(`not ok - ${bad.length} of ${checks.length} sections differ from the journal; first: ${bad[0].unit} line ${bad[0].at + 1}: log ${JSON.stringify(bad[0].log)} journal ${JSON.stringify(bad[0].journal)}`);
 
+  // journald drops a unit's lines past its rate limit and says so in its own
+  // line; config/clawbox-root-update@.service turns that limit off.
+  const suppressed = text.match(/^Suppressed \d+ messages from \S+$/gm) ?? [];
+  if (suppressed.length === 0) say("ok - journald dropped none of the steps' lines (no \"Suppressed … messages\" in the log)");
+  else say(`not ok - journald dropped lines of the update: ${suppressed.join("; ")}`);
+
   const colourful = /\x1b\[[0-9;]*m/.test(text.replace(/^\x1b\[[0-9;]*m(==>|===|\$ )/gm, ""));
   note(`ANSI sequences from the steps themselves in the log: ${colourful ? "yes" : "none (the steps printed none)"}; carriage returns: ${text.includes("\r") ? "yes" : "none"}`);
 

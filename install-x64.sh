@@ -2057,6 +2057,8 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i
 TimeoutStartSec=1800
+# Every line kept: the update screen's raw log is this unit's journal.
+LogRateLimitIntervalSec=0
 UNIT
   chown root:root "/etc/systemd/system/clawbox-root-update@.service"
   chmod 0644 "/etc/systemd/system/clawbox-root-update@.service"
