@@ -6,7 +6,8 @@ import { Readable } from "stream";
 import { chatMediaRoot } from "@/lib/harness/media-root";
 import { getActiveHarness } from "@/lib/harness";
 import { openclawWorkspaceDir } from "@/lib/language-persona";
-import { isOrgMemberRequest } from "@/lib/org-mode-server";
+import { orgMemberOf } from "@/lib/org-mode-server";
+import { isMediaOwnedBy } from "@/lib/chat-media-owners";
 
 export const dynamic = "force-dynamic";
 
@@ -216,7 +217,12 @@ async function resolveRequest(req: NextRequest): Promise<Resolved> {
   const inline = Boolean(inlineType) && !forceDownload;
   const contentType = inlineType ?? "application/octet-stream";
 
-  const { roots, workspace } = await allowedRoots(!(await isOrgMemberRequest(req)));
+  // A member of staff on an organisation box is served files of their OWN
+  // chat only: never the workspace, and in the shared media tree only what is
+  // recorded as theirs (src/lib/chat-media-owners.ts). The owner, the agent's
+  // bearer and every user on a home box are served as before.
+  const member = await orgMemberOf(req);
+  const { roots, workspace } = await allowedRoots(member === null);
 
   // TWO containment tests. The first is purely lexical and runs before any
   // filesystem call touches the query string: the request is reduced to a
@@ -259,6 +265,10 @@ async function resolveRequest(req: NextRequest): Promise<Resolved> {
   if (realRel === null) return fail(404, "Not found");
   if (root.hideDotfiles && hasDotSegment(realRel)) return fail(404, "Not found");
   const safe = path.join(root.real, realRel);
+  // Whose file, before anything about it is answered: asked after the stat,
+  // a 413 would tell a member that someone else's file exists and how big it
+  // is. The same 404 as a path that is not there, for the same reason.
+  if (member && !isMediaOwnedBy(member.username, safe, root.real)) return fail(404, "Not found");
 
   let stat: fs.Stats;
   try {

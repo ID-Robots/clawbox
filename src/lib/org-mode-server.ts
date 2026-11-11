@@ -44,11 +44,20 @@ export async function writeOrgMode(on: boolean): Promise<void> {
  * agent's bearer.
  */
 export async function isOrgMemberRequest(request: Request): Promise<boolean> {
-  if (!(await readOrgMode())) return false;
+  return (await orgMemberOf(request)) !== null;
+}
+
+/**
+ * The member of staff asking on an organisation box, or null — for the owner,
+ * the agent's bearer, a home box, or no valid session. For a route that must
+ * know WHICH member, not only that one is asking (chat/media).
+ */
+export async function orgMemberOf(request: Request): Promise<{ username: string } | null> {
+  if (!(await readOrgMode())) return null;
   // Loaded here, not at the top: owner-session pulls auth.ts, which builds its
   // secret path from config-store's DATA_DIR at import, and the routes that
   // import this module only for the switch must not carry that chain.
   const { personSession } = await import("@/lib/owner-session");
   const who = await personSession(request);
-  return !!who && !who.isOwner;
+  return who && !who.isOwner ? { username: who.username } : null;
 }

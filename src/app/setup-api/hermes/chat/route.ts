@@ -53,6 +53,8 @@ import {
 import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
+import { chatKeyUser } from "@/lib/chat-scope";
+import { recordMediaOwner } from "@/lib/chat-media-owners";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
@@ -497,6 +499,11 @@ async function settleTurn(
   const spokenClip = (await getVoiceAutoReply()) && (await hermesSpeaksReplies())
     ? await speakHermesReply(splitEmailRefs(caption).text)
     : null;
+  // What this turn wrote into the media tree for a ClawBox user other than the
+  // owner is theirs: served back to them on an organisation box, and to no
+  // other member (src/lib/chat-media-owners.ts).
+  const chatUser = chatKeyUser(sessionKey);
+  if (chatUser) recordMediaOwner(chatUser, [...drawn, spokenClip]);
   const answer = [
     caption,
     ...drawn.map((file) => `MEDIA:${file}`),

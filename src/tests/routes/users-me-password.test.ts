@@ -244,6 +244,59 @@ describe("guessing", () => {
     expect(h.verify).not.toHaveBeenCalled();
   });
 
+  /** A request whose body arrives as a stream of chunks, declaring no length (Transfer-Encoding: chunked). */
+  const postChunked = (chunks: string[], headers: Record<string, string> = {}) => {
+    const encoder = new TextEncoder();
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled < chunks.length) controller.enqueue(encoder.encode(chunks[pulled++]));
+        else controller.close();
+      },
+    });
+    return {
+      read: () => pulled,
+      res: POST(new Request("http://box.local/setup-api/users/me/password", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: "clawbox_session=old.cookie", ...headers },
+        body: stream,
+        duplex: "half",
+      } as RequestInit)),
+    };
+  };
+
+  it("refuses a body that only DECLARES more than 8 KB, on the header alone", async () => {
+    const res = await POST(new Request("http://box.local/setup-api/users/me/password", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: "clawbox_session=old.cookie", "content-length": String(8 * 1024 + 1) },
+      body: JSON.stringify(BODY),
+    }));
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ code: "body_too_large", error: "That request body is too large." });
+    expect(h.verify).not.toHaveBeenCalled();
+    expect(h.locked).not.toHaveBeenCalled();
+  });
+
+  it("refuses a chunked body past 8 KB once it arrives, without reading the rest", async () => {
+    const chunks = ['{"currentPassword":"old secret","password":"new secret 1","pad":"', ...Array.from({ length: 64 }, () => "x".repeat(1024)), '"}'];
+    const { res, read } = postChunked(chunks);
+    const answered = await res;
+    expect(answered.status).toBe(413);
+    expect(await answered.json()).toMatchObject({ code: "body_too_large" });
+    // Cut off at the cap: nowhere near all 64 KB was pulled from the client.
+    expect(read()).toBeLessThan(chunks.length);
+    expect(h.verify).not.toHaveBeenCalled();
+    expect(h.change).not.toHaveBeenCalled();
+  });
+
+  it("still takes a small chunked body that declares no length", async () => {
+    const json = JSON.stringify(BODY);
+    const { res } = postChunked([json.slice(0, 10), json.slice(10)]);
+    const answered = await res;
+    expect(answered.status).toBe(200);
+    expect(h.change).toHaveBeenCalledWith("alice", "old secret", "new secret 1");
+  });
+
   it("refuses a body that is not the two strings", async () => {
     expect((await post(undefined, "{not json")).status).toBe(400);
     expect(await (await post({ password: "new secret 1" })).json()).toMatchObject({ code: "wrong_password" });

@@ -59,6 +59,15 @@ vi.mock("@/lib/harness", async (importOriginal) => ({
   HERMES_BIN: "/home/clawbox/.local/bin/hermes",
 }));
 
+// No cookie is the owner, as before; one case below speaks as a member of staff.
+const session = vi.hoisted(() => ({
+  who: vi.fn(async (): Promise<{ username: string; isOwner: boolean } | null> => null),
+}));
+vi.mock("@/lib/owner-session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/owner-session")>()),
+  personSession: session.who,
+}));
+
 let root: string;
 let mediaRoot: string;
 
@@ -275,6 +284,38 @@ describe("POST /setup-api/hermes/chat", () => {
     // The COPY, under a name of ours — not the path the model named.
     expect(assistant.media[0]).toContain("chat-generated");
     expect(assistant.media[0]).not.toContain("pic.png");
+  });
+
+  it("records a picture drawn in a member's chat as theirs, and one in the owner's as nobody's", async () => {
+    // TASK-2435 review: on an organisation box the media route serves a member
+    // only what is recorded as theirs (src/lib/chat-media-owners.ts).
+    const owners = () => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(root, "data", "chat-media-owners.json"), "utf8")) as Record<string, string>;
+      } catch {
+        return {};
+      }
+    };
+    const drawn = path.join(root, "pic.png");
+    fs.writeFileSync(drawn, Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+    stdoutReply = `here you go\n\nMEDIA:${drawn}`;
+    await post({ message: "draw" });
+    expect(owners()).toEqual({});
+
+    session.who.mockResolvedValue({ username: "alice", isOwner: false });
+    try {
+      fs.writeFileSync(drawn, Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+      const res = await post({ message: "draw", sessionKey: "desktop-user-alice" });
+      expect(res.status).toBe(200);
+      const recorded = Object.entries(owners());
+      expect(recorded).toHaveLength(1);
+      const [file, user] = recorded[0];
+      expect(user).toBe("alice");
+      expect(file).toContain(`${path.sep}chat-generated${path.sep}`);
+      expect(fs.existsSync(file)).toBe(true);
+    } finally {
+      session.who.mockResolvedValue(null);
+    }
   });
 
   it("drops the card when the picture cannot be served, and keeps the sentence", async () => {

@@ -7,6 +7,8 @@ import { pipeline } from "stream/promises";
 import Busboy from "busboy";
 import { randomUUID } from "crypto";
 import { chatAttachmentDir, pruneMediaDir, type MediaRetention } from "@/lib/harness/media-root";
+import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
+import { personSession } from "@/lib/owner-session";
 import { getActiveHarness } from "@/lib/harness";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isImageMedia } from "@/lib/chat-media";
@@ -360,6 +362,13 @@ export async function POST(req: NextRequest) {
   // sitting on the disk until the next one arrived.
   await pruneMediaDir(dirReal, RETENTION);
 
+  // Who is staging: a ClawBox user other than the owner has what they stage
+  // recorded as theirs (src/lib/chat-media-owners.ts), and may add to a
+  // dropped folder's batch only when that batch is new or already theirs.
+  const person = await personSession(req);
+  const user = person && !person.isOwner ? person.username : null;
+  let batchDirUsed: string | null = null;
+
   let written: string | null = null;
   // Hoisted so the cleanup below can wait for the write to stop before
   // unlinking. Rejecting on a limit does not halt the pipeline synchronously,
@@ -508,6 +517,21 @@ export async function POST(req: NextRequest) {
         let dest: string | null;
         if (segments && batch) {
           const batchDir = resolveDest(dirReal, batch);
+          // A batch id is the composer's own and travels in paths, so a
+          // member who learnt someone else's could otherwise stage a file
+          // into that folder and have the folder recorded as theirs. An
+          // existing batch they do not own is refused.
+          if (user && batchDir && fs.existsSync(batchDir)) {
+            let owned = false;
+            try {
+              owned = isMediaOwnedBy(user, fs.realpathSync(batchDir), dirReal);
+            } catch { /* vanished: refused below like any other */ }
+            if (!owned) {
+              fail(new BadUpload("That folder is already being staged by someone else. Drop it again.", 409, "batch_in_use"));
+              return;
+            }
+          }
+          batchDirUsed = batchDir;
           dest = batchDir;
           for (const segment of segments) {
             dest = dest ? resolveDest(dest, segment) : null;
@@ -522,6 +546,10 @@ export async function POST(req: NextRequest) {
               fail(err);
               return;
             }
+            // Recorded in the same tick it was checked and made: a drop's
+            // files arrive as concurrent requests, and the next one must find
+            // the batch already theirs.
+            if (user && batchDir) recordMediaOwner(user, [batchDir]);
           }
         } else {
           dest = resolveDest(dirReal, `${randomUUID()}-${leaf}`);
@@ -586,6 +614,10 @@ export async function POST(req: NextRequest) {
       throw new BadUpload(IMAGE_ONLY_MESSAGE, 415);
     }
     const textPath = documentsAllowed && isOfficeDocumentName(result.path) ? await stageOfficeText(result.path) : undefined;
+    // Staged for a ClawBox user other than the owner: theirs, so the media
+    // route serves it back to them on an organisation box and to no other
+    // member. A dropped folder by its batch, which holds everything of it.
+    if (user) recordMediaOwner(user, [result.path, batchDirUsed ?? result.root, textPath]);
     return NextResponse.json({
       ok: true,
       name: result.name,
