@@ -129,6 +129,10 @@ async function reader() {
   const eventsFile = path.join(STATE, "reader.events");
   const deadline = Date.now() + Number(env.READER_S || 7200) * 1000;
   const record = (line) => fs.appendFileSync(eventsFile, `${new Date().toISOString()} ${line}\n`);
+  // The run that was newest before the update started (an earlier update's
+  // finished log): read past, never kept, so the reader waits for this one.
+  const before = env.READER_IGNORE_RUN || null;
+  let run = null;
   while (Date.now() < deadline) {
     let last = null;
     try { last = fs.readFileSync(lastFile, "utf8").trim() || null; } catch { /* from 0 */ }
@@ -141,15 +145,16 @@ async function reader() {
         onEvent: (ev) => {
           if (ev.event === "run") {
             const prev = last ? last.slice(0, last.lastIndexOf(":")) : null;
-            record(`run ${ev.data.id}${prev && prev !== ev.data.id ? " (another run: from 0)" : ""}`);
-            if (prev && prev !== ev.data.id) fs.writeFileSync(textFile, "");
+            run = ev.data.id;
+            record(`run ${run}${prev && prev !== run ? " (another run: from 0)" : ""}${run === before ? " (the previous update's: waiting for this one)" : ""}`);
+            if (prev && prev !== run) fs.writeFileSync(textFile, "");
           } else if (ev.event === "message") {
-            fs.appendFileSync(textFile, ev.data);
+            if (run !== before) fs.appendFileSync(textFile, ev.data);
             fs.writeFileSync(lastFile, ev.id);
             last = ev.id;
           } else if (ev.event === "end") {
             record(`end ${JSON.stringify(ev.data)}`);
-            ended = true;
+            if (run !== before) ended = true;
             return true;
           }
           return false;
@@ -173,7 +178,7 @@ function startReader() {
   const child = spawn(process.execPath, [new URL(import.meta.url).pathname, "reader"], {
     detached: true,
     stdio: ["ignore", out, out],
-    env: { ...env },
+    env: { ...env, READER_IGNORE_RUN: newestRun()?.id ?? "" },
   });
   child.unref();
   fs.writeFileSync(path.join(STATE, "reader.pid"), String(child.pid));
@@ -379,11 +384,9 @@ async function composite(page, name, panelJpeg, columns) {
   await page.send("Emulation.clearDeviceMetricsOverride");
   const bytes = Buffer.from(data, "base64");
   fs.writeFileSync(path.join(STATE, `${name}.jpg`), bytes);
-  if (env.SHOTS === "1") {
-    console.log(`SHOT ${name} ${crypto.createHash("sha256").update(bytes).digest("hex")} ${bytes.toString("hex")}`);
-  } else {
-    note(`screenshot ${name}.jpg kept on the board in ${STATE} (not printed here)`);
-  }
+  return env.SHOTS === "1"
+    ? `SHOT ${name} ${crypto.createHash("sha256").update(bytes).digest("hex")} ${bytes.toString("hex")}`
+    : `NOTE screenshot ${name}.jpg kept on the board in ${STATE} (not printed here)`;
 }
 
 /** The panel's rows that are lines (or wrapped parts of lines) of the log file. */
@@ -395,82 +398,133 @@ function rowsInFile(rows, fileText) {
   return { shown: shown.length, found: found.length, missing: shown.filter((r) => !hay.includes(r.trim())).slice(0, 3) };
 }
 
-async function panelEvidence(name, run, text, sectionCheck, { after = false } = {}) {
+/**
+ * The panel on a freshly loaded update screen: its rows against the log file,
+ * and the picture beside the journal's and the file's lines. Answers the lines
+ * to print — results without "RESULT ", NOTE and SHOT lines with theirs —
+ * and prints them itself unless `quiet`.
+ */
+async function panelEvidence(name, run, text, sectionCheck, { after = false, quiet = false } = {}) {
+  const out = [];
   if (!env.CHROME) {
-    say(`skip - ${name}: no Chromium on this board to draw the update screen with`);
-    return;
-  }
-  const browser = await openBrowser();
-  try {
-    const panel = await openPanel(browser.page, after ? { settle: 0, attempts: 4 } : { settle: 2500 });
-    const jpeg = panel.jpeg;
-    if (panel.attempt > 1) note(`${name}: the panel was read on load ${panel.attempt}`);
-    // The file as it is now: the panel was drawn from it a moment ago.
-    const fileNow = fs.readFileSync(run.file, "utf8");
-    const match = rowsInFile(panel.rows, fileNow);
-    if (match.shown > 0 && match.found >= Math.ceil(match.shown * 0.9)) {
-      say(`ok - ${name}: ${match.found} of the ${match.shown} rows the panel shows are lines of the log file on the box (${run.id}.log)`);
-    } else {
-      say(`not ok - ${name}: only ${match.found} of ${match.shown} panel rows are in the log file; e.g. ${JSON.stringify(match.missing)}`);
+    out.push(`skip - ${name}: no Chromium on this board to draw the update screen with`);
+  } else {
+    const browser = await openBrowser();
+    try {
+      const panel = await openPanel(browser.page, after ? { settle: 0, attempts: 4 } : { settle: 2500 });
+      if (panel.attempt > 1) out.push(`NOTE ${name}: the panel was read on load ${panel.attempt}`);
+      // The file as it is now: the panel was drawn from it a moment ago.
+      const fileNow = fs.readFileSync(run.file, "utf8");
+      const match = rowsInFile(panel.rows, fileNow);
+      if (match.shown > 0 && match.found >= Math.ceil(match.shown * 0.9)) {
+        out.push(`ok - ${name}: ${match.found} of the ${match.shown} rows the panel shows are lines of the log file on the box (${run.id}.log)`);
+      } else {
+        out.push(`not ok - ${name}: only ${match.found} of ${match.shown} panel rows are in the log file; e.g. ${JSON.stringify(match.missing)}`);
+      }
+      const shownRows = panel.rows.filter((r) => r.trim()).slice(-24);
+      const fileTail = strip(fileNow).split("\n").filter((l) => l.trim()).slice(-24);
+      const columns = [
+        { title: `tail -n 24 data/update-logs/${run.id}.log (ANSI stripped)`, lines: fileTail },
+      ];
+      if (sectionCheck) {
+        columns.unshift({
+          title: `journalctl -u ${sectionCheck.unit} --since @${sectionCheck.since} -o cat (the lines the log section holds, last 14)`,
+          lines: sectionCheck.journalTail.map(strip),
+        });
+      }
+      columns.push({ title: "the panel's rows (xterm DOM text)", lines: shownRows });
+      out.push(await composite(browser.page, name, panel.jpeg, columns));
+    } finally {
+      browser.close();
     }
-    const shownRows = panel.rows.filter((r) => r.trim()).slice(-24);
-    const fileTail = strip(fileNow).split("\n").filter((l) => l.trim()).slice(-24);
-    const columns = [
-      { title: `tail -n 24 data/update-logs/${run.id}.log (ANSI stripped)`, lines: fileTail },
-    ];
-    if (sectionCheck) {
-      columns.unshift({
-        title: `journalctl -u ${sectionCheck.unit} --since @${sectionCheck.since} -o cat (the lines the log section holds, last 14)`,
-        lines: sectionCheck.journalTail.map(strip),
-      });
-    }
-    columns.push({ title: "the panel's rows (xterm DOM text)", lines: shownRows });
-    await composite(browser.page, name, jpeg, columns);
-  } finally {
-    browser.close();
   }
+  if (!quiet) {
+    for (const line of out) {
+      if (line.startsWith("SHOT ") || line.startsWith("NOTE ")) console.log(line);
+      else say(line);
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 
+/** The box's web server answers at all (it is replaced half-way through an update). */
+async function serverUp() {
+  try {
+    const res = await fetch(`${BASE}/setup-api/update/status`, { signal: AbortSignal.timeout(5_000) });
+    return res.status > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mid-update: the stream is the start of the file, the newest unit section is
+ * that unit's journal, and the panel shows lines of the file. Everything is
+ * said at the end, or nothing but "not yet" — the next poll asks again — so a
+ * check the web server's restart cut short leaves no half a verdict behind.
+ *
+ * LABEL "before-restart" is answered only before the rebuild's restart (the
+ * log then has no "ClawBox restarted" line), "after-restart" only after it.
+ */
 async function live() {
   const run = newestRun();
   if (!run || !run.meta || run.meta.finished) {
     say("skip - not yet: no unfinished update log on the box");
     return;
   }
-  const following = (run.meta.follows ?? []).filter((f) => !f.done);
-  if (following.length === 0) {
-    say("skip - not yet: no root step is being followed right now");
+  const textNow = fs.readFileSync(run.file, "utf8");
+  const restarted = textNow.includes("ClawBox restarted on the new build");
+  if (env.LABEL === "after-restart" && !restarted) {
+    say("skip - not yet: the web server has not been restarted by the update yet");
     return;
   }
-  // The unit running now must have written something to compare: asked again
-  // at the next poll otherwise, before anything is said.
-  const unit = `clawbox-root-update@${following.at(-1).step}.service`;
-  if (![...unitSections(fs.readFileSync(run.file, "utf8"))].some(([key, lines]) => key.startsWith(`${unit}@`) && lines.length > 0)) {
-    say(`skip - not yet: ${unit} has not written anything yet`);
+  if (env.LABEL === "before-restart" && restarted) {
+    say("skip - before-restart: the update was past its restart before a check could run");
     return;
   }
-  // 1. The stream is the file: what it sends is the file's start, byte for byte.
-  const streamed = await streamWhole(6_000);
-  const file = fs.readFileSync(run.file);
-  const sent = Buffer.from(streamed.text, "utf8");
-  if (streamed.run === run.id && sent.length > 0 && file.subarray(0, sent.length).equals(sent)) {
-    say(`ok - ${env.LABEL}: mid-update, the stream sent ${sent.length} bytes of ${run.id}.log, exactly the file's (${file.length} bytes now, still growing)`);
-  } else {
-    say(`not ok - ${env.LABEL}: the stream (${sent.length} bytes, run ${streamed.run}) is not the start of ${run.id}.log (${file.length} bytes)`);
+  // The newest unit section that has lines: what the panel shows at the bottom.
+  const sections = [...unitSections(textNow)].filter(([, lines]) => lines.length > 0);
+  if (sections.length === 0) {
+    say("skip - not yet: no root step has written anything yet");
+    return;
   }
-  // 2. The unit running now: its section is its journal.
-  const checks = checkSections(file.toString("utf8"), { only: unit });
-  const check = checks.at(-1);
-  if (!check) {
-    say(`skip - ${env.LABEL}: ${unit} has not written anything yet`);
-  } else if (check.ok) {
-    say(`ok - ${env.LABEL}: the log's ${check.lines} lines of ${unit} are its journal (journalctl -u ${unit} --since @${check.since} -o cat), line for line${check.redacted ? `, ${check.redacted} redacted` : ""}`);
-  } else {
-    say(`not ok - ${env.LABEL}: line ${check.at + 1} of ${unit} differs: log ${JSON.stringify(check.log)} journal ${JSON.stringify(check.journal)}${check.error ? ` (${check.error})` : ""}`);
+  const [key] = sections.at(-1);
+  const unit = key.slice(0, key.lastIndexOf("@"));
+  const results = [];
+  const keep = (line) => results.push(line);
+  try {
+    // 1. The stream is the file: what it sends is the file's start, byte for byte.
+    const streamed = await streamWhole(6_000);
+    const file = fs.readFileSync(run.file);
+    const sent = Buffer.from(streamed.text, "utf8");
+    if (streamed.run === run.id && sent.length > 0 && file.subarray(0, sent.length).equals(sent)) {
+      keep(`ok - ${env.LABEL}: mid-update, the stream sent ${sent.length} bytes of ${run.id}.log, exactly the file's (${file.length} bytes now, still growing)`);
+    } else {
+      keep(`not ok - ${env.LABEL}: the stream (${sent.length} bytes, run ${streamed.run}) is not the start of ${run.id}.log (${file.length} bytes)`);
+    }
+    // 2. That unit's section is its journal.
+    const check = checkSections(file.toString("utf8"), { only: unit }).at(-1);
+    if (check?.ok) {
+      keep(`ok - ${env.LABEL}: the log's ${check.lines} lines of ${unit} are its journal (journalctl -u ${unit} --since @${check.since} -o cat), line for line${check.redacted ? `, ${check.redacted} redacted` : ""}`);
+    } else {
+      keep(`not ok - ${env.LABEL}: line ${(check?.at ?? 0) + 1} of ${unit} differs: log ${JSON.stringify(check?.log)} journal ${JSON.stringify(check?.journal)}${check?.error ? ` (${check.error})` : ""}`);
+    }
+    // 3. The panel.
+    const shotLines = await panelEvidence(env.LABEL, run, file.toString("utf8"), check?.ok ? check : null, { quiet: true });
+    results.push(...shotLines);
+  } catch (err) {
+    if (!(await serverUp())) {
+      say(`skip - not yet: the web server went away during the check (${err instanceof Error ? err.message : err})`);
+      return;
+    }
+    throw err;
   }
-  await panelEvidence(env.LABEL, run, file.toString("utf8"), check?.ok ? check : null);
+  for (const line of results) {
+    if (line.startsWith("SHOT ") || line.startsWith("NOTE ")) console.log(line);
+    else say(line);
+  }
 }
 
 async function after() {

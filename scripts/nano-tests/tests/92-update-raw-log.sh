@@ -88,19 +88,41 @@ else
   finish
 fi
 
-# Between the status polls: a panel check on a root step before the restart,
-# and one on a root step after it. `step` is the step wait_app_update last saw.
+# Every few seconds until the run ends: the update's status, and — once
+# before the web server's restart and once after it — the live checks. A
+# Hermes box goes through its root steps in seconds, so the checks ask the
+# log rather than the step list where the update is; each answers "not yet"
+# until it can say something. (wait_app_update polls every 15 s, which a fast
+# box outruns.)
 LIVE_BEFORE=0
 LIVE_AFTER=0
-live_checks() {
-  case "${step:-}" in
-    apt_update|chromium_install|vnc_install|openclaw_install|openclaw_patch|gateway_setup)
-      if [ "$LIVE_BEFORE" = 0 ] && raw_log live before-restart; then LIVE_BEFORE=1; fi ;;
-    post_update|hermes_edition|llamacpp_runtime)
-      if [ "$LIVE_AFTER" = 0 ] && raw_log live after-restart; then LIVE_AFTER=1; fi ;;
-  esac
+follow_update() {
+  local deadline=$(( $(date +%s) + $1 )) phase step seen_running=0 last=""
+  UPDATE_PHASE=timeout UPDATE_ERROR=
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ "$LIVE_BEFORE" = 0 ] && raw_log live before-restart; then LIVE_BEFORE=1; fi
+    if [ "$LIVE_BEFORE" = 1 ] && [ "$LIVE_AFTER" = 0 ] && raw_log live after-restart; then LIVE_AFTER=1; fi
+    API_MAX_TIME=20 board_api GET /setup-api/update/status
+    if [ "$API_STATUS" = 200 ]; then
+      phase=$(api_json '.phase // empty')
+      step=$(api_json '[.steps[]? | select(.status == "running") | .id] | first // empty')
+      if [ "$phase/$step" != "$last" ]; then note "update: $phase${step:+ ($step)}"; last="$phase/$step"; fi
+      case "$phase" in
+        running) seen_running=1 ;;
+        completed|failed)
+          if [ "$seen_running" = 1 ] || [ "$phase" = failed ]; then
+            UPDATE_PHASE=$phase
+            UPDATE_ERROR=$(api_json '(.error // ([.steps[]? | select(.status == "failed") | .error] | first) // "") | tostring | .[0:300]')
+            return 0
+          fi
+          ;;
+      esac
+    fi
+    sleep 4
+  done
+  return 1
 }
-wait_app_update 3600 live_checks
+follow_update 3600
 note "update took $(( $(date +%s) - START ))s and ended: $UPDATE_PHASE${UPDATE_ERROR:+ ($UPDATE_ERROR)}"
 case "$UPDATE_PHASE" in
   completed) ok "[$RUNTIME] the update completed" ;;
