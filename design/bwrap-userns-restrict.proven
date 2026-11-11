@@ -1,0 +1,59 @@
+# ClawBox: let bubblewrap build its sandbox on a box that restricts
+# unprivileged user namespaces (Ubuntu 23.10+,
+# kernel.apparmor_restrict_unprivileged_userns=1).
+#
+# This is upstream AppArmor's own extras/bwrap-userns-restrict at abi 4.0:
+# bwrap itself may create a user namespace and hold capabilities INSIDE it
+# (it needs CAP_NET_ADMIN there to bring up the sandbox's loopback), and
+# everything bwrap starts is stacked with unpriv_bwrap, which denies every
+# capability — so bwrap cannot be used to step around the restriction.
+#
+# Why ClawBox needs it: a read-only Codex coding run (a team's planner or
+# reviewer) is fenced by Codex's read-only sandbox, which is /usr/bin/bwrap
+# with --unshare-net. Without this profile every command fails with
+# "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(attach_disconnected,mediate_deleted) {
+  allow capability,
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow pix /** -> &bwrap//&unpriv_bwrap,
+
+  include if exists <local/bwrap-userns-restrict>
+}
+
+profile unpriv_bwrap flags=(attach_disconnected,mediate_deleted) {
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow pix /** -> &unpriv_bwrap,
+
+  audit deny capability,
+
+  include if exists <local/unpriv_bwrap>
+}
