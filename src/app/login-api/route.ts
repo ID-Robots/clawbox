@@ -10,6 +10,7 @@ import {
 import { hasOwnerPassword } from "@/lib/system-password";
 import { checkUserPassword, findUser } from "@/lib/clawbox-users";
 import { isTunnelRequest } from "@/lib/host-allowlist";
+import { passwordChangeEpoch, passwordChangeInProgress } from "@/lib/password-change-lock";
 import {
   checkLockout,
   recordFailure,
@@ -170,6 +171,16 @@ export async function POST(request: Request) {
   // be a user Settings → System → Users created; anything else is refused exactly like
   // a wrong password, so the answer never says which names exist.
   const requested = typeof body.username === "string" ? body.username.trim() : "";
+  // A user's own password change ends their sessions before it changes the
+  // password (users/me/password): no sign-in is issued in between, nor by one
+  // that began before it and finishes after (src/lib/password-change-lock.ts).
+  const changeEpoch = requested ? passwordChangeEpoch(requested) : 0;
+  const passwordChanging = () =>
+    requested !== "" && (passwordChangeInProgress(requested) || passwordChangeEpoch(requested) !== changeEpoch);
+  if (passwordChanging()) {
+    await padResponseTime(startedAt);
+    return NextResponse.json({ error: "This account's password is being changed. Try again in a moment.", code: "password_changing" }, { status: 409 });
+  }
   const target = await resolveLoginTarget(requested);
   if (target.kind !== "unknown") {
     buckets.push(userBucket(target.username));
@@ -218,6 +229,13 @@ export async function POST(request: Request) {
   // who fat-fingers it a few times and then gets it right is not left sitting
   // behind the shared cap.
   for (const bucket of buckets) await recordSuccess(bucket.key);
+
+  // Checked again at the last moment: a change that began while this sign-in
+  // was being checked may already have ended the sessions it would join.
+  if (target.kind === "user" && passwordChanging()) {
+    await padResponseTime(startedAt);
+    return NextResponse.json({ error: "This account's password is being changed. Try again in a moment.", code: "password_changing" }, { status: 409 });
+  }
 
   const secret = await getSessionSigningSecret();
   const gen = await getSessionGeneration();

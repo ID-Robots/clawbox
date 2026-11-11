@@ -256,7 +256,31 @@ describe("a spreadsheet built to balloon", () => {
     if (result.ok) {
       expect(result.truncated).toBe(true);
       expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
-      expect(result.text).toContain(field);
+      // Every field written is whole: the budget drops fields, it never cuts one.
+      const fields = result.text.split("\n").slice(1).flatMap((line) => line.split(","));
+      expect(fields.length).toBeGreaterThan(10);
+      for (const f of fields) expect(f.length, "a field was cut").toBe(field.length);
+    }
+  });
+
+  it("counts the commas of an Excel row's empty columns against the budget", () => {
+    const value = "v".repeat(32 * 1024);
+    // Column AMJ is the 1,024th: each row is 1,023 commas before its one value.
+    const rows = Array.from({ length: 30 }, (_, i) => `<row r="${i + 1}"><c r="AMJ${i + 1}" t="inlineStr"><is><t>${value}</t></is></c></row>`).join("");
+    const workbook = zip([
+      { name: "xl/workbook.xml", data: Buffer.from('<workbook><sheets><sheet name="Far" sheetId="1" r:id="rId1"/></sheets></workbook>') },
+      { name: "xl/_rels/workbook.xml.rels", data: Buffer.from('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: "xl/worksheets/sheet1.xml", data: Buffer.from(`<worksheet><sheetData>${rows}</sheetData></worksheet>`) },
+    ]);
+    const result = extractOfficeText(workbook, "far.xlsx");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.truncated).toBe(true);
+      expect(result.text.length).toBeLessThanOrEqual(OFFICE_TEXT_MAX_CHARS);
+      // Each row that was written is whole: its commas and its value.
+      const lines = result.text.split("\n").slice(1);
+      expect(lines.length).toBeGreaterThan(20);
+      for (const line of lines) expect(line).toBe(",".repeat(1023) + value);
     }
   });
 

@@ -629,9 +629,10 @@ function xlsxSheet(xml: string, shared: readonly string[]): { rows: string[][]; 
                 cut = true;
               }
               cells += Math.max(1, cellCol + 1 - row.length);
-              // As the CSV will write it: quoting can double a field. A field
-              // that would take the sheet past its budget is not written.
-              const encoded = csvField(shown).length + 1;
+              // As the CSV will write it: quoting can double a field, and the
+              // empty columns before it are a comma each. A field that would
+              // take the sheet past its budget is not written.
+              const encoded = csvField(shown).length + 1 + Math.max(0, cellCol - row.length);
               if (chars + encoded > MAX_SHEET_CHARS) {
                 chars = MAX_SHEET_CHARS;
                 cut = true;

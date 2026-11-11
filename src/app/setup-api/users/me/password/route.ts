@@ -6,6 +6,7 @@ import { createSessionCookie, getSessionGeneration, getSessionSigningSecret, isS
 import { changeUserPassword, checkUserPassword, rotateUserSessionVersion } from "@/lib/clawbox-users";
 import { checkLockout, recordFailure, recordSuccess, SHARED_BUCKET_MAX_LOCK_MS } from "@/lib/login-rate-limit";
 import { personSession } from "@/lib/owner-session";
+import { beginPasswordChange, endPasswordChange } from "@/lib/password-change-lock";
 import { sessionRequiredResponse } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
@@ -34,14 +35,16 @@ import { USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
  *   3. Only then is the password changed (the helper's `passwd`, which checks
  *      the current password again before chpasswd).
  *
+ * The whole change holds src/lib/password-change-lock.ts, which /login-api
+ * reads: no sign-in is issued for the account while it runs, nor by one that
+ * began before it — the old password still works until step 3.
+ *
  * Never a 401 for a wrong current password: the desktop reads a 401 as
  * "signed out".
  */
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
-/** Accounts with a guess in progress: one at a time per account. */
-const inFlight = new Set<string>();
 /** Locks the shared limiter reported but could not store (a full table): held here until they end. */
 const heldLocks = new Map<string, number>();
 
@@ -161,8 +164,9 @@ export async function POST(req: Request) {
   }
 
   const username = who.username;
-  if (inFlight.has(username)) return TOO_MANY();
-  inFlight.add(username);
+  // One change (one guess) per account at a time — and, while it runs, no
+  // sign-in for the account (src/lib/password-change-lock.ts).
+  if (!beginPasswordChange(username)) return TOO_MANY();
   try {
     const held = heldLocks.get(username);
     if (held !== undefined && held > Date.now()) return TOO_MANY();
@@ -211,6 +215,6 @@ export async function POST(req: Request) {
         );
     }
   } finally {
-    inFlight.delete(username);
+    endPasswordChange(username);
   }
 }

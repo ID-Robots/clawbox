@@ -140,6 +140,15 @@ describe("other sessions end before the password changes", () => {
     expect(freshCookie(res)).toContain("clawbox_session=fresh.alice.");
   });
 
+  it("holds the account's password-change lock for the whole change, so no sign-in is issued in between", async () => {
+    const lock = await import("@/lib/password-change-lock");
+    let seenDuring = false;
+    h.rotate.mockImplementation(async () => { seenDuring = lock.passwordChangeInProgress("alice"); return "f".repeat(32); });
+    await post(BODY);
+    expect(seenDuring).toBe(true);
+    expect(lock.passwordChangeInProgress("alice")).toBe(false);
+  });
+
   it("ends no session for a wrong current password", async () => {
     h.verify.mockResolvedValue("wrong");
     await post(BODY);
