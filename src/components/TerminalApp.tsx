@@ -53,7 +53,6 @@ import {
   terminalThemeFor,
   useTerminalSettings,
   type TerminalColors,
-  type TerminalFontDef,
   type TerminalSettings,
 } from "@/lib/terminal-settings";
 import { canReadClipboard as clipboardReadable, copyToClipboard, readClipboard, readClipboardImages } from "@/lib/terminal-clipboard";
@@ -69,7 +68,16 @@ import {
   type PasteUpload,
   type PictureTaker,
 } from "@/lib/terminal-paste";
-import { XTERM_LOOK, loadXtermModules, terminalBufferText, xtermLiveOptions as liveOptions } from "@/lib/xterm-setup";
+import {
+  FONT_WAIT_MS,
+  XTERM_LOOK,
+  loadTerminalFont,
+  loadXtermModules,
+  refitForFont,
+  terminalBufferText,
+  withTimeout,
+  xtermLiveOptions as liveOptions,
+} from "@/lib/xterm-setup";
 import "@xterm/xterm/css/xterm.css";
 
 type XTerm = import("@xterm/xterm").Terminal;
@@ -113,46 +121,6 @@ export interface TerminalAppProps {
 
 /** The default face's stack, as the rest of the desktop has always read it. */
 export const TERMINAL_FONT_FAMILY = TERMINAL_FONTS["jetbrains-mono"].family;
-
-/** How long the first cell waits for the settings and the web font before it is drawn with what is there. */
-const FONT_WAIT_MS = 1500;
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  return Promise.race([
-    promise,
-    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), ms); }),
-  ]).finally(() => { if (timer !== null) clearTimeout(timer); });
-}
-
-/**
- * A shipped face, loaded before the grid is measured — bounded, so a slow disk
- * never holds the shell. Answers whether the wait ran out and the load itself,
- * so a terminal drawn on the fallback face can be refitted the moment the real
- * one lands. The device's own monospace needs no wait.
- */
-async function loadTerminalFont(font: TerminalFontDef, size: number): Promise<{ late: boolean; loading: Promise<boolean> | null }> {
-  if (!font.face || typeof document === "undefined" || !("fonts" in document)) return { late: false, loading: null };
-  let loading: Promise<boolean>;
-  try {
-    loading = document.fonts.load(`${size}px "${font.face}"`).then((faces) => faces.length > 0, () => false);
-  } catch {
-    return { late: false, loading: null };
-  }
-  const late = await withTimeout(loading.then(() => false), FONT_WAIT_MS);
-  return { late: late === undefined, loading };
-}
-
-/**
- * Re-measure the grid on the face that has just arrived: xterm measures on a
- * font CHANGE, so the family is set away and back.
- */
-const FALLBACK_FONT_FAMILY = '"DejaVu Sans Mono", "Liberation Mono", monospace';
-function refitForFont(term: XTerm, fitAddon: XFitAddon, family: string): void {
-  term.options.fontFamily = FALLBACK_FONT_FAMILY;
-  term.options.fontFamily = family;
-  fitAddon.fit();
-}
 
 /**
  * The letter spacing that makes a WebGL cell as wide as the face, in whole

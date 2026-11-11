@@ -9,8 +9,12 @@
 import {
   terminalFontFor,
   terminalThemeFor,
+  type TerminalFontDef,
   type TerminalSettings,
 } from "@/lib/terminal-settings";
+
+type XTerm = import("@xterm/xterm").Terminal;
+type XFitAddon = import("@xterm/addon-fit").FitAddon;
 
 export interface XtermModules {
   Terminal: typeof import("@xterm/xterm").Terminal;
@@ -47,6 +51,57 @@ export function loadXtermModules(): Promise<XtermModules> {
     });
   }
   return xtermModules;
+}
+
+/** How long the first cell waits for the settings and the web font before it is drawn with what is there. */
+export const FONT_WAIT_MS = 1500;
+
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), ms); }),
+  ]).finally(() => { if (timer !== null) clearTimeout(timer); });
+}
+
+/**
+ * A shipped face, loaded before the grid is measured — bounded, so a slow disk
+ * never holds the shell. Answers whether the wait ran out and the load itself,
+ * so a terminal drawn on the fallback face can be refitted the moment the real
+ * one lands. The device's own monospace needs no wait.
+ *
+ * Every terminal must do this before it draws: xterm measures each glyph's
+ * width once, and a face that arrives later is drawn into the widths of the
+ * fallback. In the stack the terminal fonts share, the first fallback with a
+ * space is the colour-emoji face, whose space is twice a cell — measured
+ * there and drawn in the real face, every space came out zero wide.
+ */
+export async function loadTerminalFont(font: TerminalFontDef, size: number): Promise<{ late: boolean; loading: Promise<boolean> | null }> {
+  if (!font.face || typeof document === "undefined" || !("fonts" in document)) return { late: false, loading: null };
+  let loading: Promise<boolean>;
+  try {
+    // Bold as well: xterm measures bold glyphs on their own, and bold text
+    // measured on the fallback lost its spaces the same way.
+    loading = Promise.all([
+      document.fonts.load(`${size}px "${font.face}"`),
+      document.fonts.load(`bold ${size}px "${font.face}"`).catch(() => []),
+    ]).then(([regular]) => regular.length > 0, () => false);
+  } catch {
+    return { late: false, loading: null };
+  }
+  const late = await withTimeout(loading.then(() => false), FONT_WAIT_MS);
+  return { late: late === undefined, loading };
+}
+
+/**
+ * Re-measure the grid on the face that has just arrived: xterm measures on a
+ * font CHANGE, so the family is set away and back.
+ */
+const FALLBACK_FONT_FAMILY = '"DejaVu Sans Mono", "Liberation Mono", monospace';
+export function refitForFont(term: XTerm, fitAddon: XFitAddon, family: string): void {
+  term.options.fontFamily = FALLBACK_FONT_FAMILY;
+  term.options.fontFamily = family;
+  fitAddon.fit();
 }
 
 /** The xterm options a settings value decides — every one of them can change on a live terminal. */
@@ -93,7 +148,7 @@ export const XTERM_LOOK = {
  * joined back onto the line it continues, so "Copy all" pastes the lines the
  * program printed rather than the width the window happened to be.
  */
-export function terminalBufferText(term: Pick<import("@xterm/xterm").Terminal, "buffer">): string {
+export function terminalBufferText(term: Pick<XTerm, "buffer">): string {
   const buffer = term.buffer.active;
   const lines: string[] = [];
   for (let y = 0; y < buffer.length; y++) {

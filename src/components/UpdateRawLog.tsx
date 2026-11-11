@@ -2,9 +2,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTr } from "@/lib/i18n-floor";
-import { getTerminalSettings, loadTerminalSettings, terminalThemeFor } from "@/lib/terminal-settings";
+import { getTerminalSettings, loadTerminalSettings, terminalFontFor, terminalThemeFor } from "@/lib/terminal-settings";
 import { copyToClipboard } from "@/lib/terminal-clipboard";
-import { XTERM_LOOK, loadXtermModules, terminalBufferText, xtermLiveOptions } from "@/lib/xterm-setup";
+import {
+  FONT_WAIT_MS,
+  XTERM_LOOK,
+  loadTerminalFont,
+  loadXtermModules,
+  refitForFont,
+  terminalBufferText,
+  withTimeout,
+  xtermLiveOptions,
+} from "@/lib/xterm-setup";
 import "@xterm/xterm/css/xterm.css";
 
 /**
@@ -29,7 +38,6 @@ export const UPDATE_LOG_STREAM = "/setup-api/update/log";
 
 export type RawLogStatus = "connecting" | "live" | "reconnecting" | "ended" | "none" | "unavailable";
 
-const SETTINGS_WAIT_MS = 1500;
 const COPIED_MS = 1500;
 /** While a run is going on and the stream shows an ended one, how often it asks again. */
 const RECONNECT_ENDED_MS = 3000;
@@ -37,14 +45,6 @@ const RECONNECT_ENDED_MS = 3000;
 const MIN_SCROLLBACK = 50_000;
 /** Hide the cursor: nothing is typed here. */
 const HIDE_CURSOR = "\x1b[?25l";
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  return Promise.race([
-    promise,
-    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), ms); }),
-  ]).finally(() => { if (timer !== null) clearTimeout(timer); });
-}
 
 function atBottom(term: XTerm): boolean {
   const buffer = term.buffer.active;
@@ -149,7 +149,7 @@ export default function UpdateRawLog({
     let resize: ResizeObserver | null = null;
     let disposed = false;
     void (async () => {
-      await withTimeout(loadTerminalSettings(), SETTINGS_WAIT_MS).catch(() => undefined);
+      await withTimeout(loadTerminalSettings(), FONT_WAIT_MS).catch(() => undefined);
       let modules: Awaited<ReturnType<typeof loadXtermModules>>;
       try {
         modules = await loadXtermModules();
@@ -157,9 +157,14 @@ export default function UpdateRawLog({
         if (!disposed) setStatus("unavailable");
         return;
       }
+      // The owner's face, waited for (boundedly) before the first cell is
+      // measured, and measured again if it lands later — the Terminal app's
+      // own order (src/lib/xterm-setup.ts says what skipping it costs).
+      const settings = getTerminalSettings();
+      const face = terminalFontFor(settings.font);
+      const fontLate = await loadTerminalFont(face, settings.fontSize);
       const container = containerRef.current;
       if (disposed || !container) return;
-      const settings = getTerminalSettings();
       setGround(terminalThemeFor(settings.theme).colors.background);
       const { Terminal, FitAddon, WebLinksAddon, Unicode11Addon } = modules;
       const term = new Terminal({
@@ -198,6 +203,12 @@ export default function UpdateRawLog({
       termRef.current = term;
       fitRef.current = fit;
       try { fit.fit(); } catch { /* not laid out yet */ }
+      if (fontLate.late && fontLate.loading) {
+        void fontLate.loading.then((loaded) => {
+          if (!loaded || termRef.current !== term) return;
+          try { refitForFont(term, fit, face.family); } catch { /* disposed */ }
+        });
+      }
       term.write(HIDE_CURSOR);
       // Scrolled away from the bottom: new output no longer moves the view.
       term.onScroll(() => {
@@ -298,7 +309,9 @@ export default function UpdateRawLog({
       </div>
       <div
         ref={containerRef}
-        className="us-raw-term h-[240px] min-h-0 px-2 py-1"
+        // No ligatures: a log shows the characters the step printed ("==>",
+        // "!=", "->"), not the glyph a programming font would join them into.
+        className="us-raw-term h-[240px] min-h-0 px-2 py-1 [&_.xterm-rows]:[font-variant-ligatures:none]"
         style={ground ? { backgroundColor: ground } : undefined}
         data-testid="update-raw-log-terminal"
       />

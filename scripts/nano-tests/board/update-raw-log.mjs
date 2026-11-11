@@ -305,19 +305,51 @@ async function openBrowser() {
   return { page, close: () => { page.close(); chrome.child.kill("SIGKILL"); } };
 }
 
-/** The update screen, freshly loaded (a reload), with the raw log panel open and drawn. */
-async function openPanel(page) {
-  await page.send("Page.navigate", { url: `${BASE}/updating` });
-  await waitFor("the update screen's terminal button", () => page.evaluate(`!!document.querySelector('[data-testid="update-log-toggle"]')`), 120_000, 1000);
-  await page.evaluate(`document.querySelector('[data-testid="update-log-toggle"]').click(), true`);
-  await waitFor("the panel's first rows", () => page.evaluate(`(document.querySelector('[data-testid="update-raw-log"] .xterm-rows')?.textContent ?? "").trim().length > 40`), 60_000, 1000);
-  await sleep(2500);
-  return page.evaluate(`(() => {
-    const panel = document.querySelector('[data-testid="update-raw-log"]');
-    const rows = [...panel.querySelectorAll('.xterm-rows > div')].map((r) => r.textContent.replace(/\\u00a0/g, " ").trimEnd());
-    const r = document.querySelector('[data-testid="update-steps-panel"]').getBoundingClientRect();
-    return { status: panel.dataset.status, rows, clip: { x: r.x, y: r.y, width: r.width, height: r.height } };
-  })()`);
+/** The panel's rows and where the steps panel is, or null when the panel is not on the page. */
+const READ_PANEL = `(() => {
+  const panel = document.querySelector('[data-testid="update-raw-log"]');
+  const steps = document.querySelector('[data-testid="update-steps-panel"]');
+  if (location.pathname !== "/updating") return { left: true };
+  if (!panel || !steps) return null;
+  const rows = [...panel.querySelectorAll('.xterm-rows > div')].map((r) => r.textContent.replace(/\\u00a0/g, " ").trimEnd());
+  const r = steps.getBoundingClientRect();
+  return { status: panel.dataset.status, rows, clip: { x: r.x, y: r.y, width: r.width, height: r.height } };
+})()`;
+
+/**
+ * The update screen, freshly loaded (a reload), with the raw log panel open
+ * and drawn, and its picture.
+ *
+ * `settle`: how long to let the stream fill the panel first. Mid-update there
+ * is time. After a COMPLETED update there is not: /updating shows the result
+ * for RETURN_AFTER_COMPLETE_MS (3 s, src/app/updating/page.tsx) and then
+ * replaces itself with the desktop, so the panel is read and drawn the moment
+ * its first rows are there — and the page is loaded again if it left first.
+ */
+async function openPanel(page, { settle, attempts = 1 }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await page.send("Page.navigate", { url: `${BASE}/updating` });
+      await waitFor("the update screen's terminal button", () => page.evaluate(`!!document.querySelector('[data-testid="update-log-toggle"]')`), 120_000, 100);
+      await page.evaluate(`document.querySelector('[data-testid="update-log-toggle"]').click(), true`);
+      const drawn = await waitFor("the panel's first rows", async () => {
+        const seen = await page.evaluate(READ_PANEL);
+        if (seen?.left) return "left";
+        return seen && seen.rows.join("").trim().length > 40 ? "drawn" : null;
+      }, 60_000, 100);
+      if (drawn === "left") throw new Error("the update screen left before the panel drew");
+      if (settle) await sleep(settle);
+      const panel = await page.evaluate(READ_PANEL);
+      if (!panel || panel.left) throw new Error("the update screen left before the panel was read");
+      const jpeg = await shot(page, panel.clip);
+      return { ...panel, jpeg, attempt };
+    } catch (err) {
+      lastError = err;
+      note(`panel attempt ${attempt}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  throw lastError;
 }
 
 async function shot(page, clip) {
@@ -363,15 +395,16 @@ function rowsInFile(rows, fileText) {
   return { shown: shown.length, found: found.length, missing: shown.filter((r) => !hay.includes(r.trim())).slice(0, 3) };
 }
 
-async function panelEvidence(name, run, text, sectionCheck) {
+async function panelEvidence(name, run, text, sectionCheck, { after = false } = {}) {
   if (!env.CHROME) {
     say(`skip - ${name}: no Chromium on this board to draw the update screen with`);
     return;
   }
   const browser = await openBrowser();
   try {
-    const panel = await openPanel(browser.page);
-    const jpeg = await shot(browser.page, panel.clip);
+    const panel = await openPanel(browser.page, after ? { settle: 0, attempts: 4 } : { settle: 2500 });
+    const jpeg = panel.jpeg;
+    if (panel.attempt > 1) note(`${name}: the panel was read on load ${panel.attempt}`);
     // The file as it is now: the panel was drawn from it a moment ago.
     const fileNow = fs.readFileSync(run.file, "utf8");
     const match = rowsInFile(panel.rows, fileNow);
@@ -411,6 +444,13 @@ async function live() {
     say("skip - not yet: no root step is being followed right now");
     return;
   }
+  // The unit running now must have written something to compare: asked again
+  // at the next poll otherwise, before anything is said.
+  const unit = `clawbox-root-update@${following.at(-1).step}.service`;
+  if (![...unitSections(fs.readFileSync(run.file, "utf8"))].some(([key, lines]) => key.startsWith(`${unit}@`) && lines.length > 0)) {
+    say(`skip - not yet: ${unit} has not written anything yet`);
+    return;
+  }
   // 1. The stream is the file: what it sends is the file's start, byte for byte.
   const streamed = await streamWhole(6_000);
   const file = fs.readFileSync(run.file);
@@ -421,7 +461,6 @@ async function live() {
     say(`not ok - ${env.LABEL}: the stream (${sent.length} bytes, run ${streamed.run}) is not the start of ${run.id}.log (${file.length} bytes)`);
   }
   // 2. The unit running now: its section is its journal.
-  const unit = `clawbox-root-update@${following.at(-1).step}.service`;
   const checks = checkSections(file.toString("utf8"), { only: unit });
   const check = checks.at(-1);
   if (!check) {
@@ -463,10 +502,12 @@ async function after() {
   let readerText = null;
   try { readerText = fs.readFileSync(path.join(STATE, "reader.txt")); } catch { /* none */ }
   const events = (() => { try { return fs.readFileSync(path.join(STATE, "reader.events"), "utf8").trim().split("\n"); } catch { return []; } })();
-  const resumes = events.filter((l) => /connect \S+:\d+$/.test(l));
+  // A reconnect that resumed: a `connect <run>:<offset>` the server answered.
+  const resumes = events.filter((l, i) => /connect \S+:\d+$/.test(l) && /^\S+ run /.test(events[i + 1] ?? ""));
+  const attempts = events.filter((l) => /connect \S+:\d+$/.test(l)).length;
   for (const l of events.slice(-12)) note(`reader: ${l}`);
   if (done && readerText && readerText.equals(file)) {
-    say(`ok - the reader that followed the whole update live holds the file byte for byte, after ${resumes.length} reconnect(s) that resumed from Last-Event-ID${resumes.length ? ` (${resumes.map((l) => l.split(" ").at(-1).split(":")[1]).join(", ")})` : ""}`);
+    say(`ok - the reader that followed the whole update live holds the file byte for byte, after ${resumes.length} reconnect(s) that resumed from Last-Event-ID${resumes.length ? ` at byte ${resumes.map((l) => l.split(" ").at(-1).split(":")[1]).join(", ")}` : ""} (${attempts} attempt(s) while the web server restarted)`);
   } else {
     say(`not ok - the live reader (${readerText ? readerText.length : "no"} bytes, ended: ${Boolean(done)}) does not hold the file (${file.length} bytes)`);
   }
@@ -484,7 +525,7 @@ async function after() {
   note(`ANSI sequences from the steps themselves in the log: ${colourful ? "yes" : "none (the steps printed none)"}; carriage returns: ${text.includes("\r") ? "yes" : "none"}`);
 
   const last = [...checks].reverse().find((c) => c.ok && c.journalTail.length > 0) ?? null;
-  await panelEvidence(env.LABEL || "after-reload", run, text, last);
+  await panelEvidence(env.LABEL || "after-reload", run, text, last, { after: true });
 }
 
 const mode = process.argv[2];

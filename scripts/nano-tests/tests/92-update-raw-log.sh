@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 5400
+# timeout: 4500
 # tier: long
 # covers: src/lib/update-raw-log.ts src/app/setup-api/update/log/* src/components/UpdateRawLog.tsx src/lib/xterm-setup.ts
 # covers: scripts/nano-tests/board/update-raw-log.*
@@ -100,12 +100,12 @@ live_checks() {
       if [ "$LIVE_AFTER" = 0 ] && raw_log live after-restart; then LIVE_AFTER=1; fi ;;
   esac
 }
-wait_app_update 4800 live_checks
+wait_app_update 3600 live_checks
 note "update took $(( $(date +%s) - START ))s and ended: $UPDATE_PHASE${UPDATE_ERROR:+ ($UPDATE_ERROR)}"
 case "$UPDATE_PHASE" in
   completed) ok "[$RUNTIME] the update completed" ;;
   failed) not_ok "[$RUNTIME] the update failed: $UPDATE_ERROR (its log is checked all the same)" ;;
-  *) not_ok "[$RUNTIME] the update did not end within 80 minutes"; finish ;;
+  *) not_ok "[$RUNTIME] the update did not end within 60 minutes"; finish ;;
 esac
 [ "$LIVE_BEFORE" = 1 ] || note "no panel check ran on a root step before the restart (the steps went by between two polls)"
 [ "$LIVE_AFTER" = 1 ] || note "no panel check ran on a root step after the restart (the steps went by between two polls)"
