@@ -623,6 +623,23 @@ describe("a save the store could not record, and Hermes' provider block", () => 
     expect(sets.some((set) => set["providers.clawext.base_url"] === BASE)).toBe(true);
   });
 
+  it("registers a later save with a window Hermes can run, after one under its floor was skipped", async () => {
+    const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
+    resetExternalEngineReconcileForTests();
+    await POST(req("POST", saveBody({ contextWindow: 32768, maxTokens: 4096 })));
+    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "absent" });
+    vi.mocked(patchHermesConfig).mockClear();
+    // Under Hermes' floor: not registered, and not latched either.
+    expect(await reconcileExternalEngineWithHermes()).toBe(false);
+    expect(patchHermesConfig).not.toHaveBeenCalled();
+    // Saved again on OpenClaw, same process, with a window Hermes can run.
+    await POST(req("POST", saveBody()));
+    vi.mocked(patchHermesConfig).mockClear();
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets.some((set) => set["providers.clawext.base_url"] === BASE)).toBe(true);
+  });
+
   it("registers the block again after Remove, for an engine saved on OpenClaw and read on Hermes", async () => {
     const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
     resetExternalEngineReconcileForTests();

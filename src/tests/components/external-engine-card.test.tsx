@@ -183,6 +183,31 @@ describe("ExternalEngineCard", () => {
     await waitFor(() => expect(screen.getByTestId("local-ai-external-status").textContent).toBe("The engine could not be checked just now."));
   });
 
+  it("keeps the last good view but says a failed read-back after a save failed, and offers Retry", async () => {
+    let fail = false;
+    calls = [];
+    const OK = { ...CONFIGURED, baseUrl: "https://engine.example.com/v1", status: { reachable: true, modelListed: true, latencyMs: 12 } };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      const method = init?.method ?? "GET";
+      calls.push({ url, method, body: null });
+      if (method === "POST") { fail = true; return json({ success: true, ...OK }); }
+      return fail ? json({ error: "boom" }, 500) : json(OK);
+    }));
+    renderCard();
+    await waitFor(() => expect(screen.getByTestId("local-ai-external-status").textContent).toContain("12"));
+    expect(screen.queryByTestId("local-ai-external-retry")).toBeNull();
+    // Saved; the read back after the save fails: the old status must not stand.
+    fireEvent.click(screen.getByTestId("local-ai-external-edit"));
+    fireEvent.click(screen.getByTestId("local-ai-external-save"));
+    await waitFor(() => expect(screen.getByTestId("local-ai-external-status").textContent).toBe("The engine could not be checked just now."));
+    expect(screen.getByText("Local AI answers with Qwen3-32B.")).toBeTruthy();
+    fail = false;
+    fireEvent.click(screen.getByTestId("local-ai-external-retry"));
+    await waitFor(() => expect(screen.getByTestId("local-ai-external-status").textContent).toContain("12"));
+    expect(screen.queryByTestId("local-ai-external-retry")).toBeNull();
+  });
+
   it("removes only on the second tap", async () => {
     let configured = true;
     stub({ get: () => (configured ? CONFIGURED : NOT_CONFIGURED), remove: () => { configured = false; return json({ success: true, removed: true }); } });

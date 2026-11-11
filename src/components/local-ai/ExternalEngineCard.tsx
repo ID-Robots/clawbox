@@ -132,7 +132,8 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [httpConfirmed, setHttpConfirmed] = useState(false);
   // The last read failed: with nothing shown yet, the card offers Retry; with
-  // a view already shown, its status line says the check failed.
+  // a view already shown, it keeps that view, its status line says the check
+  // failed and it offers Retry beside Edit.
   const [readFailed, setReadFailed] = useState(false);
   const alive = useRef(true);
   // Set on every mount, not only at creation: React's Strict Mode runs the
@@ -320,14 +321,22 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               : t("localModels.external.window", { context: n(view?.contextWindow), max: n(view?.maxTokens) })}
           </p>
           <p data-testid="local-ai-external-status">
-            {!view?.status
-              ? t(readFailed ? "localModels.external.status.unread" : "localModels.external.status.checking")
+            {/* A failed read says so even over an older status: that status may no longer hold. */}
+            {readFailed
+              ? t("localModels.external.status.unread")
+              : !view?.status
+              ? t("localModels.external.status.checking")
               : view.status.modelListed
                 ? t("localModels.external.status.ok", { ms: n(view.status.latencyMs) })
                 : t("localModels.external.status.problem", { problem: say(describe(view.status)) })}
           </p>
           <p>{t("localModels.external.onDeviceIdle")}</p>
           <div className="flex flex-wrap gap-2 pt-2">
+            {readFailed && (
+              <button type="button" className={BUTTON} data-testid="local-ai-external-retry" disabled={busy !== null} onClick={reload}>
+                {t("localModels.external.retry")}
+              </button>
+            )}
             <button type="button" className={BUTTON} data-testid="local-ai-external-edit" disabled={busy !== null}
               onClick={() => { resetForm(formFrom(view)); setEditing(true); setOutcome(null); setConfirmRemove(false); }}>
               {t("localModels.external.edit")}

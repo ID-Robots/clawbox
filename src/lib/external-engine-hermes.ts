@@ -45,6 +45,7 @@ export function hermesProviderValues(settings: ExternalEngineSettings, key: stri
  * names the provider. Answers whether it is.
  */
 let hermesReconciled = false;
+let underFloorWarned = false;
 export async function reconcileExternalEngineWithHermes(opts: { force?: boolean } = {}): Promise<boolean> {
   if (hermesReconciled && !opts.force) return true;
   try {
@@ -52,11 +53,13 @@ export async function reconcileExternalEngineWithHermes(opts: { force?: boolean 
     if (!record) return false;
     // Hermes refuses a session under its window floor: a provider it cannot
     // run is not registered; Settings tells the owner to save it again here.
+    // Not latched: a later save with a window Hermes can run, on OpenClaw in
+    // this same process, must still be registered. Only the warning is once.
     if (record.contextWindow < HERMES_MIN_CONTEXT_WINDOW) {
-      if (!hermesReconciled) {
+      if (!underFloorWarned) {
         console.warn(`[external-engine] not registered with Hermes: its ${record.contextWindow}-token window is under Hermes' ${HERMES_MIN_CONTEXT_WINDOW} floor`);
+        underFloorWarned = true;
       }
-      hermesReconciled = true;
       return false;
     }
     const declared = await resolveHermesConfigValue("providers.clawext.base_url");
@@ -94,6 +97,7 @@ export async function reconcileExternalEngineWithHermes(opts: { force?: boolean 
 /** The engine was removed: the next save may need registering again. */
 export function forgetExternalEngineHermesReconcile(): void {
   hermesReconciled = false;
+  underFloorWarned = false;
 }
 
 /** For tests: forget the once-per-process latch. */
