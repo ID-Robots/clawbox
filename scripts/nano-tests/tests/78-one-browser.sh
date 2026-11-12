@@ -2,7 +2,7 @@
 # timeout: 240
 # parallel: after-boot
 # covers: src/lib/shared-browser*.ts src/lib/browser-*.ts src/lib/desktop-browser-config.ts src/lib/chromium-sandbox.ts src/lib/cdp-probe.ts src/app/setup-api/browser/* scripts/launch-browser.sh scripts/lib/browser-clean-start.sh config/clawbox-browser.service mcp/tools/browser.ts
-# covers: src/components/* src/hooks/* public/* src/app/*page.tsx src/app/*layout.tsx src/app/globals.css src/lib/*-translations*.ts src/lib/edition-translations/* src/lib/i18n.tsx
+# covers: src/components/* src/hooks/* public/* src/assets/* src/app/*page.tsx src/app/*layout.tsx src/app/globals.css src/lib/*-translations*.ts src/lib/edition-translations/* src/lib/i18n.tsx
 #
 # One browser per box. The Chromium on the remote desktop and the browser the
 # assistant drives are the same process on the same profile, kept running by

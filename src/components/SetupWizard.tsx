@@ -754,7 +754,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                 className="setup-icon-btn"
               >
                 {/* `help_outline` is not in the subset the device actually
-                    ships (public/fonts/material-symbols-rounded.ttf is a
+                    ships (src/assets/fonts/material-symbols-rounded.ttf is a
                     static font with no FILL axis and no outline aliases), so
                     it rendered as its own name. `help` is the real glyph. */}
                 <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help</span>
