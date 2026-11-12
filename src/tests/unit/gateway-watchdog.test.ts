@@ -380,8 +380,17 @@ describe("gateway liveness watchdog — when it restarts", () => {
     setCurl(28);
     silentFor(T0, 5);
     expect(journal()).not.toMatch(/RESTARTING/);
-    expect(journal()).toMatch(/nothing was restarted/);
+    expect(journal()).toMatch(/could not confirm it: systemctl did not answer afterwards/);
     expect(fs.readFileSync(path.join(runDir, "gateway-watchdog.restarts"), "utf-8").trim()).toBe("");
+    // Unknown is not "nothing happened": the failed probes stay on record, so
+    // the next silent run asks again at once.
+    const record = fs.readFileSync(path.join(runDir, "gateway-watchdog.state"), "utf-8").trim().split(" ");
+    expect(record[0]).toBe("inv-a");
+    expect(record[3]).toBe("5");
+    fs.rmSync(path.join(box, "restart-noop"));
+    runAt(T0 + 300);
+    expect(restarts()).toHaveLength(2);
+    expect(journal()).toMatch(/RESTARTING clawbox-gateway\.service: no HTTP answer on port 18789 for 300s across 6 consecutive probes/);
   });
 
   it("withdraws the restart from the cap when systemd refuses it", () => {

@@ -476,10 +476,9 @@ fi
 # as one.
 restart_rc=0
 systemctl --no-block --job-mode=fail try-restart "$UNIT" >/dev/null 2>&1 || restart_rc=$?
-restart_seen=0 after_state=""
+restart_seen=0 after_state="" after_rc=0
 if [ "$restart_rc" -eq 0 ]; then
   jobs_after="$(unit_jobs)" || jobs_after=""
-  after_rc=0
   after="$(systemctl show -p ActiveState -p InvocationID "$UNIT" 2>/dev/null)" || after_rc=$?
   after_state="$(printf '%s\n' "$after" | sed -n 's/^ActiveState=//p' | head -n 1)"
   after_inv="$(printf '%s\n' "$after" | sed -n 's/^InvocationID=//p' | head -n 1)"
@@ -504,6 +503,12 @@ else
   if [ "$restart_rc" -ne 0 ]; then
     write_record "$invocation" "$first" "$NOW" "$count" "$capped"
     log "Wanted to restart $UNIT (no HTTP answer for ${outage}s, $why) but systemd refused the request — another job for the unit, or it stopped meanwhile; trying again next run"
+  elif [ "$after_rc" -ne 0 ]; then
+    # Accepted, but systemctl could not then say what became of it: unknown,
+    # not "nothing happened". The count is kept, so the next run either sees a
+    # new invocation (and starts over) or the same silence (and asks again).
+    write_record "$invocation" "$first" "$NOW" "$count" "$capped"
+    log "Asked systemd to restart $UNIT (no HTTP answer for ${outage}s, $why) but could not confirm it: systemctl did not answer afterwards — not counted against the cap; the failed probes stay on record"
   else
     rm -f "$STATE_FILE" 2>/dev/null || true
     log "Wanted to restart $UNIT (no HTTP answer for ${outage}s, $why) but nothing was restarted: it is ${after_state:-unknown} with no job queued — stopped meanwhile, on purpose; not counted"
