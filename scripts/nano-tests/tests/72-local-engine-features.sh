@@ -105,11 +105,13 @@ const call = async (method, p, body) => {
 };
 (async () => {
   const out = {};
-  const rel = "Documents/nano-ci-local-engine-" + process.argv[1];
+  // Unique words per run: a document an earlier run ingested is a duplicate, never asked again.
+  const tag = process.argv[1] + "-" + Date.now().toString(36);
+  const rel = "Documents/nano-ci-local-engine-" + tag;
   const dir = path.join(process.env.HOME, rel);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "acme-delivery.md"), "# Acme delivery terms\n\nAcme Widgets Ltd ships blue widgets to Globex every Tuesday. Orders placed before noon leave the same day. The standard delivery fee is 12 EUR per order.\n");
-  fs.writeFileSync(path.join(dir, "globex-purchasing.md"), "# Globex purchasing\n\nИван Иванов ръководи покупките в Globex. Той одобрява всяка поръчка над 500 EUR.\n");
+  fs.writeFileSync(path.join(dir, "acme-delivery.md"), "# Acme delivery terms " + tag + "\n\nAcme Widgets Ltd ships blue widgets to Globex every Tuesday. Orders placed before noon leave the same day. The standard delivery fee is 12 EUR per order. Reference " + tag + ".\n");
+  fs.writeFileSync(path.join(dir, "globex-purchasing.md"), "# Globex purchasing " + tag + "\n\nИван Иванов ръководи покупките в Globex. Той одобрява всяка поръчка над 500 EUR. Справка " + tag + ".\n");
   try {
     const before = await call("GET", "/setup-api/prime-radiant/costs?allowance=1");
     out.before = { status: before.status, engine: before.body?.allowance?.engine ?? null, cloudCalls: before.body?.allowance?.primeRadiant?.calls ?? null };
@@ -125,7 +127,7 @@ const call = async (method, p, body) => {
         if (got.body?.job) job = got.body.job;
         if (job.status !== "running") break;
       }
-      out.ingest = { id, status: job.status, total: job.total, done: job.done, failed: job.failed, pages: job.pages, calls: job.calls, error: job.error ?? null, seconds: Math.round((Date.now() - t0) / 1000) };
+      out.ingest = { id, status: job.status, total: job.total, done: job.done, failed: job.failed, duplicates: job.duplicates, skipped: job.skipped, pages: job.pages, calls: job.calls, error: job.error ?? null, seconds: Math.round((Date.now() - t0) / 1000) };
       const costs = await call("GET", "/setup-api/prime-radiant/costs?runId=" + id);
       out.costModels = (costs.body?.byModel ?? []).map((m) => m.model);
       const after = await call("GET", "/setup-api/prime-radiant/costs?allowance=1");
