@@ -56,6 +56,13 @@ export interface ExternalEngineSettings {
   contextWindow: number;
   maxTokens: number;
   imageInput: boolean;
+  /**
+   * The model reasons and takes a reasoning effort (TASK-2497): OpenClaw then
+   * offers the chat's thinking levels for it and sends `reasoning_effort`
+   * (`none` for Off). Off by default — an engine saved before this existed, or
+   * one that 400s the field, keeps the single Off level it always had.
+   */
+  reasoning: boolean;
 }
 
 export type ValidationResult =
@@ -268,7 +275,7 @@ export function validateExternalEngineInput(body: Record<string, unknown>): Vali
   }
   return {
     ok: true,
-    value: { baseUrl, modelId, contextWindow, maxTokens, imageInput: body.imageInput === true },
+    value: { baseUrl, modelId, contextWindow, maxTokens, imageInput: body.imageInput === true, reasoning: body.reasoning === true },
   };
 }
 

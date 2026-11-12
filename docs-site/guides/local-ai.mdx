@@ -172,10 +172,13 @@ External engine → Set up** and fill in:
 | **Context window** | How many tokens the model takes, as the server runs it. |
 | **Max output tokens** | The longest reply to ask for. |
 | **The model accepts images** | Tick it for a vision model. |
+| **The model reasons (thinking levels)** | Tick it for a reasoning model — one that takes `reasoning_effort` and answers its thinking as `reasoning_content`, such as a DeepSeek-class model behind vLLM or SGLang. The chat then offers **Off, Low, Medium and High** for it: Low, Medium and High are sent as they are, Off as `none`, and the reply shows its reasoning. Off by default; leave it off if the server rejects `reasoning_effort`. |
 
 **Test** asks the server's `GET /models` and writes nothing. It tells you in plain words
 when the server cannot be reached, refuses the key, or does not list that model — and in
-the last case shows the models it does list, so you can pick one. **Save and use** runs
+the last case shows the models it does list, so you can pick one. With the reasoning box
+unticked, Test also sends the server one tiny question at low effort, and when the answer
+comes back with reasoning it suggests ticking the box (it never ticks it for you). **Save and use** runs
 the same check, then makes the engine the chat's model: the chat header and the provider
 list name its model, and you can still switch between it and a cloud model in the chat
 header as with the on-device model.
@@ -200,7 +203,9 @@ this machine, your network or the internet are fine.
 **Hermes:** the engine works the same way, with two differences. Hermes needs a context
 window of at least 64,000 tokens, so a smaller one is refused. And Hermes decides the
 reply length and how it sends images itself, so **Max output tokens** and **The model
-accepts images** are not used there. **Local-only mode** is not available while an
+accepts images** are not used there; nor is the reasoning box, because Hermes sends the
+level picked in the chat to the engine as `reasoning_effort` on every turn (`none` for
+None) by itself. **Local-only mode** is not available while an
 external engine is selected on either edition: it promises that nothing leaves the box,
 and an external engine is somewhere else.
 </Note>
