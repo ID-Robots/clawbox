@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 
 import { testEnv } from "@/tests/helpers/env";
+import { accountOnlyHome, CAN_LOCK_HOME, unlockTree } from "../helpers/account-only-home";
 import { failureReason } from "@/lib/root-step-follow";
 import { SELF_UPDATING_ROOT_STEPS, UI_ROOT_STEPS, WEB_ROOT_STEPS } from "@/lib/root-steps";
 
@@ -249,7 +250,11 @@ interface StepRun {
  * user; systemctl, the gateway probes and sleep are stubs that answer what the
  * STUB_* flags say and record what they were asked.
  */
-function runStep(recorded: string, extra: Record<string, string> = {}): StepRun {
+function runStep(
+  recorded: string,
+  extra: Record<string, string> = {},
+  { prelude = "", lock = false }: { prelude?: string; lock?: boolean } = {},
+): StepRun {
   const script = [
     "set -euo pipefail",
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
@@ -278,7 +283,11 @@ function runStep(recorded: string, extra: Record<string, string> = {}): StepRun 
     'gateway_port_listening() { [ "${STUB_GATEWAY_LISTENING:-1}" = 1 ]; }',
     'gateway_unit_running_or_starting() { [ "${STUB_GATEWAY_TRYING:-1}" = 1 ]; }',
     `sleep() { printf 'sleep %s\\n' "$*" >> ${JSON.stringify(sleepCalls)}; }`,
+    // The service account removes the request it wrote: here, this suite's user.
+    'as_clawbox() { AS_SERVICE_USER=1 "$@"; }',
+    prelude,
     ...SWAP_FUNCTIONS.map(extractShellFunction),
+    ...(lock ? ["__ao_lock"] : []),
     "step_harness_swap",
   ].join("\n");
   const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: driverEnv(extra), timeout: SPAWN_TIMEOUT_MS });
@@ -464,6 +473,55 @@ d("step_harness_swap — refusals before anything is touched", () => {
       expect(r.substeps, name).toEqual([]);
       expect(r.requestLeft, name).toBe(true);
     }
+  });
+});
+
+/**
+ * The request sits in data/, the service account's: the account removes it.
+ * Run against a checkout only `as_clawbox` can write to
+ * (src/tests/helpers/account-only-home.ts): a root `rm` there fails with
+ * EACCES, and a root command on a checkout path is logged.
+ */
+(CAN_RUN && CAN_LOCK_HOME ? describe : describe.skip)("step_harness_swap removes the request as the service account", () => {
+  function runLocked(recorded: string, prelude = "") {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(projectDir, aux);
+    const r = runStep(recorded, {}, { prelude: `${account.shell}\n${prelude}`, lock: true });
+    unlockTree(projectDir);
+    return { ...r, rootInHome: account.rootInHome(), asClawbox: account.asClawbox() };
+  }
+  const failRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+    + 'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }';
+
+  it("answers 'nothing to do' on the box it already is, and the account removes the request", () => {
+    writeRequest("openclaw");
+    const r = runLocked("openclaw");
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("  Already the OpenClaw edition — nothing to do\n");
+    expect(r.requestLeft).toBe(false);
+    expect(r.asClawbox).toEqual([`rm -f -- ${requestFile}`]);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+
+  it("removes the request as the account once a swap is done", () => {
+    writeRequest("hermes");
+    const r = runLocked("openclaw");
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases.at(-1)).toBe("[harness-swap] phase=done");
+    expect(r.out).toContain("This box is now the Hermes edition");
+    expect(r.requestLeft).toBe(false);
+    expect(r.asClawbox).toContain(`rm -f -- ${requestFile}`);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+
+  it("finishes as before, with a warning, when the account cannot remove the request", () => {
+    writeRequest("openclaw");
+    const r = runLocked("openclaw", failRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("  Already the OpenClaw edition — nothing to do\n");
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.requestLeft).toBe(true);
   });
 });
 

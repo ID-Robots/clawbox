@@ -243,7 +243,8 @@ the root-exec manifest — running the mirror staged &lt;time&gt;".
   the step is retried — a retry, not a root exec, which is the direction this
   whole file fails in.
 * **Paths deliberately left on the tree.** `install.sh` still names
-  `$PROJECT_DIR/scripts/...` where it `chmod`s or `chown`s the tree copy, where a
+  `$PROJECT_DIR/scripts/...` where the clawbox user sets the tree copy's mode
+  (`as_clawbox chmod +x`; root neither chmods nor chowns it), where a
   `User=clawbox` unit's `ExecStart` points at it (`start-vnc.sh` and
   `launch-browser.sh` — `clawbox-browser.service` runs the tree copy, so the
   `chmod +x` on it is load-bearing), where a script is run unprivileged

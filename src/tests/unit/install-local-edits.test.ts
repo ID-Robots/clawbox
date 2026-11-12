@@ -4,6 +4,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { testEnv } from "@/tests/helpers/env";
+import {
+  accountOnlyHome, handOverOrder, recursiveChownRecorder, shellFunctionIfPresent,
+} from "../helpers/account-only-home";
 
 /**
  * Local edits survive an update (TASK-1316).
@@ -540,5 +543,101 @@ d("scripts/preserve-local-edits.sh", () => {
     const copy = path.join(saves, savedDirs()[0], "untracked", "link");
     expect(fs.lstatSync(copy).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(copy)).toBe("/etc/hostname");
+  });
+});
+
+d("the checkout's .git is handed over with the checkout whole, never by its name", () => {
+  // The checkout is the service account's, so a recursive chown of a path
+  // THROUGH it (`<checkout>/.git`) changes whatever a link at the checkout's
+  // name points at. Handed over whole, the link itself is the operand, and
+  // chown -R follows no link given as its operand. The recorder changes
+  // nothing and logs where each recursive chown would land.
+  const chownLog = () => path.join(tmp, "chown-targets");
+  const landed = () => (fs.existsSync(chownLog()) ? fs.readFileSync(chownLog(), "utf-8").split("\n").filter(Boolean) : []);
+  /** The checkout under a name that is a link to it: the redirected case. */
+  const linkToCheckout = () => {
+    const link = path.join(tmp, "clawbox-link");
+    fs.symlinkSync(checkout, link);
+    return link;
+  };
+  // Root's find reports one entry under .git the owner does not own.
+  const STRAY_IN_GIT = 'find() { case "$1" in */.git) echo "$1/FETCH_HEAD"; return 0 ;; esac; command find "$@"; }';
+
+  function runOwnerForGit(dir: string, prelude = ""): { status: number; out: string } {
+    shim("id-root");
+    const script = [
+      "set -euo pipefail",
+      recursiveChownRecorder(chownLog()),
+      prelude,
+      fn("use_tree_owner_for_git"),
+      `use_tree_owner_for_git ${JSON.stringify(dir)}`,
+      "printf 'runner=%s\\n' \"${GIT_RUNNER[*]}\"",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: env() });
+    return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  it("use_tree_owner_for_git changes no owner when nothing under .git is someone else's", () => {
+    const r = runOwnerForGit(checkout);
+    expect(r.status, r.out).toBe(0);
+    expect(landed()).toEqual([]);
+    // git still runs as the account that owns the checkout.
+    expect(r.out).toContain(`runner=runuser -u ${os.userInfo().username} -- env GIT_TERMINAL_PROMPT=0`);
+  });
+
+  it("use_tree_owner_for_git never changes anything behind a link at the checkout's name", () => {
+    const r = runOwnerForGit(linkToCheckout());
+    expect(r.status, r.out).toBe(0);
+    expect(landed().filter((t) => t.startsWith(`${checkout}/`))).toEqual([]);
+    expect(landed()).toEqual([]);
+  });
+
+  it("use_tree_owner_for_git hands a stray under .git back with the checkout itself as the operand", () => {
+    const r = runOwnerForGit(checkout, STRAY_IN_GIT);
+    expect(r.status, r.out).toBe(0);
+    expect(landed()).toEqual([checkout]);
+
+    fs.writeFileSync(chownLog(), "");
+    const link = linkToCheckout();
+    const viaLink = runOwnerForGit(link, STRAY_IN_GIT);
+    expect(viaLink.status, viaLink.out).toBe(0);
+    // The link is changed itself; nothing below its target is named.
+    expect(landed()).toEqual([link]);
+  });
+
+  function runFixGitPerms(projectDir: string): { status: number; out: string; sequence: string[] } {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(checkout, aux, { lock: false });
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+      'IFACE_ENV="$PROJECT_DIR/data/network.env"',
+      // Someone other than the suite's user, so a hand-over fires.
+      "CLAWBOX_USER=clawbox",
+      account.shell,
+      recursiveChownRecorder(chownLog()),
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+      account.recordHandOvers,
+      fn("step_fix_git_perms"),
+      "step_fix_git_perms",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: env() });
+    return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, sequence: account.sequence() };
+  }
+
+  it("step_fix_git_perms hands the checkout back whole, through the merged hand-over, and says so as before", () => {
+    const r = runFixGitPerms(checkout);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toBe("  Fixed .git ownership\n");
+    expect(landed()).toEqual([checkout]);
+    expect(handOverOrder(r.sequence, "hand_over_checkout .git").handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("step_fix_git_perms changes nothing behind a link at the checkout's name", () => {
+    const r = runFixGitPerms(linkToCheckout());
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toBe("  Fixed .git ownership\n");
+    expect(landed()).toEqual([]);
   });
 });

@@ -3,6 +3,7 @@ import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { accountOnlyHome, CAN_LOCK_HOME, unlockTree } from "../helpers/account-only-home";
 
 /**
  * TASK-445 audit, GAP 2b — the root side of the password change validates what
@@ -69,6 +70,8 @@ function runStep() {
     "set -uo pipefail",
     `PROJECT_DIR="${project}"`,
     'CLAWBOX_USER="clawbox"',
+    // The service account removes the input file: here, this suite's user.
+    'as_clawbox() { "$@"; }',
     body,
     "step_chpasswd",
   ].join("\n");
@@ -169,6 +172,119 @@ d("install.sh::step_chpasswd", () => {
   it("does no git or network work — the acceptance criterion, asserted on the source", () => {
     const body = shellFunction("step_chpasswd");
     expect(body).not.toMatch(/\bgit\b|curl|wget|fetch/);
+  });
+});
+
+/**
+ * The step-input files sit in data/, the service account's, so the account
+ * removes them; root only reads the one record. Run against a checkout only
+ * `as_clawbox` can write to (src/tests/helpers/account-only-home.ts), under
+ * `set -euo pipefail` as a dispatched step: a root `rm` there fails with
+ * EACCES, and a root command on a checkout path is logged.
+ */
+(CAN_RUN && CAN_LOCK_HOME ? describe : describe.skip)("the step-input files are removed as the service account", () => {
+  const userInput = () => path.join(project, "data", ".user-add-input");
+
+  function runLocked(call: string, prelude = "") {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(project, aux);
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      'CLAWBOX_USER="clawbox"',
+      account.shell,
+      prelude,
+      shellFunction("step_chpasswd").replace("/usr/sbin/chpasswd", `${tmp}/fake-chpasswd`),
+      shellFunction("read_user_step_input"),
+      "__ao_lock",
+      call,
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    unlockTree(project);
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, rootInHome: account.rootInHome(), asClawbox: account.asClawbox() };
+  }
+  const failRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+    + 'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }';
+
+  it("step_chpasswd reads the record once as root, then the account removes the file", () => {
+    fs.writeFileSync(inputFile, "clawbox:hunter2\n", { mode: 0o600 });
+    const r = runLocked("step_chpasswd");
+    expect(r.status, r.stderr).toBe(0);
+    expect(fedToChpasswd()).toBe("clawbox:hunter2\n");
+    expect(fs.existsSync(inputFile)).toBe(false);
+    expect(r.asClawbox).toEqual([`rm -f -- ${inputFile}`]);
+    // Root's one read of the record; nothing that changes the checkout.
+    expect(r.rootInHome).toEqual([`cat ${inputFile}`]);
+  });
+
+  it("step_chpasswd still refuses a symlinked input file with 64, and the account removes the link", () => {
+    fs.symlinkSync("/etc/shadow", inputFile);
+    const r = runLocked("step_chpasswd");
+    expect(r.status).toBe(64);
+    expect(r.stderr).toBe("Error: password input file is a symlink; refusing\n");
+    expect(fs.lstatSync(inputFile, { throwIfNoEntry: false })).toBeUndefined();
+    expect(r.rootInHome).toEqual([]);
+    expect(fedToChpasswd()).toBe("");
+  });
+
+  it("step_chpasswd still changes the password, with a warning, when the removal fails", () => {
+    fs.writeFileSync(inputFile, "clawbox:hunter2\n", { mode: 0o600 });
+    const r = runLocked("step_chpasswd", failRm);
+    expect(r.status, r.stderr).toBe(0);
+    expect(fedToChpasswd()).toBe("clawbox:hunter2\n");
+    expect(r.stderr).toBe(`  Warning: could not remove ${inputFile}\n`);
+
+    fs.rmSync(inputFile, { force: true });
+    fs.symlinkSync("/etc/shadow", inputFile);
+    const link = runLocked("step_chpasswd", failRm);
+    expect(link.status).toBe(64);
+    expect(link.stderr).toBe("Error: password input file is a symlink; refusing\n");
+  });
+
+  // As step_user_add and step_user_remove capture it: only the record reaches
+  // stdout, and a refusal's exit code comes through `|| exit $?`.
+  const capture = () => `record="$(read_user_step_input ${JSON.stringify(userInput())})" || exit $?\nprintf '[%s]' "$record"`;
+
+  it("read_user_step_input hands back only the record, and the account removes the file", () => {
+    fs.writeFileSync(userInput(), "alice:pw\n", { mode: 0o600 });
+    const r = runLocked(capture());
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe("[alice:pw]");
+    expect(r.stderr).toBe("");
+    expect(fs.existsSync(userInput())).toBe(false);
+    expect(r.asClawbox).toEqual([`rm -f -- ${userInput()}`]);
+    expect(r.rootInHome).toEqual([`cat ${userInput()}`]);
+  });
+
+  it("read_user_step_input refuses a symlink with 64 and a second record with 64, removing each as the account", () => {
+    fs.symlinkSync("/etc/shadow", userInput());
+    const link = runLocked(capture());
+    expect(link.status).toBe(64);
+    expect(link.stdout).toBe("");
+    expect(link.stderr).toBe("Error: user input file is a symlink; refusing\n");
+    expect(fs.lstatSync(userInput(), { throwIfNoEntry: false })).toBeUndefined();
+    expect(link.rootInHome).toEqual([]);
+
+    fs.writeFileSync(userInput(), "alice:pw\nroot:x\n", { mode: 0o600 });
+    const two = runLocked(capture());
+    expect(two.status).toBe(64);
+    expect(two.stdout).toBe("");
+    expect(two.stderr).toBe("Error: user input must be exactly one record\n");
+    expect(fs.existsSync(userInput())).toBe(false);
+  });
+
+  it("read_user_step_input still hands back the record, with a warning on stderr, when the removal fails", () => {
+    fs.writeFileSync(userInput(), "alice:pw\n", { mode: 0o600 });
+    const r = runLocked(capture(), failRm);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe("[alice:pw]");
+    expect(r.stderr).toBe(`  Warning: could not remove ${userInput()}\n`);
+
+    fs.rmSync(userInput());
+    const missing = runLocked(capture());
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toBe("Error: user input file not found\n");
   });
 });
 

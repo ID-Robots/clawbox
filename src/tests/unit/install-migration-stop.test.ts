@@ -60,6 +60,8 @@ runuser() { shift 2; [ "\${1:-}" = "--" ] && shift; "$@"; }
 # it was handed (the step stages the core, gates the launcher there, then
 # renames it into the live prefix): a launcher answering the version asked for.
 as_clawbox() {
+  # The staging prefix, emptied, made and removed by the account that owns it.
+  case "\${1:-}" in rm|mkdir) command "$@"; return ;; esac
   case "$*" in
     *'systemctl --user'*) shift 5; ctl user "$@" ;;
     *'doctor --fix'*) echo DOCTOR_CALLED; case "$SCENARIO" in v2-replacement|v2-current|setup-*) return 0 ;; *) return 42 ;; esac ;;

@@ -1,6 +1,15 @@
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import fs, { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
+
+// The pip fallback's clean-up is run under bash below; a spawning test carries
+// both ceilings (src/tests/unit/test-timeout-hygiene.test.ts).
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // PEP 668 (externally-managed-environment) blocks `pip install --user`
 // outright on Ubuntu 24.04+ / JetPack 7, which is where the ClawKeep and
@@ -189,5 +198,78 @@ describe("no unsafe system-wide pip mutation was introduced", () => {
     // one of the two PEP 668-hardened CLI installs this change targets.
     const allowed = offenders.filter((l) => !l.includes("jetson-stats"));
     expect(allowed).toEqual([]);
+  });
+});
+
+/**
+ * The stale build output the pip fallback clears sits in the checkout, the
+ * service account's, so the account removes it after the hand-over. Run
+ * against a checkout only `as_clawbox` can write to
+ * (src/tests/helpers/account-only-home.ts): a root `rm` there fails with
+ * EACCES, and a root command on a checkout path is logged.
+ */
+(CAN_LOCK_HOME ? describe : describe.skip)("the pip --user fallback clears ClawKeep's build output as the service account", () => {
+  let tmp: string;
+  let project: string;
+  let home: string;
+  let aux: string;
+  const built = () => ["build", "dist", "UNKNOWN.egg-info", "clawkeep.egg-info"].map((n) => path.join(project, "clawkeep", n));
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-clawkeep-fallback-"));
+    project = path.join(tmp, "clawbox");
+    home = path.join(tmp, "home");
+    aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux);
+    for (const dir of built()) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "stale"), "");
+    }
+    fs.writeFileSync(path.join(project, "clawkeep", "pyproject.toml"), "[project]\n");
+    fs.mkdirSync(path.join(home, ".local", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".local", "bin", "clawkeepd"), "#!/bin/sh\n", { mode: 0o755 });
+  });
+
+  afterEach(() => {
+    unlockTree(tmp);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function runFallback() {
+    const account = accountOnlyHome(project, aux);
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      'IFACE_ENV="$PROJECT_DIR/data/network.env"',
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      "CLAWBOX_USER=clawbox",
+      account.shell,
+      `chown() { [ -n "\${AS_SERVICE_USER:-}" ] || printf '%s\\n' "$*" >> ${JSON.stringify(path.join(aux, "chowns"))}; }`,
+      // pip, as the account: recorded, never run.
+      `as_clawbox_login() { printf '%s\\n' "$*" >> ${JSON.stringify(path.join(aux, "login"))}; echo "usage: clawkeep"; }`,
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+      account.recordHandOvers,
+      `${extractShellFunction("step_clawkeep_install_pip_user_fallback")}\n}`,
+      "__ao_lock",
+      "step_clawkeep_install_pip_user_fallback",
+    ].join("\n");
+    // C collation, so the glob's order is the same on every runner.
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: { ...process.env, LC_ALL: "C" } });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, rootInHome: account.rootInHome(), sequence: account.sequence() };
+  }
+
+  it("hands the build tree over, then removes build/, dist/ and every egg-info as the account", () => {
+    const r = runFallback();
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("  ClawKeep CLI installed: usage: clawkeep");
+    for (const dir of built()) expect(fs.existsSync(dir), dir).toBe(false);
+    expect(fs.existsSync(path.join(project, "clawkeep", "pyproject.toml"))).toBe(true);
+    expect(r.rootInHome).toEqual([]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, "hand_over_checkout clawkeep");
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+    // Each name is its own argument, the glob expanded before the account runs.
+    expect(r.sequence[firstWrite]).toBe(`rm -rf -- ${built().join(" ")}`);
   });
 });
