@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { accountOnlyHome, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
 
 // Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
 // on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -115,18 +116,26 @@ function bashrcFixture(copies: number): string {
 }
 
 let sandbox: string;
+let aux: string;
 let bashrc: string;
 
 /**
  * Run install.sh's `.bashrc` hygiene over the fixture, exactly as an update
  * does — through `ensure_clawbox_bashrc_path`, which `step_coding_harness`
  * calls and `step_post_update` reaches on BOTH editions.
+ *
+ * The home is the clawbox user's and root's install.sh must write nothing in
+ * it, so every case runs with a home only `as_clawbox` can write to (see
+ * src/tests/helpers/account-only-home.ts): a read, rewrite, rename, append or
+ * removal root's own shell made there fails, and a chmod or chown it made is
+ * recorded in `rootInHome`.
  */
 function runBashrcHygiene(
   home: string = sandbox,
   /** Shell injected before the function runs — used to stage a concurrent writer. */
   prelude = "",
-): { status: number | null; stdout: string; stderr: string } {
+): { status: number | null; stdout: string; stderr: string; rootInHome: string[] } {
+  const account = accountOnlyHome(home, aux);
   const script = [
     "set -euo pipefail",
     `CLAWBOX_HOME=${JSON.stringify(home)}`,
@@ -134,19 +143,29 @@ function runBashrcHygiene(
     "",
     shellConstants(),
     "",
+    account.shell,
+    "",
     prelude,
+    "",
+    shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
     "",
     extractShellFunction("dedupe_vendor_bashrc_path_blocks"),
     "",
     extractShellFunction("ensure_clawbox_bashrc_path"),
     "",
+    "__ao_lock",
     "ensure_clawbox_bashrc_path",
     "",
   ].join("\n");
-  const runner = path.join(sandbox, "run.sh");
+  const runner = path.join(aux, "run.sh");
   fs.writeFileSync(runner, script, "utf-8");
   const result = spawnSync("bash", [runner], { encoding: "utf-8", cwd: REPO });
-  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    rootInHome: account.rootInHome(),
+  };
 }
 
 const read = () => fs.readFileSync(bashrc, "utf-8");
@@ -154,11 +173,14 @@ const countOf = (text: string, needle: string) => text.split(needle).length - 1;
 
 beforeEach(() => {
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bashrc-dedupe-"));
+  aux = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-bashrc-dedupe-aux-"));
   bashrc = path.join(sandbox, ".bashrc");
 });
 
 afterEach(() => {
+  unlockTree(sandbox);
   fs.rmSync(sandbox, { recursive: true, force: true });
+  fs.rmSync(aux, { recursive: true, force: true });
 });
 
 d("~/.bashrc keeps ONE vendor PATH block, however often the vendor appends", () => {
@@ -392,6 +414,74 @@ d("~/.bashrc keeps ONE vendor PATH block, however often the vendor appends", () 
     expect(runBashrcHygiene().status).toBe(0);
 
     expect(read()).toContain('export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"');
+  });
+});
+
+d("root writes nothing in the clawbox user's home", () => {
+  // The rewrite, its temp, the rename and both appends are the clawbox user's:
+  // root's `>`, `>>`, `mktemp`, `mv` or `chown` in that home acts through any
+  // link the user planted there. Run against a home only `as_clawbox` can
+  // write to, so a write root's own shell made fails instead of passing.
+  it("collapses the duplicates as the clawbox user, byte for byte", () => {
+    fs.writeFileSync(bashrc, bashrcFixture(23), "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain("Collapsed 23 duplicate cua-driver-rs PATH blocks");
+    expect(countOf(read(), VENDOR_MARKER)).toBe(1);
+    expect(run.rootInHome, "no chmod, chown, temp or rename by root").toEqual([]);
+    // The temp went with the rename: nothing is left beside the file.
+    expect(fs.readdirSync(sandbox).filter((f) => f.startsWith(".bashrc."))).toEqual([]);
+  });
+
+  it("appends the stanza as the clawbox user", () => {
+    fs.writeFileSync(bashrc, "# empty\n", "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(read()).toBe(
+      "# empty\n\n"
+      + "# npm global binaries (openclaw, gemini) and user-local binaries (claude, codex, hf, clawkeep)\n"
+      + 'export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"\n',
+    );
+    expect(run.rootInHome).toEqual([]);
+  });
+
+  it("appends the ~/.local/bin line alone as the clawbox user", () => {
+    fs.writeFileSync(bashrc, 'export PATH="$HOME/.npm-global/bin:$PATH"\n', "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(read()).toBe(
+      'export PATH="$HOME/.npm-global/bin:$PATH"\n\n'
+      + "# user-local binaries (claude, hf, clawkeep)\n"
+      + 'export PATH="$HOME/.local/bin:$PATH"\n',
+    );
+    expect(run.rootInHome).toEqual([]);
+  });
+
+  it("creates a missing .bashrc as the clawbox user", () => {
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(read()).toContain('export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"');
+    expect(run.rootInHome).toEqual([]);
+  });
+
+  it("leaves no temp behind when the collapse is abandoned", () => {
+    // The two early exits remove the temp as the user too.
+    const moved = ["", VENDOR_MARKER, "# a line the vendor did not use to write", VENDOR_EXPORT];
+    fs.writeFileSync(bashrc, ["# ~/.bashrc", ...moved, ...moved, ""].join("\n"), "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain("the vendor's block shape has changed");
+    expect(fs.readdirSync(sandbox).filter((f) => f.startsWith(".bashrc."))).toEqual([]);
+    expect(run.rootInHome).toEqual([]);
   });
 });
 

@@ -1,0 +1,351 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { accountOnlyHome, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
+
+// Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
+// on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+/**
+ * install.sh runs as root, and the clawbox user owns its home. Root writing,
+ * renaming, linking or removing there acts through any link that user planted
+ * (~/.config/systemd/user -> /etc/systemd/system, ~/.codex -> /etc), so the
+ * installer does that file work AS the user (`as_clawbox`), after handing back
+ * any root-owned directory an earlier root run left on the way.
+ *
+ * These are the sites no other suite runs: the mask of the user-level gateway
+ * unit (step_gateway_setup), ~/.codex (step_systemd_services), the full
+ * install's ~/Desktop clean-up, and the hand-over helper itself. Each block is
+ * cut out of the shipped install.sh and run against a home only `as_clawbox`
+ * can write to (src/tests/helpers/account-only-home.ts).
+ */
+
+const REPO = path.resolve(__dirname, "../../..");
+const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
+
+// Linux only, as install.sh is (GNU stat and find); and not as root, whose
+// writes the read-only home cannot stop.
+const CAN_RUN =
+  process.platform === "linux"
+  && typeof process.getuid === "function" && process.getuid() !== 0
+  && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
+const d = CAN_RUN ? describe : describe.skip;
+
+/** install.sh from the first line containing `from` up to (not including) the first after it containing `to`. */
+function sliceLines(source: string, from: string, to: string): string {
+  const lines = source.split("\n");
+  const start = lines.findIndex((l) => l.includes(from));
+  if (start < 0) throw new Error(`${from} not found in install.sh`);
+  const end = lines.findIndex((l, i) => i > start && l.includes(to));
+  if (end < 0) throw new Error(`${to} not found after ${from} in install.sh`);
+  return lines.slice(start, end).join("\n");
+}
+
+function shellFunction(name: string): string {
+  const start = INSTALL_SH.indexOf(`\n${name}() {`);
+  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  const end = INSTALL_SH.indexOf("\n}", start + 1);
+  return `${INSTALL_SH.slice(start + 1, end)}\n}`;
+}
+
+let sandbox: string;
+let home: string;
+let aux: string;
+
+beforeEach(() => {
+  sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-home-as-account-"));
+  home = path.join(sandbox, "home");
+  aux = path.join(sandbox, "aux");
+  fs.mkdirSync(home);
+  fs.mkdirSync(aux);
+});
+
+afterEach(() => {
+  unlockTree(sandbox);
+  fs.rmSync(sandbox, { recursive: true, force: true });
+});
+
+/** Run `body` (shell) against the locked sandbox home, as root's install.sh would. */
+function runAsInstaller(body: string, prelude = "") {
+  const account = accountOnlyHome(home, aux);
+  const script = [
+    "set -euo pipefail",
+    `CLAWBOX_HOME=${JSON.stringify(home)}`,
+    'CLAWBOX_USER="$(id -un)"',
+    `CALLS=${JSON.stringify(path.join(aux, "calls.log"))}`,
+    account.shell,
+    prelude,
+    shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+    "__ao_lock",
+    body,
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(aux, "run.sh"), script, "utf-8");
+  const result = spawnSync("bash", [path.join(aux, "run.sh")], { encoding: "utf-8", cwd: aux });
+  const callsFile = path.join(aux, "calls.log");
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    rootInHome: account.rootInHome(),
+    asClawbox: account.asClawbox(),
+    calls: fs.existsSync(callsFile) ? fs.readFileSync(callsFile, "utf-8").split("\n").filter(Boolean) : [],
+  };
+}
+
+d("the user-level gateway unit is masked by the clawbox user", () => {
+  // step_gateway_setup's block, from its first line to the `fi` that closes it.
+  const block = (() => {
+    const start = INSTALL_SH.indexOf('  local USER_SYSTEMD_DIR="$CLAWBOX_HOME/.config/systemd/user"');
+    if (start < 0) throw new Error("the user-unit mask block is not in install.sh");
+    const end = INSTALL_SH.indexOf("\n  fi\n", start);
+    return INSTALL_SH.slice(start, end + "\n  fi".length);
+  })();
+  // `sudo -u … systemctl --user stop` is the stop of a running user gateway:
+  // recorded, never run, so the test cannot stop a unit on the machine.
+  const prelude = 'sudo() { printf \'sudo %s\\n\' "$*" >> "$CALLS"; }';
+  const unitDir = () => path.join(home, ".config", "systemd", "user");
+  const unit = () => path.join(unitDir(), "openclaw-gateway.service");
+  const mask = () => runAsInstaller(`mask_user_gateway() {\n${block}\n}\nmask_user_gateway`, prelude);
+
+  it("replaces a user unit file with a link to /dev/null, after stopping it", () => {
+    fs.mkdirSync(unitDir(), { recursive: true });
+    fs.writeFileSync(unit(), "[Service]\nExecStart=/usr/bin/openclaw gateway\n");
+
+    const r = mask();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.rootInHome, "no rm, ln, mkdir or chown by root in the home").toEqual([]);
+    expect(fs.lstatSync(unit()).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(unit())).toBe("/dev/null");
+    expect(r.stdout).toContain("Masking conflicting user-level openclaw-gateway.service");
+    // The stop still comes first, so the port is freed by this run.
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]).toMatch(/systemctl --user stop openclaw-gateway\.service$/);
+    expect(r.asClawbox.some((c) => c.startsWith("ln -s"))).toBe(true);
+  });
+
+  it("is a no-op on a unit that is already masked", () => {
+    fs.mkdirSync(unitDir(), { recursive: true });
+    fs.symlinkSync("/dev/null", unit());
+
+    const r = mask();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stdout).toContain("already masked");
+    expect(r.asClawbox).toEqual([]);
+    expect(r.calls).toEqual([]);
+    expect(fs.readlinkSync(unit())).toBe("/dev/null");
+  });
+
+  it("masks again on the next run when the link was replaced by a unit file", () => {
+    fs.mkdirSync(unitDir(), { recursive: true });
+    fs.writeFileSync(unit(), "[Service]\n");
+    expect(mask().status).toBe(0);
+    fs.unlinkSync(unit());
+    fs.writeFileSync(unit(), "[Service]\n");
+
+    const r = mask();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.readlinkSync(unit())).toBe("/dev/null");
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("creates nothing when there is no user unit", () => {
+    const r = mask();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.existsSync(path.join(home, ".config"))).toBe(false);
+    expect(r.asClawbox).toEqual([]);
+  });
+});
+
+d("~/.codex is made private by the clawbox user", () => {
+  // step_systemd_services' lines, from the comment that explains them to the
+  // timer start that follows.
+  const block = sliceLines(
+    shellFunction("step_systemd_services"),
+    "# The sync unit runs under ProtectSystem=strict",
+    "systemctl enable --now clawbox-codex-auth-sync.timer",
+  );
+  const codex = () => path.join(home, ".codex");
+
+  it("is cut from install.sh with nothing but the ~/.codex lines in it", () => {
+    const commands = block.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    expect(commands.length).toBeGreaterThan(0);
+    for (const c of commands) expect(c).toContain('"$CLAWBOX_HOME/.codex"');
+  });
+
+  it("creates a missing ~/.codex with mode 0700", () => {
+    const r = runAsInstaller(block);
+
+    expect(r.rootInHome, "no install, mkdir or chmod by root in the home").toEqual([]);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.statSync(codex()).isDirectory()).toBe(true);
+    expect(fs.statSync(codex()).mode & 0o777).toBe(0o700);
+  });
+
+  it("sets an existing ~/.codex back to 0700 and keeps what is in it", () => {
+    fs.mkdirSync(codex(), { mode: 0o755 });
+    fs.chmodSync(codex(), 0o755);
+    fs.writeFileSync(path.join(codex(), "auth.json"), "{}\n");
+
+    const r = runAsInstaller(block);
+
+    expect(r.rootInHome).toEqual([]);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.statSync(codex()).mode & 0o777).toBe(0o700);
+    expect(fs.readFileSync(path.join(codex(), "auth.json"), "utf-8")).toBe("{}\n");
+  });
+});
+
+d("the full install's ~/Desktop clean-up runs as the clawbox user", () => {
+  const block = sliceLines(INSTALL_SH, "# Clean up default NVIDIA desktop shortcuts", "# Bake the edition lock");
+  const desktop = () => path.join(home, "Desktop");
+
+  it("removes the .desktop shortcuts, a linked one included, and nothing else", () => {
+    fs.mkdirSync(desktop());
+    fs.writeFileSync(path.join(desktop(), "nvidia-a.desktop"), "[Desktop Entry]\n");
+    fs.writeFileSync(path.join(desktop(), "nvidia-b.desktop"), "[Desktop Entry]\n");
+    const target = path.join(aux, "shared.desktop");
+    fs.writeFileSync(target, "[Desktop Entry]\n");
+    fs.symlinkSync(target, path.join(desktop(), "linked.desktop"));
+    fs.writeFileSync(path.join(desktop(), "notes.txt"), "keep\n");
+
+    const r = runAsInstaller(block);
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.rootInHome, "no rm by root in the home").toEqual([]);
+    expect(fs.readdirSync(desktop())).toEqual(["notes.txt"]);
+    // The link went, never what it pointed at.
+    expect(fs.existsSync(target)).toBe(true);
+  });
+
+  it("is quiet when there is no ~/Desktop", () => {
+    const r = runAsInstaller(block);
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(fs.existsSync(desktop())).toBe(false);
+  });
+});
+
+d("hand_over_home_path gives root-owned leftovers back one entry at a time", () => {
+  // The tests cannot make a root-owned directory, so the device user is named
+  // as an account other than the test's own: to the helper, everything the
+  // test made then belongs to someone else. `chown` is a stub that records the
+  // entry and the directory it was run in.
+  function handOver(target: string, chownBody = "") {
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      "CLAWBOX_USER=clawbox-device",
+      `CALLS=${JSON.stringify(path.join(aux, "chown.log"))}`,
+      `chown() { printf '%s %s\\n' "$(pwd -P)" "$*" >> "$CALLS"; ${chownBody} }`,
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      `hand_over_home_path ${JSON.stringify(target)}`,
+      'echo "rc=$?"',
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf-8", cwd: aux });
+    const log = path.join(aux, "chown.log");
+    return {
+      status: result.status,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      chowns: fs.existsSync(log) ? fs.readFileSync(log, "utf-8").split("\n").filter(Boolean) : [],
+    };
+  }
+
+  it("exists in install.sh", () => {
+    expect(shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path")).not.toBe("");
+  });
+
+  it("hands over each directory on the way, from the home down, with chown -h and no -R", () => {
+    fs.mkdirSync(path.join(home, ".config", "systemd", "user"), { recursive: true });
+
+    const r = handOver(path.join(home, ".config", "systemd", "user"));
+
+    expect(r.status, r.stderr).toBe(0);
+    const real = fs.realpathSync(home);
+    expect(r.chowns).toEqual([
+      `${real} -h -- clawbox-device:clawbox-device .config`,
+      `${real}/.config -h -- clawbox-device:clawbox-device systemd`,
+      `${real}/.config/systemd -h -- clawbox-device:clawbox-device user`,
+    ]);
+  });
+
+  it("hands over a file at the end of the path, and stops where the path stops existing", () => {
+    fs.writeFileSync(path.join(home, ".bashrc"), "");
+    expect(handOver(path.join(home, ".bashrc")).chowns).toHaveLength(1);
+
+    fs.rmSync(path.join(aux, "chown.log"));
+    fs.mkdirSync(path.join(home, ".cache"));
+    const r = handOver(path.join(home, ".cache", "node-gyp"));
+    expect(r.chowns).toHaveLength(1);
+    expect(r.chowns[0]).toMatch(/ \.cache$/);
+  });
+
+  it("never goes through a link, at any depth", () => {
+    // A link root followed would hand the user whatever it points at.
+    const outside = path.join(aux, "etc");
+    fs.mkdirSync(path.join(outside, "systemd"), { recursive: true });
+    fs.symlinkSync(outside, path.join(home, ".config"));
+    expect(handOver(path.join(home, ".config", "systemd")).chowns).toEqual([]);
+
+    fs.rmSync(path.join(home, ".config"));
+    fs.mkdirSync(path.join(home, ".config"));
+    fs.symlinkSync(path.join(outside, "systemd"), path.join(home, ".config", "systemd"));
+    const r = handOver(path.join(home, ".config", "systemd", "user"));
+    expect(r.chowns).toHaveLength(1);
+    expect(r.chowns[0]).toMatch(/ \.config$/);
+  });
+
+  it("stops when a directory is swapped for a link between its look and its entry", () => {
+    // The race the walk exists for: the user owns the home, so it can replace
+    // ~/.config with a link to /etc just after root examined it. Simulated
+    // inside the chown of ~/.config; the walk must not go on in the link's
+    // target.
+    const outside = path.join(aux, "etc");
+    fs.mkdirSync(path.join(outside, "systemd"), { recursive: true });
+    fs.mkdirSync(path.join(home, ".config", "systemd"), { recursive: true });
+    const swap = [
+      `if [ "\${@: -1}" = .config ]; then`,
+      `  command mv ${JSON.stringify(path.join(home, ".config"))} ${JSON.stringify(path.join(aux, "was-config"))};`,
+      `  command ln -s ${JSON.stringify(outside)} ${JSON.stringify(path.join(home, ".config"))};`,
+      "fi;",
+    ].join(" ");
+
+    const r = handOver(path.join(home, ".config", "systemd"), swap);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.chowns).toHaveLength(1);
+    expect(r.chowns[0]).toMatch(/ \.config$/);
+  });
+
+  it("leaves what is already the user's alone, and ignores a path outside the home", () => {
+    fs.mkdirSync(path.join(home, ".config"));
+    const script = [
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      'CLAWBOX_USER="$(id -un)"',
+      'chown() { echo "chown $*"; }',
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      `hand_over_home_path ${JSON.stringify(path.join(home, ".config", "autostart"))}`,
+      `hand_over_home_path ${JSON.stringify(path.join(aux, "x"))}`,
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+  });
+
+  it("answers 0 whatever it finds, so a caller under errexit carries on", () => {
+    // A chown that fails, a dangling link: neither may end the step.
+    fs.mkdirSync(path.join(home, ".codex"));
+    expect(handOver(path.join(home, ".codex"), "return 1;").stdout).toContain("rc=0");
+    fs.symlinkSync("/nonexistent", path.join(home, ".dangling"));
+    expect(handOver(path.join(home, ".dangling", "x")).stdout).toContain("rc=0");
+  });
+});

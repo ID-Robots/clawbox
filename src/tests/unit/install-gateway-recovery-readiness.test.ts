@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { accountOnlyHome, CAN_LOCK_HOME, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
 
 /**
  * `step_gateway_legacy_state_recovery` read a still-STARTING gateway as a
@@ -130,10 +131,16 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
     );
 
     fs.writeFileSync(path.join(tmp, "bin", "sleep"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
-    fs.writeFileSync(path.join(tmp, "bin", "journalctl"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
+    // Empty unless a case names the gateway's last journal lines.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "journalctl"),
+      `#!/bin/sh${NL}[ -z "$JOURNAL_TAIL" ] || printf '%s\\n' "$JOURNAL_TAIL"${NL}exit 0${NL}`,
+      { mode: 0o755 },
+    );
   });
 
   afterEach(() => {
+    unlockTree(tmp);
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -142,7 +149,15 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
     unitState = "activating",
     doctorOwned = "",
     restartsRise = "",
-  }: { listenAfter?: number; unitState?: string; doctorOwned?: string; restartsRise?: string } = {}) {
+    journalTail = "",
+    home = "",
+  }: {
+    listenAfter?: number; unitState?: string; doctorOwned?: string; restartsRise?: string;
+    journalTail?: string;
+    /** A sandbox home only `as_clawbox` may write to (src/tests/helpers/account-only-home.ts). */
+    home?: string;
+  } = {}) {
+    const account = home ? accountOnlyHome(home, tmp) : null;
     const log = path.join(tmp, "systemctl.log");
     const probes = path.join(tmp, "probes");
     const restarts = path.join(tmp, "restarts");
@@ -157,7 +172,14 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
       'OPENCLAW_BIN="openclaw"',
       // Every helper the step reaches that is not what is under test.
       "is_hermes_edition() { return 1; }",
-      'as_clawbox() { "$@"; }',
+      ...(account
+        ? [
+          `CLAWBOX_HOME=${JSON.stringify(home)}`,
+          'CLAWBOX_USER="$(id -un)"',
+          account.shell,
+          shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+        ]
+        : ['as_clawbox() { "$@"; }']),
       // Both top-level assignments the step reaches, cut from install.sh like
       // the functions so a test cannot pass by declaring them: the step-wide
       // budget counter, and the service-repair policy its `doctor --fix` runs
@@ -176,6 +198,7 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
       // look like a broken slice. Suspended for the CALL only, which is the one
       // statement whose status this file is about.
       "set +e",
+      ...(account ? ["__ao_lock"] : []),
       "step_gateway_legacy_state_recovery 2>&1",
       'rc=$?',
       "set -e",
@@ -196,6 +219,7 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
           LISTEN_AFTER: String(listenAfter),
           UNIT_STATE: unitState,
           DOCTOR_OWNED: doctorOwned,
+          JOURNAL_TAIL: journalTail,
           // Keep the budget short: the stubbed `sleep` returns at once, so this
           // only bounds the loop's iteration count.
           CLAWBOX_GATEWAY_READY_BUDGET_S: "30",
@@ -206,7 +230,12 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
       code = err.status ?? 1;
       out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
     }
-    return { code, out, calls: fs.readFileSync(log, "utf8").split(NL).filter(Boolean) };
+    return {
+      code,
+      out,
+      calls: fs.readFileSync(log, "utf8").split(NL).filter(Boolean),
+      rootInHome: account ? account.rootInHome() : [],
+    };
   }
 
   it("has the budgeted probe at all", () => {
@@ -310,5 +339,66 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
     const firstWait = step.indexOf("wait_for_gateway_port");
     expect(guard).toBeGreaterThan(-1);
     expect(firstWait).toBeGreaterThan(guard);
+  });
+
+  // The quarantine is in the clawbox user's home and the files in its
+  // ~/.openclaw, where root's `mkdir`, `mv` and `rmdir` acted through any link
+  // planted on the way. Run against a home only `as_clawbox` can write to; not
+  // as root, whose writes that home cannot stop.
+  const asUser = CAN_LOCK_HOME ? it : it.skip;
+  const BLOCKERS = [
+    ".openclaw/plugins/installs.json",
+    ".openclaw/plugins/installs.json.bak",
+    ".openclaw/memory/carl_pir.sqlite",
+    ".openclaw/memory/carl_pir.sqlite-wal",
+    ".openclaw/agents/carl_pir/agent/openclaw-agent.sqlite",
+  ];
+  function seedBlockers(home: string) {
+    for (const rel of BLOCKERS) {
+      fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+      fs.writeFileSync(path.join(home, rel), `${rel}\n`);
+    }
+  }
+  const quarantines = (home: string) =>
+    fs.readdirSync(home).filter((f) => f.startsWith("openclaw-legacy-quarantine-"));
+
+  asUser("quarantines the known blocker files as the clawbox user", () => {
+    const home = path.join(tmp, "home");
+    seedBlockers(home);
+
+    const r = run({
+      listenAfter: 999, unitState: "failed", home,
+      journalTail: "Error: conflicting plugin install metadata in installs.json",
+    });
+
+    expect(r.rootInHome, "no mkdir, mv or rmdir by root in the home").toEqual([]);
+    expect(r.out).toMatch(/Quarantining known legacy OpenClaw migration blockers/);
+    expect(quarantines(home)).toHaveLength(1);
+    const qdir = path.join(home, quarantines(home)[0]);
+    expect(fs.readdirSync(qdir).sort()).toEqual(BLOCKERS.map((b) => path.basename(b)).sort());
+    for (const rel of BLOCKERS) expect(fs.existsSync(path.join(home, rel)), rel).toBe(false);
+    expect(r.out).not.toMatch(/No known legacy migration blocker files found/);
+    // The recovery itself still runs after the move.
+    expect(r.calls.filter((c) => c.startsWith("openclaw doctor"))).toHaveLength(2);
+  });
+
+  asUser("says which file it could not move, never that there were none", () => {
+    // A directory the user cannot change refuses the move. Reporting "no
+    // blocker files found" over files that are still in place would be a
+    // false message on the one run that needed this step.
+    const home = path.join(tmp, "home");
+    seedBlockers(home);
+    const memory = path.join(home, ".openclaw", "memory");
+    fs.chmodSync(memory, 0o555);
+
+    const r = run({
+      listenAfter: 999, unitState: "failed", home,
+      journalTail: "agent carl_pir belongs to agent piper",
+    });
+
+    expect(r.out).toMatch(/could not move .*carl_pir\.sqlite/);
+    expect(r.out).not.toMatch(/No known legacy migration blocker files found/);
+    expect(fs.existsSync(path.join(memory, "carl_pir.sqlite"))).toBe(true);
+    expect(r.rootInHome).toEqual([]);
   });
 });

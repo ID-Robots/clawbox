@@ -187,7 +187,8 @@ describe("the update path stops the gateway through stop_gateway_unit", () => {
     const stop = body.indexOf("if ! stop_gateway_unit; then");
     expect(stop).toBeGreaterThan(0);
     expect(body.slice(stop, body.indexOf(`${NL}  fi${NL}`, stop))).toContain("return 1");
-    expect(stop).toBeLessThan(body.indexOf('mv -v "$f" "$qdir/"'));
+    // The move is the clawbox user's (as_clawbox), and still after the stop.
+    expect(stop).toBeLessThan(body.indexOf('as_clawbox mv -v -- "$f" "$qdir/"'));
     expect(body).not.toMatch(/systemctl stop clawbox-gateway/);
   });
 

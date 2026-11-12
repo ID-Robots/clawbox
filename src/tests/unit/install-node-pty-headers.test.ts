@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { accountOnlyHome, shellFunctionIfPresent } from "../helpers/account-only-home";
 
 /**
  * TASK-2244: the 4.3 update failed at rebuild_reboot with "node-pty is still
@@ -90,6 +91,10 @@ interface Run {
   builtAgainst: string | null;
   /** NODE_PTY_FAILURE once the entry returned. */
   failure: string;
+  /** Root's file commands that named a path in the home. */
+  rootInHome: string[];
+  /** The commands run as the clawbox user through `as_clawbox`. */
+  asClawbox: string[];
 }
 
 let sandbox: string;
@@ -262,6 +267,10 @@ function run(scenario: Scenario = {}): Run {
   const call = bare
     ? `${entry}; rc=0`
     : `if ${entry}; then rc=0; else rc=$?; fi`;
+  // `as_clawbox` runs the command as the test's own user, and root's file
+  // commands that name a path in the home are recorded: the home's
+  // directories are the clawbox user's to make.
+  const account = accountOnlyHome(home, sandbox, { lock: false });
   const script = [
     "set -euo pipefail",
     `PATH=${JSON.stringify(fakeBin)}:"$PATH"`,
@@ -283,9 +292,11 @@ function run(scenario: Scenario = {}): Run {
       + `HOME=${JSON.stringify(home)} `
       + Object.entries(loginEnv).map(([k, v]) => `${k}=${JSON.stringify(v)} `).join("")
       + `PATH=${JSON.stringify(fakeBin)}:"$PATH" bash -c "$*"; }`,
+    account.shell,
     "wait_for_apt() { :; }",
     "apt-get() { :; }",
     "chown() { :; }",
+    shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
     ...FUNCTIONS.map(shellFunction),
     call,
     'echo "FAILURE=$NODE_PTY_FAILURE"',
@@ -304,6 +315,8 @@ function run(scenario: Scenario = {}): Run {
     nodedirs: existsSync(npmCalls) ? readFileSync(npmCalls, "utf-8").split("\n").filter(Boolean) : [],
     builtAgainst: existsSync(pty) ? readFileSync(pty, "utf-8").trim() : null,
     failure: /^FAILURE=(.*)$/m.exec(stdout)?.[1] ?? "",
+    rootInHome: account.rootInHome(),
+    asClawbox: account.asClawbox(),
   };
 }
 
@@ -639,5 +652,34 @@ describe("ensure_node_pty_after_rollback (the restored box's terminal)", () => {
     expect(r.status).toBe(0);
     expect(r.nodedirs).toEqual([]);
     expect((r.stdout + r.stderr).split("\n").filter((l) => l && !l.startsWith("FAILURE="))).toEqual([]);
+  });
+});
+
+describe("the build's cache directories are made by the clawbox user", () => {
+  // ~/.npm and ~/.cache/node-gyp are in the clawbox user's home, where root's
+  // `mkdir -p` made every missing parent root-owned (~/.cache) and acted
+  // through any link planted on the way.
+  it("creates ~/.npm and ~/.cache/node-gyp through as_clawbox, and root makes none of them", () => {
+    const r = run({ systemHeaders: RUNNING, network: "offline" });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.rootInHome.filter((c) => c.startsWith("mkdir ")), "no mkdir by root in the home").toEqual([]);
+    expect(r.asClawbox).toContain(
+      `mkdir -p -- ${path.join(home, ".npm")} ${path.join(home, ".cache", "node-gyp")}`,
+    );
+    expect(existsSync(path.join(home, ".npm"))).toBe(true);
+    expect(existsSync(path.join(home, ".cache", "node-gyp"))).toBe(true);
+  });
+
+  it("warns and builds on when the user cannot make them, under errexit as step_build calls it", () => {
+    // Root's mkdir could not fail; the user's can (a ~/.npm that is a file
+    // here). A build that would finish must not end at this line.
+    writeFileSync(path.join(home, ".npm"), "not a directory\n", "utf-8");
+
+    const r = run({ systemHeaders: RUNNING, network: "offline", bare: true });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Warning: could not create ~/.npm and ~/.cache/node-gyp");
+    expect(r.stdout).toContain("node-pty rebuilt and verified");
   });
 });
