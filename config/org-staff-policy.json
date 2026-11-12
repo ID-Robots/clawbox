@@ -21,6 +21,17 @@
   ],
   "agentPrefix": "clawbox-staff-",
 
+  "_mcpEntryPrefix": [
+    "The MCP servers the owner lets members of staff use (Settings -> System -> Users,",
+    "src/lib/staff-mcp.ts) reach each member's agent as an OpenClaw mcp.servers entry",
+    "of its own, named <prefix><8 hex of the username>-<server>, pointing at ClawBox's",
+    "loopback relay with THAT member's relay token. The member's agent gets",
+    "<entry>__* in its tools.allow; clawbox-staff-guard lets a staff agent call only",
+    "the entries granted to it (staff-mcp-grants.json beside the plugin) and refuses",
+    "every other agent's call to one. Never clawbox__*. Hermes staff get none."
+  ],
+  "mcpEntryPrefix": "cbstaff-",
+
   "_slashCommands": [
     "The only slash commands a member of staff may send: a fresh conversation and",
     "the reasoning switch. /model, /config, /restart, /bash and every other command",

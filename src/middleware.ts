@@ -289,6 +289,10 @@ const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/llamacpp",
   "/setup-api/local-ai/ollama",
   "/setup-api/local-ai/embed",
+  // The staff MCP relay (TASK-2377): the gateway calls it for a member of
+  // staff's agent with that member's relay token, which the route checks
+  // itself (src/lib/staff-mcp-relay.ts) — no cookie, no token, 401.
+  "/setup-api/staff-mcp",
 ];
 
 // Which /setup-api/* routes are reachable during the first-boot bootstrap

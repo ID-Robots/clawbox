@@ -4193,7 +4193,12 @@ step_apt_update() {
   # filters those formats need (and pulls in libreoffice-common, which owns the
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  #
+  # acl is `setfacl`: on an organisation box the Files app serves a member of
+  # staff their own home, which the web server (the owner's account) reaches
+  # through the ACL config/clawbox-user-helper.sh `home_access` lays on it
+  # (TASK-2377). Ubuntu images carry it already; naming it keeps it true.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer acl
   # Document libraries for the agent: Word (python-docx), Excel (openpyxl) and
   # PDF writing (reportlab). "Make me an offer / a quote / a spreadsheet" is an
   # everyday chat request, and without these the agent spent the first minutes

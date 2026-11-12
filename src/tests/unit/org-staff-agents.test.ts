@@ -140,3 +140,70 @@ describe("a member of staff's agent never becomes the box's", () => {
     expect(plan.writes).toContainEqual({ path: 'agents.entries["main"]', value: { workspace: OWNER_WS } });
   });
 });
+
+// TASK-2377 (G2): the MCP servers the owner granted to staff reach each
+// member's agent as relay entries of their own — `<entry>__*` in THAT agent's
+// allow-list, the entry in `mcp.servers`, and a `cbstaff-*` deny on every
+// agent of the owner's — and go again with the grant.
+describe("staff MCP grants", () => {
+  const entry = (name: string, token: string) => ({
+    name,
+    server: "docs",
+    config: { url: "http://127.0.0.1/setup-api/staff-mcp/docs", transport: "streamable-http", headers: { Authorization: `Bearer ${token}` } },
+  });
+  const grants = new Map([
+    ["maria", [entry("cbstaff-aaaaaaaa-docs", "a".repeat(64))]],
+    ["ivan", [entry("cbstaff-bbbbbbbb-docs", "b".repeat(64))]],
+  ]);
+  const syncWith = (config: Record<string, unknown>, staff: string[], mcp?: typeof grants) => {
+    const plan = planStaffRoster(config, { staff, openclawHome: HOME, ownerWorkspace: OWNER_WS, marks: null, mcp });
+    return apply(config, plan.writes);
+  };
+  const owned = {
+    agents: { entries: { main: { workspace: OWNER_WS, tools: { deny: ["browser"] } } }, ownership: "explicit", defaults: { systemAgent: { agentId: "main" } } },
+    mcp: { servers: { docs: { url: "https://docs.example.com/mcp" }, clawbox: { command: "bun" } } },
+  };
+
+  it("gives each member exactly their own relay entry, and the owner's agent the deny", () => {
+    const next = syncWith(owned, ["maria", "ivan"], grants) as { agents: { entries: Record<string, { tools: { allow?: string[]; deny?: string[] } }> }; mcp: { servers: Record<string, unknown> } };
+    const maria = next.agents.entries["clawbox-staff-maria"].tools;
+    const ivan = next.agents.entries["clawbox-staff-ivan"].tools;
+    expect(maria.allow).toContain("cbstaff-aaaaaaaa-docs__*");
+    expect(maria.allow).not.toContain("cbstaff-bbbbbbbb-docs__*");
+    expect(ivan.allow).toContain("cbstaff-bbbbbbbb-docs__*");
+    expect(ivan.allow).not.toContain("cbstaff-aaaaaaaa-docs__*");
+    // Never the device's own tools.
+    expect(maria.deny).toContain("clawbox__*");
+    expect(maria.allow?.some((t) => t.startsWith("clawbox__") || t === "docs__*")).toBe(false);
+    expect(next.mcp.servers["cbstaff-aaaaaaaa-docs"]).toEqual(grants.get("maria")![0].config);
+    expect(next.mcp.servers["cbstaff-bbbbbbbb-docs"]).toEqual(grants.get("ivan")![0].config);
+    // The owner's own servers untouched; the owner's agent keeps its deny and gains the staff one.
+    expect(next.mcp.servers.docs).toEqual({ url: "https://docs.example.com/mcp" });
+    expect(next.agents.entries.main.tools.deny).toEqual(["browser", "cbstaff-*"]);
+  });
+
+  it("takes the entries, the allow and the deny away again when nothing is granted", () => {
+    const granted = syncWith(owned, ["maria", "ivan"], grants);
+    const next = syncWith(granted, ["maria", "ivan"], new Map()) as typeof owned & { agents: { entries: Record<string, { tools: { allow?: string[]; deny?: string[] } }> } };
+    expect(Object.keys(next.mcp.servers).sort()).toEqual(["clawbox", "docs"]);
+    expect(next.agents.entries.main.tools.deny).toEqual(["browser"]);
+    expect(next.agents.entries["clawbox-staff-maria"].tools.allow?.some((t) => t.startsWith("cbstaff-"))).toBe(false);
+  });
+
+  it("is idempotent", () => {
+    const once = syncWith(owned, ["maria", "ivan"], grants);
+    const plan = planStaffRoster(once, { staff: ["maria", "ivan"], openclawHome: HOME, ownerWorkspace: OWNER_WS, marks: null, mcp: grants });
+    expect(plan.writes).toEqual([]);
+  });
+
+  it("pins the owner's agent with the deny on a box with no roster", () => {
+    const next = syncWith({}, ["maria"], new Map([["maria", grants.get("maria")!]])) as { agents: { entries: Record<string, { tools?: { deny?: string[] } }> } };
+    expect(next.agents.entries.main.tools?.deny).toEqual(["cbstaff-*"]);
+  });
+
+  it("writes no deny and no entry for a member without grants", () => {
+    const next = syncWith(owned, ["maria"]) as typeof owned;
+    expect(Object.keys(next.mcp.servers).sort()).toEqual(["clawbox", "docs"]);
+    expect((next.agents.entries.main as { tools: { deny: string[] } }).tools.deny).toEqual(["browser"]);
+  });
+});

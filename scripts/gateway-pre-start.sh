@@ -8618,6 +8618,26 @@ if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_STAFF_GUARD_NODE" ];
     if (!staffToolCallDenyReason({ toolName: "write", params: { path: "/nonexistent/.openclaw/openclaw.json" } }, { agentId: "clawbox-staff-probe" }, opts)) throw new Error("a staff write outside its folder was not refused");
     if (!staffToolCallDenyReason({ toolName: "exec", params: { command: "ls" } }, { agentId: "clawbox-staff-probe" }, opts)) throw new Error("a staff exec was not refused");
     if (staffToolCallDenyReason({ toolName: "exec", params: { command: "ls" } }, { agentId: "main" }, opts)) throw new Error("the owner agent was judged");
+    // Staff MCP grants (TASK-2377): only an entry granted to THAT member, read
+    // from the grants file; a missing file grants nothing; never clawbox__*;
+    // a member relay entry is never the owner agent'"'"'s to call.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const tmp = fs.mkdtempSync(`${os.tmpdir()}/clawbox-staff-guard-probe-`);
+    try {
+      const grants = `${tmp}/staff-mcp-grants.json`;
+      fs.writeFileSync(grants, JSON.stringify({ agents: { "clawbox-staff-probe": ["cbstaff-00000000-docs"] } }));
+      const g = { ...opts, mcpGrants: grants };
+      if (staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("a granted staff MCP tool was refused");
+      if (!staffToolCallDenyReason({ toolName: "tool_call", params: { id: "mcp:cbstaff-00000000-other:search" } }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("an ungranted staff MCP tool behind tool_call was not refused");
+      if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-other" }, g)) throw new Error("another member could call a granted MCP tool");
+      if (!staffToolCallDenyReason({ toolName: "clawbox__system_info", params: {} }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("a staff clawbox__ call was not refused");
+      if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-probe" }, { ...opts, mcpGrants: `${tmp}/missing.json` })) throw new Error("a missing grants file granted a staff MCP tool");
+      if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "main" }, g)) throw new Error("the owner agent could call a member relay entry");
+      if (staffToolCallDenyReason({ toolName: "docs__search", params: {} }, { agentId: "main" }, g)) throw new Error("the owner agent was judged on its own MCP server");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   ' 2>&1; then
     echo "  WARNING: the installed $CLAWBOX_STAFF_GUARD_ID plugin did not load or did not refuse a staff write — a member of staff's file tools are held only by their agent's own tool policy" >&2
   fi
