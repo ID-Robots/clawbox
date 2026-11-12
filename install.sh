@@ -12822,8 +12822,11 @@ step_chpasswd() {
   # -f follows symlinks; -L rejects the link itself. A symlink here would be a
   # way to make root read a file the clawbox user could not otherwise feed in.
   # The file is removed by that user, whose data/ it sits in: root's `rm` there
-  # would act on whatever the name was changed to point at. Neither removal
-  # may end the step, which errexit would otherwise do.
+  # would act on whatever the name was changed to point at. The symlink's
+  # removal never changes the refusal's 64. After the read, a record the user
+  # could not remove ends the step before chpasswd, as root's failed `rm` did
+  # under errexit: the plaintext must not outlive a password change, and the
+  # routes scrub it only when the step fails.
   if [ -L "$INPUT_FILE" ]; then
     as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null || true
     echo "Error: password input file is a symlink; refusing" >&2
@@ -12842,7 +12845,10 @@ step_chpasswd() {
   # no NUL can reach it either.
   local record user
   record="$(cat "$INPUT_FILE")"
-  as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null || echo "  Warning: could not remove $INPUT_FILE" >&2
+  if ! as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null; then
+    echo "Error: could not remove $INPUT_FILE; the password was not changed" >&2
+    exit 1
+  fi
 
   case "$record" in
     *$'\n'*)

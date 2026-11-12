@@ -228,12 +228,15 @@ d("install.sh::step_chpasswd", () => {
     expect(fedToChpasswd()).toBe("");
   });
 
-  it("step_chpasswd still changes the password, with a warning, when the removal fails", () => {
+  // Fails closed, as root's bare `rm` did under errexit: a password change
+  // must not leave its plaintext record behind, and the routes scrub it only
+  // when the step fails.
+  it("step_chpasswd changes no password while a record it could not remove stays on disk", () => {
     fs.writeFileSync(inputFile, "clawbox:hunter2\n", { mode: 0o600 });
     const r = runLocked("step_chpasswd", failRm);
-    expect(r.status, r.stderr).toBe(0);
-    expect(fedToChpasswd()).toBe("clawbox:hunter2\n");
-    expect(r.stderr).toBe(`  Warning: could not remove ${inputFile}\n`);
+    expect(r.status).toBe(1);
+    expect(fedToChpasswd()).toBe("");
+    expect(r.stderr).toBe(`Error: could not remove ${inputFile}; the password was not changed\n`);
     // No root removal stands in for the account's: root only read the record.
     expect(r.rootInHome).toEqual([`cat ${inputFile}`]);
     expect(fs.existsSync(inputFile)).toBe(true);
