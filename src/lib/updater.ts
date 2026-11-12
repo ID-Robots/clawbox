@@ -4123,7 +4123,9 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
  *   the full repair, which lets a running pre-start finish before it stops it.
  *   Read last, right before the start, so the gap after it is the shortest.
  * - The pre-start's output feeds the plugin repair: taken only when the journal
- *   names nothing that repair, or the legacy quarantine, exists for.
+ *   names nothing that repair, or the legacy quarantine, exists for. A journal
+ *   that says nothing at all — journalctl failed, or the gateway never ran this
+ *   boot — is no such evidence, and gets the full repair.
  * - doctor --fix: still run whenever doctor's own record does not prove it
  *   completed for the installed core (install.sh records it at the core
  *   install), and whenever this start fails; the pre-start's own `config
@@ -4133,6 +4135,7 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
 async function gatewayStartsWithoutRepair(): Promise<boolean> {
   if (!(await doctorCompleteForInstalledCore())) return false;
   const journal = await readGatewayJournalTail();
+  if (!journal.trim()) return false;
   const named = [
     PLUGIN_PAYLOAD_VERIFICATION_RE,
     PLUGIN_CAPABILITY_CONSENT_RE,
@@ -4140,9 +4143,11 @@ async function gatewayStartsWithoutRepair(): Promise<boolean> {
     /SQLite transaction lock wait failed/i,
   ].some((pattern) => pattern.test(journal));
   if (named) return false;
+  // For the log line only, and read before the unit: nothing may sit between
+  // that read and the start.
+  const core = await installedOpenclawCoreVersion();
   const unit = await readGatewayStartState("clawbox-gateway.service");
   if (unit?.activeState !== "inactive" || unit.job) return false;
-  const core = await installedOpenclawCoreVersion();
   console.log("[Updater] gateway_verify: nothing to repair (no blocker in the gateway journal; doctor recorded "
     + `complete for OpenClaw ${core ?? "(version unreadable)"}); starting the gateway on its own pre-start`);
   return true;

@@ -2266,7 +2266,7 @@ describe("updater", () => {
        * times.
        */
       async function verifyAfterPostUpdate(options: {
-        journal?: string;
+        journal?: string | Error;
         unit?: () => string | Error;
         subState?: (read: number) => string;
         listensAfter?: number;
@@ -2275,10 +2275,9 @@ describe("updater", () => {
       } = {}) {
         setupExecFileMock({
           [POST_UPDATE]: { stdout: "", stderr: "" },
-          "/usr/bin/journalctl -u clawbox-gateway.service": {
-            stdout: options.journal ?? "[gateway] ready (5 plugins)\n",
-            stderr: "",
-          },
+          "/usr/bin/journalctl -u clawbox-gateway.service": options.journal instanceof Error
+            ? options.journal
+            : { stdout: options.journal ?? "[gateway] ready (5 plugins)\n", stderr: "" },
           ping: { stdout: "", stderr: "" },
           systemctl: { stdout: "", stderr: "" },
           openclaw: { stdout: "1.0.0", stderr: "" },
@@ -2429,6 +2428,17 @@ describe("updater", () => {
       ])("keeps the full repair when the journal names %s", async (_what, journal) => {
         await verifyAfterPostUpdate({ journal });
         expectFullRepair();
+      });
+
+      it.each([
+        ["journalctl failed", new Error("Failed to open the journal")],
+        ["the gateway logged nothing this boot", ""],
+      ])("keeps the full repair when the journal says nothing: %s", async (_what, journal) => {
+        // Silence is not "no blocker": it is no evidence either way.
+        const state = await verifyAfterPostUpdate({ journal });
+        expect(state.phase).toBe("completed");
+        expectFullRepair();
+        expect(indexesOf(RESTART)).toHaveLength(1);
       });
 
       it.each([
