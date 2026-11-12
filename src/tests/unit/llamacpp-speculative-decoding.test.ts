@@ -315,6 +315,10 @@ describe("LLAMACPP_LOAD_MODE in .env", () => {
     if (at < 0) throw new Error(`${name}() not found in install.sh`);
     return INSTALL.slice(at + 1, INSTALL.indexOf("\n}\n", at + 1) + 2);
   };
+  // install.sh's .env writers run as the service account; the suite's own user
+  // owns the fixtures, so the account is that user here. With no PROJECT_DIR,
+  // hand_over_checkout has no checkout to hand over.
+  const JETSON_WRITERS = ["as_clawbox() { \"$@\"; }\n", ...["append_as_clawbox", "hand_over_checkout"].map(installFunction)];
 
   /** Every .env line step_directories_permissions writes on a Jetson, run against `envFile`. */
   function seedJetsonEnv(file: string) {
@@ -322,8 +326,10 @@ describe("LLAMACPP_LOAD_MODE in .env", () => {
       .split("\n")
       .filter((l) => /^ {2}(ensure|migrate)_env_setting "\$ENV_FILE" /.test(l));
     const helpers = ["ensure_env_setting", "migrate_env_setting", "get_env_setting_or_default"].map(installFunction);
-    const r = spawnSync("bash", ["-c", [...helpers, `ENV_FILE="${file}"`, ...lines].join("\n")], { encoding: "utf8" });
+    const r = spawnSync("bash", ["-c", [...JETSON_WRITERS, ...helpers, `ENV_FILE="${file}"`, ...lines].join("\n")], { encoding: "utf8" });
     expect(r.status, r.stderr).toBe(0);
+    // Without errexit a writer missing a helper still exits 0; it says so here.
+    expect(r.stderr).toBe("");
     return read(file);
   }
 
@@ -363,11 +369,13 @@ describe("LLAMACPP_LOAD_MODE in .env", () => {
       const src = repoFile(installer);
       const at = src.indexOf("\nensure_env_setting() {\n");
       const helper = src.slice(at + 1, src.indexOf("\n}\n", at + 1) + 2);
+      const writers = installer === "install.sh" ? JETSON_WRITERS.join("\n") : "";
       const add = (body: string) => {
         const file = path.join(dir, `${installer}.env`);
         writeFileSync(file, body);
-        const r = spawnSync("bash", ["-c", `${helper}\nensure_env_setting "${file}" LLAMACPP_LOAD_MODE mmap`], { encoding: "utf8" });
+        const r = spawnSync("bash", ["-c", `${writers}\n${helper}\nensure_env_setting "${file}" LLAMACPP_LOAD_MODE mmap`], { encoding: "utf8" });
         expect(r.status, r.stderr).toBe(0);
+        expect(r.stderr).toBe("");
         return read(file);
       };
       // Glued on, the owner's last key would be corrupted and the new one unset.

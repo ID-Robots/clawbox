@@ -280,13 +280,13 @@ function fixtureGit(...args: string[]): string {
 }
 
 /**
- * The `chmod +x` over scripts/*.sh that step_directories_permissions runs,
- * verbatim. step_rebuild_reboot, the step every in-app update dispatches, runs
- * it first and builds after it.
+ * The `chmod +x` over scripts/*.sh that step_directories_permissions runs as
+ * the service account, verbatim. step_rebuild_reboot, the step every in-app
+ * update dispatches, runs it first and builds after it.
  */
 function rebuildChmodLine(): string {
   const line = shellFunction("step_directories_permissions").split("\n").map((l) => l.trim())
-    .find((l) => l.startsWith('find "$PROJECT_DIR/scripts"') && l.includes("chmod +x"));
+    .find((l) => l.startsWith('(cd / && as_clawbox find "$PROJECT_DIR/scripts"') && l.includes("chmod +x"));
   if (!line) throw new Error("step_directories_permissions no longer makes scripts/*.sh executable");
   return line;
 }
@@ -314,7 +314,11 @@ function setUpCheckout(c: Checkout): void {
   if (c.modeFlip) {
     if (fixtureGit("ls-files", "-s", "scripts/x.sh").split(" ")[0] !== "100644") throw new Error("scripts/x.sh is not tracked as 100644");
     const chmod = rebuildChmodLine();
-    const r = spawnSync("bash", ["-c", chmod], { encoding: "utf-8", env: { ...gitEnv(), PROJECT_DIR: projectDir } });
+    // The suite's own user owns the fixture, so the account is that user here.
+    const r = spawnSync("bash", ["-c", `as_clawbox() { "$@"; }\n${chmod}`], {
+      encoding: "utf-8",
+      env: { ...gitEnv(), PROJECT_DIR: projectDir },
+    });
     if (r.status !== 0) throw new Error(`${chmod} failed: ${r.stderr}`);
     const src = (name: string) => path.join(projectDir, "src", name);
     if (c.modeFlip === "edit") writeFileSync(path.join(projectDir, "scripts", "x.sh"), "echo y\n", "utf-8");
@@ -1157,7 +1161,7 @@ describe("run_next_build leaves the type check to CI only at origin's beta or ma
     const perms = code.indexOf("step_directories_permissions");
     expect(perms).toBeGreaterThan(-1);
     expect(code.indexOf("do_rebuild", perms)).toBeGreaterThan(perms);
-    expect(rebuildChmodLine()).toBe('find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +');
+    expect(rebuildChmodLine()).toBe('(cd / && as_clawbox find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +)');
   });
 
   // A here-string over a pipe buffer goes through a temp file, and with /tmp

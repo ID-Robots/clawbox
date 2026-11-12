@@ -1600,6 +1600,36 @@ unset _persisted_iface
 # Run a command as the clawbox user
 as_clawbox() { sudo -u "$CLAWBOX_USER" "$@"; }
 
+# Append stdin to a file in the checkout as the service account, whose file it
+# is. The bytes travel on stdin, so no value reaches sudo's command line or its
+# log, and a file this creates is the account's own, 0600.
+append_as_clawbox() {
+  as_clawbox sh -c 'umask 077 && cat >> "$1"' sh "$1"
+}
+
+# Before the service account writes .env or data/network.env, hand it back
+# anything an earlier root run left root-owned in its checkout, or its write
+# fails where root's succeeded. Owners are only read here; any leftover hands
+# back the whole checkout with the command step_git_pull's sync runs after every
+# update (chown -R defaults to -P: no link inside is followed, and a link given
+# as the operand is changed itself). Never a chown by name below the checkout:
+# each directory on that path is the account's, so a link swapped in at data/
+# would hand over the file it points at, /etc/clawbox/network.env included.
+# Anything under scripts/ it does not own counts too: its find must enter every
+# directory there, and its chmod fails with EPERM on a script it does not own
+# even when the bit is already set.
+hand_over_checkout() {
+  [ -d "$PROJECT_DIR" ] && [ ! -L "$PROJECT_DIR" ] || return 0
+  local entry stray
+  stray="$(find "$PROJECT_DIR/scripts" ! -user "$CLAWBOX_USER" -print -quit 2>/dev/null || true)"
+  for entry in "$PROJECT_DIR" "$PROJECT_DIR/data" "$PROJECT_DIR/.env" "$IFACE_ENV" ${stray:+"$stray"}; do
+    if [ -e "$entry" ] && [ "$(stat -c %U "$entry" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
+      chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR" || true
+      return 0
+    fi
+  done
+}
+
 # Run a command as the clawbox user with login environment
 # Explicit PATH ensures bun/node are found even inside systemd services
 as_clawbox_login() {
@@ -1919,12 +1949,13 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    hand_over_checkout
     # A hand-edited .env can end without a newline: the key must not be glued
     # onto its last line, which would corrupt that key and leave this one unset.
     if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
-      printf '\n' >> "$env_file"
+      printf '\n' | append_as_clawbox "$env_file"
     fi
-    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    printf '%s=%s\n' "$key" "$value" | append_as_clawbox "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi
 }
@@ -1948,21 +1979,24 @@ migrate_env_setting() {
   if [ "$current_value" != "$old_value" ]; then
     return 0
   fi
-  local tmp
-  tmp=$(mktemp "${env_file}.XXXXXX") || return 1
-  # Rewrite in place via a temp file rather than sed -i so an unusual character
-  # in either value cannot be read as sed syntax.
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "${key}="*) printf '%s=%s\n' "$key" "$new_value" >> "$tmp" ;;
-      *) printf '%s\n' "$line" >> "$tmp" ;;
-    esac
-  done < "$env_file"
-  # mktemp created the temp file as root with 0600; carry the real file's mode
-  # and owner across so .env stays readable by the clawbox service user.
-  chmod --reference="$env_file" "$tmp" 2>/dev/null || true
-  chown --reference="$env_file" "$tmp" 2>/dev/null || true
-  mv "$tmp" "$env_file"
+  hand_over_checkout
+  # The service account rewrites its own file: a temp beside it, every line
+  # copied but the setting's, the real file's mode carried across, then an
+  # atomic rename. The name and the new value travel on stdin, off sudo's
+  # command line. A temp file rather than sed -i, so an unusual character in
+  # either value cannot be read as sed syntax.
+  printf '%s\0%s\0' "$key" "$new_value" | as_clawbox bash -c '
+    IFS= read -r -d "" setting && IFS= read -r -d "" value || exit 1
+    tmp=$(mktemp "$1.XXXXXX") || exit 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "$setting="*) printf "%s=%s\n" "$setting" "$value" ;;
+        *) printf "%s\n" "$line" ;;
+      esac
+    done < "$1" > "$tmp" || { rm -f -- "$tmp"; exit 1; }
+    chmod --reference="$1" -- "$tmp" 2>/dev/null
+    mv -T -- "$tmp" "$1" || { rm -f -- "$tmp"; exit 1; }
+  ' migrate_env_setting "$env_file" || return 1
   echo "  Migrated ${key} from ${old_value} to ${new_value}"
 }
 
@@ -4148,10 +4182,12 @@ step_network_setup() {
     fi
   fi
   echo "  WiFi interface: $WIFI_IFACE"
-  # Persist for scripts and services
-  mkdir -p "$PROJECT_DIR/data"
-  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > "$IFACE_ENV"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data" "$IFACE_ENV"
+  # Persist for scripts and services, as the service account: data/ and this
+  # file are its own. umask 022, not 077: a fresh file is 0644, as it was when
+  # root wrote it.
+  hand_over_checkout
+  as_clawbox mkdir -p "$PROJECT_DIR/data"
+  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" | as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$IFACE_ENV"
   # Also write to root-owned path for clawbox-root-update@ service
   mkdir -p /etc/clawbox
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
@@ -9545,9 +9581,12 @@ step_captive_portal_dns() {
 }
 
 step_directories_permissions() {
-  mkdir -p "$PROJECT_DIR/data"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
-  find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
+  # The service account makes and writes everything below in its own checkout.
+  # Its find starts from /: GNU find fails when it cannot return to a starting
+  # directory the account may not enter (a step run by hand from /root).
+  hand_over_checkout
+  as_clawbox mkdir -p "$PROJECT_DIR/data"
+  (cd / && as_clawbox find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +)
   # Create .env with defaults if it doesn't already exist
   local ENV_FILE="$PROJECT_DIR/.env"
   # Google Gemini CLI public OAuth credentials (split to pass GitHub push protection)
@@ -9556,22 +9595,20 @@ step_directories_permissions() {
   local G_SEC; G_SEC="GOCSPX-4uHgMPm"
   G_SEC="${G_SEC}-1o7Sk-geV6Cu5clXFsxl"
   if [ ! -f "$ENV_FILE" ]; then
-    cp "$PROJECT_DIR/.env.example" "$ENV_FILE"
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    as_clawbox sh -c 'umask 077 && cp "$1" "$2" && chmod 600 "$2"' sh "$PROJECT_DIR/.env.example" "$ENV_FILE"
     echo "  Created $ENV_FILE from .env.example"
   fi
   # Ensure Google OAuth credentials are present (added in v2.2.0)
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_ID=' "$ENV_FILE" 2>/dev/null; then
-    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" >> "$ENV_FILE"
+    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" | append_as_clawbox "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_ID to $ENV_FILE"
   fi
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_SECRET=' "$ENV_FILE" 2>/dev/null; then
-    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
+    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" | append_as_clawbox "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
   if [ -n "${CLAWBOX_AI_API_KEY:-}" ] && ! grep -q '^CLAWBOX_AI_API_KEY=' "$ENV_FILE" 2>/dev/null; then
-    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
+    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" | append_as_clawbox "$ENV_FILE"
     echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
   fi
   # Propagate test mode into the project .env so clawbox-setup.service
