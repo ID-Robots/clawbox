@@ -2120,7 +2120,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   // The composer a tab was left with: its draft and the turns queued behind
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
-  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null; turn: TurnLine | null }>>(new Map())
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null; turn?: TurnLine | null }>>(new Map())
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
