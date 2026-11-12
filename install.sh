@@ -6150,8 +6150,18 @@ remove_gateway_watchdog() {
     /run/clawbox/gateway-watchdog.restarts
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl reset-failed clawbox-gateway-watchdog.service clawbox-gateway-watchdog.timer >/dev/null 2>&1 || true
-  if [ -e /etc/systemd/system/clawbox-gateway-watchdog.timer ]; then
-    echo "  Warning: could not remove clawbox-gateway-watchdog.timer" >&2
+  # Every piece is checked, not just the timer: a unit or a script left behind is
+  # a partial removal, and saying "removed" over it would leave nothing that
+  # points at the repair.
+  local left=()
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]; then
+      left+=("/etc/systemd/system/$unit")
+    fi
+  done
+  [ -e "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" ] && left+=("$ROOT_LIBEXEC_DIR/gateway-watchdog.sh")
+  if [ "${#left[@]}" -gt 0 ]; then
+    echo "  Warning: the gateway watchdog was only partly removed; still present: ${left[*]}" >&2
     return 1
   fi
   echo "  Gateway liveness watchdog removed (this edition runs no OpenClaw gateway)"

@@ -214,6 +214,17 @@ describe("install_gateway_watchdog / remove_gateway_watchdog", () => {
     expect(fs.existsSync(path.join(r.run, "gateway-watchdog.state"))).toBe(false);
   });
 
+  it("reports a partial removal instead of claiming the watchdog is gone", () => {
+    runFunctions("install_gateway_watchdog");
+    // The script cannot be removed (a read-only /usr); the units can.
+    const r = runFunctions(
+      'rm() { local a; for a; do case "$a" in */gateway-watchdog.sh) return 1 ;; esac; done; command rm "$@"; }\nremove_gateway_watchdog || echo RC=$?',
+    );
+    expect(r.out).toMatch(/only partly removed; still present: .*gateway-watchdog\.sh/);
+    expect(r.out).toMatch(/RC=1/);
+    expect(r.out).not.toMatch(/Gateway liveness watchdog removed/);
+  });
+
   it("is silent and touches nothing when there is nothing to remove", () => {
     const r = runFunctions("remove_gateway_watchdog");
     expect(r.status, r.out).toBe(0);

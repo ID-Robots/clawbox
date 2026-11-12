@@ -98,9 +98,10 @@ B=${JSON.stringify(box)}
 echo "$*" >> "$B/systemctl.log"
 case " $* " in
   *" LoadState "*) [ -f "$B/load-state" ] && cat "$B/load-state"; exit 0 ;;
-  *" Environment "*) [ -f "$B/environment" ] && cat "$B/environment"; exit 0 ;;
-  *" list-units "*) [ -f "$B/root-steps" ] && cat "$B/root-steps"; exit 0 ;;
+  *" Environment "*) [ -f "$B/environment-fails" ] && exit 1; [ -f "$B/environment" ] && cat "$B/environment"; exit 0 ;;
+  *" list-units "*) [ -f "$B/list-units-fails" ] && exit 1; [ -f "$B/root-steps" ] && cat "$B/root-steps"; exit 0 ;;
   *" list-jobs "*)
+    [ -f "$B/list-jobs-fails" ] && exit 1
     [ -f "$B/jobs" ] && cat "$B/jobs"
     # The job an accepted try-restart queued, seen once, by the run that asked.
     if [ -f "$B/jobs-once" ]; then cat "$B/jobs-once"; rm -f "$B/jobs-once"; fi
@@ -111,7 +112,10 @@ case " $* " in
       echo "77 clawbox-gateway.service restart running" > "$B/jobs-once"
     fi
     exit "$rc" ;;
-  *" show "*) cat "$B/props"; exit 0 ;;
+  *" show "*)
+    # After an accepted restart: the status query fails once, if asked to.
+    if [ -f "$B/show-fails-once" ] && grep -q try-restart "$B/systemctl.log"; then rm -f "$B/show-fails-once"; exit 1; fi
+    cat "$B/props"; exit 0 ;;
 esac
 exit 0
 `,
@@ -370,6 +374,16 @@ describe("gateway liveness watchdog — when it restarts", () => {
     expect(fs.readFileSync(path.join(runDir, "gateway-watchdog.restarts"), "utf-8").trim()).toBe("");
   });
 
+  it("an empty invocation from a failed status query is not evidence of a restart", () => {
+    fs.writeFileSync(path.join(box, "restart-noop"), "");
+    fs.writeFileSync(path.join(box, "show-fails-once"), "");
+    setCurl(28);
+    silentFor(T0, 5);
+    expect(journal()).not.toMatch(/RESTARTING/);
+    expect(journal()).toMatch(/nothing was restarted/);
+    expect(fs.readFileSync(path.join(runDir, "gateway-watchdog.restarts"), "utf-8").trim()).toBe("");
+  });
+
   it("withdraws the restart from the cap when systemd refuses it", () => {
     fs.writeFileSync(path.join(box, "try-restart-rc"), "1\n");
     setCurl(28);
@@ -506,6 +520,16 @@ describe("gateway liveness watchdog — when it stands down", () => {
     fs.writeFileSync(path.join(root, "data", file), `TARGET_EDITION=hermes\nREQUESTED_AT=${now - 7200}\n`);
     silentFor(T0 + 360, 5);
     expect(restarts()).toHaveLength(1);
+  });
+
+  it.each([
+    ["list-units-fails", /systemctl could not say whether a root step is running/],
+    ["list-jobs-fails", /systemctl could not list the jobs queued for it/],
+    ["environment-fails", /the port it listens on is unknown/],
+  ])("stands down when systemctl cannot answer (%s) rather than read silence as all-clear", (file, said) => {
+    interruptedBy(() => fs.writeFileSync(path.join(box, file), ""));
+    expect(restarts()).toEqual([]);
+    expect(journal()).toMatch(said);
   });
 
   it("stands down under the gateway maintenance guard", () => {

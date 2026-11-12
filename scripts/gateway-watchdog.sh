@@ -94,19 +94,22 @@ fi
 # The port the gateway listens on is the one its own unit gives it: harness.ts
 # reads GATEWAY_PORT from the web server's environment, and a unit that sets it
 # (install-x64.sh's does) sets the gateway's OPENCLAW_GATEWAY_PORT beside it. A
-# root oneshot inherits neither, so it asks the unit; 18789 otherwise, which is
-# what the Jetson unit runs on. An explicit GATEWAY_PORT (the tests) wins.
+# root oneshot inherits neither, so it asks the unit (below, once the unit is
+# known to be there); a unit that names no port runs on 18789, the Jetson
+# unit's. An explicit GATEWAY_PORT (the tests) wins. A unit whose environment
+# cannot be READ is not a unit on 18789: probing a guessed port could restart a
+# healthy gateway listening elsewhere, so that stands down.
 unit_port() {
   local env word
-  env="$(systemctl show -p Environment --value "$UNIT" 2>/dev/null)" || return 0
+  env="$(systemctl show -p Environment --value "$UNIT" 2>/dev/null)" || return 1
   for word in $env; do
     case "$word" in
       OPENCLAW_GATEWAY_PORT=*|GATEWAY_PORT=*) printf '%s' "${word#*=}"; return 0 ;;
     esac
   done
+  return 0
 }
-PORT="$(positive_int "${GATEWAY_PORT:-$(unit_port)}" 18789)"
-PROBE_URL="http://127.0.0.1:${PORT}/"
+PORT="" PROBE_URL=""
 PROBE_TIMEOUT="$(positive_int "${CLAWBOX_WATCHDOG_PROBE_TIMEOUT:-}" 5)"
 PROBE_ATTEMPTS="$(positive_int "${CLAWBOX_WATCHDOG_PROBE_ATTEMPTS:-}" 3)"
 FAILURES="$(positive_int "${CLAWBOX_WATCHDOG_FAILURES:-}" 5)"
@@ -201,9 +204,12 @@ esac
 # Any root step in flight: post_update, a rebuild, harness_swap, edition_select,
 # gateway_setup… all run as clawbox-root-update@<step>.service, a oneshot that is
 # `activating` for exactly as long as it works.
-busy_steps="$(systemctl list-units --plain --no-legend --no-pager --all \
-  --state=activating,deactivating,reloading,active 'clawbox-root-update@*' 2>/dev/null \
-  | awk 'NF { print $1 }' | paste -sd' ' -)"
+# Asked on its own, so a systemctl that FAILS is not read as "no step running":
+# an empty list is only evidence when the question was answered.
+steps_out="$(systemctl list-units --plain --no-legend --no-pager --all \
+  --state=activating,deactivating,reloading,active 'clawbox-root-update@*' 2>/dev/null)" \
+  || stand_down no-root-steps "systemctl could not say whether a root step is running"
+busy_steps="$(printf '%s\n' "$steps_out" | awk 'NF { print $1 }' | paste -sd' ' -)"
 [ -n "$busy_steps" ] && stand_down root-step "a root step is running ($busy_steps)"
 
 # data/config.json, read by a parser and never sourced: it is written by the
@@ -314,10 +320,22 @@ freezer="$(prop FreezerState)"
 case "$freezer" in ''|running) ;; *) stand_down frozen "its cgroup is $freezer" ;; esac
 case "$main_pid" in ''|0|*[!0-9]*) stand_down no-pid "it has no main process" ;; esac
 [ -n "$invocation" ] || stand_down no-invocation "systemctl did not name its invocation"
-unit_jobs() { systemctl list-jobs --plain --no-legend --no-pager "$UNIT" 2>/dev/null | awk 'NF'; }
-if [ -n "$(unit_jobs)" ]; then
-  stand_down job "a job is already queued for it"
+# The unit's queued jobs; fails when systemctl could not be asked, which is
+# never read as "none".
+unit_jobs() {
+  local out
+  out="$(systemctl list-jobs --plain --no-legend --no-pager "$UNIT" 2>/dev/null)" || return 1
+  printf '%s\n' "$out" | awk 'NF'
+}
+jobs_now="$(unit_jobs)" || stand_down no-jobs "systemctl could not list the jobs queued for it"
+[ -n "$jobs_now" ] && stand_down job "a job is already queued for it"
+if [ -n "${GATEWAY_PORT:-}" ]; then
+  PORT="$(positive_int "$GATEWAY_PORT" 18789)"
+else
+  unit_port_value="$(unit_port)" || stand_down no-port "systemctl could not read its environment, so the port it listens on is unknown"
+  PORT="$(positive_int "$unit_port_value" 18789)"
 fi
+PROBE_URL="http://127.0.0.1:${PORT}/"
 
 # A fresh gateway is still binding its port. ActiveEnterTimestampMonotonic is
 # CLOCK_MONOTONIC in microseconds, /proc/uptime is CLOCK_BOOTTIME: the same
@@ -458,15 +476,23 @@ fi
 # as one.
 restart_rc=0
 systemctl --no-block --job-mode=fail try-restart "$UNIT" >/dev/null 2>&1 || restart_rc=$?
-restart_seen=0
+restart_seen=0 after_state=""
 if [ "$restart_rc" -eq 0 ]; then
-  after="$(systemctl show -p ActiveState -p InvocationID "$UNIT" 2>/dev/null)"
+  jobs_after="$(unit_jobs)" || jobs_after=""
+  after_rc=0
+  after="$(systemctl show -p ActiveState -p InvocationID "$UNIT" 2>/dev/null)" || after_rc=$?
   after_state="$(printf '%s\n' "$after" | sed -n 's/^ActiveState=//p' | head -n 1)"
   after_inv="$(printf '%s\n' "$after" | sed -n 's/^InvocationID=//p' | head -n 1)"
-  if [ -n "$(unit_jobs)" ] || [ "$after_inv" != "$invocation" ]; then
+  if [ -n "$jobs_after" ]; then
     restart_seen=1
-  else
-    case "$after_state" in deactivating|activating|reloading) restart_seen=1 ;; esac
+  elif [ "$after_rc" -eq 0 ]; then
+    # Only an ANSWERED query is evidence: an empty id from a failed one differs
+    # from every invocation without anything having restarted.
+    if [ -n "$after_inv" ] && [ "$after_inv" != "$invocation" ]; then
+      restart_seen=1
+    else
+      case "$after_state" in deactivating|activating|reloading) restart_seen=1 ;; esac
+    fi
   fi
 fi
 if [ "$restart_seen" -eq 1 ]; then

@@ -218,10 +218,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   read -r INV1 PID1 STATE1 _ <<<"$(unit_now)"
   if [ -n "$INV1" ] && [ "$INV1" != "$INV0" ]; then
     RESTARTED_AFTER=$(( $(board 'date +%s' | tail -n 1) - HANG_AT ))
+    # Only a confirmed restart releases the stopped process from the cleanup:
+    # on the failure path the EXIT trap must SIGCONT it, because systemd still
+    # calls a stopped gateway `active` and the cleanup's restart would not fire.
+    STOPPED_PID=
     break
   fi
 done
-STOPPED_PID=
 if [ -z "$RESTARTED_AFTER" ]; then
   not_ok "the hung gateway was not restarted within 15 minutes (still $INV1/$PID1, $STATE1)"
 else
