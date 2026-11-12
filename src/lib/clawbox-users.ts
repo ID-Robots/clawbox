@@ -363,6 +363,10 @@ export async function createUser(username: unknown, password: unknown): Promise<
     try {
       await forgetUserPreferences(name);
       await forgetUserLanguage(name);
+      // An earlier account's MCP credentials (src/lib/staff-mcp.ts) must never
+      // become the new account's.
+      const { forgetStaffMcpUserStrict } = await import("@/lib/staff-mcp");
+      await forgetStaffMcpUserStrict(name);
     } catch (err) {
       console.error("[clawbox-users] could not clear an earlier account's settings:", err instanceof Error ? err.message : err);
       throw new UserAdminError(

@@ -89,9 +89,10 @@ export async function admitRelayRequest(req: Request, server: string): Promise<A
   if (!(await listUsers()).some((user) => user.username === username)) {
     return { ok: false, response: refuse(403, "not_a_user", "This member of staff is no longer a user of this box.") };
   }
-  const setting = store.servers[server];
+  const setting = Object.hasOwn(store.servers, server) ? store.servers[server] : undefined;
   if (!setting) return { ok: false, response: refuse(404, "not_granted", "The owner has not granted this server to members of staff.") };
-  const credential = store.credentials[username]?.[server];
+  const mine = Object.hasOwn(store.credentials, username) ? store.credentials[username] : undefined;
+  const credential = mine && Object.hasOwn(mine, server) ? mine[server] : undefined;
   if (!credential) return { ok: false, response: refuse(403, "no_credential", "No credential is set for this member of staff on this server.") };
 
   const { readConfigStrict, isPlainObject } = await import("@/lib/openclaw-config");
@@ -333,6 +334,11 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   }
   const headers = downstreamHeaders(upstream);
   if (listIds.size === 0 || !upstream.ok) {
+    // A streamed answer is still read event by event: any tool list in it
+    // (whatever asked for it) reaches the member filtered.
+    if (upstream.body && (upstream.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream")) {
+      return new Response(filteredSse(upstream.body, admission.filter, cache), { status: upstream.status, headers });
+    }
     return new Response(upstream.body, { status: upstream.status, headers });
   }
   const body = await readBounded(upstream.body, MAX_LIST_RESPONSE_BYTES);
@@ -344,7 +350,59 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   return new Response(filtered, { status: upstream.status, headers });
 }
 
-/** GET (the server's own stream) and DELETE (end the session): passed on as they are. */
+/** Any message in `text` that carries a tool list, filtered (whatever request it answers). */
+function filterAnyToolList(text: string, filter: ToolFilter, cache: Map<string, ToolAnnotations | null>): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  const one = (m: unknown) => (isObject(m) && isObject(m.result) && Array.isArray(m.result.tools) ? filterToolsResult(m as JsonRpcMessage, filter, cache) : m);
+  const out = Array.isArray(parsed) ? parsed.map(one) : one(parsed);
+  return JSON.stringify(out) === JSON.stringify(parsed) ? text : JSON.stringify(out);
+}
+
+/**
+ * An SSE stream, event by event, with every tool list in it filtered: a
+ * server may close a POST's stream early and deliver the answer — a
+ * `tools/list` result included — on a resumed GET (`Last-Event-ID`), which
+ * must not hand a member a tool the POST path would have removed. Events are
+ * passed on as they complete; an event larger than the list cap ends the
+ * stream rather than going through unread.
+ */
+function filteredSse(body: ReadableStream<Uint8Array>, filter: ToolFilter, cache: Map<string, ToolAnnotations | null>): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let pending = "";
+  const emit = (event: string) => {
+    const lines = event.split(/\r?\n/);
+    const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, ""));
+    if (data.length === 0) return `${event}\n\n`;
+    const rewritten = filterAnyToolList(data.join("\n"), filter, cache);
+    if (rewritten === data.join("\n")) return `${event}\n\n`;
+    const others = lines.filter((l) => !l.startsWith("data:"));
+    return `${[...others, ...rewritten.split("\n").map((l) => `data: ${l}`)].join("\n")}\n\n`;
+  };
+  return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      pending += decoder.decode(chunk, { stream: true });
+      for (;;) {
+        const m = /\r?\n\r?\n/.exec(pending);
+        if (!m) break;
+        controller.enqueue(encoder.encode(emit(pending.slice(0, m.index))));
+        pending = pending.slice(m.index + m[0].length);
+      }
+      if (pending.length > MAX_LIST_RESPONSE_BYTES) controller.error(new Error("an SSE event too large to check"));
+    },
+    flush(controller) {
+      pending += decoder.decode();
+      if (pending.trim()) controller.enqueue(encoder.encode(emit(pending)));
+    },
+  }));
+}
+
+/** GET (the server's own stream, a resumed one included) and DELETE (end the session). */
 async function relayOther(req: Request, admission: Extract<Admission, { ok: true }>): Promise<Response> {
   let upstream: Response;
   try {
@@ -361,7 +419,13 @@ async function relayOther(req: Request, admission: Extract<Admission, { ok: true
     await upstream.body?.cancel().catch(() => undefined);
     return refuse(502, "upstream_redirect", "The MCP server answered with a redirect, which is not followed.");
   }
-  return new Response(upstream.body, { status: upstream.status, headers: downstreamHeaders(upstream) });
+  const headers = downstreamHeaders(upstream);
+  if (upstream.body && (upstream.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream")) {
+    const cache = annotationCache.get(admission.cacheKey) ?? new Map<string, ToolAnnotations | null>();
+    annotationCache.set(admission.cacheKey, cache);
+    return new Response(filteredSse(upstream.body, admission.filter, cache), { status: upstream.status, headers });
+  }
+  return new Response(upstream.body, { status: upstream.status, headers });
 }
 
 export async function relayStaffMcp(req: Request, server: string): Promise<Response> {

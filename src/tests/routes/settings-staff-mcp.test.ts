@@ -150,6 +150,14 @@ describe("the grants", () => {
     expect((await (await post({ username: "ivan", server: "docs", credential: "a\r\nX-Evil: 1" })).json()).code).toBe("bad_credential");
   });
 
+  it("says when a saved change could not be applied to the assistant yet", async () => {
+    h.sync.mockResolvedValueOnce(false);
+    const res = await post({ servers: { docs: {} } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).applied).toBe(false);
+    expect((await (await post({ servers: { docs: {} } })).json()).applied).toBe(true);
+  });
+
   it("is refused on a Hermes box, where staff get no MCP tools", async () => {
     h.harness = "hermes";
     expect((await post({ servers: { docs: {} } })).status).toBe(409);

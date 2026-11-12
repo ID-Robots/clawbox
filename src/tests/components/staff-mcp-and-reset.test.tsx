@@ -104,6 +104,35 @@ describe("the staff tools card", () => {
     expect(JSON.parse(String(post[1].body))).toEqual({ servers: { docs: { header: "X-Api-Key" } } });
   });
 
+  it("keeps an unsaved grant edit when a credential is saved", async () => {
+    render(<StaffMcpCard users={["ivan", "maria"]} orgMode />);
+    const header = await screen.findByTestId("staff-mcp-header-docs");
+    fireEvent.change(header, { target: { value: "X-Api-Key" } });
+    fireEvent.change(screen.getByTestId("staff-mcp-cred-input-maria-docs"), { target: { value: "maria-token" } });
+    fireEvent.click(screen.getByTestId("staff-mcp-cred-save-maria-docs"));
+    await waitFor(() => expect((screen.getByTestId("staff-mcp-cred-input-maria-docs") as HTMLInputElement).value).toBe(""));
+    expect((screen.getByTestId("staff-mcp-header-docs") as HTMLInputElement).value).toBe("X-Api-Key");
+    expect(screen.getByLabelText(/users\.staffMcp\.credentialFor.*maria/)).toBeInTheDocument();
+  });
+
+  it("says when the list could not be read, and reads it again on Retry", async () => {
+    let fail = true;
+    fetchMock.mockImplementation(() => (fail ? json(500, {}) : json(200, VIEW)));
+    render(<StaffMcpCard users={["ivan"]} orgMode />);
+    fireEvent.click(await screen.findByTestId("staff-mcp-retry"));
+    fail = false;
+    fireEvent.click(screen.getByTestId("staff-mcp-retry"));
+    expect(await screen.findByTestId("staff-mcp-grant-docs")).toBeChecked();
+  });
+
+  it("says when a saved change is not active yet", async () => {
+    fetchMock.mockImplementation((_u: string, init?: RequestInit) => json(200, (init?.method ?? "GET") === "POST" ? { ...VIEW, applied: false } : VIEW));
+    render(<StaffMcpCard users={["ivan"]} orgMode />);
+    fireEvent.change(await screen.findByTestId("staff-mcp-header-docs"), { target: { value: "X-Api-Key" } });
+    fireEvent.click(screen.getByTestId("staff-mcp-save-grants"));
+    expect(await screen.findByText("users.staffMcp.notApplied")).toBeInTheDocument();
+  });
+
   it("says members of staff get no MCP tools on Hermes", async () => {
     fetchMock.mockImplementation(() => json(200, { ...VIEW, harness: "hermes", staffMcpSupported: false, servers: [] }));
     render(<StaffMcpCard users={["ivan"]} orgMode />);

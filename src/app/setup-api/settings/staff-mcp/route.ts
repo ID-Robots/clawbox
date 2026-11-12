@@ -207,6 +207,10 @@ export async function POST(req: Request) {
   console.log("[staff-mcp] the owner changed the staff MCP grants");
   // Each member's agent and relay entries follow at once (awaited, best effort).
   const { syncStaffAgents } = await import("@/lib/org-staff-agents");
-  await syncStaffAgents();
-  return NextResponse.json(await view(store), { headers: NO_STORE });
+  // `applied: false` — saved, but the assistant's configuration (or the
+  // guard's record) could not be updated; the next sync (this page again, a
+  // member opening their chat) retries it.
+  const applied = await syncStaffAgents();
+  if (!applied) console.error("[staff-mcp] the grants were saved but could not be applied to the assistant yet");
+  return NextResponse.json({ ...(await view(store)), applied }, { headers: NO_STORE });
 }

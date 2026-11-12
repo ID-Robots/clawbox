@@ -8,7 +8,7 @@ import Busboy from "busboy";
 import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { filesBrowseRoot } from "@/lib/file-guard";
-import type { FilesFence } from "@/lib/files-scope";
+import { openInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/files-move";
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
@@ -550,7 +550,23 @@ export async function POST(req: NextRequest) {
           // the limit, the pipeline resolves, and the caller is told the
           // upload worked.
           fileStream.on("limit", () => fail(new UploadRefused(DISK_FULL, 507, "disk_full")));
-          const ws = fs.createWriteStream(destPath);
+          // A member's destination is judged again by the descriptor opened.
+          let memberFd: number | null = null;
+          if (fence.scope.kind === "member") {
+            try {
+              memberFd = openInMemberView(fence, destPath, "write");
+            } catch (err) {
+              fileStream.resume();
+              fail(err);
+              return;
+            }
+            if (memberFd === null) {
+              fileStream.resume();
+              fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));
+              return;
+            }
+          }
+          const ws = memberFd === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: memberFd });
           activeWrite = ws;
           written.push(destPath);
           const writePromise = pipeline(fileStream, ws).then(() => {});
@@ -668,7 +684,13 @@ export async function PUT(req: NextRequest) {
   const bounded = boundedBody(req.body, { limit: uploadBudget(abs), message: DISK_FULL });
   try {
     const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
-    await pipeline(nodeReadable, fs.createWriteStream(destPath));
+    let memberFd: number | null = null;
+    if (fence.scope.kind === "member") {
+      // Judged again by the descriptor opened, as a member's download is.
+      memberFd = openInMemberView(fence, destPath, "write");
+      if (memberFd === null) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+    }
+    await pipeline(nodeReadable, memberFd === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: memberFd }));
   } catch (err) {
     // Whatever landed comes off the disk either way; only the STATUS differs,
     // and it is decided by the meter's flag, never by the error's text — the

@@ -95,6 +95,13 @@ describe("POST /setup-api/users/password", () => {
     expect(h.reset).not.toHaveBeenCalled();
   });
 
+  it("answers 404 when the user was removed meanwhile, and changes nothing", async () => {
+    h.rotate.mockResolvedValue(null);
+    const res = await POST(req({ username: "ivan", password: "a-new-password" }));
+    expect(res.status).toBe(404);
+    expect(h.reset).not.toHaveBeenCalled();
+  });
+
   it("says when the box's helper predates the verb", async () => {
     h.reset.mockResolvedValue("unavailable");
     const res = await POST(req({ username: "ivan", password: "a-new-password" }));

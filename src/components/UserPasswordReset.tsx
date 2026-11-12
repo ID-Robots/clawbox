@@ -18,8 +18,10 @@ const ERROR_KEYS: Record<string, string> = {
   password_changing: "users.errResetBusy",
 };
 
-export default function UserPasswordReset({ username, onDone, onCancel }: {
+export default function UserPasswordReset({ username, onDone, onCancel, onBusyChange }: {
   username: string;
+  /** Told when a reset starts and ends, so the panel holds its other actions meanwhile. */
+  onBusyChange?: (busy: boolean) => void;
   /** Called after the password was reset. */
   onDone: () => void;
   onCancel: () => void;
@@ -39,6 +41,7 @@ export default function UserPasswordReset({ username, onDone, onCancel }: {
     e.preventDefault();
     if (!canSave) return;
     setSaving(true);
+    onBusyChange?.(true);
     setError(null);
     try {
       const res = await fetch("/setup-api/users/password", {
@@ -57,6 +60,7 @@ export default function UserPasswordReset({ username, onDone, onCancel }: {
       setError("users.errResetFailed");
     } finally {
       setSaving(false);
+      onBusyChange?.(false);
     }
   };
 

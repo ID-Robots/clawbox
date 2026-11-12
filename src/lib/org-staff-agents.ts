@@ -413,13 +413,13 @@ async function syncStaffAgentsNow(): Promise<boolean> {
     // The guard's record first: a grant taken away is refused by the guard
     // before the policy catches up, and one added is refused by the policy
     // until it does — never the other way round.
-    await writeStaffMcpGrants(OPENCLAW_HOME, mcp);
+    const grantsWritten = await writeStaffMcpGrants(OPENCLAW_HOME, mcp);
     const plan = planStaffRoster(config, { staff, openclawHome: OPENCLAW_HOME, ownerWorkspace, marks: marksBefore, mcp });
 
     for (const username of staff) {
       await seedStaffWorkspace(staffWorkspaceDir(OPENCLAW_HOME, username), username, ownerWorkspace);
     }
-    let ok = true;
+    let ok = grantsWritten;
     if (plan.writes.length > 0) {
       // Record the marks FIRST (a crash after the write must not leave a
       // roster nobody remembers making).
@@ -485,19 +485,23 @@ async function staffMcpPlan(staff: readonly string[], config: unknown): Promise<
  * whole by rename, 0600. No plugin folder, no file: the guard then refuses
  * every staff MCP call (missing = refuse).
  */
-async function writeStaffMcpGrants(openclawHome: string, mcp: ReadonlyMap<string, readonly StaffMcpEntry[]>): Promise<void> {
+async function writeStaffMcpGrants(openclawHome: string, mcp: ReadonlyMap<string, readonly StaffMcpEntry[]>): Promise<boolean> {
   const { STAFF_MCP_GRANTS_FILE, grantsDocument } = await import("@/lib/staff-mcp");
   const dir = path.join(openclawHome, "extensions", "clawbox-staff-guard");
-  if (!fs.existsSync(dir)) return;
+  // No guard installed: nothing to record, and no grant can be honoured —
+  // a failure only when there IS something to grant.
+  if (!fs.existsSync(dir)) return mcp.size === 0;
   const file = path.join(dir, STAFF_MCP_GRANTS_FILE);
   const content = `${JSON.stringify(grantsDocument(mcp), null, 2)}\n`;
   try {
-    if ((await fsp.readFile(file, "utf-8").catch(() => null)) === content) return;
+    if ((await fsp.readFile(file, "utf-8").catch(() => null)) === content) return true;
     const temp = `${file}.tmp-${process.pid}`;
     await fsp.writeFile(temp, content, { mode: 0o600 });
     await fsp.rename(temp, file);
+    return true;
   } catch (err) {
     console.error("[org-staff] could not record the staff MCP grants for the guard:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 

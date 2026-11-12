@@ -82,7 +82,6 @@ export interface StaffMcpStore {
   relayTokens: Record<string, string>;
 }
 
-export const EMPTY_STORE: StaffMcpStore = Object.freeze({ servers: {}, credentials: {}, relayTokens: {} }) as StaffMcpStore;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -125,8 +124,18 @@ export function maskCredential(value: string): string {
 }
 
 /** Parse the stored document, dropping anything that is not in its shape. */
+/**
+ * A map with no prototype: `constructor` and `__proto__` are legal usernames
+ * and server names, and on a plain object `map["constructor"]` would answer
+ * Object's own constructor — a grant, a credential or a relay token nobody
+ * set.
+ */
+function bare<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 export function parseStore(raw: unknown): StaffMcpStore {
-  const store: StaffMcpStore = { servers: {}, credentials: {}, relayTokens: {} };
+  const store: StaffMcpStore = { servers: bare(), credentials: bare(), relayTokens: bare() };
   if (!isRecord(raw)) return store;
   if (isRecord(raw.servers)) {
     for (const [name, setting] of Object.entries(raw.servers)) {
@@ -138,7 +147,7 @@ export function parseStore(raw: unknown): StaffMcpStore {
   if (isRecord(raw.credentials)) {
     for (const [user, byServer] of Object.entries(raw.credentials)) {
       if (!isStaffUsername(user) || !isRecord(byServer)) continue;
-      const kept: Record<string, string> = {};
+      const kept = bare<string>();
       for (const [server, value] of Object.entries(byServer)) {
         const credential = normalizeCredential(value);
         if (isServerName(server) && credential) kept[server] = credential;
@@ -172,7 +181,7 @@ export async function readStaffMcpStore(file: string = STAFF_MCP_STORE_PATH): Pr
   try {
     text = await fsp.readFile(file, "utf-8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { servers: {}, credentials: {}, relayTokens: {} };
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return parseStore(undefined);
     throw new StaffMcpStoreError("the staff MCP store could not be read");
   }
   try {
@@ -188,7 +197,7 @@ export async function readStaffMcpStoreOrEmpty(file: string = STAFF_MCP_STORE_PA
     return await readStaffMcpStore(file);
   } catch (err) {
     console.error("[staff-mcp]", err instanceof Error ? err.message : err);
-    return { servers: {}, credentials: {}, relayTokens: {} };
+    return parseStore(undefined);
   }
 }
 
@@ -219,18 +228,32 @@ export function updateStaffMcpStore(
   });
 }
 
-/** A removed user's credentials and relay token go with them, so a later account of that name starts with none. */
+/**
+ * A user's credentials and relay token, taken out of the store. THROWS when
+ * the store cannot be read or written — `createUser` refuses to create an
+ * account of a name whose earlier owner's credentials it could not clear.
+ */
+export async function forgetStaffMcpUserStrict(username: string, file: string = STAFF_MCP_STORE_PATH): Promise<void> {
+  if (!isStaffUsername(username) || !fs.existsSync(file)) return;
+  const current = await readStaffMcpStore(file);
+  if (!Object.hasOwn(current.credentials, username) && !Object.hasOwn(current.relayTokens, username)) return;
+  await updateStaffMcpStore((store) => {
+    const credentials = { ...store.credentials };
+    const relayTokens = { ...store.relayTokens };
+    delete credentials[username];
+    delete relayTokens[username];
+    return { ...store, credentials, relayTokens };
+  }, file);
+}
+
+/**
+ * A removed user's credentials and relay token go with them. Never throws (a
+ * removal is not undone for it); a store it could not clear is cleared again
+ * before an account of that name is created (`forgetStaffMcpUserStrict`).
+ */
 export async function forgetStaffMcpUser(username: string, file: string = STAFF_MCP_STORE_PATH): Promise<void> {
-  if (!isStaffUsername(username)) return;
   try {
-    if (!fs.existsSync(file)) return;
-    await updateStaffMcpStore((store) => {
-      const credentials = { ...store.credentials };
-      const relayTokens = { ...store.relayTokens };
-      delete credentials[username];
-      delete relayTokens[username];
-      return { ...store, credentials, relayTokens };
-    }, file);
+    await forgetStaffMcpUserStrict(username, file);
   } catch (err) {
     console.error(`[staff-mcp] could not forget ${username}'s credentials:`, err instanceof Error ? err.message : err);
   }
@@ -263,7 +286,13 @@ export function userOfRelayToken(store: StaffMcpStore, token: string | null | un
  * with userinfo or a query string may hold the OWNER's credential, which must
  * never travel with a member's call.
  */
-export type StaffUnusableReason = "unusable" | "transport" | "urlCredential";
+export type StaffUnusableReason = "unusable" | "transport" | "urlCredential" | "insecure";
+
+/** A host that never leaves the box: plain HTTP to it carries a credential nowhere. */
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
 
 export function staffServerVerdict(server: ServerRead): StaffUnusableReason | null {
   if (!server.usable || !server.config) return "unusable";
@@ -273,6 +302,9 @@ export function staffServerVerdict(server: ServerRead): StaffUnusableReason | nu
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "transport";
+    // A member's credential travels in a header: over the network only
+    // encrypted, in clear only to a server on this box.
+    if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname)) return "insecure";
   } catch {
     return "unusable";
   }
@@ -367,7 +399,7 @@ export async function ensureRelayTokens(staff: readonly string[], file: string =
   if (missing.length === 0) return current;
   return updateStaffMcpStore((store) => {
     const relayTokens = { ...store.relayTokens };
-    for (const user of missing) if (!relayTokens[user]) relayTokens[user] = newRelayToken();
+    for (const user of missing) if (!Object.hasOwn(relayTokens, user)) relayTokens[user] = newRelayToken();
     return { ...store, relayTokens };
   }, file);
 }

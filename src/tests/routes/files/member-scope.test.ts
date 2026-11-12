@@ -268,6 +268,21 @@ describe("a home the web server cannot reach", () => {
     }
   });
 
+  it("asks the helper once for requests that arrive together", async () => {
+    const locked = path.join(ROOT, "home", "locked2");
+    fs.mkdirSync(locked, { recursive: true });
+    fs.chmodSync(locked, 0o000);
+    homes.map.locked2 = locked;
+    who.current = { username: "locked2", isOwner: false };
+    try {
+      if (process.getuid?.() === 0) return;
+      await Promise.all([listing("Home"), listing("Home"), listing("Home")]);
+      expect(homes.grant).toHaveBeenCalledTimes(1);
+    } finally {
+      fs.chmodSync(locked, 0o755);
+    }
+  });
+
   it("refuses a member with no account home", async () => {
     who.current = { username: "ghost", isOwner: false };
     const res = await listing("");

@@ -159,6 +159,7 @@ export default function UsersPanel() {
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
 
   /** A stored message, in the current language; the password rule is the one key with a {min}. */
   const say = (key: string, params?: Record<string, string | number>): string =>
@@ -326,7 +327,7 @@ export default function UsersPanel() {
                       <button
                         type="button"
                         onClick={() => { setResetting(u.username); setConfirmRemove(null); setNotice(null); }}
-                        disabled={!!removing}
+                        disabled={!!removing || resetBusy}
                         className="px-3 h-8 rounded-lg text-xs text-white/80 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer disabled:opacity-50"
                         data-testid={`users-reset-open-${u.username}`}
                       >
@@ -337,7 +338,7 @@ export default function UsersPanel() {
                       <button
                         type="button"
                         onClick={() => { setConfirmRemove(u.username); setResetting(null); setNotice(null); }}
-                        disabled={!!removing}
+                        disabled={!!removing || resetBusy}
                         className="px-3 h-8 rounded-lg text-xs text-red-300 bg-red-500/10 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
                       >
                         {t("users.remove")}
@@ -347,8 +348,13 @@ export default function UsersPanel() {
                   {resetting === u.username && !confirming && (
                     <UserPasswordReset
                       username={u.username}
-                      onCancel={() => setResetting(null)}
-                      onDone={() => { setResetting(null); setNotice({ type: "success", key: "users.resetDone", params: { name: u.username } }); }}
+                      onBusyChange={setResetBusy}
+                      onCancel={() => setResetting((r) => (r === u.username ? null : r))}
+                      onDone={() => {
+                        // Only this user's form closes, whatever is open by now.
+                        setResetting((r) => (r === u.username ? null : r));
+                        setNotice({ type: "success", key: "users.resetDone", params: { name: u.username } });
+                      }}
                     />
                   )}
                   {confirming && (

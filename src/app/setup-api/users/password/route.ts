@@ -73,15 +73,18 @@ export async function POST(req: Request) {
   try {
     // 2. Every session of theirs ends before anything changes.
     let stored = false;
+    let gone = false;
     for (let attempt = 0; attempt < 2 && !stored; attempt++) {
       try {
-        await rotateUserSessionVersion(username);
+        // null: the registry no longer holds them (removed meanwhile).
+        gone = (await rotateUserSessionVersion(username)) === null;
         stored = true;
       } catch (err) {
         console.error("[users] could not end the user's sessions:", err instanceof Error ? err.message : err);
       }
     }
     if (!stored) return refuse(500, "sessions_not_ended", "The user's sessions could not be signed out, so the password was not changed. Try again.");
+    if (gone) return refuse(404, "unknown_user", `There is no user named "${username}" on this box.`);
 
     // 3. The password.
     const result = await resetUserPassword(username, password);

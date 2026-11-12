@@ -431,7 +431,7 @@ export function endOfCentralDirectory(count: number, cdSize: number, cdOffset: n
  */
 export async function* zipEntries(
   entries: AsyncIterable<ZipWalkEntry>,
-  { maxEntries = MAX_ZIP_ENTRIES }: { maxEntries?: number } = {},
+  { maxEntries = MAX_ZIP_ENTRIES, allowed }: { maxEntries?: number; allowed?: ZipEntryAllowed } = {},
 ): AsyncGenerator<Buffer> {
   const records: ZipRecord[] = [];
   let offset = 0;
@@ -460,9 +460,24 @@ export async function* zipEntries(
     // leaving a header with no data behind it.
     let handle: import("fs/promises").FileHandle;
     try {
+      // The file actually OPENED is judged again below (its /proc path): the
+      // walk's verdict was about a path, and a link swapped in since must not
+      // carry the read somewhere else.
       handle = await fsp.open(entry.abs, "r");
     } catch {
       continue;
+    }
+    if (allowed) {
+      let opened: string | null = null;
+      try {
+        opened = await fsp.readlink(`/proc/self/fd/${handle.fd}`);
+      } catch {
+        opened = null;
+      }
+      if (!opened || !allowed(opened)) {
+        await handle.close().catch(() => undefined);
+        continue;
+      }
     }
     const rec: ZipRecord = {
       name, kind: "file", method: METHOD_DEFLATED, flags: FLAG_DATA_DESCRIPTOR | FLAG_UTF8, crc: 0,

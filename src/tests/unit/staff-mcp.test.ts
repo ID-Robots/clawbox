@@ -70,6 +70,17 @@ describe("the store", () => {
     expect(after.relayTokens).toEqual({ maria: "b".repeat(64) });
   });
 
+  it("never reads a username or server named like an object's own property as set", async () => {
+    const empty = mcp.parseStore({});
+    expect(Object.hasOwn(empty.relayTokens, "constructor")).toBe(false);
+    expect((empty.relayTokens as Record<string, unknown>).constructor).toBeUndefined();
+    expect((empty.servers as Record<string, unknown>).constructor).toBeUndefined();
+    const file = path.join(ROOT, "store-proto.json");
+    await mcp.updateStaffMcpStore(() => ({ servers: { constructor: { header: "Authorization" } }, credentials: { constructor: { constructor: "tok" } }, relayTokens: {} }), file);
+    const after = await mcp.ensureRelayTokens(["constructor"], file);
+    expect(after.relayTokens.constructor).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("masks a credential and never shows more than its last four characters", () => {
     expect(mcp.maskCredential("abcdefghijklmnop-1234")).toBe("••••1234");
     expect(mcp.maskCredential("short")).toBe("••••");
@@ -108,6 +119,11 @@ describe("which servers members of staff can be handed", () => {
     expect(mcp.staffServerVerdict(httpServer("q", "https://x/mcp?key=owner-secret"))).toBe("urlCredential");
     expect(mcp.staffServerVerdict(httpServer("u", "https://owner:pw@x/mcp"))).toBe("urlCredential");
     expect(mcp.staffServerVerdict({ name: "o", harness: "openclaw", transport: "http", usable: false, reason: "oauth" })).toBe("unusable");
+    // A credential travels encrypted, or only to this box.
+    expect(mcp.staffServerVerdict(httpServer("plain", "http://docs.example.com/mcp"))).toBe("insecure");
+    expect(mcp.staffServerVerdict(httpServer("local", "http://127.0.0.1:8080/mcp"))).toBeNull();
+    expect(mcp.staffServerVerdict(httpServer("local6", "http://[::1]:8080/mcp"))).toBeNull();
+    expect(mcp.staffServerVerdict(httpServer("localname", "http://localhost/mcp"))).toBeNull();
   });
 });
 

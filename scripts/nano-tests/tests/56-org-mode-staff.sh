@@ -136,8 +136,14 @@ top=$(printf "%s\n" "$fl" | tail -n +2 | python3 -c "import json,sys; print(\",\
 if [ "$(status_of "$fl")" = 200 ] && [ "$top" = "Home,Shared" ]; then say "ok - [$RUNTIME] A'"'"'s Files shows only Home and Shared"; else say "not ok - [$RUNTIME] A'"'"'s Files top folder: $(status_of "$fl") $top"; fi
 up=$(printf "from %s" "$A_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$A_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Home&name=$MARK.txt")
 if [ "$up" = 200 ] && [ -f "/home/$A_NAME/$MARK.txt" ]; then say "ok - [$RUNTIME] A uploads into their own Linux home"; else say "not ok - [$RUNTIME] A'"'"'s upload into Home answered $up"; fi
+bp=$(printf "from %s" "$B_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$B_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Home&name=$MARK-b.txt")
 hl=$(call GET "/setup-api/files?dir=Home" "$B_COOKIE")
-case "$(printf "%s\n" "$hl" | tail -n +2)" in *"$MARK.txt"*) say "not ok - [$RUNTIME] B sees A'"'"'s file in their Home" ;; *) say "ok - [$RUNTIME] B'"'"'s Home is B'"'"'s own, not A'"'"'s" ;; esac
+hb=$(printf "%s\n" "$hl" | tail -n +2)
+if [ "$bp" = 200 ] && [ "$(status_of "$hl")" = 200 ]; then
+  case "$hb" in *"$MARK.txt"*) say "not ok - [$RUNTIME] B sees A'"'"'s file in their Home" ;; *"$MARK-b.txt"*) say "ok - [$RUNTIME] B'"'"'s Home is B'"'"'s own, not A'"'"'s" ;; *) say "not ok - [$RUNTIME] B'"'"'s Home does not list B'"'"'s own upload" ;; esac
+else
+  say "not ok - [$RUNTIME] B'"'"'s Home answered upload $bp / listing $(status_of "$hl")"
+fi
 sh=$(printf "shared by %s" "$A_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$A_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Shared&name=$MARK-shared.txt")
 sb=$(call GET "/setup-api/files?dir=Shared" "$B_COOKIE")
 case "$sh:$(status_of "$sb"):$(printf "%s\n" "$sb" | tail -n +2)" in 200:200:*"$MARK-shared.txt"*) say "ok - [$RUNTIME] A writes into Shared and B reads it" ;; *) say "not ok - [$RUNTIME] Shared answered $sh / $(status_of "$sb")" ;; esac

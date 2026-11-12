@@ -6,7 +6,7 @@
 // Users tab is drawn for the owner alone. A credential is write-only here:
 // the route answers it masked (`••••abcd`), never in clear.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
 
@@ -24,6 +24,8 @@ interface StaffMcpView {
   staffMcpSupported: boolean;
   servers: ServerRow[];
   users: Array<{ username: string; credentials: Record<string, string> }>;
+  /** False when the change was saved but the assistant's configuration could not be updated. */
+  applied?: boolean;
 }
 
 const REASON_KEYS: Record<string, string> = {
@@ -31,13 +33,21 @@ const REASON_KEYS: Record<string, string> = {
   urlCredential: "users.staffMcp.reason.urlCredential",
   unusable: "users.staffMcp.reason.unusable",
   missing: "users.staffMcp.reason.missing",
+  insecure: "users.staffMcp.reason.insecure",
 };
 
 function parseView(data: unknown): StaffMcpView | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Partial<StaffMcpView>;
   if (!Array.isArray(d.servers) || !Array.isArray(d.users)) return null;
-  return { orgMode: d.orgMode === true, staffMcpSupported: d.staffMcpSupported !== false, servers: d.servers, users: d.users };
+  return { orgMode: d.orgMode === true, staffMcpSupported: d.staffMcpSupported !== false, servers: d.servers, users: d.users, applied: d.applied };
+}
+
+/** The granted list as the server holds it: `{ name: header }`. */
+function grantsOf(view: StaffMcpView): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const server of view.servers) if (server.granted) map[server.name] = server.header || "Authorization";
+  return map;
 }
 
 export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgMode: boolean }) {
@@ -48,21 +58,37 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [notApplied, setNotApplied] = useState(false);
 
-  const adopt = useCallback((next: StaffMcpView) => {
+  /**
+   * The server's view. The grant DRAFT follows it only when it holds no
+   * unsaved edit (or the grants themselves were just saved), so saving a
+   * member's credential never throws away a grant being edited.
+   */
+  const viewRef = useRef<StaffMcpView | null>(null);
+  const adopt = useCallback((next: StaffMcpView, replaceDraft: boolean) => {
+    const prev = viewRef.current;
+    viewRef.current = next;
     setView(next);
-    const map: Record<string, string> = {};
-    for (const server of next.servers) if (server.granted) map[server.name] = server.header || "Authorization";
-    setGranted(map);
+    setGranted((draft) => (replaceDraft || !prev || JSON.stringify(draft) === JSON.stringify(grantsOf(prev)) ? grantsOf(next) : draft));
   }, []);
 
   const load = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/settings/staff-mcp", { cache: "no-store" });
       const parsed = parseView(await res.json().catch(() => null));
-      if (res.ok && parsed) adopt(parsed);
+      // A box whose route refuses (another user, an old server) shows nothing;
+      // a read that failed says so and offers a retry.
+      if (res.status === 403 || res.status === 404) return;
+      if (res.ok && parsed) {
+        setLoadFailed(false);
+        adopt(parsed, false);
+      } else {
+        setLoadFailed(true);
+      }
     } catch {
-      // the card simply stays away
+      setLoadFailed(true);
     }
   }, [adopt]);
 
@@ -88,7 +114,8 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
         setError(typeof detail === "string" ? `${t("users.staffMcp.failed")} ${detail}` : t("users.staffMcp.failed"));
         return false;
       }
-      adopt(parsed);
+      adopt(parsed, key === "grants");
+      setNotApplied(parsed.applied === false);
       setSaved(key);
       return true;
     } catch {
@@ -99,7 +126,18 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
     }
   };
 
-  if (!view) return null;
+  if (!view) {
+    if (!loadFailed) return null;
+    return (
+      <div className="bg-white/5 rounded-xl p-5 space-y-2" data-testid="staff-mcp-card">
+        <h4 className="text-sm font-semibold text-white">{t("users.staffMcp.title")}</h4>
+        <StatusMessage type="error" message={t("users.staffMcp.loadFailed")} />
+        <button type="button" onClick={() => void load()} className="px-3 h-8 rounded-lg text-xs text-white bg-white/10 hover:bg-white/15 cursor-pointer" data-testid="staff-mcp-retry">
+          {t("users.staffMcp.retry")}
+        </button>
+      </div>
+    );
+  }
 
   const grantedServers = view.servers.filter((s) => s.granted);
   const inputClass = "h-8 px-2 bg-white/[0.06] border border-white/10 rounded-lg text-xs text-white outline-none focus:border-[var(--coral-bright)] transition-colors";
@@ -196,6 +234,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
                     type="password"
                     value={drafts[key] ?? ""}
                     placeholder={t("users.staffMcp.placeholder")}
+                    aria-label={t("users.staffMcp.credentialFor", { user: user.username, server: server.name })}
                     autoComplete="off"
                     maxLength={4096}
                     onChange={(e) => setDrafts({ ...drafts, [key]: e.target.value })}
@@ -231,7 +270,8 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
         </div>
       )}
 
-      {saved === "grants" && <StatusMessage type="success" message={t("users.staffMcp.saved")} />}
+      {saved === "grants" && !notApplied && <StatusMessage type="success" message={t("users.staffMcp.saved")} />}
+      {notApplied && <StatusMessage type="error" message={t("users.staffMcp.notApplied")} />}
       {error && <StatusMessage type="error" message={error} />}
     </div>
   );

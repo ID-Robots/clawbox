@@ -33,6 +33,32 @@ const HOME_CACHE_MS = 60_000;
 /** A helper that just failed for a user is not asked again for this long. */
 const GRANT_RETRY_MS = 60_000;
 const lastGrantFailure = new Map<string, number>();
+/** One helper run per user at a time: the Files app sends several requests at once. */
+const grantsInFlight = new Map<string, Promise<string>>();
+
+/**
+ * Ask the helper for a user's home once, whoever else is waiting for it. A
+ * run that did not answer `ok` is remembered as a failure even when the home
+ * itself opened (the helper lays the home's own ACL first, then walks what is
+ * inside it, and a walk that failed half-way leaves folders unreadable), so
+ * it is asked again after GRANT_RETRY_MS.
+ */
+function grantOnce(username: string): Promise<string> {
+  const running = grantsInFlight.get(username);
+  if (running) return running;
+  const run = (async () => {
+    const { grantHomeAccess } = await import("@/lib/clawbox-users");
+    const result = await grantHomeAccess(username);
+    if (result === "ok") lastGrantFailure.delete(username);
+    else {
+      lastGrantFailure.set(username, Date.now());
+      console.error(`[files] ${username}'s home could not be opened to the Files app (${result})`);
+    }
+    return result;
+  })().finally(() => grantsInFlight.delete(username));
+  grantsInFlight.set(username, run);
+  return run;
+}
 
 async function homeOf(username: string): Promise<string | null> {
   const cached = homeCache.get(username);
@@ -56,6 +82,7 @@ function reachable(dir: string): boolean {
 export function resetFilesScopeCachesForTests(): void {
   homeCache.clear();
   lastGrantFailure.clear();
+  grantsInFlight.clear();
 }
 
 export async function filesFenceFor(request: Request): Promise<FilesFenceAnswer> {
@@ -79,22 +106,21 @@ export async function filesFenceFor(request: Request): Promise<FilesFenceAnswer>
   const username = who.username;
   const home = await homeOf(username);
   if (!home) return refuse(503, "home_unavailable", "Your home folder could not be found on this box. Ask your administrator.");
-  if (reachable(home)) {
-    lastGrantFailure.delete(username);
-  } else {
-    const failedAt = lastGrantFailure.get(username);
-    let asked = false;
-    if (failedAt === undefined || Date.now() - failedAt >= GRANT_RETRY_MS) {
-      asked = true;
-      const { grantHomeAccess } = await import("@/lib/clawbox-users");
-      const result = await grantHomeAccess(username);
-      if (result !== "ok") console.error(`[files] ${username}'s home could not be opened to the Files app (${result})`);
-    }
+  const failedAt = lastGrantFailure.get(username);
+  const retryDue = failedAt !== undefined && Date.now() - failedAt >= GRANT_RETRY_MS;
+  if (!reachable(home)) {
+    // Never asked yet in this process, or the last run failed long enough ago.
+    const asked = failedAt === undefined || retryDue;
+    if (asked) await grantOnce(username);
     if (!reachable(home)) {
-      // The window runs from the last time the helper was ASKED.
+      // Even an `ok` that left the home closed is a failure to wait out.
       if (asked) lastGrantFailure.set(username, Date.now());
       return refuse(503, "home_unavailable", "Your home folder is not ready on this box yet. Ask your administrator to update the ClawBox.");
     }
+  } else if (retryDue) {
+    // The home opened but the last run failed part-way: finish it, without
+    // holding this request up.
+    void grantOnce(username);
   }
   const roots = memberRoots(home);
   if (!roots.ok) {

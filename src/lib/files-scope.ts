@@ -246,3 +246,46 @@ export function memberRoots(home: string, ownerBase: string = filesBrowseRoot())
     ],
   };
 }
+
+/**
+ * Open a file of a MEMBER's view and judge the file actually opened, not only
+ * the path that was resolved: the fence's verdict was about a path, and a
+ * component swapped for a link between that check and the open would carry
+ * the read or the write somewhere else. The open's own `/proc/self/fd` path
+ * is the file the descriptor holds; outside the view, the descriptor is closed
+ * and null answered. A write opens without truncating, is judged, and only
+ * then truncated; a file this open CREATED outside the view is removed again.
+ * fs errors (ENOENT, EACCES, EISDIR …) are thrown for the caller to map.
+ * Linux only, as the box is: without /proc nothing is opened for a member.
+ */
+export function openInMemberView(fence: FilesFence, abs: string, mode: "read" | "write"): number | null {
+  const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL } = fs.constants;
+  let fd: number;
+  let created = false;
+  if (mode === "read") {
+    fd = fs.openSync(/* turbopackIgnore: true */ abs, O_RDONLY);
+  } else {
+    try {
+      fd = fs.openSync(/* turbopackIgnore: true */ abs, O_WRONLY | O_CREAT | O_EXCL, 0o666);
+      created = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+      fd = fs.openSync(/* turbopackIgnore: true */ abs, O_WRONLY);
+    }
+  }
+  let opened: string | null = null;
+  try {
+    opened = fs.readlinkSync(`/proc/self/fd/${fd}`);
+  } catch {
+    opened = null;
+  }
+  if (!opened || !fence.allows(opened)) {
+    try { fs.closeSync(fd); } catch { /* closed */ }
+    if (created && opened && !opened.endsWith(" (deleted)")) {
+      try { fs.unlinkSync(/* turbopackIgnore: true */ opened); } catch { /* best effort */ }
+    }
+    return null;
+  }
+  if (mode === "write" && !created) fs.ftruncateSync(fd, 0);
+  return fd;
+}

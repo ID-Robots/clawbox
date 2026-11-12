@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
-import type { FilesFence } from "@/lib/files-scope";
+import { openInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
@@ -138,7 +138,21 @@ export async function GET(req: NextRequest, { params }: Params) {
   // multi-hundred-MB download must not OOM the Jetson.
   let nodeStream: fs.ReadStream;
   try {
-    nodeStream = fs.createReadStream(/* turbopackIgnore: true */ abs);
+    if (fence.scope.kind === "member") {
+      // A member's file is judged again by the descriptor actually opened
+      // (src/lib/files-scope.ts): a link swapped in after the check above
+      // does not carry the read out of their view.
+      const fd = openInMemberView(fence, abs, "read");
+      if (fd === null) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+      stat = fs.fstatSync(fd);
+      if (!stat.isFile()) {
+        fs.closeSync(fd);
+        return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+      }
+      nodeStream = fs.createReadStream(/* turbopackIgnore: true */ abs, { fd });
+    } else {
+      nodeStream = fs.createReadStream(/* turbopackIgnore: true */ abs);
+    }
   } catch (err) {
     return fsErrorResponse(err, "Failed to read file");
   }

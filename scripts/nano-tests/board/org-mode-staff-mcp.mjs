@@ -169,6 +169,7 @@ function chatSocket(url, headers, { owner = false } = {}) {
 async function turn(sock, key, text) {
   const tools = [];
   let finalText = "";
+  let completed = false;
   let runId = null;
   let done;
   const finished = new Promise((r) => { done = r; });
@@ -186,6 +187,7 @@ async function turn(sock, key, text) {
     if (f.event === "chat" && p.state === "final") {
       const blocks = Array.isArray(p.message?.content) ? p.message.content : [];
       finalText = blocks.map((b) => (b && typeof b.text === "string" ? b.text : "")).join(" ");
+      completed = true;
       done();
     }
     if (f.event === "chat" && (p.state === "error" || p.state === "aborted")) { finalText = `[${p.state}] ${p.errorMessage || ""}`; done(); }
@@ -195,7 +197,9 @@ async function turn(sock, key, text) {
   runId = typeof sent.payload?.runId === "string" ? sent.payload.runId : null;
   await Promise.race([finished, new Promise((r) => setTimeout(r, TURN_MS))]);
   off();
-  return { tools, text: finalText };
+  // `completed`: the turn ended with a final answer — not an error, an abort
+  // or the deadline, after which "no tool ran" would prove nothing.
+  return { tools, text: finalText, completed };
 }
 
 const ASK = `Call the ${SERVER} whoami tool right now (it is one of your tools; use tool search if you need to find it) and tell me exactly what it returned. If you have no such tool, say so.`;
@@ -273,7 +277,8 @@ async function openclawRun(port) {
   since = calls.length;
   const tb = await turn(b, bMain, ASK);
   show("staff B (no credential)", tb);
-  check(whoamiCalls(since).length === 0 && !tb.tools.some((t) => t.name.startsWith("cbstaff-")), "B, without a credential, gets no tool from the server");
+  check(tb.completed === true, "B's turn without a credential completed (so the next check means something)", tb.refused ? tb.refused.message : tb.text.slice(0, 200));
+  check(tb.completed === true && whoamiCalls(since).length === 0 && !tb.tools.some((t) => t.name.startsWith("cbstaff-")), "B, without a credential, gets no tool from the server");
 
   // 3. B gets a credential of their own.
   const setB = await api("POST", "/setup-api/settings/staff-mcp", OWNER_COOKIE, { username: B_NAME, server: SERVER, credential: CRED_B });
@@ -328,6 +333,8 @@ async function hermesRun() {
   let json = {};
   try { json = await r.json(); } catch { /* none */ }
   note(`[${RUNTIME}] staff A assistant: ${String(json.text || json.error || `HTTP ${r.status}`).slice(0, 400)}`);
+  // A chat that did not run proves nothing about what it could reach.
+  check(r.status === 200 && typeof json.text === "string" && json.text.length > 0, "A's Hermes turn completed", `HTTP ${r.status} ${json.code || ""}`);
   const aHome = path.join(HERMES_HOME, "profiles", policy.staffAgentId(A_NAME));
   const cfg = fs.existsSync(path.join(aHome, "config.yaml")) ? fs.readFileSync(path.join(aHome, "config.yaml"), "utf-8") : "";
   check(!/^mcp_servers:/m.test(cfg), "A's Hermes profile has no MCP server");
