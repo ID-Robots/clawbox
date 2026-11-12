@@ -214,3 +214,46 @@ describe("the plugin", () => {
     expect(staffDenyMessage("x")).toMatch(/administrator/);
   });
 });
+
+// TASK-2377 (G2): an MCP tool reaches a member's agent only through a relay
+// entry granted to THAT member (staff-mcp-grants.json beside the plugin); a
+// missing or unreadable file grants nothing; never clawbox__*; a member's
+// relay entry is never the owner's agent's to call; the owner's own servers
+// are not this guard's business.
+describe("staff MCP grants", () => {
+  let grants: string;
+  beforeAll(() => {
+    grants = path.join(root, "staff-mcp-grants.json");
+    fs.writeFileSync(grants, JSON.stringify({ agents: { "clawbox-staff-maria": ["cbstaff-aaaaaaaa-docs"] } }));
+  });
+  const g = () => ({ ...opts, mcpGrants: grants });
+
+  it("lets a member call their own granted server, directly and through tool_call", () => {
+    expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-docs__search", { q: "x" }), MARIA, g())).toBeNull();
+    expect(staffToolCallDenyReason(call("tool_call", { id: "mcp:cbstaff-aaaaaaaa-docs:search", args: {} }), MARIA, g())).toBeNull();
+    expect(staffToolCallDenyReason(call("tool_call", { id: "cbstaff-aaaaaaaa-docs__search" }), MARIA, g())).toBeNull();
+  });
+
+  it("refuses another member's entry, an ungranted one and every other MCP server", () => {
+    expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-docs__search"), IVAN, g())).toMatch(/not granted/);
+    expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-other__search"), MARIA, g())).toMatch(/not granted/);
+    expect(staffToolCallDenyReason(call("docs__search"), MARIA, g())).toMatch(/not available to members of staff/);
+    expect(staffToolCallDenyReason(call("clawbox__system_info"), MARIA, g())).toMatch(/not available to members of staff/);
+    expect(staffToolCallDenyReason(call("tool_call", { id: "mcp:clawbox:system_info" }), MARIA, g())).toMatch(/not available/);
+    expect(staffToolCallDenyReason(call("tool_call", { id: "mcp:cbstaff-bbbbbbbb-docs:search" }), MARIA, g())).toMatch(/not granted/);
+  });
+
+  it("grants nothing when the file is missing or unreadable", () => {
+    expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-docs__search"), MARIA, { ...opts, mcpGrants: path.join(root, "missing.json") })).toMatch(/not granted/);
+    const broken = path.join(root, "broken-grants.json");
+    fs.writeFileSync(broken, "{not json");
+    expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-docs__search"), MARIA, { ...opts, mcpGrants: broken })).toMatch(/not granted/);
+  });
+
+  it("refuses the owner's agent a member's relay entry, and leaves the owner's own servers alone", () => {
+    expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-docs__search"), OWNER, g())).toMatch(/member of staff's own assistant/);
+    expect(staffToolCallDenyReason(call("tool_call", { id: "mcp:cbstaff-aaaaaaaa-docs:search" }), OWNER, g())).toMatch(/member of staff/);
+    expect(staffToolCallDenyReason(call("docs__search"), OWNER, g())).toBeNull();
+    expect(staffToolCallDenyReason(call("clawbox__system_info"), OWNER, g())).toBeNull();
+  });
+});

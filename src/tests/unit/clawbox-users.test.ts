@@ -267,4 +267,57 @@ describe("clawbox-users", () => {
       expect(spawn).not.toHaveBeenCalled();
     });
   });
+
+  // TASK-2377: the owner resets a user's password (`setpasswd`), and the Files
+  // app reaches a member of staff's home through the helper's `home_access`.
+  describe("resetUserPassword", () => {
+    it("asks the helper's setpasswd verb with the new password on stdin, never argv", async () => {
+      vi.mocked(spawn).mockImplementation((() => fakeChild(0)) as never);
+      expect(await lib.resetUserPassword("alice", "new secret 1")).toBe("ok");
+      const [bin, args] = vi.mocked(spawn).mock.calls[0];
+      expect(bin).toBe("/usr/bin/sudo");
+      expect(args).toEqual(["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "setpasswd"]);
+      expect(JSON.stringify(args)).not.toContain("secret");
+      const child = vi.mocked(spawn).mock.results[0].value as ReturnType<typeof fakeChild>;
+      expect(child.stdin.end).toHaveBeenCalledWith("alice\nnew secret 1\n");
+    });
+
+    it("reads the helper's answer, and never spawns for the owner, a bad name or a bad password", async () => {
+      for (const [code, verdict] of [[7, "wrong"], [65, "invalid"], [66, "failed"], [64, "unavailable"]] as const) {
+        vi.mocked(spawn).mockImplementation((() => fakeChild(code)) as never);
+        expect(await lib.resetUserPassword("alice", "new secret 1"), String(code)).toBe(verdict);
+      }
+      vi.mocked(spawn).mockClear();
+      expect(await lib.resetUserPassword("clawbox", "new secret 1")).toBe("wrong");
+      expect(await lib.resetUserPassword("alice\nroot", "new secret 1")).toBe("wrong");
+      expect(await lib.resetUserPassword("alice", "short")).toBe("invalid");
+      expect(await lib.resetUserPassword("alice", "line\nbreak!!")).toBe("invalid");
+      expect(spawn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("grantHomeAccess and userHomeDir", () => {
+    it("asks home_access with the name on stdin, never argv", async () => {
+      vi.mocked(spawn).mockImplementation((() => fakeChild(0)) as never);
+      expect(await lib.grantHomeAccess("alice")).toBe("ok");
+      const [, args] = vi.mocked(spawn).mock.calls[0];
+      expect(args).toEqual(["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "home_access"]);
+      const child = vi.mocked(spawn).mock.results[0].value as ReturnType<typeof fakeChild>;
+      expect(child.stdin.end).toHaveBeenCalledWith("alice\n");
+      vi.mocked(spawn).mockImplementation((() => fakeChild(7)) as never);
+      expect(await lib.grantHomeAccess("alice")).toBe("refused");
+      vi.mocked(spawn).mockImplementation((() => fakeChild(64)) as never);
+      expect(await lib.grantHomeAccess("alice")).toBe("unavailable");
+      vi.mocked(spawn).mockClear();
+      expect(await lib.grantHomeAccess("clawbox")).toBe("refused");
+      expect(spawn).not.toHaveBeenCalled();
+    });
+
+    it("reads the home from getent, and null for no account", async () => {
+      getentAnswers({ passwd: ["alice"] });
+      expect(await lib.userHomeDir("alice")).toBe("/home/alice");
+      expect(await lib.userHomeDir("bob")).toBeNull();
+      expect(await lib.userHomeDir("../etc")).toBeNull();
+    });
+  });
 });

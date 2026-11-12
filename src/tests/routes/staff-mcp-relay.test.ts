@@ -1,0 +1,229 @@
+import fs from "fs";
+import http from "http";
+import os from "os";
+import path from "path";
+import type { AddressInfo } from "net";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * TASK-2377 (G2) — the staff MCP relay against a real (tiny) MCP server that
+ * echoes the credential it was called with: each member's call carries THAT
+ * member's credential and nothing of the owner's; a second member gets their
+ * own; no token, no credential, a withdrawn grant, a removed user or org mode
+ * off get nothing; `tools/list` is filtered and a sender is refused before
+ * the server is reached.
+ */
+
+const ROOT = path.join(fs.realpathSync(os.tmpdir()), `clawbox-staff-relay-${process.pid}-${Date.now()}`);
+
+const state = vi.hoisted(() => ({
+  orgMode: true as boolean | null,
+  users: ["ivan", "maria", "olga"],
+  servers: {} as Record<string, unknown>,
+}));
+
+vi.mock("@/lib/org-mode-server", () => ({
+  readOrgModeStrict: vi.fn(async () => state.orgMode),
+  readOrgMode: vi.fn(async () => state.orgMode === true),
+}));
+vi.mock("@/lib/clawbox-users", () => ({
+  listUsers: vi.fn(async () => state.users.map((username) => ({ username, createdAt: "2026-11-12T00:00:00Z", sv: "x" }))),
+}));
+vi.mock("@/lib/openclaw-config", () => ({
+  isPlainObject: (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v),
+  readConfigStrict: vi.fn(async () => ({ mcp: { servers: state.servers } })),
+}));
+vi.mock("@/lib/clawbox-mcp-registration", () => ({ harnessesHere: () => ({ openclaw: true, hermes: false }) }));
+vi.mock("@/lib/clawbox-mcp-switch", () => ({ readClawboxMcpEnabled: vi.fn(async () => true) }));
+
+interface Seen { auth: string | null; apiKey: string | null; ownerHeader: string | null; method: string; body: string }
+const seen: Seen[] = [];
+let upstream: http.Server;
+let upstreamUrl = "";
+let sse = false;
+
+const TOOLS = [
+  { name: "search", description: "search documents", inputSchema: { type: "object" } },
+  { name: "whoami", description: "echo the caller", inputSchema: { type: "object" } },
+  { name: "send_mail", description: "send an email", inputSchema: { type: "object" } },
+  { name: "purge_index", description: "x", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
+];
+
+let relay: typeof import("@/app/setup-api/staff-mcp/[server]/route");
+let mcp: typeof import("@/lib/staff-mcp");
+const TOKENS = { ivan: "a".repeat(64), maria: "b".repeat(64), olga: "c".repeat(64) };
+
+beforeAll(async () => {
+  fs.mkdirSync(ROOT, { recursive: true });
+  upstream = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      seen.push({ auth: req.headers.authorization ?? null, apiKey: (req.headers["x-api-key"] as string) ?? null, ownerHeader: (req.headers["x-owner"] as string) ?? null, method: req.method ?? "", body });
+      if (req.method !== "POST") { res.writeHead(405).end(); return; }
+      const msg = JSON.parse(body);
+      let result: unknown = {};
+      if (msg.method === "tools/list") result = { tools: TOOLS };
+      if (msg.method === "tools/call") result = { content: [{ type: "text", text: `caller=${req.headers.authorization ?? req.headers["x-api-key"]}` }] };
+      const reply = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
+      if (sse) {
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Mcp-Session-Id": "s-1" });
+        res.end(`event: message\ndata: ${reply}\n\n`);
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json", "Mcp-Session-Id": "s-1" });
+        res.end(reply);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", () => resolve()));
+  upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/mcp`;
+  state.servers = {
+    docs: { url: upstreamUrl, transport: "streamable-http", headers: { "X-Owner": "owner-secret", Authorization: "Bearer owner-token" } },
+    m365: { url: upstreamUrl, transport: "streamable-http" },
+    filtered: { url: upstreamUrl, transport: "streamable-http", toolFilter: { include: ["whoami"] } },
+    leaky: { url: `${upstreamUrl}?key=owner`, transport: "streamable-http" },
+  };
+  process.env.CLAWBOX_ROOT = ROOT;
+  vi.resetModules();
+  mcp = await import("@/lib/staff-mcp");
+  relay = await import("@/app/setup-api/staff-mcp/[server]/route");
+});
+
+beforeEach(async () => {
+  state.orgMode = true;
+  state.users = ["ivan", "maria", "olga"];
+  sse = false;
+  seen.length = 0;
+  await mcp.updateStaffMcpStore(() => ({
+    servers: { docs: { header: "Authorization" }, m365: { header: "X-Api-Key" }, filtered: { header: "Authorization" }, leaky: { header: "Authorization" } },
+    credentials: {
+      ivan: { docs: "ivan-docs-token", m365: "ivan-m365-key", filtered: "ivan-f", leaky: "ivan-l" },
+      maria: { docs: "maria-docs-token" },
+    },
+    relayTokens: TOKENS,
+  }));
+});
+
+afterAll(async () => {
+  delete process.env.CLAWBOX_ROOT;
+  await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  fs.rmSync(ROOT, { recursive: true, force: true });
+});
+
+function call(server: string, token: string | null, message: unknown) {
+  const req = new Request(`http://127.0.0.1/setup-api/staff-mcp/${server}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Cookie: "clawbox_session=whatever",
+    },
+    body: JSON.stringify(message),
+  });
+  return relay.POST(req, { params: Promise.resolve({ server }) });
+}
+
+const whoami = { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "whoami", arguments: {} } };
+
+describe("whose credential travels", () => {
+  it("sends each member's own credential, in the owner's chosen header, and nothing of the owner's", async () => {
+    const res = await call("docs", TOKENS.ivan, whoami);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toContain("caller=Bearer ivan-docs-token");
+    expect(seen[0].auth).toBe("Bearer ivan-docs-token");
+    expect(seen[0].ownerHeader).toBeNull();
+    expect(seen[0].body).not.toContain(TOKENS.ivan);
+
+    const second = await call("docs", TOKENS.maria, whoami);
+    expect(JSON.stringify(await second.json())).toContain("caller=Bearer maria-docs-token");
+    expect(seen[1].auth).toBe("Bearer maria-docs-token");
+
+    await call("m365", TOKENS.ivan, whoami);
+    expect(seen[2].apiKey).toBe("ivan-m365-key");
+    expect(seen[2].auth).toBeNull();
+  });
+
+  it("refuses a call with no relay token or someone else's guess, without reaching the server", async () => {
+    expect((await call("docs", null, whoami)).status).toBe(401);
+    expect((await call("docs", "d".repeat(64), whoami)).status).toBe(401);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("gives a member with no credential nothing from that server", async () => {
+    const res = await call("m365", TOKENS.maria, whoami);
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("no_credential");
+    expect((await call("docs", TOKENS.olga, whoami)).status).toBe(403);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("stops at once when the grant, the user or the switch goes", async () => {
+    state.orgMode = false;
+    expect((await call("docs", TOKENS.ivan, whoami)).status).toBe(403);
+    state.orgMode = null;
+    expect((await call("docs", TOKENS.ivan, whoami)).status).toBe(403);
+    state.orgMode = true;
+    state.users = ["maria"];
+    expect((await call("docs", TOKENS.ivan, whoami)).status).toBe(403);
+    state.users = ["ivan", "maria"];
+    await mcp.updateStaffMcpStore((s) => ({ ...s, servers: { m365: { header: "X-Api-Key" } } }));
+    expect((await call("docs", TOKENS.ivan, whoami)).status).toBe(404);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("never relays to a server whose address carries the owner's credential", async () => {
+    expect((await call("leaky", TOKENS.ivan, whoami)).status).toBe(404);
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("which tools a member reaches", () => {
+  it("filters the tool list (JSON): no sender, nothing destructive", async () => {
+    const res = await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const names = (await res.json()).result.tools.map((t: { name: string }) => t.name);
+    expect(names).toEqual(["search", "whoami"]);
+  });
+
+  it("filters the tool list in an SSE answer too", async () => {
+    sse = true;
+    const res = await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("mcp-session-id")).toBe("s-1");
+    const text = await res.text();
+    expect(text).toContain("event: message");
+    const data = JSON.parse(text.split("\n").find((l) => l.startsWith("data: "))!.slice(6));
+    expect(data.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "whoami"]);
+  });
+
+  it("keeps the owner's tool filter", async () => {
+    const res = await call("filtered", TOKENS.ivan, { jsonrpc: "2.0", id: 3, method: "tools/list" });
+    expect((await res.json()).result.tools.map((t: { name: string }) => t.name)).toEqual(["whoami"]);
+    const refused = await call("filtered", TOKENS.ivan, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "search", arguments: {} } });
+    expect((await refused.json()).error.code).toBe(-32601);
+  });
+
+  it("answers a call to a sender with an error and never reaches the server", async () => {
+    const res = await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "send_mail", arguments: { to: "x" } } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.id).toBe(9);
+    expect(body.error.message).toContain("not available to members of staff");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("refuses a whole batch that names a refused tool", async () => {
+    const res = await call("docs", TOKENS.ivan, [whoami, { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "delete_all" } }]);
+    const body = await res.json();
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.every((m: { error?: unknown }) => m.error)).toBe(true);
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("the route", () => {
+  it("refuses a name that is not a server's, and a relay entry's own prefix", async () => {
+    const res = await relay.POST(new Request("http://127.0.0.1/setup-api/staff-mcp/x", { method: "POST", body: "{}" }), { params: Promise.resolve({ server: "cbstaff-12345678-docs" }) });
+    expect(res.status).toBe(404);
+  });
+});

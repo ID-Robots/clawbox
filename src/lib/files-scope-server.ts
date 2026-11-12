@@ -70,19 +70,20 @@ export async function filesFenceFor(request: Request): Promise<FilesFenceAnswer>
   const username = who.username;
   const home = await homeOf(username);
   if (!home) return refuse(503, "home_unavailable", "Your home folder could not be found on this box. Ask your administrator.");
-  if (!reachable(home)) {
+  if (reachable(home)) {
+    lastGrantFailure.delete(username);
+  } else {
     const failedAt = lastGrantFailure.get(username);
+    let asked = false;
     if (failedAt === undefined || Date.now() - failedAt >= GRANT_RETRY_MS) {
+      asked = true;
       const { grantHomeAccess } = await import("@/lib/clawbox-users");
       const result = await grantHomeAccess(username);
-      if (result !== "ok") {
-        lastGrantFailure.set(username, Date.now());
-        console.error(`[files] ${username}'s home could not be opened to the Files app (${result})`);
-      } else {
-        lastGrantFailure.delete(username);
-      }
+      if (result !== "ok") console.error(`[files] ${username}'s home could not be opened to the Files app (${result})`);
     }
     if (!reachable(home)) {
+      // The window runs from the last time the helper was ASKED.
+      if (asked) lastGrantFailure.set(username, Date.now());
       return refuse(503, "home_unavailable", "Your home folder is not ready on this box yet. Ask your administrator to update the ClawBox.");
     }
   }

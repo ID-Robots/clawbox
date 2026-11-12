@@ -53,10 +53,11 @@ export async function POST(req: Request) {
     return read.reason === "too_long" ? refuse(413, "body_too_large", "That request body is too large.") : refuse(400, "bad_body", "Invalid JSON.");
   }
   const { username, password } = read.body as { username?: unknown; password?: unknown };
-  if (typeof username !== "string" || checkUsername(username) !== "ok") return refuse(400, "invalid_username", "That is not a username.");
+  // The owner's own name first: it may be a reserved name (`clawbox`) the user rule refuses.
   if (username === getSystemUsername()) {
     return refuse(409, "owner_password", "The owner's password is changed in Settings → System.");
   }
+  if (typeof username !== "string" || checkUsername(username) !== "ok") return refuse(400, "invalid_username", "That is not a username.");
   if (typeof password !== "string" || password.length < USER_PASSWORD_MIN || password.length > USER_PASSWORD_MAX || !isSafePasswordChars(password)) {
     return INVALID();
   }
