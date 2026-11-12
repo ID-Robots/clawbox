@@ -130,9 +130,18 @@ use_tree_owner_for_git() {
 
   # ...and make the drop possible. Earlier root steps leave root-owned objects
   # in .git — FETCH_HEAD above all — which is precisely what makes an
-  # unprivileged fetch fail; step_fix_git_perms and scripts/force-update.sh both
-  # open by repairing it. Best-effort: git says what it could not open.
-  chown -R "$owner":"$(stat -c %G "$dir" 2>/dev/null || echo "$owner")" "$dir/.git" 2>/dev/null || true
+  # unprivileged fetch fail, so a leftover there hands the WHOLE checkout back
+  # (hand_over_checkout's rule, inline: this also runs from the bootstrap block,
+  # before the constants, for whichever account owns the checkout). Never .git
+  # by name: a link at the checkout's name would carry that chown anywhere,
+  # while chown -R follows no link given as its operand. A healthy checkout is
+  # left alone. scripts/force-update.sh keeps its .git chown by name: an
+  # operator runs it by hand with their own sudo password (no grant covers it),
+  # so it crosses no boundary they do not already hold. Best-effort: git says
+  # what it could not open.
+  if [ -n "$(find "$dir/.git" ! -user "$owner" -print -quit 2>/dev/null)" ]; then
+    chown -R "$owner":"$(stat -c %G "$dir" 2>/dev/null || echo "$owner")" "$dir" 2>/dev/null || true
+  fi
 }
 
 git_with_retry() {
@@ -2124,9 +2133,10 @@ ensure_llamacpp_model_cached() {
 
   # Whatever under data/llamacpp is not the clawbox user's is handed back with
   # the checkout whole (hand_over_checkout says why never a path below it),
-  # once: the download below runs as that user.
-  mkdir -p "$MODEL_DIR"
+  # once, first: the directory, the download and the prune below are all that
+  # user's work.
   hand_over_checkout data/llamacpp
+  as_clawbox mkdir -p -- "$MODEL_DIR"
 
   if [ -f "$MODEL_PATH" ]; then
     echo "  Gemma 4 model already cached for offline use"
@@ -2160,8 +2170,12 @@ prune_superseded_llamacpp_model() {
   [ "$active_file" = "$stale" ] && return 0
   [ -f "$model_dir/$stale" ] || return 0
 
-  rm -f "$model_dir/$stale"
-  echo "  Removed superseded GGUF ${stale}"
+  # As the clawbox user: both callers hand data/llamacpp over first.
+  if as_clawbox rm -f -- "$model_dir/$stale"; then
+    echo "  Removed superseded GGUF ${stale}"
+  else
+    echo "  Warning: could not remove the superseded GGUF ${stale}" >&2
+  fi
 }
 
 has_playwright_chromium() {
@@ -2990,8 +3004,10 @@ free_memory_for_build() {
     fi
     # `|| true`: this sits between the engine pauses and the resume, and errexit
     # is live in do_rebuild. A cosmetic cleanup that cannot be done (EACCES on
-    # the parent) must not kill the shell with every engine stopped.
-    rm -f "$PROJECT_DIR/data/llamacpp/server.pid" || true
+    # the parent) must not kill the shell with every engine stopped. Removed by
+    # the clawbox user, whose llama-server wrote it into data/llamacpp: a
+    # pidfile left behind costs llamacpp_pid_if_running only a cmdline check.
+    as_clawbox rm -f -- "$PROJECT_DIR/data/llamacpp/server.pid" 2>/dev/null || true
   fi
 
   # Page cache last, once the engines have released their mappings. It is
@@ -4767,12 +4783,10 @@ persist_update_branch_pin() {
 
   local pin_file="$PROJECT_DIR/.update-branch"
 
-  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so
-  # every path under it is writable by an account the writer outranks. A symlink
-  # left at the pin path would redirect the write, the chown and the chmod onto
-  # whatever it points at, and `[ -f ]` follows one. Refuse instead. The write
-  # goes through a temp file whose name mktemp chooses (see below), and `mv`
-  # replaces the pin's directory entry rather than following it.
+  # $PROJECT_DIR belongs to $CLAWBOX_USER, so the pin is that account's file
+  # and that account writes it and sets its mode; root only reads it. A symlink
+  # left at the pin path is refused, as before: `[ -f ]` follows one, and the
+  # read below would read through it.
   if [ -L "$pin_file" ]; then
     echo "  WARN: not pinning update branch — $pin_file is a symlink" >&2
     return 0
@@ -4803,44 +4817,26 @@ persist_update_branch_pin() {
     else
       echo "  Pinning update branch to '$branch' ($pin_source)"
     fi
-    # Stage the write in a directory of our own rather than beside the pin.
+    # The account writes the pin: a temp file beside it, named by mktemp (which
+    # makes it 0600 whatever the umask, so the mode is set explicitly), then a
+    # rename over the pin's directory entry, told the target is no directory.
+    # The branch travels on stdin. A failed write removes its temp: the pin and
+    # its temps are gitignored, and the tree stays clean either way.
     #
-    # A temp file placed directly in $PROJECT_DIR can be swapped for a symlink
-    # before the printf/chown/chmod land, because $PROJECT_DIR is writable by
-    # $CLAWBOX_USER. With a fixed name that needs no timing at all; the staging
-    # directory means an attacker must instead win a race on the directory
-    # entry between the mkdir and the write. The final step is a rename, which
-    # replaces the pin's directory entry and never follows a symlink left at it.
-    #
-    # It does NOT close that race, and 0700 is not what stops it: unlinking an
-    # entry is governed by the parent's write bit, which $CLAWBOX_USER has, so
-    # $stage can still be rmdir'd and replaced between the two lines below.
-    # Closing it needs descriptor-bound openat/renameat with no-follow
-    # semantics, which POSIX shell cannot express.
-    #
-    # That residual is accepted deliberately, and the reason is three lines
-    # further down: sync_repo_to_update_target runs `git reset --hard` as root
-    # inside this same app-writable tree and then `chown -R` over all of it.
-    # Whoever can win the race below already has a far larger version of the
-    # same primitive in the same step. Hardening the pin write past this point
-    # while that stands would be motion, not progress — if this class is worth
-    # closing it has to be closed for the tree, not for one file in it.
-    local stage="$PROJECT_DIR/.update-branch.stage" tmp_pin
-    rm -rf "$stage"
-    if ! (umask 077 && mkdir "$stage"); then
-      echo "  WARN: could not stage the update-branch pin write" >&2
+    # First, anything an earlier root run left root-owned there — the checkout
+    # someone cloned as root, or a pin root wrote — is handed back with the
+    # checkout whole, so the account's write lands wherever root's did. The
+    # hand-over's scan takes any starting point, the pin file included.
+    hand_over_checkout .update-branch
+    if printf '%s\n' "$branch" | as_clawbox sh -c '
+      umask 022
+      t=$(mktemp "$1.XXXXXX") || exit 1
+      if cat > "$t" && chmod 644 "$t" && mv -f -T "$t" "$1"; then exit 0; fi
+      rm -f "$t"
+      exit 1
+    ' sh "$pin_file"; then
       return 0
     fi
-    tmp_pin="$stage/pin"
-    if printf '%s\n' "$branch" > "$tmp_pin" \
-      && chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp_pin" \
-      && chmod 644 "$tmp_pin" \
-      && mv -f "$tmp_pin" "$pin_file"; then
-      rm -rf "$stage"
-      return 0
-    fi
-    # Never leave the device's working tree holding staging litter.
-    rm -rf "$stage"
     echo "  WARN: failed to write the update-branch pin" >&2
     return 0
   fi
@@ -4855,13 +4851,15 @@ persist_update_branch_pin() {
   # it unconditionally is what makes a pin left behind by a hand-written
   # `sudo sh -c 'echo beta > .update-branch'` heal on the next run. 0644, not
   # 0600: this is a build record, not a secret, and root reads it during the
-  # bootstrap re-exec before it drops to $CLAWBOX_USER.
+  # bootstrap re-exec before it drops to $CLAWBOX_USER. The owner comes back
+  # with the checkout whole (hand_over_checkout), and the account sets the
+  # mode of its own file; neither ends the step.
   [ -n "$existing" ] || return 0
   if [ -n "$branch" ]; then
     echo "  Update branch already pinned to '$branch'"
   fi
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file"
-  chmod 644 "$pin_file"
+  hand_over_checkout .update-branch
+  as_clawbox chmod 644 -- "$pin_file" 2>/dev/null || echo "  WARN: could not reset the update-branch pin's mode" >&2
 }
 
 sync_repo_to_update_target() {
@@ -5039,8 +5037,10 @@ step_bootstrap_updater() {
   # place it is an untracked file in the project root, which the drift engine
   # reads as "the code on disk matches no commit" — it raised the About-screen
   # drift banner on a healthy box and stamped `dirty: true` on clean builds.
-  # It is gitignored now, so `git clean -fd` will not take it: drop it here.
-  rm -f "$PROJECT_DIR/.deployed-sha"
+  # It is gitignored now, so `git clean -fd` will not take it: drop it here,
+  # as the clawbox user whose checkout it is in. A file nothing reads is no
+  # reason to stop an update, so a removal that fails is let go.
+  as_clawbox rm -f -- "$PROJECT_DIR/.deployed-sha" 2>/dev/null || true
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
   handover_legacy_updater
 }
@@ -5075,7 +5075,8 @@ step_git_pull() {
   resolve_update_branch
   [ "${UPDATE_TARGET_UNRESOLVED:-0}" -eq 1 ] && refuse_unresolved_update_target
   echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
-  rm -f "$PROJECT_DIR/.deployed-sha"
+  # step_bootstrap_updater says why; never fatal.
+  as_clawbox rm -f -- "$PROJECT_DIR/.deployed-sha" 2>/dev/null || true
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 
@@ -5977,8 +5978,12 @@ ensure_embed_model_cached() {
   require_safe_hf_ref "EMBED_HF_REPO" "$HF_REPO" || return 1
   require_safe_hf_ref "EMBED_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
-  mkdir -p "$MODEL_DIR"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  # The cache is the clawbox user's, in its checkout: whatever under data/embed
+  # is not that user's is handed back with the checkout whole (hand_over_checkout
+  # says why never a path below it), then that user makes the directory, which
+  # the disk check below needs, and everything after is its own work.
+  hand_over_checkout data/embed
+  as_clawbox mkdir -p -- "$MODEL_DIR"
   if [ -f "$MODEL_PATH" ]; then
     echo "  Memory-search model already cached (${HF_FILE})"
     return 0
@@ -6011,17 +6016,22 @@ ensure_embed_model_cached() {
     return 1
   fi
   # Verified before anything uses it: a mismatch is deleted, so the next
-  # attempt starts clean instead of "already cached" over a bad file.
+  # attempt starts clean instead of "already cached" over a bad file. Read and
+  # removed by the clawbox user whose download it is: the name is its to
+  # change, and root would read or remove whatever it points at.
   if [ -n "$KNOWN_SHA" ]; then
-    got="$(sha256sum "$MODEL_PATH" 2>/dev/null | awk '{print $1}')"
+    # A file the account cannot read is "unreadable" below, not an errexit.
+    got="$(as_clawbox sha256sum -- "$MODEL_PATH" 2>/dev/null | awk '{print $1}')" || got=""
     if [ "$got" != "$KNOWN_SHA" ]; then
-      rm -f "$MODEL_PATH"
-      echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); deleted it" >&2
+      if as_clawbox rm -f -- "$MODEL_PATH"; then
+        echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); deleted it" >&2
+      else
+        echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); could not delete it" >&2
+      fi
       return 1
     fi
     echo "  Memory-search model verified (sha256)"
   fi
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
   echo "  Memory-search model cached for offline use"
 }
 
@@ -6721,7 +6731,9 @@ step_harness_swap() {
   local name
   name="$(harness_swap_label "$target")"
   if [ "$recorded" = "$target" ]; then
-    rm -f "$req"
+    # The route wrote the request into data/, the clawbox user's, so that user
+    # removes it; one left behind is answered here again.
+    as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
     echo "  Already the $name edition — nothing to do"
     return 0
   fi
@@ -6733,7 +6745,7 @@ step_harness_swap() {
   echo "[harness-swap] phase=done"
   # Only now: a request left on disk is how a failed swap stays tellable from
   # a finished one, and deleting it after a failure is the route's to do.
-  rm -f "$req"
+  as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
   echo "  This box is now the $name edition"
 }
 
@@ -6901,9 +6913,11 @@ edition_select_provision_openclaw() {
 #                     factory OpenClaw box has none of it. The shared
 #                     ~/.cache/ms-playwright stays.
 #
-# As the clawbox user first — the files are the owner's — and as root only for
-# what that leaves behind (a root-owned __pycache__ from a root probe). `rm`
-# removes a planted link as a link and never follows one inside the tree.
+# As the clawbox user only — the files are the owner's, under entries of its
+# home it controls. What its first removal leaves behind (a root-owned
+# __pycache__ from a root probe) is handed back to it, walked to from the home,
+# and it removes that itself. `rm` removes a planted link as a link and never
+# follows one inside the tree.
 # NON-FATAL: behaviour follows the lock, so a box that keeps both on disk
 # still runs exactly one agent; the miss is reported, never hidden.
 edition_select_remove_other() {
@@ -6918,7 +6932,8 @@ edition_select_remove_other() {
     [ -e "$p" ] || [ -L "$p" ] || continue
     runuser -u "$CLAWBOX_USER" -- rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
     if [ -e "$p" ] || [ -L "$p" ]; then
-      rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
+      hand_over_home_path -R "$p"
+      runuser -u "$CLAWBOX_USER" -- rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
     fi
     if [ -e "$p" ] || [ -L "$p" ]; then
       echo "  Warning: could not remove $p — it stays on disk, unused" >&2
@@ -6985,7 +7000,9 @@ step_edition_select() {
         return 1
       fi
       if [ "$pending" != "$target" ]; then
-        rm -f "$req"
+        # The route wrote the request into data/, the clawbox user's, so that
+        # user removes it; one left behind is answered here again.
+        as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
         echo "  Already set up with $name — nothing to do"
         return 0
       fi
@@ -7027,7 +7044,7 @@ step_edition_select() {
   fi
 
   echo "[edition-select] phase=done"
-  rm -f "$req"
+  as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
   echo "  This box is now set up with $name"
   edition_select_restart_web "$name"
 }
@@ -7777,11 +7794,14 @@ step_openclaw_install() {
     # swap is two renames. The stage sits inside $NPM_PREFIX so those renames
     # never cross a filesystem.
     local _oc_stage="$NPM_PREFIX/.openclaw-stage"
-    rm -rf "$_oc_stage"
-    mkdir -p "$_oc_stage"
-    # Handed over from inside the prefix, walked to from the home: the prefix
-    # is an entry in the clawbox user's home.
+    # The clawbox user empties, makes and removes the stage, which sits in its
+    # prefix, after a stage an earlier root run left is handed back from inside
+    # the prefix, walked to from the home (the prefix is an entry in that
+    # user's home). A removal on a failure path below never ends the step, so
+    # what follows it still runs.
     hand_over_home_path -R "$_oc_stage"
+    as_clawbox rm -rf -- "$_oc_stage"
+    as_clawbox mkdir -p -- "$_oc_stage"
     as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$_oc_stage"
     if [ ! -x "$_oc_stage/bin/openclaw" ]; then
       echo "Error: OpenClaw installation failed — npm left no openclaw launcher in $_oc_stage (the core already on the box is untouched)"
@@ -7820,7 +7840,7 @@ step_openclaw_install() {
       # this return abort the run either way. Said out loud so the operator knows
       # the box is parked rather than guessing.
       echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
-      rm -rf "$_oc_stage"
+      as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       return 1
     fi
     # …and it answers. An empty answer is what a launcher with no bytes in it
@@ -7828,7 +7848,7 @@ step_openclaw_install() {
     # the target was.
     if [ -z "$(printf '%s' "$_oc_version_out" | tr -d '[:space:]')" ]; then
       echo "Error: the staged openclaw answers nothing to --version — leaving the core on the box as it is" >&2
-      rm -rf "$_oc_stage"
+      as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       return 1
     fi
     # …and it is the core that was asked for. A pinned VERSION must come back
@@ -7838,7 +7858,7 @@ step_openclaw_install() {
       [0-9]*)
         if [ "$(printf '%s\n' "$_oc_version_out" | awk 'NR==1 {print $2}')" != "$TARGET" ]; then
           echo "Error: the staged openclaw answers '${_oc_version_out:-<nothing>}' to --version, not $TARGET — leaving the core on the box as it is" >&2
-          rm -rf "$_oc_stage"
+          as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
           return 1
         fi
         ;;
@@ -7850,7 +7870,7 @@ step_openclaw_install() {
     # and gets its gateway back, which the composite step's own restore would
     # not reach after this return.
     if ! openclaw_migration_disk_preflight "$_oc_stage/lib/node_modules/openclaw/package.json"; then
-      rm -rf "$_oc_stage"
+      as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       if has_openclaw_harness && [ "$_oc_gateway_stopped" -eq 1 ]; then
         systemctl start clawbox-gateway.service 2>/dev/null || true
       fi
@@ -8162,8 +8182,12 @@ step_clawkeep_install_pip_user_fallback() {
   # otherwise be re-picked up by the next build and produce another
   # UNKNOWN wheel even with the modern toolchain in place. Also remove
   # the broken UNKNOWN dist-info that the bad install registered in
-  # site-packages so pip's --force-reinstall has a clean slate.
-  rm -rf "$PROJECT_DIR/clawkeep/build" \
+  # site-packages so pip's --force-reinstall has a clean slate. The build
+  # output is in the clawbox user's checkout, so that user removes it, after
+  # anything an earlier root build left there is handed back; root only
+  # expands the glob into names.
+  hand_over_checkout clawkeep
+  as_clawbox rm -rf -- "$PROJECT_DIR/clawkeep/build" \
          "$PROJECT_DIR/clawkeep/dist" \
          "$PROJECT_DIR/clawkeep"/*.egg-info 2>/dev/null || true
   as_clawbox_login "rm -rf \"$CLAWBOX_HOME\"/.local/lib/python3.*/site-packages/UNKNOWN-0.0.0.dist-info" \
@@ -12797,8 +12821,14 @@ step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
   # -f follows symlinks; -L rejects the link itself. A symlink here would be a
   # way to make root read a file the clawbox user could not otherwise feed in.
+  # The file is removed by that user, whose data/ it sits in: root's `rm` there
+  # would act on whatever the name was changed to point at. The symlink's
+  # removal never changes the refusal's 64. After the read, a record the user
+  # could not remove ends the step before chpasswd, as root's failed `rm` did
+  # under errexit: the plaintext must not outlive a password change, and the
+  # routes scrub it only when the step fails.
   if [ -L "$INPUT_FILE" ]; then
-    rm -f "$INPUT_FILE"
+    as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null || true
     echo "Error: password input file is a symlink; refusing" >&2
     exit 64
   fi
@@ -12815,7 +12845,10 @@ step_chpasswd() {
   # no NUL can reach it either.
   local record user
   record="$(cat "$INPUT_FILE")"
-  rm -f "$INPUT_FILE"
+  if ! as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null; then
+    echo "Error: could not remove $INPUT_FILE; the password was not changed" >&2
+    exit 1
+  fi
 
   case "$record" in
     *$'\n'*)
@@ -12872,8 +12905,10 @@ clawbox_user_name_ok() {
 # file and a second record. Prints the record; exits on refusal.
 read_user_step_input() {
   local input_file="$1" record
+  # Removed as the clawbox user, whose data/ it is (step_chpasswd says why).
+  # Silent on stdout: the caller captures the record from it.
   if [ -L "$input_file" ]; then
-    rm -f "$input_file"
+    as_clawbox rm -f -- "$input_file" >/dev/null 2>&1 || true
     echo "Error: user input file is a symlink; refusing" >&2
     exit 64
   fi
@@ -12882,7 +12917,7 @@ read_user_step_input() {
     exit 1
   fi
   record="$(cat "$input_file")"
-  rm -f "$input_file"
+  as_clawbox rm -f -- "$input_file" >/dev/null 2>&1 || echo "  Warning: could not remove $input_file" >&2
   case "$record" in
     *$'\n'*)
       echo "Error: user input must be exactly one record" >&2
@@ -14008,14 +14043,18 @@ step_vnc_install() {
   # to it; without it the paste modal 503s).
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel xclip
 
-  chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+  # The scripts are the clawbox user's files, so it sets their mode, after
+  # anything an earlier root run left root-owned in scripts/ is handed back;
+  # root's chmod would follow a link at the name. Git ships them 0755: on a
+  # healthy box nothing changes, and a failure warns instead of ending the step.
   # ensure-vnc-on-first-boot.sh runs as ROOT from clawbox-firstboot-vnc.service
   # below, so the unit names the root-owned libexec copy. The `chown root:root`
   # of the tree file that used to sit here protected nothing: `chown -R clawbox`
   # undid it after every git reset, and the directory is clawbox-writable so a
   # rename replaced the file regardless. Security scan #21.
-  chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
+  hand_over_checkout
+  as_clawbox chmod +x -- "$PROJECT_DIR/scripts/start-vnc.sh" "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh" \
+    || echo "  Warning: could not make the VNC scripts executable" >&2
   if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
     install_root_libexec || return 1
   fi
@@ -14104,7 +14143,8 @@ WantedBy=multi-user.target
 FIRSTBOOTVNC
 
   # Browser CDP service (launched on demand, not auto-started)
-  chmod +x "$PROJECT_DIR/scripts/launch-browser.sh"
+  as_clawbox chmod +x -- "$PROJECT_DIR/scripts/launch-browser.sh" \
+    || echo "  Warning: could not make the VNC scripts executable" >&2
   cp "$SRC_DIR/config/clawbox-browser.service" /etc/systemd/system/
 
   systemctl daemon-reload
@@ -14341,7 +14381,9 @@ step_openclaw_models() {
 }
 
 step_fix_git_perms() {
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
+  # A root-owned object in .git (FETCH_HEAD above all) hands the checkout back
+  # whole; hand_over_checkout says why never .git by its name.
+  hand_over_checkout .git
   echo "  Fixed .git ownership"
 }
 

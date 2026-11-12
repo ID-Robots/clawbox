@@ -167,6 +167,8 @@ const AS_CLAWBOX = `as_clawbox() {
   while [ "\${1:-}" = "-H" ]; do shift; done
   # The plugin-list reader, run as the account whose files it opens.
   if [ "\${1:-}" = python3 ]; then event VERDICT_AS_CLAWBOX; "$@"; return; fi
+  # The staging prefix, emptied, made and removed by the account that owns it.
+  case "\${1:-}" in rm|mkdir) command "$@"; return ;; esac
   case "$*" in
     *"plugins list"*)
       event PLUGINS_LIST
