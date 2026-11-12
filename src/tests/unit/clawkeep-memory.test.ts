@@ -214,15 +214,17 @@ describe("run state", () => {
     await fs.mkdir(tmpDir, { recursive: true });
     await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "full", trigger: "manual",
-      // Older than INDEX_TIMEOUT_MS as well as naming a dead pid: on a kernel
-      // with a large pid_max, 999999 can exist and the age is what makes the
-      // reconcile deterministic.
+      // Hours old with no progress on record as well as naming a dead pid: on
+      // a kernel with a large pid_max, 999999 can exist, and then the stall
+      // rule (TASK-2431) is what ends it — "stalled" rather than
+      // "interrupted", but never "running".
       startedAtMs: Date.now() - 3 * 60 * 60_000, finishedAtMs: 0, durationMs: 0,
       error: "", childPid: 999_999,
     }));
     const run = await readMemoryRunState();
     expect(run.status).toBe("failed");
-    expect(run.error).toContain("interrupted");
+    expect(["interrupted", "stalled"]).toContain(run.errorCode);
+    if (run.errorCode === "interrupted") expect(run.error).toContain("interrupted");
   });
 
   it("never hands the UI the pid it ran under", async () => {

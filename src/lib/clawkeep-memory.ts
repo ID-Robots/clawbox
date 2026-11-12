@@ -22,7 +22,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, constants as fsConstants, promises as fs } from "node:fs";
+import { accessSync, constants as fsConstants, promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path, { untraced } from "@/lib/runtime-path";
 import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory-shard";
@@ -43,6 +43,14 @@ import {
 } from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
+import {
+  memoryIndexStallMs,
+  progressMark,
+  stallMinutes,
+  staleRunVerdict,
+  startStallWatchdog,
+  type StallWatchdog,
+} from "@/lib/memory-index-stall";
 import { processStore } from "@/lib/process-store";
 import { memoryReindexAdvice, type MemoryReindexAdvice } from "@/lib/memory-reindex-advice";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
@@ -80,6 +88,9 @@ export type MemoryStatusErrorCode =
   | "status_unavailable";
 
 export type MemoryRunErrorCode =
+  | "stalled"
+  /** No pass is cut at a fixed age any more (TASK-2431); kept so a record an
+   *  older build wrote, and `timeout`'s own exit 124, still read. */
   | "timed_out"
   | "interrupted"
   | "migration_busy"
@@ -89,6 +100,7 @@ export type MemoryRunErrorCode =
   | "full_reindex_required";
 
 const RUN_ERROR_CODES = new Set<string>([
+  "stalled",
   "timed_out",
   "interrupted",
   "migration_busy",
@@ -150,9 +162,31 @@ interface PersistedMemoryRunState {
   progress: MemoryIndexProgress | null;
   /** Internal only. Never returned by publicMemoryRunState(). */
   childPid: number;
+  /**
+   * Internal only: when the pass last MOVED (see memory-index-stall.ts), 0
+   * until it first does. What a process that is not supervising the pass
+   * judges a stall by — the supervising one has its own watchdog.
+   */
+  progressAtMs: number;
+  /**
+   * Internal only: the process supervising the pass, written with the very
+   * first record — before the spawn, so before any pid of the pass's own. A
+   * reader in another process takes the run for going while this is alive,
+   * whatever `childPid` names at that moment: during the wait between two
+   * OpenClaw attempts it names the attempt that has exited, and the write
+   * that would name the next one is not ordered against that reader.
+   */
+  supervisorPid: number;
+  /**
+   * Internal only: when that supervisor started (`processStartedAtMs`), 0
+   * where it could not be read. With the pid it is the supervisor's identity,
+   * so a pid a later process has been given — after a power cut — is never
+   * taken for it.
+   */
+  supervisorStartedAtMs: number;
 }
 
-export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid">;
+export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid" | "progressAtMs" | "supervisorPid" | "supervisorStartedAtMs">;
 
 export interface ClawKeepMemoryStatus {
   available: boolean;
@@ -258,6 +292,13 @@ const EXEC_FAILURE_EXITS = new Set([69, 126, 127]);
 /** How long a SIGTERM gets to close SQLite cleanly before SIGKILL follows. */
 const TERMINATE_GRACE_MS = 5_000;
 /**
+ * How long a pass that was given up on (a stop, the stall watchdog) may take
+ * to end before its run is settled without it. The OpenClaw arm ends within
+ * TERMINATE_GRACE_MS; the local arm at its next check of the signal, which an
+ * extraction (60 s budget each) can hold off for up to a minute.
+ */
+const ABANDON_SETTLE_MS = 2 * 60_000;
+/**
  * The floor between two progress writes. Half the card's fast poll (3 s), so
  * every read it makes carries a figure that moved, without the pass paying an
  * atomic write per file.
@@ -278,7 +319,16 @@ const RUN_LOCK_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index.lock");
 // boot every few polls.
 const STATUS_CACHE_MS = 120_000;
 const STATUS_TIMEOUT_MS = memoryStatusTimeoutMs(process.env.CLAWKEEP_MEMORY_STATUS_TIMEOUT_MS);
-const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+/**
+ * How long a pass may go without progress before it counts as stuck. There is
+ * deliberately NO cap on how long a pass may run (TASK-2431): a full pass on
+ * the on-box embedder takes hours, and the two-hour budget that used to end
+ * every pass ended every such pass while it was working. Read per pass, so an
+ * environment that changes it (a test, a board check) does not need a reload.
+ */
+function indexStallMs(): number {
+  return memoryIndexStallMs(process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS);
+}
 const LOCK_START_GRACE_MS = 30_000;
 const MAX_STATUS_OUTPUT_BYTES = 2 * 1024 * 1024;
 
@@ -293,6 +343,9 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   errorCode: "",
   progress: null,
   childPid: 0,
+  progressAtMs: 0,
+  supervisorPid: 0,
+  supervisorStartedAtMs: 0,
 };
 
 let writeSeq = 0;
@@ -435,6 +488,11 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     // would have a screen drawing one over a finished pass.
     progress: status === "running" ? sanitiseProgress(raw.progress) : null,
     childPid: Number.isSafeInteger(raw.childPid) && Number(raw.childPid) > 0 ? Number(raw.childPid) : 0,
+    progressAtMs: status === "running" ? finiteNonNegative(raw.progressAtMs) : 0,
+    supervisorPid: status === "running" && Number.isSafeInteger(raw.supervisorPid) && Number(raw.supervisorPid) > 0
+      ? Number(raw.supervisorPid)
+      : 0,
+    supervisorStartedAtMs: status === "running" ? finiteNonNegative(raw.supervisorStartedAtMs) : 0,
   };
 }
 
@@ -560,23 +618,174 @@ function runIsAlive(pid: number): boolean {
 }
 
 const INTERRUPTED_MESSAGE = "Indexing was interrupted. Run it again.";
+const INTERRUPTED_FAILURE = { error: INTERRUPTED_MESSAGE, errorCode: "interrupted" as const };
+/**
+ * A pass that stopped moving (TASK-2431): nothing it reports — files, chunks,
+ * passages, documents — changed for the stall window, so it was ended rather
+ * than left holding the lock for ever. Said in plain words, and without the
+ * window's length: it is configurable, and a sentence that names thirty
+ * minutes on a box set to five would be untrue. Unlike the old two-hour
+ * "timed out", it is never the verdict on a pass that was working.
+ */
+const STALLED_FAILURE = {
+  error: "Indexing made no progress for a long time and was stopped. Run it again.",
+  errorCode: "stalled" as const,
+};
 
-async function markInterrupted(state: PersistedMemoryRunState): Promise<PersistedMemoryRunState> {
+/**
+ * Is this process the one supervising the run this record is about? Then its
+ * watchdog judges a stall, with progress the throttled record does not carry
+ * yet, and no reader here second-guesses it.
+ */
+function supervisedHere(state: PersistedMemoryRunState): boolean {
+  return supervisedPass().current?.startedAtMs === state.startedAtMs
+    || (state.childPid > 0 && settlingPasses().has(state.childPid));
+}
+
+/**
+ * What a `running` record really is (TASK-2431): process liveness plus the
+ * stall rule, never its age. `going` for a pass still in its start grace
+ * (the record is written before the spawn), for one this process supervises,
+ * and for one whose process is there and which moved inside the window.
+ */
+function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" | "stalled" {
+  const now = Date.now();
+  const age = now - state.startedAtMs;
+  if (state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS) return "going";
+  if (supervisedHere(state)) return "going";
+  // This process is the supervisor on record and holds no such pass: the pass
+  // is over. Its settled record never reached the disk (a full one — `finish`
+  // gives up on it after SETTLED_WRITE_ATTEMPTS and frees the lock all the
+  // same), or this is a new process that was handed the pid. Either way
+  // nothing is running, and no later pass may be refused over it.
+  if (state.supervisorPid === process.pid) return "lost";
+  // A supervisor that is verifiably still the process that started the pass
+  // judges it itself: its watchdog ends a pass that stops moving and settles
+  // the run within ABANDON_SETTLE_MS of that. A reader elsewhere going by a
+  // record whose writes are late — the throttle, a slow disk, the wait
+  // between two OpenClaw attempts — must not take the lock from under it.
+  if (supervisorVerified(state)) return "going";
+  return staleRunVerdict(
+    { startedAtMs: state.startedAtMs, progressAtMs: state.progressAtMs, alive: runIsAlive(state.childPid) || supervisorAlive(state) },
+    now,
+    // The record carries the pass's last move at most PROGRESS_WRITE_EVERY_MS
+    // late, and a write takes time: a window set in seconds must not read
+    // that lag as a stall.
+    indexStallMs() + RECORD_LAG_MS,
+  );
+}
+
+/** How far behind the pass a reader of its record may be. */
+const RECORD_LAG_MS = 5_000;
+
+function supervisorAlive(state: PersistedMemoryRunState): boolean {
+  return state.supervisorPid > 0 && processIsAlive(state.supervisorPid);
+}
+
+/** The recorded supervisor is alive AND is the same process (its start time matches). */
+function supervisorVerified(state: PersistedMemoryRunState): boolean {
+  if (!state.supervisorStartedAtMs || !supervisorAlive(state)) return false;
+  const started = processStartedAtMs(state.supervisorPid);
+  return started !== null && Math.abs(started - state.supervisorStartedAtMs) <= SUPERVISOR_START_SLACK_MS;
+}
+
+/** Rounding between two readings of one process's start (clock ticks, uptime). */
+const SUPERVISOR_START_SLACK_MS = 3_000;
+
+/**
+ * When `pid` started, in epoch ms, from `/proc`: its start in clock ticks
+ * since boot against the uptime now. Null off Linux or for a pid that is gone.
+ */
+export function processStartedAtMs(pid: number): number | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trimStart().split(/\s+/);
+    const ticks = Number(fields[19]);
+    const uptimeS = Number(readFileSync("/proc/uptime", "utf8").split(/\s+/)[0]);
+    if (!Number.isFinite(ticks) || !Number.isFinite(uptimeS)) return null;
+    // USER_HZ is 100 on every Linux ABI this runs on.
+    return Date.now() - Math.max(0, uptimeS - ticks / 100) * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is `pid` still the OpenClaw indexer a stalled record names, rather than some
+ * process that has the number now? Judged by what the process IS, never by the
+ * pid alone: an indexer (`… memory index …`, or the `openclaw` title the CLI
+ * gives itself) or the terminal host running one, started inside that run.
+ */
+function isRecordedIndexer(pid: number, startedAtMs: number): boolean {
+  let cmdline: string;
+  try {
+    cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+  } catch {
+    return false;
+  }
+  if (!/\bmemory\b.*\bindex\b/.test(cmdline) && !/^openclaw$/.test(cmdline)) return false;
+  const started = processStartedAtMs(pid);
+  // A retry starts a few minutes in at most (WORKSPACE_LOCK_RETRIES ×
+  // WORKSPACE_LOCK_RETRY_MS); the slack either side is clock rounding.
+  return started !== null && started >= startedAtMs - 5_000 && started <= startedAtMs + 15 * 60_000;
+}
+
+/**
+ * A stalled record whose indexer outlived the process that supervised it — a
+ * server stopped some other way than through its unit, whose cgroup would
+ * have taken the child with it. Left running, it keeps EMBED_MIGRATION_LOCK
+ * and every later pass ends `migration_busy`; so it is ended before the run
+ * lock is freed, the way `terminate` ends one, and only once it is verified
+ * to be that indexer (`isRecordedIndexer`). Never the local arm's pid, which
+ * is a web server's own.
+ */
+async function stopOrphanedIndexer(state: PersistedMemoryRunState): Promise<void> {
+  const pid = state.childPid;
+  if (pid <= 0 || pid === process.pid || settlingPasses().has(pid)) return;
+  // Not an orphan while the process supervising it lives: its own watchdog
+  // ends it, and settles the run.
+  if (state.supervisorPid !== pid && (supervisorVerified(state) || supervisorAlive(state))) return;
+  if (!isRecordedIndexer(pid, state.startedAtMs)) return;
+  console.warn(`[clawkeep-memory] ending the stalled ${state.mode || "index"} pass's indexer, which no ClawBox process supervises any more`);
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  for (let waited = 0; waited < TERMINATE_GRACE_MS && processIsAlive(pid); waited += 250) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (processIsAlive(pid) && isRecordedIndexer(pid, state.startedAtMs)) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+  }
+}
+
+async function markInterrupted(
+  state: PersistedMemoryRunState,
+  failure: { error: string; errorCode: MemoryRunErrorCode } = INTERRUPTED_FAILURE,
+): Promise<PersistedMemoryRunState> {
   // Read once more before overwriting: the record this verdict was reached on
   // may be the "running" row the pass's own `finish` has just replaced with
   // how it really ended, and that answer is the better one.
   const current = await readPersistedRunState();
   if (current.status !== "running" || current.startedAtMs !== state.startedAtMs) return current;
+  // And judged once more on that fresh read: a record that has moved since —
+  // a newer pid, a newer `progressAtMs` — is going, and is left as it is.
+  if (runningRecordVerdict(current) === "going") return current;
   const finishedAtMs = Date.now();
   const failed: PersistedMemoryRunState = {
-    ...state,
+    ...current,
     status: "failed",
     finishedAtMs,
-    durationMs: state.startedAtMs ? Math.max(0, finishedAtMs - state.startedAtMs) : 0,
-    error: INTERRUPTED_MESSAGE,
-    errorCode: "interrupted",
+    durationMs: current.startedAtMs ? Math.max(0, finishedAtMs - current.startedAtMs) : 0,
+    error: failure.error,
+    errorCode: failure.errorCode,
     progress: null,
     childPid: 0,
+    progressAtMs: 0,
+    supervisorPid: 0,
+    supervisorStartedAtMs: 0,
   };
   await writeRunState(failed);
   await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
@@ -586,11 +795,9 @@ async function markInterrupted(state: PersistedMemoryRunState): Promise<Persiste
 export async function readMemoryRunState(): Promise<MemoryRunState> {
   let state = await readPersistedRunState();
   if (state.status === "running") {
-    const age = Date.now() - state.startedAtMs;
-    const stillStarting = state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS;
-    if (!stillStarting && (!runIsAlive(state.childPid) || age > INDEX_TIMEOUT_MS)) {
-      state = await markInterrupted(state);
-    }
+    const verdict = runningRecordVerdict(state);
+    if (verdict === "stalled") await stopOrphanedIndexer(state);
+    if (verdict !== "going") state = await markInterrupted(state, verdict === "stalled" ? STALLED_FAILURE : INTERRUPTED_FAILURE);
   }
   return publicMemoryRunState(state);
 }
@@ -1788,13 +1995,14 @@ async function acquireRunLock(): Promise<boolean> {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   }
   const state = await readPersistedRunState();
-  const age = Date.now() - state.startedAtMs;
-  const stillStarting = state.status === "running" && state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS;
-  if (state.status === "running" && (stillStarting || (runIsAlive(state.childPid) && age <= INDEX_TIMEOUT_MS))) {
-    return false;
+  if (state.status === "running") {
+    const verdict = runningRecordVerdict(state);
+    if (verdict === "going") return false;
+    if (verdict === "stalled") await stopOrphanedIndexer(state);
+    await markInterrupted(state, verdict === "stalled" ? STALLED_FAILURE : INTERRUPTED_FAILURE);
+  } else {
+    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
   }
-  if (state.status === "running") await markInterrupted(state);
-  else await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
   try {
     await fs.mkdir(RUN_LOCK_PATH, { mode: 0o700 });
     return true;
@@ -1903,14 +2111,34 @@ function fixedFailure(
 }
 
 /**
+ * What the CLI prints on its way out WHATEVER happened, so never the reason a
+ * pass failed (TASK-2431). OpenClaw's agent database logs a "clean-close
+ * receipt" each time a CLI closes it, and while the gateway holds the same
+ * database the receipt is `active-leases` — on every pass, the ones that
+ * succeed included. Taken as the last word, it is what the device log said
+ * about a pass that had really failed on the memory workspace lock, and it
+ * sent the diagnosis after the wrong thing. Also skipped: the stale-lease
+ * notice the next pass prints as it reaps a dead pass's lease (recovery, not
+ * a fault), and `script`'s own line when it is told to end the session.
+ */
+const SIGN_OFF_LINES = [
+  /\[state\/agent-db\] agent database clean-close receipt:/,
+  /\[state\/agent-db\] agent database stale lease:/,
+  /^Session terminated, killing shell/,
+];
+
+/**
  * The CLI's own last word, for the device log.
  *
  * Only the tail is kept (see `createIndexProgressReader`): nothing here needs
- * the transcript — just whatever it said before it gave up.
+ * the transcript — just whatever it said before it gave up, sign-off lines
+ * aside (see SIGN_OFF_LINES).
  */
 function lastMeaningfulLine(text: string): string {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
-  return lines.length ? lines[lines.length - 1].slice(0, 300) : "";
+  const said = lines.filter((line) => !SIGN_OFF_LINES.some((re) => re.test(line)));
+  const last = said.length ? said[said.length - 1] : lines[lines.length - 1];
+  return last ? last.slice(0, 300) : "";
 }
 
 /**
@@ -1929,19 +2157,20 @@ type PassOutcome =
  * One indexing pass, however it is performed.
  *
  * The whole point of the interface is that everything AROUND a pass — the
- * decline, the lock, the run-state file, the liveness reconcile, the two-hour
- * budget, the cache invalidation and the reload behind it — is written once and
- * is the same on both editions. Only the work in the middle differs.
+ * decline, the lock, the run-state file, the liveness reconcile, the stall
+ * watchdog, the cache invalidation and the reload behind it — is written once
+ * and is the same on both editions. Only the work in the middle differs.
  */
 interface IndexPass {
   /**
    * Recorded as `childPid`, which `acquireRunLock` checks with
-   * `processIsAlive`. The OpenClaw arm records the indexer's own pid. The local
-   * arm records THIS process, which is the same fact for a pass that runs
-   * inside it: while the web server is up the run is going, and a run lost to a
-   * restart reads dead and is reconciled as interrupted — exactly as before.
+   * `processIsAlive`. The OpenClaw arm records the indexer's own pid — the
+   * CURRENT one, after a retry (see startOpenclawPass). The local arm records
+   * THIS process, which is the same fact for a pass that runs inside it: while
+   * the web server is up the run is going, and a run lost to a restart reads
+   * dead and is reconciled as interrupted — exactly as before.
    */
-  pid: number;
+  readonly pid: number;
   /** Settles when the pass has ended, whatever became of it. */
   ended: Promise<PassOutcome>;
   /** Give up on it. Not the same as failing: the caller decides what to say. */
@@ -1969,6 +2198,132 @@ function ptyHost(): string | null {
 
 /** How often the OpenClaw arm reads its progress. `publishProgress` throttles the writes. */
 const OPENCLAW_PROGRESS_POLL_MS = 1_000;
+/**
+ * The same reading off a terminal, where there are no counts to SHOW but the
+ * stall watchdog still has to see the pass move: the chunks in the index it is
+ * writing, on a slower clock — it is a COUNT over the whole index, on the web
+ * server's event loop — and never drawn on the card.
+ */
+const OPENCLAW_ACTIVITY_POLL_MS = 15_000;
+
+/**
+ * How far a pass has got, on its way to the card and the stall watchdog.
+ * `shown: false` is for the watchdog alone: off a terminal the OpenClaw arm
+ * has a chunk count but no file counts, and a bar with numbers that never move
+ * would be a claim the box cannot back.
+ */
+type PassProgressReporter = (progress: LocalIndexProgress, shown?: boolean) => void;
+
+/**
+ * OpenClaw's memory workspace lock (memory-core `short-term-locks`), named in
+ * the error a pass gives up with when another process holds it (TASK-2431).
+ *
+ * A pass that dies holding it — ended by a stop or by the stall watchdog, the
+ * OOM killer — leaves the entry behind. memory-core takes over an entry only
+ * once it is more than 60 s old AND its owner is dead, and waits only 10 s for
+ * it, so a pass started inside that minute exits 1 with "Timed out waiting for
+ * memory workspace lock … (held by <the dead pid>)". That is the failure the
+ * box logged as `clean-close receipt: active-leases`: the receipt is only the
+ * last thing the CLI prints (see SIGN_OFF_LINES). The agent-database lease the
+ * dead pass leaves too is not the problem — the next pass reaps it itself
+ * ("stale lease: owner-pid-dead"). Waiting the minute out and running the pass
+ * again is the recovery; a live holder (the gateway's own memory work) is
+ * waited for the same way.
+ */
+const WORKSPACE_LOCK_HELD_RE = /Timed out waiting for memory workspace lock/;
+/** Past memory-core's 60 s, with room for the CLI's boot. */
+const DEFAULT_WORKSPACE_LOCK_RETRY_MS = 65_000;
+/** Retries after the first attempt, before the pass is let fail. */
+const WORKSPACE_LOCK_RETRIES = 2;
+/** How often the wait between two attempts tells the stall watchdog it is waiting on purpose. */
+const WORKSPACE_LOCK_WAIT_BEAT_MS = 1_000;
+
+/** Overridable for tests only: nothing a test can wait out takes 65 s. */
+function workspaceLockRetryMs(): number {
+  const parsed = Number(process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS?.trim() || NaN);
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 10 * 60_000 ? parsed : DEFAULT_WORKSPACE_LOCK_RETRY_MS;
+}
+
+function workspaceLockWasHeld(outcome: PassOutcome, tail: string): boolean {
+  return outcome.kind === "exit" && outcome.signal === null && outcome.code !== null && outcome.code !== 0
+    && WORKSPACE_LOCK_HELD_RE.test(tail);
+}
+
+/**
+ * Runs the OpenClaw pass, and runs it again when the CLI gave up on a
+ * memory workspace lock that someone else holds — up to WORKSPACE_LOCK_RETRIES
+ * times, WORKSPACE_LOCK_RETRY_MS apart (see WORKSPACE_LOCK_HELD_RE). One pass
+ * to the caller: `ended` is the last attempt's, `abandon` reaches whichever
+ * attempt is current or the wait between two, and `onRespawn` names the new
+ * attempt's process so the record and the liveness check follow it. Through
+ * the wait the record still names the attempt that has exited; what keeps a
+ * reader elsewhere from taking the run for lost then is `supervisorPid`. The
+ * wait is told to the stall watchdog all through (`onWaiting`): it is the pass
+ * doing what it should, not a pass that has hung, and a stall window set
+ * shorter than it would otherwise end the pass in the middle of it.
+ */
+function startOpenclawPass(
+  mode: MemoryIndexMode,
+  onProgress: PassProgressReporter,
+  agentId: string,
+  stallMs: number,
+  onRespawn: (pid: number) => void,
+  onWaiting: () => void,
+): IndexPass {
+  let current = startOpenclawAttempt(mode, onProgress, agentId, stallMs);
+  let abandoned = false;
+  let wake: (() => void) | null = null;
+  const ended = (async (): Promise<PassOutcome> => {
+    for (let retry = 1; ; retry += 1) {
+      const outcome = await current.ended;
+      if (abandoned || retry > WORKSPACE_LOCK_RETRIES || !workspaceLockWasHeld(outcome, current.tail())) return outcome;
+      const waitMs = workspaceLockRetryMs();
+      console.warn(
+        `[clawkeep-memory] ${mode} index pass found OpenClaw's memory workspace lock held`
+        + ` (a pass that ended without releasing it, or the gateway's own memory work);`
+        + ` running it again in ${Math.round(waitMs / 1000)} s (${retry}/${WORKSPACE_LOCK_RETRIES})`,
+      );
+      // Told to the watchdog all through the wait, not only at its two ends: a
+      // window shorter than the wait would otherwise fire inside it.
+      onWaiting();
+      const beat = setInterval(onWaiting, WORKSPACE_LOCK_WAIT_BEAT_MS);
+      beat.unref?.();
+      try {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, waitMs);
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      } finally {
+        clearInterval(beat);
+        wake = null;
+      }
+      if (abandoned) return outcome;
+      onWaiting();
+      try {
+        current = startOpenclawAttempt(mode, onProgress, agentId, stallMs);
+      } catch (error) {
+        // `spawn` throws at once for some failures (ENOMEM, E2BIG) rather
+        // than emitting "error". The pass ends on it like on any other end,
+        // so `finish` still settles the record and frees the lock.
+        return { kind: "threw", error };
+      }
+      onRespawn(current.pid);
+    }
+  })();
+  return {
+    get pid() { return current.pid; },
+    ended,
+    abandon: () => {
+      abandoned = true;
+      wake?.();
+      current.abandon();
+    },
+    tail: () => current.tail(),
+  };
+}
 
 /**
  * Starts `openclaw memory index --agent <agentId>` (`--force` for a full pass)
@@ -1976,7 +2331,12 @@ const OPENCLAW_PROGRESS_POLL_MS = 1_000;
  * terminal to run it on, its progress comes from the counts it prints there
  * and from that agent's own database.
  */
-function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgressReporter, agentId: string): IndexPass {
+function startOpenclawAttempt(
+  mode: MemoryIndexMode,
+  onProgress: PassProgressReporter,
+  agentId: string,
+  stallMs: number,
+): IndexPass {
   const host = ptyHost();
   // The agent the status reads (`openclawDefaultAgentId`), so the card's
   // counts and the pass that moves them are about the same index.
@@ -2033,24 +2393,25 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   }
   // Files come from the reporter, chunks from the index being written; the
   // two are joined here, on a clock rather than per write, because the chunk
-  // count is a database read. Off a terminal nothing is published at all and
+  // count is a database read. Off a terminal nothing is SHOWN and
   // `run.progress` stays null — a bar with numbers that never move would be a
-  // claim the box cannot back.
-  let poll: NodeJS.Timeout | null = null;
-  if (host) {
-    // The environment the pass was spawned with, so the database watched is
-    // the one its pinned state directory names.
-    const dbPath = openclawAgentDbPath(agentId, openclawEnv());
-    const since = Date.now();
-    let chunks = 0;
-    poll = setInterval(() => {
-      const counts = reader.latest();
-      const counted = countIndexChunks(dbPath, since, { rebuild: mode === "full" });
-      if (counted !== null) chunks = counted;
-      onProgress({ filesDone: counts?.filesDone ?? 0, filesTotal: counts?.filesTotal ?? 0, chunks });
-    }, OPENCLAW_PROGRESS_POLL_MS);
-    poll.unref();
-  }
+  // claim the box cannot back — but the chunks are still counted, slower, for
+  // the stall watchdog (TASK-2431).
+  // The environment the pass was spawned with, so the database watched is
+  // the one its pinned state directory names.
+  const dbPath = openclawAgentDbPath(agentId, openclawEnv());
+  const since = Date.now();
+  let chunks = 0;
+  let poll: NodeJS.Timeout | null = setInterval(() => {
+    const counts = host ? reader.latest() : null;
+    const counted = countIndexChunks(dbPath, since, { rebuild: mode === "full" });
+    if (counted !== null) chunks = counted;
+    onProgress({ filesDone: counts?.filesDone ?? 0, filesTotal: counts?.filesTotal ?? 0, chunks }, host !== null);
+    // Off a terminal, inside the stall window however short it is set: a
+    // window shorter than the clock would end a pass that is writing chunks
+    // before its first reading.
+  }, host ? OPENCLAW_PROGRESS_POLL_MS : Math.min(OPENCLAW_ACTIVITY_POLL_MS, Math.max(250, Math.floor(stallMs / 4))));
+  poll.unref();
   const stopPolling = () => {
     if (poll) clearInterval(poll);
     poll = null;
@@ -2085,6 +2446,7 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
 function startLocalPass(
   mode: MemoryIndexMode,
   onProgress: LocalIndexProgressReporter,
+  onHeartbeat: () => void,
   mayDiscard: boolean,
 ): IndexPass {
   const controller = new AbortController();
@@ -2096,7 +2458,7 @@ function startLocalPass(
   //
   // `mayDiscard` is false for the schedule: the plan's reading can be minutes
   // old, so the pass re-checks the store itself before it empties anything.
-  const ended = runLocalIndexPass(mode, controller.signal, onProgress, { mayDiscard }).then(
+  const ended = runLocalIndexPass(mode, controller.signal, onProgress, { mayDiscard, onHeartbeat }).then(
     (result): PassOutcome => {
       // The pass's own numbers exist nowhere else — the run record keeps a
       // status and a duration, not a count — so they are said once, here.
@@ -2240,6 +2602,9 @@ export async function startMemoryIndex(
     errorCode: "",
     progress: null,
     childPid: 0,
+    progressAtMs: 0,
+    supervisorPid: process.pid,
+    supervisorStartedAtMs: processStartedAtMs(process.pid) ?? 0,
   };
   try {
     await writeRunState(state);
@@ -2249,7 +2614,7 @@ export async function startMemoryIndex(
   }
 
   // The one line that differs by edition. Everything above and below it — the
-  // decline, the lock, the state file, the reconcile, the budget, the cache —
+  // decline, the lock, the state file, the reconcile, the watchdog, the cache —
   // is the same work whoever does the indexing.
   // How far the pass has got, on its way to the card's bar.
   //
@@ -2263,71 +2628,179 @@ export async function startMemoryIndex(
   let settled = false;
   let reportedAtMs = 0;
   let reportInFlight = false;
-  /** The newest progress write, for `finish` to wait behind. */
+  /** The newest write of the running record, for `finish` to wait behind. */
   let progressWritten: Promise<void> = Promise.resolve();
-  const publishProgress = (progress: LocalIndexProgress) => {
-    if (settled || reportInFlight) return;
+  /**
+   * Writes the running record as it is NOW, after every write before it.
+   * Never worth failing a run over. `finish` waits on `progressWritten` before
+   * it writes the settled record: `writeJsonAtomic` is a write-then-rename with
+   * no ordering between two calls, so a report still in flight would otherwise
+   * land after the final state and put a running run's bar back over it — for
+   * good, since nothing writes the file again. Chained for the same reason, so
+   * a retry's new pid (see startOpenclawPass) cannot be overtaken by an older
+   * progress write naming the process before it.
+   */
+  const persistState = (): Promise<void> => {
+    progressWritten = progressWritten
+      .then(() => writeRunState(state))
+      .catch(() => { /* the next write tries again */ });
+    return progressWritten;
+  };
+  /** A report arrived while a write was on its way: write once more after it. */
+  let reportWaiting = false;
+  const persistThrottled = () => {
+    if (settled) return;
+    if (reportInFlight) {
+      reportWaiting = true;
+      return;
+    }
     const now = Date.now();
     // The first report always lands, so the bar gets its denominator the
     // moment the scan has one, whatever the clock says.
     if (reportedAtMs && now - reportedAtMs < PROGRESS_WRITE_EVERY_MS) return;
     reportedAtMs = now;
     reportInFlight = true;
-    state = { ...state, progress };
-    // Never worth failing a run over. `finish` waits on this handle before it
-    // writes the settled record: `writeJsonAtomic` is a write-then-rename with
-    // no ordering between two calls, so a report still in flight would
-    // otherwise land after the final state and put a running run's bar back
-    // over it — for good, since nothing writes the file again.
-    progressWritten = writeRunState(state)
-      .catch(() => { /* the next report tries again */ })
-      .finally(() => { reportInFlight = false; });
+    reportWaiting = false;
+    void persistState().finally(() => {
+      reportInFlight = false;
+      // What came in while the disk was slow is not lost until the next
+      // report: a pass that goes quiet right after (a stall, a long file)
+      // would otherwise leave the record — `progressAtMs` included — behind.
+      if (reportWaiting && !settled) {
+        reportWaiting = false;
+        reportedAtMs = 0;
+        persistThrottled();
+      }
+    });
   };
+  // TASK-2431: the stall watchdog, and the record's own note of when the pass
+  // last moved for a reader in another process. Created once the pass is on
+  // record, below; a report before that only moves `progressAtMs`.
+  let watchdog: StallWatchdog | null = null;
+  let progressAtMs = 0;
+  let lastMark = "";
+  const noteMoved = () => {
+    if (settled) return;
+    progressAtMs = Date.now();
+    watchdog?.touch();
+    state = { ...state, progressAtMs };
+    persistThrottled();
+  };
+  const publishProgress: PassProgressReporter = (progress, shown = true) => {
+    if (settled) return;
+    // The record carries the counts and nothing else: the reporter's object
+    // is the pass's own and may grow fields no screen should get.
+    if (shown) {
+      state = {
+        ...state,
+        progress: { filesDone: progress.filesDone, filesTotal: progress.filesTotal, chunks: progress.chunks },
+      };
+    }
+    const mark = progressMark(progress);
+    if (mark === lastMark) {
+      persistThrottled();
+      return;
+    }
+    lastMark = mark;
+    noteMoved();
+  };
+  const stallMs = indexStallMs();
   const localArm = openclawIsAbsent();
+  /** Every process this pass has run as: one, unless the OpenClaw arm retried. */
+  const passPids = new Set<number>();
   const pass = localArm
-    ? startLocalPass(mode, publishProgress, trigger !== "schedule")
-    : startOpenclawPass(mode, publishProgress, agentId);
-  if (pass.pid) settlingPasses().add(pass.pid);
+    ? startLocalPass(mode, publishProgress, noteMoved, trigger !== "schedule")
+    : startOpenclawPass(mode, publishProgress, agentId, stallMs, (pid) => {
+      // An attempt whose spawn failed has no pid (its "error" ends it at
+      // once): the record keeps the last real one, which stays in
+      // `settlingPasses` until `finish`, so no reader takes the run for lost
+      // in between.
+      if (settled || !pid) return;
+      passPids.add(pid);
+      settlingPasses().add(pid);
+      state = { ...state, childPid: pid };
+      void persistState();
+    }, noteMoved);
+  if (pass.pid) {
+    passPids.add(pass.pid);
+    settlingPasses().add(pass.pid);
+  }
   state = { ...state, childPid: pass.pid };
   try {
-    await writeRunState(state);
+    // The first write that names the pass, which must land (see the catch);
+    // later writes queue behind it.
+    const named = writeRunState(state);
+    progressWritten = named.catch(() => { /* answered by the await below */ });
+    await named;
   } catch (err) {
     // Without this, the pass keeps indexing unsupervised while the lock stays
     // on disk with childPid 0; LOCK_START_GRACE_MS later the reconcile calls
     // the live run interrupted and frees the lock, and a second index starts
     // on top of the first. `finish` is not attached yet, so the pass's end
     // cannot write a final state over this cleanup.
+    settled = true;
     pass.abandon();
-    settlingPasses().delete(pass.pid);
+    for (const pid of passPids) settlingPasses().delete(pid);
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
-  const supervised: SupervisedPass = { startedAtMs, abandon: () => pass.abandon(), stopRequested: false };
+  // Every way a run is given up on — the owner's stop, the stall watchdog —
+  // comes through here, and a pass given up on is settled even if it never
+  // ends: the OpenClaw arm is SIGKILLed TERMINATE_GRACE_MS after the SIGTERM,
+  // but the local arm can only stop at its next check of the signal, and a
+  // pass that never reached one must not hold the lock for ever.
+  let abandonGrace: NodeJS.Timeout | null = null;
+  let settleAbandoned: ((outcome: PassOutcome) => void) | null = null;
+  const abandonedEnd = new Promise<PassOutcome>((resolve) => { settleAbandoned = resolve; });
+  const giveUp = () => {
+    pass.abandon();
+    if (abandonGrace) return;
+    abandonGrace = setTimeout(() => {
+      console.warn(
+        `[clawkeep-memory] the ${mode} index pass had not ended ${Math.round(ABANDON_SETTLE_MS / 1000)} s`
+        + " after it was given up on; recording it as ended",
+      );
+      settleAbandoned?.({ kind: "exit", code: null, signal: null });
+    }, ABANDON_SETTLE_MS);
+    abandonGrace.unref?.();
+  };
+  const supervised: SupervisedPass = { startedAtMs, abandon: giveUp, stopRequested: false };
   supervisedPass().current = supervised;
   // Deliberately no cache invalidation here: nothing the probe reports changes
   // until the pass ends, and dropping the reading at spawn time made the
   // panel's very next read block on the cold probe for the whole run.
 
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    pass.abandon();
-  }, INDEX_TIMEOUT_MS);
+  // NO CAP on how long a pass runs (TASK-2431). The two-hour budget that was
+  // here ended every full pass the on-box embedder needs 2.5 to 9 hours for,
+  // while it was working. A pass is given up on only once it has stopped
+  // MOVING for the stall window — see memory-index-stall.ts.
+  let stalled = false;
+  watchdog = startStallWatchdog(stallMs, () => {
+    stalled = true;
+    giveUp();
+  });
   const finish = async (outcome: PassOutcome) => {
     // Before anything else: a report that lands after this point would put a
     // running run's bar back over the settled record.
     settled = true;
-    clearTimeout(timer);
+    watchdog?.stop();
+    if (abandonGrace) clearTimeout(abandonGrace);
     if (supervisedPass().current === supervised) supervisedPass().current = null;
     const finishedAtMs = Date.now();
-    const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
-    // The timeout first, because it is the one verdict that does not depend on
-    // which arm ran: whatever the pass said on its way out, the budget is what
-    // ended it. After that each arm is worded by its own mapper.
+    // An OpenClaw pass that was given up on is never a success, whatever came
+    // back: on a terminal `script` answers the SIGTERM it passes on with an
+    // exit 0 of its own, and a stopped pass was recorded as "succeeded". The
+    // local arm's outcome is the pass's own word — one that finished before
+    // it reached a check of the signal did finish.
+    const givenUp = stalled || supervised.stopRequested;
+    const ok = outcome.kind === "exit" && outcome.code === 0 && (localArm || !givenUp);
+    // The stall first, because it is the one verdict that does not depend on
+    // which arm ran: whatever the pass said on its way out, the watchdog is
+    // what ended it. After that each arm is worded by its own mapper.
     const mapped = ok
       ? null
-      : timedOut
-        ? TIMED_OUT_FAILURE
+      : stalled
+        ? STALLED_FAILURE
         : supervised.stopRequested
           ? (mode === "full" ? STOPPED_FULL_FAILURE[localArm ? "local" : "openclaw"] : STOPPED_FAILURE)
           : outcome.kind === "threw"
@@ -2335,7 +2808,7 @@ export async function startMemoryIndex(
             : fixedFailure(outcome.code, outcome.signal);
     // The catch-all, and ONLY the catch-all, gives way to the cause the plan
     // already found. Every other verdict above is a fact about how this pass
-    // ended — a timeout, a signal, a missing binary — and stays what it is:
+    // ended — a stall, a signal, a missing binary — and stays what it is:
     // a box whose config the core ignored can still be killed by the OOM
     // killer, and "re-run setup" would be the wrong thing to say about that.
     const failure = mapped && fellBack && mapped.errorCode === "index_failed"
@@ -2345,9 +2818,10 @@ export async function startMemoryIndex(
       const how = outcome.kind === "exit"
         ? `exit ${outcome.code ?? "none"}${outcome.signal ? `, ${outcome.signal}` : ""}`
         : "threw";
+      const why = stalled ? `no progress for ${stallMinutes(stallMs)} min; ` : "";
       console.warn(
         `[clawkeep-memory] ${mode} index run failed (${failure.errorCode}, ${how}): `
-        + `${lastMeaningfulLine(pass.tail()) || "it said nothing"}`,
+        + `${why}${lastMeaningfulLine(pass.tail()) || "it said nothing"}`,
       );
     }
     const finalState: PersistedMemoryRunState = {
@@ -2362,8 +2836,11 @@ export async function startMemoryIndex(
       // counts are the card's own figures by then.
       progress: null,
       childPid: 0,
+      progressAtMs: 0,
+      supervisorPid: 0,
+      supervisorStartedAtMs: 0,
     };
-    // See `publishProgress`: no report may still be on its way to the file.
+    // See `persistState`: no report may still be on its way to the file.
     await progressWritten;
     // Tried more than once: left unwritten, the record says "running" beside a
     // reaped pid and the next read calls this pass interrupted, whatever it
@@ -2386,7 +2863,7 @@ export async function startMemoryIndex(
     }
     // Only now: until the settled record is on disk, a reader must not take
     // the reaped pid for a lost run.
-    settlingPasses().delete(pass.pid);
+    for (const pid of passPids) settlingPasses().delete(pid);
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     // Whatever the cache holds now — the reading from before the pass, or one
     // a TTL probe took while the pass was writing the index — predates the
@@ -2403,7 +2880,10 @@ export async function startMemoryIndex(
     // waits on `finish` itself, and the probe starts at this same moment.
     await reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  passSettling().current = pass.ended.then(finish);
+  // A pass that rejected instead of ending is settled the same way: left
+  // unhandled, the record would say "running" and the lock stay for good.
+  passSettling().current = Promise.race([pass.ended, abandonedEnd])
+    .then(finish, (error: unknown) => finish({ kind: "threw", error }));
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }

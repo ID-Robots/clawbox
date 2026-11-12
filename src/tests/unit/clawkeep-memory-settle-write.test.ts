@@ -68,4 +68,24 @@ describe("recording how a pass ended", () => {
     expect(failures.settled).toBe(0);
     expect((await readMemoryRunState()).status).toBe("succeeded");
   });
+
+  it("does not hold later passes back when the settled record never reached the disk", async () => {
+    // Every attempt fails: `finish` frees the lock all the same and the
+    // record still says "running", naming this very process as its
+    // supervisor. This process knows it supervises no pass, so the next read
+    // settles the record instead of refusing every pass until a restart.
+    failures.settled = 4;
+    const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    await memoryPassSettled();
+    expect(failures.settled).toBe(0);
+    // The first read after it — the status refresh `finish` itself starts —
+    // settles it once the disk takes writes again.
+    expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "interrupted" });
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+    await memoryPassSettled();
+    vi.mocked(console.warn).mockRestore();
+  });
 });

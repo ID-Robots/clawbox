@@ -278,8 +278,18 @@ export async function extractOne(file: string, out: string): Promise<boolean> {
  * Incremental: a file whose extracted copy is newer than the original is left
  * alone, so re-running after adding one PDF costs one conversion rather than
  * the whole folder.
+ *
+ * `onDocument` is told after each document is done with — converted, refused
+ * or already current. The index pass's stall watchdog (TASK-2431) hears it: a
+ * first pass over a folder of 500 PDFs can convert for longer than the stall
+ * window before it has a single file count to report, and is working all the
+ * while.
  */
-export async function extractDocuments(source: string, signal?: AbortSignal): Promise<ExtractionResult> {
+export async function extractDocuments(
+  source: string,
+  signal?: AbortSignal,
+  onDocument?: () => void,
+): Promise<ExtractionResult> {
   const derived = derivedFolderFor(source);
   let extracted = 0;
   let skipped = 0;
@@ -294,8 +304,9 @@ export async function extractDocuments(source: string, signal?: AbortSignal): Pr
   for await (const file of walkFiles(path.resolve(source), budget)) {
     // A conversion is a spawned pdftotext or libreoffice with a 60 s budget of
     // its own, and a folder can hold 500 of them — so a caller that has given
-    // up (the index run's two-hour deadline, a web server going down) must be
-    // able to stop this between files rather than up to 500 timeouts later.
+    // up (the index run's stall watchdog, an owner's stop, a web server going
+    // down) must be able to stop this between files rather than up to 500
+    // timeouts later.
     signal?.throwIfAborted();
     if (seen >= MAX_FILES) {
       notes.push(`Only the first ${MAX_FILES} files in this folder were read.`);
@@ -307,6 +318,9 @@ export async function extractDocuments(source: string, signal?: AbortSignal): Pr
     seen += 1;
     sawExtractable = true;
 
+    // Told once per document however this iteration leaves it: every path
+    // below ends in a `continue` or the bottom of the body.
+    onDocument?.();
     let stat;
     try {
       stat = await fs.stat(file);

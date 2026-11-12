@@ -812,6 +812,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.runError.migrationBusy": "埋め込みモデルの準備がまだ続いています。数分後にもう一度お試しください。",
   "clawkeep.memory.runError.openclawMissing": "OpenClaw がインストールされていないか、起動できませんでした。",
   "clawkeep.memory.runError.providerMismatch": "インデックス作成に失敗しました。使われている埋め込みモデルは、設定したものではありません。",
+  "clawkeep.memory.runError.stalled": "インデックス作成が長い間進まなかったため停止しました。もう一度実行してください。",
   "clawkeep.memory.runError.timedOut": "インデックス作成が時間切れになりました。端末が空いているときにやり直してください。",
   "clawkeep.memory.runFailed": "失敗",
   "clawkeep.memory.runNever": "なし",

@@ -362,7 +362,10 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
           last_pass: run.status,
           ...(run.mode ? { mode: run.mode } : {}),
           ...(isoMinute(run.finishedAtMs) ? { finished: isoMinute(run.finishedAtMs) } : {}),
-          ...(run.errorCode ? { problem: run.errorCode } : {}),
+          // The sentence beside the code, as the index's own `problem_text`:
+          // a pass the stall watchdog ended (TASK-2431) must read as that in
+          // plain words, not as a bare `stalled` the assistant has to guess at.
+          ...(run.errorCode ? { problem: run.errorCode, ...(run.error ? { problem_text: redact(run.error.slice(0, 200)) } : {}) } : {}),
         }
         : "no pass has run since the box started",
     schedule: scheduleWords(s.schedule),

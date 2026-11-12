@@ -137,6 +137,7 @@ import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
   EMBED_RETRY_MIN_WAIT_MS,
   EmbeddingUnavailableError,
+  IndexPassAbortedError,
   IndexRebuildRequiredError,
   embedDocumentsWithShardEmbedder,
   LOCAL_INDEX_PATH,
@@ -1421,6 +1422,92 @@ describe("chunking", () => {
  * it has to be telling the truth about both — a fraction over 1, or a
  * denominator that grows, is worse than the nothing this replaces.
  */
+/**
+ * TASK-2431: a run that gives up on a pass — its stall watchdog, an owner's
+ * stop — can settle it and free the lock before the pass has noticed, and a
+ * newer pass may be writing the store by the time it does. One that was inside
+ * its LAST file then went on to flush its `touched` rows, sweep the store
+ * against its own old scan and stamp the identity: every write of a pass that
+ * is no longer the current one.
+ */
+function storeCount(sql: string): number {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const db = new DatabaseSync(LOCAL_INDEX_PATH, { readOnly: true });
+  try {
+    return Number((db.prepare(sql).get() as { n?: unknown } | undefined)?.n ?? 0);
+  } finally {
+    db.close();
+  }
+}
+
+function storeMeta(key: string): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const db = new DatabaseSync(LOCAL_INDEX_PATH, { readOnly: true });
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value?: unknown } | undefined;
+    return row?.value === undefined ? null : String(row.value);
+  } finally {
+    db.close();
+  }
+}
+
+describe("a pass given up on inside its last file", () => {
+  it("stops before the bookkeeping that follows the walk", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    const controller = new AbortController();
+    const embed = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      // The stop lands while the file's batch is in flight (not the rebuild's
+      // probe before it); the embedder still answers it.
+      if (String((args[1] as { body?: string } | undefined)?.body).includes("deposit")) controller.abort();
+      return embed(...args);
+    }));
+    await expect(runLocalIndexPass("incremental", controller.signal)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    // Not the file's rows either: the batch came back after the stop, and
+    // nothing is written for a run that is over.
+    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(status.status.custom.indexIdentity.status).not.toBe("valid");
+    expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(0);
+  });
+
+  it("does not empty the store when the rebuild's probe answers after the stop", async () => {
+    // The probe that wakes the embedder before a rebuild deletes anything can
+    // come back after the run gave up on the pass — by then a newer pass may
+    // be filling the store, and the DELETE behind the probe would empty it.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(1);
+    const controller = new AbortController();
+    const embed = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      controller.abort();
+      return embed(...args);
+    }));
+    await expect(runLocalIndexPass("full", controller.signal)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(1);
+  });
+
+  it("still tells a search that the files it committed before the stop have changed", async () => {
+    // The vector cache keys on `generation`, which a pass moves only at the
+    // end of its bookkeeping. A pass that committed one file and was stopped
+    // in the next left it where it was, and a search kept the old chunk ids.
+    write("first.md", "First note: the deposit is two months' rent.");
+    write("second.md", "Second note: the boiler is serviced in March.");
+    const controller = new AbortController();
+    const embed = globalThis.fetch;
+    let documents = 0;
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      if (/note/.test(String((args[1] as { body?: string } | undefined)?.body)) && (documents += 1) === 2) controller.abort();
+      return embed(...args);
+    }));
+    await expect(runLocalIndexPass("incremental", controller.signal)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    expect(storeCount("SELECT COUNT(*) AS n FROM files")).toBe(1);
+    expect(storeMeta("generation")).toBe("1");
+  });
+});
+
 describe("what a pass reports about its own progress", () => {
   function reports() {
     const seen: { filesDone: number; filesTotal: number; chunks: number }[] = [];

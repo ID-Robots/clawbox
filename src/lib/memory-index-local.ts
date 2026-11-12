@@ -276,7 +276,7 @@ async function pauseBeforeRetry(ms: number, signal: AbortSignal | undefined): Pr
   });
 }
 
-/** The pass was abandoned — the two-hour budget, or a web server going down. */
+/** The pass was abandoned — the stall watchdog, an owner's stop, or a web server going down. */
 export class IndexPassAbortedError extends Error {
   constructor() {
     super("Indexing was stopped");
@@ -977,6 +977,15 @@ export interface LocalIndexPassOptions {
    * touched a row (one that is not).
    */
   mayDiscard?: boolean;
+  /**
+   * Told whenever the pass did work that moves none of the counts it reports
+   * (TASK-2431): a document converted during the scan, a batch of passages
+   * embedded inside one file. The run's stall watchdog reads these beside the
+   * progress reports, so one large document — the same `filesDone` for many
+   * minutes while its passages are embedded — or a long first conversion of a
+   * folder of PDFs is never taken for a pass that has stopped moving.
+   */
+  onHeartbeat?: () => void;
 }
 
 /**
@@ -1174,6 +1183,8 @@ export async function runLocalIndexPass(
   // last files of a run against a different budget from its first.
   const ceiling = maxIndexChunks(embedder.dimensions);
   const db = await openIndexForWrite();
+  /** This pass committed rows: a cached copy of the vectors is out of date. */
+  let wrote = false;
   try {
     // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
     // tables, and reading the owner's folder list can fail — the config store
@@ -1182,7 +1193,9 @@ export async function runLocalIndexPass(
     // working index over a momentary failure. Same rule as `mutateExtraPaths`:
     // a read that FAILED is never written over as if it were empty.
     const sources = await readLocalSources();
-    const scan = await scanSources(sources, signal);
+    const scan = await scanSources(sources, signal, options.onHeartbeat);
+    // Nothing is written for a run that is over — and the scan is long.
+    throwIfAborted(signal);
 
     const identity = identityOf(db, sources, embedder);
     const schema = metaGet(db, "schema_version");
@@ -1219,6 +1232,9 @@ export async function runLocalIndexPass(
       // unit for them, and a refusal ends the pass (`EmbeddingUnavailableError`)
       // with the index it was going to replace still on disk.
       await embedBatch([REBUILD_PROBE_TEXT], "document", signal, embedder);
+      // The probe can answer after the run has given up on this pass; the
+      // DELETE below must not then empty a store a newer pass is filling.
+      throwIfAborted(signal);
       // The identity goes WITH the rows it describes. Stamping it here — before
       // a single vector had been written — meant a rebuild whose first embed
       // failed left a valid identity over an empty index, which the shared
@@ -1245,7 +1261,6 @@ export async function runLocalIndexPass(
     // reads as nothing owed over work that did not happen.
     let incompleteFiles = 0;
     let capped = false;
-    let wrote = false;
     // The denominator as soon as it exists. Until the scan has walked every
     // source the pass genuinely does not know how much work there is, and the
     // bar says so by staying indeterminate rather than by guessing.
@@ -1330,6 +1345,9 @@ export async function runLocalIndexPass(
         // `continue` runs this too, so the descriptor is released on every path.
         await opened.close();
       }
+      // The read can outlast the run that gave up on this pass (it takes no
+      // signal): nothing below may be written for a run that is over.
+      throwIfAborted(signal);
       const sha = sha256Of(text);
       if (sameMeta && row!.sha === sha) {
         // Touched, not edited. Record the new stat so the next pass skips it
@@ -1354,6 +1372,8 @@ export async function runLocalIndexPass(
         for (let at = 0; at < pieces.length; at += EMBED_BATCH_INPUTS) {
           throwIfAborted(signal);
           vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal, embedder));
+          // Passages embedded: progress, though no count moves until the file commits.
+          options.onHeartbeat?.();
         }
       } catch (err) {
         // The embedder is the shared resource; a failure there is not this
@@ -1363,6 +1383,10 @@ export async function runLocalIndexPass(
         incompleteFiles += 1;
         continue;
       }
+      // The last check before this file's rows are replaced (and before a
+      // width change could empty the store): a batch that came back after the
+      // run gave up on the pass must not overwrite what a newer pass wrote.
+      throwIfAborted(signal);
       // A width change empties the store, so everything counted before it is
       // gone: re-read rather than carry a total that no longer describes
       // anything. Left stale, the next cap check fired on a store of ~19,800
@@ -1395,6 +1419,11 @@ export async function runLocalIndexPass(
       chunkCount = chunkCount - replaced + pieces.length;
       wrote = true;
     }
+    // A pass given up on while it was inside its last file stops here, before
+    // the bookkeeping below: the run it belonged to may already be settled and
+    // a newer pass writing the store, and this one's stale sweep, `touched`
+    // flush and identity stamp are all about a scan that is no longer current.
+    throwIfAborted(signal);
     // The last file's own outcome, which the loop's top-of-body report could
     // not carry. Everything after this is bookkeeping over a walk that is
     // finished, so this is the reading the bar rests on while it happens.
@@ -1503,6 +1532,19 @@ export async function runLocalIndexPass(
 
     if (wrote) invalidateVectorCache();
     return { mode: rebuild ? "full" : "incremental", files, chunks, failures, capped };
+  } catch (err) {
+    // Files this pass committed before it ended — stopped, given up on, an
+    // embedder that went away — are in the store whatever ended it, and the
+    // vector cache keys on `generation`: left as it was, a search kept the
+    // old chunk ids of a file this pass replaced and found nothing of it.
+    // The rest of the bookkeeping stays undone; that is the next pass's.
+    if (wrote) {
+      try {
+        metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+      } catch { /* a newer pass holding the store moves it itself */ }
+      invalidateVectorCache();
+    }
+    throw err;
   } finally {
     db.close();
   }
@@ -1540,7 +1582,11 @@ interface ScanResult {
 }
 
 /** Find everything there is to index, and be honest about what could not be looked at. */
-async function scanSources(sources: readonly string[], signal: AbortSignal | undefined): Promise<ScanResult> {
+async function scanSources(
+  sources: readonly string[],
+  signal: AbortSignal | undefined,
+  onDocument?: () => void,
+): Promise<ScanResult> {
   const files: PendingFile[] = [];
   const seen = new Set<string>();
   const unreadableSources = new Set<string>();
@@ -1557,7 +1603,7 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
     let origins: Record<string, string> = {};
     let derived: string | null = null;
     try {
-      const extraction = await extractDocuments(source, signal);
+      const extraction = await extractDocuments(source, signal, onDocument);
       origins = extraction.origins;
       derived = extraction.derived;
       unusableDocuments += extraction.skipped;
