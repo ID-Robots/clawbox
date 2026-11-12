@@ -227,6 +227,7 @@ function program(box: Box, entry: string, lift: string[] = []): string {
     "ensure_openclaw_node_engine() { event NODE_ENGINE; }",
     "remove_shadowing_system_openclaw() { event SHADOW_CLEANUP; }",
     "chown() { :; }",
+    shellFunction("hand_over_home_path"),
     "flush_core_to_disk() { :; }",
     // Suites of their own: install-openclaw-migration-preflight.test.ts and
     // install-migration-stop.test.ts.

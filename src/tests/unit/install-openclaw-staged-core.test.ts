@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
+  symlinkSync, writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { recursiveChownRecorder, shellFunctionIfPresent } from "../helpers/account-only-home";
 
 // A real bash per case: vitest's 5 s default is not enough on a loaded runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -266,7 +270,12 @@ describe("recover_parked_openclaw_core", () => {
 
 describe("step_openclaw_install stages the core", () => {
   /** The step, driven with a stub npm that lays npm's layout down at the prefix it is handed. */
-  function runStep(p: Prefix, opts: { npm: "ok" | "empty-launcher" | "wrong-version" | "stderr-first" | "nothing"; pin?: string }) {
+  function runStep(p: Prefix, opts: {
+    npm: "ok" | "empty-launcher" | "wrong-version" | "stderr-first" | "nothing";
+    pin?: string;
+    /** Record where each recursive chown would land, one path per line in this file. */
+    chownLog?: string;
+  }) {
     const calls = JSON.stringify(path.join(p.dir, "calls"));
     const bin = path.join(p.dir, "bin");
     mkdirSync(bin, { recursive: true });
@@ -316,7 +325,8 @@ exit 0
       "ensure_clawbox_bashrc_path() { :; }",
       "ensure_openclaw_node_engine() { :; }",
       "node_engine_remedy() { :; }",
-      "chown() { :; }",
+      opts.chownLog ? recursiveChownRecorder(opts.chownLog) : "chown() { :; }",
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
       `flush_core_to_disk() { printf 'flush %s\\n' "$1" >> ${calls}; }`,
       `stop_openclaw_gateways_for_migration() { printf 'stop-gateways\\n' >> ${calls}; }`,
       // Everything after the install is the migration and the plugin refresh,
@@ -359,6 +369,37 @@ exit 0
   };
   const live = (p: Prefix) => `${p.prefix}/bin/openclaw --version`;
   const staged = (p: Prefix) => `${p.prefix}/.openclaw-stage/bin/openclaw --version`;
+
+  // The npm prefix is an entry in the clawbox user's home: a recursive chown of
+  // a path through it changes whatever tree a link there points at.
+  const chownTargets = (log: string) => (existsSync(log) ? readFileSync(log, "utf-8").split("\n").filter(Boolean) : []);
+
+  it("hands the stage over from inside the npm prefix", () => {
+    const p = makePrefix({});
+    try {
+      const log = path.join(p.dir, "chown-targets");
+      const r = runStep(p, { npm: "ok", chownLog: log });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(chownTargets(log)).toContain(path.join(realpathSync(p.prefix), ".openclaw-stage"));
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("changes nothing behind a link at the npm prefix", () => {
+    const p = makePrefix({});
+    try {
+      const elsewhere = path.join(p.dir, "elsewhere");
+      renameSync(p.prefix, elsewhere);
+      symlinkSync(elsewhere, p.prefix);
+      const log = path.join(p.dir, "chown-targets");
+      const r = runStep(p, { npm: "ok", chownLog: log });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(chownTargets(log).filter((t) => t.startsWith(realpathSync(elsewhere)))).toEqual([]);
+    } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
 
   it("installs into the stage, never the live prefix, and promotes only a launcher that answers", () => {
     const p = makePrefix({});

@@ -1600,6 +1600,39 @@ unset _persisted_iface
 # Run a command as the clawbox user
 as_clawbox() { sudo -u "$CLAWBOX_USER" "$@"; }
 
+# Append stdin to a file in the checkout as the service account, whose file it
+# is. The bytes travel on stdin, so no value reaches sudo's command line or its
+# log, and a file this creates is the account's own, 0600.
+append_as_clawbox() {
+  as_clawbox sh -c 'umask 077 && cat >> "$1"' sh "$1"
+}
+
+# Before the service account writes .env or data/network.env, hand it back
+# anything an earlier root run left root-owned in its checkout, or its write
+# fails where root's succeeded. Owners are only read here; any leftover hands
+# back the whole checkout with the command step_git_pull's sync runs after every
+# update (chown -R defaults to -P: no link inside is followed, and a link given
+# as the operand is changed itself). Never a chown by name below the checkout:
+# each directory on that path is the account's, so a link swapped in at data/
+# would hand over the file it points at, /etc/clawbox/network.env included.
+# Anything under scripts/ it does not own counts too: its find must enter every
+# directory there, and its chmod fails with EPERM on a script it does not own
+# even when the bit is already set. So does anything under each DIR given,
+# relative to the checkout (node_modules, data/llamacpp): a tree the account
+# writes into next.
+hand_over_checkout() {
+  [ -d "$PROJECT_DIR" ] && [ ! -L "$PROJECT_DIR" ] || return 0
+  local entry stray tree trees=("$PROJECT_DIR/scripts")
+  for tree in "$@"; do trees+=("$PROJECT_DIR/$tree"); done
+  stray="$(find "${trees[@]}" ! -user "$CLAWBOX_USER" -print -quit 2>/dev/null || true)"
+  for entry in "$PROJECT_DIR" "$PROJECT_DIR/data" "$PROJECT_DIR/.env" "$IFACE_ENV" ${stray:+"$stray"}; do
+    if { [ -e "$entry" ] || [ -L "$entry" ]; } && [ "$(stat -c %U "$entry" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
+      chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR" || true
+      return 0
+    fi
+  done
+}
+
 # Run a command as the clawbox user with login environment
 # Explicit PATH ensures bun/node are found even inside systemd services
 as_clawbox_login() {
@@ -1609,6 +1642,57 @@ as_clawbox_login() {
   local cuda_prefix=""
   [ -x /usr/local/cuda/bin/nvcc ] && cuda_prefix="/usr/local/cuda/bin:"
   su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
+}
+
+# Give the clawbox user back what earlier root runs left root-owned on the way
+# to a path in its home, so the user can then write there itself. Root's
+# `mkdir -p` of a nested directory made every missing parent root-owned and
+# handed over only the leaf (~/.config from ~/.config/autostart, ~/.cache from
+# ~/.cache/node-gyp), and a write AS the user fails in such a directory where
+# root's own write succeeded.
+#
+# PATH is one of this file's own paths under the home. The walk takes one entry
+# at a time from the home down and never follows a link. Each entry is examined
+# with one lstat (`stat` without -L) and, when the user does not own it, changed
+# with `chown -h` by its name in the directory the walk is in. The walk goes
+# deeper only by entering the directory it examined and checking that it is the
+# same inode, and it stops there when it is not. It also stops, quietly, at the
+# first entry that is missing (the user creates that itself), a link, or neither
+# a directory nor a regular file with one name: a second hard link is the same
+# file somewhere else, which would change hands with it. With -R, a last entry
+# that is a directory is handed over with everything below it by `chown -R` of
+# its name, run in the directory the walk is in; chown -R follows no link, its
+# operand included.
+hand_over_home_path() {
+  local tree=""
+  if [ "${1:-}" = -R ]; then tree=1; shift; fi
+  local rest="${1#"$CLAWBOX_HOME"/}"
+  [ "$rest" != "$1" ] || return 0
+  (
+    cd -P -- "$CLAWBOX_HOME" 2>/dev/null || exit 0
+    while [ -n "$rest" ]; do
+      part="${rest%%/*}"
+      if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+      [ -n "$part" ] || continue
+      info="$(stat -c '%F|%h|%d:%i|%U' -- "$part" 2>/dev/null)" || exit 0
+      case "$info" in
+        "directory|"* | "regular file|1|"* | "regular empty file|1|"*) ;;
+        *) exit 0 ;;
+      esac
+      if [ -n "$tree" ] && [ -z "$rest" ] && [ "${info%%|*}" = directory ]; then
+        chown -R -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null || true
+        exit 0
+      fi
+      if [ "${info##*|}" != "$CLAWBOX_USER" ]; then
+        chown -h -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null || exit 0
+      fi
+      [ -n "$rest" ] || exit 0
+      case "$info" in "directory|"*) ;; *) exit 0 ;; esac
+      cd -P -- "$part" 2>/dev/null || exit 0
+      ino="${info#*|*|}"
+      [ "$(stat -c '%d:%i' . 2>/dev/null)" = "${ino%%|*}" ] || exit 0
+    done
+  )
 }
 
 # The marker the third-party cua-driver-rs installer writes above its PATH
@@ -1642,8 +1726,8 @@ dedupe_vendor_bashrc_path_blocks() {
   local BASHRC="$1"
   [ -f "$BASHRC" ] || return 0
   # A symlinked ~/.bashrc — a dotfiles checkout — would be read THROUGH the
-  # link as root and then replaced by the `mv` below with a regular file,
-  # silently breaking the owner's link. Not ours to convert.
+  # link and then replaced by the `mv` below with a regular file, silently
+  # breaking the owner's link. Not ours to convert.
   if [ -L "$BASHRC" ]; then
     return 0
   fi
@@ -1661,8 +1745,13 @@ dedupe_vendor_bashrc_path_blocks() {
   local snapshot=""
   snapshot=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || snapshot=""
 
+  # Every read, write, rename and removal from here on is the clawbox user's:
+  # the file, its directory and the temp are that user's, and root writing or
+  # renaming there would follow whatever link the user planted. Each wrapped
+  # call is guarded, since this runs under errexit and a failed `sudo` must
+  # warn like every other failure here.
   local tmp=""
-  tmp=$(mktemp "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
+  tmp=$(as_clawbox mktemp -- "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
     echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (mktemp failed)"
     return 0
   }
@@ -1670,12 +1759,14 @@ dedupe_vendor_bashrc_path_blocks() {
   # A blank line belongs to the block that FOLLOWS it (the vendor writes
   # blank/comment/export), so blanks are buffered and one is dropped with each
   # block that goes. Our own fence lines are dropped on the way in and written
-  # back out, which is what makes a second run a no-op.
-  if awk \
+  # back out, which is what makes a second run a no-op. awk writes the temp
+  # itself (`> OUT`): a shell redirect here would be opened by root.
+  if as_clawbox awk \
+      -v OUT="$tmp" \
       -v MARKER="$CUA_BASHRC_MARKER" \
       -v FOPEN="$CUA_BASHRC_FENCE_OPEN" \
       -v FCLOSE="$CUA_BASHRC_FENCE_CLOSE" '
-      function flush(  i) { for (i = 0; i < blanks; i++) print ""; blanks = 0 }
+      function flush(  i) { for (i = 0; i < blanks; i++) print "" > OUT; blanks = 0 }
       BEGIN { kept = 0; blanks = 0 }
       $0 == FOPEN || $0 == FCLOSE { next }
       /^$/ { blanks++; next }
@@ -1686,20 +1777,20 @@ dedupe_vendor_bashrc_path_blocks() {
           if (kept) { if (blanks > 0) blanks--; next }
           kept = 1
           flush()
-          print FOPEN
-          print first
-          print second
-          print FCLOSE
+          print FOPEN > OUT
+          print first > OUT
+          print second > OUT
+          print FCLOSE > OUT
           next
         }
         flush()
-        print first
-        if (got > 0) { if (second == "") blanks++; else print second }
+        print first > OUT
+        if (got > 0) { if (second == "") blanks++; else print second > OUT }
         next
       }
-      { flush(); print }
+      { flush(); print > OUT }
       END { flush() }
-    ' "$BASHRC" > "$tmp"; then
+    ' "$BASHRC"; then
     # Judge the OUTCOME, never the attempt. The premise of this whole function
     # is that the writer is a third party ClawBox does not own and cannot pin,
     # so the shape it appends WILL change — one extra line between the marker
@@ -1708,42 +1799,41 @@ dedupe_vendor_bashrc_path_blocks() {
     # byte-identical and log a success on every update, for ever, with the
     # bound silently gone. An empty result means the rewrite lost the file.
     local collapsed=0
-    collapsed=$(grep -cF "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
-    if [ "$collapsed" -eq 1 ] 2>/dev/null && [ -s "$tmp" ]; then
-      # Ownership and mode FIRST, so the divergence check below is the last
-      # thing between the look and the rename. There is no atomic
-      # compare-and-rename, so the window cannot be closed — only made as
-      # narrow as one `stat` and one `rename`.
-      chown --reference="$BASHRC" "$tmp" 2>/dev/null \
-        || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
-      chmod --reference="$BASHRC" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
+    collapsed=$(as_clawbox grep -cF -- "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
+    if [ "$collapsed" -eq 1 ] 2>/dev/null && as_clawbox test -s "$tmp"; then
+      # The mode FIRST, so the divergence check below is the last thing
+      # between the look and the rename. There is no atomic compare-and-rename,
+      # so the window cannot be closed — only made as narrow as one `stat` and
+      # one `rename`. No chown: the temp is already the user's, as the file is.
+      as_clawbox chmod --reference="$BASHRC" -- "$tmp" 2>/dev/null \
+        || as_clawbox chmod 0644 -- "$tmp" 2>/dev/null || true
       local now=""
       now=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || now=""
       if [ -z "$snapshot" ] || [ "$now" != "$snapshot" ]; then
         # Somebody wrote to .bashrc while it was being collapsed. The rewrite
         # describes a file that no longer exists; the next update collapses it.
-        rm -f "$tmp"
+        as_clawbox rm -f -- "$tmp" 2>/dev/null || true
         echo "  Warning: .bashrc changed while it was being collapsed — left untouched"
         return 0
       fi
       # Guarded: this runs under `set -euo pipefail` from a step the dispatcher
       # calls plainly, so a .bashrc that cannot be replaced must warn, not end
       # the update at this line.
-      if mv -f "$tmp" "$BASHRC"; then
+      if as_clawbox mv -f -T -- "$tmp" "$BASHRC"; then
         echo "  Collapsed $copies duplicate cua-driver-rs PATH blocks in .bashrc to one"
         return 0
       fi
     else
       # The live file is left exactly as it is: a copy of itself is not an
       # improvement, and this line is the only signal anyone gets.
-      rm -f "$tmp"
+      as_clawbox rm -f -- "$tmp" 2>/dev/null || true
       echo "  Warning: .bashrc carries $copies cua-driver-rs PATH blocks and the collapse"
       echo "           left $collapsed — the vendor's block shape has changed; file untouched"
       return 0
     fi
   fi
 
-  rm -f "$tmp"
+  as_clawbox rm -f -- "$tmp" 2>/dev/null || true
   echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (rewrite failed)"
   return 0
 }
@@ -1752,21 +1842,25 @@ ensure_clawbox_bashrc_path() {
   # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
   # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
   # codex, gemini, hf, and clawkeep resolve without a full path.
+  # Appended AS the clawbox user (`tee -a`, the stanza on stdin): root's own
+  # `>>` would follow a link planted at ~/.bashrc. A root-owned file left by an
+  # earlier root run is handed back first, which is the owner the old chown
+  # after the append gave it.
   local BASHRC="$CLAWBOX_HOME/.bashrc"
   if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
-    cat >> "$BASHRC" <<'PATHEOF'
+    hand_over_home_path "$BASHRC"
+    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF'
 
 # npm global binaries (openclaw, gemini) and user-local binaries (claude, codex, hf, clawkeep)
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 PATHEOF
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   elif ! grep -q '\.local/bin' "$BASHRC" 2>/dev/null; then
-    cat >> "$BASHRC" <<'PATHEOF'
+    hand_over_home_path "$BASHRC"
+    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF'
 
 # user-local binaries (claude, hf, clawkeep)
 export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   fi
   # Third-party appends to the same file, bounded here because their writer is
   # not ours to fix (TASK-758).
@@ -1919,12 +2013,13 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    hand_over_checkout
     # A hand-edited .env can end without a newline: the key must not be glued
     # onto its last line, which would corrupt that key and leave this one unset.
     if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
-      printf '\n' >> "$env_file"
+      printf '\n' | append_as_clawbox "$env_file"
     fi
-    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    printf '%s=%s\n' "$key" "$value" | append_as_clawbox "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi
 }
@@ -1948,21 +2043,24 @@ migrate_env_setting() {
   if [ "$current_value" != "$old_value" ]; then
     return 0
   fi
-  local tmp
-  tmp=$(mktemp "${env_file}.XXXXXX") || return 1
-  # Rewrite in place via a temp file rather than sed -i so an unusual character
-  # in either value cannot be read as sed syntax.
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "${key}="*) printf '%s=%s\n' "$key" "$new_value" >> "$tmp" ;;
-      *) printf '%s\n' "$line" >> "$tmp" ;;
-    esac
-  done < "$env_file"
-  # mktemp created the temp file as root with 0600; carry the real file's mode
-  # and owner across so .env stays readable by the clawbox service user.
-  chmod --reference="$env_file" "$tmp" 2>/dev/null || true
-  chown --reference="$env_file" "$tmp" 2>/dev/null || true
-  mv "$tmp" "$env_file"
+  hand_over_checkout
+  # The service account rewrites its own file: a temp beside it, every line
+  # copied but the setting's, the real file's mode carried across, then an
+  # atomic rename. The name and the new value travel on stdin, off sudo's
+  # command line. A temp file rather than sed -i, so an unusual character in
+  # either value cannot be read as sed syntax.
+  printf '%s\0%s\0' "$key" "$new_value" | as_clawbox bash -c '
+    IFS= read -r -d "" setting && IFS= read -r -d "" value || exit 1
+    tmp=$(mktemp "$1.XXXXXX") || exit 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "$setting="*) printf "%s=%s\n" "$setting" "$value" ;;
+        *) printf "%s\n" "$line" ;;
+      esac
+    done < "$1" > "$tmp" || { rm -f -- "$tmp"; exit 1; }
+    chmod --reference="$1" -- "$tmp" 2>/dev/null
+    mv -T -- "$tmp" "$1" || { rm -f -- "$tmp"; exit 1; }
+  ' migrate_env_setting "$env_file" || return 1
   echo "  Migrated ${key} from ${old_value} to ${new_value}"
 }
 
@@ -2024,8 +2122,11 @@ ensure_llamacpp_model_cached() {
   require_safe_hf_ref "LLAMACPP_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
+  # Whatever under data/llamacpp is not the clawbox user's is handed back with
+  # the checkout whole (hand_over_checkout says why never a path below it),
+  # once: the download below runs as that user.
   mkdir -p "$MODEL_DIR"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
+  hand_over_checkout data/llamacpp
 
   if [ -f "$MODEL_PATH" ]; then
     echo "  Gemma 4 model already cached for offline use"
@@ -2044,7 +2145,6 @@ ensure_llamacpp_model_cached() {
     return 1
   fi
 
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
   echo "  Gemma 4 model cached for offline startup"
   prune_superseded_llamacpp_model "$MODEL_DIR" "$HF_FILE"
 }
@@ -2343,12 +2443,17 @@ ensure_node_pty() {
   apt-get install -y -qq python3 python3-pip python-is-python3 build-essential pkg-config
 
   # The DEFAULT devdir, made the clawbox user's whatever NODE_GYP_DEVDIR says:
-  # a devdir the user's own environment names is theirs to have made.
-  mkdir -p "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" \
-    "$CLAWBOX_HOME/.npm" \
-    "$CLAWBOX_HOME/.cache/node-gyp" \
-    "$PROJECT_DIR/node_modules" 2>/dev/null || true
+  # a devdir the user's own environment names is theirs to have made. Created
+  # BY that user, after what earlier root runs left root-owned is handed back:
+  # ~/.cache and everything in ~/.cache/node-gyp, walked to from the home;
+  # node_modules with the checkout whole; ~/.npm, whose parent is the home.
+  # Warned about rather than fatal, because step_build calls this under errexit
+  # and a build that would finish must not end here.
+  hand_over_home_path -R "$CLAWBOX_HOME/.cache/node-gyp"
+  hand_over_checkout node_modules
+  as_clawbox mkdir -p -- "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp" \
+    || echo "  Warning: could not create ~/.npm and ~/.cache/node-gyp as $CLAWBOX_USER"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
 
   # Each attempt's output is kept as well as streamed. A failure then ends with
   # the last 80 lines of the attempt that failed, and the compiler's own error
@@ -4148,10 +4253,12 @@ step_network_setup() {
     fi
   fi
   echo "  WiFi interface: $WIFI_IFACE"
-  # Persist for scripts and services
-  mkdir -p "$PROJECT_DIR/data"
-  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > "$IFACE_ENV"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data" "$IFACE_ENV"
+  # Persist for scripts and services, as the service account: data/ and this
+  # file are its own. umask 022, not 077: a fresh file is 0644, as it was when
+  # root wrote it.
+  hand_over_checkout
+  as_clawbox mkdir -p "$PROJECT_DIR/data"
+  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" | as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$IFACE_ENV"
   # Also write to root-owned path for clawbox-root-update@ service
   mkdir -p /etc/clawbox
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
@@ -7672,7 +7779,9 @@ step_openclaw_install() {
     local _oc_stage="$NPM_PREFIX/.openclaw-stage"
     rm -rf "$_oc_stage"
     mkdir -p "$_oc_stage"
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$_oc_stage"
+    # Handed over from inside the prefix, walked to from the home: the prefix
+    # is an entry in the clawbox user's home.
+    hand_over_home_path -R "$_oc_stage"
     as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$_oc_stage"
     if [ ! -x "$_oc_stage/bin/openclaw" ]; then
       echo "Error: OpenClaw installation failed — npm left no openclaw launcher in $_oc_stage (the core already on the box is untouched)"
@@ -9545,9 +9654,12 @@ step_captive_portal_dns() {
 }
 
 step_directories_permissions() {
-  mkdir -p "$PROJECT_DIR/data"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
-  find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
+  # The service account makes and writes everything below in its own checkout.
+  # Its find starts from /: GNU find fails when it cannot return to a starting
+  # directory the account may not enter (a step run by hand from /root).
+  hand_over_checkout
+  as_clawbox mkdir -p "$PROJECT_DIR/data"
+  (cd / && as_clawbox find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +)
   # Create .env with defaults if it doesn't already exist
   local ENV_FILE="$PROJECT_DIR/.env"
   # Google Gemini CLI public OAuth credentials (split to pass GitHub push protection)
@@ -9556,22 +9668,20 @@ step_directories_permissions() {
   local G_SEC; G_SEC="GOCSPX-4uHgMPm"
   G_SEC="${G_SEC}-1o7Sk-geV6Cu5clXFsxl"
   if [ ! -f "$ENV_FILE" ]; then
-    cp "$PROJECT_DIR/.env.example" "$ENV_FILE"
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    as_clawbox sh -c 'umask 077 && cp "$1" "$2" && chmod 600 "$2"' sh "$PROJECT_DIR/.env.example" "$ENV_FILE"
     echo "  Created $ENV_FILE from .env.example"
   fi
   # Ensure Google OAuth credentials are present (added in v2.2.0)
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_ID=' "$ENV_FILE" 2>/dev/null; then
-    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" >> "$ENV_FILE"
+    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" | append_as_clawbox "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_ID to $ENV_FILE"
   fi
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_SECRET=' "$ENV_FILE" 2>/dev/null; then
-    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
+    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" | append_as_clawbox "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
   if [ -n "${CLAWBOX_AI_API_KEY:-}" ] && ! grep -q '^CLAWBOX_AI_API_KEY=' "$ENV_FILE" 2>/dev/null; then
-    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
+    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" | append_as_clawbox "$ENV_FILE"
     echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
   fi
   # Propagate test mode into the project .env so clawbox-setup.service
@@ -10578,7 +10688,12 @@ step_systemd_services() {
   # in ReadWritePaths. ~/.codex doesn't exist until the first ChatGPT login, so
   # create it up front — otherwise the very first mirror write (the one that
   # makes Codex work at all) hits a read-only namespace.
-  install -d -o clawbox -g clawbox -m 700 "$CLAWBOX_HOME/.codex"
+  # Made and set private BY the clawbox user: root's `install -d` applied its
+  # owner and mode to whatever a ~/.codex link pointed at. A root-owned one is
+  # handed back first, the owner `install -o` gave it.
+  hand_over_home_path "$CLAWBOX_HOME/.codex"
+  as_clawbox mkdir -p -- "$CLAWBOX_HOME/.codex"
+  as_clawbox chmod 700 -- "$CLAWBOX_HOME/.codex"
   # Start the Codex credential mirror sync immediately so a box updating into
   # this release strips any refresh_token 3.1.11 planted in its mirrors without
   # waiting for a reboot — that token is what burns the OAuth family.
@@ -11246,10 +11361,14 @@ step_gateway_legacy_state_recovery() {
     return 0
   fi
 
-  local ts qdir moved=0
+  # The quarantine directory, its removal and every move are the clawbox
+  # user's: the directory is in that user's home and the files in its
+  # ~/.openclaw, where root's `mv` would follow a planted link. So the
+  # directory is now that user's, not root's; the files keep their owners.
+  local ts qdir moved=0 unmoved=0
   ts=$(date +%Y%m%d-%H%M%S)
   qdir="$CLAWBOX_HOME/openclaw-legacy-quarantine-$ts"
-  mkdir -p "$qdir"
+  as_clawbox mkdir -p -- "$qdir"
 
   echo "  Quarantining known legacy OpenClaw migration blockers in $qdir"
   # Not under the maintenance guard (this step stands down while it is held),
@@ -11259,7 +11378,7 @@ step_gateway_legacy_state_recovery() {
   # a database moved out from under a live writer.
   if ! stop_gateway_unit; then
     echo "  Warning: could not stop the gateway; leaving its state files where they are" >&2
-    rmdir "$qdir" 2>/dev/null || true
+    as_clawbox rmdir -- "$qdir" 2>/dev/null || true
     return 1
   fi
   for f in \
@@ -11268,11 +11387,20 @@ step_gateway_legacy_state_recovery() {
     "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"*
   do
     if [ -e "$f" ]; then
-      mv -v "$f" "$qdir/" && moved=1
+      # A root-owned directory on the way to the file would refuse the user's
+      # move where root's succeeded: handed back first, one by one, never
+      # recursively.
+      hand_over_home_path "${f%/*}"
+      if as_clawbox mv -v -- "$f" "$qdir/"; then
+        moved=1
+      else
+        unmoved=1
+        echo "  Warning: could not move $f into $qdir" >&2
+      fi
     fi
   done
 
-  if [ "$moved" -eq 0 ]; then
+  if [ "$moved" -eq 0 ] && [ "$unmoved" -eq 0 ]; then
     echo "  No known legacy migration blocker files found to quarantine"
   fi
 
@@ -13040,11 +13168,20 @@ step_gateway_setup() {
           XDG_RUNTIME_DIR="/run/user/$CLAWBOX_UID" \
           systemctl --user stop openclaw-gateway.service 2>/dev/null || true
       fi
-      mkdir -p "$USER_SYSTEMD_DIR"
-      chown "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_SYSTEMD_DIR"
-      rm -f "$USER_GATEWAY_UNIT"
-      ln -s /dev/null "$USER_GATEWAY_UNIT"
-      chown -h "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_GATEWAY_UNIT" 2>/dev/null || true
+      # The mask is written BY the clawbox user, in its own directory: root's
+      # `rm` and `ln` there would act through a link planted on the way. The
+      # directory exists (the unit is in it); a root-owned one, or a root-owned
+      # ~/.config or ~/.config/systemd above it, is handed back first, the owner
+      # the old chown gave the directory.
+      # The user's write can fail where root's did not. A mask that did not
+      # land is said on the updater's warning line and the step goes on, so
+      # the system gateway below is still configured and restarted: the
+      # updater stops a whole update on this step's failure.
+      hand_over_home_path "$USER_SYSTEMD_DIR"
+      if ! as_clawbox rm -f -- "$USER_GATEWAY_UNIT" || ! as_clawbox ln -s -- /dev/null "$USER_GATEWAY_UNIT"; then
+        echo "  Warning: could not mask the user-level openclaw-gateway.service" >&2
+        echo "CLAWBOX-WARN[user-gateway-not-masked]: the user-level openclaw-gateway.service could not be masked, so it can start beside the system gateway at the next login; 'sudo bash $PROJECT_DIR/install.sh --step gateway_setup' tries again"
+      fi
     fi
   fi
 
@@ -13311,9 +13448,25 @@ install_claude_ds_wrapper() {
     return 1
   fi
 
-  install -d -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$CLAWBOX_HOME/.local/bin"
-  install -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$src" "$dest"
-  echo "  claude-ds installed at $dest"
+  # Written BY the clawbox user, into its own ~/.local/bin: root's `install`
+  # there would follow a planted link. Root opens the source and hands it over
+  # on stdin, so the copy does not depend on the user being able to read it;
+  # the user writes a temp beside the target and renames it over, which also
+  # replaces a link at the target instead of writing through it (an older box
+  # can have one pointing back into the checkout).
+  hand_over_home_path "$CLAWBOX_HOME/.local/bin"
+  local tmp=""
+  if as_clawbox mkdir -p -- "$CLAWBOX_HOME/.local/bin" \
+    && tmp=$(as_clawbox mktemp -- "$dest.XXXXXX") \
+    && as_clawbox tee -- "$tmp" >/dev/null < "$src" \
+    && as_clawbox chmod 755 -- "$tmp" \
+    && as_clawbox mv -f -T -- "$tmp" "$dest"; then
+    echo "  claude-ds installed at $dest"
+    return 0
+  fi
+  [ -z "$tmp" ] || as_clawbox rm -f -- "$tmp" 2>/dev/null || true
+  echo "  WARN: could not install claude-ds at $dest"
+  return 1
 }
 
 # The ClawBox coding harness: Claude Code plus the claude-ds wrapper that
@@ -14078,11 +14231,18 @@ step_desktop_theme() {
     exit 1
   fi
 
-  chmod +x "$theme_script"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$theme_script"
+  # The script's mode and the autostart entry are set and written BY the
+  # clawbox user: both live in that user's tree, where root's chmod, chown and
+  # `>` would follow a planted link. A root-owned leftover on the way to
+  # either — ~/.config made by this step's old root `mkdir -p` is one — is
+  # handed back first, the owner the old chowns gave them: the script with the
+  # checkout it is in, the entry walked to from the home.
+  hand_over_checkout
+  as_clawbox chmod +x -- "$theme_script"
 
-  mkdir -p "$autostart_dir"
-  cat > "$autostart_file" <<EOF
+  hand_over_home_path "$autostart_file"
+  as_clawbox mkdir -p -- "$autostart_dir"
+  as_clawbox tee -- "$autostart_file" >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
 Name=ClawBox Desktop Theme
@@ -14091,8 +14251,7 @@ Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 EOF
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$autostart_dir" "$autostart_file"
-  chmod 644 "$autostart_file"
+  as_clawbox chmod 644 -- "$autostart_file"
 
   mkdir -p /etc/dconf/db/local.d
   cat > /etc/dconf/db/local.d/01-clawbox-desktop-theme <<'EOF'
@@ -14134,10 +14293,10 @@ EOF
 # field is fixed by its next in-app update.
 #
 # A box installed before this step can have a root-owned ~/.config: on a home
-# without one, step_desktop_theme's root `mkdir -p` of ~/.config/autostart
-# created it and chowned only autostart. The user write fails there, so that
-# directory alone (never its contents, never through a symlink) is handed back
-# to clawbox first.
+# without one, step_desktop_theme's old root `mkdir -p` of ~/.config/autostart
+# (it writes as clawbox now) created it and chowned only autostart. The user
+# write fails there, so that directory alone (never its contents, never through
+# a symlink) is handed back to clawbox first.
 #
 # The update runs post_update AFTER its own reboot, so by then the session has
 # already started the assistant without a marker to stop it. Writing the marker
@@ -15384,8 +15543,11 @@ step_clawkeep_install
 log "Setting up directories, permissions and DNS..."
 step_setup_config
 
-# Clean up default NVIDIA desktop shortcuts
-rm -f "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
+# Clean up default NVIDIA desktop shortcuts. Removed BY the clawbox user, from
+# its own ~/Desktop (handed back first if root left it root-owned): root's `rm`
+# there would act through a planted link. The glob is root's to expand.
+hand_over_home_path "$CLAWBOX_HOME/Desktop"
+as_clawbox rm -f -- "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
 
 # Bake the edition lock BEFORE any unit is installed. Ordering is load-bearing
 # in both directions: on hermes the lock masks clawbox-gateway (so the unit
@@ -15450,9 +15612,9 @@ step_vnc_install
 
 log "Applying ClawBox desktop theme..."
 # Under the same heading, so the step count stays what it is. Non-fatal: GNOME's
-# first-run assistant costs memory, not function. BEFORE step_desktop_theme: on
-# a home with no ~/.config, that step's root `mkdir -p` of ~/.config/autostart
-# leaves ~/.config itself root-owned, and the marker is written as clawbox.
+# first-run assistant costs memory, not function. Before step_desktop_theme, as
+# it has always run; both write ~/.config as clawbox now, and each hands a
+# root-owned one left by an older install back to clawbox on its own.
 step_gnome_initial_setup_done || echo "  Warning: gnome_initial_setup_done step failed (non-fatal)"
 step_desktop_theme
 

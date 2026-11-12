@@ -50,6 +50,7 @@ ensure_clawbox_bashrc_path() { :; }
 ensure_openclaw_node_engine() { :; }
 openclaw_version_is_v2() { [[ "$1" == 2026.8.* ]]; }
 chown() { :; }
+${fn("hand_over_home_path")}
 flush_core_to_disk() { :; }
 systemctl() { ctl system "$@"; }
 # The probes install.sh asks as the service account (runuser -u … -- cmd…).

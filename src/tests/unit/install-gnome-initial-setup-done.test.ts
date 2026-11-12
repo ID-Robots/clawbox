@@ -3,6 +3,9 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 
 // Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
 // on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -280,8 +283,127 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     const fullInstall = INSTALL_SH.slice(INSTALL_SH.indexOf("# ── Full Install Mode"));
     const call = fullInstall.search(/^step_gnome_initial_setup_done \|\| /m);
     expect(call).toBeGreaterThan(0);
-    // Before the theme step, whose root `mkdir -p ~/.config/autostart` would
-    // leave a missing ~/.config root-owned and the marker unwritable as clawbox.
+    // Before the theme step, as it has always run. That step's old root
+    // `mkdir -p ~/.config/autostart` left a missing ~/.config root-owned and
+    // the marker unwritable as clawbox; it writes as clawbox now.
     expect(call).toBeLessThan(fullInstall.search(/^step_desktop_theme$/m));
+  });
+});
+
+// Not as root, whose writes the read-only home of
+// src/tests/helpers/account-only-home.ts cannot stop.
+(CAN_RUN && CAN_LOCK_HOME ? describe : describe.skip)("step_desktop_theme writes as the device user", () => {
+  // The theme script's mode and the autostart entry live in the clawbox user's
+  // tree, where root's chmod, chown, `mkdir -p` and `cat >` acted through any
+  // link planted on the way. Run against a home only `as_clawbox` can write to.
+  let aux: string;
+  let project: string;
+  let dconfDir: string;
+
+  beforeEach(() => {
+    sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-desktop-theme-"));
+    home = path.join(sandbox, "home");
+    aux = path.join(sandbox, "aux");
+    project = path.join(home, "clawbox");
+    dconfDir = path.join(sandbox, "dconf");
+    fs.mkdirSync(path.join(project, "scripts"), { recursive: true });
+    fs.mkdirSync(aux);
+    fs.writeFileSync(path.join(project, "scripts", "apply-desktop-theme.sh"), "#!/bin/sh\n", { mode: 0o644 });
+    fs.chmodSync(path.join(project, "scripts", "apply-desktop-theme.sh"), 0o644);
+  });
+
+  afterEach(() => {
+    unlockTree(sandbox);
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  const themeScript = () => path.join(project, "scripts", "apply-desktop-theme.sh");
+  const entry = () => path.join(home, ".config", "autostart", "clawbox-desktop-theme.desktop");
+
+  function runTheme() {
+    // The system-wide dconf default is root's to write, and not under test:
+    // its path is moved into the sandbox, and the cut is checked to have moved
+    // both of its uses.
+    const fn = extractShellFunction("step_desktop_theme");
+    const uses = fn.split("/etc/dconf/db/local.d").length - 1;
+    expect(uses, "step_desktop_theme's dconf directory, named twice").toBe(2);
+    const account = accountOnlyHome(home, aux);
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      'CLAWBOX_USER="$(id -un)"',
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      "is_test_mode() { return 1; }",
+      "dconf() { :; }",
+      "as_clawbox_login() { :; }",
+      account.shell,
+      `IFACE_ENV=${JSON.stringify(path.join(project, "data", "network.env"))}`,
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+      account.recordHandOvers,
+      fn.split("/etc/dconf/db/local.d").join(path.join(dconfDir, "db", "local.d")),
+      "__ao_lock",
+      "step_desktop_theme",
+    ].join("\n");
+    const runner = path.join(aux, "run.sh");
+    fs.writeFileSync(runner, script, "utf-8");
+    const r = spawnSync("bash", [runner], { encoding: "utf-8", cwd: aux });
+    return {
+      status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", rootInHome: account.rootInHome(),
+      sequence: account.sequence(),
+    };
+  }
+
+  it("writes the autostart entry with its text and mode 0644, and root writes nothing in the home", () => {
+    const r = runTheme();
+
+    expect(r.rootInHome, "no chmod, chown, mkdir or write by root in the home").toEqual([]);
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.readFileSync(entry(), "utf-8")).toBe([
+      "[Desktop Entry]",
+      "Type=Application",
+      "Name=ClawBox Desktop Theme",
+      `Exec=${themeScript()}`,
+      "Terminal=false",
+      "NoDisplay=true",
+      "X-GNOME-Autostart-enabled=true",
+      "",
+    ].join("\n"));
+    expect(fs.statSync(entry()).mode & 0o777).toBe(0o644);
+    expect(r.stdout).toContain("ClawBox desktop background configured");
+  });
+
+  it("makes the theme script executable as the device user", () => {
+    const r = runTheme();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.statSync(themeScript()).mode & 0o111).not.toBe(0);
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("rewrites an entry that is already there, and is still 0644", () => {
+    fs.mkdirSync(path.dirname(entry()), { recursive: true });
+    fs.writeFileSync(entry(), "stale\n");
+    fs.chmodSync(entry(), 0o600);
+
+    const r = runTheme();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(fs.readFileSync(entry(), "utf-8")).toContain(`Exec=${themeScript()}`);
+    expect(fs.statSync(entry()).mode & 0o777).toBe(0o644);
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("hands over the script with its checkout, and the entry's way from the home, before each is written", () => {
+    const r = runTheme();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    const script = handOverOrder(r.sequence, "hand_over_checkout");
+    expect(script.handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(script.handOver).toBeLessThan(script.firstWrite);
+    expect(r.sequence[script.firstWrite]).toBe(`chmod +x -- ${themeScript()}`);
+    const autostart = r.sequence.indexOf(`hand-over hand_over_home_path ${entry()}`);
+    expect(autostart).toBeGreaterThanOrEqual(0);
+    expect(autostart).toBeLessThan(r.sequence.indexOf(`mkdir -p -- ${path.dirname(entry())}`));
   });
 });

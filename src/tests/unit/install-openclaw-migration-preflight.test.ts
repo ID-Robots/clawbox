@@ -157,6 +157,7 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     "ensure_openclaw_node_engine() { :; }",
     "node_engine_remedy() { :; }",
     "chown() { :; }",
+    shellFunction("hand_over_home_path"),
     "flush_core_to_disk() { :; }",
     `stop_openclaw_gateways_for_migration() { printf 'stop-gateways\\n' >> ${log}; }`,
     `systemctl() { printf 'systemctl %s\\n' "$*" >> ${log}; }`,
