@@ -67,7 +67,8 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
   }, [adopt]);
 
   // Re-read when the users or the switch change: a new user gets a row.
-  useEffect(() => { void load(); }, [load, users.join("\n"), orgMode]);
+  const usersKey = users.join("\n");
+  useEffect(() => { void load(); }, [load, usersKey, orgMode]);
 
   const post = async (key: string, body: unknown) => {
     setBusy(key);

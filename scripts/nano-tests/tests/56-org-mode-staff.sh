@@ -141,7 +141,7 @@ case "$(printf "%s\n" "$hl" | tail -n +2)" in *"$MARK.txt"*) say "not ok - [$RUN
 sh=$(printf "shared by %s" "$A_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$A_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Shared&name=$MARK-shared.txt")
 sb=$(call GET "/setup-api/files?dir=Shared" "$B_COOKIE")
 case "$sh:$(status_of "$sb"):$(printf "%s\n" "$sb" | tail -n +2)" in 200:200:*"$MARK-shared.txt"*) say "ok - [$RUNTIME] A writes into Shared and B reads it" ;; *) say "not ok - [$RUNTIME] Shared answered $sh / $(status_of "$sb")" ;; esac
-ln -sfn "$REPO" "/home/$A_NAME/$MARK-link" 2>/dev/null || sudo -n ln -sfn "$REPO" "/home/$A_NAME/$MARK-link" 2>/dev/null || true
+ln -sfn "$REPO" "/home/$A_NAME/$MARK-link" 2>/dev/null || printf "NOTE [%s] could not plant the test link in A home\n" "$RUNTIME"
 bad=""
 for p in "dir=.." "dir=Home/.." "dir=Home/../.." "dir=$REPO" "dir=clawbox" "dir=Home/$MARK-link" "dir=Shared/.." "dir=/etc"; do
   c=$(status_of "$(call GET "/setup-api/files?$p" "$A_COOKIE")"); [ "$c" = 400 ] || bad="$bad $p:$c"
