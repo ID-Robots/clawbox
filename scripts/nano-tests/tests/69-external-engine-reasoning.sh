@@ -18,7 +18,8 @@
 #     per-turn level and gets no new key);
 #   * EVERY level, by the CLI and in the owner's browser: the picker lists
 #     them, a turn at each sends the expected `reasoning_effort` (the mock's
-#     log is the proof), the reply shows its reasoning part or, at Off, none;
+#     log is the proof); on Hermes the reply shows its reasoning part or, at
+#     Off, none, and on OpenClaw (whose chat never renders it) none leaks in;
 #     levels are switched in one conversation; the picked level survives a page
 #     reload and a restart of the runtime (pre-start keeps `reasoning: true`);
 #     Edit → Save keeps the switch on;
@@ -149,8 +150,13 @@ judge() {
   [ "$got" = missing ] && { effort=missing; thought=-; }
   [ "$effort" = "$want" ] || verdict="not ok"
   if [ -n "$shown" ]; then
-    # In the browser: the reasoning part is shown exactly when the engine sent one.
-    [ "$shown" = "$([ "$thought" = true ] && echo yes || echo no)" ] || verdict="not ok"
+    # In the browser, on Hermes: the reasoning part is shown exactly when the
+    # engine sent one. OpenClaw's chat never renders the model's reasoning (the
+    # gateway keeps it out of the chat by default), so there it must not leak
+    # into the reply at any level.
+    local want_shown=no
+    [ "$RUNTIME" = hermes ] && [ "$thought" = true ] && want_shown=yes
+    [ "$shown" = "$want_shown" ] || verdict="not ok"
     thought="engine=$thought ui=$shown"
   fi
   note "TABLE $RUNTIME | $path | $level | sent=$effort (want $want) | thinking: $thought | $verdict"
