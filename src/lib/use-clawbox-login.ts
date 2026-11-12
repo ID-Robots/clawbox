@@ -18,7 +18,8 @@ import { monotonicNow } from "@/lib/visible-interval";
 // i.e. the PLAN the stored claw_ token's account pays for, regardless of
 // which provider is driving the current chat. A Max subscriber chatting via
 // OpenAI is still loggedIn=true with tier="pro" so ClawKeep + Remote Desktop
-// stay unlocked. The chat-header *badge* uses a separate endpoint field
+// stay unlocked — and so is one who linked the subscription for its plan
+// alone and never made ClawBox AI a chat model (TASK-2501). The chat-header *badge* uses a separate endpoint field
 // (`clawaiTier`) that reflects the active chat provider — that goes blank
 // when chatting via OpenAI, which is the right behaviour for the badge.
 //
@@ -87,6 +88,9 @@ interface AiStatusResponse {
   // "no ClawBox AI account" (false) from "Free user paired"
   // (true, clawaiAccountTier=null).
   clawaiConfigured?: boolean;
+  // A subscription linked to the box for its plan alone, with no ClawBox AI
+  // chat model (TASK-2501). Absent on an older server, which had no such link.
+  subscriptionLinked?: boolean;
   // Set on the one answer whose poll recorded a CHANGED plan on the box.
   clawaiPlanChanged?: boolean;
 }
@@ -223,11 +227,13 @@ function readAnswer(data: AiStatusResponse): Answer {
       ? normalizeClawboxAiTier(plan)
       : (data.clawaiAccountTier ?? data.clawaiTier ?? null),
     plan,
-    // `loggedIn` means "device has a clawai profile configured"
-    // independent of which provider is currently active for chat.
-    // Older responses without `clawaiConfigured` fall back to the
-    // pre-rollout `provider === "clawai"` heuristic.
-    loggedIn: data.clawaiConfigured ?? (data.provider === "clawai"),
+    // `loggedIn` means "the owner's ClawBox account is on this device":
+    // a clawai profile configured, independent of which provider is
+    // currently active for chat, or a subscription linked for its plan
+    // alone (TASK-2501) — the plan surfaces gate on the account, never on
+    // the chat model. Older responses without `clawaiConfigured` fall back
+    // to the pre-rollout `provider === "clawai"` heuristic.
+    loggedIn: (data.clawaiConfigured ?? (data.provider === "clawai")) || data.subscriptionLinked === true,
     // One normaliser, shared with the server that produced the field, so
     // the two cannot disagree about what an empty list means.
     allowedModels: normalizeAllowedModelIds(data.clawaiAllowedModels),

@@ -2,7 +2,7 @@
  * The paid-plan gate's server half: reading the tier off the box, and the one
  * refusal both enable routes answer with.
  *
- * SERVER ONLY — `readClawaiEntitlementTier` opens `data/config.json`. The
+ * SERVER ONLY — `readPlanEntitlement` opens `data/config.json`. The
  * arithmetic itself is in `@/lib/paid-plan-gate`, which the wizards import;
  * this file adds nothing to it but the read and the response shape, so a route
  * and a screen can never disagree about what "paid" means.
@@ -14,7 +14,7 @@
  * A route handler may return either.
  */
 
-import { readClawaiEntitlementTier } from "@/lib/clawai-plan-tier";
+import { readPlanEntitlement } from "@/lib/plan-entitlement";
 import {
   PAID_PLAN_REQUIRED_CODE,
   paidPlanRefusalText,
@@ -26,17 +26,18 @@ import {
 /**
  * The gate as this box stands.
  *
- * `readClawaiEntitlementTier` is the ONE reader of the plan/badge pair — the
- * portal's plan when it has answered for this account, the device badge until
- * then — so the gate cannot disagree with the Providers page or the Harness
- * card about which plan the box is on. A store that cannot be read is "no plan
- * on record", which fails the gate: the refusal is recoverable (connect the
- * account, press the button again) and the alternative is handing a Free box a
- * paid feature on a failed read.
+ * `readPlanEntitlement` is the ONE reader of "which paid plan does the owner
+ * have": the ClawBox AI credential's plan/badge pair (`readClawaiEntitlementTier`,
+ * so the gate cannot disagree with the Providers page about a ClawBox AI box),
+ * and a subscription linked for its plan alone (TASK-2501), which unlocks the
+ * same features without making ClawBox AI the chat model. A store that cannot
+ * be read is "no plan on record", which fails the gate: the refusal is
+ * recoverable (connect the account, press the button again) and the
+ * alternative is handing a Free box a paid feature on a failed read.
  */
 export async function readPlanGate(): Promise<PlanGate> {
   try {
-    return planGateFor(await readClawaiEntitlementTier());
+    return planGateFor((await readPlanEntitlement()).tier);
   } catch {
     return planGateFor(null);
   }

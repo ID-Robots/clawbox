@@ -162,4 +162,39 @@ describe("portal-heartbeat — pushHeartbeatTick (periodic liveness)", () => {
     expect(body.deviceId).toMatch(/^dev_[a-f0-9]{16}$/);
     expect(body.name).toMatch(/^ClawBox-[A-F0-9]{4}$/);
   });
+
+  // TASK-2501: a box whose subscription is linked for its plan alone has no
+  // ClawBox AI token, and Remote Control's tunnel still hangs off the account.
+  it("names the account with the linked subscription's token on a box with no ClawBox AI token", async () => {
+    await configStore.set("clawai_token", undefined);
+    await configStore.set("subscription_link_token", "claw_fedcba9876543210fedcba9876543210");
+    try {
+      fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+      heartbeat.pushHeartbeatTick("https://linked.trycloudflare.com");
+      await flushHeartbeat();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect((init.headers as Record<string, string>).Authorization).toBe(
+        "Bearer claw_fedcba9876543210fedcba9876543210",
+      );
+    } finally {
+      await configStore.set("subscription_link_token", undefined);
+    }
+  });
+
+  it("prefers the ClawBox AI token when the box holds both", async () => {
+    await configStore.set("clawai_token", "claw_0123456789abcdef0123456789abcdef");
+    await configStore.set("subscription_link_token", "claw_fedcba9876543210fedcba9876543210");
+    try {
+      fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+      heartbeat.pushHeartbeatTick("https://both.trycloudflare.com");
+      await flushHeartbeat();
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect((init.headers as Record<string, string>).Authorization).toBe(
+        "Bearer claw_0123456789abcdef0123456789abcdef",
+      );
+    } finally {
+      await configStore.set("subscription_link_token", undefined);
+    }
+  });
 });

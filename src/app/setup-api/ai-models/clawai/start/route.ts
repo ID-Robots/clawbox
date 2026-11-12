@@ -3,6 +3,7 @@ import os from "os";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
 import {
   CLAWAI_USER_CODE_LENGTH,
+  type ClawAiConnectScope,
   createClawAiDeviceId,
   createClawAiUserCode,
   writeClawAiSession,
@@ -18,6 +19,8 @@ const CLAWBOX_AI_VERIFICATION_URL =
   process.env.CLAWBOX_AI_VERIFICATION_URL?.trim()
   || `${PORTAL_LOGIN_URL}/connect`;
 const DEFAULT_INTERVAL_SECONDS = 5;
+/** Every `ClawAiConnectScope` (`@/lib/clawai-connect` says what each one is for). */
+const CONNECT_SCOPES: readonly ClawAiConnectScope[] = ["primary", "local", "entitlement"];
 
 interface UpstreamDeviceStartResponse {
   user_code?: string;
@@ -68,16 +71,23 @@ export async function POST(request: NextRequest) {
     tier = body.tier;
   }
 
-  let scope: "primary" | "local" = "primary";
+  let scope: ClawAiConnectScope = "primary";
   if (body.scope !== undefined) {
-    if (body.scope !== "primary" && body.scope !== "local") {
+    if (!CONNECT_SCOPES.includes(body.scope as ClawAiConnectScope)) {
       return NextResponse.json(
-        { error: "scope must be 'primary' or 'local' when provided" },
+        { error: "scope must be 'primary', 'local' or 'entitlement' when provided" },
         { status: 400 },
       );
     }
-    scope = body.scope;
+    scope = body.scope as ClawAiConnectScope;
   }
+
+  // A link for the plan alone (TASK-2501) chooses no model, so it asks the
+  // portal for no paid model tier: a paid tier here is what makes the portal
+  // answer 402 `paid_plan_required` to a Free account, and a Free account may
+  // still link — the gate it links for then offers the upgrade instead of an
+  // error. The plan itself is read from the account, never from this stamp.
+  if (scope === "entitlement") tier = "free";
 
   const deviceNameRaw = typeof body.deviceName === "string" ? body.deviceName : "";
   const deviceName = deviceNameRaw.trim() || os.hostname() || "ClawBox";

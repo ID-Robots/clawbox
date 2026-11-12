@@ -45,6 +45,42 @@ describe("useClawboxLogin", () => {
     );
   });
 
+  it("counts a subscription linked for its plan alone as logged in, with its plan (TASK-2501)", async () => {
+    // The box chats through its local engine; ClawBox AI is no model of it,
+    // but the owner's subscription is linked — the gates must see the plan.
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "llamacpp",
+      clawaiTier: null,
+      clawaiAccountTier: null,
+      clawaiConfigured: false,
+      subscriptionLinked: true,
+      clawaiPlan: "pro",
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBe("pro");
+    expect(result.current.plan).toBe("pro");
+  });
+
+  it("a linked Free account is logged in without a paid tier", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "ollama",
+      clawaiConfigured: false,
+      subscriptionLinked: true,
+      clawaiPlan: "free",
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.tier).toBeNull();
+    expect(result.current.plan).toBe("free");
+  });
+
   it("treats no-clawai-profile as logged-out even when chatting via another provider", async () => {
     // Pure OpenAI install — no clawai profile configured anywhere.
     // `clawaiConfigured: false` is the new authoritative signal; the
