@@ -21,8 +21,8 @@
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { capText } from "./guard";
-import { redactCredentials } from "./redact-credentials";
+import { truncationNote } from "./guard";
+import { redactCredentials, redactQuotedCredentialValues } from "./redact-credentials";
 import { ToolError, toolErrorResult } from "./errors";
 import { PARAM_NAME_RE, TOOL_NAME_RE, type Shape } from "./schema";
 
@@ -164,6 +164,21 @@ export interface Registrar {
 export type ToolHandler = (args: any) => Promise<ToolResult> | ToolResult;
 
 /**
+ * A text result as the agent reads it: every credential rule, the output cap,
+ * and the quoted-value pass (see redactQuotedCredentialValues) last, on the
+ * part the cap kept, so text the cap cut off stays cut off. Where a
+ * placeholder came out longer than the value it replaced, the text is cut to
+ * the cap once more, and the note counts every character dropped: the cap's
+ * and that overflow.
+ */
+function gateText(text: string, maxChars: number): string {
+  const redacted = redactCredentials(text);
+  const masked = redactQuotedCredentialValues(redacted.slice(0, maxChars));
+  const omitted = Math.max(0, redacted.length - maxChars) + Math.max(0, masked.length - maxChars);
+  return omitted > 0 ? `${masked.slice(0, maxChars)}${truncationNote(omitted)}` : masked;
+}
+
+/**
  * Apply a tool's output cap, exactly as the dispatcher does before the result
  * reaches the agent. Exported so the test registrar can put a handler's return
  * value through the same gate — a suite that inspects the UNCAPPED string is
@@ -175,7 +190,7 @@ export function capResult(result: ToolResult, maxChars: number): ToolResult {
     // Every text result is scrubbed of credentials here, at the one gate all
     // tools share, so no individual tool can forget to (customer security report:
     // OAuth tokens surfaced unmasked in a diagnostic tool result).
-    if (part.type === "text") return { type: "text", text: capText(redactCredentials(part.text), maxChars) };
+    if (part.type === "text") return { type: "text", text: gateText(part.text, maxChars) };
     if (part.data.length > MAX_IMAGE_BASE64) {
       // Dropping it beats truncating base64 (which decodes to garbage) and
       // beats blowing the context window.

@@ -71,6 +71,19 @@ describe("openPullRequest", () => {
     expect(runChild).toHaveBeenCalledTimes(3);
   });
 
+  it("sends a title and body whose quoted credential values are masked", async () => {
+    runChild
+      .mockResolvedValueOnce(result(0, "https://github.com/o/r.git"))
+      .mockResolvedValueOnce(result(0))
+      .mockResolvedValueOnce(result(0, "https://github.com/o/r/pull/12"))
+      .mockResolvedValueOnce(viewed);
+    const phrase = "correct horse battery staple";
+    await pr.openPullRequest({ ...input, title: `Set DB_PASSWORD="${phrase}"`, body: `Config: {"DB_PASSWORD": "${phrase}"}` });
+    const args = runChild.mock.calls[2][1];
+    expect(args[args.indexOf("--title") + 1]).toBe('Set DB_PASSWORD="<redacted>"');
+    expect(args[args.indexOf("--body") + 1]).toBe('Config: {"DB_PASSWORD": "<redacted>"}');
+  });
+
   it("opens a ready pull request when nobody asked for a draft", async () => {
     runChild
       .mockResolvedValueOnce(result(0, "https://github.com/o/r.git"))

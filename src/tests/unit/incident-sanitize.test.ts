@@ -12,11 +12,17 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_STACK_FRAMES,
   normalizeMessage,
+  redactCredentialShapes,
+  redactQuotedCredentialValues,
   REDACTED,
   sanitizeContext,
   sanitizeStack,
   sanitizeText,
 } from "@/lib/incident-sanitize";
+
+/** The shared rules, then the quoted-value pass, the way a caller runs them. */
+const quoted = (input: string, replacement?: string) =>
+  redactQuotedCredentialValues(redactCredentialShapes(input, replacement), replacement);
 
 describe("sanitizeText — credential shapes", () => {
   it.each([
@@ -55,6 +61,31 @@ describe("sanitizeText — credential shapes", () => {
     expect(sanitizeText("Stopped at the token limit after 12 steps")).toBe("Stopped at the token limit after 12 steps");
   });
 
+  it.each([
+    ['{"token": "0123456789abcdef0123456789abcdef"}', '{"token": "[redacted]"}'],
+    ['{"apiKey":"0123456789abcdef"}', '{"apiKey":"[redacted]"}'],
+    ["{'password': 'hunter2hunter2'}", "{'password': '[redacted]'}"],
+    ['{\\"token\\":\\"0123456789abcdef0123\\"}', '{\\"token\\":\\"[redacted]\\"}'],
+  ])("removes the value under a quoted key and keeps the JSON shape: %s", (input, expected) => {
+    const out = sanitizeText(input);
+    expect(out).toBe(expected);
+    expect(sanitizeText(out)).toBe(out);
+  });
+
+  it("leaves a quoted key's quotes in place with the empty replacement", () => {
+    expect(quoted('{"token": "0123456789abcdef0123456789abcdef"}', "")).toBe('{"token": ""}');
+  });
+
+  it("rewrites an unquoted key exactly as before", () => {
+    expect(quoted("token: abcdef123456")).toBe("token=[redacted]");
+    expect(quoted("token: abcdef123456", "")).toBe("");
+    expect(quoted("password='hunter2hunter2'")).toBe("password='[redacted]'");
+  });
+
+  it("keeps redacting a value on the line after its label", () => {
+    expect(quoted("token:\n  0123456789abcdef")).not.toContain("0123456789abcdef");
+  });
+
   it("removes a value that is only a secret because this box says it is", () => {
     const out = sanitizeText("config rejected value wondrous-passphrase", { secrets: ["wondrous-passphrase"] });
     expect(out).not.toContain("wondrous-passphrase");
@@ -62,6 +93,155 @@ describe("sanitizeText — credential shapes", () => {
 
   it("ignores a short config value, which is a word rather than a credential", () => {
     expect(sanitizeText("the desktop is enabled", { secrets: ["enabled"] })).toContain("enabled");
+  });
+});
+
+describe("the quoted-value pass after redactCredentialShapes — a quoted value is read through its closing quote", () => {
+  const PHRASE = "correct horse battery staple";
+  // The other quote character inside the value: an apostrophe in "…", a double quote in '…'.
+  const otherQuote = (q: string) => (q === '"' ? "abcd'efghijklmnop" : 'abcd"efghijklmnop');
+  const PIECES = /correct|horse|battery|staple|abcd|efghijklmnop/;
+  const forms = (key: string) =>
+    ['"', "'"].flatMap((q) => [key, `${q}${key}${q}`].flatMap((k) =>
+      [":", ": ", " : ", "=", "= ", " = "].flatMap((sep) => [PHRASE, otherQuote(q)].map((v) => `${k}${sep}${q}${v}${q}`))));
+
+  it("takes the whole value out, whichever way the key, quote and separator are written", () => {
+    const leaked = [...forms("password"), ...forms("token"), ...forms("api_key")].filter((input) => {
+      const out = quoted(input);
+      return PIECES.test(out) || !out.includes(REDACTED) || quoted(out) !== out
+        || PIECES.test(quoted(input, ""));
+    });
+    expect(leaked).toEqual([]);
+  });
+
+  it.each([
+    ['{"password": "correct horse battery staple"}', '{"password": "[redacted]"}'],
+    ['password="correct horse battery staple" was refused', 'password="[redacted]" was refused'],
+    ['{"password":"abcd\'efghijklmnop"}', '{"password":"[redacted]"}'],
+    ['{"password":"abcd\\"efghijkl"}', '{"password":"[redacted]"}'],
+    ['{\\"password\\":\\"correct horse battery staple\\"}', '{\\"password\\":\\"[redacted]\\"}'],
+    ['token: "correct horse battery staple" and then "more text here"', 'token: "[redacted]" and then "more text here"'],
+  ])("rewrites %s and keeps what follows the closing quote", (input, expected) => {
+    expect(sanitizeText(input)).toBe(expected);
+    expect(sanitizeText(expected)).toBe(expected);
+  });
+
+  it("keeps a quoted key's quotes with the empty replacement, and drops a bare key's pair as before", () => {
+    expect(quoted('{"password": "correct horse battery staple"}', "")).toBe('{"password": ""}');
+    expect(quoted('password="correct horse battery staple" was refused', "")).toBe(" was refused");
+  });
+
+  it("keeps the cut's marker where the cap falls inside a quoted value", () => {
+    const out = sanitizeText(`{"password": "${"a b ".repeat(100)}"}`, { maxChars: 50 });
+    expect(out).toBe('{"password": "[redacted]…');
+    const stack = sanitizeStack(`Error: password: "${"a b ".repeat(150)}" was refused\n    at f (/srv/x.js:1:1)`);
+    expect(stack?.split("\n")[0]).toBe('Error: password: "[redacted]…');
+  });
+
+  it("takes a value with no closing quote to the end of its line, and no further", () => {
+    expect(quoted('{"password": "correct horse battery staple')).toBe('{"password": "[redacted]');
+    expect(quoted('{"password": "correct horse battery staple\n')).toBe('{"password": "[redacted]\n');
+    expect(quoted('{"password": "correct horse battery staple\n"note": "kept as is"}'))
+      .toBe('{"password": "[redacted]\n"note": "kept as is"}');
+    // A key after an unclosed quote keeps its value on the next line redacted.
+    expect(quoted('note: "abc def token:\n  0123456789abcdef')).toBe('note: "abc def token=[redacted]');
+    const joined = quoted('password: "abc def token:\n  0123456789abcdef');
+    expect(joined).not.toMatch(/abc def|0123456789abcdef/);
+    expect(quoted(joined)).toBe(joined);
+  });
+
+  it("leaves prose and an empty or short quoted value as they were", () => {
+    for (const text of [
+      "the password field is required",
+      'He said "the token is fine" and left',
+      '{"password": "", "name": "a name with spaces"}',
+      '{"token": ""}',
+      'password: "short"',
+    ]) {
+      expect(quoted(text)).toBe(text);
+      expect(quoted(text, "")).toBe(text);
+    }
+  });
+
+  it("takes a value with an escaped quote in it whole under a quoted key, however early or late the escape", () => {
+    // Late (ten characters before the escape), early, and twice.
+    const values = (q: string) => [`abcdefghij\\${q}klmnop`, `a\\${q}bcdefghijklmnop`, `abcdefghij\\${q}klm\\${q}nopqr`];
+    const inputs = ['"', "'"].flatMap((q) => values(q).flatMap((v) =>
+      [":", ": ", "=", " = "].map((sep) => `${q}password${q}${sep}${q}${v}${q} and the rest`)));
+    const leaked = inputs.filter((input) => [quoted(input), quoted(input, ""), sanitizeText(input)]
+      .some((out) => /bcdefghij|klm|nopqr/.test(out) || !out.endsWith(" and the rest")));
+    expect(leaked).toEqual([]);
+    expect(sanitizeText('{"password":"abcdef\\"ghijkl"}')).toBe('{"password":"[redacted]"}');
+    expect(quoted('{"password":"abcdef\\"ghijkl"}', "")).toBe('{"password":""}');
+  });
+
+  it("keeps the value of a later key redacted when an earlier value holds an escaped quote", () => {
+    for (const input of [
+      'password: "abcdefghij\\"klm token" : "real secret phrase"',
+      'password: "abcdefghij\\"klm token\n: realsecret12345',
+    ]) {
+      for (const out of [quoted(input), quoted(input, ""), sanitizeText(input)]) {
+        expect(out).not.toMatch(/real secret phrase|realsecret12345/);
+      }
+    }
+    // With the empty replacement a pair taken out must not make a later `"name" : "` look like a key.
+    const glued = quoted('token: "fakeone fakeone2" secret: "fakethree\\"fakefour" : "x"', "");
+    expect(glued).not.toMatch(/fakeone|fakethree/);
+  });
+
+  it("never lets a value in escaped quotes run over a bare quote, and keeps the next key's value redacted", () => {
+    for (const [input, expected] of [
+      // The bare quote ends the string the value is escaped in, so the fields after it stay.
+      ['{"task":"Set password: \\"abc def","status":"done","note":"see token: \\"0123456789abcdef\\""}',
+        '{"task":"Set password: \\"[redacted]","status":"done","note":"see token: \\"[redacted]\\""}'],
+      ['{"task":"Set password: \\"abc def","status":"done","note":"he said \\"hi\\""}',
+        '{"task":"Set password: \\"[redacted]","status":"done","note":"he said \\"hi\\""}'],
+    ]) {
+      expect(quoted(input)).toBe(expected);
+      expect(quoted(expected)).toBe(expected);
+    }
+    expect(quoted('password: "abc def, token: "0123456789abcdef"', "")).not.toContain("0123456789abcdef");
+  });
+
+  it("leaves a quoted reference to a secret held elsewhere as it was", () => {
+    for (const text of [
+      'token: "${{ secrets.GITHUB_TOKEN }}"',
+      'password: "${DB_PASSWORD}"',
+      'token: "{{ .Values.apiToken }}"',
+      "The deploy workflow passes token: \"${{ secrets.GITHUB_TOKEN }}\" to the checkout step.",
+    ]) {
+      expect(quoted(text)).toBe(text);
+      expect(quoted(text, "")).toBe(text);
+    }
+  });
+
+  it("keeps the scheme word of a quoted Bearer value", () => {
+    const once = quoted('Authorization: "Bearer AbCdEf0123456789xyz"');
+    expect(once).toBe('Authorization: "Bearer [redacted]"');
+    expect(quoted(once)).toBe(once);
+  });
+
+  it("takes a quoted sentence under a credential key at its word", () => {
+    expect(quoted('{"password": "must be at least 8 characters"}')).toBe('{"password": "[redacted]"}');
+  });
+
+  it("stays fast on a long line: 100 kB of prose, and a quote that never closes", () => {
+    const prose = "the password field is required and the token limit was hit. ".repeat(1_700);
+    const open = `password: "${"a b ".repeat(25_000)}`;
+    const started = performance.now();
+    expect(quoted(prose)).toBe(prose);
+    expect(quoted(open)).toBe('password: "[redacted]');
+    expect(quoted(`${open}\nnext line`)).toBe('password: "[redacted]\nnext line');
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
+  it("stays fast on a quoted value holding a long run of escapes that ends in a key word", () => {
+    const run = `password: "abcdefghij\\"${"\\\\".repeat(50_000)}token"`;
+    const started = performance.now();
+    quoted(run);
+    quoted(run, "");
+    sanitizeText(`${run}\nnext`);
+    expect(performance.now() - started).toBeLessThan(1_500);
   });
 });
 

@@ -30,7 +30,7 @@ import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { redactCredentialShapes } from "@/lib/incident-sanitize";
+import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
@@ -1297,11 +1297,14 @@ function coreEmbedderFailure(raw: unknown, agentId: string): string {
   const custom = asRecord(asRecord(agentStatusRow(raw, agentId).status).custom);
   const said = cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason);
   if (!said) return "";
-  return redactCredentialShapes(said, "[redacted]")
+  const line = redactCredentialShapes(said, "[redacted]")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
     .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
     .replace(/\s+/g, " ")
     .slice(0, 200);
+  // A quoted value under a credential name comes out last, on what the cut kept;
+  // the second cut only takes off what a longer placeholder pushed past it.
+  return redactQuotedCredentialValues(line, "[redacted]").slice(0, 200);
 }
 
 /**

@@ -510,6 +510,23 @@ describe("the provider's own words, scrubbed with the repo's one inventory", () 
     }
   });
 
+  it("keeps the mark that says the quoted sentence was cut, where the cut falls inside a quoted value", () => {
+    const shown = detailWith(`Login refused for {"password": "${"word ".repeat(80)}"} on the proxy`);
+    expect(shown).not.toMatch(/word word/);
+    expect(shown).toMatch(/"…”/);
+  });
+
+  it("takes a quoted value under a credential name out of the quoted sentence", () => {
+    const shown = detailWith('Login refused for {"password": "correct horse battery staple"} on the proxy');
+    expect(shown).not.toMatch(/correct|horse|battery|staple/);
+    expect(shown).toMatch(/gpt-5\.5/);
+  });
+
+  it("still falls back to its own sentence where the provider's words are refused whole", () => {
+    // The whole-message check reads the sentence before the quoted-value pass.
+    expect(detailWith('Key check failed: api_key: "see /srv/keys/api.txt" for org acme')).not.toMatch(/acme|api\.txt/);
+  });
+
   it("strips a bearer token whole and keeps what the provider said around it", () => {
     // The inventory takes the entire `Bearer sk-…` shape out BEFORE the
     // whole-message reject list runs, so this never reaches GENERIC: the
