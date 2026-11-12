@@ -25,6 +25,14 @@ import * as childProcess from "child_process";
 const DATA_DIR = `/tmp/clawbox-catalog-surface-cache-test-${process.pid}`;
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
+// No gateway answers here: every enumeration falls back to the CLI this suite pins.
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) =>
+  (await import("./gateway-ws-mock")).gatewayWsUnavailable(
+    await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>(),
+  ));
+// On a Jetson, explicitly: the only host where the route asks the gateway first.
+vi.mock("@/lib/ollama-size-cap", async (importOriginal) =>
+  (await import("./gateway-ws-mock")).onJetson(await importOriginal<typeof import("@/lib/ollama-size-cap")>()));
 vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: () => "openclaw",
   openclawIsAbsent: () => false,

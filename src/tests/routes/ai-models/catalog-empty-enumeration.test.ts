@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
 import * as childProcess from "child_process";
 import fs from "fs";
@@ -21,6 +21,14 @@ import { NextRequest } from "next/server";
 // row was filtered out is NOT an answer and is recorded as nothing at all.
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
+// No gateway answers here: every enumeration falls back to the CLI this suite pins.
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) =>
+  (await import("./gateway-ws-mock")).gatewayWsUnavailable(
+    await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>(),
+  ));
+// On a Jetson, explicitly: the only host where the route asks the gateway first.
+vi.mock("@/lib/ollama-size-cap", async (importOriginal) =>
+  (await import("./gateway-ws-mock")).onJetson(await importOriginal<typeof import("@/lib/ollama-size-cap")>()));
 
 vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: () => "openclaw",
@@ -90,6 +98,18 @@ async function recordedCount(provider: string): Promise<number | undefined> {
 function settle(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 300));
 }
+
+// The boot warm-up starts on the first GET and enumerates `clawai` at once (its
+// 0 s slot). Left to the first test, that enumeration can outlive it: its
+// record write then lands after the next `beforeEach` has wiped the cache, and
+// while it runs the client retry the next test relies on is — by design — not
+// spent ("not while anything else is enumerating"). Run that slot to the end
+// here, before any test, so no test shares the process with it.
+beforeAll(async () => {
+  await get("clawai");
+  await vi.waitFor(() => expect(readRecord().clawai?.models).toBeTypeOf("number"), { timeout: 4000, interval: 25 });
+  await settle();
+});
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async () => {
