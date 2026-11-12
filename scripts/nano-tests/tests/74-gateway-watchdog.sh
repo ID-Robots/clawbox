@@ -47,11 +47,10 @@ if [ "$RUNTIME" = hermes ]; then
     not-found|masked) ok "no gateway watchdog timer on the Hermes box ($(val timer_load))" ;;
     *) not_ok "the gateway watchdog timer is $(val timer_load)/$(val timer_active) on a Hermes box" ;;
   esac
-  [ "$(val timer_active)" != active ] && ok "the watchdog timer is not running" || not_ok "the watchdog timer is active on a Hermes box"
-  [ "$(val script)" = absent ] && ok "$LIBEXEC/gateway-watchdog.sh is not installed" || not_ok "$LIBEXEC/gateway-watchdog.sh is still installed"
-  [ "$(val gateway_load)" = masked ] && ok "clawbox-gateway.service is masked, as the Hermes edition leaves it" \
-    || not_ok "clawbox-gateway.service is $(val gateway_load) on a Hermes box"
-  [ -z "$(val failed)" ] && ok "no clawbox unit failed" || not_ok "failed units: $(val failed)"
+  if [ "$(val timer_active)" != active ]; then ok "the watchdog timer is not running"; else not_ok "the watchdog timer is active on a Hermes box"; fi
+  if [ "$(val script)" = absent ]; then ok "$LIBEXEC/gateway-watchdog.sh is not installed"; else not_ok "$LIBEXEC/gateway-watchdog.sh is still installed"; fi
+  if [ "$(val gateway_load)" = masked ]; then ok "clawbox-gateway.service is masked, as the Hermes edition leaves it"; else not_ok "clawbox-gateway.service is $(val gateway_load) on a Hermes box"; fi
+  if [ -z "$(val failed)" ]; then ok "no clawbox unit failed"; else not_ok "failed units: $(val failed)"; fi
   if wait_runtime_settled 300; then
     ok "the Hermes runtime is settled"
   else
@@ -79,7 +78,7 @@ if [ "$(val timer_enabled)" = enabled ] && [ "$(val timer_active)" = active ]; t
 else
   not_ok "clawbox-gateway-watchdog.timer is $(val timer_enabled)/$(val timer_active)"
 fi
-[ "$(val service_load)" = loaded ] && ok "clawbox-gateway-watchdog.service is installed" || not_ok "clawbox-gateway-watchdog.service is $(val service_load)"
+if [ "$(val service_load)" = loaded ]; then ok "clawbox-gateway-watchdog.service is installed"; else not_ok "clawbox-gateway-watchdog.service is $(val service_load)"; fi
 for f in gateway-watchdog.sh gateway-unit-guard.sh; do
   case "$(val "$f")" in
     "current owner=root") ok "$LIBEXEC/$f is root-owned and matches the checkout" ;;
@@ -106,6 +105,7 @@ unit_now() {
 }
 
 STOPPED_PID=
+# shellcheck disable=SC2317,SC2329  # invoked by the traps below
 cleanup() {
   if [ -n "$STOPPED_PID" ]; then
     # shellcheck disable=SC2016  # expanded on the board
@@ -189,13 +189,18 @@ fi
 # shellcheck disable=SC2016  # expanded on the board
 TURN=$(board 'tail -c 2000 "$1" 2>/dev/null | tr "\n" " " | tail -c 300; rm -f "$1"' "$TURN_OUT" | tail -n 1)
 note "the in-flight agent turn: ${TURN:-<no output>}"
+# shellcheck disable=SC2016  # expanded on the board
 SAID=$(board 'journalctl -t clawbox-gateway-watchdog --since "@$1" --no-pager -o cat 2>/dev/null' "$STALL_AT")
 if grep -q '^RESTARTING' <<<"$SAID"; then
   not_ok "the watchdog asked for a restart during the short stall"
 else
   ok "the watchdog asked for no restart during the short stall"
 fi
-grep -q 'did not answer HTTP' <<<"$SAID" && note "it counted the stall's failed probes, as it should" || note "no failed probe fell inside the stall"
+if grep -q 'did not answer HTTP' <<<"$SAID"; then
+  note "it counted the stall's failed probes, as it should"
+else
+  note "no failed probe fell inside the stall"
+fi
 watchdog_journal "$STALL_AT"
 
 # ---- 3. hung: restarted within the window ------------------------------------
@@ -235,6 +240,7 @@ else
     not_ok "the hung gateway was restarted after only ${RESTARTED_AFTER}s, inside the watchdog's 240 s window"
   fi
 fi
+# shellcheck disable=SC2016  # expanded on the board
 SAID=$(board 'journalctl -t clawbox-gateway-watchdog --since "@$1" --no-pager -o cat 2>/dev/null' "$HANG_AT")
 if grep -q '^RESTARTING clawbox-gateway.service' <<<"$SAID"; then
   ok "the restart decision is in the journal"
@@ -244,7 +250,7 @@ fi
 watchdog_journal "$HANG_AT"
 # shellcheck disable=SC2016  # expanded on the board
 GONE=$(board 'if kill -0 "$1" 2>/dev/null; then echo alive; else echo gone; fi' "$PID0" | tail -n 1)
-[ "$GONE" = gone ] && ok "the hung process $PID0 is gone" || not_ok "the hung process $PID0 is still there"
+if [ "$GONE" = gone ]; then ok "the hung process $PID0 is gone"; else not_ok "the hung process $PID0 is still there"; fi
 
 if wait_gateway_health 600 && wait_gateway_settled 600; then
   ok "the gateway is back and settled after the watchdog's restart"
