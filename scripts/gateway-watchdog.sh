@@ -18,7 +18,8 @@
 # THE PROBE is harnessHealthy's: a GET of the gateway's base URL on 127.0.0.1,
 # where ANY HTTP answer — whatever its status — means the server is up, retried
 # a few times with a short gap so one slow answer under load is not a failure.
-# Only a refused, reset or timed-out connection counts. The per-attempt timeout
+# Only a refused, reset, empty or timed-out connection counts; a probe that
+# could not run at all (no curl) counts for nothing. The per-attempt timeout
 # is longer than the UI's (5 s against 2.5 s): this probe's verdict restarts
 # something, the UI's only paints a badge.
 #
@@ -56,8 +57,9 @@
 #
 # Every restart decision — a failed probe counted, a restart asked for, one
 # refused by the cap or by systemd, an outage that cleared on its own — is one
-# line in the journal under the tag clawbox-gateway-watchdog. A healthy box
-# writes nothing.
+# line in the journal under the tag clawbox-gateway-watchdog, and so is each
+# stand-down: once when its reason begins (and whenever it clears a count), and
+# once when the watchdog judges again. A healthy box writes nothing.
 #
 # State is kept in the root-owned tmpfs (/run/clawbox), never in the
 # clawbox-writable data/ directory: this runs as root and writes there, and /run
@@ -75,6 +77,11 @@ ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 RUN_DIR="${CLAWBOX_RUN_DIR:-/run/clawbox}"
 STATE_FILE="$RUN_DIR/gateway-watchdog.state"
 RESTARTS_FILE="$RUN_DIR/gateway-watchdog.restarts"
+# Why the last run stood down, so each reason is said once when it starts and
+# once when it ends, not once a minute.
+STANDDOWN_FILE="$RUN_DIR/gateway-watchdog.standdown"
+# When this boot first saw an update flag it could not date (see below).
+UPDATE_SEEN_FILE="$RUN_DIR/gateway-watchdog.update-seen"
 MAINTENANCE_GUARD="${CLAWBOX_GATEWAY_MAINTENANCE_GUARD:-/run/clawbox-gateway-maintenance}"
 
 GUARD="${CLAWBOX_GATEWAY_GUARD:-$(dirname "${BASH_SOURCE[0]}")/gateway-unit-guard.sh}"
@@ -84,7 +91,21 @@ if ! { [ -f "$GUARD" ] && . "$GUARD"; }; then
   exit 0
 fi
 
-PORT="$(positive_int "${GATEWAY_PORT:-}" 18789)"
+# The port the gateway listens on is the one its own unit gives it: harness.ts
+# reads GATEWAY_PORT from the web server's environment, and a unit that sets it
+# (install-x64.sh's does) sets the gateway's OPENCLAW_GATEWAY_PORT beside it. A
+# root oneshot inherits neither, so it asks the unit; 18789 otherwise, which is
+# what the Jetson unit runs on. An explicit GATEWAY_PORT (the tests) wins.
+unit_port() {
+  local env word
+  env="$(systemctl show -p Environment --value "$UNIT" 2>/dev/null)" || return 0
+  for word in $env; do
+    case "$word" in
+      OPENCLAW_GATEWAY_PORT=*|GATEWAY_PORT=*) printf '%s' "${word#*=}"; return 0 ;;
+    esac
+  done
+}
+PORT="$(positive_int "${GATEWAY_PORT:-$(unit_port)}" 18789)"
 PROBE_URL="http://127.0.0.1:${PORT}/"
 PROBE_TIMEOUT="$(positive_int "${CLAWBOX_WATCHDOG_PROBE_TIMEOUT:-}" 5)"
 PROBE_ATTEMPTS="$(positive_int "${CLAWBOX_WATCHDOG_PROBE_ATTEMPTS:-}" 3)"
@@ -147,13 +168,20 @@ write_record() {
   fi
 }
 
-# Stand down. A count in progress is cleared, and said, because a deliberate
-# stop, an update or a swap in the middle of an outage is a different story
-# from the outage carrying on; a box with nothing counted writes nothing.
+# Stand down: stand_down KEY MESSAGE. A count in progress is cleared, because a
+# deliberate stop, an update or a swap in the middle of an outage is a different
+# story from the outage carrying on. Said in the journal when it clears a count,
+# and otherwise once per reason (KEY) — when it begins, not every minute it lasts;
+# the run that judges again says that too.
 stand_down() {
+  local key="$1" msg="$2" last=""
+  read -r last _ < "$STANDDOWN_FILE" 2>/dev/null || true
   if read_record; then
-    log "Not judging $UNIT: $1 — cleared ${REC_COUNT} failed probe(s) counted since $(( NOW - REC_FIRST ))s ago"
+    log "Not judging $UNIT: $msg — cleared ${REC_COUNT} failed probe(s) counted since $(( NOW - REC_FIRST ))s ago"
+  elif [ "$last" != "$key" ]; then
+    log "Not judging $UNIT: $msg"
   fi
+  [ "$last" = "$key" ] || printf '%s\n' "$key" > "$STANDDOWN_FILE" 2>/dev/null || true
   rm -f "$STATE_FILE" 2>/dev/null || true
   exit 0
 }
@@ -164,11 +192,11 @@ gateway_unit_load_state "$UNIT" >/dev/null || load_rc=$?
 case "$load_rc" in
   0) ;;
   # Hermes, or no gateway installed: nothing here, every minute, so silent.
-  1) rm -f "$STATE_FILE" 2>/dev/null || true; exit 0 ;;
-  *) stand_down "systemctl did not answer for its load state" ;;
+  1) rm -f "$STATE_FILE" "$STANDDOWN_FILE" 2>/dev/null || true; exit 0 ;;
+  *) stand_down no-systemd "systemctl did not answer for its load state" ;;
 esac
 
-[ -e "$MAINTENANCE_GUARD" ] && stand_down "the gateway maintenance guard is up ($MAINTENANCE_GUARD)"
+[ -e "$MAINTENANCE_GUARD" ] && stand_down maintenance "the gateway maintenance guard is up ($MAINTENANCE_GUARD)"
 
 # Any root step in flight: post_update, a rebuild, harness_swap, edition_select,
 # gateway_setup… all run as clawbox-root-update@<step>.service, a oneshot that is
@@ -176,7 +204,7 @@ esac
 busy_steps="$(systemctl list-units --plain --no-legend --no-pager --all \
   --state=activating,deactivating,reloading,active 'clawbox-root-update@*' 2>/dev/null \
   | awk 'NF { print $1 }' | paste -sd' ' -)"
-[ -n "$busy_steps" ] && stand_down "a root step is running ($busy_steps)"
+[ -n "$busy_steps" ] && stand_down root-step "a root step is running ($busy_steps)"
 
 # data/config.json, read by a parser and never sourced: it is written by the
 # web server, i.e. by the clawbox user, and this runs as root. A link, a
@@ -215,19 +243,39 @@ PY
 }
 facts="$(config_facts)"
 case "$facts" in
-  unknown|'') stand_down "data/config.json could not be read, so setup cannot be shown complete" ;;
+  unknown|'') stand_down no-config "data/config.json could not be read, so setup cannot be shown complete" ;;
 esac
 read -r setup_done updating lock_age _ <<<"$facts"
-[ "$setup_done" = "1" ] || stand_down "setup is not complete"
+[ "$setup_done" = "1" ] || stand_down setup "setup is not complete"
+# The updater's flag. Its holder record says when the run last moved; a record
+# younger than UPDATE_LOCK_MAX_AGE is an update in progress. A flag this cannot
+# date — no holder (a build that predates it), no parseable time, or one dated
+# more than five minutes ahead — is timed from when THIS boot first saw it, so a
+# flag a dead run left behind still stops silencing the watchdog after the same
+# two hours instead of never.
 if [ "$updating" = "1" ]; then
-  case "$lock_age" in
-    ''|-|*[!0-9-]*) stand_down "an update is in progress" ;;
-  esac
-  if [ "$lock_age" -le "$UPDATE_LOCK_MAX_AGE" ]; then
-    stand_down "an update is in progress (lock refreshed ${lock_age}s ago)"
+  dated=1
+  case "$lock_age" in ''|-|*[!0-9-]*) dated=0 ;; esac
+  if [ "$dated" = 1 ] && [ "$lock_age" -lt -300 ]; then dated=0; fi
+  if [ "$dated" = 1 ]; then
+    rm -f "$UPDATE_SEEN_FILE" 2>/dev/null || true
+    [ "$lock_age" -le "$UPDATE_LOCK_MAX_AGE" ] \
+      && stand_down update "an update is in progress (lock refreshed ${lock_age}s ago)"
+  else
+    seen=""
+    read -r seen _ < "$UPDATE_SEEN_FILE" 2>/dev/null || true
+    case "$seen" in
+      ''|*[!0-9]*) seen="$NOW"; printf '%s\n' "$NOW" > "$UPDATE_SEEN_FILE" 2>/dev/null || true ;;
+    esac
+    [ "$seen" -gt "$NOW" ] && { seen="$NOW"; printf '%s\n' "$NOW" > "$UPDATE_SEEN_FILE" 2>/dev/null || true; }
+    lock_age="$(( NOW - seen ))"
+    [ "$lock_age" -le "$UPDATE_LOCK_MAX_AGE" ] \
+      && stand_down update-undated "an update is in progress (its lock carries no usable time; seen for ${lock_age}s)"
   fi
   # Older than any step: a run that died. Said once per run of failures below,
   # by the probe line, and judged as a box that is not updating.
+else
+  rm -f "$UPDATE_SEEN_FILE" 2>/dev/null || true
 fi
 
 # A request file the swap / edition routes write, with REQUESTED_AT inside the
@@ -235,7 +283,8 @@ fi
 fresh_request() {
   local req="$1" line at now
   [ -f "$req" ] && [ ! -L "$req" ] || return 1
-  line="$(grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?REQUESTED_AT=' "$req" 2>/dev/null)" || return 1
+  # Bounded: the shape checks above leave a moment for a FIFO to be swapped in.
+  line="$(timeout 5 grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?REQUESTED_AT=' "$req" 2>/dev/null)" || return 1
   at="${line#*=}"
   at="${at//\"/}"
   at="${at//\'/}"
@@ -245,7 +294,7 @@ fresh_request() {
   [ "$at" -le $(( now + 300 )) ] && [ "$at" -ge $(( now - REQUEST_MAX_AGE )) ]
 }
 for req in harness-swap.env edition-select.env; do
-  fresh_request "$ROOT/data/$req" && stand_down "a harness change was requested (data/$req)"
+  fresh_request "$ROOT/data/$req" && stand_down "request-$req" "a harness change was requested (data/$req)"
 done
 
 # The unit itself. Only a unit that is up, running and has nothing queued is
@@ -261,19 +310,22 @@ entered_us="$(prop ActiveEnterTimestampMonotonic)"
 freezer="$(prop FreezerState)"
 
 [ "$active_state" = "active" ] && [ "$sub_state" = "running" ] \
-  || stand_down "it is ${active_state:-unknown}/${sub_state:-unknown}, not running — stopped on purpose, starting or restarting"
-case "$freezer" in ''|running) ;; *) stand_down "its cgroup is $freezer" ;; esac
-case "$main_pid" in ''|0|*[!0-9]*) stand_down "it has no main process" ;; esac
-[ -n "$invocation" ] || stand_down "systemctl did not name its invocation"
-if [ -n "$(systemctl list-jobs --plain --no-legend --no-pager "$UNIT" 2>/dev/null | awk 'NF')" ]; then
-  stand_down "a job is already queued for it"
+  || stand_down "state-${active_state:-unknown}" "it is ${active_state:-unknown}/${sub_state:-unknown}, not running — stopped on purpose, starting or restarting"
+case "$freezer" in ''|running) ;; *) stand_down frozen "its cgroup is $freezer" ;; esac
+case "$main_pid" in ''|0|*[!0-9]*) stand_down no-pid "it has no main process" ;; esac
+[ -n "$invocation" ] || stand_down no-invocation "systemctl did not name its invocation"
+unit_jobs() { systemctl list-jobs --plain --no-legend --no-pager "$UNIT" 2>/dev/null | awk 'NF'; }
+if [ -n "$(unit_jobs)" ]; then
+  stand_down job "a job is already queued for it"
 fi
 
 # A fresh gateway is still binding its port. ActiveEnterTimestampMonotonic is
-# CLOCK_MONOTONIC in microseconds; /proc/uptime is the same clock on a box that
-# never suspends, and the tests set both.
+# CLOCK_MONOTONIC in microseconds, /proc/uptime is CLOCK_BOOTTIME: the same
+# count on a box that has never suspended (an appliance does not), and after a
+# suspend boot time runs ahead, so the grace ends early by the time slept — which
+# only starts the count sooner; a restart still needs the sustained window.
 case "$entered_us" in
-  ''|*[!0-9]*) stand_down "systemctl did not say when it started" ;;
+  ''|*[!0-9]*) stand_down no-start-time "systemctl did not say when it started" ;;
 esac
 up_for=$(( NOW - entered_us / 1000000 ))
 if [ "$up_for" -lt "$STARTUP_GRACE" ]; then
@@ -295,6 +347,10 @@ probe() {
     curl -sS -o /dev/null --max-time "$PROBE_TIMEOUT" "$PROBE_URL" >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 0 ] && return 0
     probe_rc="$rc"
+    # Only a server that refused, reset, timed out or hung up on us is evidence
+    # about the gateway. curl missing (127), a bad URL, a failed write… say
+    # nothing about it, and must never add up to a restart.
+    case "$rc" in 7|28|52|56) ;; *) return 2 ;; esac
     [ "$attempt" -ge "$PROBE_ATTEMPTS" ] && return 1
     attempt=$(( attempt + 1 ))
     sleep 0.25
@@ -318,7 +374,18 @@ proc_state() {
   printf '%s' "${stat%% *}"
 }
 
-if probe; then
+probe_verdict=0
+probe || probe_verdict=$?
+if [ "$probe_verdict" -eq 2 ]; then
+  stand_down "probe-error-$probe_rc" "the probe itself could not run (curl exit $probe_rc), which says nothing about the gateway"
+fi
+# Judging again after a stand-down: said once.
+if [ -f "$STANDDOWN_FILE" ]; then
+  read -r was _ < "$STANDDOWN_FILE" 2>/dev/null || was=""
+  rm -f "$STANDDOWN_FILE" 2>/dev/null || true
+  log "Judging $UNIT again (stood down for: ${was:-unknown})"
+fi
+if [ "$probe_verdict" -eq 0 ]; then
   if read_record; then
     log "$UNIT answers HTTP again on port $PORT after ${REC_COUNT} failed probe(s) over $(( NOW - REC_FIRST ))s — not restarting"
   fi
@@ -383,13 +450,37 @@ fi
 # is refused rather than replacing it. --no-block: the stop can take
 # TimeoutStopSec and the start its whole ExecStartPre; the next run sees the unit
 # activating and stands down until the new gateway is past its grace.
-if systemctl --no-block --job-mode=fail try-restart "$UNIT" >/dev/null 2>&1; then
+#
+# try-restart also answers 0 for a unit that went down between the look above
+# and this call, having done nothing. So the request counts only once systemd
+# shows it working: a job queued on the unit, the unit stopping or starting, or
+# a new invocation already. Anything else was no restart, and is not recorded
+# as one.
+restart_rc=0
+systemctl --no-block --job-mode=fail try-restart "$UNIT" >/dev/null 2>&1 || restart_rc=$?
+restart_seen=0
+if [ "$restart_rc" -eq 0 ]; then
+  after="$(systemctl show -p ActiveState -p InvocationID "$UNIT" 2>/dev/null)"
+  after_state="$(printf '%s\n' "$after" | sed -n 's/^ActiveState=//p' | head -n 1)"
+  after_inv="$(printf '%s\n' "$after" | sed -n 's/^InvocationID=//p' | head -n 1)"
+  if [ -n "$(unit_jobs)" ] || [ "$after_inv" != "$invocation" ]; then
+    restart_seen=1
+  else
+    case "$after_state" in deactivating|activating|reloading) restart_seen=1 ;; esac
+  fi
+fi
+if [ "$restart_seen" -eq 1 ]; then
   rm -f "$STATE_FILE" 2>/dev/null || true
   log "RESTARTING $UNIT: no HTTP answer on port $PORT for ${outage}s across $count consecutive probes ($why) — asked systemd for a restart ($(( recent + 1 )) of at most $MAX_RESTARTS per ${RESTART_WINDOW}s)"
 else
   printf '%s' "$kept" > "$RESTARTS_FILE.new" 2>/dev/null && mv -f "$RESTARTS_FILE.new" "$RESTARTS_FILE" 2>/dev/null \
     || rm -f "$RESTARTS_FILE.new" 2>/dev/null || true
-  write_record "$invocation" "$first" "$NOW" "$count" "$capped"
-  log "Wanted to restart $UNIT (no HTTP answer for ${outage}s, $why) but systemd refused the request — another job for the unit, or it stopped meanwhile; trying again next run"
+  if [ "$restart_rc" -ne 0 ]; then
+    write_record "$invocation" "$first" "$NOW" "$count" "$capped"
+    log "Wanted to restart $UNIT (no HTTP answer for ${outage}s, $why) but systemd refused the request — another job for the unit, or it stopped meanwhile; trying again next run"
+  else
+    rm -f "$STATE_FILE" 2>/dev/null || true
+    log "Wanted to restart $UNIT (no HTTP answer for ${outage}s, $why) but nothing was restarted: it is ${after_state:-unknown} with no job queued — stopped meanwhile, on purpose; not counted"
+  fi
 fi
 exit 0

@@ -98,9 +98,19 @@ B=${JSON.stringify(box)}
 echo "$*" >> "$B/systemctl.log"
 case " $* " in
   *" LoadState "*) [ -f "$B/load-state" ] && cat "$B/load-state"; exit 0 ;;
+  *" Environment "*) [ -f "$B/environment" ] && cat "$B/environment"; exit 0 ;;
   *" list-units "*) [ -f "$B/root-steps" ] && cat "$B/root-steps"; exit 0 ;;
-  *" list-jobs "*) [ -f "$B/jobs" ] && cat "$B/jobs"; exit 0 ;;
-  *" try-restart "*) exit "$(cat "$B/try-restart-rc")" ;;
+  *" list-jobs "*)
+    [ -f "$B/jobs" ] && cat "$B/jobs"
+    # The job an accepted try-restart queued, seen once, by the run that asked.
+    if [ -f "$B/jobs-once" ]; then cat "$B/jobs-once"; rm -f "$B/jobs-once"; fi
+    exit 0 ;;
+  *" try-restart "*)
+    rc=$(cat "$B/try-restart-rc")
+    if [ "$rc" = 0 ] && [ ! -f "$B/restart-noop" ]; then
+      echo "77 clawbox-gateway.service restart running" > "$B/jobs-once"
+    fi
+    exit "$rc" ;;
   *" show "*) cat "$B/props"; exit 0 ;;
 esac
 exit 0
@@ -149,6 +159,12 @@ function restarts(): string[] {
   } catch {
     return [];
   }
+}
+
+/** Forget the restarts asked for so far (systemctl's log and the hourly cap). */
+function restartsReset(): void {
+  fs.rmSync(path.join(box, "systemctl.log"), { force: true });
+  fs.rmSync(path.join(runDir, "gateway-watchdog.restarts"), { force: true });
 }
 
 function curlCalls(): number {
@@ -214,6 +230,24 @@ describe("gateway liveness watchdog — when it restarts", () => {
   it("honours GATEWAY_PORT like src/lib/harness.ts", () => {
     runAt(T0, { GATEWAY_PORT: "18800" });
     expect(fs.readFileSync(path.join(box, "curl.log"), "utf-8")).toContain("http://127.0.0.1:18800/");
+  });
+
+  it("otherwise probes the port the gateway's own unit gives it", () => {
+    // A root oneshot inherits no GATEWAY_PORT; a unit that moves the gateway
+    // (install-x64.sh's) says so in its Environment.
+    fs.writeFileSync(path.join(box, "environment"), "HOME=/home/clawbox OPENCLAW_GATEWAY_PORT=18999 NODE_ENV=production\n");
+    runAt(T0, { GATEWAY_PORT: "" });
+    expect(fs.readFileSync(path.join(box, "curl.log"), "utf-8")).toContain("http://127.0.0.1:18999/");
+  });
+
+  it("a probe that could not run at all (no curl) is not a failed probe", () => {
+    setCurl(127);
+    silentFor(T0, 8);
+    expect(restarts()).toEqual([]);
+    const said = journal().split("\n").filter(Boolean);
+    // Said once, not once a minute.
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatch(/the probe itself could not run \(curl exit 127\)/);
   });
 
   it("restarts only after five consecutive failed probes spanning four minutes, and logs each one", () => {
@@ -326,6 +360,16 @@ describe("gateway liveness watchdog — when it restarts", () => {
     expect(at - 60).toBeLessThan(T0 + 240 + 3600 + 60);
   });
 
+  it("does not count a restart systemd accepted but never ran (the unit stopped meanwhile)", () => {
+    fs.writeFileSync(path.join(box, "restart-noop"), "");
+    setCurl(28);
+    silentFor(T0, 5);
+    expect(restarts()).toHaveLength(1);
+    expect(journal()).not.toMatch(/RESTARTING/);
+    expect(journal()).toMatch(/nothing was restarted: it is active with no job queued/);
+    expect(fs.readFileSync(path.join(runDir, "gateway-watchdog.restarts"), "utf-8").trim()).toBe("");
+  });
+
   it("withdraws the restart from the cap when systemd refuses it", () => {
     fs.writeFileSync(path.join(box, "try-restart-rc"), "1\n");
     setCurl(28);
@@ -414,14 +458,25 @@ describe("gateway liveness watchdog — when it stands down", () => {
     expect(restarts()).toEqual([]);
     expect(journal()).toMatch(/an update is in progress \(lock refreshed \d+s ago\)/);
 
-    // An older build's lock with no holder record still counts as an update.
+    // An older build's lock with no holder record still counts as an update —
+    // for two hours from when this boot first saw it, not for ever.
     setConfig({ setup_complete: true, update_in_progress: true });
     silentFor(T0 + 360, 6);
+    expect(restarts()).toEqual([]);
+    expect(journal()).toMatch(/its lock carries no usable time; seen for 0s/);
+    silentFor(T0 + 360 + 7260, 5); // past the two hours, then the sustained window
+    expect(restarts()).toHaveLength(1);
+    restartsReset();
+
+    // A holder dated hours ahead (a clock stepped back under it) is undatable too.
+    fs.rmSync(path.join(runDir, "gateway-watchdog.update-seen"), { force: true });
+    setConfig({ setup_complete: true, update_in_progress: true, update_lock_holder: { pid: 1, at: at(-3 * 3600) } });
+    silentFor(T0 + 9000, 6);
     expect(restarts()).toEqual([]);
 
     // A lock last refreshed three hours ago belongs to a run that died.
     setConfig({ setup_complete: true, update_in_progress: true, update_lock_holder: { pid: 1, at: at(3 * 3600) } });
-    silentFor(T0 + 800, 5);
+    silentFor(T0 + 9600, 5);
     expect(restarts()).toHaveLength(1);
     expect(journal()).toMatch(/a run that died; judging clawbox-gateway\.service anyway/);
   });
@@ -457,6 +512,18 @@ describe("gateway liveness watchdog — when it stands down", () => {
     interruptedBy(() => fs.mkdirSync(path.join(box, "maintenance")));
     expect(restarts()).toEqual([]);
     expect(journal()).toMatch(/maintenance guard is up/);
+  });
+
+  it("says a stand-down once when it begins and once when it ends, even with nothing counted", () => {
+    setCurl(0);
+    setConfig({ setup_complete: true, update_in_progress: true, update_lock_holder: { pid: 1, at: new Date().toISOString() } });
+    for (let t = T0; t < T0 + 600; t += 60) runAt(t);
+    setConfig({ setup_complete: true });
+    for (let t = T0 + 600; t < T0 + 900; t += 60) runAt(t);
+    const said = journal().split("\n").filter(Boolean);
+    expect(said).toHaveLength(2);
+    expect(said[0]).toMatch(/^Not judging clawbox-gateway\.service: an update is in progress/);
+    expect(said[1]).toMatch(/^Judging clawbox-gateway\.service again \(stood down for: update\)/);
   });
 
   it("refuses to run without its guard rather than judge the unit some other way", () => {

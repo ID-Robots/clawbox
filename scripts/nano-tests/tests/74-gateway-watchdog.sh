@@ -119,7 +119,11 @@ cleanup() {
     esac
   ' >/dev/null
 }
+# EXIT alone is not enough: a runner that kills the test on its deadline sends
+# TERM (or HUP), and bash runs no EXIT trap for an untrapped fatal signal — the
+# gateway would be left stopped. Exiting from the signal trap runs the EXIT one.
 trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 watchdog_journal() {
   # shellcheck disable=SC2016  # expanded on the board
