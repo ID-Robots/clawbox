@@ -33,6 +33,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = process.cwd();
 const DISPATCHER = path.join(REPO, "scripts", "nm-dispatcher-failover.sh");
 const WAITER = path.join(REPO, "scripts", "gateway-restart-when-online.sh");
+const GUARD = path.join(REPO, "scripts", "gateway-unit-guard.sh");
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 
 // Unconditional, not skipIf: a runner without bash would report green while
@@ -128,6 +129,9 @@ function makeBox(opts: BoxOptions = {}): void {
   mkdirSync(path.join(root, "run"), { recursive: true });
   copyFileSync(WAITER, path.join(root, "libexec", "gateway-restart-when-online.sh"));
   chmodSync(path.join(root, "libexec", "gateway-restart-when-online.sh"), 0o755);
+  // The waiter sources the guard it shares with the liveness watchdog
+  // (TASK-2490) from beside itself, as install.sh lays them out.
+  copyFileSync(GUARD, path.join(root, "libexec", "gateway-unit-guard.sh"));
 
   const stub = (name: string, body: string) => {
     const file = path.join(bin, name);
@@ -1394,6 +1398,7 @@ describe("the installer reports what it actually installed", () => {
     mkdirSync(path.join(project, "scripts"), { recursive: true });
     copyFileSync(DISPATCHER, path.join(project, "scripts", "nm-dispatcher-failover.sh"));
     copyFileSync(WAITER, path.join(project, "scripts", "gateway-restart-when-online.sh"));
+    copyFileSync(GUARD, path.join(project, "scripts", "gateway-unit-guard.sh"));
     mkdirSync(libexec, { recursive: true });
     mkdirSync(path.join(project, "config"), { recursive: true });
     for (const name of ["wifi-radio.sh", "wifi-failover.sh"]) {

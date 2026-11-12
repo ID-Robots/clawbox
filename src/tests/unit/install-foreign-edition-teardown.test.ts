@@ -500,6 +500,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-gateway.service": "enabled:active",
     "clawbox-heartbeat.timer": "enabled:active",
     "clawbox-ap-watchdog.timer": "enabled:active",
+    "clawbox-gateway-watchdog.timer": "enabled:active",
     "clawbox-codex-auth-sync.timer": "enabled:active",
     "clawbox-heartbeat.service": "static:inactive",
     "clawbox-browser.service": "disabled:inactive",
@@ -507,6 +508,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
+    "clawbox-gateway-watchdog.service": "static:inactive",
     "clawbox-wifi-failover.service": "static:inactive",
     "clawbox-codex-auth-sync.service": "static:inactive",
     "clawbox-build-heal.service": "enabled:inactive",
@@ -556,8 +558,9 @@ d("the validator now says what to run, not just what is wrong", () => {
     // The teardown adds no checks — the healthy line must not move.
     const r = runValidator("openclaw", healthyOpenclaw());
     expect(r.status).toBe(0);
-    // 19 with the supervised WiFi worker among the installed-but-on-demand units,
-    // and clawbox-build-heal.service (TASK-1316), the boot-time oneshot.
-    expect(r.stdout).toMatch(/All 19 checks healthy/);
+    // 21 with the supervised WiFi worker among the installed-but-on-demand units,
+    // clawbox-build-heal.service (TASK-1316), the boot-time oneshot, and the
+    // gateway liveness watchdog's timer and oneshot (TASK-2490).
+    expect(r.stdout).toMatch(/All 21 checks healthy/);
   });
 });
