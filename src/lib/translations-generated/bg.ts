@@ -3389,6 +3389,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "Преглед на паметта на заден план",
   "settings.bgMemoryHint": "Уплътнява запомненото с твоя модел, между разговорите.",
   "settings.bgPending": "Записано — влиза в сила при следващото рестартиране на асистента.",
+  "settings.bgSingleEngine": "Изключено по подразбиране на тази кутия: тя споделя един AI двигател с всички потребители.",
   "settings.bgTitle": "Работи самостоятелно",
   "settings.bgUnsupported": "Това издание го няма",
   "settings.botConnected": "Ботът е свързан",

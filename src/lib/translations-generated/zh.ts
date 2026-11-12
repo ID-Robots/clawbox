@@ -3389,6 +3389,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "后台记忆整理",
   "settings.bgMemoryHint": "在对话之间，用你自己的模型整理它记住的内容。",
   "settings.bgPending": "已保存：将在助手下次重启后生效。",
+  "settings.bgSingleEngine": "此设备上默认关闭：它与所有用户共用一个 AI 引擎。",
   "settings.bgTitle": "自行运行的工作",
   "settings.bgUnsupported": "此版本没有此功能",
   "settings.botConnected": "机器人已连接",

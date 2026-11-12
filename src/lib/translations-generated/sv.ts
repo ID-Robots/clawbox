@@ -3389,6 +3389,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "Minnesgenomgång i bakgrunden",
   "settings.bgMemoryHint": "Sammanfogar det den minns, på din egen modell, mellan samtalen.",
   "settings.bgPending": "Sparat — börjar gälla när assistenten startas om.",
+  "settings.bgSingleEngine": "Av som standard på den här enheten: den delar en AI-motor med alla användare.",
   "settings.bgTitle": "Arbetar på egen hand",
   "settings.bgUnsupported": "Den här utgåvan har inte det",
   "settings.botConnected": "Bot ansluten",

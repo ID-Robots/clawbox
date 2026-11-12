@@ -3389,6 +3389,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "バックグラウンドの記憶整理",
   "settings.bgMemoryHint": "会話の合間に、あなたのモデルで記憶を整理します。",
   "settings.bgPending": "保存しました。次回アシスタント再起動時に反映されます。",
+  "settings.bgSingleEngine": "このデバイスでは既定でオフです：1つのAIエンジンをすべてのユーザーで共有しています。",
   "settings.bgTitle": "自分から動く動作",
   "settings.bgUnsupported": "このエディションにはありません",
   "settings.botConnected": "ボット接続済み",

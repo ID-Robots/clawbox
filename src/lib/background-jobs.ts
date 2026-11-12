@@ -21,8 +21,10 @@ import { readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConf
 // the harness defaults ONCE (generation 2 of `data/background-optouts.json`,
 // which only flips a key still AT the old opt-out literal), and from then on
 // the keys are the owner's for ever. This module is the switches themselves,
-// in both directions; nothing at boot seeds a value into a key any more, and
-// nothing ever writes `0m` but the owner's own OFF here.
+// in both directions; nothing at boot seeds a value into a key any more —
+// except, once per box, `off` / `false` into an ABSENT self-learning or dreaming
+// key on a single-engine box (TASK-2387, `isSingleEngineBox`) — and nothing ever
+// writes `0m` but the owner's own OFF here.
 //
 // HARNESS FIRST — every one of these is the harness's own documented key, read
 // and written through the harness's own writer. Nothing here invents a store.
@@ -73,6 +75,30 @@ export interface BackgroundJobsStatus {
    * unreadable config. The panel says so rather than painting a guess as fact.
    */
   degraded: boolean;
+  /**
+   * TASK-2387: an OpenClaw box whose chats all share one AI engine
+   * (`CLAWBOX_SINGLE_ENGINE`), where `gateway-pre-start.sh` keeps memory
+   * dreaming and self-learning's background review off by default. Always
+   * false on Hermes, whose keys that flag does not touch.
+   */
+  singleEngine: boolean;
+}
+
+/**
+ * `CLAWBOX_SINGLE_ENGINE` the way `gateway-pre-start.sh` reads it: 1, true, yes
+ * or on, any case. The web server gets it from `.env` (clawbox-setup loads that
+ * file); the gateway unit does not, which is why the boot script reads the file
+ * itself.
+ */
+export function isSingleEngineBox(env: NodeJS.ProcessEnv = process.env): boolean {
+  let raw = (env.CLAWBOX_SINGLE_ENGINE ?? "").trim();
+  // One pair of matching quotes, as the boot script strips them: whatever
+  // loaded `.env` into this process may have left a hand-written `"1"` quoted.
+  if (raw.length >= 2 && raw[0] === raw[raw.length - 1] && (raw[0] === '"' || raw[0] === "'")) {
+    raw = raw.slice(1, -1).trim();
+  }
+  const value = raw.toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 const OPENCLAW_KEYS: Record<BackgroundJobId, string> = {
@@ -115,6 +141,7 @@ async function readOpenclawJobs(): Promise<BackgroundJobsStatus> {
   return {
     harness: "openclaw",
     degraded: false,
+    singleEngine: isSingleEngineBox(),
     jobs: [
       {
         id: "checkIns",
@@ -154,6 +181,7 @@ async function readHermesJobs(): Promise<BackgroundJobsStatus> {
   return {
     harness: "hermes",
     degraded: false,
+    singleEngine: false,
     jobs: [
       { id: "checkIns", enabled: false, supported: false, key: null },
       { id: "memoryReview", enabled: on(review), supported: true, key: HERMES_KEYS.memoryReview ?? null },
@@ -171,6 +199,7 @@ export async function readBackgroundJobs(): Promise<BackgroundJobsStatus> {
     return {
       harness,
       degraded: true,
+      singleEngine: harness !== "hermes" && isSingleEngineBox(),
       jobs: (["checkIns", "memoryReview", "skillLearning"] as BackgroundJobId[]).map((id) => ({
         id,
         enabled: true,

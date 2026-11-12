@@ -1031,6 +1031,18 @@ seed_llamacpp_env() {
     ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_TYPE" "draft-mtp"
     ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_DRAFT_N_MAX" "$LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX"
   fi
+  # TASK-2387: a workstation's chats all share ONE local engine, so the box is
+  # single-engine (gateway-pre-start.sh keeps self-learning's background review
+  # and memory dreaming off by default there). OUTSIDE the model guard on
+  # purpose: an update of a workstation that already has its model gets the
+  # flag too. Fills a missing key only — an owner's own value, `0` included,
+  # stays — and "missing" is judged in every form the gateway's reader takes:
+  # ensure_env_setting knows only `KEY=`, and a `1` appended after an owner's
+  # `export CLAWBOX_SINGLE_ENGINE=0` would win as the last assignment.
+  if llamacpp_workstation_host "${LLAMACPP_WORKSTATION_MEMINFO:-/proc/meminfo}" \
+    && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?CLAWBOX_SINGLE_ENGINE[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
+    ensure_env_setting "$ENV_FILE" "CLAWBOX_SINGLE_ENGINE" "1"
+  fi
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
   # Keep these four lines in step with src/lib/llamacpp.ts - the model id is

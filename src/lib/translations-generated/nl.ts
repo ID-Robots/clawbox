@@ -3389,6 +3389,7 @@ const table: Record<string, string> = {
   "settings.bgMemory": "Geheugenoverzicht op de achtergrond",
   "settings.bgMemoryHint": "Verdicht wat hij onthoudt, op je eigen model, tussen gesprekken door.",
   "settings.bgPending": "Opgeslagen — werkt na de volgende herstart van de assistent.",
+  "settings.bgSingleEngine": "Standaard uit op dit apparaat: het deelt één AI-engine met alle gebruikers.",
   "settings.bgTitle": "Werkt uit zichzelf",
   "settings.bgUnsupported": "Deze editie heeft dit niet",
   "settings.botConnected": "Bot verbonden",
