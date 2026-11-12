@@ -315,7 +315,7 @@ describe("clawbox-users", () => {
 
     it("reads the home from getent, and null for no account", async () => {
       getentAnswers({ passwd: ["alice"] });
-      expect(await lib.userHomeDir("alice")).toBe("/home/alice");
+      expect(await lib.userHomeDir("alice")).toBe("/home/alice"); // public-hygiene: allow the getent fixture's generic home
       expect(await lib.userHomeDir("bob")).toBeNull();
       expect(await lib.userHomeDir("../etc")).toBeNull();
     });

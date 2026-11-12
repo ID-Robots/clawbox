@@ -182,7 +182,7 @@ function ownerFence(scope: Extract<FilesScope, { kind: "owner" }>): FilesFence {
       // The browse root itself.
       if (resolved === base) return isProtectedFilePath(base) ? null : base;
       // Anything else must be INSIDE it (with the separator, otherwise sibling
-      // dirs like "/home/clawboxmalicious" would slip through).
+      // dirs like "<browse root>malicious" would slip through).
       if (!resolved.startsWith(base + path.sep)) return null;
       // The browse root is $HOME, so secret stores (.ssh, .openclaw, the data/
       // tokens) sit inside the sandbox — denied at this one chokepoint.
