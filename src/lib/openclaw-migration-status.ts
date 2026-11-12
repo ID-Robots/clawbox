@@ -101,6 +101,33 @@ export async function readOpenclawMigrationStatus(): Promise<OpenclawMigrationSt
 }
 
 /**
+ * Whether the record says doctor's own run COMPLETED for the core installed
+ * now: `state` `ok`, and `core`, `doctor.core` and the core's own manifest all
+ * naming the same version, with `doctor.verdict` `complete`. The update's
+ * gateway check starts a gateway its own quiesce stopped without running doctor
+ * again only on this answer, so anything short of that proof — no file, a torn
+ * one, a record for another core, a core that cannot be read — is `false`.
+ * Never throws. Read per call: the record changes at every gateway start.
+ */
+export async function doctorCompleteForInstalledCore(): Promise<boolean> {
+  try {
+    const raw: unknown = JSON.parse(await fs.readFile(openclawMigrationStatusPath(), "utf-8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const record = raw as { state?: unknown; core?: unknown; doctor?: unknown };
+    const doctor = (record.doctor ?? {}) as { core?: unknown; verdict?: unknown };
+    const core = typeof record.core === "string" ? record.core.trim() : "";
+    if (record.state !== "ok" || !core || doctor.verdict !== "complete") return false;
+    if (typeof doctor.core !== "string" || doctor.core.trim() !== core) return false;
+    // Loaded here, not at the top: openclaw-core-generation reaches
+    // `@/lib/openclaw-config`, which imports this module.
+    const { installedOpenclawCoreVersion } = await import("@/lib/openclaw-core-generation");
+    return (await installedOpenclawCoreVersion())?.trim() === core;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The status as one sentence for the update's own warnings list (English, like
  * every other updater warning): a gateway that answers after a core update is
  * not yet a working assistant, and "Completed" over agents that refuse every

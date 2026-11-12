@@ -146,7 +146,15 @@ import {
   downgradeAuthorizedFor,
   writeDowngradeAuthorization,
 } from "./harness-downgrade-backup";
-import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
+import {
+  describeOpenclawMigration,
+  doctorCompleteForInstalledCore,
+  doctorFixBudgetMs,
+  migrationBudgetMs,
+  openclawDatabaseBytes,
+  readOpenclawMigrationStatus,
+} from "./openclaw-migration-status";
+import { installedOpenclawCoreVersion } from "./openclaw-core-generation";
 import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
 import { redactCredentialShapes } from "./incident-sanitize";
 import {
@@ -4101,6 +4109,45 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
   });
 }
 
+/**
+ * Whether the verify after a quiesced root step can just START the gateway that
+ * step stopped, on the unit's own ExecStartPre (the same new pre-start), and
+ * keep the full repair below for a start that does not come up. Each reason
+ * for that repair, answered:
+ *
+ * - One writer for the SQLite store: nothing here writes. The unit's pre-start
+ *   runs before the gateway process exists, as at every boot.
+ * - A pre-start killed midway is unsafe: nothing is killed. Only a unit stopped
+ *   cleanly (`inactive`, no job queued — what the quiesce leaves) is started;
+ *   one in `start-pre`, up, failed, or that systemctl cannot describe goes to
+ *   the full repair, which lets a running pre-start finish before it stops it.
+ *   Read last, right before the start, so the gap after it is the shortest.
+ * - The pre-start's output feeds the plugin repair: taken only when the journal
+ *   names nothing that repair, or the legacy quarantine, exists for.
+ * - doctor --fix: still run whenever doctor's own record does not prove it
+ *   completed for the installed core (install.sh records it at the core
+ *   install), and whenever this start fails; the pre-start's own `config
+ *   validate` -> doctor arm covers a config the core refuses at this start.
+ * - No pre-start runs outside the unit, so none leaves a start record behind.
+ */
+async function gatewayStartsWithoutRepair(): Promise<boolean> {
+  if (!(await doctorCompleteForInstalledCore())) return false;
+  const journal = await readGatewayJournalTail();
+  const named = [
+    PLUGIN_PAYLOAD_VERIFICATION_RE,
+    PLUGIN_CAPABILITY_CONSENT_RE,
+    LEGACY_GATEWAY_BLOCKER_RE,
+    /SQLite transaction lock wait failed/i,
+  ].some((pattern) => pattern.test(journal));
+  if (named) return false;
+  const unit = await readGatewayStartState("clawbox-gateway.service");
+  if (unit?.activeState !== "inactive" || unit.job) return false;
+  const core = await installedOpenclawCoreVersion();
+  console.log("[Updater] gateway_verify: nothing to repair (no blocker in the gateway journal; doctor recorded "
+    + `complete for OpenClaw ${core ?? "(version unreadable)"}); starting the gateway on its own pre-start`);
+  return true;
+}
+
 /** Recover gateway readiness using the installed desktop or appliance contract. */
 async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
   if (hasX64DesktopIntegration(PROJECT_DIR)) {
@@ -4132,6 +4179,9 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
   }
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
+  // Read before the reset below: the gateway is down because an update root
+  // step of ours quiesced it, and no caller asked for a restart first.
+  const routine = !options.restartFirst && gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
   // Followed, not raced: a gateway systemd says is still starting is waited
   // for here rather than stopped for the repair below and started over, which
@@ -4139,6 +4189,21 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // past the old 30 s — failed, stopped, crash-looping, or a unit systemctl
   // cannot describe — goes on to the repair exactly as before.
   if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
+
+  if (routine && (await gatewayStartsWithoutRepair())) {
+    try {
+      await restartGatewayForRecovery();
+      if ((await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true)).kind === "listening") return;
+    } catch (err) {
+      // A start systemd finished with the unit down (a pre-start that refused)
+      // is a start that did not come up, not the step's verdict: the repair
+      // below exists for it, and its own restart's error is the one reported.
+      console.warn(`[Updater] gateway_verify: the gateway's own start failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // From the top: the journal is read again inside the quiesce below, now
+    // with this start's own lines in it.
+    console.log("[Updater] gateway_verify: the gateway did not come up on its own pre-start; running the full repair");
+  }
 
   // post_update and the standalone OpenClaw updater both run several config,
   // doctor and plugin commands. Do all remaining repair against a stopped,
