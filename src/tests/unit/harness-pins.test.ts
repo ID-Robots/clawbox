@@ -85,6 +85,25 @@ describe("the OpenClaw pin", () => {
     );
   });
 
+  it("names the version the catalogue's copy of `openclaw models list` was checked against", () => {
+    // src/lib/openclaw-models-list.ts sends a running gateway the request the
+    // pinned CLI sends (its fields, deadlines and required capability) and
+    // turns the answer into the CLI's own `--json` rows and stderr. Nothing at
+    // run time notices when a new core changes any of that: a renamed
+    // capability silently sends every enumeration back to the CLI, and a new
+    // row shape fails every socket answer. So a bump must re-check the copy.
+    // Read from the source, like the fallbacks above.
+    const checked = /^export const MODELS_LIST_CHECKED_AT = "([^"]*)";$/m.exec(read("src/lib/openclaw-models-list.ts"))?.[1];
+    expect(checked, "MODELS_LIST_CHECKED_AT in src/lib/openclaw-models-list.ts").toBeTypeOf("string");
+    expect(
+      checked,
+      `src/lib/openclaw-models-list.ts was checked against OpenClaw ${checked}, and the pin is ${OPENCLAW_PIN}. `
+      + `Re-check its models.list request (params, deadlines, capability), toCliModelRow, modelKey and the stderr `
+      + `sentences against ${OPENCLAW_PIN}'s \`openclaw models list\` (kb diff openclaw ${checked} ${OPENCLAW_PIN}), `
+      + "regenerate src/tests/fixtures/openclaw-models-list-<version>.ts from that version, then set MODELS_LIST_CHECKED_AT",
+    ).toBe(OPENCLAW_PIN);
+  });
+
   it("is not copied into the e2e image", () => {
     // The image models a box BEFORE the update and installs no core of its own,
     // so a version there could only be a comment — and a comment that names

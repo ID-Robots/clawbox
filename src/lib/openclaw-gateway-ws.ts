@@ -39,6 +39,17 @@ export class GatewayWsUnavailableError extends Error {
   }
 }
 
+/** The gateway took the call and did not answer it inside the call's own
+ *  deadline. NOT a gateway that is down — asking the CLI would ask the same
+ *  slow gateway again — so deliberately not a {@link GatewayWsUnavailableError}:
+ *  `callGatewayRpc` rethrows it rather than falling back. */
+export class GatewayWsCallTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GatewayWsCallTimeoutError";
+  }
+}
+
 /** The gateway answered the call with `ok: false`. */
 export class GatewayRpcError extends Error {
   readonly code: string;
@@ -70,6 +81,13 @@ interface Frame {
 
 export interface GatewayWsCallOptions {
   timeoutMs?: number;
+  /**
+   * Capabilities the hello must advertise (`features.capabilities`) before the
+   * request is sent — the check the pinned CLI makes for a request whose
+   * fields an older gateway would not understand. A gateway missing one is
+   * {@link GatewayWsUnavailableError}: the CLI path answers for it.
+   */
+  requiredCapabilities?: string[];
 }
 
 /**
@@ -186,6 +204,20 @@ export async function gatewayWsActiveSessions(
   return { mainSessionKey, sessionKeys: active.map((row) => row.key) };
 }
 
+/** The first required capability the hello does not advertise, trimmed as the
+ *  pinned CLI compares them; null when there is none (or none was asked for). */
+function missingCapability(hello: Record<string, unknown>, required: string[] | undefined): string | null {
+  const wanted = (required ?? []).map((entry) => entry.trim()).filter(Boolean);
+  if (wanted.length === 0) return null;
+  const features = hello.features as { capabilities?: unknown } | undefined;
+  const advertised = new Set(
+    (Array.isArray(features?.capabilities) ? features.capabilities : [])
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim()),
+  );
+  return wanted.find((entry) => !advertised.has(entry)) ?? null;
+}
+
 /**
  * The exchange itself: connect, handshake, then ONE request whose params may
  * depend on what the gateway said in its hello (`chat.send` needs the session
@@ -273,10 +305,15 @@ async function callAfterHello(
         }
         stage = "call";
         if (timer) clearTimeout(timer);
-        timer = setTimeout(() => finish(() => reject(new Error(`${method} timed out after ${timeoutMs}ms`))), timeoutMs);
+        timer = setTimeout(() => finish(() => reject(new GatewayWsCallTimeoutError(`${method} timed out after ${timeoutMs}ms`))), timeoutMs);
         const hello = frame.payload && typeof frame.payload === "object" && !Array.isArray(frame.payload)
           ? (frame.payload as Record<string, unknown>)
           : {};
+        const missing = missingCapability(hello, options.requiredCapabilities);
+        if (missing) {
+          finish(() => reject(new GatewayWsUnavailableError(`gateway does not advertise ${missing}`)));
+          return;
+        }
         let params: Record<string, unknown>;
         try {
           params = paramsFor(hello);
