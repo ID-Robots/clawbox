@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
 
 /**
  * /setup-api/llamacpp/models — the GGUF library.
@@ -47,11 +48,20 @@ vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: (...a: unknown[]
 const disabled = vi.fn<(req: Request) => Promise<Response>>(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
 vi.mock("@/app/setup-api/local-ai/route", () => ({ POST: (req: Request) => disabled(req) }));
 
-/** The `hf download` child. */
+// The capability drop: the real gate, on a host whose web server holds no
+// ambient capabilities unless a case sets `wrap` — so every other case here
+// pins that such a host spawns exactly as before.
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", async (importOriginal) =>
+  (await import("@/tests/helpers/capability-drop")).realGate(await importOriginal(), drop));
+
+/** The `hf download` child, and what each spawn was asked: (bin, args, options). */
 const child = { code: 0, stderr: "", writes: null as string | null, bytes: 32 };
+const spawned: unknown[][] = [];
 vi.mock("child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("child_process")>()),
-  spawn: () => {
+  spawn: (...call: unknown[]) => {
+    spawned.push(call);
     const handlers: Record<string, ((...a: unknown[]) => void)[]> = {};
     const errHandlers: ((chunk: string) => void)[] = [];
     const fake = {
@@ -110,6 +120,9 @@ beforeEach(() => {
   child.stderr = "";
   child.writes = "other.gguf";
   child.bytes = 32;
+  spawned.length = 0;
+  drop.wrap = false;
+  drop.calls.length = 0;
   hubTree.status = 200;
   hubTree.entries = [{ path: "other.gguf", size: 135, lfs: { size: 4 * 1024 * 1024 * 1024 } }];
   vi.stubGlobal("fetch", vi.fn(async () => ({
@@ -121,6 +134,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   fs.rmSync(modelDir, { recursive: true, force: true });
 });
 
@@ -274,7 +288,15 @@ describe("POST /setup-api/llamacpp/models", () => {
     expect((await res.json()).code).toBe("already_here");
   });
 
+  /** The download's options as beta passes them. */
+  const todaysOptions = () => ({
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+    env: { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1" },
+  });
+
   it("streams the download and ends with the file's real size", async () => {
+    stubWebServerSettings();
     child.bytes = 4096;
     const { POST } = await load();
     const lines = await readStream(await POST(post({ repo: "owner/name", file: "other.gguf" })));
@@ -282,6 +304,37 @@ describe("POST /setup-api/llamacpp/models", () => {
     expect(lines[0]).toMatchObject({ total: 4 * 1024 * 1024 * 1024 });
     expect(lines.at(-1)).toMatchObject({ success: true, file: "other.gguf", bytes: 4096 });
     expect(fs.existsSync(path.join(modelDir, "other.gguf"))).toBe(true);
+    // A host without ambient capabilities: the whole call as beta makes it,
+    // the web server's own settings still in the environment.
+    expect(spawned).toStrictEqual([
+      [spec.hfBin, ["download", "owner/name", "other.gguf", "--local-dir", modelDir], todaysOptions()],
+    ]);
+  });
+
+  it("starts the download without the web server's capabilities or its own settings on a host that holds them", async () => {
+    drop.wrap = true;
+    stubWebServerSettings();
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ repo: "owner/name", file: "other.gguf" })));
+
+    expect(lines.at(-1)).toMatchObject({ success: true, file: "other.gguf" });
+    expect(spawned).toHaveLength(1);
+    const [bin, args, opts] = spawned[0] as [string, string[], { env: Record<string, string | undefined> }];
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(args).toEqual([
+      "--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--",
+      spec.hfBin, "download", "owner/name", "other.gguf", "--local-dir", modelDir,
+    ]);
+    // The child's environment holds none of the web server's own settings, and
+    // everything else as today's. Its own process group still (detached), so
+    // the timeout's group kill ends the transfer.
+    const today = todaysOptions();
+    expect(Object.keys(opts.env).filter((key) => WEB_SERVER_SETTINGS.includes(key))).toEqual([]);
+    expect(opts).toStrictEqual({ ...today, env: withoutThem(today.env) });
+    const [askedBin, , askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
+    expect(askedBin).toBe(spec.hfBin);
+    expect(askedOpts.label).toBe("the model download");
+    expect(askedOpts.env).toStrictEqual(today.env);
   });
 
   it("leaves nothing half-written behind when the download fails", async () => {

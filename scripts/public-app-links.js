@@ -56,6 +56,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { APP_ID_RE, isProxyablePort, readJsonSync, resolveRegisteredApp } = require("./app-port.js");
+const { withCapabilityDrop } = require("./capability-drop.js");
 
 const LINK_ID_RE = /^[a-f0-9]{16}$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -902,7 +903,17 @@ function startPublicAppLinks(options = {}) {
   const bin = options.cloudflaredBin || process.env.CLOUDFLARED_BIN || "/usr/local/bin/cloudflared";
   const pollMs = options.pollMs || 1000;
   const goneGraceMs = options.goneGraceMs ?? GONE_GRACE_MS;
-  const spawnTunnel = options.spawnTunnel || ((port, configFile) => spawn(bin, ["tunnel", "--no-autoupdate", "--config", configFile, "--url", `http://127.0.0.1:${port}`], { stdio: ["ignore", "pipe", "pipe"] }));
+  const spawnImpl = options.spawnImpl || spawn;
+  const capabilityDrop = options.capabilityDrop || withCapabilityDrop;
+  // Without the web server's network capabilities where it holds them, as
+  // clawbox-tunnel.service already runs cloudflared, and, on such a start,
+  // without the web server's own settings. setpriv execs cloudflared in place,
+  // so child.kill below and the URL on its output are cloudflared's. Only a
+  // dropped start brings an env; any other spawns as before.
+  const spawnTunnel = options.spawnTunnel || ((port, configFile) => {
+    const launch = capabilityDrop(bin, ["tunnel", "--no-autoupdate", "--config", configFile, "--url", `http://127.0.0.1:${port}`], { label: "a public app link's tunnel" });
+    return spawnImpl(launch.bin, launch.argv, { stdio: ["ignore", "pipe", "pipe"], ...(launch.env ? { env: launch.env } : {}) });
+  });
   const paths = linkPaths(root);
   const entries = new Map();
   let stopped = false;

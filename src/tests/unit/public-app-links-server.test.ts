@@ -6,7 +6,8 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { EventEmitter } from "events";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
 
 /**
  * TASK-1478 — the serving half of public app links, attacked for real: the
@@ -18,7 +19,7 @@ const require_ = createRequire(import.meta.url);
 const links = require_("../../../scripts/public-app-links.js") as {
   COOKIE_NAME: string;
   BAD_TOKEN_PER_VISITOR: number;
-  linkPaths: (root: string) => { dir: string; links: string; runtime: string; audit: string };
+  linkPaths: (root: string) => { dir: string; links: string; runtime: string; audit: string; emptyConfig: string };
   validLink: (raw: unknown) => unknown;
   canonicalTarget: (url: string) => { path: string; search: string } | null;
   methodAllowed: (link: { apiAllow: string[]; apiReadOnly?: boolean }, method: string, rest: string) => boolean;
@@ -483,5 +484,103 @@ describe("the supervisor", () => {
     } finally {
       sup.stop();
     }
+  });
+
+  /**
+   * The default tunnel spawn, with nothing below the spawn faked but the spawn
+   * itself (`spawnImpl`) and, where a case says so, the capability drop. The
+   * binary is a path that does not exist, so a spawn that ignored `spawnImpl`
+   * would fail for real and the recorder would see nothing.
+   */
+  type Drop = (
+    bin: string,
+    argv: string[],
+    opts: { label: string },
+  ) => { bin: string; argv: string[]; env?: Record<string, string | undefined>; dropped: boolean };
+  async function defaultSpawn(capabilityDrop: Drop) {
+    const cloudflaredBin = path.join(root, "no-such-dir", "cloudflared");
+    const calls: { bin: string; argv: string[]; opts: unknown }[] = [];
+    const tunnels: FakeTunnel[] = [];
+    const sup = links.startPublicAppLinks({
+      root,
+      pollMs: 20,
+      cloudflaredBin,
+      resolveApp: () => ({ id: APP, port: appPort, strip: false }),
+      spawnImpl: (bin: string, argv: string[], opts: unknown) => {
+        calls.push({ bin, argv, opts });
+        const t = new FakeTunnel();
+        tunnels.push(t);
+        return t;
+      },
+      capabilityDrop,
+    });
+    try {
+      await until(() => calls.length === 1);
+      const port = sup.entries.get(LINK_ID)?.port;
+      const today = ["tunnel", "--no-autoupdate", "--config", links.linkPaths(root).emptyConfig, "--url", `http://127.0.0.1:${port}`];
+      tunnels[0].stdout.emit("data", Buffer.from("https://quiet-lake-test-words.trycloudflare.com"));
+      await until(() => sup.entries.get(LINK_ID)?.state === "live");
+      return { cloudflaredBin, call: calls[0], today };
+    } finally {
+      sup.stop();
+    }
+  }
+  const DROP = ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"];
+  const OPTIONS = { stdio: ["ignore", "pipe", "pipe"] };
+  // Loaded when a case runs, so the cases that do not need it never depend on it.
+  const realDrop = () => require_("../../../scripts/capability-drop.js") as {
+    withCapabilityDrop: (bin: string, argv: string[], opts: { label: string; probes?: unknown }) => ReturnType<Drop>;
+  };
+  const probesFor = (capAmb: string, executables: string[]) => ({
+    readStatus: () => `CapAmb:\t${capAmb}\n`,
+    isExecutable: (p: string) => executables.includes(p),
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("starts each link's cloudflared through the capability drop, with the environment it hands back", async () => {
+    const asked: unknown[] = [];
+    const { cloudflaredBin, call, today } = await defaultSpawn((bin, argv, opts) => {
+      asked.push(opts.label);
+      return { bin: "/usr/bin/setpriv", argv: [...DROP, `/resolved/${bin}`, ...argv], env: { FROM_THE_GATE: "1" }, dropped: true };
+    });
+    expect(call).toStrictEqual({
+      bin: "/usr/bin/setpriv",
+      argv: [...DROP, `/resolved/${cloudflaredBin}`, ...today],
+      opts: { ...OPTIONS, env: { FROM_THE_GATE: "1" } },
+    });
+    expect(asked).toEqual(["a public app link's tunnel"]);
+  });
+
+  it("drops the capabilities and the web server's own settings with the real gate on a host that holds them", async () => {
+    stubWebServerSettings();
+    let bin = "";
+    const { cloudflaredBin, call, today } = await defaultSpawn((b, a, o) => {
+      bin = b;
+      return realDrop().withCapabilityDrop(b, a, { ...o, probes: probesFor("0000000000003400", ["/usr/bin/setpriv", b]) });
+    });
+    expect(bin).toBe(cloudflaredBin);
+    // The environment the child gets: its own when the spawn passes one, the web server's otherwise.
+    const childEnv = (call.opts as { env?: Record<string, string | undefined> }).env ?? process.env;
+    expect(Object.keys(childEnv).filter((key) => WEB_SERVER_SETTINGS.includes(key))).toEqual([]);
+    expect(call).toStrictEqual({
+      bin: "/usr/bin/setpriv",
+      argv: [...DROP, cloudflaredBin, ...today],
+      opts: { ...OPTIONS, env: withoutThem(process.env) },
+    });
+    // The web server keeps its own.
+    expect(WEB_SERVER_SETTINGS.filter((key) => process.env[key] === undefined)).toEqual([]);
+  });
+
+  it.each([
+    ["a pass-through drop", ((b, a) => ({ bin: b, argv: a, dropped: false })) as Drop],
+    ["the real gate on a host that holds none", ((b, a, o) =>
+      realDrop().withCapabilityDrop(b, a, { ...o, probes: probesFor("0000000000000000", ["/usr/bin/setpriv", b]) })) as Drop],
+  ])("spawns exactly what it always did with %s", async (_name, capabilityDrop) => {
+    stubWebServerSettings();
+    const { cloudflaredBin, call, today } = await defaultSpawn(capabilityDrop);
+    // No env of its own: cloudflared inherits the web server's, settings and all.
+    expect(call).toStrictEqual({ bin: cloudflaredBin, argv: today, opts: OPTIONS });
   });
 });

@@ -7,6 +7,7 @@ import {
   type StartBackgroundTaskSpec,
 } from "@/lib/background-tasks";
 import { LLAMACPP_INSTALL_KIND } from "@/lib/background-task-kinds";
+import { withCapabilityDrop } from "@/lib/capability-drop";
 import { getActiveHarness } from "@/lib/harness";
 import { LOCAL_AI_SYSTEM_LANE, llamacppInstallNeeds } from "@/lib/local-ai-install-queue";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
@@ -121,7 +122,13 @@ async function repairLlamaCppRuntime(task: BackgroundTaskContext): Promise<{ ok:
 }
 
 function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: string) {
-  return spawn(
+  const env = { ...process.env, HOME: CLAWBOX_HOME_DIR };
+  // Without the web server's network capabilities where it holds them and, on
+  // such a start, without the web server's own settings (launch.env), as the
+  // on-demand start does (instrumentation-node.ts): setpriv execs the launcher
+  // in place, so the pid written below is still the one that ends as
+  // llama-server.
+  const launch = withCapabilityDrop(
     "bash",
     [
       spec.scriptPath,
@@ -136,13 +143,14 @@ function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: st
       spec.hfBinPath,
       `${spec.contextWindow}`,
     ],
-    {
-      cwd: CLAWBOX_HOME_DIR,
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env, HOME: CLAWBOX_HOME_DIR },
-    }
+    { label: "the local chat server", env },
   );
+  return spawn(launch.bin, launch.argv, {
+    cwd: CLAWBOX_HOME_DIR,
+    detached: true,
+    stdio: "ignore",
+    env: launch.env,
+  });
 }
 
 // How long the stream follows a gateway restart the configure route answered

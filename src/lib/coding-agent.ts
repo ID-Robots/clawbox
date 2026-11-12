@@ -69,6 +69,7 @@ import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
+import { CAPABILITY_DROP_ARGS, CAPABILITY_DROP_COMMAND } from "@/lib/capability-drop";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
@@ -1184,15 +1185,11 @@ const SCOPE_LEFTOVER_CHECK_MS = 1_500;
  * ambient and inheritable capability set. See the header: the web server holds
  * CAP_NET_ADMIN and CAP_NET_RAW ambiently and every child would otherwise keep
  * them. `--no-new-privs` is here for the same reason — a run has no business
- * regaining through a setuid binary what these flags just took away.
+ * regaining through a setuid binary what these flags just took away. The two
+ * live in scripts/capability-drop.js, shared with the web server's own helper
+ * programs; re-exported here for this module's callers.
  */
-export const CAPABILITY_DROP_COMMAND = "setpriv";
-export const CAPABILITY_DROP_ARGS: readonly string[] = [
-  "--ambient-caps=-all",
-  "--inh-caps=-all",
-  "--no-new-privs",
-  "--",
-];
+export { CAPABILITY_DROP_COMMAND, CAPABILITY_DROP_ARGS };
 
 /** Claude Code tools the run may use at all (`--tools`). No WebFetch/WebSearch:
  *  the appliance is offline-first and the task is local code. The sub-agent

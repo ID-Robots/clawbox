@@ -567,6 +567,13 @@ describe("what every run now gets, permanently", () => {
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
     expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
   });
+
+  it("drops a run's capabilities with the same arguments as the web server's helper programs", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const shared = await import("@/lib/capability-drop");
+    expect(lib.CAPABILITY_DROP_ARGS).toEqual(shared.CAPABILITY_DROP_ARGS);
+    expect(lib.CAPABILITY_DROP_COMMAND).toEqual(shared.CAPABILITY_DROP_COMMAND);
+  });
 });
 
 describe("working in a folder the owner already has", () => {

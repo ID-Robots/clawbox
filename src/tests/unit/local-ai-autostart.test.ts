@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
+import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
 
 /**
  * The defect these cover: on the Hermes SKU the on-demand start gate was
@@ -18,6 +19,21 @@ const spawnMock = vi.fn();
 vi.mock("child_process", () => ({
   spawn: (...args: unknown[]) => spawnMock(...args),
 }));
+
+// The capability drop: the real gate, on a host whose web server holds no
+// ambient capabilities unless a case sets `wrap` — so every other assertion
+// here pins that such a host spawns exactly as before.
+const DROP = ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"];
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", async (importOriginal) =>
+  (await import("@/tests/helpers/capability-drop")).realGate(await importOriginal(), drop));
+beforeEach(() => {
+  drop.wrap = false;
+  drop.calls.length = 0;
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const readConfigMock = vi.fn();
 vi.mock("@/lib/openclaw-config", () => ({
@@ -162,6 +178,83 @@ describe("llama.cpp auto-start gate", () => {
     // The window reaches the launcher script as its last argument, --ctx-size.
     const [, argv] = spawnMock.mock.calls[0] as [string, string[]];
     expect(argv.at(-1)).toBe("65536");
+  });
+
+  it("spawns exactly what it always did on a host whose web server holds no ambient capabilities", async () => {
+    stubWebServerSettings();
+    readConfigMock.mockResolvedValue({});
+    getAllMock.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    expect(await (await loadModule()).startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    // The whole call as beta makes it: bin, argv and options, the web server's
+    // own settings still in the environment.
+    const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+    expect(spawnMock.mock.calls).toStrictEqual([[
+      "bash",
+      [
+        LAUNCH_SPEC.scriptPath,
+        LAUNCH_SPEC.modelDir,
+        LAUNCH_SPEC.hfRepo,
+        LAUNCH_SPEC.hfFile,
+        "gemma4-e2b-it-q4_0",
+        LAUNCH_SPEC.host,
+        `${LAUNCH_SPEC.port}`,
+        LAUNCH_SPEC.logPath,
+        LAUNCH_SPEC.binPath,
+        LAUNCH_SPEC.hfBinPath,
+        `${LAUNCH_SPEC.contextWindow}`,
+      ],
+      {
+        cwd: home,
+        detached: false,
+        stdio: "ignore",
+        env: { ...process.env, HOME: home, LLAMACPP_PID_PATH: LAUNCH_SPEC.pidPath },
+      },
+    ]]);
+  });
+
+  it("starts the server without the web server's capabilities or its own settings on a host that holds them", async () => {
+    stubWebServerSettings();
+    vi.stubEnv("PATH", "/usr/bin:/bin");
+    readConfigMock.mockResolvedValue({});
+    getAllMock.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    // The same start on a host without them, for its options.
+    expect(await (await loadModule()).startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+    type Opts = { env: Record<string, string | undefined> };
+    const [plainBin, plainArgv, plainOpts] = spawnMock.mock.calls[0] as [string, string[], Opts];
+    expect(plainBin).toBe("bash");
+
+    drop.wrap = true;
+    drop.calls.length = 0;
+    spawnMock.mockClear();
+    expect(await (await loadModule()).startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    const [bin, argv, opts] = spawnMock.mock.calls[0] as [string, string[], Opts];
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(argv).toEqual([...DROP, "/usr/bin/bash", ...plainArgv]);
+    expect(argv[5]).toBe(LAUNCH_SPEC.scriptPath);
+    // The child's environment holds none of the web server's own settings...
+    expect(Object.keys(opts.env).filter((key) => WEB_SERVER_SETTINGS.includes(key))).toEqual([]);
+    // ...and everything else as the unwrapped start has it, as do cwd,
+    // detached false and stdio.
+    expect(opts).toStrictEqual({ ...plainOpts, env: withoutThem(plainOpts.env) });
+    expect(drop.calls).toHaveLength(1);
+    const [askedBin, askedArgv, askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
+    expect(askedBin).toBe("bash");
+    expect(askedArgv).toEqual(plainArgv);
+    expect(askedOpts.label).toBe("the local chat server");
+    // The program is looked up on the unwrapped start's PATH.
+    expect(askedOpts.env).toStrictEqual(plainOpts.env);
   });
 
   it("auto-starts from the config store when OpenClaw has no primary (boot path, no alias)", async () => {
