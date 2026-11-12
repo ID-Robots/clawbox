@@ -108,6 +108,21 @@ log() { logger -t "$LOG_TAG" -- "$*"; }
 # on, which needs no second source of truth about the edition.
 UNIT="${CLAWBOX_GATEWAY_UNIT:-clawbox-gateway.service}"
 
+# The answer to "is there a gateway here systemd would act on", the monotonic
+# clock and the number check are shared with the liveness watchdog
+# (gateway-watchdog.sh, TASK-2490), which has to ask the same questions and must
+# not answer them differently. The root-owned copy beside this one: install.sh
+# publishes it BEFORE this script, and refuses to publish this script without
+# it. A guard that cannot be read is said, and the event stood down on — the
+# same rule as a systemctl that does not answer below; the next network event
+# starts a fresh wait.
+GUARD="${CLAWBOX_GATEWAY_GUARD:-$(dirname "${BASH_SOURCE[0]}")/gateway-unit-guard.sh}"
+# shellcheck source=scripts/gateway-unit-guard.sh
+if ! { [ -f "$GUARD" ] && . "$GUARD"; }; then
+  log "ERROR: $GUARD missing or unreadable — standing down for: $REASON"
+  exit 0
+fi
+
 # `full` is NetworkManager's own verdict and the only authoritative yes. Every
 # other value is NOT-YET-DECIDED rather than a no: connectivity checking is
 # ENABLED on the Ubuntu/JetPack base this ships on
@@ -158,13 +173,8 @@ public_route_answers() {
 }
 
 # A budget that is not a number must not become an unset `deadline` and a
-# `set -u` death three lines later, with only "Deferring…" in the journal.
-positive_int() {
-  case "${1:-}" in
-    ''|*[!0-9]*) printf '%s' "$2" ;;
-    *) [ "$1" -gt 0 ] 2>/dev/null && printf '%s' "$1" || printf '%s' "$2" ;;
-  esac
-}
+# `set -u` death three lines later, with only "Deferring…" in the journal:
+# `positive_int` comes from the guard sourced above.
 
 # How long a recovering box is given before we stop waiting. Long enough for
 # WiFi association plus DHCP on a slow link; short enough that a genuinely
@@ -225,12 +235,8 @@ COALESCE_WINDOW="$(positive_int "${CLAWBOX_RESTART_COALESCE:-}" 60)"
 # window collapses three restarts to two instead of to one. /run is cleared on
 # boot, so the stamp and this counter share a lifetime by construction.
 # Empty (no /proc/uptime) means there is no monotonic clock to compare against.
-monotonic_seconds() {
-  local up=""
-  read -r up _ < /proc/uptime 2>/dev/null || return 1
-  case "$up" in ''|*[!0-9.]*) return 1 ;; esac
-  printf '%s' "${up%%.*}"
-}
+# `monotonic_seconds` comes from the guard sourced above, which the liveness
+# watchdog reads its windows off as well.
 
 # The wait's own clock. A bound on ONE wait is sound on either clock, so this
 # falls back rather than refusing to wait; both ends of every comparison come
@@ -438,9 +444,12 @@ dip_was_not_a_reconnection() {
 # installed. Anything but `loaded` means there is nothing here to restart — not
 # an error, and not worth a journal line per network event. An EMPTY answer is a
 # different thing again and is handled separately below.
+#
+# The question itself is gateway_unit_load_state, in the shared guard.
 if [ "${CLAWBOX_SKIP_UNIT_CHECK:-0}" != "1" ]; then
-  unit_load_state="$(systemctl show -p LoadState --value "$UNIT" 2>/dev/null)"
-  if [ -z "$unit_load_state" ]; then
+  unit_load_rc=0
+  gateway_unit_load_state "$UNIT" >/dev/null || unit_load_rc=$?
+  if [ "$unit_load_rc" -eq 2 ]; then
     # systemctl did not answer at all — a `daemon-reexec` (install.sh and the
     # updater both trigger one), a bus hiccup, or no systemd here. That is NOT
     # evidence that this edition has no gateway, and exiting silently on it
@@ -453,7 +462,7 @@ if [ "${CLAWBOX_SKIP_UNIT_CHECK:-0}" != "1" ]; then
     exit 0
   fi
   # `loaded` is the only state describing a unit systemd would act on.
-  [ "$unit_load_state" = "loaded" ] || exit 0
+  [ "$unit_load_rc" -eq 0 ] || exit 0
 fi
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true

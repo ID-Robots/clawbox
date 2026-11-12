@@ -1493,6 +1493,8 @@ EXPECTED_INSTALLED_SERVICES=(
 # registered in one of the two lists above.
 EDITION_SCOPED_UNITS=(
   clawbox-gateway.service                 # openclaw + dual (removed on hermes)
+  clawbox-gateway-watchdog.service        # openclaw + dual (removed on hermes)
+  clawbox-gateway-watchdog.timer          # openclaw + dual (removed on hermes)
   clawbox-hermes-dashboard.service        # hermes + dual
   clawbox-hermes-dashboard-proxy.service  # hermes + dual
 )
@@ -1515,6 +1517,13 @@ if ! has_openclaw_harness; then
     [ "$_s" = "clawbox-gateway.service" ] || _active_svcs+=("$_s")
   done
   EXPECTED_ACTIVE_SERVICES=("${_active_svcs[@]}")
+fi
+# The gateway's liveness watchdog (TASK-2490) goes wherever the gateway does,
+# and nowhere else: on Hermes it would probe a masked unit every minute for
+# nothing. The timer must be up; the service is its oneshot.
+if has_openclaw_harness; then
+  EXPECTED_ACTIVE_SERVICES+=(clawbox-gateway-watchdog.timer)
+  EXPECTED_INSTALLED_SERVICES+=(clawbox-gateway-watchdog.service)
 fi
 
 # Units belonging to a harness THIS edition does not run.
@@ -1552,6 +1561,8 @@ if ! has_openclaw_harness; then
   # `enabled but inactive` case. A masked gateway matches neither, so a
   # correctly provisioned Hermes box reports nothing twice.
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
+  # And its liveness watchdog (TASK-2490), which goes wherever it goes.
+  FOREIGN_EDITION_UNITS+=(clawbox-gateway-watchdog.timer clawbox-gateway-watchdog.service)
 fi
 # The same registry for the clawbox USER's manager. `hermes gateway install`
 # (no --system) writes hermes-gateway.service under ~/.config/systemd/user —
@@ -6075,6 +6086,97 @@ step_embed_model() {
 # in ALL_SERVICES on hermes, and step_gateway_setup early-returns.
 #
 # Idempotent, and never fatal when the unit was never installed (fresh flash).
+# The OpenClaw gateway's liveness watchdog (TASK-2490): a root oneshot run once
+# a minute by clawbox-gateway-watchdog.timer, which restarts a gateway whose
+# process is alive but has stopped answering HTTP — the outage `Restart=always`
+# cannot see, because nothing exits. scripts/gateway-watchdog.sh says when it
+# acts and when it stands down.
+#
+# It belongs exactly where the gateway does, so it has two halves and every
+# caller is idempotent:
+#
+#   install_gateway_watchdog  step_systemd_services (fresh install and every
+#                             in-app update, through post_update) and
+#                             step_gateway_setup (the edition choice and the
+#                             harness swap TO OpenClaw run that step, not this
+#                             one's caller)
+#   remove_gateway_watchdog   step_edition_gateway_state's Hermes branch (the
+#                             swap and choice TO Hermes, and every Hermes
+#                             update), and step_systemd_services on any box
+#                             without an OpenClaw harness
+#
+# Both check their own steps and return non-zero on a failure, rather than
+# leaning on errexit: every caller runs them in a condition context.
+GATEWAY_WATCHDOG_UNITS=(clawbox-gateway-watchdog.service clawbox-gateway-watchdog.timer)
+
+install_gateway_watchdog() {
+  local unit failed=0
+  # The unit ExecStarts the ROOT-OWNED copy, and that copy sources the guard
+  # from beside itself: both land before the unit that points at them.
+  # install_root_libexec does the same on the systemd_services path; repeating
+  # it here is what makes gateway_setup alone enough.
+  if ! { install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+         && [ -f "$SRC_DIR/scripts/gateway-unit-guard.sh" ] \
+         && [ -f "$SRC_DIR/scripts/gateway-watchdog.sh" ] \
+         && install_root_file "$SRC_DIR/scripts/gateway-unit-guard.sh" "$ROOT_LIBEXEC_DIR/gateway-unit-guard.sh" 0644 \
+         && install_root_file "$SRC_DIR/scripts/gateway-watchdog.sh" "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh"; }; then
+    echo "  Warning: could not install the gateway watchdog's root-owned script; leaving its units as they were" >&2
+    return 1
+  fi
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ ! -f "$SRC_DIR/config/$unit" ] \
+       || ! install -o root -g root -m 0644 "$SRC_DIR/config/$unit" "/etc/systemd/system/$unit"; then
+      echo "  Warning: could not install $unit" >&2
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ] || return 1
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if ! systemctl enable --now clawbox-gateway-watchdog.timer >/dev/null 2>&1; then
+    echo "  Warning: could not enable clawbox-gateway-watchdog.timer" >&2
+    return 1
+  fi
+  echo "  Gateway liveness watchdog installed (clawbox-gateway-watchdog.timer)"
+}
+
+remove_gateway_watchdog() {
+  local unit present=0
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]; then
+      present=1
+    fi
+  done
+  [ -e "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" ] && present=1
+  # Nothing to do is the common case — every Hermes update after the first —
+  # and it says nothing.
+  [ "$present" -eq 1 ] || return 0
+  systemctl disable --now clawbox-gateway-watchdog.timer >/dev/null 2>&1 || true
+  systemctl stop clawbox-gateway-watchdog.service >/dev/null 2>&1 || true
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    rm -f "/etc/systemd/system/$unit"
+  done
+  # The guard stays: the NetworkManager waiter sources it on every edition.
+  rm -f "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" /run/clawbox/gateway-watchdog.state \
+    /run/clawbox/gateway-watchdog.restarts
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed clawbox-gateway-watchdog.service clawbox-gateway-watchdog.timer >/dev/null 2>&1 || true
+  # Every piece is checked, not just the timer: a unit or a script left behind is
+  # a partial removal, and saying "removed" over it would leave nothing that
+  # points at the repair.
+  local left=()
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]; then
+      left+=("/etc/systemd/system/$unit")
+    fi
+  done
+  [ -e "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" ] && left+=("$ROOT_LIBEXEC_DIR/gateway-watchdog.sh")
+  if [ "${#left[@]}" -gt 0 ]; then
+    echo "  Warning: the gateway watchdog was only partly removed; still present: ${left[*]}" >&2
+    return 1
+  fi
+  echo "  Gateway liveness watchdog removed (this edition runs no OpenClaw gateway)"
+}
+
 step_edition_gateway_state() {
   local unit="clawbox-gateway.service"
   if is_hermes_edition; then
@@ -6091,6 +6193,10 @@ step_edition_gateway_state() {
       active|activating|reloading) systemctl stop "$unit" >/dev/null 2>&1 || true ;;
     esac
     echo "  [hermes edition] clawbox-gateway.service stopped, disabled and masked"
+    # Its liveness watchdog goes with it (TASK-2490). It would only stand down
+    # on the masked unit every minute, but a Hermes box carries nothing of the
+    # OpenClaw gateway's.
+    remove_gateway_watchdog || echo "  Warning: the gateway watchdog is still installed on this Hermes box" >&2
   else
     # Re-installing a previously-Hermes box as openclaw/dual: the mask is a
     # symlink to /dev/null at the exact path step_systemd_services cp's the unit
@@ -10298,11 +10404,27 @@ install_root_libexec() {
     echo "  Error: WiFi helper publication failed; preserving dependent entrypoints" >&2
     failed=1
   fi
+  # The same rule for the gateway's shared guard (TASK-2490): the NetworkManager
+  # waiter and the liveness watchdog both source gateway-unit-guard.sh from
+  # beside themselves, so it lands first and neither is replaced without it.
+  # A tree without the guard (one that predates it) publishes neither consumer
+  # and is not a failure, like any script the loop below does not find; a copy
+  # that does not land is.
+  local gateway_guard_ready=0
+  if [ -f "$SRC_DIR/scripts/gateway-unit-guard.sh" ]; then
+    if install_root_file "$SRC_DIR/scripts/gateway-unit-guard.sh" "$ROOT_LIBEXEC_DIR/gateway-unit-guard.sh" 0644; then
+      gateway_guard_ready=1
+    else
+      echo "  Error: gateway guard publication failed; preserving the waiter and watchdog already installed" >&2
+      failed=1
+    fi
+  fi
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             clawbox-resource-limits.sh gateway-restart-when-online.sh gateway-watchdog.sh \
              wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     case "$src" in
       wifi-failover.sh|start-ap.sh|stop-ap.sh) [ "$wifi_helper_ready" -eq 1 ] || continue ;;
+      gateway-restart-when-online.sh|gateway-watchdog.sh) [ "$gateway_guard_ready" -eq 1 ] || continue ;;
     esac
     if [ -f "$SRC_DIR/scripts/$src" ]; then
       install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
@@ -10700,6 +10822,7 @@ step_systemd_services() {
     # Timer-driven one-shot (no [Install]); enabled via its .timer below.
     [[ "$svc" == "clawbox-ap-watchdog.service" ]] && continue
     [[ "$svc" == "clawbox-codex-auth-sync.service" ]] && continue
+    [[ "$svc" == "clawbox-gateway-watchdog.service" ]] && continue
     systemctl enable "$svc"
   done
   # Start the heartbeat timer immediately so the portal sees the device
@@ -10708,6 +10831,14 @@ step_systemd_services() {
   # Start the AP watchdog immediately so a dropped setup hotspot self-heals
   # without waiting for a reboot.
   systemctl enable --now clawbox-ap-watchdog.timer
+  # The gateway's liveness watchdog, on the editions that run the gateway, and
+  # taken off the ones that do not (TASK-2490). Both halves are idempotent: this
+  # is how every in-app update installs or refreshes it.
+  if has_openclaw_harness; then
+    install_gateway_watchdog || echo "  Warning: the gateway liveness watchdog was not installed" >&2
+  else
+    remove_gateway_watchdog || echo "  Warning: the gateway liveness watchdog could not be removed" >&2
+  fi
   # The sync unit runs under ProtectSystem=strict and can only write paths named
   # in ReadWritePaths. ~/.codex doesn't exist until the first ChatGPT login, so
   # create it up front — otherwise the very first mirror write (the one that
@@ -10883,12 +11014,20 @@ step_nm_dispatcher() {
   # it is meant to end. A new waiter still takes an old dispatcher's bare
   # `<reason>`, so the pairing a failed dispatcher copy leaves behind is safe.
   local WAITER_SRC="$SRC_DIR/scripts/gateway-restart-when-online.sh"
+  local GUARD_SRC="$SRC_DIR/scripts/gateway-unit-guard.sh"
   if [ -f "$WAITER_SRC" ]; then
     # install_root_file returns 1 on both its failure paths and leaves the
     # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
     # STALE one — worse, and invisible until a network event logs the
     # dispatcher's own "missing or not executable" line.
+    #
+    # The waiter sources gateway-unit-guard.sh from beside itself (shared with
+    # the liveness watchdog, TASK-2490), so the guard lands FIRST and a new
+    # waiter is never published without it: a waiter that cannot read its guard
+    # stands down on every network event.
     if install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+       && [ -f "$GUARD_SRC" ] \
+       && install_root_file "$GUARD_SRC" "$ROOT_LIBEXEC_DIR/gateway-unit-guard.sh" 0644 \
        && install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"; then
       echo "  Deferred gateway-restart helper installed"
     else
@@ -13238,6 +13377,10 @@ CONF
 
   systemctl daemon-reload
   systemctl enable clawbox-gateway.service
+  # The watchdog with the gateway (TASK-2490): an edition choice or a harness
+  # swap to OpenClaw reaches the gateway through this step and not through
+  # step_systemd_services. Not fatal — a box without it is a box as before.
+  install_gateway_watchdog || echo "  Warning: the gateway liveness watchdog was not installed" >&2
   # Clear any tripped start-limit (breaker) state so the restart isn't refused
   # on a box whose gateway had been crash-looping (issue #284 breaker).
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true

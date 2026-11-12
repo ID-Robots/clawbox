@@ -372,7 +372,12 @@ describe("install_root_libexec: a copy that did not land is never a success", ()
     for (const f of ["clawbox-root-manifest.sh", "clawbox-run-root-step.sh", "clawbox-root-step.sh"]) {
       fs.writeFileSync(path.join(project, "config", f), "#!/bin/bash\n");
     }
-    for (const f of ["wifi-radio.sh", "wifi-failover.sh", "start-ap.sh", "stop-ap.sh", "ap-watchdog.sh", "ensure-vnc-on-first-boot.sh"]) {
+    for (const f of [
+      "wifi-radio.sh", "wifi-failover.sh", "start-ap.sh", "stop-ap.sh", "ap-watchdog.sh", "ensure-vnc-on-first-boot.sh",
+      // The gateway guard the waiter and the liveness watchdog share (TASK-2490):
+      // published first, like wifi-radio.sh, and a failure when it cannot be.
+      "gateway-unit-guard.sh", "gateway-restart-when-online.sh", "gateway-watchdog.sh",
+    ]) {
       fs.writeFileSync(path.join(project, "scripts", f), "#!/bin/bash\n");
     }
     const script = [
