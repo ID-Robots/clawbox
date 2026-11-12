@@ -155,10 +155,26 @@ const call = async (method, p, body) => {
         try { shas = cp.execFileSync("git", ["-C", vault, "log", "--format=%H", "--fixed-strings", "--grep=(" + id + ")"], { encoding: "utf8" }).split("\n").filter(Boolean); } catch {}
         out.commits = shas.length;
         out.reverted = 0;
+        const gitOut = (args) => { try { return cp.execFileSync("git", ["-C", vault, ...args], { encoding: "utf8" }); } catch { return ""; } };
         for (const sha of shas) {
           const r = await call("POST", "/setup-api/prime-radiant/revert", { commit: sha });
-          if (r.status === 200) out.reverted++;
-          else out.revertError = r.body?.code ?? r.status;
+          if (r.status === 200) {
+            out.reverted++;
+            continue;
+          }
+          out.revertError = r.body?.code ?? r.status;
+          // Another commit landed on the same lines (index.md, most likely): say
+          // which, and undo the pages the job added one by one instead.
+          out.onTop = gitOut(["log", "--format=%h %s", sha + "..HEAD"]).split("\n").filter(Boolean).slice(0, 5);
+          const added = gitOut(["show", "--format=", "--name-only", "--diff-filter=A", sha]).split("\n").filter((f) => /^(entities|concepts|syntheses|sources)\/.+\.md$/.test(f));
+          let undone = 0;
+          for (const page of added) {
+            const d = await call("DELETE", "/setup-api/prime-radiant/pages/" + page.split("/").map(encodeURIComponent).join("/"));
+            if (d.status === 200) undone++;
+          }
+          out.pagesAdded = added.length;
+          out.pagesDeleted = undone;
+          if (added.length > 0 && undone === added.length) out.reverted++;
         }
       } catch (err) {
         out.cleanupCrash = String((err && err.message) || err).slice(0, 200);
@@ -280,12 +296,17 @@ else
   not_ok "the running server's Usage meter: before $(sj -c '.before'), after $(sj -c '.after')"
 fi
 
+# Cleanup, not the feature: a commit that cannot be undone is noted, never the verdict.
 if [ "$(sj '.commits')" -ge 1 ] 2>/dev/null && [ "$(sj '.reverted')" = "$(sj '.commits')" ]; then
-  ok "the job's $(sj '.commits') commit(s) were undone through the revert route"
+  if [ -n "$(sj '.revertError // empty')" ]; then
+    note "the job's commit could not be reverted whole ($(sj '.revertError'); on top: $(sj -c '.onTop')); its $(sj '.pagesDeleted') page(s) were deleted instead"
+  else
+    note "the job's $(sj '.commits') commit(s) were undone through the revert route"
+  fi
 elif [ "$(sj '.commits // 0')" = 0 ]; then
   note "no commit of the job was found to undo"
 else
-  not_ok "the job's commits were not all undone: $(sj '.reverted')/$(sj '.commits') ($(sj '.revertError // empty'))"
+  note "the job's commits were not all undone: $(sj '.reverted')/$(sj '.commits') ($(sj '.revertError // empty'); on top: $(sj -c '.onTop'); pages deleted $(sj '.pagesDeleted // 0')/$(sj '.pagesAdded // 0'))"
 fi
 
 # shellcheck disable=SC2016  # $r is jq's
