@@ -71,7 +71,8 @@ cleanup() {
   # The engine goes first, and only once it is confirmed gone does the mock
   # behind it stop: Remove is also what puts the chat back where it was.
   local tries gone=0
-  for tries in 1 2 3; do
+  # Up to three removals, each confirmed by the GET of the next round.
+  for tries in 1 2 3 4; do
     board_owner_api GET /setup-api/local-ai/external
     if [ "$API_STATUS" != 200 ]; then sleep 5; continue; fi
     if [ "$(api_json '.configured')" != true ] || [ "$(api_json '.baseUrl')" != "http://127.0.0.1:$PORT/v1" ] \
@@ -79,6 +80,7 @@ cleanup() {
       gone=1
       break
     fi
+    [ "$tries" = 4 ] && break
     board_owner_api DELETE /setup-api/local-ai/external
     note "cleanup: removing this test's engine (try $tries, HTTP $API_STATUS)"
     [ "$API_STATUS" = 200 ] || sleep 5
@@ -402,6 +404,7 @@ if [ "$BROWSER" = 1 ]; then
 else
   # No browser: the API's own re-save with the fields as they are.
   engine_call POST /setup-api/local-ai/external '{"reasoning": true}'
+  if [ "$API_STATUS" = 200 ] && [ "$(api_json '.success')" = true ]; then ok "re-save through the API answered success"; else not_ok "re-save through the API answered $(api_error)"; fi
 fi
 board_owner_api GET /setup-api/local-ai/external
 if [ "$(api_json '.reasoning')" = true ]; then ok "Edit → Save kept reasoning on"; else not_ok "after Edit → Save: reasoning=$(api_json '.reasoning')"; fi
