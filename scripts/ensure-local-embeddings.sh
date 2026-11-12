@@ -339,8 +339,17 @@ if [ "${#TOKEN}" -lt 16 ]; then
   log "no local-AI token at $LOCAL_AI_TOKEN_FILE yet (the web server writes it at first start) — trying again on the next gateway start"
   exit 0
 fi
+# The bearer reaches curl on its stdin, as a line of curl's own config format,
+# never as an argument: every local account can read a running process's
+# arguments. Inside the quotes curl turns \\ \" \n \r back into the bytes they
+# stand for, so it sends the very header the argument named, and the value is
+# left no quote to close early and no line break to start a second option.
+TOKEN_CFG=${TOKEN//\\/\\\\}
+TOKEN_CFG=${TOKEN_CFG//\"/\\\"}
+TOKEN_CFG=${TOKEN_CFG//$'\n'/\\n}
+TOKEN_CFG=${TOKEN_CFG//$'\r'/\\r}
 embed_ready() {
-  curl -fsS --max-time 200 -H "Authorization: Bearer $TOKEN" "$EMBED_PROXY_URL/models" >/dev/null 2>&1
+  printf 'header = "Authorization: Bearer %s"\n' "$TOKEN_CFG" 2>/dev/null | curl -fsS --max-time 200 -K - "$EMBED_PROXY_URL/models" >/dev/null 2>&1
 }
 # The budget is wall-clock, not a count of naps: one probe can itself hold the
 # line for its whole --max-time when the proxy accepts and then stalls, so
