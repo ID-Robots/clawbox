@@ -385,6 +385,12 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       "bash -s marker <<'EOF'",
       'sudo -u clawbox tool "$HEREDOC_ARG_SECRET"',
       "EOF",
+      "bash '-s' marker <<'EOF'",
+      'sudo -u clawbox tool "$QUOTED_S_SECRET"',
+      "EOF",
+      "bash -s -c 'true' <<'EOF'",
+      'sudo -u clawbox tool "$HEREDOC_DATA_SECRET"',
+      "EOF",
     ].join("\n");
     expect(scan([{ file: "sample.sh", text: sample }]).hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
       [1, "as_clawbox", ["API_KEY"]],
@@ -393,6 +399,7 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       [4, "as_clawbox", ["API_KEY"]],
       [5, "as_clawbox", ["API_KEY"]],
       [7, "sudo", ["HEREDOC_ARG_SECRET"]],
+      [10, "sudo", ["QUOTED_S_SECRET"]],
     ]);
   });
 

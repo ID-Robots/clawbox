@@ -28,12 +28,14 @@ function feedsShell(before: string): boolean {
   const shell = SHELL_BEFORE_HEREDOC.exec(before);
   if (!shell) return false;
   const words = shell[1].match(SHELL_WORD) ?? [];
+  // Options run up to the first operand; `-c` among them wins over `-s`.
+  let stdin = false;
   for (let j = 0; j < words.length; j += 1) {
-    const w = words[j];
-    if (w === "--") return j + 1 === words.length;
-    if (!/^[-+][A-Za-z]+$/.test(w)) return false;
+    const w = words[j].replace(/['"]/g, ""); // an option reads the same quoted (`'-s'`)
+    if (w === "--") return stdin || j + 1 === words.length;
+    if (!/^[-+][A-Za-z]+$/.test(w)) return stdin;
     if (w.includes("c")) return false;
-    if (w.slice(1).includes("s")) return true;
+    if (w.slice(1).includes("s")) stdin = true;
     // -o and -O take a value: `bash -o pipefail <<EOF`.
     if (/[oO]$/.test(w)) j += 1;
   }

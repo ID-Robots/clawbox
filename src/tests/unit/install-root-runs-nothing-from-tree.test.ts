@@ -1343,6 +1343,8 @@ const MUST_HIT: [string, string[], number, string][] = [
   // A program a shell or interpreter reads on stdin, from a file or as text.
   ["a heredoc bash -s reads, with arguments", ["bash -s marker <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"], 2, "/home/clawbox/.local/bin/probe"],
   ["a heredoc bash -s -- reads", ['bash -s -- "$x" <<EOF', '"$OPENCLAW_BIN" x', "EOF"], 2, '"$OPENCLAW_BIN"'],
+  ["a heredoc bash reads with a quoted -s", ["bash '-s' marker <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"], 2, "/home/clawbox/.local/bin/probe"],
+  ["a heredoc bash reads with a double-quoted -s", [`bash "-s" marker <<'EOF'`, "/home/clawbox/.local/bin/probe", "EOF"], 2, "/home/clawbox/.local/bin/probe"],
   ["a script bash reads on stdin", ['bash < "$PROJECT_DIR/scripts/a.sh"'], 1, '"$PROJECT_DIR/scripts/a.sh"'],
   ["a program python3 reads on stdin", ['python3 - < "$PROJECT_DIR/x.py"'], 1, '"$PROJECT_DIR/x.py"'],
   ["a here-string program for bash", ['bash <<< "\\"$OPENCLAW_BIN\\" x"'], 1, '"\\"$OPENCLAW_BIN\\" x"'],
@@ -1412,6 +1414,8 @@ const MUST_MISS: [string, string[]][] = [
   ["system interpreters and env", ["/usr/bin/python3 -I /usr/lib/x.py", "/usr/bin/env node /usr/lib/x.js", "/usr/bin/perl -e 1"]],
   ["the venv's python3 as the account", ['runuser -u "$CLAWBOX_USER" -- "$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python3" -V']],
   ["a heredoc a script reads as data", ["bash /usr/lib/x.sh <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"]],
+  ["a heredoc that -s -c leaves as data", ["bash -s -c 'command' <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"]],
+  ["a heredoc that -sc leaves as data", ["bash -sc 'command' <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"]],
   [
     "stdin a module, a script or a -c program reads as data",
     [
