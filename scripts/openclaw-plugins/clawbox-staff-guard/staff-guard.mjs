@@ -139,13 +139,23 @@ export function readStaffMcpGrants(file) {
   }
 }
 
-/** The grants file beside the installed plugin. */
-function defaultGrantsFile() {
+/**
+ * Where the grants file may be, in order: in the installed plugin's folder
+ * under OpenClaw's state directory — where ClawBox writes it — and beside
+ * this module. The state directory comes first because the gateway may load
+ * a plugin from a snapshot of its folder taken at start (its plugin
+ * "generations"), which a file ClawBox writes later never reaches.
+ */
+function defaultGrantsFiles(opts) {
+  const home = opts.home ?? os.homedir();
+  const stateDir = opts.openclawHome ?? process.env.OPENCLAW_STATE_DIR ?? path.join(home, ".openclaw");
+  const files = [path.join(stateDir, "extensions", "clawbox-staff-guard", "staff-mcp-grants.json")];
   try {
-    return fileURLToPath(new URL("./staff-mcp-grants.json", import.meta.url));
+    files.push(fileURLToPath(new URL("./staff-mcp-grants.json", import.meta.url)));
   } catch {
-    return undefined;
+    // not a file URL
   }
+  return [...new Set(files)];
 }
 
 /**
@@ -303,8 +313,12 @@ function staffMcpVerdict(toolId, username, ctx, opts) {
     return isRelayEntry ? `\`${toolId}\` belongs to a member of staff's own assistant` : undefined;
   }
   if (server.toLowerCase() === "clawbox" || !isRelayEntry) return `\`${toolId}\` is not available to members of staff`;
-  const file = "mcpGrants" in opts ? opts.mcpGrants : defaultGrantsFile();
-  const agents = file ? readStaffMcpGrants(file) : null;
+  const files = "mcpGrants" in opts ? [opts.mcpGrants].filter(Boolean) : defaultGrantsFiles(opts);
+  let agents = null;
+  for (const file of files) {
+    agents = readStaffMcpGrants(file);
+    if (agents) break;
+  }
   const agentId = `${staffPolicyTable().agentPrefix}${username}`;
   const granted = agents && Array.isArray(agents[agentId]) ? agents[agentId] : [];
   return granted.includes(server) ? null : `\`${toolId}\` is not granted to this member of staff`;
