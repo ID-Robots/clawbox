@@ -326,6 +326,26 @@ d("hand_over_home_path gives root-owned leftovers back one entry at a time", () 
     expect(r.chowns[0]).toMatch(/ \.config$/);
   });
 
+  it("hands over a file only while it has one name, so nothing outside the home changes hands", () => {
+    // A second hard link is the same file under another name: handing over the
+    // name in the home would hand over the file wherever else it is linked.
+    // Where a directory is expected (~/.codex) the old `install -d` failed on
+    // a file and chowned nothing.
+    const outside = path.join(aux, "elsewhere");
+    fs.writeFileSync(outside, "");
+    fs.linkSync(outside, path.join(home, ".codex"));
+    fs.linkSync(outside, path.join(home, ".bashrc"));
+
+    expect(handOver(path.join(home, ".codex")).chowns).toEqual([]);
+    expect(handOver(path.join(home, ".bashrc")).chowns).toEqual([]);
+    expect(handOver(path.join(home, ".codex", "x")).chowns).toEqual([]);
+
+    // The same file with one name left is handed over as before.
+    fs.rmSync(outside);
+    fs.rmSync(path.join(home, ".codex"));
+    expect(handOver(path.join(home, ".bashrc")).chowns).toHaveLength(1);
+  });
+
   it("leaves what is already the user's alone, and ignores a path outside the home", () => {
     fs.mkdirSync(path.join(home, ".config"));
     const script = [

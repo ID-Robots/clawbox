@@ -1655,7 +1655,9 @@ as_clawbox_login() {
 # deeper only by entering the directory and checking it is the same inode it
 # examined, so root never acts on an entry outside the tree it looked at. Stops
 # quietly at the first entry that is missing, a link or not a directory: a
-# missing one the user creates itself, and a link is not ours to follow.
+# missing one the user creates itself, and a link is not ours to follow. A file
+# is handed over only while it has one name: a second hard link is the same
+# file somewhere else, which would change hands with it.
 hand_over_home_path() {
   local rest="${1#"$CLAWBOX_HOME"/}"
   [ "$rest" != "$1" ] || return 0
@@ -1665,9 +1667,9 @@ hand_over_home_path() {
       part="${rest%%/*}"
       if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
       [ -n "$part" ] || continue
-      info="$(stat -c '%F|%d:%i|%U' -- "$part" 2>/dev/null)" || exit 0
+      info="$(stat -c '%F|%h|%d:%i|%U' -- "$part" 2>/dev/null)" || exit 0
       case "$info" in
-        "directory|"* | "regular file|"* | "regular empty file|"*) ;;
+        "directory|"* | "regular file|1|"* | "regular empty file|1|"*) ;;
         *) exit 0 ;;
       esac
       if [ "${info##*|}" != "$CLAWBOX_USER" ]; then
@@ -1676,7 +1678,7 @@ hand_over_home_path() {
       [ -n "$rest" ] || exit 0
       case "$info" in "directory|"*) ;; *) exit 0 ;; esac
       cd -P -- "$part" 2>/dev/null || exit 0
-      ino="${info#*|}"
+      ino="${info#*|*|}"
       [ "$(stat -c '%d:%i' . 2>/dev/null)" = "${ino%%|*}" ] || exit 0
     done
   )
