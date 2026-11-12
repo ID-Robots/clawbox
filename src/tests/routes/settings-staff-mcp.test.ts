@@ -159,6 +159,17 @@ describe("the grants", () => {
     expect(fs.readFileSync(storePath, "utf-8")).not.toContain("old-account-token-0001");
   });
 
+  it("tells two accounts of one name apart even when they share a createdAt", async () => {
+    await post({ servers: { docs: {} } });
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const users = vi.mocked(listUsers);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-12T00:00:00.000Z", sv: "a".repeat(32) }]);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-12T00:00:00.000Z", sv: "b".repeat(32) }]);
+    const res = await post({ username: "ivan", server: "docs", credential: "same-clock-token-0001" });
+    expect(res.status).toBe(400);
+    expect(fs.readFileSync(storePath, "utf-8")).not.toContain("same-clock-token-0001");
+  });
+
   it("clears a credential with null", async () => {
     await post({ servers: { docs: {} } });
     await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });

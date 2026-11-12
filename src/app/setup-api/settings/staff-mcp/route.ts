@@ -178,8 +178,10 @@ export async function POST(req: Request) {
     if (!isServerName(server)) return refuse(400, "bad_server", "That is not a server name.");
     const [{ listUsers }, { getSystemUsername }] = await Promise.all([import("@/lib/clawbox-users"), import("@/lib/auth")]);
     // The ACCOUNT, not only its name: a user removed and created again under
-    // the same name is a new account (a new `createdAt`) and never inherits a
-    // credential meant for the old one.
+    // the same name is a new account — a new random session version `sv`
+    // (16 random bytes minted at creation) beside its `createdAt` — and never
+    // inherits a credential meant for the old one. (A password change also
+    // rotates `sv`; a write racing one is refused and simply repeated.)
     const account = username === getSystemUsername() ? undefined : (await listUsers()).find((u) => u.username === username);
     if (!account) {
       return refuse(400, "unknown_user", `"${username}" is not a member of staff on this box.`);
@@ -197,7 +199,7 @@ export async function POST(req: Request) {
       // clean-ups take too: a credential is never written for an account that
       // was removed (or replaced by a new one of the same name) meanwhile.
       const { listUsers: usersNow } = await import("@/lib/clawbox-users");
-      if (!(await usersNow()).some((u) => u.username === username && u.createdAt === account.createdAt)) throw new UserGoneError();
+      if (!(await usersNow()).some((u) => u.username === username && u.createdAt === account.createdAt && u.sv === account.sv)) throw new UserGoneError();
       const mine = { ...(store.credentials[username] ?? {}) };
       if (credential) mine[server] = credential;
       else delete mine[server];
