@@ -1,7 +1,21 @@
 #!/bin/bash
 # Install local voice pipeline: faster-whisper (STT) + Kokoro (TTS)
 # With CUDA GPU acceleration and persistent model servers for fast inference.
-# Runs as clawbox user. It needs NO system speech package: `kokoro` pulls in
+#
+# Root runs it (install.sh's openclaw_tts, voice_kokoro_install and
+# voice_whisper_install steps), and every file it creates, copies, writes,
+# appends or removes under the clawbox user's home, and every stamp it reads
+# there, is handled AS that user (as_clawbox): root doing it there would act
+# through any link the user planted on the way. install.sh hands back whatever
+# an earlier root run left root-owned on those paths (hand_over_voice_paths)
+# before it runs this script.
+# A run install.sh did not precede with that hand-over (a hand run as root, or
+# the full mode below, which no installer calls) on a box that still has such
+# a leftover fails the affected write with that write's own ERROR or Warning
+# line; in the full mode a unit that cannot be written then publishes
+# failed:unit and exits 12, where root's own write used to succeed.
+#
+# It needs NO system speech package: `kokoro` pulls in
 # `misaki[en]`, and misaki/espeak.py calls
 # `EspeakWrapper.set_library(espeakng_loader.get_library_path())` at import, so
 # both the espeak-ng shared library and its data come out of the bundled
@@ -194,17 +208,23 @@ kokoro_expected_cusparselt_dir() {
 # Returns non-zero if ANY required piece did not land. A device that keeps a
 # stale or half-copied speech install while the updater reports success is the
 # same class of bug as a silent TTS failure, one layer further out.
+#
+# The copies are the clawbox user's own writes: root opens each source (the
+# mirror root holds, on a dispatched step) and hands its bytes over on stdin.
+# `cat >` truncates a copy that is there in place, keeping its mode as cp did,
+# and a new one gets 0666 less the umask, then +x for the *.sh, which is what
+# cp gave these 0644 and 0755 sources. Nothing is left for root to chown.
 deploy_voice_scripts() {
   local src dst f rc=0
   src="$(cd "$(dirname "$0")" && pwd)" || return 1
   dst="$WORKSPACE/scripts"
-  if ! mkdir -p "$dst/openclaw"; then
+  if ! as_clawbox mkdir -p -- "$dst/openclaw"; then
     echo "  ERROR: could not create $dst/openclaw" >&2
     return 1
   fi
   for f in kokoro-server.py kokoro-client.sh kokoro-tts.sh whisper-server.py stt-client.py stt.py; do
     if [ -f "$src/$f" ]; then
-      cp "$src/$f" "$dst/$f" || { echo "  ERROR: could not copy $f" >&2; rc=1; }
+      as_clawbox sh -c 'cat > "$1"' sh "$dst/$f" < "$src/$f" || { echo "  ERROR: could not copy $f" >&2; rc=1; }
     fi
   done
   # The entrypoint is not optional — it is the command OpenClaw execs — so a
@@ -212,18 +232,14 @@ deploy_voice_scripts() {
   if [ ! -f "$src/openclaw/clawbox-tts.sh" ]; then
     echo "  ERROR: $src/openclaw/clawbox-tts.sh is missing" >&2
     rc=1
-  elif ! cp "$src/openclaw/clawbox-tts.sh" "$dst/openclaw/clawbox-tts.sh"; then
+  elif ! as_clawbox sh -c 'cat > "$1"' sh "$dst/openclaw/clawbox-tts.sh" < "$src/openclaw/clawbox-tts.sh"; then
     echo "  ERROR: could not deploy clawbox-tts.sh to $dst/openclaw" >&2
     rc=1
-  elif ! chmod +x "$dst/openclaw/clawbox-tts.sh"; then
+  elif ! as_clawbox chmod +x -- "$dst/openclaw/clawbox-tts.sh"; then
     echo "  ERROR: could not make $dst/openclaw/clawbox-tts.sh executable" >&2
     rc=1
   fi
-  chmod +x "$dst"/*.sh 2>/dev/null || true
-  if ! chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$WORKSPACE"; then
-    echo "  ERROR: could not chown $WORKSPACE to $CLAWBOX_USER" >&2
-    rc=1
-  fi
+  as_clawbox chmod +x -- "$dst"/*.sh 2>/dev/null || true
   return "$rc"
 }
 
@@ -327,6 +343,21 @@ clawbox_python() {
   printf '%s\n' "$1" | su - "$CLAWBOX_USER" -c "$payload"
 }
 
+# Run a command as the clawbox user: every file this script handles under its
+# home goes through here (see the header). A fixed program with the paths as
+# arguments and any file's bytes on stdin, so no path or byte is ever part of
+# a command string. runuser is root's (install.sh's use_tree_owner_for_git
+# drops the same way), and `id -u` rather than $EUID so a test can stand in
+# for root; a run that is not root, the clawbox user's own included, runs it
+# itself.
+as_clawbox() {
+  if [ "$(id -u)" = 0 ]; then
+    runuser -u "$CLAWBOX_USER" -- "$@"
+  else
+    "$@"
+  fi
+}
+
 # Is the PINNED CUDA torch wheel already installed for the clawbox user?
 #
 # Asked separately from $KOKORO_STAMP, and not as a substitute for it. The stamp
@@ -368,18 +399,18 @@ install_cuda_torch() {
 # install_cuda_torch so the skip path above still guarantees them — a box that
 # already has the wheel but lost its .bashrc would otherwise never get them
 # back.
+#
+# Appended BY the clawbox user, so a .bashrc it creates is that user's own
+# (0644 under umask 022). Best-effort and said out loud: the units and
+# clawbox_python carry the same path, so failing the GPU install over an
+# interactive shell's PATH would cost the box its voice for nothing.
 ensure_cuda_bashrc_exports() {
   local bashrc="$CLAWBOX_HOME/.bashrc" ld
   ld=$(kokoro_ld_path expected)
   if ! grep -q "cusparselt" "$bashrc" 2>/dev/null; then
-    echo "export LD_LIBRARY_PATH=$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" >> "$bashrc"
-    echo "export CUDA_HOME=$CUDA_HOME_DIR" >> "$bashrc"
-    # `>>` CREATES the file when it is missing, and this runs as root: a box
-    # whose clawbox user had no .bashrc would get a root-owned one it can never
-    # edit again. Best-effort, like every other chown here — the exports still
-    # work if it fails, and failing the GPU install over file ownership would
-    # cost the box its voice for nothing.
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$bashrc" 2>/dev/null || true
+    printf '%s\n' "export LD_LIBRARY_PATH=$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" "export CUDA_HOME=$CUDA_HOME_DIR" \
+      | as_clawbox sh -c 'umask 022 && cat >> "$1"' sh "$bashrc" \
+      || echo "  Warning: could not add the CUDA library path to $bashrc (the voice units and servers set it themselves)" >&2
   fi
 }
 
@@ -500,7 +531,7 @@ print('Phonemiser OK (out-of-vocabulary words phonemise)')
 # the import alone would report a box that died at the model download as ready
 # forever — see $KOKORO_STAMP above.
 kokoro_stack_present() {
-  [ "$(cat "$KOKORO_STAMP" 2>/dev/null || true)" = "$KOKORO_STAMP_VERSION" ] || return 1
+  [ "$(as_clawbox cat -- "$KOKORO_STAMP" 2>/dev/null || true)" = "$KOKORO_STAMP_VERSION" ] || return 1
   clawbox_python "import kokoro, torch" >/dev/null 2>&1
 }
 
@@ -508,25 +539,28 @@ kokoro_stack_present() {
 # only cost is redoing this work on the next update, so it must not fail the
 # install — but it is said out loud, because silently paying for a 300 MB
 # download on every update is exactly the kind of thing nobody notices.
+# Written by the clawbox user, 0644 under umask 022.
 kokoro_mark_installed() {
   local dir
   dir=$(dirname "$KOKORO_STAMP")
-  if ! (mkdir -p "$dir" && printf '%s\n' "$KOKORO_STAMP_VERSION" > "$KOKORO_STAMP"); then
+  if ! { as_clawbox mkdir -p -- "$dir" \
+      && printf '%s\n' "$KOKORO_STAMP_VERSION" | as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$KOKORO_STAMP"; }; then
     echo "  Warning: could not write $KOKORO_STAMP — the next update will reinstall Kokoro" >&2
     return 0
   fi
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$dir" 2>/dev/null || true
 }
 
 # The kokoro-server.service heredoc lives here, once, so the full path and
-# the mode dispatch below cannot ship two different units.
+# the mode dispatch below cannot ship two different units. Written by the
+# clawbox user, whose unit it is, 0644 under umask 022; the status is the
+# write's.
 write_kokoro_unit() {
   local ld
   # "expected": this file is written once and read for the life of the box, and
   # it is refreshed even on a run whose wheel install failed.
   ld=$(kokoro_ld_path expected)
-  mkdir -p "$SYSTEMD_USER" || return 1
-  cat > "$SYSTEMD_USER/kokoro-server.service" << EOF
+  as_clawbox mkdir -p -- "$SYSTEMD_USER" || return 1
+  as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$SYSTEMD_USER/kokoro-server.service" << EOF
 [Unit]
 Description=Kokoro TTS Server (GPU)
 After=default.target
@@ -542,12 +576,12 @@ WantedBy=default.target
 EOF
 }
 
-# Make freshly written user units usable: owned by the user that runs them,
-# lingering enabled so they can start without a login session, and reloaded.
-# All three are best-effort — none of them can cost the box its voice, because
+# Make freshly written user units usable: lingering enabled so they can start
+# without a login session, and reloaded. They are already the user's own, who
+# wrote them (install.sh hands the directory back before this script runs).
+# Both are best-effort — neither can cost the box its voice, because
 # clawbox-tts.sh starts the server on demand if the unit is not running.
 activate_user_units() {
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$SYSTEMD_USER" 2>/dev/null || true
   loginctl enable-linger "$CLAWBOX_USER" 2>/dev/null || true
   su - "$CLAWBOX_USER" -c "
     export XDG_RUNTIME_DIR=/run/user/\$(id -u)
@@ -806,7 +840,7 @@ install_kokoro_tts() {
 # advertise a voice the box does not have.
 kokoro_report_present() {
   local stamp
-  stamp="$(cat "$KOKORO_STAMP" 2>/dev/null || true)"
+  stamp="$(as_clawbox cat -- "$KOKORO_STAMP" 2>/dev/null || true)"
   if [ -z "$stamp" ]; then
     echo "  Kokoro is not installed on this box (install it from Settings → Local AI)"
     kokoro_report "absent"
@@ -1017,18 +1051,19 @@ whisper_refresh_present() {
 }
 
 whisper_stack_present() {
-  [ "$(cat "$WHISPER_STAMP" 2>/dev/null || true)" = "$WHISPER_STAMP_VERSION" ] || return 1
+  [ "$(as_clawbox cat -- "$WHISPER_STAMP" 2>/dev/null || true)" = "$WHISPER_STAMP_VERSION" ] || return 1
   clawbox_python "import faster_whisper" >/dev/null 2>&1
 }
 
+# Written by the clawbox user, as kokoro_mark_installed's is.
 whisper_mark_installed() {
   local dir
   dir=$(dirname "$WHISPER_STAMP")
-  if ! (mkdir -p "$dir" && printf '%s\n' "$WHISPER_STAMP_VERSION" > "$WHISPER_STAMP"); then
+  if ! { as_clawbox mkdir -p -- "$dir" \
+      && printf '%s\n' "$WHISPER_STAMP_VERSION" | as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$WHISPER_STAMP"; }; then
     echo "  Warning: could not write $WHISPER_STAMP - the next Install from Settings → Local AI (install-voice.sh --whisper) will redo faster-whisper" >&2
     return 0
   fi
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$dir" 2>/dev/null || true
 }
 
 # The whisper-server.service heredoc lives here, once, so the full path and
@@ -1044,9 +1079,10 @@ write_whisper_unit() {
   # the caller stamp the install and report a ready engine whose unit file does
   # not exist — the same disagreement between local-models.ts (unit presence)
   # and stt-local.ts (a real import) that the write-last ordering exists to
-  # prevent, arriving from the other direction.
-  mkdir -p "$SYSTEMD_USER" || return 1
-  cat > "$SYSTEMD_USER/whisper-server.service" << EOF
+  # prevent, arriving from the other direction. Written by the clawbox user, as
+  # write_kokoro_unit's is.
+  as_clawbox mkdir -p -- "$SYSTEMD_USER" || return 1
+  as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$SYSTEMD_USER/whisper-server.service" << EOF
 [Unit]
 Description=Whisper STT Server (GPU)
 After=default.target
@@ -1224,13 +1260,40 @@ retire_legacy_whisper_scope() {
       systemctl --user reset-failed $unit
     " >/dev/null 2>&1 || true
   fi
+  # In the user scope, a file in the clawbox user's home ($dir/$unit, or a
+  # FragmentPath there) is removed AS that user: root's rm there would act
+  # through any link the user planted on the way. A FragmentPath outside the
+  # home is a system unit directory and stays root's, as in the system scope;
+  # the case filter above limits it to a file named for this unit. The user's
+  # removal can fail where root's did not, so a file that stayed is named. The
+  # run still reports the unit retired: stop, disable and reset-failed above
+  # already took it out of service.
   for f in "${files[@]}"; do
-    rm -f "$f" 2>/dev/null || true
-    rm -rf "$f.d" 2>/dev/null || true
+    case "$scope:$f" in
+      user:"$CLAWBOX_HOME"/*)
+        as_clawbox rm -f -- "$f" 2>/dev/null || true
+        as_clawbox rm -rf -- "$f.d" 2>/dev/null || true
+        if [ -e "$f" ] || [ -L "$f" ]; then
+          echo "  Warning: could not remove $f" >&2
+        fi
+        ;;
+      *)
+        rm -f "$f" 2>/dev/null || true
+        rm -rf "$f.d" 2>/dev/null || true
+        ;;
+    esac
   done
-  # Links a hand-made `ln -s` left, which disable cannot know about.
-  find "$dir" -mindepth 2 -maxdepth 2 -type l -name "$unit" \
-    \( -path "*.wants/$unit" -o -path "*.requires/$unit" \) -delete 2>/dev/null || true
+  # Links a hand-made `ln -s` left, which disable cannot know about. The user
+  # scope's are in the home, so that user finds and removes them; from `/`,
+  # because find returns to the directory it started in, which that user may
+  # not be able to enter.
+  if [ "$scope" = "system" ]; then
+    find "$dir" -mindepth 2 -maxdepth 2 -type l -name "$unit" \
+      \( -path "*.wants/$unit" -o -path "*.requires/$unit" \) -delete 2>/dev/null || true
+  else
+    (cd / && as_clawbox find "$dir" -mindepth 2 -maxdepth 2 -type l -name "$unit" \
+      \( -path "*.wants/$unit" -o -path "*.requires/$unit" \) -delete) 2>/dev/null || true
+  fi
   if [ "$scope" = "system" ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
   else
@@ -1628,7 +1691,7 @@ echo "[5/7] Pre-downloading Whisper model (base)..."
 WHISPER_CACHE="$WHISPER_HF_CACHE"
 if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -type f -empty -print -quit | grep -q .; then
   echo "  Clearing corrupted Whisper model cache..."
-  rm -rf "$WHISPER_CACHE"
+  as_clawbox rm -rf -- "$WHISPER_CACHE" || echo "  Warning: could not clear the Whisper model cache" >&2
 fi
 # Through the shared helper: this was a third copy of the same download, on the
 # same pinned python3.10 path, and the one helper carries the compute-type fix
@@ -1711,7 +1774,7 @@ fi
 retire_legacy_whisper_unit
 write_whisper_unit
 
-# Owner, lingering and daemon-reload (servers start on demand via stt-client.py)
+# Lingering and daemon-reload (servers start on demand via stt-client.py)
 activate_user_units
 
 echo ""

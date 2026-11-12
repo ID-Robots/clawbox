@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { accountOnlyHome, HAND_OVER, shellFunctionIfPresent } from "@/tests/helpers/account-only-home";
 
 /**
  * A box with NO working on-device TTS engine must not finish provisioning as
@@ -527,7 +528,37 @@ describe.skipIf(!hasBash)("the manual voice-pipeline install fails a box with no
  * would call a box with a working Kokoro mute. An unknown status lands on 14
  * for the same reason: "something did not complete", not "there is no engine".
  */
-function runStep(voiceExit: number, verdictFile?: string) {
+/**
+ * What install.sh gives install-voice.sh's run: the real hand-over helpers
+ * against a sandbox `home`, each call logged in order
+ * (src/tests/helpers/account-only-home.ts), with the stub install-voice.sh
+ * logging itself into the same sequence as `voice-run`. Without a home the
+ * hand-over is a no-op: those runs have no home to walk.
+ */
+function voiceHandOver(home?: string) {
+  if (home === undefined) {
+    return { shell: ["hand_over_voice_paths() { :; }"], voiceLog: "", sequence: () => [] as string[] };
+  }
+  const aux = path.join(root, "aux");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(aux, { recursive: true });
+  const account = accountOnlyHome(home, aux, { lock: false });
+  return {
+    shell: [
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      account.shell,
+      // The stub install-voice.sh is a process of its own.
+      "export __AO_CALLS",
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_voice_paths"),
+      account.recordHandOvers,
+    ],
+    voiceLog: `printf 'voice-run\\n' >> "$__AO_CALLS"\n`,
+    sequence: account.sequence,
+  };
+}
+
+function runStep(voiceExit: number, verdictFile?: string, home?: string) {
   const projectDir = path.join(root, "project");
   mkdirSync(path.join(projectDir, "scripts", "openclaw"), { recursive: true });
   writeExec(
@@ -536,7 +567,8 @@ function runStep(voiceExit: number, verdictFile?: string) {
   );
   const ttsStatus = path.join(root, "step-tts-status");
   if (verdictFile !== undefined) writeFileSync(ttsStatus, verdictFile);
-  writeExec(path.join(projectDir, "scripts", "install-voice.sh"), `exit ${voiceExit}`);
+  const handOver = voiceHandOver(home);
+  writeExec(path.join(projectDir, "scripts", "install-voice.sh"), `${handOver.voiceLog}exit ${voiceExit}`);
   const openclaw = path.join(root, "openclaw");
   const openclawLog = path.join(root, "openclaw-calls.log");
   writeExec(openclaw, `printf '%s\\n' "$*" >> "${openclawLog}"\nexit 0`);
@@ -549,6 +581,7 @@ function runStep(voiceExit: number, verdictFile?: string) {
     'SRC_DIR="$PROJECT_DIR"',
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
+    ...handOver.shell,
     'as_clawbox() { env "$@"; }',
     "is_hermes_edition() { return 1; }",
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
@@ -570,8 +603,64 @@ function runStep(voiceExit: number, verdictFile?: string) {
     stepRc: /STEP_RC=(\d+)/.exec(out)?.[1] ?? "",
     provisionFailures: lines(provisionLog),
     openclawCalls: lines(openclawLog),
+    sequence: handOver.sequence(),
   };
 }
+
+/** The real step_voice_whisper_install, with SRC_DIR the sandbox, over a stub install-voice.sh. */
+function runWhisperStep(home: string) {
+  const src = path.join(root, "src");
+  mkdirSync(path.join(src, "scripts"), { recursive: true });
+  const handOver = voiceHandOver(home);
+  writeExec(path.join(src, "scripts", "install-voice.sh"), `${handOver.voiceLog}exit 0`);
+  const program = [
+    "set -uo pipefail",
+    `SRC_DIR=${JSON.stringify(src)}`,
+    "CLAWBOX_USER=clawbox",
+    ...handOver.shell,
+    extractShellFn(INSTALL_SH, "step_voice_whisper_install"),
+    "step_voice_whisper_install",
+    'echo "STEP_RC=$?"',
+  ].join("\n");
+  const res = runShellProgram(program, {});
+  const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+  return { out, stepRc: /STEP_RC=(\d+)/.exec(out)?.[1] ?? "", sequence: handOver.sequence() };
+}
+
+describe.skipIf(!hasBash)("install.sh hands the voice paths back before install-voice.sh writes them as the account", () => {
+  // install-voice.sh writes these as the clawbox user, and a root-owned
+  // leftover on the way (an earlier root run's `mkdir -p`) would fail that
+  // write where root's own succeeded.
+  const voicePaths = (home: string) => [
+    `${HAND_OVER}hand_over_home_path -R ${home}/.openclaw/workspace`,
+    `${HAND_OVER}hand_over_home_path -R ${home}/.config/systemd/user`,
+    `${HAND_OVER}hand_over_home_path -R ${home}/.cache/clawbox`,
+    `${HAND_OVER}hand_over_home_path ${home}/.bashrc`,
+  ];
+  const expectHandedOverFirst = (sequence: string[], home: string, out: string) => {
+    const voiceRun = sequence.indexOf("voice-run");
+    expect(voiceRun, `install-voice.sh never ran:\n${out}`).toBeGreaterThan(-1);
+    for (const handOver of voicePaths(home)) {
+      const at = sequence.indexOf(handOver);
+      expect(at, `${handOver} is missing: ${sequence.join(" | ")}`).toBeGreaterThan(-1);
+      expect(at, `${handOver} came after the script`).toBeLessThan(voiceRun);
+    }
+  };
+
+  it("step_openclaw_tts, which every update runs", () => {
+    const home = path.join(root, "home");
+    const res = runStep(0, "KOKORO=ready\n", home);
+    expect(res.stepRc, res.out).toBe("0");
+    expectHandedOverFirst(res.sequence, home, res.out);
+  });
+
+  it("step_voice_whisper_install, the Local AI tab's Install", () => {
+    const home = path.join(root, "home");
+    const res = runWhisperStep(home);
+    expect(res.stepRc, res.out).toBe("0");
+    expectHandedOverFirst(res.sequence, home, res.out);
+  });
+});
 
 describe.skipIf(!hasBash)("step_openclaw_tts records the failures it is handed", () => {
   it("records a provision failure when Kokoro was requested and did not install (12)", () => {

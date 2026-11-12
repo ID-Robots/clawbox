@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { accountOnlyHome, CAN_LOCK_HOME, unlockTree } from "../helpers/account-only-home";
 
 /**
  * The legacy `clawbox-whisper.service` (TASK-1214, the report's "Half 2").
@@ -59,7 +60,11 @@ let tmp: string;
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "whisper-legacy-"));
 });
-afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => {
+  // A run the account-only home below left locked cannot be removed otherwise.
+  unlockTree(tmp);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
 const sysDir = () => path.join(tmp, "etc-systemd-system");
 const home = () => path.join(tmp, "home", "clawbox");
@@ -145,6 +150,8 @@ function update({
     `sed -n '/^LEGACY_WHISPER_UNIT=/p;/^LEGACY_WHISPER_RETIRED=/p' "$1" > "${tmp}/f.sh"`,
     ...fns.map((fn) => `sed -n '/^${fn}() {/,/^}/p' "$1" >> "${tmp}/f.sh"`),
     `. "${tmp}/f.sh"`,
+    // The script's own helper when it is not root: the command itself.
+    'as_clawbox() { "$@"; }',
     `SYSTEMD_SYSTEM_DIR="${sysDir()}"`,
     `${entry} 2>&1`,
     "echo DONE",
@@ -359,6 +366,105 @@ describe("retire_legacy_whisper_unit — what it leaves alone", () => {
     const r = update({ userFragment: "Welcome to Ubuntu 22.04.5 LTS" });
     expect(r.done, r.out).toBe(true);
     expect(mutations(r.calls)).toEqual([]);
+  });
+});
+
+/**
+ * The user scope's files are in the clawbox user's home, and root removing
+ * them there acts through any link that user planted on the way. So the unit,
+ * its drop-ins and the links beside it are removed AS that user. Run against a
+ * home only `as_clawbox` can write to (src/tests/helpers/account-only-home.ts):
+ * a removal root made there fails, and a file command root ran there is
+ * recorded in `rootInHome`.
+ */
+describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbox user's files are removed by that user", () => {
+  function retireUser({ userFragment = "", prelude = "" } = {}) {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    fs.mkdirSync(home(), { recursive: true });
+    const account = accountOnlyHome(home(), aux);
+    const program = [
+      "set -euo pipefail",
+      'CLAWBOX_USER="clawbox"',
+      `CLAWBOX_HOME="${home()}"`,
+      `SYSTEMD_USER="${userDir()}"`,
+      `USER_FRAGMENT="${userFragment}"`,
+      "systemctl() { return 0; }",
+      "su() {",
+      '  local cmd=""',
+      '  while [ $# -gt 0 ]; do case "$1" in -c) cmd="$2"; shift 2 ;; *) shift ;; esac; done',
+      '  case "$cmd" in *FragmentPath*) printf "%s\\n" "$USER_FRAGMENT" ;; esac',
+      "  return 0",
+      "}",
+      `sed -n '/^LEGACY_WHISPER_UNIT=/p;/^LEGACY_WHISPER_RETIRED=/p' "$1" > "${aux}/f.sh"`,
+      ...["legacy_whisper_unit_stale", "retire_legacy_whisper_scope"].map(
+        (fn) => `sed -n '/^${fn}() {/,/^}/p' "$1" >> "${aux}/f.sh"`,
+      ),
+      `. "${aux}/f.sh"`,
+      // After the functions, so `as_clawbox` is the account's.
+      account.shell,
+      prelude,
+      "__ao_lock",
+      "retire_legacy_whisper_scope user 2>&1 || true",
+      "echo DONE",
+    ].join(NL);
+    const file = path.join(aux, "prog.sh");
+    fs.writeFileSync(file, program);
+    const r = spawnSync("bash", [file, VOICE_SH_PATH], { encoding: "utf-8", timeout: SPAWN_TIMEOUT_MS });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    return { out, done: out.includes("DONE"), rootInHome: account.rootInHome(), asClawbox: account.asClawbox() };
+  }
+  const userUnit = () => path.join(userDir(), UNIT);
+  const wantsDir = () => path.join(userDir(), "default.target.wants");
+
+  it("removes the unit, its drop-ins and its .wants link as the clawbox user", () => {
+    placeUnit(userDir(), LEGACY_UNIT, "default.target");
+    fs.mkdirSync(`${userUnit()}.d`);
+    fs.writeFileSync(path.join(`${userUnit()}.d`, "override.conf"), "[Service]\nRestartSec=10\n");
+
+    const r = retireUser();
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(userUnit()), r.out).toBe(false);
+    expect(fs.existsSync(`${userUnit()}.d`)).toBe(false);
+    // Listed, not stat'ed: once the unit is gone the link dangles, and
+    // existsSync follows it.
+    expect(fs.readdirSync(wantsDir()), "the .wants link is still there").toEqual([]);
+    expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
+    expect(r.asClawbox).toContain(`rm -f -- ${userUnit()}`);
+    expect(r.asClawbox).toContain(`rm -rf -- ${userUnit()}.d`);
+    expect(r.asClawbox.some((c) => c.startsWith(`find ${userDir()} `) && c.endsWith("-delete"))).toBe(true);
+    expect(r.rootInHome, "no rm by root in the home").toEqual([]);
+  });
+
+  it("removes a FragmentPath outside the home as root, as before", () => {
+    // A system unit directory: the case filter keeps it to a file named for
+    // this unit, and the clawbox user could not remove it anyway.
+    const outside = path.join(tmp, "etc-systemd-user");
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, UNIT), LEGACY_UNIT);
+
+    const r = retireUser({ userFragment: path.join(outside, UNIT) });
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(path.join(outside, UNIT))).toBe(false);
+    expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
+    expect(r.asClawbox.filter((c) => c.includes(outside))).toEqual([]);
+  });
+
+  it("names a file it could not remove, and still reports the unit taken out of service", () => {
+    placeUnit(userDir(), LEGACY_UNIT, "default.target");
+    const failRm = [
+      'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+      'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }',
+    ].join(NL);
+
+    const r = retireUser({ prelude: failRm });
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(userUnit())).toBe(true);
+    expect(r.out).toContain(`Warning: could not remove ${userUnit()}`);
+    expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
   });
 });
 

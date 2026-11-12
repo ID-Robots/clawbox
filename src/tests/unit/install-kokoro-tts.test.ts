@@ -1,9 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import {
+  mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync, statSync, symlinkSync,
+  realpathSync, readdirSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  accountOnlyHome, CAN_LOCK_HOME, recursiveChownRecorder, shellFunctionIfPresent, unlockTree,
+} from "@/tests/helpers/account-only-home";
 import { testEnv } from "@/tests/helpers/env";
 
 /**
@@ -311,6 +317,8 @@ function runStep(
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
+    // The hand-over walks the real home; this run has none.
+    "hand_over_voice_paths() { :; }",
     "is_hermes_edition() { return 1; }",
     // The real one appends to PROVISION_FAILURES, which the full install turns
     // into the summary, the exit status and the marker the flash host reads.
@@ -361,7 +369,11 @@ function runStep(
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "kokoro-install-"));
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  // A run the account-only home below left locked cannot be removed otherwise.
+  unlockTree(root);
+  rmSync(root, { recursive: true, force: true });
+});
 
 describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises", () => {
   it("asks install-voice.sh for the scripts and the units — never for an engine — on an install or update", () => {
@@ -873,10 +885,9 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
   });
 
   it("leaves the .bashrc it appends to owned by the clawbox user", () => {
-    // install_cuda_torch runs as ROOT and appends with `>>`, which creates the
-    // file when it is missing — a box whose clawbox user had no .bashrc would
-    // get a root-owned one it can never edit again. The exports still load,
-    // so nothing here fails loudly; the user just loses their own file.
+    // install_cuda_torch runs as ROOT. The append is the clawbox user's own
+    // (see "the file work in the clawbox user's home" below), so a .bashrc it
+    // creates is that user's from the start and root has nothing to chown.
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
     const bashrc = path.join(res.home, ".bashrc");
     const body = readFileSync(bashrc, "utf-8");
@@ -884,7 +895,7 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     // Derived here too: this line is appended once and sourced for the life of
     // the box, so a pinned /home/clawbox would outlive the run that wrote it.
     expect(body).toContain(`${res.home}/.local/lib`);
-    expect(res.chown.some((c) => c.includes("clawbox:clawbox") && c.includes(bashrc)), "the .bashrc was never chowned back to the user").toBe(true);
+    expect(res.chown.filter((c) => c.includes(bashrc)), "root chowned the .bashrc").toEqual([]);
   });
 
   it("still deploys the TTS entrypoint and the server script alongside it", () => {
@@ -1463,5 +1474,324 @@ describe.skipIf(!hasBash)("the openclaw setup step weighs the TTS result", () =>
     // timeout quietly standing in for a propagated failure.
     expect(res.status, `a hard TTS failure was swallowed:\n${res.out}`).toBe(code);
     expect(res.out).not.toContain("SETUP_COMPLETED=");
+  });
+});
+
+// ── The file work in the clawbox user's home ────────────────────────────────
+
+/**
+ * install-voice.sh runs as root (install.sh's openclaw_tts, voice_kokoro_install
+ * and voice_whisper_install steps), and what it writes lives in the clawbox
+ * user's home: the workspace copy of the voice scripts, the user units, the
+ * completion stamps and the CUDA exports in ~/.bashrc. Root writing or reading
+ * there acts through any link that user planted on the way, so each of those
+ * writes, and each read of a stamp, is the account's (`as_clawbox`).
+ *
+ * The functions are cut out of the shipped script and run against a home only
+ * `as_clawbox` can write to (src/tests/helpers/account-only-home.ts): a write
+ * root's own shell makes there fails, and a file command root runs there is
+ * recorded in `rootInHome`. `$0` is the shipped script, which is where
+ * deploy_voice_scripts finds its sources.
+ */
+const HOME_FNS = [
+  "kokoro_ld_path",
+  "deploy_voice_scripts",
+  "ensure_cuda_bashrc_exports",
+  "kokoro_stack_present",
+  "kokoro_mark_installed",
+  "write_kokoro_unit",
+  "activate_user_units",
+  "kokoro_report_present",
+  "whisper_stack_present",
+  "whisper_mark_installed",
+  "write_whisper_unit",
+];
+/** The script's own assignments of the paths and stamp versions those functions use. */
+const HOME_CONSTS = INSTALL_VOICE_SH.split("\n")
+  .filter((l) => /^(WORKSPACE|SYSTEMD_USER|CUDA_HOME_DIR|(KOKORO|WHISPER)_STAMP(_VERSION)?)=/.test(l))
+  .join("\n");
+const VOICE_SCRIPTS = ["kokoro-server.py", "kokoro-client.sh", "kokoro-tts.sh", "whisper-server.py", "stt-client.py", "stt.py"];
+
+/** The units as the script wrote them before this change, for the same home and CUDA directory. */
+function pinnedUnit(unit: "kokoro-server" | "whisper-server", home: string, cuda: string): string {
+  const ld = `${home}/.local/lib:${home}/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:${cuda}/lib64`;
+  return [
+    "[Unit]",
+    unit === "kokoro-server" ? "Description=Kokoro TTS Server (GPU)" : "Description=Whisper STT Server (GPU)",
+    "After=default.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    `Environment=LD_LIBRARY_PATH=${ld}`,
+    ...(unit === "whisper-server" ? ["Environment=WHISPER_MODEL=base"] : []),
+    `ExecStart=/usr/bin/python3 ${home}/.openclaw/workspace/scripts/${unit}.py`,
+    "Restart=no",
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n");
+}
+
+function inHome(body: string, { lock = CAN_LOCK_HOME, prelude = "", user = "clawbox" } = {}) {
+  const home = path.join(root, "home");
+  const aux = path.join(root, "aux");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(aux, { recursive: true });
+  const account = accountOnlyHome(home, aux, { lock });
+  const program = [
+    "set -euo pipefail",
+    // The root step's own umask, so a file the run creates gets a box's mode.
+    "umask 022",
+    `CLAWBOX_USER=${user}`,
+    `CLAWBOX_HOME=${JSON.stringify(home)}`,
+    HOME_CONSTS,
+    // Everything that is not file work in the home.
+    "su() { return 0; }",
+    "loginctl() { return 0; }",
+    "systemctl() { return 0; }",
+    "clawbox_python() { return 0; }",
+    "kokoro_check_phonemiser() { return 0; }",
+    'kokoro_report() { echo "VERDICT=$1"; }',
+    `kokoro_expected_cusparselt_dir() { printf '%s' "$CLAWBOX_HOME/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib"; }`,
+    ...HOME_FNS.map((fn) => extractShellFn(INSTALL_VOICE_SH, fn)),
+    // After the functions, so `as_clawbox` is the account's.
+    account.shell,
+    prelude,
+    "__ao_lock",
+    body,
+  ].join("\n");
+  const res = spawnSync("bash", ["-c", program, INSTALL_VOICE], {
+    encoding: "utf-8",
+    timeout: 60_000,
+    env: { ...process.env, CLAWBOX_CUDA_HOME: path.join(root, "cuda") },
+  });
+  const stdout = res.stdout ?? "";
+  return {
+    stdout,
+    stderr: res.stderr ?? "",
+    rc: /^RC=(\d+)$/m.exec(stdout)?.[1] ?? "",
+    rootInHome: account.rootInHome(),
+    asClawbox: account.asClawbox(),
+    home,
+    cuda: path.join(root, "cuda"),
+  };
+}
+
+const modeOf = (file: string) => statSync(file).mode & 0o777;
+
+describe.skipIf(!hasBash || !CAN_LOCK_HOME)("install-voice.sh does its file work in the home as the clawbox user", () => {
+  it("deploys the voice scripts byte for byte, with the modes cp gave them", () => {
+    const scripts = path.join(root, "home", ".openclaw", "workspace", "scripts");
+    // There already, as on every box after its first update.
+    mkdirSync(path.join(scripts, "openclaw"), { recursive: true });
+    // A copy that is there keeps its mode, as it did under cp.
+    writeFileSync(path.join(scripts, "stt.py"), "old\n");
+    chmodSync(path.join(scripts, "stt.py"), 0o600);
+
+    const r = inHome('rc=0; deploy_voice_scripts || rc=$?; echo "RC=$rc"');
+
+    expect(r.rc, r.stderr).toBe("0");
+    expect(r.stderr).not.toContain("ERROR");
+    for (const f of VOICE_SCRIPTS) {
+      expect(readFileSync(path.join(scripts, f)).equals(readFileSync(path.join(REPO, "scripts", f))), f).toBe(true);
+    }
+    const entrypoint = path.join(scripts, "openclaw", "clawbox-tts.sh");
+    expect(readFileSync(entrypoint).equals(readFileSync(path.join(REPO, "scripts", "openclaw", "clawbox-tts.sh")))).toBe(true);
+    expect(modeOf(entrypoint)).toBe(0o755);
+    for (const f of VOICE_SCRIPTS.filter((n) => n.endsWith(".sh"))) expect(modeOf(path.join(scripts, f)), f).toBe(0o755);
+    expect(modeOf(path.join(scripts, "kokoro-server.py"))).toBe(0o644);
+    expect(modeOf(path.join(scripts, "stt.py")), "an existing copy lost its mode").toBe(0o600);
+    expect(r.rootInHome, "no mkdir, cp, chmod or chown by root in the home").toEqual([]);
+  });
+
+  it("creates the workspace directories as the clawbox user", () => {
+    const r = inHome('rc=0; deploy_voice_scripts || rc=$?; echo "RC=$rc"');
+
+    expect(r.rc, r.stderr).toBe("0");
+    expect(existsSync(path.join(r.home, ".openclaw", "workspace", "scripts", "openclaw", "clawbox-tts.sh"))).toBe(true);
+    expect(r.asClawbox[0]).toBe(`mkdir -p -- ${r.home}/.openclaw/workspace/scripts/openclaw`);
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("appends the CUDA exports to ~/.bashrc as the clawbox user, creating a missing one 0644", () => {
+    const r = inHome('rc=0; ensure_cuda_bashrc_exports || rc=$?; echo "RC=$rc"');
+
+    const bashrc = path.join(r.home, ".bashrc");
+    const ld = `${r.home}/.local/lib:${r.home}/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:${r.cuda}/lib64`;
+    expect(r.rc, r.stderr).toBe("0");
+    expect(existsSync(bashrc), r.stderr).toBe(true);
+    expect(readFileSync(bashrc, "utf-8")).toBe(
+      `export LD_LIBRARY_PATH=${ld}\${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\nexport CUDA_HOME=${r.cuda}\n`,
+    );
+    expect(modeOf(bashrc)).toBe(0o644);
+    expect(r.rootInHome, "no append or chown by root in the home").toEqual([]);
+  });
+
+  it("appends them once, after what the user already has", () => {
+    mkdirSync(path.join(root, "home"), { recursive: true });
+    const bashrc = path.join(root, "home", ".bashrc");
+    writeFileSync(bashrc, "# mine\n");
+
+    const first = inHome('rc=0; ensure_cuda_bashrc_exports || rc=$?; echo "RC=$rc"');
+    const after = readFileSync(bashrc, "utf-8");
+    const second = inHome('rc=0; ensure_cuda_bashrc_exports || rc=$?; echo "RC=$rc"');
+
+    expect(first.rc, first.stderr).toBe("0");
+    expect(after.startsWith("# mine\nexport LD_LIBRARY_PATH=")).toBe(true);
+    expect(after.endsWith(`export CUDA_HOME=${first.cuda}\n`)).toBe(true);
+    expect(second.rc).toBe("0");
+    expect(readFileSync(bashrc, "utf-8")).toBe(after);
+    expect([...first.rootInHome, ...second.rootInHome]).toEqual([]);
+  });
+
+  it.each([
+    ["write_kokoro_unit", "kokoro-server"],
+    ["write_whisper_unit", "whisper-server"],
+  ] as const)("%s writes %s.service as the clawbox user, byte for byte", (fn, unit) => {
+    const r = inHome(`rc=0; ${fn} || rc=$?; echo "RC=$rc"`);
+
+    const file = path.join(r.home, ".config", "systemd", "user", `${unit}.service`);
+    expect(r.rc, r.stderr).toBe("0");
+    expect(readFileSync(file, "utf-8")).toBe(pinnedUnit(unit, r.home, r.cuda));
+    expect(modeOf(file)).toBe(0o644);
+    expect(r.rootInHome, "no mkdir by root in the home").toEqual([]);
+  });
+
+  it.each([
+    ["kokoro_mark_installed", "kokoro-installed", "KOKORO_STAMP_VERSION"],
+    ["whisper_mark_installed", "whisper-installed", "WHISPER_STAMP_VERSION"],
+  ])("%s writes its stamp as the clawbox user", (fn, stamp, version) => {
+    const r = inHome(`rc=0; ${fn} || rc=$?; echo "RC=$rc"`);
+
+    const file = path.join(r.home, ".cache", "clawbox", stamp);
+    expect(r.rc, r.stderr).toBe("0");
+    expect(r.stderr).not.toContain("Warning");
+    expect(existsSync(file), r.stderr).toBe(true);
+    expect(readFileSync(file, "utf-8")).toBe(`${shellConst(version)}\n`);
+    expect(modeOf(file)).toBe(0o644);
+    expect(r.rootInHome, "no mkdir by root in the home").toEqual([]);
+  });
+
+  it.each(["kokoro_mark_installed", "whisper_mark_installed"])(
+    "%s leaves the hand-over to install.sh: no chown -R of its own",
+    (fn) => {
+      const r = inHome(`rc=0; ${fn} || rc=$?; echo "RC=$rc"`, { lock: false });
+
+      expect(r.rc, r.stderr).toBe("0");
+      expect(r.rootInHome, "root's chown -R of ~/.cache/clawbox").toEqual([]);
+    },
+  );
+
+  it("activate_user_units runs no chown -R of the unit directory", () => {
+    mkdirSync(path.join(root, "home", ".config", "systemd", "user"), { recursive: true });
+
+    const r = inHome('rc=0; activate_user_units || rc=$?; echo "RC=$rc"', { lock: false });
+
+    expect(r.rc, r.stderr).toBe("0");
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it.each([
+    ["kokoro_report_present", "kokoro-installed", "KOKORO_STAMP_VERSION"],
+    ["kokoro_stack_present", "kokoro-installed", "KOKORO_STAMP_VERSION"],
+    ["whisper_stack_present", "whisper-installed", "WHISPER_STAMP_VERSION"],
+  ])("%s reads the stamp as the clawbox user", (fn, stamp, version) => {
+    // A stamp the user replaced with a link to a file outside the home: root's
+    // `cat` would read it, and kokoro_report_present prints what it read.
+    const outside = path.join(root, "outside");
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, stamp), `${shellConst(version)}\n`);
+    mkdirSync(path.join(root, "home", ".cache", "clawbox"), { recursive: true });
+    const file = path.join(root, "home", ".cache", "clawbox", stamp);
+    symlinkSync(path.join(outside, stamp), file);
+
+    const r = inHome(`rc=0; ${fn} || rc=$?; echo "RC=$rc"`);
+
+    expect(r.rc, r.stderr).toBe("0");
+    expect(r.asClawbox).toContain(`cat -- ${file}`);
+    expect(r.rootInHome, "root read the stamp, or wrote in the home").toEqual([]);
+  });
+
+  it("hands nothing over through a linked ~/.cache: the script runs no chown, and install.sh's walk stops at the link", () => {
+    const home = path.join(root, "home");
+    const outside = path.join(root, "outside");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(outside);
+    symlinkSync(outside, path.join(home, ".cache"));
+    // A directory that really is in the home, so the walk does hand one over.
+    mkdirSync(path.join(home, ".config", "systemd", "user"), { recursive: true });
+    const log = path.join(root, "chown-R.log");
+    writeFileSync(log, "");
+
+    // The device account is named as someone else, so to the walk everything
+    // here is a leftover to hand back.
+    const r = inHome(
+      ["rc=0; kokoro_mark_installed || rc=$?", "hand_over_voice_paths || true", 'echo "RC=$rc"'].join("\n"),
+      {
+        lock: false,
+        user: "clawbox-device",
+        prelude: [
+          recursiveChownRecorder(log),
+          shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+          shellFunctionIfPresent(INSTALL_SH, "hand_over_voice_paths"),
+        ].join("\n"),
+      },
+    );
+
+    const landed = readFileSync(log, "utf-8").split("\n").filter(Boolean);
+    const realHome = realpathSync(home);
+    expect(r.rc, r.stderr).toBe("0");
+    expect(landed.filter((p) => !p.startsWith(`${realHome}/`)), "a chown -R landed outside the home").toEqual([]);
+    expect(landed, "install.sh's walk handed nothing over").toContain(`${realHome}/.config/systemd/user`);
+  });
+});
+
+describe.skipIf(!hasBash || !CAN_LOCK_HOME)("install-voice.sh's as_clawbox", () => {
+  it("is install.sh's: runuser to the account when root, the command itself otherwise", () => {
+    const helper = shellFunctionIfPresent(INSTALL_VOICE_SH, "as_clawbox");
+    expect(helper, "install-voice.sh has no as_clawbox").not.toBe("");
+    const log = path.join(root, "runuser.log");
+    const target = path.join(root, "made");
+    writeFileSync(log, "");
+    const program = (asRoot: boolean) => [
+      "CLAWBOX_USER=clawbox-device",
+      ...(asRoot ? ['id() { if [ "$*" = "-u" ]; then echo 0; else command id "$@"; fi; }'] : []),
+      `runuser() { printf '%s\\n' "runuser $*" >> ${JSON.stringify(log)}; }`,
+      helper,
+      `as_clawbox mkdir -p -- ${JSON.stringify(target)}`,
+    ].join("\n");
+
+    spawnSync("bash", ["-c", program(true)], { encoding: "utf-8" });
+    expect(readFileSync(log, "utf-8")).toBe(`runuser -u clawbox-device -- mkdir -p -- ${target}\n`);
+    expect(existsSync(target)).toBe(false);
+
+    const r = spawnSync("bash", ["-c", program(false)], { encoding: "utf-8" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(log, "utf-8"), "a non-root run went through runuser").toBe(
+      `runuser -u clawbox-device -- mkdir -p -- ${target}\n`,
+    );
+  });
+});
+
+describe("install-voice.sh's reach", () => {
+  const code = (text: string) => text.split("\n").filter((l) => !l.trim().startsWith("#"));
+
+  it("runs no chown: what it writes is the clawbox user's already, and install.sh hands back the rest", () => {
+    expect(code(INSTALL_VOICE_SH).filter((l) => /\bchown\b/.test(l))).toEqual([]);
+  });
+
+  it("is run by no x64 path, which this change leaves as it was", () => {
+    const migration = path.join(REPO, "scripts", "x64-migration");
+    const files = [
+      path.join(REPO, "install-x64.sh"),
+      ...readdirSync(migration, { recursive: true, encoding: "utf-8" })
+        .map((f) => path.join(migration, f))
+        .filter((f) => statSync(f).isFile()),
+    ];
+    for (const f of files) {
+      expect(code(readFileSync(f, "utf-8")).filter((l) => l.includes("install-voice.sh")), f).toEqual([]);
+    }
   });
 });
