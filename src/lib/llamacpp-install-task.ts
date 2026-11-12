@@ -123,10 +123,11 @@ async function repairLlamaCppRuntime(task: BackgroundTaskContext): Promise<{ ok:
 
 function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: string) {
   const env = { ...process.env, HOME: CLAWBOX_HOME_DIR };
-  // Without the web server's network capabilities where it holds them, and
-  // on such a start without its own settings (launch.env), as the on-demand start does
-  // (instrumentation-node.ts): setpriv execs the launcher in place, so the pid
-  // written below is still the one that ends as llama-server.
+  // Without the web server's network capabilities where it holds them and, on
+  // such a start, without the web server's own settings (launch.env), as the
+  // on-demand start does (instrumentation-node.ts): setpriv execs the launcher
+  // in place, so the pid written below is still the one that ends as
+  // llama-server.
   const launch = withCapabilityDrop(
     "bash",
     [

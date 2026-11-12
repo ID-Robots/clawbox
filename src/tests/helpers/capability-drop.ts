@@ -3,16 +3,20 @@ import path from "path";
 import { vi } from "vitest";
 import type * as CapabilityDrop from "@/lib/capability-drop";
 
+/** production-server.js, as text. */
+export const PRODUCTION_SERVER_SOURCE = fs.readFileSync(path.resolve(__dirname, "../../../production-server.js"), "utf-8");
+
 /**
  * The settings production-server.js puts into its own environment
- * (`process.env.NAME = …`), read from its source. The suites pin the helper
- * programs' environment against this list rather than a copy of the module's.
+ * (`process.env.NAME = …`, also `??=`, `||=` and `process.env["NAME"]`), read
+ * from its source. The suites pin the helper programs' environment against
+ * this list rather than a copy of the module's.
  */
 export const WEB_SERVER_SETTINGS: readonly string[] = [
-  ...fs
-    .readFileSync(path.resolve(__dirname, "../../../production-server.js"), "utf-8")
-    .matchAll(/^\s*process\.env\.([A-Z][A-Z0-9_]*) = /gm),
-].map((m) => m[1]);
+  ...PRODUCTION_SERVER_SOURCE.matchAll(
+    /^\s*process\.env(?:\.([A-Z][A-Z0-9_]*)|\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\])\s*(?:\?\?|\|\|)?=(?!=)/gm,
+  ),
+].map((m) => m[1] ?? m[2]);
 
 /** Give each of them a value of its own for this test (`vi.unstubAllEnvs()` undoes it). */
 export function stubWebServerSettings(): void {

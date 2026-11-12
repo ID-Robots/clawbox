@@ -4,7 +4,12 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
+import {
+  PRODUCTION_SERVER_SOURCE,
+  WEB_SERVER_SETTINGS,
+  stubWebServerSettings,
+  withoutThem,
+} from "@/tests/helpers/capability-drop";
 
 /**
  * The capability drop for the long-running programs the web server starts
@@ -329,6 +334,8 @@ describe.each([
   it("names exactly the settings production-server.js puts into its own environment", async () => {
     const mod = await load();
     expect(WEB_SERVER_SETTINGS.length).toBeGreaterThan(0);
+    // A bulk write would add settings the list above cannot see.
+    expect(PRODUCTION_SERVER_SOURCE).not.toMatch(/Object\.assign\(\s*process\.env\b/);
     expect([...mod.WEB_SERVER_OWN_SETTINGS].sort()).toEqual([...WEB_SERVER_SETTINGS].sort());
     const env = { PATH: "/usr/bin", ...Object.fromEntries(WEB_SERVER_SETTINGS.map((key) => [key, "x"])) };
     expect(mod.withoutWebServerSettings(env)).toStrictEqual({ PATH: "/usr/bin" });
@@ -380,16 +387,25 @@ describe.each([
     },
   );
 
-  it.skipIf(!fs.existsSync("/proc/self/status"))(
-    "reads this process's own status, and drops exactly when its CapAmb line holds a capability",
+  it.skipIf(process.platform !== "linux" || !fs.existsSync(SETPRIV))(
+    "reads this process's own status file, and drops exactly when its CapAmb line holds a capability",
     async () => {
       const { withCapabilityDrop } = await load();
       warns();
-      // Worked out here, independently of the module's own parsing.
-      const line = /^CapAmb:\s*([0-9a-fA-F]+)\s*$/m.exec(fs.readFileSync("/proc/self/status", "utf-8"));
-      const held = line !== null && BigInt(`0x${line[1]}`) !== 0n;
-      const r = withCapabilityDrop(process.execPath, ["--version"], { label: "node" });
-      expect(r.dropped).toBe(held && fs.existsSync(SETPRIV));
+      // No probes at all: the module's own read, answered here for that one
+      // file (every other read goes through), so a status path or read that
+      // went wrong would show as no drop.
+      let status = HELD;
+      const realRead = fs.readFileSync;
+      const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) =>
+        file === "/proc/self/status"
+          ? status
+          : (realRead as (...a: unknown[]) => unknown)(file, ...rest)) as typeof fs.readFileSync);
+      const ask = () => withCapabilityDrop(process.execPath, ["--version"], { label: "node" });
+      expect(ask()).toMatchObject({ bin: SETPRIV, argv: [...DROP, process.execPath, "--version"], dropped: true });
+      expect(read).toHaveBeenCalledWith("/proc/self/status", "utf8");
+      status = NONE;
+      expect(ask().dropped).toBe(false);
     },
   );
 });

@@ -146,7 +146,7 @@ function resolveProgram(bin, env, isExecutable) {
 }
 
 /**
- * What to spawn for `bin argv`: the same two values on a host whose web server
+ * What to spawn for `bin argv`: the same values on a host whose web server
  * holds no ambient capabilities, otherwise setpriv with the drop in front of
  * the program's resolved path. Synchronous, because a caller may allow no
  * await between its last check and the spawn (instrumentation-node.ts), and
@@ -158,7 +158,8 @@ function resolveProgram(bin, env, isExecutable) {
  * A dropped start also gets an environment without the web server's own
  * settings (`env`, to spawn as the child's environment). Every other start
  * gets back exactly the `opts.env` it passed, none when it passed none, so it
- * spawns as before.
+ * spawns as before. A program that needs one of those settings is not one to
+ * start through this.
  *
  * @param {string} bin
  * @param {readonly string[]} argv

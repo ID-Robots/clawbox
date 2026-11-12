@@ -906,10 +906,10 @@ function startPublicAppLinks(options = {}) {
   const spawnImpl = options.spawnImpl || spawn;
   const capabilityDrop = options.capabilityDrop || withCapabilityDrop;
   // Without the web server's network capabilities where it holds them, as
-  // clawbox-tunnel.service already runs cloudflared, and on such a start
-  // without its own settings. setpriv execs cloudflared in place, so child.kill below and the
-  // URL on its output are cloudflared's. Only a dropped start brings an env;
-  // any other spawns as before, inheriting the web server's.
+  // clawbox-tunnel.service already runs cloudflared, and, on such a start,
+  // without the web server's own settings. setpriv execs cloudflared in place,
+  // so child.kill below and the URL on its output are cloudflared's. Only a
+  // dropped start brings an env; any other spawns as before.
   const spawnTunnel = options.spawnTunnel || ((port, configFile) => {
     const launch = capabilityDrop(bin, ["tunnel", "--no-autoupdate", "--config", configFile, "--url", `http://127.0.0.1:${port}`], { label: "a public app link's tunnel" });
     return spawnImpl(launch.bin, launch.argv, { stdio: ["ignore", "pipe", "pipe"], ...(launch.env ? { env: launch.env } : {}) });

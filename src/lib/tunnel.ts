@@ -279,10 +279,10 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
     // `--config` goes before `--url`, exactly as scripts/run-tunnel.sh runs it.
     const args = ["tunnel", "--no-autoupdate", "--config", isolatedConfig, "--url", target];
     // Without the web server's network capabilities where it holds them, as
-    // clawbox-tunnel.service already runs cloudflared, and on such a start
-    // without its own settings. setpriv execs it in place, so the pid recorded below is
-    // cloudflared's. Only a dropped start brings an env; any other spawns as
-    // before, inheriting the web server's.
+    // clawbox-tunnel.service already runs cloudflared, and, on such a start,
+    // without the web server's own settings. setpriv execs it in place, so the
+    // pid recorded below is cloudflared's. Only a dropped start brings an env;
+    // any other spawns as before.
     const launch = withCapabilityDrop("cloudflared", args, { label: "the tunnel route's quick tunnel" });
     const proc = spawn(launch.bin, launch.argv, {
       detached: true,
