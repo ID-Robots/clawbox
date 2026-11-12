@@ -29,20 +29,23 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * every standalone assignment (bare, local, export, readonly, declare) whose
  * value BEGINS with a tainted expansion, `${a:-$b}` when either side is, or
  * with a substitution, `$(…)` or backquoted, that keeps a tainted path
- * (`dirname`, `readlink`, `realpath`, `cd … && pwd`); an array whose first
- * element is; a for-loop variable over a tainted word; and a function's `$N`
- * when a call passes it a tainted word. A `NAME=value` before a command or
+ * (`dirname`, `readlink`, `realpath`, `cd … && pwd`, and install.sh's own
+ * `hermes_venv_python`, which prints a venv's interpreter); an array whose
+ * first element is; a for-loop variable over a tainted word; and a function's
+ * `$N` when a call passes it a tainted word. A `NAME=value` before a command or
  * after `env` taints nothing, and neither does any other command substitution.
  * `local` and parameter taint stay in their function.
  *
  * A run: a tainted word as a command (after `NAME=value` words, keywords,
  * `exec`, `time`, `command`, `builtin`, `env …`, a root `sudo`, or a runuser,
- * su or `sudo -u` whose target is root), as the script of
- * bash/sh/dash/node/python3/perl, as a module node preloads (`-r`, `--require`,
- * `--import`), or as the file of `source`/`.`. Before the script, any word that
- * starts with `-` is an option (`-0777`, `-i.bak`); a value-taking option's
- * value is skipped when it is a letter this file lists or one of the long
- * options it lists for node and bash. A program handed over as text (`bash -c`,
+ * su or `sudo -u` whose target is root), the interpreter or `env` binary itself
+ * included (a venv's `bin/python3`), as the script of
+ * bash/sh/dash/node/python3/perl, as code they load first (node's `-r`,
+ * `--require`, `--import`, `--loader`; perl's `-I`, `-M`, `-m`), or as the file
+ * of `source`/`.`. Before the script, any word that starts with `-` is an
+ * option (`-0777`, `-i.bak`, `-0777e`); a value-taking option's value is
+ * skipped when it is a letter this file lists or one of the long options it
+ * lists for node and bash. A program handed over as text (`bash -c`,
  * `node -e`/`-p`, `python3 -c`, `perl -e`, a root `su -c`/`-lc`, and
  * `python3 -cTEXT`/`perl -eTEXT` glued) is a run when it names the account's
  * directories: a `$NAME` of one outside single quotes (escaped or not), or the
@@ -69,10 +72,14 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * whose value is the next word (that value is read as the script), program text
  * held in a variable whose value does not begin with the account's path, a
  * heredoc fed to a shell under a wrapper, which reads as root (the safe
- * direction), a switch target known only at run time, which is taken to be the
- * account it names (a name the file ever sets to root, or a `${X:-root}`
- * default, reads as root), and a path is judged where it is run: the guard does
- * not follow it through a copy (`install`, `cp`).
+ * direction), a `$…` between single quotes in the body of an unquoted heredoc
+ * fed to a shell (root expands it before the shell reads the body; it is read
+ * as quoted text), a path that comes from any other command substitution, a
+ * relative path run after a `cd` into the account's directories, a switch
+ * target known only at run time, which is taken to be the account it names (a
+ * name the file ever sets to root, or a `${X:-root}` default, reads as root),
+ * and a path is judged where it is run: the guard does not follow it through a
+ * copy (`install`, `cp`).
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -104,10 +111,18 @@ interface Interpreter {
   program: string;
   /** Option letters after which there is no script file: stdin, a module. */
   none: string;
-  /** Option letters that take a value. */
+  /** Option letters that take a value: the rest of their word, or the next word when nothing follows. */
   takesArg: string;
+  /** Option letters that take the rest of their word, if any, and never the next word (perl's `-i.bak`). */
+  rest?: string;
+  /** Option letters followed by digits that end there, the cluster going on after them (perl's `-0777e`). */
+  digits?: string;
+  /** Option letters whose value is code the interpreter loads before its program: judged as a run. */
+  preload?: string;
   /** Long options whose value is the program as text. */
   long?: string[];
+  /** Long options whose value is code loaded before the program, as the next word unless glued with `=`. */
+  preloadLong?: string[];
   /** Long options that take a value, as the next word unless glued with `=`. */
   longArgs?: string[];
   /** A shell: `-c` takes no value of its own; the program is the first operand. */
@@ -130,21 +145,15 @@ const INTERPRETERS: Record<string, Interpreter> = {
   node: {
     program: "ep",
     none: "",
-    takesArg: "rC",
+    takesArg: "C",
+    preload: "r",
     long: ["--eval", "--print"],
-    longArgs: [
-      "--require",
-      "--import",
-      "--loader",
-      "--experimental-loader",
-      "--env-file",
-      "--title",
-      "--conditions",
-      "--input-type",
-    ],
+    preloadLong: ["--require", "--import", "--loader", "--experimental-loader"],
+    longArgs: ["--env-file", "--title", "--conditions", "--input-type"],
   },
   python3: { program: "c", none: "m", takesArg: "WX", glues: true },
-  perl: { program: "eE", none: "", takesArg: "", glues: true },
+  // -I adds an include directory and -M/-m load a module, before the program.
+  perl: { program: "eE", none: "", takesArg: "", rest: "ixCdD", digits: "0l", preload: "IMm", glues: true },
 };
 const PREFIX_KEYWORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!"]);
 const DECLARATIONS = new Set(["local", "export", "readonly", "declare", "typeset"]);
@@ -176,6 +185,15 @@ interface Allowed {
 
 /** Each entry needs a reason, an expiry date and exactly one live line. */
 const ALLOWED: Allowed[] = [];
+
+/**
+ * The fewest logical lines and commands run as the account the guard may read
+ * in install.sh: it had 6855 and 167 when these were set. A drop past them
+ * means the reader lost part of the file, or the lines left on purpose, in
+ * which case lower them.
+ */
+const LINE_FLOOR = 6500;
+const WRAPPED_FLOOR = 155;
 
 interface Word {
   raw: string;
@@ -561,8 +579,10 @@ const bare = (raw: string): string => raw.replace(/["'\\]/g, "");
 interface Shape {
   /** The word in run position: the command, an interpreter's script, the file of `source`. */
   candidate?: Word;
-  /** Modules node loads before its program: `-r`, `--require`, `--import`. */
+  /** Code an interpreter loads before its program: node's `-r`/`--require`/`--import`/`--loader`, perl's `-I`/`-M`/`-m`. */
   preloads: Word[];
+  /** The interpreter or `env` binary itself, which root runs whatever it then runs. */
+  launchers: Word[];
   /** A program root hands an interpreter, or a root `su -c`, as text. */
   programs: Word[];
   /** Text a trap hands root's own shell, read as shell where it is set. */
@@ -574,45 +594,70 @@ interface Shape {
   call?: { name: string; args: Word[] };
 }
 
-/** The script file an interpreter's argv names, or the program it hands it as text; neither for stdin or a module. */
-function operands(spec: Interpreter, args: Word[]): { script?: Word; program?: Word } {
+interface Operands {
+  /** The script file it runs. */
+  script?: Word;
+  /** The program it is handed as text. */
+  program?: Word;
+  /** Code it loads before its program: node's `-r`/`--require`/`--import`/`--loader`, perl's `-I`/`-M`/`-m`. */
+  preloads: Word[];
+}
+
+/** What an interpreter's argv runs: its script file or its program text, and what it loads first. */
+function operands(spec: Interpreter, args: Word[]): Operands {
+  const out: Operands = { preloads: [] };
   let text = false;
-  const operand = (w: Word | undefined): { script?: Word; program?: Word } => (text ? { program: w } : { script: w });
+  const operand = (w: Word | undefined): Operands => ({ ...out, ...(text ? { program: w } : { script: w }) });
   for (let j = 0; j < args.length; j += 1) {
     const r = bare(args[j].raw);
-    if (r === "-") return {};
+    if (r === "-") return out;
     if (r === "--") return operand(args[j + 1]);
     if (r.startsWith("--")) {
       const name = r.split("=")[0];
-      if (spec.long?.includes(name)) return { program: r.includes("=") ? gluedValue(args[j]) : args[j + 1] };
-      if (spec.longArgs?.includes(name) && !r.includes("=")) j += 1;
+      const glued = r.includes("=");
+      if (spec.long?.includes(name)) return { ...out, program: glued ? gluedValue(args[j]) : args[j + 1] };
+      const value = glued ? gluedValue(args[j]) : args[j + 1];
+      if (spec.preloadLong?.includes(name) && value) out.preloads.push(value);
+      if ((spec.preloadLong?.includes(name) || spec.longArgs?.includes(name)) && !glued) j += 1;
       continue;
     }
     if (/^-./.test(r) || /^\+[A-Za-z]/.test(r)) {
       // An option, never the script, whatever follows its dash (`-0777`). Its
-      // leading letters are read the way the interpreter reads them: the first
-      // letter that takes a value or the program takes the rest of the word
-      // (`-cTEXT`, `-i.bak`), or the next word when nothing follows.
+      // letters are read the way the interpreter reads them: a letter that
+      // takes a value or the program takes the rest of the word (`-cTEXT`,
+      // `-I/dir`) or, when nothing follows, the next word; digits after perl's
+      // `-0` and `-l` end there and the cluster goes on (`-0777e`).
       const word = /^[-+]/.test(args[j].raw) ? args[j].raw : r;
-      const letters = /^[-+]([A-Za-z]*)/.exec(word)?.[1] ?? "";
-      for (let n = 0; n < letters.length; n += 1) {
-        const l = letters[n];
-        const glued = word.slice(n + 2);
-        if (spec.none.includes(l)) return {};
-        if (spec.program.includes(l) && !spec.shell) {
-          return { program: glued && spec.glues ? { raw: glued, subs: [] } : args[j + 1] };
+      for (let n = 1; n < word.length; n += 1) {
+        const l = word[n];
+        if (spec.digits?.includes(l)) {
+          n += /^(?:x[0-9A-Fa-f]*|[0-7]*)/.exec(word.slice(n + 1))?.[0].length ?? 0;
+          continue;
         }
-        if (spec.program.includes(l)) text = true;
-        else if (spec.takesArg.includes(l)) {
+        if (!/[A-Za-z]/.test(l)) break;
+        const glued = word.slice(n + 1);
+        const value = (): Word | undefined => (glued ? { raw: glued, subs: [] } : args[j + 1]);
+        if (spec.none.includes(l)) return out;
+        if (spec.program.includes(l) && !spec.shell) {
+          return { ...out, program: glued && spec.glues ? { raw: glued, subs: [] } : args[j + 1] };
+        }
+        if (spec.program.includes(l)) {
+          text = true;
+          continue;
+        }
+        if (spec.preload?.includes(l) || spec.takesArg.includes(l)) {
+          const v = value();
+          if (spec.preload?.includes(l) && v) out.preloads.push(v);
           if (!glued) j += 1;
           break;
         }
+        if (spec.rest?.includes(l)) break;
       }
       continue;
     }
     return operand(args[j]);
   }
-  return {};
+  return out;
 }
 
 /** The value of a glued `--option=value` word, as written. */
@@ -695,23 +740,6 @@ function unquote(raw: string): string {
   return out;
 }
 
-/** node's preload operands: they run at startup even when the program is `-e` text. */
-function preloadOperands(args: Word[]): Word[] {
-  const out: Word[] = [];
-  for (let j = 0; j < args.length; j += 1) {
-    const r = bare(args[j].raw);
-    if (r === "--" || !r.startsWith("-")) break;
-    if (r === "-r" || r === "--require" || r === "--import") {
-      if (args[j + 1]) out.push(args[j + 1]);
-      j += 1;
-    } else {
-      const glued = /^(?:-r|--require=|--import=)(.+)$/.exec(args[j].raw.replace(/^["']/, ""));
-      if (glued) out.push({ raw: glued[1], subs: [] });
-    }
-  }
-  return out;
-}
-
 /** A switch target that is root after all: `-u root`, `-u 0`, sudo's `-u '#0'`. */
 const ROOT_TARGET = /^(?:root|#?0)$/;
 /** `NAME=root`, `local NAME="0"`: a name the file sets to root somewhere. */
@@ -767,7 +795,15 @@ function switchOf(args: Word[]): { target?: string; command?: number } {
 }
 
 function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>, rootNames: Set<string>): Shape {
-  const shape: Shape = { wrapped: false, assigns: [], locals: [], preloads: [], programs: [], shellText: [] };
+  const shape: Shape = {
+    wrapped: false,
+    assigns: [],
+    locals: [],
+    preloads: [],
+    launchers: [],
+    programs: [],
+    shellText: [],
+  };
   const { words } = command;
   if (command.loopVar) return shape;
   let k = 0;
@@ -789,6 +825,7 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
       continue;
     }
     if (word === "env" || word.endsWith("/env")) {
+      shape.launchers.push(words[k]);
       k += 1;
       while (k < words.length) {
         const r = bare(words[k].raw);
@@ -869,10 +906,11 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
   }
   const interpreter = INTERPRETERS[name.replace(/^.*\//, "")];
   if (interpreter) {
-    const { script, program } = operands(interpreter, words.slice(k + 1));
+    shape.launchers.push(cmd);
+    const { script, program, preloads } = operands(interpreter, words.slice(k + 1));
     shape.candidate = script;
+    shape.preloads = preloads;
     if (program) shape.programs.push(program);
-    if (interpreter === INTERPRETERS.node) shape.preloads = preloadOperands(words.slice(k + 1));
     return shape;
   }
   if (name === "source" || name === ".") {
@@ -904,9 +942,12 @@ function isTainted(name: string, fn: string | null, taint: Taint): boolean {
 /**
  * Commands whose output is a path made from their operand: its directory, its
  * resolved form. Taken as the account's path when the operand is one, which
- * errs toward a hit (`dirname "$CLAWBOX_HOME"` is /home).
+ * errs toward a hit (`dirname "$CLAWBOX_HOME"` is /home). hermes_venv_python is
+ * install.sh's own: it prints the interpreter of the venv inside the agent
+ * directory it is given. If install.sh renames it, rename it here; the
+ * self-check's `venv_python` fails until then.
  */
-const PATH_KEEPERS = new Set(["dirname", "readlink", "realpath"]);
+const PATH_KEEPERS = new Set(["dirname", "readlink", "realpath", "hermes_venv_python"]);
 
 /**
  * Whether a command substitution prints a path made from one in the service
@@ -1038,7 +1079,9 @@ function scan(sources: { file: string; text: string }[]): {
     shapes.forEach((s, n) => {
       const { fn, lineNo, text: line } = commands[n];
       if (s.wrapped) wrapped += 1;
-      const runs = [s.candidate, ...s.preloads].filter((w): w is Word => !!w && beginsTainted(w.raw, fn, taint));
+      const runs = [...s.launchers, s.candidate, ...s.preloads].filter(
+        (w): w is Word => !!w && beginsTainted(w.raw, fn, taint),
+      );
       const programs = s.programs.filter((w) => namesTainted(w.raw, fn, taint));
       for (const [run, program] of [...runs.map((w) => [w, false] as const), ...programs.map((w) => [w, true] as const)]) {
         const key = `${lineNo} ${run.raw}`;
@@ -1235,6 +1278,47 @@ const MUST_HIT: [string, string[], number, string][] = [
     `"exec(open('$PROJECT_DIR/x').read())"`,
   ],
   ["a script after an option that starts with a digit", ['perl -00 "$PROJECT_DIR/x.pl"'], 1, '"$PROJECT_DIR/x.pl"'],
+  // An option letter that takes the rest of its word ends the cluster; the
+  // digits after perl's -0 do not.
+  ["a perl -e cluster after -0's digits", [`perl -0777e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a perl -e cluster after -00 and -n", [`perl -00ne "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a perl -e program after -M with an e in it", [`perl -Mfeature=say -e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a perl -e program after a -M module", [`perl -MFile::Temp -e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
+  ["a perl include directory in the account's tree", [`perl -I"$PROJECT_DIR/lib" -e 'require Foo'`], 1, '"$PROJECT_DIR/lib"'],
+  // Modules node loads before its program are runs, whatever option names them.
+  ["a node --require value", ['node --require "$PROJECT_DIR/r.cjs" /usr/lib/app.js'], 1, '"$PROJECT_DIR/r.cjs"'],
+  ["a node --import value", ['node --import "$PROJECT_DIR/i.mjs" /usr/lib/app.js'], 1, '"$PROJECT_DIR/i.mjs"'],
+  ["a node --loader value", ['node --loader "$PROJECT_DIR/l.mjs" /usr/lib/app.js'], 1, '"$PROJECT_DIR/l.mjs"'],
+  [
+    "a glued node --experimental-loader value",
+    ['node --experimental-loader="$PROJECT_DIR/l.mjs" /usr/lib/app.js'],
+    1,
+    '"$PROJECT_DIR/l.mjs"',
+  ],
+  // The interpreter or launcher binary itself, when it is the account's.
+  [
+    "a venv's python3 in the account's home",
+    ['"$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python3" -m hermes_cli.main --version'],
+    1,
+    '"$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python3"',
+  ],
+  [
+    "a venv's python3 by its literal path, reading stdin",
+    ["/home/clawbox/.hermes/hermes-agent/venv/bin/python3 - <<'PY'", "print(1)", "PY"],
+    1,
+    "/home/clawbox/.hermes/hermes-agent/venv/bin/python3",
+  ],
+  ["the npm prefix's node", ['"$NPM_PREFIX/bin/node" /usr/lib/x.js'], 1, '"$NPM_PREFIX/bin/node"'],
+  ["a node by its literal path, with -e text", ["/home/clawbox/.local/bin/node -e 0"], 1, "/home/clawbox/.local/bin/node"],
+  ["a node beside a tainted launcher", ['"${OPENCLAW_BIN%/*}/node" x'], 1, '"${OPENCLAW_BIN%/*}/node"'],
+  ["an env binary in the npm prefix", ['"$NPM_PREFIX/bin/env" true'], 1, '"$NPM_PREFIX/bin/env"'],
+  ["a venv's python, which is no interpreter key", ['"$CLAWBOX_HOME/venv/bin/python" -V'], 1, '"$CLAWBOX_HOME/venv/bin/python"'],
+  [
+    "a value from install.sh's helper that prints a venv's interpreter",
+    ['venv_python="$(hermes_venv_python "$CLAWBOX_HOME/.hermes/hermes-agent" "$CLAWBOX_HOME/.hermes")"', '"$venv_python" -V'],
+    2,
+    '"$venv_python"',
+  ],
   ["a glued node --eval program", [`node --eval="require('$PROJECT_DIR/x.js')"`], 1, `"require('$PROJECT_DIR/x.js')"`],
   ["a node -p program", [`node -p "require('$NPM_PREFIX/lib/x.js')"`], 1, `"require('$NPM_PREFIX/lib/x.js')"`],
   ["a perl -e program", [`perl -e "do '$PROJECT_DIR/x.pl'"`], 1, `"do '$PROJECT_DIR/x.pl'"`],
@@ -1287,6 +1371,10 @@ const MUST_MISS: [string, string[]][] = [
   ["su -lc to the account", ['su -lc "\\"$OPENCLAW_BIN\\" x" "$CLAWBOX_USER"', 'su -l "$CLAWBOX_USER" -c "$BUN x"']],
   ["node with a root-held --require value", ["node --require /usr/lib/a.js /usr/lib/app.js"]],
   ["a perl program that only reads a path after -0777", [`perl -0777 -ne 'print' "$PROJECT_DIR/x"`]],
+  ["a perl -i program over the account's file", [`perl -i.bak -pe 's/a/b/' "$PROJECT_DIR/x"`]],
+  ["node loading root-held modules", ["node --loader /usr/lib/l.mjs --import /usr/lib/i.mjs /usr/lib/app.js"]],
+  ["system interpreters and env", ["/usr/bin/python3 -I /usr/lib/x.py", "/usr/bin/env node /usr/lib/x.js", "/usr/bin/perl -e 1"]],
+  ["the venv's python3 as the account", ['runuser -u "$CLAWBOX_USER" -- "$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python3" -V']],
   ["a forwarding function", ['as_owner() { runuser -u "$CLAWBOX_USER" -- "$@"; }', 'as_owner "$OPENCLAW_BIN" x']],
   ["the git runner", ['"${GIT_RUNNER[@]}" git -C "$PROJECT_DIR" status']],
   [
@@ -1420,21 +1508,26 @@ const MUST_MISS: [string, string[]][] = [
 describe("root runs nothing from the service account's directories in install.sh", () => {
   it("reads install.sh whole, so an empty result means something", () => {
     const { lines, tainted, wrapped } = tree();
-    expect(lines).toBeGreaterThan(1000);
+    const floor = (what: string, n: number, min: number, name: string): string =>
+      `install.sh reads as ${n} ${what}, under the floor of ${min}. If a change to the reader did this, it ` +
+      `stopped reading part of the file: find where. If they left install.sh on purpose, lower ${name}.`;
+    expect(lines, floor("logical lines", lines, LINE_FLOOR, "LINE_FLOOR")).toBeGreaterThanOrEqual(LINE_FLOOR);
+    expect(wrapped, floor("commands run as the account", wrapped, WRAPPED_FLOOR, "WRAPPED_FLOOR")).toBeGreaterThanOrEqual(
+      WRAPPED_FLOOR,
+    );
     // One name per way a path travels, so a reader that stops following it
     // fails here: an assignment from NPM_PREFIX, one from CLAWBOX_HOME, a
-    // function parameter (verify_build_present's) and a `readlink -f` of a
-    // tainted path.
-    for (const name of ["OPENCLAW_BIN", "BUN", "project_dir", "managed_real"]) {
+    // function parameter (verify_build_present's), a `readlink -f` of a
+    // tainted path and the venv helper's answer. The last is set in
+    // step_desktop_theme, one of the file's last steps, so a reader that loses
+    // the end of the file fails here too.
+    for (const name of ["OPENCLAW_BIN", "BUN", "project_dir", "managed_real", "venv_python", "autostart_dir"]) {
       expect(
         tainted.has(name),
         `${name}: this self-check expects install.sh to hold a path under the service account's directories in ` +
           `${name}. If a change renamed or removed ${name}, put a name here that install.sh still sets the same way.`,
       ).toBe(true);
     }
-    // Commands run through a switch to the service account: install.sh had 160
-    // when this was written.
-    expect(wrapped).toBeGreaterThan(120);
   });
 
   it.each(MUST_HIT)("finds %s", (_name, rows, line, word) => {

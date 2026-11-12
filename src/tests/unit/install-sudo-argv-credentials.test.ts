@@ -33,8 +33,10 @@ import {
  * call inside single-quoted text, which is often a program a shell runs: a
  * trap, `bash -c '…'`, a program handed to the nano-tests' `board`, a variable
  * that holds one. A call there is read up to the closing quote. A value under
- * a name that says nothing is out of its reach, so review still matters.
- * systemd units are not shell and are not read.
+ * a name that says nothing is out of its reach, so review still matters, and
+ * so is a call inside double-quoted text whose credential sits between inner
+ * single quotes (`bash -c "sudo tool '$X'"`): that text is read as if the inner
+ * quotes were shell quotes. systemd units are not shell and are not read.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -113,8 +115,9 @@ const ALLOWED: Allowed[] = [];
 
 /**
  * The fewest sudo and wrapper calls the tree may read: the shipped shell had
- * 344 when this was set. A drop past it means the reader lost a shape it read
- * before, or the calls left the scripts on purpose, in which case lower it.
+ * 344 when this was set and 352 when it was last checked. A drop past it means
+ * the reader lost a shape it read before, or the calls left the scripts on
+ * purpose, in which case lower it.
  */
 const CALL_FLOOR = 335;
 
