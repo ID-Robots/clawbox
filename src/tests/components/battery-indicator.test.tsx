@@ -273,9 +273,9 @@ describe("BatteryIndicator — the glyph and the percentage", () => {
   });
 
   it("names only glyphs the bundled Material Symbols subset carries", () => {
-    // `grep -c -a -w <name> public/fonts/material-symbols-rounded.ttf` must
+    // `grep -c -a -w <name> src/assets/fonts/material-symbols-rounded.ttf` must
     // print 1: a name the subset lacks renders as its literal text.
-    const font = readFileSync(path.join(process.cwd(), "public/fonts/material-symbols-rounded.ttf"), "latin1");
+    const font = readFileSync(path.join(process.cwd(), "src/assets/fonts/material-symbols-rounded.ttf"), "latin1");
     const lines = font.split("\n");
     const names = ["battery_charging_full", "battery_full", ...Array.from({ length: 7 }, (_, i) => `battery_${i}_bar`)];
     for (const name of names) {
