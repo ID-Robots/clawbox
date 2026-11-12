@@ -4125,6 +4125,39 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# Ubuntu's logrotate and its daily timer, for step_apt_update. Jetson images can
+# ship without the package, and then rsyslog's /var/log/syslog, kern.log,
+# auth.log and ufw.log are never rotated (one board's syslog held 61 days in
+# 179 MB) although the rsyslog and ufw packages' own weekly policy sits in
+# /etc/logrotate.d. ClawBox adds no policy of its own and never forces a
+# rotation: the package's first run only records state, and its weekly rules
+# take it from there.
+#
+# Never fails the step. Its own apt line, because under errexit a mirror that
+# cannot serve logrotate would fail the base install with it; a box left without
+# it retries on its next update. The package's postinst enables and starts the
+# timer on a first install, so the timer line is a safety net for a box where it
+# was disabled or stopped since; a masked timer stays masked. The closing line
+# is read back from systemd, never taken from an exit code above it.
+ensure_logrotate() {
+  if [ "$(dpkg-query -W -f='${Status}' logrotate 2>/dev/null || true)" != 'install ok installed' ]; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate \
+      || [ "$(dpkg-query -W -f='${Status}' logrotate 2>/dev/null || true)" != 'install ok installed' ]; then
+      echo "  Warning: logrotate not installed - /var/log text logs keep growing until an update installs it" >&2
+      return 0
+    fi
+  fi
+  if ! { systemctl is-enabled --quiet logrotate.timer && systemctl is-active --quiet logrotate.timer; }; then
+    # The verdict is the read-back below: enable can succeed and the start fail.
+    systemctl enable --now logrotate.timer || true
+  fi
+  if systemctl is-enabled --quiet logrotate.timer && systemctl is-active --quiet logrotate.timer; then
+    echo "  logrotate: installed, daily timer enabled"
+  else
+    echo "  Warning: logrotate.timer could not be enabled and started - /var/log text logs are not rotated" >&2
+  fi
+}
+
 # refresh_root_update_log_limit [UNIT_DIR] — makes the NEXT root step start
 # under the root update unit's journald rate limit (the LogRateLimit* lines of
 # config/clawbox-root-update@.service). The update screen's raw log is these
@@ -4200,6 +4233,8 @@ step_apt_update() {
   # through the ACL config/clawbox-user-helper.sh `home_access` lays on it
   # (TASK-2377). Ubuntu images carry it already; naming it keeps it true.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer acl
+  # Never part of the line above: see ensure_logrotate.
+  ensure_logrotate
   # Document libraries for the agent: Word (python-docx), Excel (openpyxl) and
   # PDF writing (reportlab). "Make me an offer / a quote / a spreadsheet" is an
   # everyday chat request, and without these the agent spent the first minutes
