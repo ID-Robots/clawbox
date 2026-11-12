@@ -13,11 +13,32 @@ const REPO = path.resolve(__dirname, "../../..");
 
 /** A heredoc opener and its delimiter word, quoted (group 2 or 3) or bare (group 4). */
 const HEREDOC = /^<<(-?)\s*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"`]+))/;
+/** A shell before `<<` and the words after it (group 1). */
+const SHELL_BEFORE_HEREDOC =
+  /(?:^|[\s;&|(!`])(?:\S*\/)?(?:ba|da)?sh((?:\s+(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s;&|<>()'"])+)*)\s*$/;
+const SHELL_WORD = /(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s;&|<>()'"])+/g;
+
 /**
- * A command that reads its script from the heredoc: a shell as the last word
- * before `<<`, with options but no `-c` (`bash -c '…' <<EOF` reads data).
+ * Whether the command before `<<` is a shell that reads its program from the
+ * heredoc: `-s` (the words after it are arguments), or options alone with no
+ * operand. `-c` reads its program from its operand and the heredoc is data
+ * (`bash -c '…' <<EOF`), and so is a script operand (`bash x.sh <<EOF`).
  */
-const FEEDS_SHELL = /(?:^|[\s;&|(!`])(?:\S*\/)?(?:ba|da)?sh(?:\s+-(?!c\b)[A-Za-z]+)*\s*$/;
+function feedsShell(before: string): boolean {
+  const shell = SHELL_BEFORE_HEREDOC.exec(before);
+  if (!shell) return false;
+  const words = shell[1].match(SHELL_WORD) ?? [];
+  for (let j = 0; j < words.length; j += 1) {
+    const w = words[j];
+    if (w === "--") return j + 1 === words.length;
+    if (!/^[-+][A-Za-z]+$/.test(w)) return false;
+    if (w.includes("c")) return false;
+    if (w.slice(1).includes("s")) return true;
+    // -o and -O take a value: `bash -o pipefail <<EOF`.
+    if (/[oO]$/.test(w)) j += 1;
+  }
+  return true;
+}
 /** A function head: `name()`, `function name`; its opener `{` or `(` (group 3) and the rest of the line (group 4). */
 const FUNCTION_HEAD =
   /^\s*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?|([A-Za-z_][A-Za-z0-9_]*)\s*\(\))\s*(?:([{(])([\s\S]*))?$/;
@@ -137,8 +158,9 @@ function heredocSubstitutions(body: string, file: string, firstLine: number, opt
  * continuations and newlines inside quotes, `$(…)`, `$((…))` or backquotes are
  * joined, comments dropped. Quoting nests the way bash nests it, so `'…"…'`
  * inside `"$(…)"` does not end the outer string, and `<<` inside arithmetic is
- * a shift. A heredoc body is dropped, unless its command is a shell: then it is
- * read as shell too (see ReadOptions for the substitutions of the rest). A
+ * a shift. A heredoc body is dropped, unless its command is a shell that reads
+ * its program from it (`-s`, or no operand): then it is read as shell too (see
+ * ReadOptions for the substitutions of the rest). A
  * reader that loses its place throws rather than skipping the rest of the
  * file, which would read as "nothing found".
  */
@@ -257,7 +279,7 @@ export function logicalLines(text: string, file: string, offset = 0, options: Re
             word,
             strip: opener[1] === "-",
             at: i + 1,
-            feedsShell: FEEDS_SHELL.test(buf + code),
+            feedsShell: feedsShell(buf + code),
             quoted: opener[4] === undefined || opener[0].includes("\\"),
             body: [],
           });
@@ -400,34 +422,97 @@ export function ownWords(rest: string): { text: string; literal: boolean }[] {
 const QUOTED_COMMAND = /^[A-Za-z0-9_./-]+$/;
 
 /**
- * Every call through `wrapper` on a line, each with its own text: up to the
- * next call. The calls of the line itself are found with its single-quoted
- * strings blanked (which keeps every offset), so a wrapper's name inside one
- * never cuts an outer call's text short. A single-quoted string is often a
- * program a shell runs (`trap '…'`, `bash -c '…'`, a variable that holds one),
- * so each is read for calls too, every call up to the next one in it or its
- * closing quote.
+ * For each offset of `text` that sits directly inside a double-quoted string,
+ * the offset of that string's closing quote (`text.length` if it never
+ * closes); -1 elsewhere. A `$(…)` or backquote inside the string is code again,
+ * so its offsets are -1, and a `'` inside the string is a character.
+ */
+export function doubleQuotedEnds(text: string): Int32Array {
+  const owner = new Int32Array(text.length).fill(-1);
+  const ends: number[] = [];
+  const stack: { kind: "'" | '"' | "$(" | "`"; id: number; depth: number }[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const top = stack[stack.length - 1];
+    const c = text[i];
+    if (top?.kind === "'") {
+      if (c === "'") stack.pop();
+      continue;
+    }
+    if (top?.kind === '"') owner[i] = top.id;
+    if (c === "\\") {
+      if (top?.kind === '"' && i + 1 < text.length) owner[i + 1] = top.id;
+      i += 1;
+      continue;
+    }
+    if (top?.kind === '"' && c === '"') {
+      ends[top.id] = i;
+      stack.pop();
+      continue;
+    }
+    if (c === "$" && text[i + 1] === "(") {
+      stack.push({ kind: "$(", id: -1, depth: 0 });
+      i += 1;
+      continue;
+    }
+    if (c === "`") {
+      if (top?.kind === "`") stack.pop();
+      else stack.push({ kind: "`", id: -1, depth: 0 });
+      continue;
+    }
+    if (top?.kind === '"') continue;
+    if (c === "'") stack.push({ kind: "'", id: -1, depth: 0 });
+    else if (c === '"') {
+      ends.push(text.length);
+      stack.push({ kind: '"', id: ends.length - 1, depth: 0 });
+    } else if (top?.kind === "$(" && c === "(") top.depth += 1;
+    else if (top?.kind === "$(" && c === ")") {
+      if (top.depth) top.depth -= 1;
+      else stack.pop();
+    }
+  }
+  return owner.map((id) => (id < 0 ? -1 : ends[id]));
+}
+
+/**
+ * Every call through `wrapper` on a line, each with its own text. The calls of
+ * the line itself are found with its single-quoted strings blanked (which
+ * keeps every offset), and each runs up to the next one. A wrapper's name
+ * inside quoted text is read as a call of its own that never cuts an outer
+ * call's text short: quoted text is often a program a shell runs (`trap '…'`,
+ * `bash -c "…"`, a variable that holds one), and when it is only an argument
+ * (`tool "a sudo b" KEY=…`) the outer call keeps all of its words. Such a call
+ * runs up to the next call in the same string or its closing quote.
  */
 export function wrapperCalls(text: string, wrapper: RegExp): { name: string; rest: string }[] {
   const re = new RegExp(wrapper.source, "g");
   const spans = singleQuotedSpans(text);
   const calls: { at: number; name: string; rest: string }[] = [];
-  /** The calls found in `searched`, which is text[from…] as written or with strings blanked. */
-  const read = (searched: string, from: number): void => {
-    const found = [...searched.matchAll(re)];
-    found.forEach((m, n) => {
-      const at = from + (m.index ?? 0);
-      calls.push({ at, name: m[1], rest: text.slice(at + m[0].length, from + (found[n + 1]?.index ?? searched.length)) });
-    });
-  };
   // A quoted word that is only a command name (`'sudo' -n …`) is that command, so it is not blanked.
   const line = text.split("");
   for (const [start, end] of spans) if (!QUOTED_COMMAND.test(text.slice(start, end))) line.fill(" ", start, end);
-  read(line.join(""), 0);
-  for (const [start, end] of spans) read(text.slice(start, end), start);
+  const dqEnd = doubleQuotedEnds(text);
+  const found = [...line.join("").matchAll(re)].map((m) => {
+    const at = m.index ?? 0;
+    const nameAt = at + m[0].indexOf(m[1]);
+    // A double-quoted string that is only the command word (`"sudo"`, `"${run[@]}"`) is that command.
+    const whole = text[nameAt - 1] === '"' && dqEnd[nameAt] === nameAt + m[1].length;
+    return { at, after: at + m[0].length, name: m[1], end: whole ? -1 : dqEnd[nameAt] };
+  });
+  found.forEach((f, n) => {
+    const next = found.slice(n + 1).find((g) => (f.end < 0 ? g.end < 0 : g.end === f.end));
+    const stop = next ? next.at : f.end < 0 ? text.length : f.end;
+    calls.push({ at: f.at, name: f.name, rest: text.slice(f.after, stop) });
+  });
+  for (const [start, end] of spans) {
+    const body = text.slice(start, end);
+    const inner = [...body.matchAll(re)];
+    inner.forEach((m, n) => {
+      const at = start + (m.index ?? 0);
+      calls.push({ at, name: m[1], rest: text.slice(at + m[0].length, start + (inner[n + 1]?.index ?? body.length)) });
+    });
+  }
   return calls.sort((a, b) => a.at - b.at).map(({ name, rest }) => ({ name, rest }));
 }
-
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

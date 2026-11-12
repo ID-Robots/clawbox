@@ -375,18 +375,24 @@ describe("no credential-named variable reaches a sudo command line in the shippe
     ]);
   });
 
-  it("reads a call inside a single-quoted program on its own, without cutting the outer call short", () => {
+  it("reads a call inside quoted text on its own, without cutting the outer call short", () => {
     const sample = [
       `as_clawbox sh -c 'sudo true' sh "$API_KEY"`,
       `as_clawbox bash -c 'as_clawbox x; echo' -- "$API_KEY"`,
       `as_clawbox tool 'a sudo b' "$API_KEY"`,
       'as_clawbox tool "a sudo b" "$API_KEY"',
+      'as_clawbox tool "a sudo b" API_KEY=secret',
+      "bash -s marker <<'EOF'",
+      'sudo -u clawbox tool "$HEREDOC_ARG_SECRET"',
+      "EOF",
     ].join("\n");
     expect(scan([{ file: "sample.sh", text: sample }]).hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
       [1, "as_clawbox", ["API_KEY"]],
       [2, "as_clawbox", ["API_KEY"]],
       [3, "as_clawbox", ["API_KEY"]],
-      [4, "sudo", ["API_KEY"]],
+      [4, "as_clawbox", ["API_KEY"]],
+      [5, "as_clawbox", ["API_KEY"]],
+      [7, "sudo", ["HEREDOC_ARG_SECRET"]],
     ]);
   });
 

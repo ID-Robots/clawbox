@@ -41,12 +41,14 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * su or `sudo -u` whose target is root), the interpreter or `env` binary itself
  * included (a venv's `bin/python3`), as the script of
  * bash/sh/dash/node/python3/perl, as code they load first (node's `-r`,
- * `--require`, `--import`, `--loader`; perl's `-I`, `-M`, `-m`), or as the file
- * of `source`/`.`. Before the script, any word that starts with `-` is an
- * option (`-0777`, `-i.bak`, `-0777e`); a value-taking option's value is
- * skipped when it is a letter this file lists or one of the long options it
- * lists for node and bash. A program handed over as text (`bash -c`,
- * `node -e`/`-p`, `python3 -c`, `perl -e`, a root `su -c`/`-lc`, and
+ * `--require`, `--import`, `--loader`; perl's `-I`, `-M`, `-m`), as the file of
+ * `source`/`.`, or as the file an interpreter reads its program from on stdin
+ * (`bash < FILE`; a here-string, `bash <<< "…"`, is judged as a program given
+ * as text). Before the script, any word that starts with `-` is an option
+ * (`-0777`, `-i.bak`, `-0777e`); a value-taking option's value is skipped when
+ * it is a letter this file lists or one of the long options it lists for node
+ * and bash. A program handed over as text (`bash -c`, `node -e`/`-p`,
+ * `python3 -c`, `perl -e`, a root `su -c`/`-lc`, and
  * `python3 -cTEXT`/`perl -eTEXT` glued) is a run when it names the account's
  * directories: a `$NAME` of one outside single quotes (escaped or not), or the
  * literal home anywhere in it. The guard does not read that text as its
@@ -54,17 +56,20 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * shell where the trap is set, with the `$…` that the setting shell expands
  * judged as expansions even between single quotes inside double ones. Every
  * `$(…)`, backquote and `<(…)` is read as root's own command text, inside a
- * wrapper's arguments and in the body of an unquoted heredoc too: root's shell
- * expands it before the wrapper starts, and while it writes the heredoc.
+ * wrapper's arguments, inside arithmetic (`$((…))`, `((…))`) and in the body of
+ * an unquoted heredoc too: root's shell expands it before the wrapper starts,
+ * and while it writes the heredoc.
  *
  * Not a run: a command whose own command word switches to the service account
  * (as_clawbox, as_clawbox_login, as_user*, runuser, su and `sudo -u` with a
  * target other than root, the git runner, or a function that forwards its
  * arguments through one), which covers that command's own words only; arguments
- * and redirection targets; a program on stdin (`-`, `-s`) or a module (`-m`); a
- * program given as text that names none of the account's directories; tests;
- * case patterns; comments; other single-quoted text; the text of a heredoc body
- * that is not fed to a shell, and all of a quoted one (`<<'EOF'`).
+ * and redirection targets; a program root wrote on stdin (a heredoc that no
+ * shell reads as its program) or a module (`-m`), and stdin that a script, a
+ * module or a `-c` program reads as data; a program given as text that names
+ * none of the account's directories; tests; case patterns; comments; other
+ * single-quoted text; the text of a heredoc body that is not fed to a shell,
+ * and all of a quoted one (`<<'EOF'`).
  *
  * Known limits: a wrapper or launcher this file does not name (`nohup`,
  * `xargs`, `find -exec`, `systemd-run`), `eval`, what a program given as text
@@ -109,8 +114,10 @@ const GIT_RUNNER = /^"?\$\{GIT_RUNNER\[[@*]\]\}"?$/;
 interface Interpreter {
   /** Option letters whose operand is the program as text (a shell's `-c` takes its first operand). */
   program: string;
-  /** Option letters after which there is no script file: stdin, a module. */
+  /** Option letters after which there is no script file and stdin is data: a module (`python3 -m`). */
   none: string;
+  /** Option letters after which the program is read from stdin (a shell's `-s`). */
+  stdin?: string;
   /** Option letters that take a value: the rest of their word, or the next word when nothing follows. */
   takesArg: string;
   /** Option letters that take the rest of their word, if any, and never the next word (perl's `-i.bak`). */
@@ -133,7 +140,8 @@ interface Interpreter {
 
 const SHELL: Interpreter = {
   program: "c",
-  none: "s",
+  none: "",
+  stdin: "s",
   takesArg: "oO",
   longArgs: ["--rcfile", "--init-file"],
   shell: true,
@@ -200,7 +208,7 @@ interface Word {
   subs: string[];
 }
 
-type Token = { t: "word"; raw: string; subs: string[]; open?: boolean } | { t: "op"; v: string } | { t: "redir" };
+type Token = { t: "word"; raw: string; subs: string[]; open?: boolean } | { t: "op"; v: string } | { t: "redir"; op: string };
 
 interface Command {
   lineNo: number;
@@ -209,6 +217,8 @@ interface Command {
   words: Word[];
   /** `for NAME in WORDS`: the loop variable. */
   loopVar?: string;
+  /** What stdin is redirected from: a file (`<`) or a here-string (`<<<`). */
+  stdin?: { op: "<" | "<<<"; word: Word }[];
 }
 
 interface Hit {
@@ -241,9 +251,10 @@ function skip(text: string, i: number, close: string, subs: string[] | null): nu
     }
     if (c === "$" && text[i + 1] === "(") {
       const from = i + 2;
-      i = skip(text, from, ")", null);
-      // `$((…))` is arithmetic, not a command.
-      if (text[from] !== "(") subs?.push(text.slice(from, i - 1));
+      // `$((…))` is arithmetic, not a command, but a substitution inside it runs.
+      const arithmetic = text[from] === "(";
+      i = skip(text, from, ")", arithmetic ? subs : null);
+      if (!arithmetic) subs?.push(text.slice(from, i - 1));
       continue;
     }
     if (c === "$" && text[i + 1] === "{") {
@@ -320,8 +331,9 @@ function readWord(text: string, i: number): Word & { end: number; open: boolean 
     }
     if (c === "$" && text[i + 1] === "(") {
       const from = i + 2;
-      i = skip(text, from, ")", null);
-      if (text[from] !== "(") subs.push(text.slice(from, i - 1));
+      const arithmetic = text[from] === "(";
+      i = skip(text, from, ")", arithmetic ? subs : null);
+      if (!arithmetic) subs.push(text.slice(from, i - 1));
       continue;
     }
     if (c === "$" && text[i + 1] === "{") {
@@ -363,15 +375,16 @@ function tokenize(text: string): Token[] {
     }
     const redirect = (c === "<" || c === ">") && text[i + 1] === "(" ? null : REDIRECT.exec(text.slice(i, i + 3));
     if (redirect) {
-      out.push({ t: "redir" });
+      out.push({ t: "redir", op: redirect[0] });
       i += redirect[0].length;
       continue;
     }
     if (";&|()".includes(c)) {
       if (c === "(" && text[i + 1] === "(") {
-        // `((…))`: arithmetic, no command in it.
-        i = skip(text, i + 1, ")", null);
-        out.push({ t: "word", raw: "((", subs: [] });
+        // `((…))`: arithmetic, no command in it but the substitutions it holds.
+        const subs: string[] = [];
+        i = skip(text, i + 1, ")", subs);
+        out.push({ t: "word", raw: "((", subs });
         continue;
       }
       out.push({ t: "op", v: c });
@@ -458,11 +471,14 @@ function parse(
   let caseHead: "subject" | "in" | null = null;
   let functionKeyword = false;
   let closed = false;
-  let redirected = false;
+  /** The redirection operator whose target is the next word, if any. */
+  let redirected: string | null = null;
+  let stdin: NonNullable<Command["stdin"]> = [];
   const finish = (): void => {
     if (loop?.name) out.push({ lineNo, text, fn: fnNow(), words: loop.words, loopVar: loop.name });
-    else if (words.length) out.push({ lineNo, text, fn: fnNow(), words });
+    else if (words.length) out.push({ lineNo, text, fn: fnNow(), words, stdin });
     words = [];
+    stdin = [];
     loop = null;
     closed = false;
   };
@@ -477,11 +493,12 @@ function parse(
       for (const sub of tok.subs) parse(sub, lineNo, { frames: [], pendingFn: null }, fnNow(), out, file);
     }
     if (tok.t === "redir") {
-      redirected = true;
+      redirected = tok.op;
       continue;
     }
     if (tok.t === "word" && redirected) {
-      redirected = false;
+      if (redirected === "<" || redirected === "<<<") stdin.push({ op: redirected, word: tok });
+      redirected = null;
       continue;
     }
     const frame = top();
@@ -583,6 +600,8 @@ interface Shape {
   preloads: Word[];
   /** The interpreter or `env` binary itself, which root runs whatever it then runs. */
   launchers: Word[];
+  /** A file an interpreter reads its program from on stdin (`bash < FILE`). */
+  stdinFiles: Word[];
   /** A program root hands an interpreter, or a root `su -c`, as text. */
   programs: Word[];
   /** Text a trap hands root's own shell, read as shell where it is set. */
@@ -601,17 +620,19 @@ interface Operands {
   program?: Word;
   /** Code it loads before its program: node's `-r`/`--require`/`--import`/`--loader`, perl's `-I`/`-M`/`-m`. */
   preloads: Word[];
+  /** It reads its program from stdin: `-`, a shell's `-s`, or no script and no program text. */
+  fromStdin: boolean;
 }
 
 /** What an interpreter's argv runs: its script file or its program text, and what it loads first. */
 function operands(spec: Interpreter, args: Word[]): Operands {
-  const out: Operands = { preloads: [] };
+  const out: Operands = { preloads: [], fromStdin: false };
   let text = false;
   const operand = (w: Word | undefined): Operands => ({ ...out, ...(text ? { program: w } : { script: w }) });
   for (let j = 0; j < args.length; j += 1) {
     const r = bare(args[j].raw);
-    if (r === "-") return out;
-    if (r === "--") return operand(args[j + 1]);
+    if (r === "-") return { ...out, fromStdin: true };
+    if (r === "--") return args[j + 1] ? operand(args[j + 1]) : { ...out, fromStdin: !text };
     if (r.startsWith("--")) {
       const name = r.split("=")[0];
       const glued = r.includes("=");
@@ -637,6 +658,7 @@ function operands(spec: Interpreter, args: Word[]): Operands {
         if (!/[A-Za-z]/.test(l)) break;
         const glued = word.slice(n + 1);
         const value = (): Word | undefined => (glued ? { raw: glued, subs: [] } : args[j + 1]);
+        if (spec.stdin?.includes(l)) return { ...out, fromStdin: true };
         if (spec.none.includes(l)) return out;
         if (spec.program.includes(l) && !spec.shell) {
           return { ...out, program: glued && spec.glues ? { raw: glued, subs: [] } : args[j + 1] };
@@ -657,7 +679,7 @@ function operands(spec: Interpreter, args: Word[]): Operands {
     }
     return operand(args[j]);
   }
-  return out;
+  return { ...out, fromStdin: !text };
 }
 
 /** The value of a glued `--option=value` word, as written. */
@@ -801,6 +823,7 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
     locals: [],
     preloads: [],
     launchers: [],
+    stdinFiles: [],
     programs: [],
     shellText: [],
   };
@@ -907,10 +930,14 @@ function shapeOf(command: Command, wrappers: Set<string>, functions: Set<string>
   const interpreter = INTERPRETERS[name.replace(/^.*\//, "")];
   if (interpreter) {
     shape.launchers.push(cmd);
-    const { script, program, preloads } = operands(interpreter, words.slice(k + 1));
+    const { script, program, preloads, fromStdin } = operands(interpreter, words.slice(k + 1));
     shape.candidate = script;
     shape.preloads = preloads;
     if (program) shape.programs.push(program);
+    // A program read from stdin is the redirected file, or the here-string's text.
+    for (const { op, word } of fromStdin ? (command.stdin ?? []) : []) {
+      (op === "<" ? shape.stdinFiles : shape.programs).push(word);
+    }
     return shape;
   }
   if (name === "source" || name === ".") {
@@ -1079,7 +1106,7 @@ function scan(sources: { file: string; text: string }[]): {
     shapes.forEach((s, n) => {
       const { fn, lineNo, text: line } = commands[n];
       if (s.wrapped) wrapped += 1;
-      const runs = [...s.launchers, s.candidate, ...s.preloads].filter(
+      const runs = [...s.launchers, s.candidate, ...s.preloads, ...s.stdinFiles].filter(
         (w): w is Word => !!w && beginsTainted(w.raw, fn, taint),
       );
       const programs = s.programs.filter((w) => namesTainted(w.raw, fn, taint));
@@ -1313,6 +1340,15 @@ const MUST_HIT: [string, string[], number, string][] = [
   ["a node beside a tainted launcher", ['"${OPENCLAW_BIN%/*}/node" x'], 1, '"${OPENCLAW_BIN%/*}/node"'],
   ["an env binary in the npm prefix", ['"$NPM_PREFIX/bin/env" true'], 1, '"$NPM_PREFIX/bin/env"'],
   ["a venv's python, which is no interpreter key", ['"$CLAWBOX_HOME/venv/bin/python" -V'], 1, '"$CLAWBOX_HOME/venv/bin/python"'],
+  // A program a shell or interpreter reads on stdin, from a file or as text.
+  ["a heredoc bash -s reads, with arguments", ["bash -s marker <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"], 2, "/home/clawbox/.local/bin/probe"],
+  ["a heredoc bash -s -- reads", ['bash -s -- "$x" <<EOF', '"$OPENCLAW_BIN" x', "EOF"], 2, '"$OPENCLAW_BIN"'],
+  ["a script bash reads on stdin", ['bash < "$PROJECT_DIR/scripts/a.sh"'], 1, '"$PROJECT_DIR/scripts/a.sh"'],
+  ["a program python3 reads on stdin", ['python3 - < "$PROJECT_DIR/x.py"'], 1, '"$PROJECT_DIR/x.py"'],
+  ["a here-string program for bash", ['bash <<< "\\"$OPENCLAW_BIN\\" x"'], 1, '"\\"$OPENCLAW_BIN\\" x"'],
+  // A substitution inside arithmetic still runs.
+  ["a substitution inside arithmetic", ["n=$(( $(/home/clawbox/.local/bin/probe) + 1 ))"], 1, "/home/clawbox/.local/bin/probe"],
+  ["a substitution inside an arithmetic command", ['if (( $("$OPENCLAW_BIN" --count) > 0 )); then :; fi'], 1, '"$OPENCLAW_BIN"'],
   [
     "a value from install.sh's helper that prints a venv's interpreter",
     ['venv_python="$(hermes_venv_python "$CLAWBOX_HOME/.hermes/hermes-agent" "$CLAWBOX_HOME/.hermes")"', '"$venv_python" -V'],
@@ -1375,6 +1411,16 @@ const MUST_MISS: [string, string[]][] = [
   ["node loading root-held modules", ["node --loader /usr/lib/l.mjs --import /usr/lib/i.mjs /usr/lib/app.js"]],
   ["system interpreters and env", ["/usr/bin/python3 -I /usr/lib/x.py", "/usr/bin/env node /usr/lib/x.js", "/usr/bin/perl -e 1"]],
   ["the venv's python3 as the account", ['runuser -u "$CLAWBOX_USER" -- "$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python3" -V']],
+  ["a heredoc a script reads as data", ["bash /usr/lib/x.sh <<'EOF'", "/home/clawbox/.local/bin/probe", "EOF"]],
+  [
+    "stdin a module, a script or a -c program reads as data",
+    [
+      'python3 -m json.tool < "$PROJECT_DIR/x.json"',
+      'python3 /usr/lib/x.py < "$PROJECT_DIR/x.json"',
+      `bash -c 'cat' < "$PROJECT_DIR/x"`,
+    ],
+  ],
+  ["arithmetic with no substitution", ['n=$(( x + 1 ))', "(( n > 0 )) && :"]],
   ["a forwarding function", ['as_owner() { runuser -u "$CLAWBOX_USER" -- "$@"; }', 'as_owner "$OPENCLAW_BIN" x']],
   ["the git runner", ['"${GIT_RUNNER[@]}" git -C "$PROJECT_DIR" status']],
   [
