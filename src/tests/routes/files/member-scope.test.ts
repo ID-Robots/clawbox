@@ -120,6 +120,13 @@ describe("who is served what", () => {
     expect(await names(await listing(""))).toEqual(expect.arrayContaining(["clawbox", "backups"]));
   });
 
+  it("refuses a request whose session cookie could not be resolved, never serving the owner's home", async () => {
+    who.current = null;
+    const res = await list(new NextRequest(url("/setup-api/files?dir="), { headers: { cookie: "clawbox_session=unresolvable" } }));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("session_unknown");
+  });
+
   it("refuses a non-owner when the switch cannot be read", async () => {
     org.mode = null;
     const res = await listing("");

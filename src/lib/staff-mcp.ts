@@ -388,7 +388,21 @@ const WRITE_VERBS = new Set([
   "transfer", "pay", "book", "accept", "decline", "copy", "save", "register", "revoke", "grant",
   "reset", "restore", "purge", "trash", "flag", "replace", "merge", "commit", "push", "deploy",
   "install", "uninstall", "enable", "disable", "start", "stop", "kill", "rsvp", "compose", "notify", "react",
+  "wipe", "destroy", "erase", "clear", "refund", "charge", "buy", "order", "overwrite", "unlink", "close",
+  "terminate", "shutdown", "reboot", "format", "truncate", "approve", "reject", "sign", "unsubscribe", "subscribe",
 ]);
+
+/**
+ * A name run together without separators (`sendmail`, `deletefile`): a word
+ * that BEGINS with one of the longer verbs is that verb. Four letters and up
+ * only, so `settings`, `address` and `running` are not read as `set`, `add`
+ * and `run`.
+ */
+const LONG_WRITE_VERBS = [...WRITE_VERBS].filter((verb) => verb.length >= 4);
+
+function isWriteWord(word: string): boolean {
+  return WRITE_VERBS.has(word) || LONG_WRITE_VERBS.some((verb) => word.startsWith(verb));
+}
 
 /** The words of a tool name: split on `_`, `-`, `.`, `/`, spaces and camelCase. */
 export function toolNameWords(name: string): string[] {
@@ -421,7 +435,7 @@ export function staffToolAllowed(name: unknown, filter: ToolFilter, annotations?
   if (typeof name !== "string" || !name || name.length > 128) return false;
   if (filter.include && !filter.include.includes(name)) return false;
   if (filter.exclude.includes(name)) return false;
-  if (toolNameWords(name).some((word) => WRITE_VERBS.has(word))) return false;
+  if (toolNameWords(name).some(isWriteWord)) return false;
   if (annotations && (annotations.destructiveHint === true || annotations.readOnlyHint === false)) return false;
   return true;
 }

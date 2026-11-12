@@ -61,7 +61,16 @@ export function resetFilesScopeCachesForTests(): void {
 export async function filesFenceFor(request: Request): Promise<FilesFenceAnswer> {
   const { personSession } = await import("@/lib/owner-session");
   const who = await personSession(request);
-  if (!who || who.isOwner) return { ok: true, fence: fenceFor(ownerScope()) };
+  if (!who) {
+    // No person: the agent's bearer. A request that DOES carry a session
+    // cookie whose identity could not be resolved here (a registry read that
+    // failed) is not the owner — refused, never served the owner's home.
+    if (/(?:^|;\s*)clawbox_session=/.test(request.headers.get("cookie") ?? "")) {
+      return refuse(503, "session_unknown", "Who is signed in could not be checked just now. Try again in a moment.");
+    }
+    return { ok: true, fence: fenceFor(ownerScope()) };
+  }
+  if (who.isOwner) return { ok: true, fence: fenceFor(ownerScope()) };
   const { readOrgModeStrict } = await import("@/lib/org-mode-server");
   const on = await readOrgModeStrict();
   if (on === null) return refuse(503, "org_mode_unknown", "The box's settings could not be read just now. Try again in a moment.");

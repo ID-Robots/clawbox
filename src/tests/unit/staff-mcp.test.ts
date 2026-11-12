@@ -177,11 +177,11 @@ describe("each member's relay entries", () => {
 describe("which tools a member's call may reach", () => {
   const open = { include: null, exclude: [] };
   it("never one that sends or changes something, whatever the owner's filter says", () => {
-    for (const name of ["send_mail", "sendMail", "create_event", "delete-file", "update_document", "upload", "reply_to_message", "forwardEmail", "write_note", "move_item", "share_link", "run_query"]) {
+    for (const name of ["send_mail", "sendMail", "create_event", "delete-file", "update_document", "upload", "reply_to_message", "forwardEmail", "write_note", "move_item", "share_link", "run_query", "sendmail", "deletefile", "wipe_cache", "refund_order", "Destroy"]) {
       expect(mcp.staffToolAllowed(name, open), name).toBe(false);
       expect(mcp.staffToolAllowed(name, { include: [name], exclude: [] }), name).toBe(false);
     }
-    for (const name of ["search", "search_documents", "get_document", "list_messages", "fetch", "read_mail", "get_email"]) {
+    for (const name of ["search", "search_documents", "get_document", "list_messages", "fetch", "read_mail", "get_email", "get_settings", "address_lookup", "running_jobs"]) {
       expect(mcp.staffToolAllowed(name, open), name).toBe(true);
     }
   });

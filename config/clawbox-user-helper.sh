@@ -221,11 +221,12 @@ do_home_access() {
     exit "$ACL_UNAVAILABLE"
   fi
   # The folder itself, then a default ACL on every directory (what is created
-  # later inherits it), then rwX on what is already there. -P: a link inside
-  # the home is never followed to somewhere else.
+  # later inherits it), then rwX on what is already there. `find` without -L
+  # and -xdev, and -P: a link inside the home is never followed, and a
+  # filesystem mounted inside it is never entered.
   "$SETFACL" -m "u:${owner}:rwx" -- "$home" || exit "$ACL_UNAVAILABLE"
   find "$home" -xdev -type d -exec "$SETFACL" -P -d -m "u:${owner}:rwx,u:${user}:rwx" -- {} + || exit "$ACL_UNAVAILABLE"
-  "$SETFACL" -R -P -m "u:${owner}:rwX" -- "$home" || exit "$ACL_UNAVAILABLE"
+  find "$home" -xdev \( -type d -o -type f \) -exec "$SETFACL" -P -m "u:${owner}:rwX" -- {} + || exit "$ACL_UNAVAILABLE"
   exit 0
 }
 

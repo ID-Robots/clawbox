@@ -112,7 +112,7 @@ function memberRootOf(roots: readonly FilesRoot[], abs: string): FilesRoot | nul
 function memberFence(scope: Extract<FilesScope, { kind: "member" }>): FilesFence {
   const { roots } = scope;
   const isVirtualRoot = (rel: string) => {
-    const trimmed = rel.replace(/^[/\\]+|[/\\]+$/g, "");
+    const trimmed = rel.replace(/^\/+|\/+$/g, "");
     return trimmed === "" || trimmed === ".";
   };
   /** Inside its root as typed AND once every link on the way is resolved. */
@@ -130,8 +130,10 @@ function memberFence(scope: Extract<FilesScope, { kind: "member" }>): FilesFence
       if (isVirtualRoot(rel)) return null;
       // A member names paths relative to their two folders only: an absolute
       // path (the owner's "Open in Files" sends one) is not theirs to name.
-      if (path.isAbsolute(rel) || /^[/\\]/.test(rel)) return null;
-      const segments = rel.split(/[/\\]+/).filter((s) => s !== "");
+      // `/` only, as the owner's rule: on Linux a backslash is a character of
+      // a name, never a separator.
+      if (path.isAbsolute(rel)) return null;
+      const segments = rel.split("/").filter((s) => s !== "");
       const root = roots.find((r) => r.name === segments[0]);
       if (!root) return null;
       const resolved = path.resolve(root.real, ...segments.slice(1));

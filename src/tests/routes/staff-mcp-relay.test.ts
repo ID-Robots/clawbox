@@ -36,6 +36,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 vi.mock("@/lib/clawbox-mcp-registration", () => ({ harnessesHere: () => ({ openclaw: true, hermes: false }) }));
 vi.mock("@/lib/clawbox-mcp-switch", () => ({ readClawboxMcpEnabled: vi.fn(async () => true) }));
 
+const callsOnly = () => seen.filter((s) => s.body.includes('"tools/call"'));
 interface Seen { auth: string | null; apiKey: string | null; ownerHeader: string | null; method: string; body: string }
 const seen: Seen[] = [];
 let upstream: http.Server;
@@ -47,9 +48,11 @@ const TOOLS = [
   { name: "whoami", description: "echo the caller", inputSchema: { type: "object" } },
   { name: "send_mail", description: "send an email", inputSchema: { type: "object" } },
   { name: "purge_index", description: "x", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
+  { name: "lookup_ledger", description: "harmless name, destructive by the server's word", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
 ];
 
 let relay: typeof import("@/app/setup-api/staff-mcp/[server]/route");
+let resetRelayCaches: () => void;
 let mcp: typeof import("@/lib/staff-mcp");
 const TOKENS = { ivan: "a".repeat(64), maria: "b".repeat(64), olga: "c".repeat(64) };
 
@@ -87,6 +90,7 @@ beforeAll(async () => {
   vi.resetModules();
   mcp = await import("@/lib/staff-mcp");
   relay = await import("@/app/setup-api/staff-mcp/[server]/route");
+  ({ resetRelayCachesForTests: resetRelayCaches } = await import("@/lib/staff-mcp-relay"));
 });
 
 beforeEach(async () => {
@@ -94,6 +98,7 @@ beforeEach(async () => {
   state.users = ["ivan", "maria", "olga"];
   sse = false;
   seen.length = 0;
+  resetRelayCaches();
   await mcp.updateStaffMcpStore(() => ({
     servers: { docs: { header: "Authorization" }, m365: { header: "X-Api-Key" }, filtered: { header: "Authorization" }, leaky: { header: "Authorization" } },
     credentials: {
@@ -131,17 +136,16 @@ describe("whose credential travels", () => {
     const res = await call("docs", TOKENS.ivan, whoami);
     expect(res.status).toBe(200);
     expect(JSON.stringify(await res.json())).toContain("caller=Bearer ivan-docs-token");
-    expect(seen[0].auth).toBe("Bearer ivan-docs-token");
-    expect(seen[0].ownerHeader).toBeNull();
-    expect(seen[0].body).not.toContain(TOKENS.ivan);
+    expect(callsOnly()[0].auth).toBe("Bearer ivan-docs-token");
+    expect(seen.every((s) => s.ownerHeader === null && !s.body.includes(TOKENS.ivan))).toBe(true);
 
     const second = await call("docs", TOKENS.maria, whoami);
     expect(JSON.stringify(await second.json())).toContain("caller=Bearer maria-docs-token");
-    expect(seen[1].auth).toBe("Bearer maria-docs-token");
+    expect(callsOnly()[1].auth).toBe("Bearer maria-docs-token");
 
     await call("m365", TOKENS.ivan, whoami);
-    expect(seen[2].apiKey).toBe("ivan-m365-key");
-    expect(seen[2].auth).toBeNull();
+    expect(callsOnly()[2].apiKey).toBe("ivan-m365-key");
+    expect(callsOnly()[2].auth).toBeNull();
   });
 
   it("refuses a call with no relay token or someone else's guess, without reaching the server", async () => {
@@ -209,7 +213,7 @@ describe("which tools a member reaches", () => {
     const body = await res.json();
     expect(body.id).toBe(9);
     expect(body.error.message).toContain("not available to members of staff");
-    expect(seen).toHaveLength(0);
+    expect(callsOnly()).toHaveLength(0);
   });
 
   it("refuses a whole batch that names a refused tool", async () => {
@@ -217,7 +221,31 @@ describe("which tools a member reaches", () => {
     const body = await res.json();
     expect(Array.isArray(body)).toBe(true);
     expect(body.every((m: { error?: unknown }) => m.error)).toBe(true);
-    expect(seen).toHaveLength(0);
+    expect(callsOnly()).toHaveLength(0);
+  });
+});
+
+describe("a call is judged by what the server listed", () => {
+  it("looks the tool list up when it has none, then calls a listed, allowed tool", async () => {
+    const res = await call("docs", TOKENS.ivan, whoami);
+    expect(JSON.stringify(await res.json())).toContain("caller=Bearer ivan-docs-token");
+    expect(seen.map((s) => JSON.parse(s.body).method)).toEqual(["tools/list", "tools/call"]);
+    expect(seen.every((s) => s.auth === "Bearer ivan-docs-token")).toBe(true);
+  });
+
+  it("refuses a tool the server marks destructive even when its name sends nothing, listed before or not", async () => {
+    const cold = await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lookup_ledger" } });
+    expect((await cold.json()).error.code).toBe(-32601);
+    await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 6, method: "tools/list" });
+    const warm = await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "lookup_ledger" } });
+    expect((await warm.json()).error.code).toBe(-32601);
+    expect(seen.some((s) => s.body.includes('"tools/call"'))).toBe(false);
+  });
+
+  it("refuses a tool the server does not list at all", async () => {
+    const res = await call("docs", TOKENS.ivan, { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "hidden_lookup" } });
+    expect((await res.json()).error.code).toBe(-32601);
+    expect(seen.some((s) => s.body.includes('"tools/call"'))).toBe(false);
   });
 });
 

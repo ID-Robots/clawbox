@@ -106,7 +106,7 @@ describe("the member's fence", () => {
       "..", "../owner", "Home/..", "Home/../..", "Home/../../owner/secret-project/plan.txt",
       "Shared/../secret-project", "Shared/../../staff/maria/private", "secret-project", "Documents",
       OWNER, `${OWNER}/secret-project`, HOME, `${HOME}/Documents`, "/etc/passwd", "\\etc", "home", "SHARED",
-      `Home/${String.fromCharCode(0)}x`,
+      `Home/${String.fromCharCode(0)}x`, "Home\\..", "Home\\..\\..\\owner",
     ]) {
       expect(fence.resolve(rel), rel).toBeNull();
     }

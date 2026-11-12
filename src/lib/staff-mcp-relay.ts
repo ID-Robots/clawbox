@@ -149,9 +149,11 @@ function filterToolsResult(message: JsonRpcMessage, filter: ToolFilter, cache: M
   const tools = message.result.tools.filter((tool: unknown) => {
     if (!isObject(tool)) return false;
     const annotations = isObject(tool.annotations) ? (tool.annotations as ToolAnnotations) : null;
-    const allowed = staffToolAllowed(tool.name, filter, annotations);
-    if (allowed && typeof tool.name === "string") cache.set(tool.name, annotations);
-    return allowed;
+    // EVERY listed tool is remembered with what the server said of it — the
+    // refused ones too, so a call naming one is judged by its annotations
+    // rather than waved through for want of them.
+    if (typeof tool.name === "string") cache.set(tool.name, annotations);
+    return staffToolAllowed(tool.name, filter, annotations);
   });
   return { ...message, result: { ...message.result, tools } };
 }
@@ -216,6 +218,65 @@ function toolRefusal(id: unknown, name: unknown): Record<string, unknown> {
   };
 }
 
+/** The JSON-RPC messages of a response body, JSON or SSE. */
+function messagesOf(text: string, contentType: string): unknown[] {
+  const parse = (raw: string): unknown[] => {
+    try {
+      const v: unknown = JSON.parse(raw);
+      return Array.isArray(v) ? v : [v];
+    } catch {
+      return [];
+    }
+  };
+  if (!contentType.toLowerCase().includes("text/event-stream")) return parse(text);
+  return text.split(/\r?\n\r?\n/).flatMap((event) => {
+    const data = event.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, ""));
+    return data.length > 0 ? parse(data.join("\n")) : [];
+  });
+}
+
+/**
+ * Ask the server for its tool list on the member's behalf (their credential,
+ * the gateway's MCP session) and remember every tool and its annotations. At
+ * most a few pages; anything that fails leaves the cache as it was, and the
+ * call it was for is then refused.
+ */
+async function learnToolList(req: Request, admission: Extract<Admission, { ok: true }>, cache: Map<string, ToolAnnotations | null>): Promise<void> {
+  let cursor: string | undefined;
+  for (let page = 0; page < 10; page++) {
+    let res: Response;
+    try {
+      const headers = upstreamHeaders(req, admission);
+      headers.set("content-type", "application/json");
+      if (!headers.has("accept")) headers.set("accept", "application/json, text/event-stream");
+      res = await fetch(admission.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ jsonrpc: "2.0", id: `clawbox-relay-list-${page}`, method: "tools/list", ...(cursor ? { params: { cursor } } : {}) }),
+        redirect: "manual",
+        signal: AbortSignal.any([req.signal, AbortSignal.timeout(30_000)]),
+      });
+    } catch {
+      return;
+    }
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      return;
+    }
+    const body = await readBounded(res.body, MAX_LIST_RESPONSE_BYTES);
+    if (body === null) return;
+    const answer = messagesOf(body, res.headers.get("content-type") ?? "").find(
+      (m): m is JsonRpcMessage => isObject(m) && m.id === `clawbox-relay-list-${page}`,
+    );
+    if (!answer || !isObject(answer.result) || !Array.isArray(answer.result.tools)) return;
+    for (const tool of answer.result.tools) {
+      if (isObject(tool) && typeof tool.name === "string") cache.set(tool.name, isObject(tool.annotations) ? (tool.annotations as ToolAnnotations) : null);
+    }
+    cursor = typeof answer.result.nextCursor === "string" && answer.result.nextCursor ? answer.result.nextCursor : undefined;
+    if (!cursor) return;
+  }
+}
+
 /** POST: one JSON-RPC message (or a batch) from the gateway. */
 async function relayPost(req: Request, admission: Extract<Admission, { ok: true }>): Promise<Response> {
   const text = await readBounded(req.body, MAX_REQUEST_BYTES);
@@ -230,10 +291,20 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   const cache = annotationCache.get(admission.cacheKey) ?? new Map<string, ToolAnnotations | null>();
   annotationCache.set(admission.cacheKey, cache);
 
+  // A call is judged by what the server LISTED: a tool this relay has not
+  // seen listed (a restart, a session the gateway opened before) is looked up
+  // first, and one the server does not list at all is refused.
+  const calledNames = messages
+    .filter((m) => m.method === "tools/call")
+    .map((m) => (isObject(m.params) ? m.params.name : undefined));
+  if (calledNames.some((name) => typeof name === "string" && !cache.has(name))) {
+    await learnToolList(req, admission, cache);
+  }
   const refused = messages.filter((m) => {
     if (m.method !== "tools/call") return false;
     const name = isObject(m.params) ? m.params.name : undefined;
-    return !staffToolAllowed(name, admission.filter, typeof name === "string" ? cache.get(name) : undefined);
+    if (typeof name !== "string" || !cache.has(name)) return true;
+    return !staffToolAllowed(name, admission.filter, cache.get(name));
   });
   if (refused.length > 0) {
     // Nothing of a batch that names a refused tool reaches the server.
