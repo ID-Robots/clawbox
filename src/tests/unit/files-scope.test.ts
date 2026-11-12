@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { execFileSync } from "child_process";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
@@ -155,6 +156,14 @@ describe("a member's open is judged by the file actually opened", () => {
     fs.symlinkSync(path.join(OWNER, "secret-project"), dirLink);
     expect(scope.openInMemberView(fence, path.join(dirLink, "new.txt"), "write")).toBeNull();
     expect(fs.existsSync(path.join(OWNER, "secret-project", "new.txt"))).toBe(false);
+  });
+
+  it("never waits on a FIFO left in a home, and serves only regular files", () => {
+    const fence = memberFence();
+    const fifo = path.join(HOME, "Documents", "pipe");
+    execFileSync("mkfifo", [fifo]);
+    expect(scope.openInMemberView(fence, fifo, "read")).toBeNull();
+    expect(() => scope.openInMemberView(fence, fifo, "write")).toThrow(); // ENXIO: no reader, no wait
   });
 
   it("opens a file inside the view, and a write truncates only after the check", () => {

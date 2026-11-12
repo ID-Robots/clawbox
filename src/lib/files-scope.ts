@@ -259,18 +259,20 @@ export function memberRoots(home: string, ownerBase: string = filesBrowseRoot())
  * Linux only, as the box is: without /proc nothing is opened for a member.
  */
 export function openInMemberView(fence: FilesFence, abs: string, mode: "read" | "write"): { fd: number; real: string } | null {
-  const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL } = fs.constants;
+  // O_NONBLOCK: a FIFO left in a home must not hold the open (and the
+  // server) waiting for a writer or a reader; only a regular file is served.
+  const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NONBLOCK } = fs.constants;
   let fd: number;
   let created = false;
   if (mode === "read") {
-    fd = fs.openSync(/* turbopackIgnore: true */ abs, O_RDONLY);
+    fd = fs.openSync(/* turbopackIgnore: true */ abs, O_RDONLY | O_NONBLOCK);
   } else {
     try {
-      fd = fs.openSync(/* turbopackIgnore: true */ abs, O_WRONLY | O_CREAT | O_EXCL, 0o666);
+      fd = fs.openSync(/* turbopackIgnore: true */ abs, O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0o666);
       created = true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
-      fd = fs.openSync(/* turbopackIgnore: true */ abs, O_WRONLY);
+      fd = fs.openSync(/* turbopackIgnore: true */ abs, O_WRONLY | O_NONBLOCK);
     }
   }
   let opened: string | null = null;
@@ -279,7 +281,13 @@ export function openInMemberView(fence: FilesFence, abs: string, mode: "read" | 
   } catch {
     opened = null;
   }
-  if (!opened || !fence.allows(opened)) {
+  let regular = false;
+  try {
+    regular = fs.fstatSync(fd).isFile();
+  } catch {
+    regular = false;
+  }
+  if (!opened || !regular || !fence.allows(opened)) {
     try { fs.closeSync(fd); } catch { /* closed */ }
     if (created && opened && !opened.endsWith(" (deleted)")) {
       try { fs.unlinkSync(/* turbopackIgnore: true */ opened); } catch { /* best effort */ }

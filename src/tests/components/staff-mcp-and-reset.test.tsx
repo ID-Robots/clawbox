@@ -126,15 +126,34 @@ describe("the staff tools card", () => {
   });
 
   it("says when a saved change is not active yet", async () => {
-    fetchMock.mockImplementation((_u: string, init?: RequestInit) => json(200, (init?.method ?? "GET") === "POST" ? { ...VIEW, applied: false } : VIEW));
+    // The route answers the view built from what it saved.
+    fetchMock.mockImplementation((_u: string, init?: RequestInit) => {
+      if ((init?.method ?? "GET") !== "POST") return json(200, VIEW);
+      const sent = JSON.parse(String(init!.body)).servers as Record<string, { header: string }>;
+      return json(200, { ...VIEW, applied: false, servers: VIEW.servers.map((s) => (sent[s.name] ? { ...s, granted: true, header: sent[s.name].header } : { ...s, granted: false })) });
+    });
     render(<StaffMcpCard users={["ivan"]} orgMode />);
     fireEvent.change(await screen.findByTestId("staff-mcp-header-docs"), { target: { value: "X-Api-Key" } });
     fireEvent.click(screen.getByTestId("staff-mcp-save-grants"));
     expect(await screen.findByText("users.staffMcp.notApplied")).toBeInTheDocument();
-    const posts = () => fetchMock.mock.calls.filter(([, i]) => i?.method === "POST").length;
-    expect(posts()).toBe(1);
+    const posts = () => fetchMock.mock.calls.filter(([, i]) => i?.method === "POST");
+    expect(posts()).toHaveLength(1);
+    // An edit made since is not what Try again re-sends: the SAVED grants are.
+    fireEvent.change(screen.getByTestId("staff-mcp-header-docs"), { target: { value: "X-Other" } });
     fireEvent.click(screen.getByTestId("staff-mcp-apply-retry"));
-    await waitFor(() => expect(posts()).toBe(2));
+    await waitFor(() => expect(posts()).toHaveLength(2));
+    expect(JSON.parse(String(posts()[1][1].body))).toEqual({ servers: { docs: { header: "X-Api-Key" } } });
+  });
+
+  it("does not read a server named like an object's own property as granted", async () => {
+    fetchMock.mockImplementation(() => json(200, { ...VIEW, servers: [{ name: "constructor", transport: "http", usable: true, granted: false, header: "Authorization" }] }));
+    render(<StaffMcpCard users={["ivan"]} orgMode />);
+    const box = await screen.findByTestId("staff-mcp-grant-constructor");
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    expect(box).toBeChecked();
+    fireEvent.click(box);
+    expect(box).not.toBeChecked();
   });
 
   it("says members of staff get no MCP tools on Hermes", async () => {

@@ -162,7 +162,8 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
       {view.staffMcpSupported && view.servers.length > 0 && (
         <ul className="space-y-2" data-testid="staff-mcp-servers">
           {view.servers.map((server) => {
-            const on = server.name in granted;
+            // Own properties only: a server named `constructor` is not "granted" by Object's prototype.
+            const on = Object.hasOwn(granted, server.name);
             const offerable = server.usable || server.granted;
             return (
               <li key={server.name} className="rounded-lg border border-white/10 p-3">
@@ -277,7 +278,8 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
           <button
             type="button"
             disabled={busy !== null}
-            onClick={() => void post("grants", { servers: Object.fromEntries(Object.entries(granted).map(([name, header]) => [name, { header }])) })}
+            // The grants as SAVED — never an unsaved edit made since.
+            onClick={() => void post("grants", { servers: Object.fromEntries(Object.entries(grantsOf(view)).map(([name, header]) => [name, { header }])) })}
             className="px-3 h-8 rounded-lg text-xs text-white bg-white/10 hover:bg-white/15 cursor-pointer disabled:opacity-50"
             data-testid="staff-mcp-apply-retry"
           >

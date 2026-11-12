@@ -63,6 +63,15 @@ beforeAll(async () => {
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
       seen.push({ auth: req.headers.authorization ?? null, apiKey: (req.headers["x-api-key"] as string) ?? null, ownerHeader: (req.headers["x-owner"] as string) ?? null, method: req.method ?? "", body });
+      // A resume needs the position it resumes from; "cr" asks for CR-only framing.
+      const lastId = req.headers["last-event-id"];
+      if (req.method === "GET" && lastId !== "8" && lastId !== "cr") { res.writeHead(400).end(); return; }
+      if (req.method === "GET" && lastId === "cr") {
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write(`id: 9\revent: message\rdata: ${JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: TOOLS } })}\r`);
+        res.end("\r");
+        return;
+      }
       if (req.method === "GET") {
         // A resumed stream delivering a tool list (Last-Event-ID).
         res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -232,6 +241,20 @@ describe("which tools a member reaches", () => {
 });
 
 describe("a resumed stream", () => {
+  it("filters an event framed with CR-only line endings", async () => {
+    const req = new Request("http://127.0.0.1/setup-api/staff-mcp/docs", { method: "GET", headers: { Authorization: `Bearer ${TOKENS.ivan}`, "Last-Event-ID": "cr" } });
+    const res = await relay.GET(req, { params: Promise.resolve({ server: "docs" }) });
+    const text = await res.text();
+    expect(text).not.toContain("send_mail");
+    const data = JSON.parse(text.split("\n").find((l) => l.startsWith("data: "))!.slice(6));
+    expect(data.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "whoami"]);
+  });
+
+  it("does not answer a resume without the position it resumes from", async () => {
+    const req = new Request("http://127.0.0.1/setup-api/staff-mcp/docs", { method: "GET", headers: { Authorization: `Bearer ${TOKENS.ivan}` } });
+    expect((await relay.GET(req, { params: Promise.resolve({ server: "docs" }) })).status).toBe(400);
+  });
+
   it("filters a tool list delivered on a GET", async () => {
     const req = new Request("http://127.0.0.1/setup-api/staff-mcp/docs", { method: "GET", headers: { Authorization: `Bearer ${TOKENS.ivan}`, "Last-Event-ID": "8" } });
     const res = await relay.GET(req, { params: Promise.resolve({ server: "docs" }) });

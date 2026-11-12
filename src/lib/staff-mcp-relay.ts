@@ -173,7 +173,8 @@ function filterJsonBody(text: string, listIds: Set<string>, filter: ToolFilter, 
 
 /** Rewrite each `tools/list` answer in an SSE body, event by event; other events pass as they are. */
 function filterSseBody(text: string, listIds: Set<string>, filter: ToolFilter, cache: Map<string, ToolAnnotations | null>): string {
-  const events = text.split(/\r?\n\r?\n/);
+  // Every SSE line ending (CRLF, LF, a lone CR) read as one.
+  const events = text.replace(/\r\n?/g, "\n").split("\n\n");
   return events
     .map((event) => {
       const lines = event.split(/\r?\n/);
@@ -230,7 +231,7 @@ function messagesOf(text: string, contentType: string): unknown[] {
     }
   };
   if (!contentType.toLowerCase().includes("text/event-stream")) return parse(text);
-  return text.split(/\r?\n\r?\n/).flatMap((event) => {
+  return text.replace(/\r\n?/g, "\n").split("\n\n").flatMap((event) => {
     const data = event.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, ""));
     return data.length > 0 ? parse(data.join("\n")) : [];
   });
@@ -375,6 +376,15 @@ function filteredSse(body: ReadableStream<Uint8Array>, filter: ToolFilter, cache
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
+  // Every SSE line ending (CRLF, LF, a lone CR) becomes LF before events are
+  // cut; a CR at the end of a chunk waits to see whether an LF follows it.
+  let heldCR = false;
+  const normalize = (text: string): string => {
+    let t = heldCR ? `\r${text}` : text;
+    heldCR = t.endsWith("\r");
+    if (heldCR) t = t.slice(0, -1);
+    return t.replace(/\r\n?/g, "\n");
+  };
   const emit = (event: string) => {
     const lines = event.split(/\r?\n/);
     const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, ""));
@@ -386,9 +396,9 @@ function filteredSse(body: ReadableStream<Uint8Array>, filter: ToolFilter, cache
   };
   return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      pending += decoder.decode(chunk, { stream: true });
+      pending += normalize(decoder.decode(chunk, { stream: true }));
       for (;;) {
-        const m = /\r?\n\r?\n/.exec(pending);
+        const m = /\n\n/.exec(pending);
         if (!m) break;
         controller.enqueue(encoder.encode(emit(pending.slice(0, m.index))));
         pending = pending.slice(m.index + m[0].length);
@@ -396,7 +406,8 @@ function filteredSse(body: ReadableStream<Uint8Array>, filter: ToolFilter, cache
       if (pending.length > MAX_LIST_RESPONSE_BYTES) controller.error(new Error("an SSE event too large to check"));
     },
     flush(controller) {
-      pending += decoder.decode();
+      pending += normalize(decoder.decode());
+      if (heldCR) pending += "\n";
       if (pending.trim()) controller.enqueue(encoder.encode(emit(pending)));
     },
   }));

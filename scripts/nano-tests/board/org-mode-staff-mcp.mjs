@@ -273,7 +273,7 @@ async function openclawRun(port) {
   show("staff A", ta);
   const aCalls = whoamiCalls(since);
   note(`[${RUNTIME}] the server saw for A's turn: ${aCalls.map((c) => whose(c.auth)).join(", ") || "(nothing)"}`);
-  check(aCalls.length > 0 && aCalls.every((c) => c.auth === `Bearer ${CRED_A}`), "A's assistant calls the server with A's own credential");
+  check(ta.completed === true && aCalls.length > 0 && aCalls.every((c) => c.auth === `Bearer ${CRED_A}`), "A's assistant calls the server with A's own credential (and the turn completed)");
   since = calls.length;
   const tb = await turn(b, bMain, ASK);
   show("staff B (no credential)", tb);
@@ -298,7 +298,7 @@ async function openclawRun(port) {
   show("staff B (credential set)", tb2);
   const bCalls = whoamiCalls(since);
   note(`[${RUNTIME}] the server saw for B's turn: ${bCalls.map((c) => whose(c.auth)).join(", ") || "(nothing)"}`);
-  check(bCalls.length > 0 && bCalls.every((c) => c.auth === `Bearer ${CRED_B}`), "B's assistant calls the server with B's own credential, never A's");
+  check(tb2.completed === true && bCalls.length > 0 && bCalls.every((c) => c.auth === `Bearer ${CRED_B}`), "B's assistant calls the server with B's own credential, never A's (and the turn completed)");
 
   // 4. The owner.
   const owner = await chatSocket(`ws://127.0.0.1:${GATEWAY_PORT}/`, { origin: "http://127.0.0.1", host: `127.0.0.1:${GATEWAY_PORT}` }, { owner: true });
@@ -308,7 +308,7 @@ async function openclawRun(port) {
   show("owner", to);
   const oCalls = whoamiCalls(since);
   note(`[${RUNTIME}] the server saw for the owner's turn: ${oCalls.map((c) => whose(c.auth)).join(", ") || "(nothing)"}`);
-  check(oCalls.length > 0 && oCalls.every((c) => c.auth === `Bearer ${OWNER_TOKEN}`) && !to.tools.some((t) => t.name.startsWith("cbstaff-")),
+  check(to.completed === true && oCalls.length > 0 && oCalls.every((c) => c.auth === `Bearer ${OWNER_TOKEN}`) && !to.tools.some((t) => t.name.startsWith("cbstaff-")),
     "the owner's assistant uses its own server entry with the owner's header — never a member's");
   await owner.request("sessions.delete", { key: ownerKey, deleteTranscript: true });
   a.close(); b.close(); owner.close();
