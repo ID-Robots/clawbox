@@ -19,7 +19,7 @@
  * SERVER ONLY.
  */
 
-import { get as configGet } from "@/lib/config-store";
+import { get as configGet, getKnown } from "@/lib/config-store";
 import type { LocalEngine } from "@/lib/local-engine";
 
 /**
@@ -30,14 +30,30 @@ import type { LocalEngine } from "@/lib/local-engine";
  */
 export const CLOUD_AI_LOCK_KEY = "ai_cloud_lock";
 
-/** Is the local-only AI lock on? An unreadable store reads as off, like every other device setting. */
+/**
+ * Is the local-only AI lock on? FAILING CLOSED, by PR-A's own rule: an absent
+ * store (no data/config.json yet) is known and empty, so unlocked — the state
+ * every box ships in; a store that is there and cannot be read (EACCES, a torn
+ * or corrupt file) is not known to be unlocked, so it reads as LOCKED until it
+ * reads again — on OpenClaw the ClawBox AI credential lives in openclaw.json,
+ * which an unreadable data/config.json does not take away. `getKnown` reports
+ * every read failure itself; only where the store has no tri-state reader is
+ * it read the plain way.
+ */
 export async function cloudAiLockOn(): Promise<boolean> {
+  let read: { value: unknown; known: boolean };
   try {
-    const value = await configGet(CLOUD_AI_LOCK_KEY);
-    return value === true || value === "pinned";
+    read = await getKnown(CLOUD_AI_LOCK_KEY);
   } catch {
-    return false;
+    try {
+      const value = await configGet(CLOUD_AI_LOCK_KEY);
+      return value === true || value === "pinned";
+    } catch {
+      return false;
+    }
   }
+  if (!read.known) return true;
+  return read.value === true || read.value === "pinned";
 }
 
 export type FeatureEngine =

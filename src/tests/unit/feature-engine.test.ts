@@ -11,11 +11,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const store = new Map<string, unknown>();
-const storeFails = { get: false };
+/** `unreadable`: the store is there and cannot be read (getKnown says so); `throws`: no tri-state reader at all. */
+const storeFails = { unreadable: false, throws: false };
 vi.mock("@/lib/config-store", () => ({
-  get: async (key: string) => {
-    if (storeFails.get) throw new Error("unreadable");
-    return store.get(key);
+  get: async (key: string) => store.get(key),
+  getKnown: async (key: string) => {
+    if (storeFails.throws) throw new Error("no tri-state reader");
+    return storeFails.unreadable ? { value: undefined, known: false } : { value: store.get(key), known: true };
   },
   set: async (key: string, value: unknown) => {
     store.set(key, value);
@@ -43,7 +45,8 @@ import { CLOUD_AI_LOCK_KEY, cloudAiLockOn, resolveFeatureEngine } from "@/lib/fe
 
 beforeEach(() => {
   store.clear();
-  storeFails.get = false;
+  storeFails.unreadable = false;
+  storeFails.throws = false;
   token.mockReset().mockResolvedValue("claw_test");
   localEngine.mockReset().mockResolvedValue(LOCAL);
 });
@@ -56,9 +59,19 @@ describe("the local-only AI lock, as the store holds it", () => {
     }
   });
 
-  it("reads as off when the store cannot be read", async () => {
-    storeFails.get = true;
+  it("reads as ON when the store is there but cannot be read: never the cloud on a read failure (PR-A's rule)", async () => {
+    storeFails.unreadable = true;
+    expect(await cloudAiLockOn()).toBe(true);
+    // Signed in, with a model on the box: the box's own engine, not ClawBox AI.
+    expect(await resolveFeatureEngine()).toEqual({ kind: "local", engine: LOCAL });
+    expect(token).not.toHaveBeenCalled();
+  });
+
+  it("reads the plain way where the store has no tri-state reader", async () => {
+    storeFails.throws = true;
     expect(await cloudAiLockOn()).toBe(false);
+    store.set(CLOUD_AI_LOCK_KEY, "pinned");
+    expect(await cloudAiLockOn()).toBe(true);
   });
 });
 
