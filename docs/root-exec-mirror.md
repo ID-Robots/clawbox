@@ -247,7 +247,7 @@ the root-exec manifest — running the mirror staged &lt;time&gt;".
   `User=clawbox` unit's `ExecStart` points at it (`start-vnc.sh` and
   `launch-browser.sh` — `clawbox-browser.service` runs the tree copy, so the
   `chmod +x` on it is load-bearing), where a script is run unprivileged
-  (`ensure-local-embeddings.sh`, `apply-desktop-theme.sh` — which is chowned to
+  (`ensure-local-embeddings.sh`, `apply-desktop-theme.sh` — which belongs to
   `clawbox`, so mirroring it would make the mirror writable), and in
   `step_vnc_install`'s migration of the old first-boot unit, which has to
   recognise the tree path in order to rewrite it. `clawbox-tts.sh` is named

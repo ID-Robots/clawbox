@@ -1626,7 +1626,7 @@ hand_over_checkout() {
   for tree in "$@"; do trees+=("$PROJECT_DIR/$tree"); done
   stray="$(find "${trees[@]}" ! -user "$CLAWBOX_USER" -print -quit 2>/dev/null || true)"
   for entry in "$PROJECT_DIR" "$PROJECT_DIR/data" "$PROJECT_DIR/.env" "$IFACE_ENV" ${stray:+"$stray"}; do
-    if [ -e "$entry" ] && [ "$(stat -c %U "$entry" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
+    if { [ -e "$entry" ] || [ -L "$entry" ]; } && [ "$(stat -c %U "$entry" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
       chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR" || true
       return 0
     fi
@@ -1680,7 +1680,7 @@ hand_over_home_path() {
         *) exit 0 ;;
       esac
       if [ -n "$tree" ] && [ -z "$rest" ] && [ "${info%%|*}" = directory ]; then
-        chown -R -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null
+        chown -R -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null || true
         exit 0
       fi
       if [ "${info##*|}" != "$CLAWBOX_USER" ]; then

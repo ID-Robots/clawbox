@@ -505,6 +505,22 @@ describe("ensure_llamacpp_model_cached hands data/llamacpp over only through the
     expect(rootChowns(r)).toEqual([`chown -R ${os.userInfo().username}:${os.userInfo().username} ${project}`]);
   });
 
+  it("hands back the checkout when the first leftover root's find reports is a link to nothing", () => {
+    fs.writeFileSync(path.join(models(), MODEL), "gguf");
+    const stray = path.join(models(), "gone");
+    fs.symlinkSync(path.join(dir, "nothing-here"), stray);
+    const shims = [
+      `find() { case " $* " in *" $PROJECT_DIR/data/llamacpp "*) echo ${JSON.stringify(stray)}; return 0 ;; esac; `
+        + 'command find "$@"; }',
+      `stat() { if [ "\${@: -1}" = ${JSON.stringify(stray)} ]; then echo nobody; else command stat "$@"; fi; }`,
+    ].join("\n");
+
+    const r = run(cacheCall(shims));
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(rootChowns(r)).toEqual([`chown -R ${os.userInfo().username}:${os.userInfo().username} ${project}`]);
+  });
+
   it("changes no owner in a checkout that is all the account's", () => {
     fs.writeFileSync(path.join(models(), MODEL), "gguf");
 

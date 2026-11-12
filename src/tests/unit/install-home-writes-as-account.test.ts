@@ -470,5 +470,9 @@ d("hand_over_home_path gives root-owned leftovers back one entry at a time", () 
     expect(handOver(path.join(home, ".codex"), "return 1;").stdout).toContain("rc=0");
     fs.symlinkSync("/nonexistent", path.join(home, ".dangling"));
     expect(handOver(path.join(home, ".dangling", "x")).stdout).toContain("rc=0");
+    // The recursive hand-over too: errexit is on in its subshell, as in the
+    // installer, and chown -R fails when an entry goes away under it.
+    expect(handOver(path.join(home, ".codex"), 'case " $* " in *" -R "*) return 1 ;; esac;', "-R").stdout)
+      .toContain("rc=0");
   });
 });
