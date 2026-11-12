@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -46,19 +46,25 @@ const UNIT = "clawbox-gateway.service";
 const RESTART = `systemctl restart ${UNIT}`;
 const RESET_FAILED = `systemctl reset-failed ${UNIT}`;
 const LEAVING = "Leaving the running clawbox-gateway.service as it is";
+/** systemd's id for the running gateway's current run, as `systemctl show -p InvocationID --value` prints it. */
+const INVOCATION = "6a2f0c1e9b8d4f7a8c3e5d1b0a9f8e7d";
+const ASK_INVOCATION = `systemctl show ${UNIT} -p InvocationID --value`;
 
-type Box = { dir: string; calls: () => string[]; cleanup: () => void };
+type Box = { dir: string; note: string; calls: () => string[]; cleanup: () => void };
 
 /**
- * A temp box: data/config.json (the update lock) as given, and the answers
+ * A temp box: data/config.json (the update lock) as given, the answers
  * `systemctl is-active` gives, one per ask (the last repeats; "" is a query
- * that answered nothing).
+ * that answered nothing), and the running gateway's InvocationID ("" is a
+ * query that answered nothing). `note` is where the step records which run of
+ * the gateway it left serving (CLAWBOX_GATEWAY_LEFT_RUNNING).
  */
-function makeBox(opts: { lock?: unknown; states: string[] }): Box {
+function makeBox(opts: { lock?: unknown; states: string[]; invocation?: string }): Box {
   const dir = mkdtempSync(path.join(tmpdir(), "clawbox-gateway-setup-"));
   mkdirSync(path.join(dir, "data"), { recursive: true });
   writeFileSync(path.join(dir, "calls"), "");
   writeFileSync(path.join(dir, "asks"), "");
+  writeFileSync(path.join(dir, "invocation"), opts.invocation ?? INVOCATION);
   writeFileSync(path.join(dir, "states"), opts.states.map((s) => `${s}\n`).join(""));
   if (opts.lock !== undefined) {
     writeFileSync(
@@ -68,6 +74,7 @@ function makeBox(opts: { lock?: unknown; states: string[] }): Box {
   }
   return {
     dir,
+    note: path.join(dir, "run", "clawbox", "gateway-left-running"),
     calls: () => readFileSync(path.join(dir, "calls"), "utf-8").split("\n").filter(Boolean),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
@@ -84,8 +91,14 @@ function prelude(box: Box, dispatched: string | undefined): string[] {
     "set -euo pipefail",
     dispatched === undefined ? "unset CLAWBOX_DISPATCHED_STEP" : `CLAWBOX_DISPATCHED_STEP=${JSON.stringify(dispatched)}`,
     `PROJECT_DIR=${JSON.stringify(box.dir)}`,
+    `CLAWBOX_GATEWAY_LEFT_RUNNING=${JSON.stringify(box.note)}`,
     "systemctl() {",
     `  printf 'systemctl %s\\n' "$*" >> ${q("calls")}`,
+    `  if [ "$*" = ${JSON.stringify(`show ${UNIT} -p InvocationID --value`)} ]; then`,
+    `    cat ${q("invocation")}`,
+    '    echo',
+    "    return 0",
+    "  fi",
     '  if [ "${1:-}" = is-active ]; then',
     "    local n s",
     `    n=$(wc -l < ${q("asks")})`,
@@ -198,6 +211,7 @@ describe("step_gateway_setup inside an in-app update", () => {
       // Optional so that unmodified beta runs the step and fails on what it
       // DOES (the restart), not on a missing name.
       shellFunctionIfPresent("gateway_setup_restart_wanted"),
+      shellFunctionIfPresent("record_gateway_left_running"),
       step.split("/etc/systemd/system").join(etc),
       "step_gateway_setup",
       'echo "RC=0"',
@@ -206,19 +220,93 @@ describe("step_gateway_setup inside an in-app update", () => {
     return { ...r, calls: box.calls() };
   }
 
-  it("leaves an active gateway running: no reset-failed, no restart, one line, RC=0", () => {
+  /** The step restarted the gateway the way it always has: reset-failed, then the restart. */
+  function expectRestart(r: { stdout: string; calls: string[] }) {
+    expect(r.stdout).not.toContain(LEAVING);
+    const reset = r.calls.indexOf(RESET_FAILED);
+    expect(reset).toBeGreaterThan(-1);
+    expect(r.calls.indexOf(RESTART)).toBeGreaterThan(reset);
+  }
+
+  it("leaves an active gateway running, and notes which run it left: no reset-failed, no restart, RC=0", () => {
     const box = makeBox({ lock: LOCKED, states: ["active"] });
     try {
       const r = gatewaySetup(box, "gateway_setup");
       expect(r.stdout, r.stderr).toContain("RC=0");
-      // The unit is still copied, reloaded and enabled; asked once; never
-      // reset-failed or restarted.
+      // The unit is still copied, reloaded and enabled; asked once, then its
+      // run's id is read; never reset-failed or restarted.
       expect(r.calls).toEqual([
         "systemctl daemon-reload",
         `systemctl enable ${UNIT}`,
         `systemctl is-active ${UNIT}`,
+        ASK_INVOCATION,
       ]);
       expect(r.stdout).toContain(LEAVING);
+      // The note gateway_verify reads as the web server's account: that id,
+      // in a plain file anyone may read and only root may write.
+      expect(readFileSync(box.note, "utf-8")).toBe(`${INVOCATION}\n`);
+      expect(statSync(box.note).mode & 0o777).toBe(0o644);
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it.each<[string, string]>([
+    ["systemd answers no id for the running gateway", ""],
+    ["systemd answers something that is not an id", "n/a"],
+    ["systemd answers an id of the wrong length", "6a2f0c1e9b8d"],
+    ["systemd answers 32 characters that are not an id", "6a2f0c1e9b8d4f7a8c3e5d1b0a9f8e/Z"],
+  ])("restarts as before, with no note, when %s", (_name, invocation) => {
+    const box = makeBox({ lock: LOCKED, states: ["active"], invocation });
+    try {
+      const r = gatewaySetup(box, "gateway_setup");
+      expect(r.stdout, r.stderr).toContain("RC=0");
+      expectRestart(r);
+      expect(existsSync(box.note)).toBe(false);
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("restarts as before when the note cannot be written", () => {
+    const box = makeBox({ lock: LOCKED, states: ["active"] });
+    try {
+      // Where the note's directory should be, a file: mkdir cannot make it.
+      writeFileSync(path.join(box.dir, "run"), "");
+      const r = gatewaySetup(box, "gateway_setup");
+      expect(r.stdout, r.stderr).toContain("RC=0");
+      expectRestart(r);
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("restarts as before when the note's place is a directory, and leaves it as it was", () => {
+    const box = makeBox({ lock: LOCKED, states: ["active"] });
+    try {
+      mkdirSync(box.note, { recursive: true });
+      const r = gatewaySetup(box, "gateway_setup");
+      expect(r.stdout, r.stderr).toContain("RC=0");
+      expectRestart(r);
+      expect(statSync(box.note).isDirectory()).toBe(true);
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("replaces a link at the note's place instead of writing through it", () => {
+    const box = makeBox({ lock: LOCKED, states: ["active"] });
+    try {
+      const target = path.join(box.dir, "elsewhere");
+      writeFileSync(target, "kept\n");
+      mkdirSync(path.dirname(box.note), { recursive: true });
+      symlinkSync(target, box.note);
+      const r = gatewaySetup(box, "gateway_setup");
+      expect(r.stdout, r.stderr).toContain("RC=0");
+      expect(r.stdout).toContain(LEAVING);
+      expect(readFileSync(target, "utf-8")).toBe("kept\n");
+      expect(lstatSync(box.note).isSymbolicLink()).toBe(false);
+      expect(readFileSync(box.note, "utf-8")).toBe(`${INVOCATION}\n`);
     } finally {
       box.cleanup();
     }
@@ -229,15 +317,14 @@ describe("step_gateway_setup inside an in-app update", () => {
     ["an active gateway but no update in flight", "gateway_setup", { update_in_progress: false }, "active"],
     ["post_update's own call, lock held and gateway active", "post_update", LOCKED, "active"],
     ["a full install (not dispatched), lock held and gateway active", undefined, LOCKED, "active"],
-  ])("restarts as before with %s", (_name, dispatched, lock, state) => {
+  ])("restarts as before with %s, and notes nothing", (_name, dispatched, lock, state) => {
     const box = makeBox({ lock, states: [state] });
     try {
       const r = gatewaySetup(box, dispatched);
       expect(r.stdout, r.stderr).toContain("RC=0");
-      expect(r.stdout).not.toContain(LEAVING);
-      const reset = r.calls.indexOf(RESET_FAILED);
-      expect(reset).toBeGreaterThan(-1);
-      expect(r.calls.indexOf(RESTART)).toBeGreaterThan(reset);
+      expectRestart(r);
+      expect(r.calls).not.toContain(ASK_INVOCATION);
+      expect(existsSync(box.note)).toBe(false);
     } finally {
       box.cleanup();
     }

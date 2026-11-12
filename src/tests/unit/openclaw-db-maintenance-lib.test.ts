@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 
@@ -56,6 +56,8 @@ import {
   normaliseDbMaintenanceSchedule,
   readDbMaintenanceSchedule,
   readDbMaintenanceStatus,
+  markOpenclawDoctorDue,
+  recordOpenclawDoctorComplete,
   startDbMaintenance,
   writeDbMaintenanceSchedule,
 } from "@/lib/openclaw-db-maintenance";
@@ -288,6 +290,120 @@ describe("readDbMaintenanceStatus", () => {
 
 // The real one: this suite mocks child_process for the module under test.
 const { spawnSync } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+
+/**
+ * The update's gateway check records a `doctor --fix` it saw complete the way
+ * install.sh records its own: the helper's `record-doctor --verdict complete`,
+ * which stamps the core's version and the time and recomputes the status from
+ * the databases.
+ */
+describe("recordOpenclawDoctorComplete", () => {
+  const HELPER = path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py");
+  const ok = () => h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
+    cb(null, "", ""));
+
+  it("runs the helper's record-doctor with the places install.sh passes, and answers true when it exits 0", async () => {
+    ok();
+    expect(await recordOpenclawDoctorComplete()).toBe(true);
+    expect(h.execFile).toHaveBeenCalledTimes(1);
+    const [bin, args] = h.execFile.mock.calls[0] as [string, string[]];
+    expect(bin).toBe("python3");
+    expect(args).toEqual([
+      "-I", path.join(h.root, "scripts", "openclaw-db-maintenance.py"), "record-doctor", "--verdict", "complete",
+      "--source", "update",
+      "--state-dir", "/home/clawbox/.openclaw",
+      "--config", "/home/clawbox/.openclaw/openclaw.json",
+      "--data-dir", path.join(h.root, "data"),
+      "--core-pkg", "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json",
+    ]);
+  });
+
+  it("answers false, without throwing, when the helper fails", async () => {
+    h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
+      cb(new Error("exit 1"), "", "Traceback"));
+    expect(await recordOpenclawDoctorComplete()).toBe(false);
+  });
+
+  it("records nothing when the core cannot be named, or on the Hermes edition", async () => {
+    ok();
+    // No absolute binary: no core package to name, and a verdict for no core
+    // would close the fast path the record opens.
+    h.bin = "openclaw";
+    expect(await recordOpenclawDoctorComplete()).toBe(false);
+    h.bin = "/home/clawbox/.npm-global/bin/openclaw";
+    h.edition = "hermes";
+    expect(await recordOpenclawDoctorComplete()).toBe(false);
+    expect(h.execFile).not.toHaveBeenCalled();
+  });
+
+  it.runIf(spawnSync("python3", ["--version"]).status === 0)(
+    "is a command line the real helper takes: it records doctor complete, for the installed core, with its time",
+    async () => {
+      ok();
+      await recordOpenclawDoctorComplete();
+      const args = [...(h.execFile.mock.calls[0][1] as string[])];
+      const state = path.join(h.root, "state");
+      const prefix = path.join(h.root, "prefix", "lib", "node_modules", "openclaw");
+      mkdirSync(state, { recursive: true });
+      mkdirSync(prefix, { recursive: true });
+      writeFileSync(path.join(prefix, "package.json"), JSON.stringify({
+        name: "openclaw", version: "2026.10.9", openclaw: { schemaVersions: { state: 20, agent: 25 } },
+      }));
+      args[args.indexOf("record-doctor") - 1] = HELPER;
+      args[args.indexOf("--state-dir") + 1] = state;
+      args[args.indexOf("--config") + 1] = path.join(state, "openclaw.json");
+      args[args.indexOf("--core-pkg") + 1] = path.join(prefix, "package.json");
+      const before = Date.now();
+      const run = spawnSync("python3", args, { encoding: "utf8" });
+      expect(run.status, run.stderr).toBe(0);
+      const written = JSON.parse(readFileSync(path.join(h.root, "data", "openclaw-migration-status.json"), "utf8"));
+      expect(written.doctor).toMatchObject({ core: "2026.10.9", verdict: "complete" });
+      expect(written.source).toBe("update");
+      // Whole seconds: the helper writes `%Y-%m-%dT%H:%M:%SZ`.
+      expect(Date.parse(written.doctor.at)).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000);
+      expect(written.state).toBe("ok");
+    },
+  );
+
+  it("marks the recorded run due again with the helper's doctor-due, at the same places", async () => {
+    ok();
+    expect(await markOpenclawDoctorDue()).toBe(true);
+    const [bin, args] = h.execFile.mock.calls[0] as [string, string[]];
+    expect(bin).toBe("python3");
+    expect(args.slice(2, 3)).toEqual(["doctor-due"]);
+    expect(args).not.toContain("--verdict");
+    expect(args.slice(3)).toEqual([
+      "--state-dir", "/home/clawbox/.openclaw",
+      "--config", "/home/clawbox/.openclaw/openclaw.json",
+      "--data-dir", path.join(h.root, "data"),
+      "--core-pkg", "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json",
+    ]);
+    h.edition = "hermes";
+    h.execFile.mockReset();
+    expect(await markOpenclawDoctorDue()).toBe(false);
+    expect(h.execFile).not.toHaveBeenCalled();
+  });
+
+  it.runIf(spawnSync("python3", ["--version"]).status === 0)(
+    "is a command line the real helper takes: the verdict and core stay, the time goes",
+    async () => {
+      ok();
+      await markOpenclawDoctorDue();
+      const args = [...(h.execFile.mock.calls[0][1] as string[])];
+      const state = path.join(h.root, "state");
+      mkdirSync(state, { recursive: true });
+      args[args.indexOf("doctor-due") - 1] = HELPER;
+      args[args.indexOf("--state-dir") + 1] = state;
+      args[args.indexOf("--config") + 1] = path.join(state, "openclaw.json");
+      const record = { state: "ok", core: "2026.10.9", doctor: { core: "2026.10.9", verdict: "complete", at: "2026-11-03T21:04:27Z" } };
+      writeFileSync(path.join(h.root, "data", "openclaw-migration-status.json"), JSON.stringify(record));
+      const run = spawnSync("python3", args, { encoding: "utf8" });
+      expect(run.status, run.stderr).toBe(0);
+      const written = JSON.parse(readFileSync(path.join(h.root, "data", "openclaw-migration-status.json"), "utf8"));
+      expect(written).toMatchObject({ state: "ok", core: "2026.10.9", doctor: { core: "2026.10.9", verdict: "complete", at: null } });
+    },
+  );
+});
 
 describe("the core package.json the helper reads (--core-pkg)", () => {
   const HELPER = path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py");

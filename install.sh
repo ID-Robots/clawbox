@@ -7944,8 +7944,10 @@ step_openclaw_install() {
     # "Original state captures"), so the pre-start's clean-up is the EARLY path
     # for the first and the only one for the other two. The run above is one
     # only on this full path (the fast path skips it while the pin holds); on
-    # the appliance, every update's gateway recovery runs another (the
-    # updater's runOpenclawDoctorFix).
+    # the appliance, the updater's gateway check runs another (its
+    # runOpenclawDoctorFix) whenever it takes its full repair, which it does
+    # among other cases when the verdict recorded here, or by that check's own
+    # last completed run, is more than 30 days old or names another core.
     openclaw_record_migration_verdict complete "$_oc_live_pkg"
 
   fi
@@ -13211,8 +13213,10 @@ step_recover() {
 # last step (the build pause on a box under 12 GB, post_update's quiesce on
 # every box), and gateway_verify starts it on the updated core, patches, unit
 # and pre-start, so a restart here was a whole gateway start thrown away a
-# minute later: 35-65 s of chat down on an 8 GB board, every update. What the
-# restart used to be for still holds:
+# minute later: 35-65 s of chat down on an 8 GB board, every update. Should
+# nothing stop it (post_update's quiesce failing at or before its stop),
+# gateway_verify finds the run record_gateway_left_running noted still serving
+# and starts it then. What the restart used to be for still holds:
 #  - openclaw_install's full path stops the gateway and leaves it stopped:
 #    `inactive`, so `restart`, as before;
 #  - openclaw_patch rewrote core files beside the running process (the fast
@@ -13241,6 +13245,35 @@ gateway_setup_restart_wanted() {
     *) echo restart ;;
   esac
   return 0
+}
+
+# The note step_gateway_setup leaves with a gateway it does not restart: which
+# run of clawbox-gateway.service that is, by systemd's own id for the run
+# (InvocationID, new at every start and never reused). gateway_verify, as the
+# web server's account, reads it at its decision and starts that run again if
+# it is still the one serving (src/lib/updater.ts, gatewaySetupRunStillServing).
+# A plain data file root writes and runs nothing from, in root's /run/clawbox:
+# it outlives the web server's restart inside the update and is gone after a
+# boot. Written through a fresh mktemp file renamed over the place (never
+# through a link there, and never into a directory there), readable by all.
+# Returns 1, leaving the place as it was, when systemd names no run or the
+# note cannot be written: the step then restarts the gateway as it always did.
+record_gateway_left_running() {
+  local note="${CLAWBOX_GATEWAY_LEFT_RUNNING:-/run/clawbox/gateway-left-running}" run tmp=""
+  run="$(systemctl show clawbox-gateway.service -p InvocationID --value 2>/dev/null || true)"
+  case "$run" in
+    *[!0-9a-f]*|'') ;;
+    *)
+      if [ "${#run}" -eq 32 ] && mkdir -p "$(dirname "$note")" 2>/dev/null \
+        && tmp="$(mktemp "$(dirname "$note")/.gateway-left-running.XXXXXX" 2>/dev/null)" \
+        && printf '%s\n' "$run" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$note" 2>/dev/null; then
+        return 0
+      fi
+      ;;
+  esac
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  echo "  Could not note which clawbox-gateway.service run this step leaves for the update's final check; restarting it here instead"
+  return 1
 }
 
 step_gateway_setup() {
@@ -13331,7 +13364,7 @@ CONF
 
   systemctl daemon-reload
   systemctl enable clawbox-gateway.service
-  if [ "$(gateway_setup_restart_wanted)" = leave ]; then
+  if [ "$(gateway_setup_restart_wanted)" = leave ] && record_gateway_left_running; then
     echo "  Leaving the running clawbox-gateway.service as it is: this update stops it before its final check, which starts it on the updated core and pre-start (gateway_verify)"
     return 0
   fi

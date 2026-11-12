@@ -101,30 +101,73 @@ export async function readOpenclawMigrationStatus(): Promise<OpenclawMigrationSt
 }
 
 /**
- * Whether the record says doctor's own run COMPLETED for the core installed
- * now: `state` `ok`, and `core`, `doctor.core` and the core's own manifest all
- * naming the same version, with `doctor.verdict` `complete`. The update's
- * gateway check starts a gateway its own quiesce stopped without running doctor
- * again only on this answer, so anything short of that proof — no file, a torn
- * one, a record for another core, a core that cannot be read — is `false`.
- * Never throws. Read per call: the record changes at every gateway start.
+ * How long a recorded `doctor --fix` run stands in for the next one: the
+ * pinned core keeps a standalone run's state capture for 30 days, and only the
+ * next standalone `doctor --fix` retires the ones older than that (OpenClaw
+ * 2026.10.9, docs/cli/update/repair-and-recovery.md, "Original state
+ * captures"). Past it, the update's gateway check runs doctor again.
  */
-export async function doctorCompleteForInstalledCore(): Promise<boolean> {
+const DOCTOR_RUN_STANDS_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Why the record does NOT prove doctor's own run COMPLETED for the core
+ * installed now within the last 30 days, in neutral words for the update's log
+ * line (no value from the record); null when it does: `state` `ok`, `core`,
+ * `doctor.core` and the core's own manifest all naming the same version,
+ * `doctor.verdict` `complete`, and `doctor.at` no later than `nowMs` and no
+ * more than 30 days before it. The update's gateway check starts a gateway its
+ * own quiesce stopped without running doctor again only on null, so anything
+ * short of that proof — no file, a torn one, a record for another core, a core
+ * that cannot be read, a run with no readable time or one stamped after
+ * `nowMs` (a clock that stepped back) — is a reason. Never throws. Read per
+ * call: the record changes at every gateway start.
+ */
+export async function doctorRecordRefusal(nowMs: number = Date.now()): Promise<string | null> {
   try {
-    const raw: unknown = JSON.parse(await fs.readFile(openclawMigrationStatusPath(), "utf-8"));
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await fs.readFile(openclawMigrationStatusPath(), "utf-8"));
+    } catch {
+      return "there is no readable migration record";
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "there is no readable migration record";
     const record = raw as { state?: unknown; core?: unknown; doctor?: unknown };
-    const doctor = (record.doctor ?? {}) as { core?: unknown; verdict?: unknown };
+    const doctor = (record.doctor ?? {}) as { core?: unknown; verdict?: unknown; at?: unknown };
     const core = typeof record.core === "string" ? record.core.trim() : "";
-    if (record.state !== "ok" || !core || doctor.verdict !== "complete") return false;
-    if (typeof doctor.core !== "string" || doctor.core.trim() !== core) return false;
+    if (record.state !== "ok") return "the migration record does not say ok";
+    if (!core) return "the migration record names no core";
+    if (doctor.verdict !== "complete") return "the migration record holds no completed doctor run";
+    if (typeof doctor.core !== "string" || doctor.core.trim() !== core) return "doctor's recorded run was for another core";
+    const ranAt = typeof doctor.at === "string" ? Date.parse(doctor.at) : Number.NaN;
+    if (!Number.isFinite(ranAt)) return "doctor's recorded run has no readable time";
+    if (ranAt > nowMs) return "doctor's recorded run is stamped later than now";
+    if (nowMs - ranAt > DOCTOR_RUN_STANDS_MS) return "doctor's recorded run is more than 30 days old";
     // Loaded here, not at the top: openclaw-core-generation reaches
     // `@/lib/openclaw-config`, which imports this module.
     const { installedOpenclawCoreVersion } = await import("@/lib/openclaw-core-generation");
-    return (await installedOpenclawCoreVersion())?.trim() === core;
+    if ((await installedOpenclawCoreVersion())?.trim() !== core) return "the installed core is not the record's core";
+    return null;
   } catch {
-    return false;
+    return "the migration record could not be judged";
   }
+}
+
+/**
+ * The words with which a `doctor --fix` that exited 0 still says its migration
+ * did not finish — install.sh's `openclaw_migration_complete` reads the same
+ * ones (openclaw-migration-status-doctor.test.ts holds the two lists equal).
+ */
+const DOCTOR_MIGRATION_UNFINISHED_RE =
+  /requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration/i;
+
+/**
+ * Whether the output of a `doctor --fix` that exited 0 says its migration
+ * finished, by install.sh's rule for recording its own run. The update's
+ * gateway check records `complete` only on this answer, and that record opens
+ * install.sh's fast path as well as the check's start without doctor.
+ */
+export function doctorRunCompleted(output: string): boolean {
+  return !DOCTOR_MIGRATION_UNFINISHED_RE.test(output);
 }
 
 /**

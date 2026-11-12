@@ -1,7 +1,7 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
-import { existsSync, lstatSync, readdirSync } from "fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "fs";
 import path from "./runtime-path";
 import { openclawSkippedLine, openclawUpdateSkip, type OpenclawUpdateSkip } from "./openclaw-update-skip";
 import { get, getKnown, set, setMany } from "./config-store";
@@ -148,14 +148,15 @@ import {
 } from "./harness-downgrade-backup";
 import {
   describeOpenclawMigration,
-  doctorCompleteForInstalledCore,
   doctorFixBudgetMs,
+  doctorRecordRefusal,
+  doctorRunCompleted,
   migrationBudgetMs,
   openclawDatabaseBytes,
   readOpenclawMigrationStatus,
 } from "./openclaw-migration-status";
 import { installedOpenclawCoreVersion } from "./openclaw-core-generation";
-import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
+import { dbMaintenanceRunning, markOpenclawDoctorDue, recordOpenclawDoctorComplete } from "./openclaw-db-maintenance";
 import { redactCredentialShapes } from "./incident-sanitize";
 import {
   closeUpdateLog,
@@ -1538,6 +1539,18 @@ async function persistWarnings(): Promise<void> {
   await set("update_warnings", runtime.state.warnings?.length ? JSON.stringify(runtime.state.warnings) : undefined);
 }
 
+/**
+ * Take back a warning about a gateway this step has since replaced, in memory
+ * and in the persisted copy: the check that follows warns again if the new one
+ * earns it.
+ */
+async function dropUpdateWarning(code: string): Promise<void> {
+  const warnings = runtime.state.warnings ?? [];
+  if (!warnings.some((w) => w.code === code)) return;
+  runtime.state.warnings = warnings.filter((w) => w.code !== code);
+  await persistWarnings();
+}
+
 async function restoreWarnings(): Promise<UpdateWarning[]> {
   try {
     const raw = await get("update_warnings");
@@ -2396,6 +2409,13 @@ function doctorChildEnv(): NodeJS.ProcessEnv {
  * finds no gateway, and swallowing it silently is what left a customer box
  * dark for 25 hours with "Applying system fixups — completed" on screen
  * (TASK-737).
+ *
+ * A run that exited 0 and, by install.sh's rule (`doctorRunCompleted`),
+ * finished its migration is recorded the way install.sh records its own run
+ * (`recordOpenclawDoctorComplete`): that fresh `complete`, with its time, is
+ * what lets the next updates start the gateway without doctor for 30 days.
+ * Any other run marks the recorded one due again (`markOpenclawDoctorDue`), so
+ * the next update runs doctor again, as it did at every update before.
  */
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
@@ -2408,15 +2428,17 @@ async function runOpenclawDoctorFix(): Promise<void> {
   // is what tells a field log "not long enough" apart from "stuck".
   console.log(`[Updater] openclaw doctor --fix: bound ${Math.round(timeoutMs / 1000)}s `
     + `for ${(databaseBytes / 1024 ** 3).toFixed(2)} GiB of OpenClaw databases`);
+  let ran: { stdout?: unknown; stderr?: unknown };
   try {
     // Asked again while another holder has the state under maintenance: the
     // core refuses before it acts (`@/lib/openclaw-maintenance`).
-    await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
+    ran = await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
     }), { timeoutMs, label: "openclaw doctor --fix" });
   } catch (err) {
+    await markOpenclawDoctorDue();
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
     // its own closing sentence is advice for the command that is blocked —
@@ -2452,7 +2474,11 @@ async function runOpenclawDoctorFix(): Promise<void> {
     }
     warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
       + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err, timeoutMs)}`);
+    return;
   }
+  const output = [ran?.stdout, ran?.stderr].map((part) => (typeof part === "string" ? part : "")).join("\n");
+  if (doctorRunCompleted(output)) await recordOpenclawDoctorComplete();
+  else await markOpenclawDoctorDue();
 }
 
 /**
@@ -4057,17 +4083,125 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
   }
 }
 
-async function readGatewayJournalTail(): Promise<string> {
+/**
+ * This boot's last 160 lines of the gateway's journal, or "" when journalctl
+ * fails. `quiet` drops journalctl's own `-- … --` lines (`-q`): without it a
+ * unit with no entries reads `-- No entries --` (some versions print a
+ * `-- Journal begins at … --` header above it), which is journalctl talking,
+ * not the gateway. The readers that quote the last line keep the plain form.
+ */
+async function readGatewayJournalTail(options: { quiet?: boolean } = {}): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", "clawbox-gateway.service", "-b", "-n", "160", "--no-pager"],
+      [...(options.quiet ? ["-q"] : []), "-u", "clawbox-gateway.service", "-b", "-n", "160", "--no-pager"],
       { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
     );
     return stdout;
   } catch {
     return "";
   }
+}
+
+/**
+ * What the full repair in `ensureGatewayHealthy` exists for, as the gateway's
+ * journal names it — the two plugin refusals its plugin repair answers, the
+ * legacy state its quarantine moves aside, and the SQLite lock wait — in words
+ * for the log line that says why the repair runs, or null for none of them.
+ */
+function repairNamedIn(journal: string): string | null {
+  const named: Array<[RegExp, string]> = [
+    [PLUGIN_PAYLOAD_VERIFICATION_RE, "a plugin payload refusal"],
+    [PLUGIN_CAPABILITY_CONSENT_RE, "a capability consent refusal"],
+    [LEGACY_GATEWAY_BLOCKER_RE, "legacy state"],
+    [/SQLite transaction lock wait failed/i, "a SQLite lock failure"],
+  ];
+  return named.find(([pattern]) => pattern.test(journal))?.[1] ?? null;
+}
+
+/**
+ * The one line every way into the verify's full repair logs, naming the gate
+ * that sent it there in neutral words: a field log must tell them apart.
+ */
+function logFullRepair(why: string): void {
+  console.log(`[Updater] gateway_verify: running the full repair: ${why}`);
+}
+
+/**
+ * systemd's id for the gateway unit's current run (InvocationID: new at every
+ * start, never reused), or null when systemctl cannot name one. The unit is
+ * installed and loaded, so a running one always has its id — unlike an ad-hoc
+ * root step instance (see `@/lib/root-step-journal`).
+ */
+async function gatewayRunId(): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", "clawbox-gateway.service", "-p", "InvocationID"],
+      { timeout: 10_000 },
+    );
+    return /^InvocationID=([0-9a-f]{32})\s*$/im.exec(stdout)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Everything one run of the gateway logged — its pre-start's lines and its
+ * own, none of the boot's other runs — or null when journalctl cannot answer
+ * or has nothing for it: a run that started has logged, so silence is no
+ * evidence. Read by the journal's own `_SYSTEMD_INVOCATION_ID`, as
+ * `latestSwapPhase` and `readLoadedHermesPlugins` read one run; no `-n`,
+ * because the refusals sit at the head of a run, where a last-N read would cut
+ * them off a chatty start.
+ */
+async function readGatewayRunJournal(runId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["-q", "--no-pager", "-b", `_SYSTEMD_INVOCATION_ID=${runId}`],
+      { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout.trim() ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where install.sh's gateway setup step notes which run of the gateway it left
+ * serving (`record_gateway_left_running`): root's, on /run, so the note
+ * outlives a web-server restart inside the update and is gone after a boot.
+ */
+function gatewayLeftRunningNote(): string {
+  return process.env.CLAWBOX_GATEWAY_LEFT_RUNNING || "/run/clawbox/gateway-left-running";
+}
+
+/**
+ * Why the gateway serving now must be started again rather than accepted, in
+ * neutral words for the log line, or null to accept it: it is the very run the
+ * update's gateway setup step left running, so nothing stopped it after that
+ * step and accepting it would keep the process from before the update. Read
+ * at each decision.
+ *
+ * No note: the step restarted the gateway itself, or the box has booted since,
+ * and the answer is null without asking systemd. A note that cannot be read,
+ * or a run systemctl cannot name, is a reason: the restart the step itself
+ * used to do. Compared by systemd's id for the run, never by clocks: these
+ * boards have no battery-backed clock, and the time can step during an update.
+ */
+async function gatewaySetupRunStillServing(): Promise<string | null> {
+  let left: string;
+  try {
+    left = readFileSync(/* turbopackIgnore: true */ gatewayLeftRunningNote(), "utf-8").trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+    return "the gateway setup step's note cannot be read";
+  }
+  if (!/^[0-9a-f]{32}$/.test(left)) return "the gateway setup step's note cannot be read";
+  const now = await gatewayRunId();
+  if (now === null) return "systemctl could not name the gateway's run";
+  return now === left ? "it is still the run the update's gateway setup step left running" : null;
 }
 
 function getGatewayFailureDetail(logText: string): string | null {
@@ -4124,37 +4258,88 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
  *   Read last, right before the start, so the gap after it is the shortest.
  * - The pre-start's output feeds the plugin repair: taken only when the journal
  *   names nothing that repair, or the legacy quarantine, exists for. A journal
- *   that says nothing at all — journalctl failed, or the gateway never ran this
- *   boot — is no such evidence, and gets the full repair.
+ *   that says nothing at all — journalctl failed, or the gateway logged nothing
+ *   this boot (read with `-q`, so journalctl's own `-- No entries --` is not
+ *   taken for the gateway's) — is no such evidence, and gets the full repair.
+ *   This start's own lines are read once the chat has answered
+ *   (`repairWhatOwnStartNamed`): a refusal at plugin load can come after the
+ *   port opens.
  * - doctor --fix: still run whenever doctor's own record does not prove it
- *   completed for the installed core (install.sh records it at the core
- *   install), and whenever this start fails; the pre-start's own `config
- *   validate` -> doctor arm covers a config the core refuses at this start.
+ *   completed for the installed core in the last 30 days (install.sh records it
+ *   at the core install, and the repair below at each run that completes), and
+ *   whenever this start fails; the pre-start's own `config validate` -> doctor
+ *   arm covers a config the core refuses at this start.
  * - No pre-start runs outside the unit, so none leaves a start record behind.
  */
 async function gatewayStartsWithoutRepair(): Promise<boolean> {
-  if (!(await doctorCompleteForInstalledCore())) return false;
-  const journal = await readGatewayJournalTail();
-  if (!journal.trim()) return false;
-  const named = [
-    PLUGIN_PAYLOAD_VERIFICATION_RE,
-    PLUGIN_CAPABILITY_CONSENT_RE,
-    LEGACY_GATEWAY_BLOCKER_RE,
-    /SQLite transaction lock wait failed/i,
-  ].some((pattern) => pattern.test(journal));
-  if (named) return false;
+  // Each refusal says which gate it was: a field log must tell them apart.
+  const refuse = (why: string) => {
+    logFullRepair(why);
+    return false;
+  };
+  const record = await doctorRecordRefusal();
+  if (record) return refuse(record);
+  const journal = await readGatewayJournalTail({ quiet: true });
+  if (!journal.trim()) return refuse("the gateway journal says nothing this boot, or could not be read");
+  const named = repairNamedIn(journal);
+  if (named) return refuse(`the gateway journal names ${named}`);
   // For the log line only, and read before the unit: nothing may sit between
   // that read and the start.
   const core = await installedOpenclawCoreVersion();
   const unit = await readGatewayStartState("clawbox-gateway.service");
-  if (unit?.activeState !== "inactive" || unit.job) return false;
+  if (!unit) return refuse("systemctl could not describe clawbox-gateway.service");
+  if (unit.activeState !== "inactive" || unit.job) {
+    return refuse(`clawbox-gateway.service is ${describeUnitState(unit)}${unit.job ? " with a job queued" : ""}`);
+  }
   console.log("[Updater] gateway_verify: nothing to repair (no blocker in the gateway journal; doctor recorded "
     + `complete for OpenClaw ${core ?? "(version unreadable)"}); starting the gateway on its own pre-start`);
   return true;
 }
 
-/** Recover gateway readiness using the installed desktop or appliance contract. */
-async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
+/**
+ * A start `ensureGatewayHealthy` made WITHOUT the full repair — the routine
+ * start after the update's own quiesce, or the start of a gateway the update's
+ * gateway setup step left running — and its run's id, null when systemctl
+ * could not name it. The verify reads that run's journal once the chat has
+ * answered (`repairWhatOwnStartNamed`).
+ */
+interface OwnGatewayStart {
+  runId: string | null;
+}
+
+/**
+ * Start the gateway on its own pre-start (the unit's ExecStartPre) and wait
+ * for it as every recovery restart is waited for. Its run when it came up;
+ * null when it did not, or systemd refused the start, which is a start that
+ * did not come up, not the step's verdict: the caller's full repair is for it.
+ */
+async function startGatewayWithoutRepair(): Promise<OwnGatewayStart | null> {
+  try {
+    await restartGatewayForRecovery();
+    if ((await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true)).kind === "listening") {
+      return { runId: await gatewayRunId() };
+    }
+  } catch (err) {
+    console.warn(`[Updater] gateway_verify: the gateway's own start failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // From the top: the journal is read again inside the quiesce, now with this
+  // start's own lines in it.
+  logFullRepair("the gateway did not come up on its own pre-start");
+  return null;
+}
+
+/**
+ * Recover gateway readiness using the installed desktop or appliance contract.
+ * Answers the start it made without the full repair, if it made one (only on
+ * the appliance); null otherwise. `journal`: lines a start of ours named a
+ * repair with, handed to the full repair beside the boot's tail. `why`: what
+ * the caller says for the full repair's log line, when it knows better than
+ * the default (a `restartFirst` caller, or one whose own step stopped the
+ * gateway).
+ */
+async function ensureGatewayHealthy(
+  options: { restartFirst?: boolean; journal?: string; why?: string } = {},
+): Promise<OwnGatewayStart | null> {
   if (hasX64DesktopIntegration(PROJECT_DIR)) {
     // The desktop package restores its existing user gateway before its core
     // step returns, including failures. It must not inherit the appliance's
@@ -4163,9 +4348,9 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // (X64_DESKTOP_GATEWAY_READY_WAIT_MS says why): restarting a gateway that
     // is still booting only starts the slow boot over.
     gatewayNeedsRecovery = false;
-    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return null;
     await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
-    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return null;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
   }
   if (hasX64Install(PROJECT_DIR)) {
@@ -4177,12 +4362,13 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // the appliance's repairs. Its sudoers grant carries this restart.
     // Same unit, same slow start on large databases: followed the same way.
     gatewayNeedsRecovery = false;
-    if (!options.restartFirst && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
+    if (!options.restartFirst && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return null;
     await restartGatewayForRecovery();
     const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
-    if (verdict.kind === "listening") return;
+    if (verdict.kind === "listening") return null;
     throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
   }
+  if (options.restartFirst) logFullRepair(options.why ?? "a restart was asked for first");
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
   // Read before the reset below: the gateway is down because an update root
   // step of ours quiesced it, and no caller asked for a restart first.
@@ -4193,21 +4379,20 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // on a large database only begins the same slow start again. Anything else
   // past the old 30 s — failed, stopped, crash-looping, or a unit systemctl
   // cannot describe — goes on to the repair exactly as before.
-  if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
-
-  if (routine && (await gatewayStartsWithoutRepair())) {
-    try {
-      await restartGatewayForRecovery();
-      if ((await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true)).kind === "listening") return;
-    } catch (err) {
-      // A start systemd finished with the unit down (a pre-start that refused)
-      // is a start that did not come up, not the step's verdict: the repair
-      // below exists for it, and its own restart's error is the one reported.
-      console.warn(`[Updater] gateway_verify: the gateway's own start failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    // From the top: the journal is read again inside the quiesce below, now
-    // with this start's own lines in it.
-    console.log("[Updater] gateway_verify: the gateway did not come up on its own pre-start; running the full repair");
+  if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") {
+    // The one place a listening gateway is accepted without a start of ours:
+    // never the run the update's gateway setup step left serving (nothing of
+    // this update stopped it, so it is the process from before the update).
+    const why = await gatewaySetupRunStillServing();
+    if (!why) return null;
+    console.log(`[Updater] gateway_verify: starting the gateway on the updated tree: ${why}`);
+    const started = await startGatewayWithoutRepair();
+    if (started) return started;
+  } else if (routine && (await gatewayStartsWithoutRepair())) {
+    const started = await startGatewayWithoutRepair();
+    if (started) return started;
+  } else if (!recoverImmediately) {
+    logFullRepair(options.why ?? "the gateway is not listening, and this update's own quiesce did not stop it");
   }
 
   // post_update and the standalone OpenClaw updater both run several config,
@@ -4215,7 +4400,10 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // masked gateway so the v2 SQLite store has one writer. A pre-start timeout
   // is fatal here: restarting after killing a migration midway is unsafe.
   await withGatewayQuiesced(async () => {
-    const journal = await readGatewayJournalTail();
+    // A start of ours that named a repair hands its own lines over too: by now
+    // the boot's 160-line tail may have scrolled past them.
+    const tail = await readGatewayJournalTail();
+    const journal = options.journal ? `${tail}\n${options.journal}` : tail;
     let preStartOutput: string;
     try {
       preStartOutput = await runCurrentGatewayPreStart();
@@ -4239,7 +4427,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // it exists to perform ever ran.
   await restartGatewayForRecovery();
   const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
-  if (verdict.kind === "listening") return;
+  if (verdict.kind === "listening") return null;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
@@ -4252,7 +4440,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   });
   await restartGatewayForRecovery();
   const afterRecovery = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
-  if (afterRecovery.kind === "listening") return;
+  if (afterRecovery.kind === "listening") return null;
 
   const afterRecoveryLog = await readGatewayJournalTail();
   throw new Error(
@@ -4293,10 +4481,15 @@ async function restartGatewayAndWait(): Promise<void> {
  *
  * `CLAWBOX_TEST_SESSION_FAULT` is a hardware-test seam (see
  * `withSimulatedSessionFault`), read per run; nothing on a box sets it.
+ *
+ * Answers null when the gateway served the chat's request — an authenticated
+ * request, which the core admits only once its startup sidecars have settled
+ * (OpenClaw 2026.10.9, docs/gateway/embedding.md, "Wait for protocol
+ * readiness") — and otherwise what the chat did, in neutral words.
  */
-async function ensureGatewayServesSessions(): Promise<void> {
+async function ensureGatewayServesSessions(): Promise<string | null> {
   // No OpenClaw gateway on the Hermes edition: nothing to ask.
-  if (gatewayIsAbsent()) return;
+  if (gatewayIsAbsent()) return null;
   const outcome = await verifyGatewaySessions({
     probe: withSimulatedSessionFault(
       () => probeMainChatSession(GATEWAY_SESSION_CALL_TIMEOUT_MS),
@@ -4311,7 +4504,7 @@ async function ensureGatewayServesSessions(): Promise<void> {
   });
   if (outcome.verdict === "serving") {
     console.log(`[Updater] gateway sessions: serving${outcome.restarted ? " after one restart" : ""}`);
-    return;
+    return null;
   }
   // Not a failure — nothing said the store failed — but not a silent green
   // either: a gateway that listens and never answers the chat's own request,
@@ -4334,6 +4527,9 @@ async function ensureGatewayServesSessions(): Promise<void> {
         + "if the chat does not answer in a few minutes, restart the device.",
     );
   }
+  if (outcome.answer.kind === "refused") return "the chat refused its request";
+  if (outcome.answer.kind === "unreachable" && outcome.answer.final && !outcome.restarted) return "the chat could not be asked";
+  return "the chat did not answer";
 }
 
 /**
@@ -4353,14 +4549,20 @@ async function ensureGatewayServesSessions(): Promise<void> {
  * its to inherit. Nor on a PC installed with install-x64.sh: the retry runs
  * under `withGatewayQuiesced`, whose root-owned maintenance helper that PC does
  * not have.
+ *
+ * Answers whether it started the gateway again through the full repair.
  */
-async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
-  if (hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR)) return;
+async function retryPluginRepairsLeftByOlderCore(): Promise<boolean> {
+  if (hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR)) return false;
+  let repairedGateway = false;
   try {
     await retryPluginRepairsAfterCoreUpdate({
       release: currentCoreRelease,
       quiesce: withGatewayQuiesced,
-      restartAndVerify: () => ensureGatewayHealthy({ restartFirst: true }),
+      restartAndVerify: async () => {
+        repairedGateway = true;
+        await ensureGatewayHealthy({ restartFirst: true, why: "the after-update plugin repair restarts the gateway" });
+      },
     });
   } catch (err) {
     // A repair the update OFFERS, never one it depends on: the gateway was
@@ -4373,8 +4575,54 @@ async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
       "[Updater] the after-update plugin repair did not complete:",
       err instanceof Error ? err.message : err,
     );
-    await ensureGatewayHealthy();
+    // Its own quiesce may be what left the gateway down.
+    await ensureGatewayHealthy({ why: "the gateway is not listening after the after-update plugin repair did not complete" });
   }
+  return repairedGateway;
+}
+
+/**
+ * After the session check, the start `ensureGatewayHealthy` made without the
+ * full repair (`ownStart`) answers for itself, once.
+ *
+ * On a box that neither reboots nor pauses the gateway for the build, that
+ * start is the updated tree's first, and the journal the gate read before it
+ * was the old process's. A refusal raised at plugin load can come after the
+ * port opens, so its lines are read here, after the wait the step already
+ * has: the session check asked the chat, which the core admits only once its
+ * startup sidecars have settled. The read waits for nothing itself — one
+ * `systemctl show` when the run came up, one `journalctl` here.
+ *
+ * Runs the full repair, with the start's own lines as its evidence, then the
+ * degraded-databases warning and the chat again, when those lines name a
+ * repair, cannot be read, or the chat was not served (`chat`, what it did: the
+ * start's lines may then be incomplete): the sequence the check ran before it
+ * had a routine start. The first check's warning about the chat is taken back
+ * first: it was about the gateway the repair replaces. The caller skips all
+ * this when the after-update plugin retry has already run that repair on a
+ * later start.
+ */
+async function repairWhatOwnStartNamed(ownStart: OwnGatewayStart, chat: string | null): Promise<void> {
+  let journal: string | null = null;
+  let why: string;
+  if (chat) {
+    why = `${chat} after its own start`;
+  } else {
+    journal = ownStart.runId ? await readGatewayRunJournal(ownStart.runId) : null;
+    const named = journal === null ? null : repairNamedIn(journal);
+    if (journal === null) {
+      why = "its own start's journal could not be read";
+    } else if (named) {
+      why = `its own start's journal names ${named}`;
+    } else {
+      console.log(`[Updater] gateway_verify: its own start's journal names nothing to repair (${journal.trim().split("\n").length} lines)`);
+      return;
+    }
+  }
+  await ensureGatewayHealthy({ restartFirst: true, journal: journal ?? undefined, why });
+  await warnIfOpenclawDatabasesDegraded();
+  await dropUpdateWarning("gateway-sessions-unconfirmed");
+  await ensureGatewayServesSessions();
 }
 
 /**
@@ -4555,12 +4803,14 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // gateway only when it has something to load, and only a healthy gateway
     // is one it can prove a repair against. The session check (TASK-2153) asks
     // the gateway the owner is left with, after the degraded-agents warning
-    // that its throw must not swallow.
+    // that its throw must not swallow. A start made without the full repair
+    // then answers for itself from its own journal (repairWhatOwnStartNamed).
     customRun: async () => {
-      await ensureGatewayHealthy();
-      await retryPluginRepairsLeftByOlderCore();
+      const ownStart = await ensureGatewayHealthy();
+      const retryRepairedGateway = await retryPluginRepairsLeftByOlderCore();
       await warnIfOpenclawDatabasesDegraded();
-      await ensureGatewayServesSessions();
+      const chat = await ensureGatewayServesSessions();
+      if (ownStart && !retryRepairedGateway) await repairWhatOwnStartNamed(ownStart, chat);
     },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
@@ -6104,7 +6354,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 30_000,
     // The core-only update changes the core too, so it owes the same retry.
     customRun: async () => {
-      await ensureGatewayHealthy({ restartFirst: true });
+      await ensureGatewayHealthy({ restartFirst: true, why: "the OpenClaw update restarts the gateway" });
       await retryPluginRepairsLeftByOlderCore();
       // First: the session check's throw must not swallow it.
       await warnIfOpenclawDatabasesDegraded();
