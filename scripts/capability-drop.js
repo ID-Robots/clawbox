@@ -84,24 +84,32 @@ function holdsAmbientCapabilities(readStatus) {
 
 /**
  * The program's own path, as setpriv must be told it: an absolute path that is
- * an executable file, or the first PATH entry holding one. null when neither,
- * so the caller spawns it unwrapped and a missing program still fails with
- * Node's own ENOENT through the site's 'error' listener.
+ * an executable file, or the first PATH entry holding one. Otherwise `miss`
+ * says why, so the caller spawns it unwrapped and a missing program still
+ * fails with Node's own ENOENT through the site's 'error' listener.
+ *
+ * exec reads a relative program, or an empty or relative PATH entry, against
+ * the CHILD's working directory, which the spawn may set. A path resolved here
+ * against the web server's own directory could start a different file behind
+ * setpriv, so the lookup stops at the first such entry instead of skipping it:
+ * unwrapped, Node finds exactly what it always did.
  *
  * @param {string} bin
  * @param {Record<string, string | undefined>} env
  * @param {(p: string) => boolean} isExecutable
- * @returns {string | null}
+ * @returns {{ target: string } | { miss: string }}
  */
 function resolveProgram(bin, env, isExecutable) {
-  if (path.isAbsolute(bin)) return isExecutable(bin) ? bin : null;
-  if (bin.includes("/")) return null;
-  for (const dir of String(env.PATH || "").split(":")) {
-    if (!dir) continue;
+  if (path.isAbsolute(bin)) return isExecutable(bin) ? { target: bin } : { miss: `${bin} not found` };
+  if (bin.includes("/")) return { miss: `${bin} is a relative path` };
+  if (!env.PATH) return { miss: `${bin} not found` };
+  for (const dir of String(env.PATH).split(":")) {
+    if (!dir) return { miss: `PATH has an empty entry before any ${bin}` };
+    if (!path.isAbsolute(dir)) return { miss: `PATH has the relative entry "${dir}" before any ${bin}` };
     const candidate = path.join(dir, bin);
-    if (isExecutable(candidate)) return candidate;
+    if (isExecutable(candidate)) return { target: candidate };
   }
-  return null;
+  return { miss: `${bin} not found` };
 }
 
 /**
@@ -135,12 +143,12 @@ function withCapabilityDrop(bin, argv, opts) {
     console.warn(`[capability-drop] setpriv not found: ${opts.label} starts with the web server's network capabilities`);
     return { bin, argv, dropped: false };
   }
-  const target = resolveProgram(bin, opts.env || process.env, isExecutable);
-  if (target === null) {
-    console.warn(`[capability-drop] ${opts.label}: ${bin} not found, started without the drop`);
+  const program = resolveProgram(bin, opts.env || process.env, isExecutable);
+  if ("miss" in program) {
+    console.warn(`[capability-drop] ${opts.label}: ${program.miss}, started without the drop`);
     return { bin, argv, dropped: false };
   }
-  return { bin: SETPRIV_PATH, argv: [...CAPABILITY_DROP_ARGS, target, ...argv], dropped: true };
+  return { bin: SETPRIV_PATH, argv: [...CAPABILITY_DROP_ARGS, program.target, ...argv], dropped: true };
 }
 
 module.exports = { CAPABILITY_DROP_COMMAND, CAPABILITY_DROP_ARGS, SETPRIV_PATH, withCapabilityDrop };

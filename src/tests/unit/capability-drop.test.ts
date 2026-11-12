@@ -161,6 +161,68 @@ describe.each([
     );
   });
 
+  // exec reads an empty or relative PATH entry against the CHILD's working
+  // directory, which the site may set (the chat server's cwd is the home
+  // folder). A path resolved here against the web server's own directory could
+  // start a different file behind setpriv, so the gate stops at such an entry
+  // and the program starts unwrapped, found by Node exactly as before.
+  it.each([
+    ["a relative", "tools:/usr/bin", 'PATH has the relative entry "tools" before any bash'],
+    ["an empty", ":/usr/bin", "PATH has an empty entry before any bash"],
+  ])("starts unchanged, with one warning, when %s PATH entry comes before the program", async (_kind, PATH, why) => {
+    const { withCapabilityDrop } = await load();
+    const warn = warns();
+    const r = withCapabilityDrop("bash", ["s"], {
+      label: "the local chat server",
+      env: { PATH },
+      probes: probes(HELD, [SETPRIV, "tools/bash", "/usr/bin/bash"]),
+    });
+    expect(r).toEqual({ bin: "bash", argv: ["s"], dropped: false });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toBe(`[capability-drop] the local chat server: ${why}, started without the drop`);
+  });
+
+  it("still drops when a relative PATH entry comes only after the program's absolute match", async () => {
+    const { withCapabilityDrop } = await load();
+    const warn = warns();
+    const r = withCapabilityDrop("bash", ["s"], {
+      label: "the local chat server",
+      env: { PATH: "/usr/bin:tools:" },
+      probes: probes(HELD, [SETPRIV, "/usr/bin/bash", "tools/bash"]),
+    });
+    expect(r).toEqual({ bin: SETPRIV, argv: [...DROP, "/usr/bin/bash", "s"], dropped: true });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["unset", undefined],
+    ["empty", ""],
+  ])("starts unchanged, with one 'not found' warning, when PATH is %s", async (_kind, PATH) => {
+    const { withCapabilityDrop } = await load();
+    const warn = warns();
+    const r = withCapabilityDrop("bash", ["s"], {
+      label: "the local chat server",
+      env: { PATH },
+      probes: probes(HELD, [SETPRIV, "/usr/bin/bash"]),
+    });
+    expect(r).toEqual({ bin: "bash", argv: ["s"], dropped: false });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toBe("[capability-drop] the local chat server: bash not found, started without the drop");
+  });
+
+  it("starts unchanged, with one warning, when the program is a relative path", async () => {
+    const { withCapabilityDrop } = await load();
+    const warn = warns();
+    const r = withCapabilityDrop("bin/hf", ["download"], {
+      label: "the model download",
+      env: { PATH: "/usr/bin" },
+      probes: probes(HELD, [SETPRIV, "bin/hf"]),
+    });
+    expect(r).toEqual({ bin: "bin/hf", argv: ["download"], dropped: false });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toBe("[capability-drop] the model download: bin/hf is a relative path, started without the drop");
+  });
+
   it.each([
     ["the status cannot be read", () => { throw new Error("EACCES"); }],
     ["the status has no CapAmb line", () => "Name:\tnode\nCapEff:\t0000000000003400\n"],
@@ -227,6 +289,9 @@ describe("one implementation", () => {
       ["/abs/hf", ["download"], { label: "e", probes: probes(HELD, [SETPRIV]) }],
       ["/abs/hf", ["download"], { label: "f", probes: probes(HELD, [SETPRIV, "/abs/hf"]) }],
       ["bash", ["s"], { label: "g", probes: probes(() => { throw new Error("x"); }, [SETPRIV]) }],
+      ["bash", ["s"], { label: "h", env: { PATH: "tools:/usr/bin" }, probes: probes(HELD, [SETPRIV, "tools/bash", "/usr/bin/bash"]) }],
+      ["bash", ["s"], { label: "i", env: { PATH: ":/usr/bin" }, probes: probes(HELD, [SETPRIV, "/usr/bin/bash"]) }],
+      ["bin/hf", ["download"], { label: "j", env: { PATH: "/usr/bin" }, probes: probes(HELD, [SETPRIV, "bin/hf"]) }],
     ];
     for (const [bin, argv, opts] of cases) {
       const warn = warns();
