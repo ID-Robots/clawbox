@@ -387,11 +387,18 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
     expect(r.calls.some((c) => c.includes(":8081"))).toBe(false);
   });
 
-  it("escapes a bearer holding a quote and a backslash for curl's config line", () => {
-    const token = '0123456789abcdef"\\x';
+  it.each([
+    ["a quote and a backslash", '0123456789abcdef"\\x', 'header = "Authorization: Bearer 0123456789abcdef\\"\\\\x"\n'],
+    [
+      "a line break and a carriage return",
+      "0123456789abcdef\nx\ry",
+      'header = "Authorization: Bearer 0123456789abcdef\\nx\\ry"\n',
+    ],
+  ])("escapes a bearer holding %s for curl's config line", (_name, token, line) => {
     const r = run({ token });
-    expect(r.calls.filter((c) => c.startsWith("curl") && c.includes(token))).toEqual([]);
-    expect(r.stdin).toBe('header = "Authorization: Bearer 0123456789abcdef\\"\\\\x"\n');
+    // The part before any line break: the call log holds one line per call.
+    expect(r.calls.filter((c) => c.startsWith("curl") && c.includes("0123456789abcdef"))).toEqual([]);
+    expect(r.stdin).toBe(line);
   });
 
   it("skips the download when the GGUF is on disk but still configures and reindexes", () => {

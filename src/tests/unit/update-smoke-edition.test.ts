@@ -159,6 +159,7 @@ describe("post-update smoke keeps the bot token off curl's arguments", () => {
   it.each([
     ['a quote and a backslash', '123456:a"b\\c', '123456:a', `url = "${API}123456:a\\"b\\\\c/getMe"\n`],
     ["a line break", "123456:ab\nx", "123456:ab", `url = "${API}123456:ab\\nx/getMe"\n`],
+    ["a carriage return", "123456:ab\rx", "123456:ab", `url = "${API}123456:ab\\rx/getMe"\n`],
   ])("escapes a token holding %s onto one config line", (_name, token, fragment, line) => {
     const { calls, stdin } = runSmoke("openclaw", true, { botToken: token });
     expect(calls.flat().filter((a) => a.includes(fragment))).toEqual([]);
