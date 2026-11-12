@@ -57,8 +57,12 @@ interface Form {
 type Message = { key: string; params?: Record<string, string | number> } | { raw: string };
 
 // "warn": done, but not all of it (the chat could not be switched, say).
-// `suggestReasoning`: Test saw the engine reason while the switch is off.
-type Outcome = { kind: "ok" | "warn" | "error"; message: Message; models?: string[]; suggestReasoning?: boolean };
+// `suggestReasoningFor`: Test saw the engine reason while the switch is off —
+// for THIS engine and model (`testedIdentity` of the form Test was run with),
+// so changing either afterwards, or while Test runs, drops the suggestion.
+type Outcome = { kind: "ok" | "warn" | "error"; message: Message; models?: string[]; suggestReasoningFor?: string };
+
+const testedIdentity = (form: { baseUrl: string; modelId: string }) => `${form.baseUrl.trim()}\n${form.modelId.trim()}`;
 
 const INPUT = `w-full rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] ${FOCUS_RING}`;
 const LABEL = "block text-xs font-medium text-[var(--text-secondary)] mb-1";
@@ -201,6 +205,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
   };
 
   const runTest = async () => {
+    const tested = testedIdentity(form);
     setBusy("test");
     setOutcome(null);
     try {
@@ -216,7 +221,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
         setOutcome({
           kind: "ok",
           message: { key: "localModels.external.testOk", params: { model: form.modelId.trim(), ms: n(data.latencyMs) } },
-          suggestReasoning: data.reasoningDetected === true,
+          ...(data.reasoningDetected === true ? { suggestReasoningFor: tested } : {}),
         });
       } else {
         setOutcome({ kind: "error", message: describe(data), models: Array.isArray(data.models) ? data.models : undefined });
@@ -305,7 +310,7 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
           : "border border-red-500/20 bg-red-500/[0.06] text-red-300"}`}
     >
       {say(outcome.message)}
-      {outcome.suggestReasoning && editing && !form.reasoning && (
+      {outcome.suggestReasoningFor === testedIdentity(form) && editing && !form.reasoning && (
         <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="local-ai-external-reasoning-suggest">
           <span>{t("localModels.external.reasoningDetected")}</span>
           <button type="button" className={BUTTON} data-testid="local-ai-external-reasoning-enable" onClick={() => set("reasoning", true)}>

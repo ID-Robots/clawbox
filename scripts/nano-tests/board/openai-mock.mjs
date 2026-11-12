@@ -18,7 +18,7 @@
 // anything else is a 401, which is how the test proves the box sends the key
 // it was given. Each request is appended to --log as one JSON line — path,
 // model, stream, whether it was authorized, the end of the last user message,
-// the `reasoning_effort` it carried (`effort`, null when the field was absent)
+// the `reasoning_effort` it carried (`effortSent`, and its value as `effort`)
 // and the reply given — never the key. Prints READY once it listens.
 //
 // --reasoning (TASK-2497) makes it a reasoning engine the way a DeepSeek-class
@@ -104,8 +104,11 @@ const server = http.createServer((req, res) => {
     if (req.method === "POST" && path === "/v1/chat/completions") {
       const { last, reply } = replyFor(body.messages);
       const stream = body.stream === true;
-      const effort = Object.prototype.hasOwnProperty.call(body, "reasoning_effort") ? body.reasoning_effort : null;
-      const thought = REASONING && effort !== "none" ? `NANO-THINK[${reply}] effort=${effort ?? "default"}` : "";
+      // Whether the field was SENT is kept apart from its value: an explicit
+      // `"reasoning_effort": null` is a field the client should have left out.
+      const effortSent = Object.prototype.hasOwnProperty.call(body, "reasoning_effort");
+      const effort = effortSent ? body.reasoning_effort : null;
+      const thought = REASONING && effort !== "none" ? `NANO-THINK[${reply}] effort=${effortSent ? effort : "default"}` : "";
       record({
         method: req.method, path, authorized: true, model: body.model, stream,
         messages: Array.isArray(body.messages) ? body.messages.length : 0,
@@ -113,10 +116,11 @@ const server = http.createServer((req, res) => {
         // The END of the message: a harness may put an envelope in front.
         lastUser: last.slice(-160),
         reply: reply.slice(0, 120),
+        effortSent,
         effort,
         thought: thought !== "",
       });
-      if (REASONING && effort !== null && !EFFORTS.has(effort)) {
+      if (REASONING && effortSent && !EFFORTS.has(effort)) {
         send(res, 400, { error: { message: `reasoning_effort must be one of ${[...EFFORTS].join(", ")}`, type: "invalid_request_error" } });
         return;
       }
