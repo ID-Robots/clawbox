@@ -173,11 +173,15 @@ keys() {
       if (!engineSet && alias) { c.local_ai_configured = true; c.local_ai_provider = \"llamacpp\"; c.local_ai_model = \"llamacpp/\" + alias; console.log(\"LOCAL_AI_SET \" + alias); }
       else if (!engineSet) console.log(\"NO_ENGINE\");
       write(c);
+      if (read().ai_cloud_lock === true) console.log(\"LOCK_SET\");
     } else {
-      let before = {};
-      try { before = JSON.parse(fs.readFileSync(savedPath, \"utf8\")); } catch { return; }
-      for (const k of KEYS) { if (before[k] === null || before[k] === undefined) delete c[k]; else c[k] = before[k]; }
-      write(c);
+      let before = null;
+      try { before = JSON.parse(fs.readFileSync(savedPath, \"utf8\")); } catch {}
+      if (before) {
+        for (const k of KEYS) { if (before[k] === null || before[k] === undefined) delete c[k]; else c[k] = before[k]; }
+        write(c);
+        console.log(\"KEYS_RESTORED\");
+      }
     }
   " data/config.json "$SAVED" "$@"
 }
@@ -192,6 +196,10 @@ timeout 200 bun -e "$1" 2>&1 | tail -n 5
 timeout 540 node -e "$2" "$3" 2>&1 | tail -n 5
 ' "$CHECKS" "$SERVER_FLOW" "$NANO_RUN_ID")
 
+if ! printf '%s\n' "$RAW" | grep -qx 'LOCK_SET'; then
+  not_ok "the local-only AI lock could not be put on in data/config.json: $(printf '%s' "$RAW" | head -n 5 | tr '\n' ' ' | head -c 400)"
+  finish
+fi
 if printf '%s\n' "$RAW" | grep -qx 'NO_ENGINE'; then
   skip "no engine of the box's own: Local AI is off and the llama.cpp Gemma GGUF is not on this board (the test downloads nothing)"
   finish
