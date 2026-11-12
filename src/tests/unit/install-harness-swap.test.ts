@@ -523,6 +523,22 @@ d("step_harness_swap — refusals before anything is touched", () => {
     expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
     expect(r.requestLeft).toBe(true);
   });
+
+  it("reports a finished swap as finished, with a warning, when the account cannot remove the request after it", () => {
+    // The box is already the target edition by then: under errexit, a failed
+    // removal must not turn that into a failed step. Only the request's
+    // removal fails.
+    writeRequest("hermes");
+    const failRequestRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+      + `as_clawbox() { [ "$1" = rm ] && [ "\${@: -1}" = ${JSON.stringify(requestFile)} ] && return 1; __real_as_clawbox "$@"; }`;
+    const r = runLocked("openclaw", failRequestRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases.at(-1)).toBe("[harness-swap] phase=done");
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.out).toContain("  This box is now the Hermes edition\n");
+    expect(r.requestLeft).toBe(true);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
 });
 
 d("step_harness_swap — openclaw → hermes", () => {

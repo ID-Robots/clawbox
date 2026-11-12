@@ -272,4 +272,22 @@ describe("no unsafe system-wide pip mutation was introduced", () => {
     // Each name is its own argument, the glob expanded before the account runs.
     expect(r.sequence[firstWrite]).toBe(`rm -rf -- ${built().join(" ")}`);
   });
+
+  it("still installs, under errexit, when the account cannot remove all of the build output", () => {
+    // A directory in build/ not even the account may empty: its removal
+    // fails for real, and the fallback is reached bare under errexit.
+    const stuck = path.join(project, "clawkeep", "build", "lib");
+    fs.mkdirSync(stuck);
+    fs.writeFileSync(path.join(stuck, "stale.py"), "");
+    fs.chmodSync(stuck, 0o555);
+
+    const r = runFallback();
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("  ClawKeep CLI installed: usage: clawkeep");
+    expect(fs.existsSync(path.join(stuck, "stale.py"))).toBe(true);
+    // No root removal stands in for the account's.
+    expect(r.rootInHome).toEqual([]);
+    expect(r.sequence).toContain(`rm -rf -- ${built().join(" ")}`);
+  });
 });

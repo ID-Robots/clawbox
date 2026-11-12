@@ -474,6 +474,25 @@ d("step_edition_select on a unified-image box", () => {
     expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
     expect(r.requestLeft).toBe(true);
   });
+
+  it("reports a finished setup as finished, with a warning, when the account cannot remove the request after it", () => {
+    // The box is already set up with its choice by then: under errexit, a
+    // failed removal must not turn that into a failed step, nor skip the web
+    // server's restart. Only the request's removal fails.
+    layDownBoth();
+    writeRequest("hermes");
+    const failRequestRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+      + `as_clawbox() { [ "$1" = rm ] && [ "\${@: -1}" = ${JSON.stringify(requestFile)} ] && return 1; __real_as_clawbox "$@"; }`;
+    const r = runLocked("unselected", failRequestRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases).toEqual(["check", "lock", "provision", "cleanup", "done"]);
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.out).toContain("  This box is now set up with Hermes\n");
+    expect(r.out).toContain("  The web server restarts in 10 s to load Hermes\n");
+    expect(r.systemdRun).toHaveLength(1);
+    expect(r.requestLeft).toBe(true);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
 });
 
 /**

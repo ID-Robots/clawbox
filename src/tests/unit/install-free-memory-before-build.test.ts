@@ -512,6 +512,38 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     }
   });
 
+  // Between the engine pauses and the resume, under errexit: a pidfile the
+  // account cannot remove must not end do_rebuild with every engine stopped.
+  (CAN_LOCK_HOME ? it : it.skip)("goes on to the build when the account cannot remove the pidfile", () => {
+    const script = path.join(tmp, "bin", "llama-server-fake");
+    fs.writeFileSync(script, `trap 'exit 0' TERM${NL}while :; do sleep 1 & wait $!; done${NL}`);
+    const child = spawn("/bin/sh", [script], { detached: true, stdio: "ignore" });
+    child.unref();
+    strays.push(child.pid!);
+    const pid = child.pid!;
+    fs.writeFileSync(pidFile(), `${pid}${NL}`);
+    const dir = path.dirname(pidFile());
+    const aux = fs.mkdtempSync(path.join(os.tmpdir(), "free-mem-aux-"));
+    try {
+      // Not even the account may write data/llamacpp: its removal fails for real.
+      fs.chmodSync(dir, 0o555);
+      const account = accountOnlyHome(dir, aux);
+
+      const r = run({ before: [account.shell, "__ao_lock"] });
+      unlockTree(dir);
+
+      expect(r.code, r.out).toBe(0);
+      expect(alive(pid)).toBe(false);
+      expect(r.out).toMatch(/Memory available for the build: \d+ MB \(was \d+ MB\)/);
+      expect(fs.existsSync(pidFile())).toBe(true);
+      expect(account.asClawbox()).toEqual([`rm -f -- ${pidFile()}`]);
+      expect(account.rootInHome().filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+      fs.rmSync(aux, { recursive: true, force: true });
+    }
+  });
+
   it("never signals a process that merely inherited the pid", () => {
     // This runs as root on the device. A pidfile outlives a crash and pids are
     // recycled, so an unverified kill here is a root SIGKILL aimed at whatever

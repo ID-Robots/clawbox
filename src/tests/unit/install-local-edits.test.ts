@@ -607,6 +607,14 @@ d("the checkout's .git is handed over with the checkout whole, never by its name
     expect(landed()).toEqual([link]);
   });
 
+  it.skipIf(process.getuid?.() === 0)("use_tree_owner_for_git still runs git as the owner when the hand-over's chown fails, under errexit", () => {
+    // Best-effort: git says what it could not open, and the caller goes on.
+    const r = runOwnerForGit(checkout, `${STRAY_IN_GIT}\nchown() { echo "chown refused: $*"; return 1; }`);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain(`chown refused: -R `);
+    expect(r.out).toContain(`runner=runuser -u ${os.userInfo().username} -- env GIT_TERMINAL_PROMPT=0`);
+  });
+
   function runFixGitPerms(projectDir: string): { status: number; out: string; sequence: string[] } {
     const aux = path.join(tmp, "aux");
     fs.mkdirSync(aux, { recursive: true });
