@@ -16,6 +16,8 @@ import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
 import OpenClawSharingCard from "./OpenClawSharingCard";
 import OrgModeCard from "./OrgModeCard";
+import StaffMcpCard from "./StaffMcpCard";
+import UserPasswordReset from "./UserPasswordReset";
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 
 interface UsersListing {
@@ -156,6 +158,8 @@ export default function UsersPanel() {
 
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [resetting, setResetting] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
 
   /** A stored message, in the current language; the password rule is the one key with a {min}. */
   const say = (key: string, params?: Record<string, string | number>): string =>
@@ -319,17 +323,40 @@ export default function UsersPanel() {
                         {t("users.youBadge")}
                       </span>
                     )}
+                    {!isSelf && !confirming && resetting !== u.username && (
+                      <button
+                        type="button"
+                        onClick={() => { setResetting(u.username); setConfirmRemove(null); setNotice(null); }}
+                        disabled={!!removing || resetBusy}
+                        className="px-3 h-8 rounded-lg text-xs text-white/80 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer disabled:opacity-50"
+                        data-testid={`users-reset-open-${u.username}`}
+                      >
+                        {t("users.resetPassword")}
+                      </button>
+                    )}
                     {!isSelf && !confirming && (
                       <button
                         type="button"
-                        onClick={() => { setConfirmRemove(u.username); setNotice(null); }}
-                        disabled={!!removing}
+                        onClick={() => { setConfirmRemove(u.username); setResetting(null); setNotice(null); }}
+                        disabled={!!removing || resetBusy}
                         className="px-3 h-8 rounded-lg text-xs text-red-300 bg-red-500/10 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
                       >
                         {t("users.remove")}
                       </button>
                     )}
                   </div>
+                  {resetting === u.username && !confirming && (
+                    <UserPasswordReset
+                      username={u.username}
+                      onBusyChange={setResetBusy}
+                      onCancel={() => setResetting((r) => (r === u.username ? null : r))}
+                      onDone={() => {
+                        // Only this user's form closes, whatever is open by now.
+                        setResetting((r) => (r === u.username ? null : r));
+                        setNotice({ type: "success", key: "users.resetDone", params: { name: u.username } });
+                      }}
+                    />
+                  )}
                   {confirming && (
                     <div className="mt-3 ml-12 rounded-lg border border-red-500/25 bg-red-500/10 p-3" role="alertdialog" aria-label={t("users.removeConfirm", { name: u.username })}>
                       <p className="text-xs text-red-200 leading-relaxed">{t("users.removeConfirm", { name: u.username })}</p>
@@ -463,6 +490,7 @@ export default function UsersPanel() {
       {/* ── The owner may share OpenClaw (hidden from anyone else) ── */}
       <OpenClawSharingCard />
       <OrgModeCard onChange={setOrgMode} />
+      {listing && <StaffMcpCard users={listing.users.map((u) => u.username)} orgMode={orgMode} />}
 
       {/* ── What another user gets: on an organisation box, much less ── */}
       <div className="rounded-xl border border-white/10 p-4">

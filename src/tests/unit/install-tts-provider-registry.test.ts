@@ -109,6 +109,8 @@ function runStep(env: Record<string, string> = {}) {
     `TTS_STATUS_FILE="${path.join(dir, "tts-status")}"`,
     // as_clawbox drops privileges on a device; here it just runs the command.
     "as_clawbox() { env \"$@\"; }",
+    // The hand-over walks the real home; this run has none.
+    "hand_over_voice_paths() { :; }",
     "is_hermes_edition() { return 1; }",
     // Recorded by the step when Kokoro was requested and did not install, so
     // the failure reaches the provisioning summary. A no-op here.

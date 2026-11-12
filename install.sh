@@ -1855,21 +1855,29 @@ ensure_clawbox_bashrc_path() {
   # `>>` would follow a link planted at ~/.bashrc. A root-owned file left by an
   # earlier root run is handed back first, which is the owner the old chown
   # after the append gave it.
-  local BASHRC="$CLAWBOX_HOME/.bashrc"
+  # The user's append can still fail where root's did not. It is said on the
+  # updater's warning line and the function goes on: dispatched under errexit
+  # a bare failure here ended the step, and run with errexit off it passed
+  # with no word.
+  local BASHRC="$CLAWBOX_HOME/.bashrc" append_rc=0
   if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
     hand_over_home_path "$BASHRC"
-    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF'
+    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF' || append_rc=$?
 
 # npm global binaries (openclaw, gemini) and user-local binaries (claude, codex, hf, clawkeep)
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 PATHEOF
   elif ! grep -q '\.local/bin' "$BASHRC" 2>/dev/null; then
     hand_over_home_path "$BASHRC"
-    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF'
+    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF' || append_rc=$?
 
 # user-local binaries (claude, hf, clawkeep)
 export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
+  fi
+  if [ "$append_rc" -ne 0 ]; then
+    echo "  Warning: could not add the PATH lines to $BASHRC" >&2
+    echo "CLAWBOX-WARN[bashrc-path-not-added]: the clawbox user's ~/.bashrc could not be given the PATH lines for openclaw, claude and codex, so the Terminal finds them only by their full path; the next update tries again"
   fi
   # Third-party appends to the same file, bounded here because their writer is
   # not ours to fix (TASK-758).
@@ -4185,7 +4193,12 @@ step_apt_update() {
   # filters those formats need (and pulls in libreoffice-common, which owns the
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  #
+  # acl is `setfacl`: on an organisation box the Files app serves a member of
+  # staff their own home, which the web server (the owner's account) reaches
+  # through the ACL config/clawbox-user-helper.sh `home_access` lays on it
+  # (TASK-2377). Ubuntu images carry it already; naming it keeps it true.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer acl
   # Document libraries for the agent: Word (python-docx), Excel (openpyxl) and
   # PDF writing (reportlab). "Make me an offer / a quote / a spreadsheet" is an
   # everyday chat request, and without these the agent spent the first minutes
@@ -8900,6 +8913,20 @@ tts_ensure_ffmpeg() {
   return 0
 }
 
+# install-voice.sh writes these AS the clawbox user: the workspace copy of the
+# voice scripts, the user units, the completion stamps and the CUDA exports in
+# ~/.bashrc. Whatever an earlier root run left root-owned on the way (its
+# `mkdir -p` of ~/.config/systemd/user made ~/.config/systemd root's) is handed
+# back first, through the walk that follows no link, or the user's write fails
+# where root's succeeded. The three trees are handed over whole, the owner the
+# script's own `chown -R` of each used to give them on every run. Always 0.
+hand_over_voice_paths() {
+  hand_over_home_path -R "$CLAWBOX_HOME/.openclaw/workspace"
+  hand_over_home_path -R "$CLAWBOX_HOME/.config/systemd/user"
+  hand_over_home_path -R "$CLAWBOX_HOME/.cache/clawbox"
+  hand_over_home_path "$CLAWBOX_HOME/.bashrc"
+}
+
 step_openclaw_tts() {
   # WHAT install-voice.sh is asked for. `--scripts-only` (the default, and what
   # step_openclaw_setup and step_post_update run) deploys the voice scripts and
@@ -8940,6 +8967,8 @@ step_openclaw_tts() {
   # fallback of the time and nothing else, so every box we shipped ran on that
   # fallback while this step printed "Kokoro GPU" (TASK-420). That fallback is
   # gone; Kokoro is the only on-device engine, and now an opt-in one.
+  # The script writes in the clawbox user's home as that user: leftovers first.
+  hand_over_voice_paths
   local VOICE_RC=0
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
     bash "$SRC_DIR/scripts/install-voice.sh" "$VOICE_MODE" || VOICE_RC=$?
@@ -9653,6 +9682,8 @@ step_voice_kokoro_install() {
 # marker the flash host reads must not go red over an owner's click.
 step_voice_whisper_install() {
   local STT_RC=0
+  # The script writes in the clawbox user's home as that user: leftovers first.
+  hand_over_voice_paths
   bash "$SRC_DIR/scripts/install-voice.sh" --whisper || STT_RC=$?
   case "$STT_RC" in
     0)  echo "  On-device speech-to-text installed (faster-whisper)" ;;
@@ -10715,9 +10746,15 @@ step_systemd_services() {
   # Made and set private BY the clawbox user: root's `install -d` applied its
   # owner and mode to whatever a ~/.codex link pointed at. A root-owned one is
   # handed back first, the owner `install -o` gave it.
+  # The user's mkdir or chmod can still fail where root's did not. It is said
+  # on the updater's warning line and the step goes on, as the user-gateway
+  # mask does: a bare failure under errexit ended the step, and with errexit
+  # off it passed with no word.
   hand_over_home_path "$CLAWBOX_HOME/.codex"
-  as_clawbox mkdir -p -- "$CLAWBOX_HOME/.codex"
-  as_clawbox chmod 700 -- "$CLAWBOX_HOME/.codex"
+  if ! as_clawbox mkdir -p -- "$CLAWBOX_HOME/.codex" || ! as_clawbox chmod 700 -- "$CLAWBOX_HOME/.codex"; then
+    echo "  Warning: could not prepare ~/.codex" >&2
+    echo "CLAWBOX-WARN[codex-dir-not-ready]: ~/.codex could not be made private for the clawbox user, so the Codex sign-in mirror cannot write there; 'sudo bash $PROJECT_DIR/install.sh --step systemd_services' tries again"
+  fi
   # Start the Codex credential mirror sync immediately so a box updating into
   # this release strips any refresh_token 3.1.11 planted in its mirrors without
   # waiting for a reboot — that token is what burns the OAuth family.

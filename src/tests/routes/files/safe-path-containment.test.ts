@@ -248,7 +248,9 @@ describe("the containment check is one statement of its own", () => {
   }
 
   it("holds the prefix test alone in the Files route", () => {
-    const body = bodyOf(read("src/app/setup-api/files/route.ts"), "function safePath(rel: string)");
+    // The owner's half of the Files fence (TASK-2377 moved the route's
+    // `safePath` into src/lib/files-scope.ts, beside the member's half).
+    const body = bodyOf(read("src/lib/files-scope.ts"), "function ownerFence(");
     expect(body).toContain("if (!resolved.startsWith(base + path.sep)) return null;");
     expect(body).not.toMatch(/resolved !== base &&/);
     // The base's own answer is the constant this module built, not the
