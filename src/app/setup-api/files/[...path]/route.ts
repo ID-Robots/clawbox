@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { Readable } from "stream";
-import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
+import { isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
+import type { FilesFence } from "@/lib/files-scope";
+import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
 
@@ -42,8 +44,6 @@ const MIME_TYPES: Record<string, string> = {
   mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav',
 };
 
-const BASE_DIR = filesBrowseRoot();
-
 // The rename and delete handlers' answer for a directory that HOLDS the box's
 // own state — the data directory and its ancestors, the browse root, the
 // parent of a credential store. `safePath` keeps such a directory openable so
@@ -61,13 +61,15 @@ function protectedContainerResponse(): NextResponse {
   );
 }
 
-function safePath(segments: string[]): string | null {
-  const rel = segments.join("/");
-  const resolved = path.resolve(BASE_DIR, rel);
-  if (!resolved.startsWith(path.resolve(BASE_DIR) + path.sep) && resolved !== path.resolve(BASE_DIR)) return null;
-  // Browse root is $HOME → secret stores live inside the sandbox; deny them.
-  if (isProtectedFilePath(resolved)) return null;
-  return resolved;
+/**
+ * The path a request names, through the caller's fence (src/lib/files-scope.ts):
+ * the owner's browse root with its secret stores carved out, or — for a member
+ * of staff on an organisation box — their own home and the shared folder only,
+ * a link that leads out of them refused like a path that does not exist.
+ */
+function safePath(fence: FilesFence, segments: string[]): string | null {
+  const abs = fence.resolve(segments.join("/"));
+  return abs && fence.allows(abs) ? abs : null;
 }
 
 type Params = { params: Promise<{ path: string[] }> };
@@ -79,11 +81,11 @@ type Params = { params: Promise<{ path: string[] }> };
  * many files" before a download starts rather than leave a failed one in the
  * browser's download list.
  */
-async function folderZipResponse(abs: string, checkOnly: boolean): Promise<NextResponse> {
+async function folderZipResponse(fence: FilesFence, abs: string, checkOnly: boolean): Promise<NextResponse> {
   let summary;
   if (checkOnly) {
     try {
-      summary = await summarizeFolderForZip(abs);
+      summary = await summarizeFolderForZip(abs, undefined, fence.allows);
     } catch (err) {
       return fsErrorResponse(err, "Failed to read folder");
     }
@@ -97,7 +99,7 @@ async function folderZipResponse(abs: string, checkOnly: boolean): Promise<NextR
     return NextResponse.json(body);
   }
   const name = path.basename(abs);
-  const stream = zipFolderStream(abs, name);
+  const stream = zipFolderStream(abs, name, { allowed: fence.allows });
   // A walk or read that fails part-way ends the response with an error, which
   // the browser shows as a failed download — never a ZIP that unzips wrong.
   stream.on("error", (err) => console.error("[files] ZIP download stopped:", err instanceof Error ? err.message : err));
@@ -113,8 +115,11 @@ async function folderZipResponse(abs: string, checkOnly: boolean): Promise<NextR
 
 // GET /setup-api/files/[...path] — download file; a folder with ?zip=1
 export async function GET(req: NextRequest, { params }: Params) {
+  const scoped = await filesFenceFor(req);
+  if (!scoped.ok) return scoped.response;
+  const { fence } = scoped;
   const { path: segments } = await params;
-  const abs = safePath(segments);
+  const abs = safePath(fence, segments);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
   let stat: fs.Stats;
@@ -125,7 +130,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   }
   if (stat.isDirectory()) {
     const query = req.nextUrl.searchParams;
-    if (query.get("zip") === "1") return folderZipResponse(abs, query.get("check") === "1");
+    if (query.get("zip") === "1") return folderZipResponse(fence, abs, query.get("check") === "1");
     return NextResponse.json({ error: "Is a directory", code: "is_directory" }, { status: 400 });
   }
 
@@ -156,12 +161,16 @@ export async function GET(req: NextRequest, { params }: Params) {
 // PUT /setup-api/files/[...path] — rename/move
 // Body: { newName: string }  (renames within same directory)
 export async function PUT(req: NextRequest, { params }: Params) {
+  const scoped = await filesFenceFor(req);
+  if (!scoped.ok) return scoped.response;
+  const { fence } = scoped;
   const { path: segments } = await params;
-  const abs = safePath(segments);
+  const abs = safePath(fence, segments);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
   // Before the existence check: `data` is renamable precisely because it is
-  // there and `safePath` lets it through.
-  if (isProtectedContainer(abs)) return protectedContainerResponse();
+  // there and `safePath` lets it through. A member's Home and Shared are
+  // their view's roots: never renamed.
+  if (fence.isRoot(abs) || isProtectedContainer(abs)) return protectedContainerResponse();
   if (!fs.existsSync(/* turbopackIgnore: true */ abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   // `.catch` covers a body that is not JSON at all; this covers one that IS —
@@ -185,8 +194,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
   const parentDir = path.dirname(abs);
   const newAbs = path.resolve(parentDir, newName);
-  const base = path.resolve(BASE_DIR);
-  if (newAbs !== base && !newAbs.startsWith(base + path.sep)) {
+  // The new name lands beside the old one, so it must still be inside the
+  // caller's view (the owner's browse root, or the member's root it is in).
+  if (fence.resolve(fence.relOf(newAbs)) !== newAbs) {
     return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
   }
   // Don't let a rename create/clobber a secret store name either.
@@ -208,14 +218,18 @@ export async function PUT(req: NextRequest, { params }: Params) {
 }
 
 // DELETE /setup-api/files/[...path] — delete file or directory
-export async function DELETE(_req: NextRequest, { params }: Params) {
+export async function DELETE(req: NextRequest, { params }: Params) {
+  const scoped = await filesFenceFor(req);
+  if (!scoped.ok) return scoped.response;
+  const { fence } = scoped;
   const { path: segments } = await params;
-  const abs = safePath(segments);
+  const abs = safePath(fence, segments);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
   // `rmSync(…, { recursive: true })` on the data directory removes the config,
   // the session secret and every token in one request; on the browse root it
-  // removes the home. Neither is a file-manager gesture.
-  if (isProtectedContainer(abs)) return protectedContainerResponse();
+  // removes the home. Neither is a file-manager gesture — nor is removing a
+  // member's whole home or the shared folder.
+  if (fence.isRoot(abs) || isProtectedContainer(abs)) return protectedContainerResponse();
   if (!fs.existsSync(/* turbopackIgnore: true */ abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const stat = fs.statSync(/* turbopackIgnore: true */ abs);

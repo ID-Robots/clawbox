@@ -591,3 +591,91 @@ export async function changeUserPassword(username: string, current: string, next
 export async function verifyUserPassword(username: string, password: string): Promise<boolean> {
   return (await checkUserPassword(username, password)) === "ok";
 }
+
+/**
+ * The owner RESETS a ClawBox user's password (Settings → System → Users,
+ * TASK-2377), through the root-owned helper's `setpasswd` verb: no current
+ * password (the owner is the administrator), the same membership and password
+ * rules as {@link changeUserPassword}, the username and the new password on
+ * STDIN only. Never the owner's own password — that is `system/credentials`'.
+ * `wrong` here means the account is not a ClawBox user's. Never throws.
+ */
+export async function resetUserPassword(username: string, next: string): Promise<UserPasswordChange> {
+  if (checkUsername(username) !== "ok" || username === getSystemUsername()) return "wrong";
+  if (
+    typeof next !== "string"
+    || next.length < USER_PASSWORD_MIN
+    || next.length > USER_PASSWORD_MAX
+    || !isSafePasswordChars(next)
+  ) {
+    return "invalid";
+  }
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "setpasswd"], {
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+      child.on("error", () => resolve("unavailable"));
+      child.on("close", (code) => {
+        if (code === HELPER_OK) resolve("ok");
+        else if (code === HELPER_AUTH_ERR) resolve("wrong");
+        else if (code === HELPER_BAD_NEW_PASSWORD) resolve("invalid");
+        else if (code === HELPER_CHPASSWD_FAILED) resolve("failed");
+        else resolve("unavailable");
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${username}\n${next}\n`);
+    } catch {
+      resolve("unavailable");
+    }
+  });
+}
+
+/**
+ * A ClawBox user's home folder as the account database names it (`getent
+ * passwd`), or null when there is no such account or the lookup failed. The
+ * name is checked first, and it travels as its own argv element.
+ */
+export async function userHomeDir(username: string): Promise<string | null> {
+  if (checkUsername(username) !== "ok") return null;
+  try {
+    const { stdout } = await execFile(GETENT_BIN, ["passwd", username], { timeout: 5_000 });
+    const fields = String(stdout).trim().split("\n")[0]?.split(":") ?? [];
+    if (fields[0] !== username) return null;
+    const home = fields[5] ?? "";
+    return path.isAbsolute(home) && home !== "/" ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What asking the helper for a user's home came to: `ok`, `refused` (not a ClawBox user), `unavailable`. */
+export type HomeAccessResult = "ok" | "refused" | "unavailable";
+
+/**
+ * Let the web server (the owner's account) reach a ClawBox user's home, so the
+ * Files app can serve a member of staff their own home on an organisation box
+ * (src/lib/files-scope.ts). The helper's `home_access` verb lays a POSIX ACL
+ * for the owner's account on that home (config/clawbox-user-helper.sh); the
+ * username travels on STDIN. Never throws.
+ */
+export async function grantHomeAccess(username: string): Promise<HomeAccessResult> {
+  if (checkUsername(username) !== "ok" || username === getSystemUsername()) return "refused";
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "home_access"], {
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 120_000,
+        killSignal: "SIGKILL",
+      });
+      child.on("error", () => resolve("unavailable"));
+      child.on("close", (code) => resolve(code === HELPER_OK ? "ok" : code === HELPER_AUTH_ERR ? "refused" : "unavailable"));
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${username}\n`);
+    } catch {
+      resolve("unavailable");
+    }
+  });
+}

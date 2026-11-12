@@ -29,6 +29,12 @@ export interface ZipTicket {
   names: string[];
   /** The archive's own file name. */
   archiveName: string;
+  /**
+   * Whose view the paths are relative to (src/lib/files-scope.ts): `owner`, or
+   * `member:<name>`. A ticket is redeemed only in the view that issued it, so
+   * one person's selection is never re-read against another's folders.
+   */
+  scope?: string;
   expiresAt: number;
 }
 

@@ -52,10 +52,12 @@ import { listUsers } from "@/lib/clawbox-users";
 import { readOrgMode } from "@/lib/org-mode-server";
 import { resolveDefaultAgentId } from "@/lib/openclaw-default-agent";
 import {
+  STAFF_MCP_ENTRY_PREFIX,
   STAFF_OPENCLAW_TOOLS,
   isStaffAgentId,
   staffAgentId,
 } from "@/lib/org-staff-policy";
+import type { StaffMcpEntry } from "@/lib/staff-mcp";
 
 /** The device-store key recording what ClawBox added to the roster to make room for staff. */
 export const ORG_STAFF_ROSTER_KEY = "org_staff_roster";
@@ -99,8 +101,24 @@ export function staffWorkspaceDir(openclawHome: string, username: string): strin
   return path.join(openclawHome, "staff", username);
 }
 
-/** The roster entry of one member of staff's agent. */
-export function staffAgentEntry(openclawHome: string, username: string): Json {
+/**
+ * The deny every agent that is NOT a member of staff's carries while any
+ * member has a granted MCP server (src/lib/staff-mcp.ts): those entries carry
+ * a member's relay token, so the owner's agents neither list nor call them.
+ */
+export const STAFF_MCP_DENY_GLOB = `${STAFF_MCP_ENTRY_PREFIX}*`;
+
+/** A config path to one `mcp.servers` entry. */
+function mcpServerPath(name: string): string {
+  return `mcp.servers[${JSON.stringify(name)}]`;
+}
+
+/**
+ * The roster entry of one member of staff's agent. `mcpEntries` are the names
+ * of their own relay entries (src/lib/staff-mcp.ts): each adds `<entry>__*` to
+ * the allow-list — that member's granted tools, and nobody else's.
+ */
+export function staffAgentEntry(openclawHome: string, username: string, mcpEntries: readonly string[] = []): Json {
   return {
     name: `${username} (staff)`,
     workspace: staffWorkspaceDir(openclawHome, username),
@@ -113,7 +131,7 @@ export function staffAgentEntry(openclawHome: string, username: string): Json {
       // `tools.profile` says: a global profile the owner (or the owner's
       // agent) flips to `full` or `coding` neither widens nor starves it.
       profile: "full",
-      allow: [...STAFF_OPENCLAW_TOOLS.allow],
+      allow: [...STAFF_OPENCLAW_TOOLS.allow, ...mcpEntries.map((name) => `${name}__*`)],
       deny: [...STAFF_OPENCLAW_TOOLS.deny],
       elevated: { enabled: false },
     },
@@ -159,6 +177,18 @@ export interface StaffRosterInput {
   ownerWorkspace: string;
   /** What an earlier sync recorded, or null. */
   marks: StaffRosterMarks | null;
+  /** Each member's granted MCP relay entries (src/lib/staff-mcp.ts); none when absent. */
+  mcp?: ReadonlyMap<string, readonly StaffMcpEntry[]>;
+}
+
+/** `deny` with the staff MCP glob added (`want`) or taken out, or undefined when nothing changes. */
+function nextDeny(current: unknown, want: boolean): { changed: boolean; value: string[] | undefined } {
+  const list = Array.isArray(current) ? current.filter((v): v is string => typeof v === "string") : [];
+  const has = list.includes(STAFF_MCP_DENY_GLOB);
+  if (want === has) return { changed: false, value: list };
+  if (want) return { changed: true, value: [...list, STAFF_MCP_DENY_GLOB] };
+  const rest = list.filter((v) => v !== STAFF_MCP_DENY_GLOB);
+  return { changed: true, value: rest.length > 0 ? rest : undefined };
 }
 
 /**
@@ -173,10 +203,16 @@ export function planStaffRoster(config: unknown, input: StaffRosterInput): Staff
   const writes: RosterWrite[] = [];
 
   const wanted = new Map<string, Json>();
+  const mcpWanted = new Map<string, Json>();
   for (const username of input.staff) {
     const id = staffAgentId(username);
-    if (id) wanted.set(id, staffAgentEntry(input.openclawHome, username));
+    const grants = input.mcp?.get(username) ?? [];
+    if (id) {
+      wanted.set(id, staffAgentEntry(input.openclawHome, username, grants.map((entry) => entry.name)));
+      for (const entry of grants) mcpWanted.set(entry.name, entry.config);
+    }
   }
+  const anyMcp = mcpWanted.size > 0;
   const present = view.ids.filter((id) => isStaffAgentId(id));
   const others = view.ids.filter((id) => !isStaffAgentId(id));
   // The owner's agent — never a member of staff's, even on a roster that (by
@@ -185,8 +221,20 @@ export function planStaffRoster(config: unknown, input: StaffRosterInput): Staff
   const owner = isStaffAgentId(resolved) ? others[0] ?? "main" : resolved;
 
   if (view.shape === "list") {
-    // A legacy roster is one array: rewritten whole, the owner's entries as they are.
-    const list = (agents.list as unknown[]).filter((entry) => !(isRecord(entry) && isStaffAgentId(String(entry.id ?? "").toLowerCase())));
+    // A legacy roster is one array: rewritten whole, the owner's entries as
+    // they are (but for the staff MCP deny, below).
+    const list = (agents.list as unknown[])
+      .filter((entry) => !(isRecord(entry) && isStaffAgentId(String(entry.id ?? "").toLowerCase())))
+      .map((entry) => {
+        if (!isRecord(entry)) return entry;
+        const tools = isRecord(entry.tools) ? entry.tools : {};
+        const deny = nextDeny(tools.deny, anyMcp);
+        if (!deny.changed) return entry;
+        const { deny: _old, ...restTools } = tools;
+        const nextTools = deny.value ? { ...restTools, deny: deny.value } : restTools;
+        const { tools: _t, ...restEntry } = entry;
+        return Object.keys(nextTools).length > 0 ? { ...restEntry, tools: nextTools } : restEntry;
+      });
     const next = [...list, ...[...wanted].map(([id, entry]) => ({ id, ...entry }))];
     if (!isDeepStrictEqual(next, agents.list)) writes.push({ path: "agents.list", value: next });
   } else {
@@ -196,13 +244,35 @@ export function planStaffRoster(config: unknown, input: StaffRosterInput): Staff
     for (const [id, entry] of wanted) {
       if (!isDeepStrictEqual(view.entryOf(id), entry)) writes.push({ path: entryPath(id), value: entry });
     }
+    // The owner's agents never see a member's relay entries.
+    const entries = isRecord(agents.entries) ? agents.entries : {};
+    for (const [key, value] of Object.entries(entries)) {
+      if (isStaffAgentId(key.toLowerCase()) || !isRecord(value)) continue;
+      const tools = isRecord(value.tools) ? value.tools : {};
+      const deny = nextDeny(tools.deny, anyMcp);
+      if (deny.changed) writes.push({ path: `${entryPath(key)}.tools.deny`, ...(deny.value ? { value: deny.value } : {}) });
+    }
+  }
+
+  // The members' relay entries in `mcp.servers`: exactly the wanted ones of
+  // ClawBox's prefix, every other server untouched.
+  const mcpConfig = isRecord(config) && isRecord(config.mcp) ? config.mcp : {};
+  const servers = isRecord(mcpConfig.servers) ? mcpConfig.servers : {};
+  for (const name of Object.keys(servers)) {
+    if (name.toLowerCase().startsWith(STAFF_MCP_ENTRY_PREFIX) && !mcpWanted.has(name)) writes.push({ path: mcpServerPath(name) });
+  }
+  for (const [name, entry] of mcpWanted) {
+    if (!isDeepStrictEqual(servers[name], entry)) writes.push({ path: mcpServerPath(name), value: entry });
   }
 
   const systemAgentNow = isRecord(defaults.systemAgent) ? defaults.systemAgent.agentId : undefined;
   if (wanted.size > 0) {
     // Make room for a fleet, naming only what is absent.
     if (view.shape === "none" || (view.shape === "entries" && others.length === 0)) {
-      writes.unshift({ path: entryPath(owner), value: { workspace: input.ownerWorkspace } });
+      writes.unshift({
+        path: entryPath(owner),
+        value: { workspace: input.ownerWorkspace, ...(anyMcp ? { tools: { deny: [STAFF_MCP_DENY_GLOB] } } : {}) },
+      });
       marks.ownerEntry = { id: owner, workspace: input.ownerWorkspace };
     }
     if (view.shape !== "list" && agents.ownership === undefined) {
@@ -339,7 +409,12 @@ async function syncStaffAgentsNow(): Promise<boolean> {
     const ownerWorkspace = openclawWorkspaceDir();
     const config = await readConfigStrict();
     const marksBefore = readMarks(await get(ORG_STAFF_ROSTER_KEY));
-    const plan = planStaffRoster(config, { staff, openclawHome: OPENCLAW_HOME, ownerWorkspace, marks: marksBefore });
+    const mcp = await staffMcpPlan(staff, config);
+    // The guard's record first: a grant taken away is refused by the guard
+    // before the policy catches up, and one added is refused by the policy
+    // until it does — never the other way round.
+    await writeStaffMcpGrants(OPENCLAW_HOME, mcp);
+    const plan = planStaffRoster(config, { staff, openclawHome: OPENCLAW_HOME, ownerWorkspace, marks: marksBefore, mcp });
 
     for (const username of staff) {
       await seedStaffWorkspace(staffWorkspaceDir(OPENCLAW_HOME, username), username, ownerWorkspace);
@@ -385,6 +460,48 @@ async function syncStaffAgentsNow(): Promise<boolean> {
 }
 
 /**
+ * Each member's granted MCP relay entries (src/lib/staff-mcp.ts), from the
+ * owner's store and the servers openclaw.json defines. A store that cannot be
+ * read grants nothing (fail closed); members without a relay token get one.
+ */
+async function staffMcpPlan(staff: readonly string[], config: unknown): Promise<Map<string, StaffMcpEntry[]>> {
+  if (staff.length === 0) return new Map();
+  try {
+    const { ensureRelayTokens, planStaffMcpEntries } = await import("@/lib/staff-mcp");
+    const { openclawServerEntries } = await import("@/lib/project-mcp-servers");
+    const { getLocalAiProxyRootUrl } = await import("@/lib/local-ai-proxy-url");
+    const store = await ensureRelayTokens(staff);
+    const mcpConfig = isRecord(config) && isRecord(config.mcp) ? config.mcp : {};
+    return planStaffMcpEntries({ staff, store, servers: openclawServerEntries(mcpConfig.servers), relayBase: getLocalAiProxyRootUrl() });
+  } catch (err) {
+    console.error("[org-staff] the staff MCP grants could not be read; none are given:", err instanceof Error ? err.message : err);
+    return new Map();
+  }
+}
+
+/**
+ * The grants clawbox-staff-guard reads (`staff-mcp-grants.json` beside the
+ * installed plugin): which relay entries each staff agent may call. Written
+ * whole by rename, 0600. No plugin folder, no file: the guard then refuses
+ * every staff MCP call (missing = refuse).
+ */
+async function writeStaffMcpGrants(openclawHome: string, mcp: ReadonlyMap<string, readonly StaffMcpEntry[]>): Promise<void> {
+  const { STAFF_MCP_GRANTS_FILE, grantsDocument } = await import("@/lib/staff-mcp");
+  const dir = path.join(openclawHome, "extensions", "clawbox-staff-guard");
+  if (!fs.existsSync(dir)) return;
+  const file = path.join(dir, STAFF_MCP_GRANTS_FILE);
+  const content = `${JSON.stringify(grantsDocument(mcp), null, 2)}\n`;
+  try {
+    if ((await fsp.readFile(file, "utf-8").catch(() => null)) === content) return;
+    const temp = `${file}.tmp-${process.pid}`;
+    await fsp.writeFile(temp, content, { mode: 0o600 });
+    await fsp.rename(temp, file);
+  } catch (err) {
+    console.error("[org-staff] could not record the staff MCP grants for the guard:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * A removed member of staff's agent goes with them, and so does their
  * workspace — their memory and their folder — and the agent's own state
  * directory, so a user created later under the same name starts empty. Best
@@ -394,6 +511,10 @@ async function syncStaffAgentsNow(): Promise<boolean> {
 export async function forgetStaffAgent(username: string): Promise<void> {
   const id = staffAgentId(username);
   if (!id) return;
+  // Their MCP credentials and relay token first, so the sync below takes
+  // their relay entries away with the agent.
+  const { forgetStaffMcpUser } = await import("@/lib/staff-mcp");
+  await forgetStaffMcpUser(username);
   await syncStaffAgents();
   try {
     const { OPENCLAW_HOME } = await import("@/lib/openclaw-config");

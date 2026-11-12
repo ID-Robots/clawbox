@@ -7,7 +7,9 @@ import { pipeline } from "stream/promises";
 import Busboy from "busboy";
 import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
-import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
+import { filesBrowseRoot } from "@/lib/file-guard";
+import type { FilesFence } from "@/lib/files-scope";
+import { filesFenceFor } from "@/lib/files-scope-server";
 import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/files-move";
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
@@ -113,55 +115,15 @@ export const dynamic = "force-dynamic";
 
 const BASE_DIR = filesBrowseRoot();
 
-/**
- * The absolute path one request may name, or null.
- *
- * SAME RULE, ONE TERM AT A TIME. The two cases used to share a condition —
- * `resolved !== base && !resolved.startsWith(base + path.sep)` — and that is
- * what kept `js/path-injection` open on every fs call downstream of this
- * helper (alerts #523-#528, and the dismissed #247/#248 before them). A
- * containment check only vouches for the path when reaching the code after it
- * REQUIRED the check to pass: with the two terms `&&`-ed, the fall-through is
- * reachable through `resolved === base` without the prefix test having decided
- * anything, so the check governs nothing an analyser — or a reader — can rely
- * on. Split, each line is the only way past itself.
- *
- * The base case answers with the ROOT'S OWN string. It is the same value
- * `resolved` holds there (they are equal, which is why that branch is taken),
- * but it is the constant this module built rather than the request's spelling
- * of it, so nothing of the request survives into the `""` answer.
- *
- * The accepted set is unchanged, deliberately and exactly: an absolute path
- * that already lies under the root is still accepted (the Coding Agent's "Open
- * in Files" sends one), a name beginning `..` — `~/..hidden` — is still a
- * legitimate entry rather than a traversal, and everything that resolved
- * outside the root is still refused. `isInside()` would have been the shorter
- * spelling and is NOT equivalent: its `rel.startsWith("..")` refuses
- * `~/..hidden`, and the Files app has always listed it.
- *
- * THE SAME SHAPE IS STILL SPELLED IN SIX OTHER PLACES, and none of them is
- * reported: `files/[...path]/route.ts:65` and `:148` (this API's other half,
- * whose input is a Next dynamic-route `params` value — not a source the query
- * models), `webapps/route.ts:171`, `chat/attachments/route.ts:229`,
- * `chat/media/route.ts:211` and `harness/media-root.ts:194` (each already
- * fenced through a realpath). The rule above is about all of them, so anyone
- * next in one of those files should take the two-line split with them; not
- * doing it here keeps this change to the sinks the alerts name.
+/*
+ * WHERE A PATH MAY LEAD is the fence's question now (src/lib/files-scope.ts,
+ * TASK-2377): the owner's view is the rule this file always spelled — the
+ * browse root, the root's own string for `""`, an absolute path under it
+ * accepted, `~/..hidden` a legitimate name, every secret store refused — and a
+ * member of staff on an organisation box gets their own home and the shared
+ * folder instead. Every read, write, rename and download below funnels through
+ * `fence.resolve`, the single chokepoint the old `safePath` was.
  */
-function safePath(rel: string): string | null {
-  const base = path.resolve(BASE_DIR);
-  const resolved = path.resolve(base, rel);
-  // The browse root itself.
-  if (resolved === base) return isProtectedFilePath(base) ? null : base;
-  // Anything else must be INSIDE it (with the separator, otherwise sibling
-  // dirs like "/home/clawboxmalicious" would slip through).
-  if (!resolved.startsWith(base + path.sep)) return null;
-  // The browse root is $HOME, so secret stores (.ssh, .openclaw, the data/
-  // tokens) sit inside the sandbox — deny them at the single resolve chokepoint
-  // that every read/write/rename/download path funnels through.
-  if (isProtectedFilePath(resolved)) return null;
-  return resolved;
-}
 
 // Folders the search walks past. A home directory's weight is almost entirely
 // node_modules: searching from Home spent the whole 20,000-entry budget inside
@@ -176,8 +138,7 @@ const SEARCH_SKIPPED_DIRS = new Set(["node_modules", ".git", ".cache", ".npm", "
 // home directory can't hang the request or exhaust memory. Symlinked
 // directories are reported (if their name matches) but never traversed —
 // `dirent.isDirectory()` is false for symlinks, which avoids cycle loops.
-async function searchTree(rootAbs: string, query: string, includeHidden: boolean) {
-  const baseResolved = path.resolve(BASE_DIR);
+async function searchTree(fence: FilesFence, rootAbs: string | string[], query: string, includeHidden: boolean) {
   const MAX_MATCHES = 300;
   const MAX_SCANNED = 20000;
   const matches: Array<{
@@ -187,7 +148,7 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
     modified: string;
     path: string;
   }> = [];
-  const queue: string[] = [rootAbs];
+  const queue: string[] = Array.isArray(rootAbs) ? [...rootAbs] : [rootAbs];
   let head = 0;
   let scanned = 0;
   // WHY the walk ended, not just that it did: "the match list is full" and
@@ -210,8 +171,9 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
       if (!includeHidden && name.startsWith(".")) continue;
       const isDir = dirent.isDirectory();
       const full = path.join(dir, name);
-      // Never surface or descend into secret stores, even with ?hidden=1.
-      if (isProtectedFilePath(full)) continue;
+      // Never surface or descend into secret stores, even with ?hidden=1 —
+      // nor, for a member of staff, into a link that leads out of their view.
+      if (!fence.allows(full)) continue;
       if (name.toLowerCase().includes(query)) {
         let size: number | null = null;
         let modified = "";
@@ -225,7 +187,7 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
           type: isDir ? "directory" : "file",
           size,
           modified,
-          path: path.relative(baseResolved, full).split(path.sep).join("/"),
+          path: fence.relOf(full),
         });
         if (matches.length >= MAX_MATCHES) { stoppedBy = "matches"; break; }
       }
@@ -237,7 +199,9 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
   return { files: matches, search: query, truncated: stoppedBy !== null, stoppedBy };
 }
 
-function ensureBaseDir() {
+function ensureBaseDir(fence: FilesFence) {
+  // A member of staff's folders are prepared by the fence itself.
+  if (fence.scope.kind !== "owner") return;
   try { if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR, { recursive: true }); } catch { /* read-only fs */ }
   // Ensure standard home subdirectories exist (skip when FILES_ROOT is explicitly set, e.g. tests)
   if (!process.env.FILES_ROOT) {
@@ -250,7 +214,7 @@ function ensureBaseDir() {
 
 /**
  * The items a request names by browse-relative path, or why they cannot be
- * taken: a list of 1..`max` non-empty strings, each through `safePath` (the
+ * taken: a list of 1..`max` non-empty strings, each through `fence.resolve` (the
  * browse root itself is never an item). Shared by the selection's ZIP and its
  * move so the two read a selection the same way.
  */
@@ -269,27 +233,26 @@ const MAX_ZIP_SELECTION = 10_000;
  * would hold (the folder download's `check=1` shape) and a ticket the download
  * link redeems; see src/lib/zip-tickets.ts for why the list is not in the link.
  */
-async function selectionZipTicket(dirAbs: string, raw: unknown): Promise<NextResponse> {
+async function selectionZipTicket(fence: FilesFence, dirAbs: string | null, raw: unknown): Promise<NextResponse> {
   const parsed = parseItemPaths(raw, MAX_ZIP_SELECTION);
   if (!parsed.ok) return parsed.response;
-  const base = path.resolve(BASE_DIR);
   const items: { rel: string; abs: string }[] = [];
   for (const rel of parsed.paths) {
-    const abs = safePath(rel);
-    if (!abs || abs === base) return NextResponse.json({ error: "Invalid path", code: "invalid_path", path: rel }, { status: 400 });
+    const abs = fence.resolve(rel);
+    if (!abs || (fence.scope.kind === "owner" && fence.isRoot(abs))) return NextResponse.json({ error: "Invalid path", code: "invalid_path", path: rel }, { status: 400 });
     if (!fs.existsSync(/* turbopackIgnore: true */ abs)) {
       return NextResponse.json({ error: "Not found", code: "not_found", path: rel }, { status: 404 });
     }
-    items.push({ rel: path.relative(base, abs).split(path.sep).join("/"), abs });
+    items.push({ rel: fence.relOf(abs), abs });
   }
   const names = uniqueArchiveNames(items.map((item) => path.basename(item.abs)));
   let summary;
   try {
-    summary = await summarizeSelectionForZip(items.map((item, i) => ({ abs: item.abs, name: names[i] })));
+    summary = await summarizeSelectionForZip(items.map((item, i) => ({ abs: item.abs, name: names[i] })), undefined, fence.allows);
   } catch {
     return NextResponse.json({ error: "Failed to read the selection" }, { status: 500 });
   }
-  const archiveName = dirAbs === base ? "selection.zip" : `${path.basename(dirAbs)}-selection.zip`;
+  const archiveName = !dirAbs || fence.isRoot(dirAbs) ? "selection.zip" : `${path.basename(dirAbs)}-selection.zip`;
   const body = { name: archiveName, ...summary };
   if (summary.tooMany) {
     return NextResponse.json(
@@ -297,25 +260,27 @@ async function selectionZipTicket(dirAbs: string, raw: unknown): Promise<NextRes
       { status: 413 },
     );
   }
-  const ticket = issueZipTicket({ rels: items.map((item) => item.rel), names, archiveName });
+  const ticket = issueZipTicket({ rels: items.map((item) => item.rel), names, archiveName, scope: fence.key });
   return NextResponse.json({ ...body, ticket });
 }
 
 /** `GET ?zip=<ticket>` — the selection's archive, streamed as it is read. */
-function selectionZipDownload(ticketId: string): NextResponse {
-  const ticket = redeemZipTicket(ticketId);
+function selectionZipDownload(fence: FilesFence, ticketId: string): NextResponse {
+  const found = redeemZipTicket(ticketId);
+  // Redeemed only in the view that issued it: one person's selection is never
+  // read again against another person's folders. The same 404 as an expired one.
+  const ticket = found && (found.scope ?? "owner") === fence.key ? found : null;
   if (!ticket) {
     return NextResponse.json({ error: "This download has expired. Select the items and download them again.", code: "zip_expired" }, { status: 404 });
   }
-  const base = path.resolve(BASE_DIR);
   // Re-judged NOW: the ticket vouches for what was selected, not for what the
   // paths lead to by the time the bytes are read.
   const items: { abs: string; name: string }[] = [];
   ticket.rels.forEach((rel, i) => {
-    const abs = safePath(rel);
-    if (abs && abs !== base) items.push({ abs, name: ticket.names[i] });
+    const abs = fence.resolve(rel);
+    if (abs && !(fence.scope.kind === "owner" && fence.isRoot(abs))) items.push({ abs, name: ticket.names[i] });
   });
-  const stream = zipSelectionStream(items);
+  const stream = zipSelectionStream(items, { allowed: fence.allows });
   stream.on("error", (err) => console.error("[files] selection ZIP stopped:", err instanceof Error ? err.message : err));
   return new NextResponse(Readable.toWeb(stream) as unknown as ReadableStream, {
     headers: {
@@ -332,15 +297,22 @@ function selectionZipDownload(ticketId: string): NextResponse {
  * app's "Move to…" and its drag-and-drop. See src/lib/files-move.ts for the
  * rules.
  */
-async function moveAction(destAbs: string, body: Record<string, unknown>): Promise<NextResponse> {
+async function moveAction(fence: FilesFence, destAbs: string | null, body: Record<string, unknown>): Promise<NextResponse> {
   const parsed = parseItemPaths(body.paths, MAX_MOVE_ITEMS);
   if (!parsed.ok) return parsed.response;
   const conflict: MoveConflictPolicy = body.conflict === "rename" || body.conflict === "skip" ? body.conflict : "fail";
   const result = moveEntries({
-    root: BASE_DIR,
+    root: fence.scope.kind === "owner" ? fence.scope.base : BASE_DIR,
     destAbs,
     conflict,
-    sources: parsed.paths.map((rel) => ({ rel, abs: safePath(rel) })),
+    // A source that leads out of the view (a member's link into the owner's
+    // home) is refused like a path that does not resolve.
+    sources: parsed.paths.map((rel) => {
+      const abs = fence.resolve(rel);
+      return { rel, abs: abs && fence.allows(abs) ? abs : null };
+    }),
+    isRoot: fence.isRoot,
+    relOfTarget: fence.relOf,
   });
   if (!result.ok) return NextResponse.json(result.refusal.body, { status: result.refusal.status });
   const { moved, skipped, failed } = result.outcome;
@@ -349,16 +321,32 @@ async function moveAction(destAbs: string, body: Record<string, unknown>): Promi
 
 // GET /setup-api/files?dir=relative/path  (or ?zip=<ticket> — a selection's ZIP)
 export async function GET(req: NextRequest) {
-  ensureBaseDir();
+  const scoped = await filesFenceFor(req);
+  if (!scoped.ok) return scoped.response;
+  const { fence } = scoped;
+  ensureBaseDir(fence);
   const zipTicket = req.nextUrl.searchParams.get("zip");
-  if (zipTicket !== null) return selectionZipDownload(zipTicket);
+  if (zipTicket !== null) return selectionZipDownload(fence, zipTicket);
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
-  const abs = safePath(dir);
+
+  // A member of staff's top folder: their home and the shared folder, nothing
+  // to stat or write. A search from it walks both.
+  if (fence.isVirtualRoot(dir)) {
+    const searchAtRoot = req.nextUrl.searchParams.get("search");
+    const roots = fence.scope.kind === "member" ? fence.scope.roots.map((root) => root.real) : [];
+    if (searchAtRoot && searchAtRoot.trim()) {
+      const includeHidden = req.nextUrl.searchParams.get("hidden") === "1";
+      return NextResponse.json(await searchTree(fence, roots, searchAtRoot.trim().toLowerCase(), includeHidden));
+    }
+    return NextResponse.json({ files: fence.rootEntries(), availableSpace: roots[0] ? getAvailableDiskBytes(roots[0]) : 0, virtualRoot: true, view: "member" });
+  }
+
+  const abs = fence.resolve(dir);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
   if (!fs.existsSync(/* turbopackIgnore: true */ abs)) {
     // Auto-create if it's the base dir
-    if (abs === path.resolve(BASE_DIR)) {
+    if (fence.scope.kind === "owner" && fence.isRoot(abs)) {
       fs.mkdirSync(abs, { recursive: true });
     } else {
       return NextResponse.json({ error: "Directory not found" }, { status: 404 });
@@ -384,7 +372,7 @@ export async function GET(req: NextRequest) {
   const searchRaw = req.nextUrl.searchParams.get("search");
   if (searchRaw && searchRaw.trim()) {
     const includeHidden = req.nextUrl.searchParams.get("hidden") === "1";
-    return NextResponse.json(await searchTree(abs, searchRaw.trim().toLowerCase(), includeHidden));
+    return NextResponse.json(await searchTree(fence, abs, searchRaw.trim().toLowerCase(), includeHidden));
   }
 
   // Return everything including dotfiles. The client (FilesApp) hides
@@ -406,8 +394,9 @@ export async function GET(req: NextRequest) {
     .map((name) => {
       try {
         const fullPath = path.join(abs, name);
-        // Keep secret stores out of the listing entirely (not just un-openable).
-        if (isProtectedFilePath(fullPath)) return null;
+        // Keep secret stores out of the listing entirely (not just un-openable),
+        // and, for a member of staff, any link that leads out of their view.
+        if (!fence.allows(fullPath)) return null;
         const s = fs.statSync(fullPath);
         return {
           name,
@@ -422,18 +411,34 @@ export async function GET(req: NextRequest) {
     .filter(Boolean);
 
   const availableSpace = getAvailableDiskBytes(abs);
-  return NextResponse.json({ files, availableSpace });
+  // `view: "member"` tells the Files app to offer the member's own places
+  // (Home, Shared) instead of the owner's.
+  return NextResponse.json({ files, availableSpace, ...(fence.scope.kind === "member" ? { view: "member" } : {}) });
 }
 
 // POST /setup-api/files?dir=relative/path
 // Body: multipart (file upload) OR JSON { action: "mkdir", name: "..." }
 export async function POST(req: NextRequest) {
-  ensureBaseDir();
+  const scoped = await filesFenceFor(req);
+  if (!scoped.ok) return scoped.response;
+  const { fence } = scoped;
+  ensureBaseDir(fence);
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
-  const abs = safePath(dir);
-  if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
-
+  const atVirtualRoot = fence.isVirtualRoot(dir);
+  const abs = atVirtualRoot ? null : fence.resolve(dir);
   const contentType = req.headers.get("content-type") ?? "";
+  if (!abs) {
+    // The member's top folder holds their two folders and nothing else: a
+    // selection's ZIP may be made there, nothing may be written there.
+    if (atVirtualRoot && !contentType.includes("multipart/form-data")) {
+      const parsedBody: unknown = await req.json().catch(() => null);
+      const body = (parsedBody && typeof parsedBody === "object" ? parsedBody : {}) as Record<string, unknown>;
+      if (body.action === "zip") return selectionZipTicket(fence, null, body.paths);
+      if (body.action === "resolve") return resolveAction(fence, body.filePath);
+      return NextResponse.json({ error: "Choose Home or Shared first", code: "virtual_root" }, { status: 400 });
+    }
+    return NextResponse.json(atVirtualRoot ? { error: "Choose Home or Shared first", code: "virtual_root" } : { error: "Invalid path" }, { status: 400 });
+  }
 
   if (contentType.includes("multipart/form-data")) {
     if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
@@ -534,7 +539,7 @@ export async function POST(req: NextRequest) {
           activeFileStream = fileStream as unknown as Readable;
           fileStream.on("error", fail);
           fileName = info.filename;
-          const destPath = safePath(path.join(dir, fileName));
+          const destPath = fence.resolve(path.join(dir, fileName));
           if (!destPath) {
             fileStream.resume();
             fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));
@@ -574,16 +579,15 @@ export async function POST(req: NextRequest) {
       // silently inherit whatever bytes did.
       await Promise.allSettled(pendingWrites);
       // Containment re-established HERE, not trusted from the write: every
-      // entry is a safePath() answer, but the check that admitted it governed
+      // entry is a fence.resolve() answer, but the check that admitted it governed
       // the write inside the promise, and a guard does not carry across that
       // closure into this catch block — CodeQL's path-injection query says so
       // (js/path-injection, alert 519), and it is right that an unlink should
       // vouch for its own argument. The same resolve-then-prefix shape
-      // safePath uses; it never refuses a path that was written.
-      const base = path.resolve(BASE_DIR);
+      // the fence uses; it never refuses a path that was written.
       for (const p of written) {
         const target = path.resolve(p);
-        if (!target.startsWith(base + path.sep)) continue;
+        if (fence.resolve(fence.relOf(target)) !== target) continue;
         try { await fsp.unlink(target); } catch { /* best effort */ }
       }
       const { status, body } = refusal(err);
@@ -594,42 +598,51 @@ export async function POST(req: NextRequest) {
   // JSON action. Anything that is not a plain object carries no action.
   const parsedBody: unknown = await req.json().catch(() => null);
   const body = (parsedBody && typeof parsedBody === "object" ? parsedBody : {}) as Record<string, unknown> & { name?: string; filePath?: string };
-  if (body.action === "move") return moveAction(abs, body);
-  if (body.action === "zip") return selectionZipTicket(abs, body.paths);
+  if (body.action === "move") return moveAction(fence, abs, body);
+  if (body.action === "zip") return selectionZipTicket(fence, abs, body.paths);
   if (body.action === "mkdir") {
     if (!body.name) return NextResponse.json({ error: "Name required" }, { status: 400 });
-    const newDir = safePath(path.join(dir, body.name));
+    const newDir = fence.resolve(path.join(dir, body.name));
     if (!newDir) return NextResponse.json({ error: "Invalid name" }, { status: 400 });
     if (fs.existsSync(/* turbopackIgnore: true */ newDir)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
     fs.mkdirSync(newDir, { recursive: true });
     return NextResponse.json({ ok: true });
   }
 
-  if (body.action === "resolve") {
-    if (!body.filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
-    const resolved = safePath(body.filePath);
-    if (!resolved) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
-    // `relPath` is what the Files app navigates by — the Coding Agent's
-    // "Open in Files" asks for a project folder's, absolute as it knows it.
-    return NextResponse.json({ absPath: resolved, relPath: path.relative(path.resolve(BASE_DIR), resolved) });
-  }
+  if (body.action === "resolve") return resolveAction(fence, body.filePath);
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+}
+
+/**
+ * `{ action: "resolve", filePath }` — `relPath` is what the Files app
+ * navigates by; the Coding Agent's "Open in Files" asks for a project folder's,
+ * absolute as it knows it. A member of staff names paths in their own view only.
+ */
+function resolveAction(fence: FilesFence, filePath: unknown): NextResponse {
+  if (typeof filePath !== "string" || !filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+  const resolved = fence.resolve(filePath);
+  if (!resolved) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  return NextResponse.json({ absPath: resolved, relPath: fence.scope.kind === "owner" ? path.relative(fence.scope.base, resolved) : fence.relOf(resolved) });
 }
 
 // PUT /setup-api/files?dir=relative/path&name=filename
 // Body: raw binary file (application/octet-stream)
 // Streams directly to disk — handles large files without buffering
 export async function PUT(req: NextRequest) {
-  ensureBaseDir();
+  const scoped = await filesFenceFor(req);
+  if (!scoped.ok) return scoped.response;
+  const { fence } = scoped;
+  ensureBaseDir(fence);
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
   const name = req.nextUrl.searchParams.get("name");
   if (!name) return NextResponse.json({ error: "Name required" }, { status: 400 });
 
-  const abs = safePath(dir);
+  if (fence.isVirtualRoot(dir)) return NextResponse.json({ error: "Choose Home or Shared first", code: "virtual_root" }, { status: 400 });
+  const abs = fence.resolve(dir);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
-  const destPath = safePath(path.join(dir, name));
+  const destPath = fence.resolve(path.join(dir, name));
   if (!destPath) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
 
   if (!fs.existsSync(/* turbopackIgnore: true */ abs)) fs.mkdirSync(abs, { recursive: true });

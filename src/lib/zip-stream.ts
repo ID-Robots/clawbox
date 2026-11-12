@@ -102,7 +102,15 @@ export interface ZipWalkEntry {
  * folder itself as `topName/`. Unreadable folders are passed over rather than
  * failing the archive — the owner asked for what can be read.
  */
-export async function* walkFolderForZip(rootAbs: string, topName: string): AsyncGenerator<ZipWalkEntry> {
+/**
+ * Which entries may go in: by default the Files API's owner rule (no secret
+ * store). A member of staff's view (src/lib/files-scope.ts) passes its own
+ * fence, so a link in their home that leads out of it is left out as well.
+ */
+export type ZipEntryAllowed = (abs: string) => boolean;
+const NOT_A_SECRET_STORE: ZipEntryAllowed = (abs) => !isProtectedFilePath(abs);
+
+export async function* walkFolderForZip(rootAbs: string, topName: string, allowed: ZipEntryAllowed = NOT_A_SECRET_STORE): AsyncGenerator<ZipWalkEntry> {
   const top = await fsp.stat(rootAbs);
   yield { kind: "directory", abs: rootAbs, name: `${topName}/`, size: 0, mtime: top.mtime, mode: top.mode };
   const stack: Array<{ abs: string; name: string }> = [{ abs: rootAbs, name: topName }];
@@ -119,7 +127,7 @@ export async function* walkFolderForZip(rootAbs: string, topName: string): Async
     for (const dirent of dirents) {
       const abs = path.join(dir.abs, dirent.name);
       const name = `${dir.name}/${dirent.name}`;
-      if (isProtectedFilePath(abs)) continue;
+      if (!allowed(abs)) continue;
       if (dirent.isDirectory()) {
         if (ZIP_SKIPPED_DIRS.has(dirent.name) || (await isSkippedModelDir(abs, dirent.name))) continue;
         let st: import("fs").Stats;
@@ -167,13 +175,13 @@ export interface ZipSelectionItem {
  * passed over — so a selection holds exactly what the items downloaded one by
  * one would.
  */
-export async function* walkSelectionForZip(items: readonly ZipSelectionItem[]): AsyncGenerator<ZipWalkEntry> {
+export async function* walkSelectionForZip(items: readonly ZipSelectionItem[], allowed: ZipEntryAllowed = NOT_A_SECRET_STORE): AsyncGenerator<ZipWalkEntry> {
   for (const item of items) {
-    if (isProtectedFilePath(item.abs)) continue;
+    if (!allowed(item.abs)) continue;
     let st: import("fs").Stats;
     try { st = await fsp.stat(item.abs); } catch { continue; }
     if (st.isDirectory()) {
-      yield* walkFolderForZip(item.abs, item.name);
+      yield* walkFolderForZip(item.abs, item.name, allowed);
       continue;
     }
     if (!st.isFile()) continue;
@@ -197,13 +205,13 @@ async function summarizeWalk(walk: AsyncIterable<ZipWalkEntry>, limit: number): 
 }
 
 /** What a ZIP of the folder would hold, counted without reading a byte of it. */
-export async function summarizeFolderForZip(rootAbs: string, limit = MAX_ZIP_ENTRIES): Promise<ZipSummary> {
-  return summarizeWalk(walkFolderForZip(rootAbs, path.basename(rootAbs)), limit);
+export async function summarizeFolderForZip(rootAbs: string, limit = MAX_ZIP_ENTRIES, allowed?: ZipEntryAllowed): Promise<ZipSummary> {
+  return summarizeWalk(walkFolderForZip(rootAbs, path.basename(rootAbs), allowed), limit);
 }
 
 /** What a ZIP of the selection would hold, counted the same way. */
-export async function summarizeSelectionForZip(items: readonly ZipSelectionItem[], limit = MAX_ZIP_ENTRIES): Promise<ZipSummary> {
-  return summarizeWalk(walkSelectionForZip(items), limit);
+export async function summarizeSelectionForZip(items: readonly ZipSelectionItem[], limit = MAX_ZIP_ENTRIES, allowed?: ZipEntryAllowed): Promise<ZipSummary> {
+  return summarizeWalk(walkSelectionForZip(items, allowed), limit);
 }
 
 // ── The format ───────────────────────────────────────────────────────────────
@@ -509,11 +517,11 @@ export async function* zipEntries(
 }
 
 /** A ZIP of the folder at `rootAbs`, its entries under `topName/`, as a Node stream. */
-export function zipFolderStream(rootAbs: string, topName: string, opts: { maxEntries?: number } = {}): Readable {
-  return Readable.from(zipEntries(walkFolderForZip(rootAbs, topName), opts), { objectMode: false });
+export function zipFolderStream(rootAbs: string, topName: string, opts: { maxEntries?: number; allowed?: ZipEntryAllowed } = {}): Readable {
+  return Readable.from(zipEntries(walkFolderForZip(rootAbs, topName, opts.allowed), opts), { objectMode: false });
 }
 
 /** A ZIP of the selected files and folders, each at the top of the archive, as a Node stream. */
-export function zipSelectionStream(items: readonly ZipSelectionItem[], opts: { maxEntries?: number } = {}): Readable {
-  return Readable.from(zipEntries(walkSelectionForZip(items), opts), { objectMode: false });
+export function zipSelectionStream(items: readonly ZipSelectionItem[], opts: { maxEntries?: number; allowed?: ZipEntryAllowed } = {}): Readable {
+  return Readable.from(zipEntries(walkSelectionForZip(items, opts.allowed), opts), { objectMode: false });
 }
