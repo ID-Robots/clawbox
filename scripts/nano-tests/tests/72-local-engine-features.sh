@@ -168,12 +168,25 @@ const call = async (method, p, body) => {
           out.onTop = gitOut(["log", "--format=%h %s", sha + "..HEAD"]).split("\n").filter(Boolean).slice(0, 5);
           const added = gitOut(["show", "--format=", "--name-only", "--diff-filter=A", sha]).split("\n").filter((f) => /^(entities|concepts|syntheses|sources)\/.+\.md$/.test(f));
           let undone = 0;
+          let changed = 0;
           for (const page of added) {
+            // Only a page still exactly as the job wrote it (committed or not):
+            // one edited since is left in place and reported, never deleted.
+            let same = false;
+            try {
+              cp.execFileSync("git", ["-C", vault, "diff", "--quiet", sha, "--", page], { stdio: "ignore" });
+              same = true;
+            } catch {}
+            if (!same) {
+              changed++;
+              continue;
+            }
             const d = await call("DELETE", "/setup-api/prime-radiant/pages/" + page.split("/").map(encodeURIComponent).join("/"));
             if (d.status === 200) undone++;
           }
           out.pagesAdded = added.length;
           out.pagesDeleted = undone;
+          out.pagesChangedSince = changed;
           if (added.length > 0 && undone === added.length) out.reverted++;
         }
       } catch (err) {
@@ -306,7 +319,7 @@ if [ "$(sj '.commits')" -ge 1 ] 2>/dev/null && [ "$(sj '.reverted')" = "$(sj '.c
 elif [ "$(sj '.commits // 0')" = 0 ]; then
   note "no commit of the job was found to undo"
 else
-  note "the job's commits were not all undone: $(sj '.reverted')/$(sj '.commits') ($(sj '.revertError // empty'); on top: $(sj -c '.onTop'); pages deleted $(sj '.pagesDeleted // 0')/$(sj '.pagesAdded // 0'))"
+  note "the job's commits were not all undone: $(sj '.reverted')/$(sj '.commits') ($(sj '.revertError // empty'); on top: $(sj -c '.onTop'); pages deleted $(sj '.pagesDeleted // 0')/$(sj '.pagesAdded // 0'), left in place as changed since $(sj '.pagesChangedSince // 0'))"
 fi
 
 # shellcheck disable=SC2016  # $r is jq's
