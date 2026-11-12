@@ -143,6 +143,9 @@ describe("the staff tools card", () => {
     fireEvent.click(screen.getByTestId("staff-mcp-apply-retry"));
     await waitFor(() => expect(posts()).toHaveLength(2));
     expect(JSON.parse(String(posts()[1][1].body))).toEqual({ servers: { docs: { header: "X-Api-Key" } } });
+    // …and the edit made since is still in the form after the answer.
+    await waitFor(() => expect(screen.queryByTestId("staff-mcp-apply-retry")).not.toBeDisabled());
+    expect((screen.getByTestId("staff-mcp-header-docs") as HTMLInputElement).value).toBe("X-Other");
   });
 
   it("does not read a server named like an object's own property as granted", async () => {

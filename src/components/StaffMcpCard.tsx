@@ -271,7 +271,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
         </div>
       )}
 
-      {saved === "grants" && !notApplied && <StatusMessage type="success" message={t("users.staffMcp.saved")} />}
+      {(saved === "grants" || saved === "apply-retry") && !notApplied && <StatusMessage type="success" message={t("users.staffMcp.saved")} />}
       {notApplied && (
         <div className="space-y-2" data-testid="staff-mcp-not-applied">
           <StatusMessage type="error" message={t("users.staffMcp.notApplied")} />
@@ -279,7 +279,8 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
             type="button"
             disabled={busy !== null}
             // The grants as SAVED — never an unsaved edit made since.
-            onClick={() => void post("grants", { servers: Object.fromEntries(Object.entries(grantsOf(view)).map(([name, header]) => [name, { header }])) })}
+            // Its own key: the answer does not replace a draft being edited.
+            onClick={() => void post("apply-retry", { servers: Object.fromEntries(Object.entries(grantsOf(view)).map(([name, header]) => [name, { header }])) })}
             className="px-3 h-8 rounded-lg text-xs text-white bg-white/10 hover:bg-white/15 cursor-pointer disabled:opacity-50"
             data-testid="staff-mcp-apply-retry"
           >
