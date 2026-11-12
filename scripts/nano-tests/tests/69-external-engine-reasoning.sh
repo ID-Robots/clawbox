@@ -335,12 +335,18 @@ if [ "$sw" = "$want_sw" ]; then ok "the card's reasoning switch reads $sw when e
 if [ "$line" = "$want_line" ]; then ok "the card's summary reasoning line: $line"; else not_ok "the card's summary reasoning line: '${line}', want '$want_line'"; fi
 board_owner_api GET /setup-api/local-ai/external
 if [ "$(api_json '.reasoning')" = true ]; then ok "Edit → Save kept reasoning on"; else not_ok "after Edit → Save: reasoning=$(api_json '.reasoning')"; fi
-[ "$RUNTIME" = openclaw ] && { entry=$(openclaw_entry); [ "$entry" = "$ENTRY_ON" ] && ok "after Edit → Save clawext is still reasoning:true" || not_ok "after Edit → Save clawext is $entry"; }
+if [ "$RUNTIME" = openclaw ]; then
+  entry=$(openclaw_entry)
+  if [ "$entry" = "$ENTRY_ON" ]; then ok "after Edit → Save clawext is still reasoning:true"; else not_ok "after Edit → Save clawext is $entry"; fi
+fi
 
 # 8. Remove.
 board_owner_api DELETE /setup-api/local-ai/external
 if [ "$API_STATUS" = 200 ] && [ "$(api_json '.removed')" = true ]; then ok "Remove: the engine is gone"; else not_ok "Remove answered $(api_error)"; fi
-[ "$RUNTIME" = openclaw ] && { entry=$(openclaw_entry); [ "$entry" = absent ] && ok "openclaw.json has no clawext after Remove" || not_ok "openclaw.json after Remove: $entry"; }
+if [ "$RUNTIME" = openclaw ]; then
+  entry=$(openclaw_entry)
+  if [ "$entry" = absent ]; then ok "openclaw.json has no clawext after Remove"; else not_ok "openclaw.json after Remove: $entry"; fi
+fi
 AFTER=$(chat_selection)
 if [ "$AFTER" = "$BEFORE" ]; then ok "the chat is back on ${AFTER:-what it was}"; else not_ok "the chat was on ${BEFORE:-none} and is now on ${AFTER:-none}"; fi
 
