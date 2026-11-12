@@ -196,6 +196,10 @@ d("a mask the clawbox user cannot write is reported, and the gateway step still 
       "is_unselected_edition() { return 1; }",
       'sudo() { printf \'sudo %s\\n\' "$*" >> "$CALLS"; }',
       'systemctl() { printf \'systemctl %s\\n\' "$*" >> "$CALLS"; }',
+      // Not the update's own step, so the restart is wanted as always.
+      "unset CLAWBOX_DISPATCHED_STEP",
+      shellFunction("update_owns_the_box"),
+      shellFunction("gateway_setup_restart_wanted"),
       fn.split("/etc/systemd/system").join(etc),
     ].join("\n");
     return runAsInstaller(call, prelude);

@@ -71,9 +71,13 @@ describe("the updater wiring", () => {
   });
 
   it("says so on the update's result when the gateway answers over degraded agents", () => {
-    // Both steps that end an update on a running gateway.
-    const verify = UPDATER.slice(UPDATER.indexOf('id: "gateway_verify"'), UPDATER.indexOf('id: "gateway_verify"') + 600);
-    const restart = UPDATER.slice(UPDATER.indexOf('id: "gateway_restart"'), UPDATER.indexOf('id: "gateway_restart"') + 600);
+    // Both steps that end an update on a running gateway: each one's customRun.
+    const customRunOf = (id: string) => {
+      const run = UPDATER.indexOf("customRun:", UPDATER.indexOf(`id: "${id}"`));
+      return UPDATER.slice(run, UPDATER.indexOf("\n    },", run));
+    };
+    const verify = customRunOf("gateway_verify");
+    const restart = customRunOf("gateway_restart");
     expect(verify).toContain("await warnIfOpenclawDatabasesDegraded();");
     expect(restart).toContain("await warnIfOpenclawDatabasesDegraded();");
     expect(UPDATER).toContain('warnUpdate("openclaw-migration-degraded", describeOpenclawMigration(status))');
