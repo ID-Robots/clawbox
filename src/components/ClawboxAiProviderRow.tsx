@@ -1,7 +1,8 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useContext, type ReactNode } from "react";
 import ProviderRadioRow from "./ProviderRadioRow";
+import { CloudRecommendContext } from "./cloud-recommend-context";
 import { useT } from "@/lib/i18n";
 import { CLAWBOX_AI_DESCRIPTION, CLAWBOX_AI_DESCRIPTION_KEY } from "@/lib/clawbox-ai-tiers";
 
@@ -40,6 +41,8 @@ export default function ClawboxAiProviderRow({
   isDefault = false,
 }: ClawboxAiProviderRowProps) {
   const { t } = useT();
+  // Not on a box whose AI is the owner's own (src/components/cloud-recommend-context.ts).
+  const recommend = useContext(CloudRecommendContext);
   // The catalogue's line, with the English constant as the floor for the
   // moment before the pack has loaded (the same floor the desktop's other
   // pre-load strings keep): `t` answers the key itself until then.
@@ -60,9 +63,11 @@ export default function ClawboxAiProviderRow({
       statusSlot={statusSlot}
       badges={
         <>
-          <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--coral-tint)] text-[var(--coral-bright)] leading-none">
-            {t("recommended")}
-          </span>
+          {recommend && (
+            <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--coral-tint)] text-[var(--coral-bright)] leading-none">
+              {t("recommended")}
+            </span>
+          )}
           {trailingBadge}
         </>
       }

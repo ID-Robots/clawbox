@@ -597,6 +597,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import VoiceSecureNotice from '@/components/VoiceSecureNotice'
 import { chatProviderPillLabel, shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { isLocalAiProviderId } from '@/lib/cloud-providers'
 import {
   chatKeepsEarlierModel,
   conversationModelFor,
@@ -7192,6 +7193,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         current?: unknown
         reasoning?: unknown
         stale?: unknown
+        cloudProvidersHidden?: unknown
       }
       // `aborted` alone is not enough: a response can resolve before the abort
       // lands, and `json()` adds a second await for a newer seed to start in.
@@ -7219,6 +7221,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       // Keep what is rendered and go back for the real list; only a header with
       // nothing on offer yet falls back to the device's own provider.
       if (degraded && hermesProvidersRef.current.length > 0) {
+        // The setting is the box's own, not the dashboard's: a degraded answer
+        // carries it too, so rows already on screen follow it while the
+        // dashboard is away (src/lib/cloud-providers.ts).
+        if (mData?.cloudProvidersHidden === true) {
+          const kept = hermesProvidersRef.current.filter(p => isLocalAiProviderId(p.id))
+          if (kept.length !== hermesProvidersRef.current.length) setHermesProviders(kept)
+        }
         retryLater()
         return
       }
@@ -7228,6 +7237,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       // `null` means the source couldn't tell — keep those.
       const rows: HermesChatProvider[] = reported
         .filter(p => typeof p?.id === 'string' && p.id && p.authenticated !== false)
+        // "Hide cloud AI providers" (src/lib/cloud-providers.ts): the box's
+        // own AI only.
+        .filter(p => mData?.cloudProvidersHidden !== true || isLocalAiProviderId(p.id))
         .map(p => ({
           id: p.id as string,
           name: typeof p.name === 'string' ? p.name : (p.id as string),
@@ -7237,7 +7249,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       // The configured provider always belongs in the list even if Hermes
       // reports it unauthenticated — it is what this chat is running on,
       // so the header must be able to show it.
-      if (deviceProvider && !rows.some(r => r.id === deviceProvider)) {
+      // Not a cloud one while they are hidden: the header offers the box's own
+      // AI alone, and falls back to its plain label without a row.
+      if (deviceProvider && !rows.some(r => r.id === deviceProvider)
+        && (mData?.cloudProvidersHidden !== true || isLocalAiProviderId(deviceProvider))) {
         rows.unshift({ id: deviceProvider, name: deviceProvider })
       }
       setHermesProviders(rows)
@@ -9439,7 +9454,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
             const activeOption = chatModelState.options.find(o => o.id === activeId)
             const triggerLabel = activeOption
               ? getProviderPillText(activeOption)
-              : (unselectableActive ? t('chat.noChatModel') : activeId)
+              : (unselectableActive ? (chatModelState.activeLabel ?? t('chat.noChatModel')) : activeId)
             return (
               <HeaderDropdown
                 ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}

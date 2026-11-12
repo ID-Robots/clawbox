@@ -9,6 +9,7 @@ import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
 import AiProviderList from "./AiProviderList";
+import { CloudProvidersSettings } from "./CloudProvidersPanel";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
@@ -666,6 +667,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
+  // The last of the two requests above the cloud-provider fold acted on, so a
+  // later visit to Providers does not open it again (CloudProvidersSettings).
+  const [cloudOpenSeen, setCloudOpenSeen] = useState(0);
   // A deep link asked for Providers with the Anthropic accounts open and in
   // view (the usage-limit notices). Held until the list says it showed them,
   // then cleared, so a later visit to Providers is not the same ask again.
@@ -4373,7 +4377,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 card's to pitch over. */}
             {/* Never on an organisation box (src/lib/org-mode.ts): its ClawBox AI
                 offers are hidden for everyone, the owner included. */}
-            {aiProvider?.clawaiConfigured === false && !sessionUser?.orgMode && (
+            {/* On a box whose AI is the owner's own (an external engine,
+                Local-only mode) the local choice leads and the cloud cards
+                fold away or, with "Hide cloud AI providers" on, are not drawn
+                (src/components/CloudProvidersPanel.tsx, TASK-2497). */}
+            <CloudProvidersSettings
+              onOpenLocalAi={() => setSectionGated("localAi")}
+              openRequest={openClawAIOfferRequest + providerSelectionRequest}
+              openRequestSeen={cloudOpenSeen}
+              onOpenRequestSeen={setCloudOpenSeen}
+              pitch={aiProvider?.clawaiConfigured === false && !sessionUser?.orgMode && (
               <ClawboxAiPitchCard
                 onConnect={() => {
                   // Two panels answer this page, and only one of them acts on
@@ -4393,6 +4406,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 onLocalAi={() => setSectionGated("localAi")}
               />
             )}
+            >
 
             <AiProviderList
               showAnthropicAccounts={showAnthropicAccounts}
@@ -4426,6 +4440,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
               }}
             /></I18nProvider>
+            </CloudProvidersSettings>
 
             {/* The ClawBox AI allowances are no longer a card of their own down
                 here. They now hang off the ClawBox AI row in the list above,
