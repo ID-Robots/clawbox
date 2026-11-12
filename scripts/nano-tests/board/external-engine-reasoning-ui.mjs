@@ -177,12 +177,15 @@ async function sendTurn(page, label, marker) {
   }
   await sleep(1500);
   const after = await page.evaluate(toggles);
-  if (after > before) {
-    // The reasoning part is collapsed; open the newest one to read it.
-    await page.evaluate(`(() => { const all = document.querySelectorAll('[data-testid="chat-transcript"] [data-testid="chat-reasoning-toggle"]'); const b = all[all.length - 1]; if (b && b.getAttribute("aria-expanded") === "false") b.click(); })()`);
-    await sleep(500);
+  let thinking = (await transcriptText(page)).includes(`NANO-THINK[${marker}]`);
+  if (!thinking && after > before) {
+    // The reasoning part is collapsed; open the newest one and give it a moment
+    // to render (a click can land while the bubble is still settling).
+    thinking = !!(await waitFor(`the reasoning of ${marker}`, async () => {
+      await page.evaluate(`(() => { const all = document.querySelectorAll('[data-testid="chat-transcript"] [data-testid="chat-reasoning-toggle"]'); const b = all[all.length - 1]; if (b && b.getAttribute("aria-expanded") !== "true") b.click(); })()`);
+      return (await transcriptText(page)).includes(`NANO-THINK[${marker}]`);
+    }, 10_000, 1000).catch(() => false));
   }
-  const thinking = (await transcriptText(page)).includes(`NANO-THINK[${marker}]`);
   out(`TURN ${label} ${marker} thinking=${thinking ? "yes" : "no"} disclosures=${before}->${after}`);
 }
 
@@ -252,6 +255,23 @@ async function phaseCard(page) {
   await shot(page, "card-after-resave");
 }
 
+/**
+ * Shut Chromium down the way a person closing it would (CDP Browser.close),
+ * so the profile — the picker's level in localStorage among it — is on disk
+ * for the next phase; a SIGTERM alone can lose what was written last.
+ */
+async function closeChrome(chrome) {
+  try {
+    const port = Number(fs.readFileSync(path.join(env.PROFILE_DIR, "DevToolsActivePort"), "utf8").split("\n")[0]);
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    const browser = await connectTarget(version.webSocketDebuggerUrl);
+    await browser.send("Browser.close").catch(() => null);
+    browser.close();
+    await waitFor("Chromium to exit", async () => chrome.child.exitCode !== null || chrome.child.signalCode !== null, 15_000).catch(() => null);
+  } catch { /* already gone, or no DevTools: fall through */ }
+  try { chrome.child.kill("SIGTERM"); } catch { /* gone */ }
+}
+
 async function run() {
   // The profile persists between phases, and so does the DevToolsActivePort
   // file the last phase's Chromium left in it: read before this Chromium
@@ -289,7 +309,7 @@ async function run() {
     say(`not ok - the ${PHASE} browser phase failed: ${err instanceof Error ? err.message : err}`);
   } finally {
     page?.close();
-    try { chrome.child.kill("SIGTERM"); } catch { /* gone */ }
+    await closeChrome(chrome);
   }
 }
 
