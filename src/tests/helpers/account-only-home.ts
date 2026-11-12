@@ -36,10 +36,54 @@ const RECORDED = [
 export interface AccountOnlyHome {
   /** Shell to source before the code under test; defines `as_clawbox`. */
   shell: string;
+  /**
+   * Shell to source AFTER the hand-over helpers are defined: each call of
+   * `hand_over_home_path` or `hand_over_checkout` is then logged, in order,
+   * with the commands `as_clawbox` runs (`sequence`).
+   */
+  recordHandOvers: string;
   /** Root's file commands that named a path in the home, one per line. */
   rootInHome: () => string[];
   /** Every command run through `as_clawbox`, one per line. */
   asClawbox: () => string[];
+  /** The hand-overs (`hand-over <helper> <args>`) and `as_clawbox` commands, in the order they ran. */
+  sequence: () => string[];
+}
+
+/** The prefix of a hand-over line in `sequence()`. */
+export const HAND_OVER = "hand-over ";
+
+/**
+ * Where in `sequence` the hand-over `call` ran, and where the first command
+ * through `as_clawbox` did: a site that writes as the account must hand over
+ * first, so `handOver` is found and comes before `firstWrite`.
+ */
+export function handOverOrder(sequence: string[], call: string): { handOver: number; firstWrite: number } {
+  return {
+    handOver: sequence.indexOf(`${HAND_OVER}${call}`),
+    firstWrite: sequence.findIndex((l) => !l.startsWith(HAND_OVER)),
+  };
+}
+
+/**
+ * A `chown` for root that changes nothing and records, for every operand of a
+ * RECURSIVE call, where the change would land: the operand's directory resolved
+ * through every link, then the operand's own name, which `chown -R` does not
+ * follow. One path per line in `log`.
+ */
+export function recursiveChownRecorder(log: string): string {
+  return [
+    "chown() {",
+    '  local a r="" owner=""',
+    '  for a in "$@"; do case "$a" in -R) r=1 ;; esac; done',
+    '  [ -n "$r" ] || return 0',
+    '  for a in "$@"; do',
+    '    case "$a" in -*) continue ;; esac',
+    '    if [ -z "$owner" ]; then owner=1; continue; fi',
+    `    printf '%s/%s\\n' "$(cd -P -- "$(dirname -- "$a")" 2>/dev/null && pwd -P)" "$(basename -- "$a")" >> ${JSON.stringify(log)}`,
+    "  done",
+    "}",
+  ].join("\n");
 }
 
 /**
@@ -90,8 +134,27 @@ export function accountOnlyHome(home: string, aux: string, { lock = CAN_LOCK_HOM
       (cmd) => `${cmd}() { [ -n "\${AS_SERVICE_USER:-}" ] || __ao_root ${cmd} "$@"; command ${cmd} "$@"; }`,
     ),
   ].join("\n");
+  // Each helper that is defined is renamed and wrapped: the wrapper logs the
+  // call to the same file as `as_clawbox`, then runs the helper unchanged.
+  const recordHandOvers = [
+    "__ao_record_hand_overs() {",
+    "  local fn",
+    "  for fn in hand_over_home_path hand_over_checkout; do",
+    '    declare -F "$fn" >/dev/null || continue',
+    '    eval "$(declare -f "$fn" | sed "1s/^$fn /__ao_real_$fn /")"',
+    `    eval "$fn() { printf '%s\\\\n' \\"${HAND_OVER}$fn \\$*\\" >> \\"\\$__AO_CALLS\\"; __ao_real_$fn \\"\\$@\\"; }"`,
+    "  done",
+    "}",
+    "__ao_record_hand_overs",
+  ].join("\n");
   const lines = (file: string) => fs.readFileSync(file, "utf-8").split("\n").filter(Boolean);
-  return { shell, rootInHome: () => lines(log), asClawbox: () => lines(calls) };
+  return {
+    shell,
+    recordHandOvers,
+    rootInHome: () => lines(log),
+    asClawbox: () => lines(calls).filter((l) => !l.startsWith(HAND_OVER)),
+    sequence: () => lines(calls).map((l) => l.trimEnd()),
+  };
 }
 
 /** Write bits back on a sandbox a failed run left locked, so it can be removed. */

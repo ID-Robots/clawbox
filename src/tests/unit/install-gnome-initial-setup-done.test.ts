@@ -3,7 +3,9 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { accountOnlyHome, CAN_LOCK_HOME, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 
 // Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
 // on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -335,7 +337,10 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
       "dconf() { :; }",
       "as_clawbox_login() { :; }",
       account.shell,
+      `IFACE_ENV=${JSON.stringify(path.join(project, "data", "network.env"))}`,
       shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+      account.recordHandOvers,
       fn.split("/etc/dconf/db/local.d").join(path.join(dconfDir, "db", "local.d")),
       "__ao_lock",
       "step_desktop_theme",
@@ -343,7 +348,10 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     const runner = path.join(aux, "run.sh");
     fs.writeFileSync(runner, script, "utf-8");
     const r = spawnSync("bash", [runner], { encoding: "utf-8", cwd: aux });
-    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", rootInHome: account.rootInHome() };
+    return {
+      status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", rootInHome: account.rootInHome(),
+      sequence: account.sequence(),
+    };
   }
 
   it("writes the autostart entry with its text and mode 0644, and root writes nothing in the home", () => {
@@ -384,5 +392,18 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(fs.readFileSync(entry(), "utf-8")).toContain(`Exec=${themeScript()}`);
     expect(fs.statSync(entry()).mode & 0o777).toBe(0o644);
     expect(r.rootInHome).toEqual([]);
+  });
+
+  it("hands over the script with its checkout, and the entry's way from the home, before each is written", () => {
+    const r = runTheme();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    const script = handOverOrder(r.sequence, "hand_over_checkout");
+    expect(script.handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(script.handOver).toBeLessThan(script.firstWrite);
+    expect(r.sequence[script.firstWrite]).toBe(`chmod +x -- ${themeScript()}`);
+    const autostart = r.sequence.indexOf(`hand-over hand_over_home_path ${entry()}`);
+    expect(autostart).toBeGreaterThanOrEqual(0);
+    expect(autostart).toBeLessThan(r.sequence.indexOf(`mkdir -p -- ${path.dirname(entry())}`));
   });
 });

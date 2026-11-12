@@ -7,7 +7,9 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
-import { accountOnlyHome, CAN_LOCK_HOME, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 
 // The wrapper's install starts a real bash: vitest's 5 s test and 10 s hook
 // defaults are not enough on a loaded CI runner. See
@@ -212,6 +214,7 @@ const CAN_RUN_WRAPPER = CAN_LOCK_HOME && spawnSync("bash", ["-c", "true"], { std
       `SRC_DIR=${JSON.stringify(src)}`,
       account.shell,
       shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      account.recordHandOvers,
       `${extractShellFunction("install_claude_ds_wrapper")}\n}`,
       "__ao_lock",
       // As step_coding_harness calls it: errexit off inside, the status read.
@@ -219,7 +222,7 @@ const CAN_RUN_WRAPPER = CAN_LOCK_HOME && spawnSync("bash", ["-c", "true"], { std
     ].join("\n");
     writeFileSync(path.join(aux, "run.sh"), script, "utf-8");
     const r = spawnSync("bash", [path.join(aux, "run.sh")], { encoding: "utf-8", cwd: aux });
-    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", rootInHome: account.rootInHome() };
+    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", rootInHome: account.rootInHome(), sequence: account.sequence() };
   }
 
   it("lands with the repo's bytes and mode 0755, and root writes nothing in the home", () => {
@@ -232,6 +235,9 @@ const CAN_RUN_WRAPPER = CAN_LOCK_HOME && spawnSync("bash", ["-c", "true"], { std
     expect(statSync(dest()).mode & 0o777).toBe(0o755);
     // The temp went with the rename.
     expect(readdirSync(path.dirname(dest()))).toEqual([CODING_HARNESS_COMMAND]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, `hand_over_home_path ${path.dirname(dest())}`);
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
   });
 
   it("replaces a link at the target instead of writing through it", () => {

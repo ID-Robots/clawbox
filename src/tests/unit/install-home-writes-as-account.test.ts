@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { accountOnlyHome, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
+import { accountOnlyHome, handOverOrder, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
 
 // Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
 // on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -79,6 +79,7 @@ function runAsInstaller(body: string, prelude = "") {
     account.shell,
     prelude,
     shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+    account.recordHandOvers,
     "__ao_lock",
     body,
     "",
@@ -92,6 +93,7 @@ function runAsInstaller(body: string, prelude = "") {
     stderr: result.stderr ?? "",
     rootInHome: account.rootInHome(),
     asClawbox: account.asClawbox(),
+    sequence: account.sequence(),
     calls: fs.existsSync(callsFile) ? fs.readFileSync(callsFile, "utf-8").split("\n").filter(Boolean) : [],
   };
 }
@@ -126,6 +128,11 @@ d("the user-level gateway unit is masked by the clawbox user", () => {
     expect(r.calls).toHaveLength(1);
     expect(r.calls[0]).toMatch(/systemctl --user stop openclaw-gateway\.service$/);
     expect(r.asClawbox.some((c) => c.startsWith("ln -s"))).toBe(true);
+    // Its directory, and each one above it, are handed over before the first write.
+    const { handOver, firstWrite } = handOverOrder(r.sequence, `hand_over_home_path ${unitDir()}`);
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+    expect(r.sequence[firstWrite]).toBe(`rm -f -- ${unit()}`);
   });
 
   it("is a no-op on a unit that is already masked", () => {
@@ -164,6 +171,69 @@ d("the user-level gateway unit is masked by the clawbox user", () => {
   });
 });
 
+d("a mask the clawbox user cannot write is reported, and the gateway step still finishes", () => {
+  // The whole step: the updater dispatches it on its own under errexit (and
+  // stops the update when it fails), and step_post_update runs it as a fixup
+  // with errexit off. The account's rm or ln can fail where root's could not;
+  // either way the system gateway is still configured and restarted, and the
+  // failed mask is said on the line the updater turns into a warning.
+  const unitDir = () => path.join(home, ".config", "systemd", "user");
+  const unit = () => path.join(unitDir(), "openclaw-gateway.service");
+  const MARKER = /^CLAWBOX-WARN\[user-gateway-not-masked\]: /m;
+
+  function gatewaySetup(call: string) {
+    const fn = shellFunction("step_gateway_setup");
+    const etc = path.join(sandbox, "etc-systemd");
+    expect(fn.split("/etc/systemd/system").length - 1, "step_gateway_setup's unit paths").toBe(3);
+    const src = path.join(sandbox, "src");
+    fs.mkdirSync(path.join(src, "config"), { recursive: true });
+    fs.mkdirSync(etc, { recursive: true });
+    fs.writeFileSync(path.join(src, "config", "clawbox-gateway.service"), "[Service]\n");
+    const prelude = [
+      `SRC_DIR=${JSON.stringify(src)}`,
+      `PROJECT_DIR=${JSON.stringify(path.join(home, "clawbox"))}`,
+      "is_hermes_edition() { return 1; }",
+      "is_unselected_edition() { return 1; }",
+      'sudo() { printf \'sudo %s\\n\' "$*" >> "$CALLS"; }',
+      'systemctl() { printf \'systemctl %s\\n\' "$*" >> "$CALLS"; }',
+      fn.split("/etc/systemd/system").join(etc),
+    ].join("\n");
+    return runAsInstaller(call, prelude);
+  }
+
+  beforeEach(() => {
+    fs.mkdirSync(unitDir(), { recursive: true });
+    fs.writeFileSync(unit(), "[Service]\nExecStart=/usr/bin/openclaw gateway\n");
+    // The account cannot change the directory the unit is in.
+    fs.chmodSync(unitDir(), 0o555);
+  });
+
+  it.each([
+    ["dispatched on its own, under errexit", 'step_gateway_setup; echo "RC=0"'],
+    ["run as a fixup, errexit off", 'if step_gateway_setup; then echo "RC=0"; else echo "RC=$?"; fi'],
+  ])("%s", (_name, call) => {
+    const r = gatewaySetup(call);
+
+    expect(r.stdout, r.stderr).toContain("RC=0");
+    expect(r.stdout).toMatch(MARKER);
+    expect(r.stderr).toContain("Warning: could not mask the user-level openclaw-gateway.service");
+    expect(r.calls).toContain("systemctl restart clawbox-gateway.service");
+    expect(fs.lstatSync(unit()).isSymbolicLink()).toBe(false);
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("says nothing of the kind when the mask lands", () => {
+    fs.chmodSync(unitDir(), 0o755);
+
+    const r = gatewaySetup('step_gateway_setup; echo "RC=0"');
+
+    expect(r.stdout, r.stderr).toContain("RC=0");
+    expect(r.stdout).not.toMatch(MARKER);
+    expect(fs.readlinkSync(unit())).toBe("/dev/null");
+    expect(r.calls).toContain("systemctl restart clawbox-gateway.service");
+  });
+});
+
 d("~/.codex is made private by the clawbox user", () => {
   // step_systemd_services' lines, from the comment that explains them to the
   // timer start that follows.
@@ -187,6 +257,9 @@ d("~/.codex is made private by the clawbox user", () => {
     expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(fs.statSync(codex()).isDirectory()).toBe(true);
     expect(fs.statSync(codex()).mode & 0o777).toBe(0o700);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, `hand_over_home_path ${codex()}`);
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
   });
 
   it("sets an existing ~/.codex back to 0700 and keeps what is in it", () => {
@@ -223,6 +296,9 @@ d("the full install's ~/Desktop clean-up runs as the clawbox user", () => {
     expect(fs.readdirSync(desktop())).toEqual(["notes.txt"]);
     // The link went, never what it pointed at.
     expect(fs.existsSync(target)).toBe(true);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, `hand_over_home_path ${desktop()}`);
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
   });
 
   it("is quiet when there is no ~/Desktop", () => {
@@ -239,7 +315,7 @@ d("hand_over_home_path gives root-owned leftovers back one entry at a time", () 
   // as an account other than the test's own: to the helper, everything the
   // test made then belongs to someone else. `chown` is a stub that records the
   // entry and the directory it was run in.
-  function handOver(target: string, chownBody = "") {
+  function handOver(target: string, chownBody = "", flags = "") {
     const script = [
       "set -euo pipefail",
       `CLAWBOX_HOME=${JSON.stringify(home)}`,
@@ -247,7 +323,7 @@ d("hand_over_home_path gives root-owned leftovers back one entry at a time", () 
       `CALLS=${JSON.stringify(path.join(aux, "chown.log"))}`,
       `chown() { printf '%s %s\\n' "$(pwd -P)" "$*" >> "$CALLS"; ${chownBody} }`,
       shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
-      `hand_over_home_path ${JSON.stringify(target)}`,
+      `hand_over_home_path ${flags} ${JSON.stringify(target)}`,
       'echo "rc=$?"',
     ].join("\n");
     const result = spawnSync("bash", ["-c", script], { encoding: "utf-8", cwd: aux });
@@ -324,6 +400,33 @@ d("hand_over_home_path gives root-owned leftovers back one entry at a time", () 
     expect(r.status, r.stderr).toBe(0);
     expect(r.chowns).toHaveLength(1);
     expect(r.chowns[0]).toMatch(/ \.config$/);
+  });
+
+  it("with -R, hands over the last directory with everything below it, from the directory it is in", () => {
+    fs.mkdirSync(path.join(home, ".cache", "node-gyp", "24.22.2"), { recursive: true });
+
+    const r = handOver(path.join(home, ".cache", "node-gyp"), "", "-R");
+
+    expect(r.status, r.stderr).toBe(0);
+    const real = fs.realpathSync(home);
+    expect(r.chowns).toEqual([
+      `${real} -h -- clawbox-device:clawbox-device .cache`,
+      `${real}/.cache -R -- clawbox-device:clawbox-device node-gyp`,
+    ]);
+  });
+
+  it("with -R, goes through no link, the last entry included", () => {
+    const outside = path.join(aux, "elsewhere");
+    fs.mkdirSync(path.join(outside, "node-gyp"), { recursive: true });
+    fs.symlinkSync(outside, path.join(home, ".cache"));
+    expect(handOver(path.join(home, ".cache", "node-gyp"), "", "-R").chowns).toEqual([]);
+
+    fs.rmSync(path.join(home, ".cache"));
+    fs.mkdirSync(path.join(home, ".cache"));
+    fs.symlinkSync(path.join(outside, "node-gyp"), path.join(home, ".cache", "node-gyp"));
+    const r = handOver(path.join(home, ".cache", "node-gyp"), "", "-R");
+    expect(r.chowns).toHaveLength(1);
+    expect(r.chowns[0]).toMatch(/ -h -- \S+ \.cache$/);
   });
 
   it("hands over a file only while it has one name, so nothing outside the home changes hands", () => {

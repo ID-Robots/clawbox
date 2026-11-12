@@ -4,10 +4,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // not enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { accountOnlyHome, shellFunctionIfPresent } from "../helpers/account-only-home";
+import {
+  accountOnlyHome, handOverOrder, recursiveChownRecorder, shellFunctionIfPresent,
+} from "../helpers/account-only-home";
 
 /**
  * TASK-2244: the 4.3 update failed at rebuild_reboot with "node-pty is still
@@ -79,6 +84,8 @@ interface Scenario {
   loginEnv?: Record<string, string>;
   /** The project's .npmrc; absent when not given. */
   npmrc?: string;
+  /** Runs after the per-run clean-up, just before the entry: to lay out the home. */
+  setup?: () => void;
 }
 
 interface Run {
@@ -95,6 +102,10 @@ interface Run {
   rootInHome: string[];
   /** The commands run as the clawbox user through `as_clawbox`. */
   asClawbox: string[];
+  /** The hand-overs and the `as_clawbox` commands, in order. */
+  sequence: string[];
+  /** Where each of root's recursive chowns would land (src/tests/helpers/account-only-home.ts). */
+  chownTargets: string[];
 }
 
 let sandbox: string;
@@ -237,6 +248,7 @@ function run(scenario: Scenario = {}): Run {
     ptyLoads = false,
     loginEnv = {},
     npmrc,
+    setup,
   } = scenario;
 
   // Per RUN: a case that calls this twice must not start from the first one's
@@ -261,6 +273,7 @@ function run(scenario: Scenario = {}): Run {
   if (systemHeaders !== null) writeHeaders(path.join(include, "node"), systemHeaders);
   if (nodejsDir === "symlink-to-node") symlinkSync("node", path.join(include, "nodejs"));
   if (nodejsDir === "flat-dir") writeHeaders(path.join(include, "nodejs"), RUNNING);
+  setup?.();
 
   const unwritable = path.join(sandbox, "no-write");
   writeFileSync(unwritable, "", "utf-8");
@@ -271,6 +284,8 @@ function run(scenario: Scenario = {}): Run {
   // commands that name a path in the home are recorded: the home's
   // directories are the clawbox user's to make.
   const account = accountOnlyHome(home, sandbox, { lock: false });
+  const chownLog = path.join(sandbox, "chown-targets.txt");
+  rmSync(chownLog, { force: true });
   const script = [
     "set -euo pipefail",
     `PATH=${JSON.stringify(fakeBin)}:"$PATH"`,
@@ -295,8 +310,11 @@ function run(scenario: Scenario = {}): Run {
     account.shell,
     "wait_for_apt() { :; }",
     "apt-get() { :; }",
-    "chown() { :; }",
+    recursiveChownRecorder(chownLog),
+    `IFACE_ENV=${JSON.stringify(path.join(project, "data", "network.env"))}`,
     shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+    shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+    account.recordHandOvers,
     ...FUNCTIONS.map(shellFunction),
     call,
     'echo "FAILURE=$NODE_PTY_FAILURE"',
@@ -317,6 +335,8 @@ function run(scenario: Scenario = {}): Run {
     failure: /^FAILURE=(.*)$/m.exec(stdout)?.[1] ?? "",
     rootInHome: account.rootInHome(),
     asClawbox: account.asClawbox(),
+    sequence: account.sequence(),
+    chownTargets: existsSync(chownLog) ? readFileSync(chownLog, "utf-8").split("\n").filter(Boolean) : [],
   };
 }
 
@@ -681,5 +701,65 @@ describe("the build's cache directories are made by the clawbox user", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain("Warning: could not create ~/.npm and ~/.cache/node-gyp");
     expect(r.stdout).toContain("node-pty rebuilt and verified");
+  });
+});
+
+describe("root hands the build's caches over only from a directory it walked to", () => {
+  // ~/.cache and the checkout directory are entries in the clawbox user's own
+  // home. A recursive chown given a path that goes THROUGH one of them changes
+  // the tree a link there points at; ~/.npm's parent is the home path itself.
+  // The run names the device user as an account other than the test's own, so
+  // every hand-over has something to hand over (src/tests/helpers/account-only-home.ts
+  // records where each recursive chown would land).
+  const cacheDir = () => path.join(home, ".cache", "node-gyp");
+
+  it("hands over ~/.cache/node-gyp from inside ~/.cache, ~/.npm, and the checkout whole", () => {
+    const r = run({
+      systemHeaders: RUNNING, network: "offline",
+      setup: () => mkdirSync(cacheDir(), { recursive: true }),
+    });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect([...r.chownTargets].sort()).toEqual([
+      path.join(realpathSync(home), ".cache", "node-gyp"),
+      path.join(realpathSync(home), ".npm"),
+      path.join(realpathSync(sandbox), "clawbox"),
+    ].sort());
+  });
+
+  it("changes nothing behind a link at ~/.cache", () => {
+    const outside = path.join(sandbox, "outside");
+    const r = run({
+      systemHeaders: RUNNING, network: "offline",
+      setup: () => {
+        mkdirSync(path.join(outside, "node-gyp"), { recursive: true });
+        symlinkSync(outside, path.join(home, ".cache"));
+      },
+    });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.chownTargets.filter((t) => t.startsWith(realpathSync(outside)))).toEqual([]);
+  });
+
+  it("changes nothing behind a link at the checkout directory", () => {
+    const elsewhere = path.join(sandbox, "elsewhere");
+    renameSync(project, elsewhere);
+    symlinkSync(elsewhere, project);
+
+    const r = run({ systemHeaders: RUNNING, network: "offline" });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.chownTargets.filter((t) => t.startsWith(realpathSync(elsewhere)))).toEqual([]);
+  });
+
+  it("hands both over before the clawbox user makes the directories", () => {
+    const r = run({ systemHeaders: RUNNING, network: "offline" });
+
+    expect(r.status, r.stderr).toBe(0);
+    for (const call of [`hand_over_home_path -R ${cacheDir()}`, "hand_over_checkout node_modules"]) {
+      const { handOver, firstWrite } = handOverOrder(r.sequence, call);
+      expect(handOver, `${call} in ${r.sequence.join(" | ")}`).toBeGreaterThanOrEqual(0);
+      expect(handOver, call).toBeLessThan(firstWrite);
+    }
   });
 });

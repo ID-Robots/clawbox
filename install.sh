@@ -1617,11 +1617,14 @@ append_as_clawbox() {
 # would hand over the file it points at, /etc/clawbox/network.env included.
 # Anything under scripts/ it does not own counts too: its find must enter every
 # directory there, and its chmod fails with EPERM on a script it does not own
-# even when the bit is already set.
+# even when the bit is already set. So does anything under each DIR given,
+# relative to the checkout (node_modules, data/llamacpp): a tree the account
+# writes into next.
 hand_over_checkout() {
   [ -d "$PROJECT_DIR" ] && [ ! -L "$PROJECT_DIR" ] || return 0
-  local entry stray
-  stray="$(find "$PROJECT_DIR/scripts" ! -user "$CLAWBOX_USER" -print -quit 2>/dev/null || true)"
+  local entry stray tree trees=("$PROJECT_DIR/scripts")
+  for tree in "$@"; do trees+=("$PROJECT_DIR/$tree"); done
+  stray="$(find "${trees[@]}" ! -user "$CLAWBOX_USER" -print -quit 2>/dev/null || true)"
   for entry in "$PROJECT_DIR" "$PROJECT_DIR/data" "$PROJECT_DIR/.env" "$IFACE_ENV" ${stray:+"$stray"}; do
     if [ -e "$entry" ] && [ "$(stat -c %U "$entry" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
       chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR" || true
@@ -1648,17 +1651,21 @@ as_clawbox_login() {
 # ~/.cache/node-gyp), and a write AS the user fails in such a directory where
 # root's own write succeeded.
 #
-# One entry at a time from the home down, never recursive, and never through a
-# link: the home is the user's, so any directory under it can be swapped for a
-# link to /etc between root's look and root's chown. Each entry is examined with
-# one lstat (`stat` without -L) and changed with `chown -h`, and the walk goes
-# deeper only by entering the directory and checking it is the same inode it
-# examined, so root never acts on an entry outside the tree it looked at. Stops
-# quietly at the first entry that is missing, a link or not a directory: a
-# missing one the user creates itself, and a link is not ours to follow. A file
-# is handed over only while it has one name: a second hard link is the same
-# file somewhere else, which would change hands with it.
+# PATH is one of this file's own paths under the home. The walk takes one entry
+# at a time from the home down and never follows a link. Each entry is examined
+# with one lstat (`stat` without -L) and, when the user does not own it, changed
+# with `chown -h` by its name in the directory the walk is in. The walk goes
+# deeper only by entering the directory it examined and checking that it is the
+# same inode, and it stops there when it is not. It also stops, quietly, at the
+# first entry that is missing (the user creates that itself), a link, or neither
+# a directory nor a regular file with one name: a second hard link is the same
+# file somewhere else, which would change hands with it. With -R, a last entry
+# that is a directory is handed over with everything below it by `chown -R` of
+# its name, run in the directory the walk is in; chown -R follows no link, its
+# operand included.
 hand_over_home_path() {
+  local tree=""
+  if [ "${1:-}" = -R ]; then tree=1; shift; fi
   local rest="${1#"$CLAWBOX_HOME"/}"
   [ "$rest" != "$1" ] || return 0
   (
@@ -1672,6 +1679,10 @@ hand_over_home_path() {
         "directory|"* | "regular file|1|"* | "regular empty file|1|"*) ;;
         *) exit 0 ;;
       esac
+      if [ -n "$tree" ] && [ -z "$rest" ] && [ "${info%%|*}" = directory ]; then
+        chown -R -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null
+        exit 0
+      fi
       if [ "${info##*|}" != "$CLAWBOX_USER" ]; then
         chown -h -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null || exit 0
       fi
@@ -2111,8 +2122,11 @@ ensure_llamacpp_model_cached() {
   require_safe_hf_ref "LLAMACPP_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
+  # Whatever under data/llamacpp is not the clawbox user's is handed back with
+  # the checkout whole (hand_over_checkout says why never a path below it),
+  # once: the download below runs as that user.
   mkdir -p "$MODEL_DIR"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
+  hand_over_checkout data/llamacpp
 
   if [ -f "$MODEL_PATH" ]; then
     echo "  Gemma 4 model already cached for offline use"
@@ -2131,7 +2145,6 @@ ensure_llamacpp_model_cached() {
     return 1
   fi
 
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
   echo "  Gemma 4 model cached for offline startup"
   prune_superseded_llamacpp_model "$MODEL_DIR" "$HF_FILE"
 }
@@ -2431,16 +2444,16 @@ ensure_node_pty() {
 
   # The DEFAULT devdir, made the clawbox user's whatever NODE_GYP_DEVDIR says:
   # a devdir the user's own environment names is theirs to have made. Created
-  # BY that user, after a root-owned ~/.cache from an earlier root run is
-  # handed back; warned about rather than fatal, because step_build calls this
-  # under errexit and a build that would finish must not end here.
-  hand_over_home_path "$CLAWBOX_HOME/.cache/node-gyp"
+  # BY that user, after what earlier root runs left root-owned is handed back:
+  # ~/.cache and everything in ~/.cache/node-gyp, walked to from the home;
+  # node_modules with the checkout whole; ~/.npm, whose parent is the home.
+  # Warned about rather than fatal, because step_build calls this under errexit
+  # and a build that would finish must not end here.
+  hand_over_home_path -R "$CLAWBOX_HOME/.cache/node-gyp"
+  hand_over_checkout node_modules
   as_clawbox mkdir -p -- "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp" \
     || echo "  Warning: could not create ~/.npm and ~/.cache/node-gyp as $CLAWBOX_USER"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" \
-    "$CLAWBOX_HOME/.npm" \
-    "$CLAWBOX_HOME/.cache/node-gyp" \
-    "$PROJECT_DIR/node_modules" 2>/dev/null || true
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
 
   # Each attempt's output is kept as well as streamed. A failure then ends with
   # the last 80 lines of the attempt that failed, and the compiler's own error
@@ -7766,7 +7779,9 @@ step_openclaw_install() {
     local _oc_stage="$NPM_PREFIX/.openclaw-stage"
     rm -rf "$_oc_stage"
     mkdir -p "$_oc_stage"
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$_oc_stage"
+    # Handed over from inside the prefix, walked to from the home: the prefix
+    # is an entry in the clawbox user's home.
+    hand_over_home_path -R "$_oc_stage"
     as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$_oc_stage"
     if [ ! -x "$_oc_stage/bin/openclaw" ]; then
       echo "Error: OpenClaw installation failed — npm left no openclaw launcher in $_oc_stage (the core already on the box is untouched)"
@@ -13158,9 +13173,15 @@ step_gateway_setup() {
       # directory exists (the unit is in it); a root-owned one, or a root-owned
       # ~/.config or ~/.config/systemd above it, is handed back first, the owner
       # the old chown gave the directory.
+      # The user's write can fail where root's did not. A mask that did not
+      # land is said on the updater's warning line and the step goes on, so
+      # the system gateway below is still configured and restarted: the
+      # updater stops a whole update on this step's failure.
       hand_over_home_path "$USER_SYSTEMD_DIR"
-      as_clawbox rm -f -- "$USER_GATEWAY_UNIT"
-      as_clawbox ln -s -- /dev/null "$USER_GATEWAY_UNIT"
+      if ! as_clawbox rm -f -- "$USER_GATEWAY_UNIT" || ! as_clawbox ln -s -- /dev/null "$USER_GATEWAY_UNIT"; then
+        echo "  Warning: could not mask the user-level openclaw-gateway.service" >&2
+        echo "CLAWBOX-WARN[user-gateway-not-masked]: the user-level openclaw-gateway.service could not be masked, so it can start beside the system gateway at the next login; 'sudo bash $PROJECT_DIR/install.sh --step gateway_setup' tries again"
+      fi
     fi
   fi
 
@@ -14214,8 +14235,9 @@ step_desktop_theme() {
   # clawbox user: both live in that user's tree, where root's chmod, chown and
   # `>` would follow a planted link. A root-owned leftover on the way to
   # either — ~/.config made by this step's old root `mkdir -p` is one — is
-  # handed back first, the owner the old chowns gave them.
-  hand_over_home_path "$theme_script"
+  # handed back first, the owner the old chowns gave them: the script with the
+  # checkout it is in, the entry walked to from the home.
+  hand_over_checkout
   as_clawbox chmod +x -- "$theme_script"
 
   hand_over_home_path "$autostart_file"

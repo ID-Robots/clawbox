@@ -297,6 +297,7 @@ const AMBIENT = [
   "ensure_clawbox_bashrc_path() { :; }",
   "is_hermes_edition() { return 1; }",
   "chown() { :; }",
+  shellFunction("hand_over_home_path"),
   'systemctl() { printf "systemctl %s\\n" "$*" >> "$ST/calls"; }',
   // `as_clawbox -H cmd …` runs cmd as the service user; here it just runs it.
   'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',

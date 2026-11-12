@@ -446,3 +446,71 @@ describe.skipIf(ROOT_USER)("install.sh writes .env and data/network.env as the s
     );
   });
 });
+
+describe("ensure_llamacpp_model_cached hands data/llamacpp over only through the whole checkout", () => {
+  // The model cache sits below data/, an entry the account controls: a
+  // recursive chown named below the checkout changes whatever a link at data/
+  // points at. A leftover anywhere under data/llamacpp hands back the checkout
+  // whole, with the sync's own command; a checkout that is all the account's
+  // is left alone.
+  const MODEL = "gemma-4-E2B_q4_0-it.gguf";
+  const models = () => path.join(project, "data", "llamacpp", "models");
+  const cacheCall = (extra = "") => [
+    extra,
+    installFunction("require_safe_hf_ref"),
+    installFunction("prune_superseded_llamacpp_model"),
+    installFunction("ensure_llamacpp_model_cached"),
+    // The download, as the account: hf writes the file into --local-dir.
+    "hf() { : > \"$5/$3\"; }",
+    'as_clawbox_login() { ( export AS_SERVICE_USER=1; eval "$*" ); }',
+    "ensure_llamacpp_model_cached",
+  ].join("\n");
+  const rootChowns = (r: Run) => [...new Set(
+    r.events.filter((e) => e.who === "root" && e.argv[0] === "chown").map((e) => e.argv.join(" ")),
+  )];
+
+  beforeEach(() => {
+    put(".env", "LLAMACPP_LOAD_MODE=mmap\n", 0o600);
+    fs.mkdirSync(models(), { recursive: true });
+  });
+
+  it.each([
+    ["the model is cached", true],
+    ["the model is downloaded", false],
+  ])("hands back a checkout with leftovers whole, never a path below it, when %s", (_name, cached) => {
+    if (cached) fs.writeFileSync(path.join(models(), MODEL), "gguf");
+
+    const r = run(cacheCall(), { user: "root" });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(fs.existsSync(path.join(models(), MODEL))).toBe(true);
+    expect(rootChowns(r)).toEqual([`chown -R root:root ${project}`]);
+  });
+
+  it("hands back the checkout for a leftover deep under data/llamacpp when everything above it is the account's", () => {
+    // The test cannot make a file it does not own, so root's find and stat
+    // report one: a file below data/llamacpp owned by another account.
+    fs.writeFileSync(path.join(models(), MODEL), "gguf");
+    const stray = path.join(models(), "partial");
+    fs.writeFileSync(stray, "");
+    const shims = [
+      `find() { case " $* " in *" $PROJECT_DIR/data/llamacpp "*) echo ${JSON.stringify(stray)}; return 0 ;; esac; `
+        + 'command find "$@"; }',
+      `stat() { if [ "\${@: -1}" = ${JSON.stringify(stray)} ]; then echo nobody; else command stat "$@"; fi; }`,
+    ].join("\n");
+
+    const r = run(cacheCall(shims));
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(rootChowns(r)).toEqual([`chown -R ${os.userInfo().username}:${os.userInfo().username} ${project}`]);
+  });
+
+  it("changes no owner in a checkout that is all the account's", () => {
+    fs.writeFileSync(path.join(models(), MODEL), "gguf");
+
+    const r = run(cacheCall());
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(rootChowns(r)).toEqual([]);
+  });
+});

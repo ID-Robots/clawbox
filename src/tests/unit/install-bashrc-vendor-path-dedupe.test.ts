@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { accountOnlyHome, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
+import { accountOnlyHome, handOverOrder, shellFunctionIfPresent, unlockTree } from "../helpers/account-only-home";
 
 // Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
 // on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -134,7 +134,7 @@ function runBashrcHygiene(
   home: string = sandbox,
   /** Shell injected before the function runs — used to stage a concurrent writer. */
   prelude = "",
-): { status: number | null; stdout: string; stderr: string; rootInHome: string[] } {
+): { status: number | null; stdout: string; stderr: string; rootInHome: string[]; sequence: string[] } {
   const account = accountOnlyHome(home, aux);
   const script = [
     "set -euo pipefail",
@@ -148,6 +148,7 @@ function runBashrcHygiene(
     prelude,
     "",
     shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+    account.recordHandOvers,
     "",
     extractShellFunction("dedupe_vendor_bashrc_path_blocks"),
     "",
@@ -165,6 +166,7 @@ function runBashrcHygiene(
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
     rootInHome: account.rootInHome(),
+    sequence: account.sequence(),
   };
 }
 
@@ -447,6 +449,10 @@ d("root writes nothing in the clawbox user's home", () => {
       + 'export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"\n',
     );
     expect(run.rootInHome).toEqual([]);
+    const { handOver, firstWrite } = handOverOrder(run.sequence, `hand_over_home_path ${bashrc}`);
+    expect(handOver, run.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+    expect(run.sequence[firstWrite]).toBe(`tee -a -- ${bashrc}`);
   });
 
   it("appends the ~/.local/bin line alone as the clawbox user", () => {
@@ -461,6 +467,10 @@ d("root writes nothing in the clawbox user's home", () => {
       + 'export PATH="$HOME/.local/bin:$PATH"\n',
     );
     expect(run.rootInHome).toEqual([]);
+    const { handOver, firstWrite } = handOverOrder(run.sequence, `hand_over_home_path ${bashrc}`);
+    expect(handOver, run.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+    expect(run.sequence[firstWrite]).toBe(`tee -a -- ${bashrc}`);
   });
 
   it("creates a missing .bashrc as the clawbox user", () => {

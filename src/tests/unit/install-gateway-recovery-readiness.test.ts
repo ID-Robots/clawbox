@@ -178,6 +178,7 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
           'CLAWBOX_USER="$(id -un)"',
           account.shell,
           shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+          account.recordHandOvers,
         ]
         : ['as_clawbox() { "$@"; }']),
       // Both top-level assignments the step reaches, cut from install.sh like
@@ -235,6 +236,7 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
       out,
       calls: fs.readFileSync(log, "utf8").split(NL).filter(Boolean),
       rootInHome: account ? account.rootInHome() : [],
+      sequence: account ? account.sequence() : [],
     };
   }
 
@@ -378,6 +380,13 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
     expect(fs.readdirSync(qdir).sort()).toEqual(BLOCKERS.map((b) => path.basename(b)).sort());
     for (const rel of BLOCKERS) expect(fs.existsSync(path.join(home, rel)), rel).toBe(false);
     expect(r.out).not.toMatch(/No known legacy migration blocker files found/);
+    // Each file's directory is handed over before the file is moved.
+    for (const rel of BLOCKERS) {
+      const file = path.join(home, rel);
+      const handOver = r.sequence.indexOf(`hand-over hand_over_home_path ${path.dirname(file)}`);
+      expect(handOver, `${rel} in ${r.sequence.join(" | ")}`).toBeGreaterThanOrEqual(0);
+      expect(handOver, rel).toBeLessThan(r.sequence.findIndex((l) => l.startsWith(`mv -v -- ${file} `)));
+    }
     // The recovery itself still runs after the move.
     expect(r.calls.filter((c) => c.startsWith("openclaw doctor"))).toHaveLength(2);
   });
