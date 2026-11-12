@@ -37,7 +37,7 @@
 
 import { estimateUsd, type CostRates } from "./cost-rates";
 import { mergeClaimIndex, previewMerge } from "./edit";
-import { ALLOWANCE_SPENT, allowanceStopOf, completeWithRetry, flashClient, type AllowanceStop, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, allowanceStopOf, completeWithRetry, flashClient, itemsThatFit, type AllowanceStop, type FlashClient } from "./flash-client";
 import { recordCost } from "./ingest-store";
 import {
   buildSummaryPrompt,
@@ -209,10 +209,19 @@ export async function runSummaries(
 
   const forModel = modelOn ? plan.jobs.slice(0, s.maxPages) : [];
   const rest = modelOn ? plan.jobs.slice(s.maxPages) : plan.jobs;
-  const client = forModel.length > 0 ? (options.client ?? flashClient()) : null;
+  const client = forModel.length > 0 ? (options.client ?? (await flashClient())) : null;
   let stopped = false;
-  for (let i = 0; i < forModel.length; i += SUMMARY_BATCH) {
-    const batch = forModel.slice(i, i + SUMMARY_BATCH);
+  for (let i = 0; i < forModel.length; ) {
+    // As many nodes a call as the box's own model's window holds (ClawBox AI: SUMMARY_BATCH).
+    const at = i;
+    const size = stopped || !client
+      ? SUMMARY_BATCH
+      : itemsThatFit(client.budget, Math.min(SUMMARY_BATCH, forModel.length - at), (n) => ({
+          ...buildSummaryPrompt(forModel.slice(at, at + n).map((j) => shownNeighbourhood(j.hood))),
+          maxTokens: summaryMaxTokens(n),
+        }));
+    const batch = forModel.slice(at, at + size);
+    i += batch.length;
     if (stopped || !client) {
       batch.forEach(fromFacts);
       continue;

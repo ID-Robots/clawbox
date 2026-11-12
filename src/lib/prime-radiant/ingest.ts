@@ -54,6 +54,7 @@ import {
   allowanceStopOf,
   completeWithRetry,
   flashClient,
+  NO_ENGINE_MESSAGE,
   type AllowanceStop,
   type FlashClient,
   type RetryOptions,
@@ -115,6 +116,9 @@ import {
   buildPage,
   buildWriterPrompt,
   parseWriterResponse,
+  boundedTextChars,
+  writerLimits,
+  MIN_TEXT_CHARS_PER_FILE,
   type BuildContext,
   type ExistingPage,
   type ItemVerdict,
@@ -206,6 +210,14 @@ export class IngestBusyError extends Error {
   constructor(readonly runningId: string) {
     super("an ingest is already running");
     this.name = "IngestBusyError";
+  }
+}
+
+/** The box's own model has a window too small to write one document's page (writer.ts `writerLimits`): no job is started. */
+export class IngestWindowError extends Error {
+  constructor(readonly contextTokens: number) {
+    super(`The model on this box has a window of ${contextTokens} tokens, too small to write pages with. Choose a model with a larger window in Settings → Local AI.`);
+    this.name = "IngestWindowError";
   }
 }
 
@@ -327,6 +339,11 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
       console.warn(`[prime-radiant] memory-wiki repair failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
+  // The engine that writes, chosen once for the job: on the box's own engine
+  // with a window too small for one document's card, refused before a job —
+  // or a single dead letter — exists.
+  const client = deps.client ?? (await flashClient());
+  if (client.budget && !writerLimits(client.budget)) throw new IngestWindowError(client.budget.contextTokens);
   // Checked again after the await: two starts that arrived together both passed the first look.
   const raced = runningJobId();
   if (raced) throw new IngestBusyError(raced);
@@ -385,7 +402,7 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
   const live: LiveJob = { job, listeners: new Set(), backlog: [], abort: new AbortController(), done: Promise.resolve() };
   store.live.set(job.id, live);
   await pruneKeptCopies(now().getTime()).catch(() => 0);
-  live.done = runJob(live, input, claimed, vault, deps).finally(() => {
+  live.done = runJob(live, input, claimed, vault, { ...deps, client }).finally(() => {
     // Kept a little after the end so a stream opened right as it finished still
     // gets the closing state from memory; the database has it either way.
     const t = setTimeout(() => {
@@ -476,13 +493,18 @@ async function runJob(
 ): Promise<void> {
   const { job } = live;
   const now = deps.now ?? (() => new Date());
-  const client = deps.client ?? flashClient();
+  const client = deps.client ?? (await flashClient());
   const settings = readSettings();
   const rates = deps.costRates ?? effectiveCostRates();
-  const parallel = Math.min(MAX_PARALLEL, Math.max(1, Math.floor(deps.parallel ?? settings.ingest.parallel)));
-  const maxBatchChars = deps.maxBatchChars ?? MAX_BATCH_CHARS;
+  // A model with a bounded window (the box's own engine) gets batches it can
+  // hold, one call at a time: its budget, whatever the settings say.
+  const limits = client.budget ? writerLimits(client.budget) : null;
+  const parallel = Math.min(MAX_PARALLEL, Math.max(1, Math.floor(deps.parallel ?? settings.ingest.parallel)), client.budget?.parallel ?? MAX_PARALLEL);
+  const maxBatchChars = Math.min(deps.maxBatchChars ?? MAX_BATCH_CHARS, limits?.batchChars ?? MAX_BATCH_CHARS);
+  const writerBatch = Math.min(WRITER_BATCH_SIZE, limits?.batchFiles ?? WRITER_BATCH_SIZE);
   const scratch = path.join(primeRadiantRoot(), "tmp", job.id);
   const signal = live.abort.signal;
+  // (A window too small for the writer never gets here: startIngest refuses it, IngestWindowError.)
   let fatal: string | null = null;
   /** The spent allowance that stopped the job: what it did not finish stays queued. */
   let spent: AllowanceStop | null = null;
@@ -550,7 +572,7 @@ async function runJob(
     const files = input.kind === "retry" ? scan.files : await documentsOf(scan.files, skips, { machineText: input.kind === "folders", signal });
     job.total = files.length;
     job.skips = skips;
-    const batchSize = Math.min(WRITER_BATCH_SIZE, Math.max(1, Math.floor(deps.batchSize ?? progressBatchSize(files.length))));
+    const batchSize = Math.min(writerBatch, Math.max(1, Math.floor(deps.batchSize ?? progressBatchSize(files.length))));
     job.notes.push(...scan.notes);
     const s = scan.skips;
     if (s.unsupported > 0) job.notes.push(`${s.unsupported} file(s) of a kind Prime Radiant does not read were left out.`);
@@ -628,7 +650,9 @@ async function runJob(
         const bySeq = new Map(files.map((f) => [f.seq, f]));
         updates = updates.filter((u) => {
           const f = u.status === "failed" && results.transient.has(u.seq) ? bySeq.get(u.seq) : undefined;
-          if (f) requeue.push(f);
+          // Too long for the box's own model: asked again smaller — in half the
+          // batch, and a document alone with half its text — never as it was.
+          if (f) requeue.push(limits && u.error === TOO_LONG_FAILURE ? { ...f, text: f.text.slice(0, Math.max(MIN_TEXT_CHARS_PER_FILE, Math.floor(f.text.length / 2))) } : f);
           return !f;
         });
       }
@@ -681,7 +705,7 @@ async function runJob(
         publish();
         continue;
       }
-      const prepared = prepareText(raw);
+      const prepared = prepareText(raw, limits ? boundedTextChars(limits, file.label) : undefined);
       if (prepared.text.trim() === "") {
         settle([{ seq, status: "skipped", sha256: read.sha256, bytes, error: "empty" }], labels);
         publish();
@@ -716,7 +740,7 @@ async function runJob(
         }
       }
       // Half the writer's own batch, not the progress batch: a retry round is no progress step.
-      const half = Math.max(1, Math.ceil(Math.min(WRITER_BATCH_SIZE, Math.max(1, Math.floor(deps.batchSize ?? WRITER_BATCH_SIZE))) / 2));
+      const half = Math.max(1, Math.ceil(Math.min(writerBatch, Math.max(1, Math.floor(deps.batchSize ?? writerBatch))) / 2));
       let chunk: PreparedFile[] = [];
       let chunkChars = 0;
       for (const f of queued) {
@@ -908,8 +932,12 @@ function askAboutVerifiedPages(vault: string, docs: readonly VerifiedDocument[],
   return waiting;
 }
 
+/** How a file a call too long for the box's own model failed: its retry is cut (see the requeue). */
+const TOO_LONG_FAILURE = "model call failed (too_long)";
+
 const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
   no_credential: "This box is not signed in to ClawBox AI.",
+  no_engine: NO_ENGINE_MESSAGE,
   auth: "ClawBox AI refused this box's sign-in. Sign in again in Settings.",
   refused: "ClawBox AI refused the request. Check the plan this box is on.",
 };
@@ -990,12 +1018,14 @@ async function processBatch(
       if (e?.kind === "aborted" && signal.aborted) {
         return { updates: [], transient: new Set(), pagesWritten: 0, commit: null, cost: cost.calls ? cost : null, fatal: null };
       }
-      const fatal = e ? (FATAL_MESSAGES[e.kind] ?? null) : null;
+      // The box's own engine words its refusal for the owner itself (its key, its runtime); ClawBox AI's are the table's.
+      const fatal = e && FATAL_MESSAGES[e.kind] ? (client.engine === "local" ? e.message : FATAL_MESSAGES[e.kind]!) : null;
       return failAll(
         e?.kind === "aborted" ? "stopped" : `model call failed${e ? ` (${e.kind})` : ""}`,
         fatal,
         cost.calls ? cost : null,
-        e ? e.retryable : true,
+        // Too long for the box's own model: the retry round asks again in half the batch.
+        e ? e.retryable || e.kind === "too_long" : true,
       );
     }
     const usd = estimateUsd(outcome.response.model, outcome.response.usage, rates);

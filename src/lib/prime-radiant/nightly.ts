@@ -428,7 +428,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
   const rates = deps.rates ?? effectiveCostRates();
   const notes = summary.notes;
   const online = await (deps.online ?? flashAvailable)().catch(() => false);
-  if (!online) notes.push("ClawBox AI is not reachable from this box; the ingest and the contradiction judge were skipped.");
+  if (!online) notes.push("No model can write from this box (ClawBox AI or a model of its own); the ingest and the contradiction judge were skipped.");
 
   // Once per vault, before the branch is cut: what memory-wiki wrote into main goes first.
   try {

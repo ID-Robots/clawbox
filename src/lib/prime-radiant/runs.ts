@@ -196,12 +196,33 @@ const AGG = "COUNT(*) AS calls, COALESCE(SUM(tokens_in), 0) AS tokens_in, COALES
  * One total over the calls since an instant, leaving out the operations
  * named. Zero, creating nothing, before the state database exists.
  */
-export function readCostTotals(vault: string, options: { since: string; excludeOperations?: readonly string[] }): CostTotals {
+/**
+ * The cost rows since `since`, summed. `excludeOperations` leaves out rows by
+ * operation; `models` keeps only the rows whose model starts with one of
+ * `prefixes` (`only`) or leaves them out (`except`) — the box's own engine
+ * records its answers under `llamacpp/…`, `ollama/…` or `clawext/…`.
+ */
+export function readCostTotals(
+  vault: string,
+  options: { since: string; excludeOperations?: readonly string[]; models?: { only?: readonly string[]; except?: readonly string[] } },
+): CostTotals {
   if (!stateDbExists(vault)) return { calls: 0, tokensIn: 0, tokensOut: 0, usdEstimate: 0 };
   const excluded = [...new Set(options.excludeOperations ?? [])];
-  const not = excluded.length > 0 ? ` AND operation NOT IN (${excluded.map(() => "?").join(", ")})` : "";
+  let where = excluded.length > 0 ? ` AND operation NOT IN (${excluded.map(() => "?").join(", ")})` : "";
+  const params: Array<string | number> = [options.since, ...excluded];
+  // A prefix match by substr, never LIKE: a model id may hold `_` or `%`.
+  const only = [...new Set(options.models?.only ?? [])];
+  if (only.length > 0) {
+    where += ` AND (${only.map(() => "substr(model, 1, ?) = ?").join(" OR ")})`;
+    for (const p of only) params.push(p.length, p);
+  }
+  const except = [...new Set(options.models?.except ?? [])];
+  for (const p of except) {
+    where += " AND substr(model, 1, ?) <> ?";
+    params.push(p.length, p);
+  }
   return withStateDb(vault, (db) =>
-    totals(db.prepare(`SELECT ${AGG} FROM costs WHERE at >= ?${not}`).get(options.since, ...excluded) as { calls: number; tokens_in: number; tokens_out: number; usd: number }),
+    totals(db.prepare(`SELECT ${AGG} FROM costs WHERE at >= ?${where}`).get(...params) as { calls: number; tokens_in: number; tokens_out: number; usd: number }),
   );
 }
 

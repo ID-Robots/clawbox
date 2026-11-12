@@ -96,14 +96,17 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
           </p>
           {meter && (
             <div className="space-y-0.5" data-testid="prime-radiant-usage-allowance">
-              <p className="text-[11px] text-[var(--text-secondary)] tabular-nums">
-                <span className="uppercase tracking-wider text-[var(--text-muted)]">{t("primeRadiant.usage.allowance.title")}</span>{" "}
-                {t("primeRadiant.usage.allowance.share", {
-                  days: n(meter.windowDays),
-                  tokens: tok(meter.primeRadiant.tokensIn + meter.primeRadiant.tokensOut),
-                  calls: n(meter.primeRadiant.calls),
-                })}
-              </p>
+              {/* On the box's own engine with no ClawBox AI call in the window, the share is no news: the line below says it. */}
+              {!(meter.engine === "local" && meter.primeRadiant.calls === 0) && (
+                <p className="text-[11px] text-[var(--text-secondary)] tabular-nums">
+                  <span className="uppercase tracking-wider text-[var(--text-muted)]">{t("primeRadiant.usage.allowance.title")}</span>{" "}
+                  {t("primeRadiant.usage.allowance.share", {
+                    days: n(meter.windowDays),
+                    tokens: tok(meter.primeRadiant.tokensIn + meter.primeRadiant.tokensOut),
+                    calls: n(meter.primeRadiant.calls),
+                  })}
+                </p>
+              )}
               {account?.available && (
                 <p className="text-[11px] text-[var(--text-muted)] tabular-nums" data-testid="prime-radiant-usage-allowance-weekly">
                   {t("primeRadiant.usage.allowance.weekly", { percent: n(account.weekly.percentUsed) })}
@@ -113,6 +116,15 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
               {spent && (
                 <p role="status" className="text-[11px] text-amber-200" data-testid="prime-radiant-usage-allowance-spent">
                   {spentAt ? t("primeRadiant.usage.allowance.spentAt", { at: spentAt }) : t("primeRadiant.usage.allowance.spent")}
+                </p>
+              )}
+              {meter.engine === "local" && (
+                <p className="text-[11px] text-[var(--text-secondary)] tabular-nums" data-testid="prime-radiant-usage-local">
+                  {t("primeRadiant.usage.local", {
+                    days: n(meter.windowDays),
+                    tokens: tok((meter.local?.tokensIn ?? 0) + (meter.local?.tokensOut ?? 0)),
+                    calls: n(meter.local?.calls ?? 0),
+                  })}
                 </p>
               )}
               {account && !account.available && (

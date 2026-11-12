@@ -172,7 +172,9 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   file_refused: { code: "BAD_ARGUMENT", next: "That file is one of ClawBox's own; leave it out." },
   invalid_name: { code: "BAD_ARGUMENT", next: "Leave that file out: Prime Radiant reads .txt, .md, .pdf, .docx, .odt and .rtf." },
   busy: { code: "CONFLICT", next: "One is already running. Do not start another; follow it with prime_radiant_ingest_status or prime_radiant_status." },
-  no_credential: { code: "CONFLICT", next: "The box is not signed in to ClawBox AI, which writes the pages. Tell the user to sign in under Settings → Providers." },
+  no_credential: { code: "CONFLICT", next: "No model can write the pages: the box is neither signed in to ClawBox AI nor running a model of its own. Tell the user to sign in under Settings → Providers or set up Local AI in Settings." },
+  cloud_ai_locked: { code: "CONFLICT", next: "Local-only AI is on and no model is set up on this box to write the pages. Tell the user to set up Local AI in Settings." },
+  window_too_small: { code: "CONFLICT", next: "The model on this box has too small a window to write pages. Tell the user to choose a model with a larger window in Settings → Local AI." },
   lint_blocked: { code: "CONFLICT", next: "Change what the rules name — a secret in the text, a claim id another page uses or one that was retired — and try again, or tell the user." },
   verified: { code: "CONFLICT", next: "Set a verified claim's new text with prime_radiant_claim_verify, or ask the owner through prime_radiant_review_raise." },
   exists: { code: "CONFLICT", next: "Edit what is there instead (prime_radiant_page_edit or prime_radiant_claim_edit), or call again." },
@@ -1200,7 +1202,7 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_ingest_start",
-    "Import documents into the wiki — folders or files inside the owner's Files — when the user asked. ClawBox AI writes pages from them on the owner's allowance. One import at a time; follow it with prime_radiant_ingest_status.",
+    "Import documents into the wiki — folders or files inside the owner's Files — when the user asked. ClawBox AI writes pages from them on the owner's allowance, or the model on this box where the box runs its own. One import at a time; follow it with prime_radiant_ingest_status.",
     {
       folders: zOptList(20, 4096, "Folders to import, inside the owner's Files."),
       files: zOptList(200, 4096, "Files to import (.txt .md .pdf .docx .odt .rtf, 9 MB each), inside the owner's Files."),
