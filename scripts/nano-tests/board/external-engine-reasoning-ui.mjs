@@ -253,6 +253,11 @@ async function phaseCard(page) {
 }
 
 async function run() {
+  // The profile persists between phases, and so does the DevToolsActivePort
+  // file the last phase's Chromium left in it: read before this Chromium
+  // writes its own, it names a port nobody listens on any more.
+  fs.mkdirSync(env.PROFILE_DIR, { recursive: true });
+  fs.rmSync(path.join(env.PROFILE_DIR, "DevToolsActivePort"), { force: true });
   let chrome = startChrome(env.NO_SANDBOX === "1");
   current = chrome;
   let page = null;

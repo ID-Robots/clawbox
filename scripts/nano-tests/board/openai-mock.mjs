@@ -8,7 +8,8 @@
 //
 //   GET  /v1/models            the one model, with its window (`max_model_len`)
 //   POST /v1/chat/completions  streamed (SSE) or not; the reply is the text
-//                              after "nothing else:" in the last user message
+//                              after "nothing else:" in the newest user message
+//                              that has it
 //                              (the suite's "Reply with exactly this text and
 //                              nothing else: NANO-CI-OK <serial>"), else
 //                              "NANO-EXT-MOCK"
@@ -67,9 +68,16 @@ function textOf(content) {
 
 function replyFor(messages) {
   const users = Array.isArray(messages) ? messages.filter((m) => m?.role === "user") : [];
-  const last = textOf(users.at(-1)?.content);
-  const m = /nothing else:\s*([^\n]+)/i.exec(last);
-  return { last, reply: m ? m[1].trim() : "NANO-EXT-MOCK" };
+  const texts = users.map((m) => textOf(m?.content));
+  const last = texts.at(-1) ?? "";
+  // The newest user message that asks for a text. A chat turn from the
+  // desktop chat ends with OpenClaw's runtime-context message AFTER the
+  // owner's, so the very last user message is not always the owner's.
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const m = /nothing else:\s*([^\n]+)/i.exec(texts[i]);
+    if (m) return { last, reply: m[1].trim() };
+  }
+  return { last, reply: "NANO-EXT-MOCK" };
 }
 
 const server = http.createServer((req, res) => {
