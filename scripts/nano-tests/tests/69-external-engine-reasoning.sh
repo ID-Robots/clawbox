@@ -248,6 +248,25 @@ else:
 ENTRY_ON='{"compat":{"reasoningEffortMap":{"off":"none"},"supportedReasoningEfforts":["none","low","medium","high"]},"reasoning":true}'
 ENTRY_OFF='{"compat":null,"reasoning":false}'
 
+# gateway_levels — the thinking levels the OpenClaw gateway itself publishes for
+# clawext/$MODEL (its `models.list`, asked by the CLI), comma-joined.
+gateway_levels() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board '
+    timeout 90 "$1" gateway call models.list --json 2>/dev/null | python3 -c "
+import json, sys
+t = sys.stdin.read()
+try:
+    d = json.loads(t[t.index(\"{\"):])
+except ValueError:
+    sys.exit(0)
+for m in d.get(\"models\") or []:
+    if m.get(\"provider\") == \"clawext\" and m.get(\"id\") == sys.argv[1]:
+        print(\",\".join(l.get(\"id\", \"\") for l in m.get(\"thinkingLevels\") or []))
+" "$2"
+  ' "$OPENCLAW_BIN" "$MODEL" | tail -n1
+}
+
 restart_runtime() {
   if [ "$RUNTIME" = hermes ]; then
     # Hermes' own restart door (bounceHermesDashboardShared): the chat backend
@@ -279,8 +298,7 @@ if [ "$RUNTIME" = openclaw ]; then
   entry=$(openclaw_entry)
   if [ "$entry" = "$ENTRY_ON" ]; then ok "openclaw.json: clawext's model is reasoning:true, efforts none/low/medium/high, off→none"; else not_ok "openclaw.json clawext model after save: $entry"; fi
   wait_gateway_health 180 || note "the gateway did not report healthy within 180 s"
-  board_owner_api GET /setup-api/chat/model
-  levels=$(api_json -r '.local.thinkingLevels // [] | join(",")')
+  levels=$(gateway_levels)
   note "gateway thinking levels for clawext/$MODEL: ${levels:-none}"
   case ",$levels," in *,low,*medium,*high,*) ok "the gateway publishes low/medium/high for the engine ($levels)" ;; *) not_ok "the gateway's thinking levels for the engine: ${levels:-none}" ;; esac
 else
@@ -357,8 +375,7 @@ if [ "$RUNTIME" = openclaw ]; then
   entry=$(openclaw_entry)
   if [ "$entry" = "$ENTRY_OFF" ]; then ok "openclaw.json: clawext's model is reasoning:false with no effort contract"; else not_ok "openclaw.json clawext model with the switch off: $entry"; fi
   wait_gateway_health 180 || note "the gateway did not report healthy within 180 s"
-  board_owner_api GET /setup-api/chat/model
-  note "gateway thinking levels with the switch off: $(api_json -r '.local.thinkingLevels // [] | join(",")')"
+  note "gateway thinking levels with the switch off: $(gateway_levels)"
   r=$(cli_turn medium "$MARK-cli-off-medium")
   note "cli medium with the switch off: $r"
   case "$r" in rc=0*) note "TABLE $RUNTIME | cli (switch off) | medium | accepted | - | note" ;; *) note "TABLE $RUNTIME | cli (switch off) | medium | refused by the gateway: ${r#rc=* } | - | as before" ;; esac

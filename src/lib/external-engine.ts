@@ -441,8 +441,8 @@ const REASONING_PROBE_MAX_BODY_BYTES = 256 * 1024;
  * spelling some servers use) with text in it; `false` when the engine answered
  * without one, or refused the field (a 4xx: such a server could not take the
  * effort OpenClaw would send). `null` when it could not be told — a timeout, a
- * network error, a 5xx, a body that is not a completion — so a slow cluster is
- * never read as "does not reason". Same address rules, no redirects, the key
+ * network error, a 5xx, a 408 or 429 (busy, not a refusal), a body that is
+ * not a completion — so a slow cluster is never read as "does not reason". Same address rules, no redirects, the key
  * only as a bearer, and nothing of the engine's text is passed on.
  */
 export async function probeExternalEngineReasoning(options: {
@@ -476,7 +476,7 @@ export async function probeExternalEngineReasoning(options: {
   } catch {
     return null;
   }
-  if (res.status >= 400 && res.status < 500) {
+  if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
     await res.body?.cancel().catch(() => {});
     return false;
   }

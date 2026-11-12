@@ -8,7 +8,8 @@
 //
 //   GET  /v1/models            the one model, with its window (`max_model_len`)
 //   POST /v1/chat/completions  streamed (SSE) or not; the reply is the text
-//                              after "nothing else:" in the last user message
+//                              after "nothing else:" in the newest user message
+//                              that has it
 //                              (the suite's "Reply with exactly this text and
 //                              nothing else: NANO-CI-OK <serial>"), else
 //                              "NANO-EXT-MOCK"
@@ -74,8 +75,14 @@ function replyFor(messages) {
   const users = Array.isArray(messages) ? messages.filter((m) => m?.role === "user") : [];
   const prompts = users.filter((m) => !RUNTIME_CONTEXT.test(textOf(m?.content)));
   const last = textOf((prompts.length ? prompts : users).at(-1)?.content);
-  const m = /nothing else:\s*([^\n]+)/i.exec(last);
-  return { last, reply: m ? m[1].trim() : "NANO-EXT-MOCK" };
+  // The newest user message that asks for a text, so a runtime-context block
+  // or any other trailing user message never hides the owner's request.
+  const texts = users.map((m) => textOf(m?.content));
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const m = /nothing else:\s*([^\n]+)/i.exec(texts[i]);
+    if (m) return { last, reply: m[1].trim() };
+  }
+  return { last, reply: "NANO-EXT-MOCK" };
 }
 
 const server = http.createServer((req, res) => {

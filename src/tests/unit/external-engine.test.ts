@@ -307,11 +307,13 @@ describe("probeExternalEngineReasoning (TASK-2497)", () => {
     expect(r).toBe(false);
   });
 
-  it("cannot tell (null) on a timeout, a 5xx, a redirect-less 3xx, non-JSON or a body that is not a completion", async () => {
+  it("cannot tell (null) on a timeout, a 5xx, a 408 / 429, a redirect-less 3xx, non-JSON or a body that is not a completion", async () => {
     const timeout = Object.assign(new Error("timed out"), { name: "TimeoutError" });
     expect(await probeExternalEngineReasoning({ ...opts, apiKey: null, fetchImpl: vi.fn(async () => { throw timeout; }) as unknown as typeof fetch })).toBeNull();
     for (const res of [
       new Response("busy", { status: 503 }),
+      new Response("slow down", { status: 429 }),
+      new Response("request timeout", { status: 408 }),
       new Response(null, { status: 302, headers: { Location: "http://elsewhere.example/" } }),
       new Response("<html></html>", { status: 200 }),
       json({ hello: "world" }),
