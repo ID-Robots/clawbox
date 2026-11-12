@@ -11,6 +11,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
  * fence is the browse root exactly as before.
  */
 
+// It starts a real process (mkfifo): both ceilings, as test-timeout-hygiene.test.ts asks.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const ROOT = path.join(fs.realpathSync(os.tmpdir()), `clawbox-files-scope-${process.pid}-${Date.now()}`);
 const OWNER = path.join(ROOT, "owner");
 const HOME = path.join(ROOT, "staff", "ivan");
