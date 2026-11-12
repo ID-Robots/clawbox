@@ -68,12 +68,28 @@ note "chat model before: ${BEFORE:-none}"
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
 # shellcheck disable=SC2016,SC2317
 cleanup() {
-  board_owner_api GET /setup-api/local-ai/external
-  if [ "$(api_json '.configured')" = true ] && [ "$(api_json '.baseUrl')" = "http://127.0.0.1:$PORT/v1" ] \
-    && [ "$(api_json '.modelId')" = "$MODEL" ]; then
+  # The engine goes first, and only once it is confirmed gone does the mock
+  # behind it stop: Remove is also what puts the chat back where it was.
+  local tries gone=0
+  for tries in 1 2 3; do
+    board_owner_api GET /setup-api/local-ai/external
+    if [ "$API_STATUS" != 200 ]; then sleep 5; continue; fi
+    if [ "$(api_json '.configured')" != true ] || [ "$(api_json '.baseUrl')" != "http://127.0.0.1:$PORT/v1" ] \
+      || [ "$(api_json '.modelId')" != "$MODEL" ]; then
+      gone=1
+      break
+    fi
     board_owner_api DELETE /setup-api/local-ai/external
-    note "cleanup: this test's engine removed (HTTP $API_STATUS)"
+    note "cleanup: removing this test's engine (try $tries, HTTP $API_STATUS)"
+    [ "$API_STATUS" = 200 ] || sleep 5
+  done
+  if [ "$gone" != 1 ]; then
+    note "cleanup: could not confirm that the engine clawext/$MODEL (127.0.0.1:$PORT) is removed; its mock and $DIR are left in place — remove it in Settings → Local AI"
+    return
   fi
+  local now
+  now=$(chat_selection)
+  [ "$now" = "$BEFORE" ] || note "cleanup: the chat was on ${BEFORE:-none} and is now on ${now:-none}"
   board '
     [ -f "$1/mock.pid" ] && kill "$(cat "$1/mock.pid")" 2>/dev/null
     rm -rf "$1"
@@ -134,7 +150,8 @@ if hit is None:
     print(\"missing\")
 else:
     e = hit.get(\"effort\")
-    print((\"absent\" if e is None else str(e)) + \" \" + (\"true\" if hit.get(\"thought\") else \"false\"))
+    sent = \"absent\" if not hit.get(\"effortSent\") else (\"null\" if e is None else str(e))
+    print(sent + \" \" + (\"true\" if hit.get(\"thought\") else \"false\"))
 " "$1/requests.jsonl" "$2" 2>/dev/null || echo missing
   ' "$DIR" "$1" | tail -n1
 }
@@ -174,6 +191,22 @@ want_for() {
     X-High|xhigh) echo xhigh ;;
     Max|max) echo max ;;
     *) echo "?" ;;
+  esac
+}
+
+# cli_judge PATH LEVEL MARKER EXPECTED — a CLI turn at LEVEL that must succeed;
+# only then is the effort the engine logged for it judged (a turn that failed
+# after the request went out must not pass on the mock's log alone).
+cli_judge() {
+  local r
+  r=$(cli_turn "$2" "$3")
+  note "$1 $2: $r"
+  case "$r" in
+    rc=0*) judge "$1" "$2" "$3" "$4" ;;
+    *)
+      note "TABLE $RUNTIME | $1 | $2 | turn failed ($r) | - | not ok"
+      not_ok "$1 $2: the CLI turn failed ($r)"
+      ;;
   esac
 }
 
@@ -236,6 +269,10 @@ ui_turns() {
 }
 
 ui_value() { grep "^$1 " <<<"$UI" | head -n1 | cut -d' ' -f2-; }
+
+# ui_ran — the last browser phase ran (it was not skipped for want of Chromium),
+# so what it reported can be judged.
+ui_ran() { ! grep -q "^RESULT skip - " <<<"$UI"; }
 
 openclaw_entry() {
   # shellcheck disable=SC2016  # expanded on the board
@@ -316,21 +353,24 @@ fi
 # 4. Every level by the runtime's CLI.
 if [ "$RUNTIME" = hermes ]; then CLI_LEVELS="none minimal low medium high xhigh max"; else CLI_LEVELS="off low medium high"; fi
 for lvl in $CLI_LEVELS; do
-  r=$(cli_turn "$lvl" "$MARK-cli-$lvl")
-  note "cli $lvl: $r"
-  judge "cli" "$lvl" "$MARK-cli-$lvl" "$(want_for "$lvl")"
+  cli_judge "cli" "$lvl" "$MARK-cli-$lvl" "$(want_for "$lvl")"
 done
 
 # 5. Every level in the owner's browser, one conversation; then a reload.
 ui levels
-offered=$(ui_value LEVELS)
-note "picker offers: ${offered:-nothing}"
-if [ "$RUNTIME" = hermes ]; then want_levels="None|Minimal|Low|Medium|High|X-High|Max"; else want_levels="Off|Low|Medium|High"; fi
-if [ "$offered" = "$want_levels" ]; then ok "the chat's picker offers $offered"; else not_ok "the chat's picker offers '${offered}', want '$want_levels'"; fi
-ui_turns
-last=${offered##*|}
-reload=$(ui_value RELOAD)
-if [ -n "$last" ] && [ "$reload" = "$last" ]; then ok "after a page reload the picker is still on $last"; else not_ok "after a page reload the picker reads '${reload}', want '$last'"; fi
+BROWSER=0
+last=
+if ui_ran; then
+  BROWSER=1
+  offered=$(ui_value LEVELS)
+  note "picker offers: ${offered:-nothing}"
+  if [ "$RUNTIME" = hermes ]; then want_levels="None|Minimal|Low|Medium|High|X-High|Max"; else want_levels="Off|Low|Medium|High"; fi
+  if [ "$offered" = "$want_levels" ]; then ok "the chat's picker offers $offered"; else not_ok "the chat's picker offers '${offered}', want '$want_levels'"; fi
+  ui_turns
+  last=${offered##*|}
+  reload=$(ui_value RELOAD)
+  if [ -n "$last" ] && [ "$reload" = "$last" ]; then ok "after a page reload the picker is still on $last"; else not_ok "after a page reload the picker reads '${reload}', want '$last'"; fi
+fi
 
 # 6. A restart of the runtime: pre-start keeps the reasoning entry, the level stays.
 r=$(restart_runtime)
@@ -343,20 +383,26 @@ fi
 board_owner_api GET /setup-api/local-ai/external
 if [ "$(api_json '.reasoning')" = true ]; then ok "the record still says reasoning on after the restart"; else not_ok "the record after the restart: reasoning=$(api_json '.reasoning')"; fi
 lvl=medium
-note "cli $lvl after restart: $(cli_turn "$lvl" "$MARK-cli-restart-$lvl")"
-judge "cli after restart" "$lvl" "$MARK-cli-restart-$lvl" "$(want_for "$lvl")"
-ui check
-picked=$(ui_value PICKER)
-if [ -n "$last" ] && [ "$picked" = "$last" ]; then ok "after the restart the picker is still on $last"; else not_ok "after the restart the picker reads '${picked}', want '$last'"; fi
-ui_turns
+cli_judge "cli after restart" "$lvl" "$MARK-cli-restart-$lvl" "$(want_for "$lvl")"
+if [ "$BROWSER" = 1 ]; then
+  ui check
+  picked=$(ui_value PICKER)
+  if [ -n "$last" ] && [ "$picked" = "$last" ]; then ok "after the restart the picker is still on $last"; else not_ok "after the restart the picker reads '${picked}', want '$last'"; fi
+  ui_turns
+fi
 
 # 7. Edit → Save, untouched, keeps the switch on.
-ui card
-sw=$(ui_value CARD_SWITCH)
-line=$(ui_value CARD_LINE)
-if [ "$RUNTIME" = hermes ]; then want_sw="on/disabled"; want_line="before=no after=no"; else want_sw="on"; want_line="before=yes after=yes"; fi
-if [ "$sw" = "$want_sw" ]; then ok "the card's reasoning switch reads $sw when editing"; else not_ok "the card's reasoning switch reads '${sw}', want '$want_sw'"; fi
-if [ "$line" = "$want_line" ]; then ok "the card's summary reasoning line: $line"; else not_ok "the card's summary reasoning line: '${line}', want '$want_line'"; fi
+if [ "$BROWSER" = 1 ]; then
+  ui card
+  sw=$(ui_value CARD_SWITCH)
+  line=$(ui_value CARD_LINE)
+  if [ "$RUNTIME" = hermes ]; then want_sw="on/disabled"; want_line="before=no after=no"; else want_sw="on"; want_line="before=yes after=yes"; fi
+  if [ "$sw" = "$want_sw" ]; then ok "the card's reasoning switch reads $sw when editing"; else not_ok "the card's reasoning switch reads '${sw}', want '$want_sw'"; fi
+  if [ "$line" = "$want_line" ]; then ok "the card's summary reasoning line: $line"; else not_ok "the card's summary reasoning line: '${line}', want '$want_line'"; fi
+else
+  # No browser: the API's own re-save with the fields as they are.
+  engine_call POST /setup-api/local-ai/external '{"reasoning": true}'
+fi
 board_owner_api GET /setup-api/local-ai/external
 if [ "$(api_json '.reasoning')" = true ]; then ok "Edit → Save kept reasoning on"; else not_ok "after Edit → Save: reasoning=$(api_json '.reasoning')"; fi
 if [ "$RUNTIME" = openclaw ]; then
@@ -385,22 +431,23 @@ if [ "$RUNTIME" = openclaw ]; then
   r=$(cli_turn medium "$MARK-cli-off-medium")
   note "cli medium with the switch off: $r"
   case "$r" in rc=0*) note "TABLE $RUNTIME | cli (switch off) | medium | accepted | - | note" ;; *) note "TABLE $RUNTIME | cli (switch off) | medium | refused by the gateway: ${r#rc=* } | - | as before" ;; esac
-  note "cli off with the switch off: $(cli_turn off "$MARK-cli-off-off")"
-  judge "cli (switch off)" "off" "$MARK-cli-off-off" "absent"
+  cli_judge "cli (switch off)" "off" "$MARK-cli-off-off" "absent"
 else
-  note "cli medium with the switch off: $(cli_turn medium "$MARK-cli-off-medium")"
-  judge "cli (switch off)" "medium" "$MARK-cli-off-medium" "medium"
+  cli_judge "cli (switch off)" "medium" "$MARK-cli-off-medium" "medium"
 fi
-ui off
-offered=$(ui_value LEVELS)
-note "picker with the switch off: '${offered}'"
-if [ "$RUNTIME" = openclaw ]; then
-  case "$offered" in ""|Off) ok "with the switch off the picker offers no effort levels ('${offered}')" ;; *) not_ok "with the switch off the picker offers '$offered'" ;; esac
-  while read -r _ label marker thinking _; do
-    judge "browser (switch off)" "$label" "$marker" "absent"
-  done < <(grep "^TURN " <<<"$UI")
-else
-  ui_turns
+if [ "$BROWSER" = 1 ]; then
+  ui off
+  offered=$(ui_value LEVELS)
+  note "picker with the switch off: '${offered}'"
+  if [ "$RUNTIME" = openclaw ]; then
+    case "$offered" in ""|Off) ok "with the switch off the picker offers no effort levels ('${offered}')" ;; *) not_ok "with the switch off the picker offers '$offered'" ;; esac
+    # No effort on the wire, and no reasoning shown in the chat either.
+    while read -r _ label marker thinking _; do
+      judge "browser (switch off)" "$label" "$marker" "absent" "${thinking#thinking=}"
+    done < <(grep "^TURN " <<<"$UI")
+  else
+    ui_turns
+  fi
 fi
 
 # 10. Remove again.

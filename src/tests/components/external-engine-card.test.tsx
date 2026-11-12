@@ -32,7 +32,7 @@ const CONFIGURED = {
 
 function stub(answers: {
   get?: () => unknown;
-  test?: () => Response;
+  test?: () => Response | Promise<Response>;
   save?: () => Response;
   remove?: () => Response;
 }) {
@@ -360,6 +360,34 @@ describe("ExternalEngineCard", () => {
       fireEvent.click(screen.getByTestId("local-ai-external-test"));
       await waitFor(() => expect(calls.some((c) => c.url.endsWith("/test"))).toBe(true));
       expect(calls.find((c) => c.url.endsWith("/test"))!.body).not.toHaveProperty("detectReasoning");
+    });
+
+    it("drops the suggestion once the model or address is no longer the one Test asked", async () => {
+      stub({ test: () => json({ ok: true, models: [MODEL], latencyMs: 12, reasoningDetected: true }) });
+      renderCard();
+      await fillForm();
+      fireEvent.click(screen.getByTestId("local-ai-external-test"));
+      await screen.findByTestId("local-ai-external-reasoning-suggest");
+      fireEvent.change(screen.getByLabelText("Model id"), { target: { value: "other-model" } });
+      expect(screen.queryByTestId("local-ai-external-reasoning-suggest")).toBeNull();
+      // Back on the tested model, the answer is about it again.
+      fireEvent.change(screen.getByLabelText("Model id"), { target: { value: MODEL } });
+      expect(screen.getByTestId("local-ai-external-reasoning-suggest")).toBeTruthy();
+      fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "http://192.0.2.99:8000/v1" } });
+      expect(screen.queryByTestId("local-ai-external-reasoning-suggest")).toBeNull();
+    });
+
+    it("an answer that arrives after the model was changed suggests nothing for the new one", async () => {
+      let answer!: (r: Response) => void;
+      stub({ test: () => new Promise<Response>((resolve) => { answer = resolve; }) });
+      renderCard();
+      await fillForm();
+      fireEvent.click(screen.getByTestId("local-ai-external-test"));
+      await waitFor(() => expect(calls.some((c) => c.url.endsWith("/test"))).toBe(true));
+      fireEvent.change(screen.getByLabelText("Model id"), { target: { value: "other-model" } });
+      answer(json({ ok: true, models: [MODEL, "other-model"], latencyMs: 12, reasoningDetected: true }));
+      await screen.findByText(`The engine answers and lists ${MODEL} (12 ms).`);
+      expect(screen.queryByTestId("local-ai-external-reasoning-suggest")).toBeNull();
     });
 
     it("suggests nothing when the engine does not reason", async () => {
