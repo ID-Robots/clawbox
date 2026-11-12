@@ -6546,8 +6546,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // read and the attach, and a tab the owner left and came back to inside
     // that window (TASK-2494), both read it before this promise settles. The
     // same answer twice under one question is a second reply the agent never
-    // gave.
-    setMessages(prev => answerAlreadyShown(prev, result.text) ? prev : [...prev, {
+    // gave. Outside a follow only a text reply is skipped, so a picture or a
+    // clip the settled turn carries is never lost to the bubble the read drew.
+    setMessages(prev => (attach || !hasMedia) && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
       role: 'assistant',
       // A reply that is nothing BUT a picture is still a real answer — don't
       // call it '(no response)'.
