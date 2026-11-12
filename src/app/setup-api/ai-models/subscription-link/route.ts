@@ -30,11 +30,19 @@ export async function GET() {
  * Remove the link. The features it unlocked are gated again at once; nothing
  * a feature already has is switched off (the paid-plan gate's own rule). The
  * token stays listed on the portal, where the owner can revoke it.
+ *
+ * The named tunnel goes with it when no other account remains: on a link-only
+ * box the heartbeat provisioned Remote Control's hostname with the link's
+ * token, and a box that no longer holds any account credential must not keep
+ * serving that account's hostname. A ClawBox AI token still on the box keeps
+ * its tunnel.
  */
 export async function DELETE() {
   try {
     const wasLinked = await unlinkSubscription();
-    return NextResponse.json({ linked: false, wasLinked }, { headers: { "Cache-Control": "no-store" } });
+    const { revokeNamedTunnelWithoutAccount } = await import("@/lib/portal-heartbeat");
+    const tunnelRevoked = await revokeNamedTunnelWithoutAccount("the subscription was unlinked from this box");
+    return NextResponse.json({ linked: false, wasLinked, tunnelRevoked }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     console.error("[subscription-link] unlink failed:", err instanceof Error ? err.name : "unknown error");
     return NextResponse.json(
