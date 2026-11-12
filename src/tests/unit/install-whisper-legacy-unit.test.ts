@@ -474,7 +474,8 @@ describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbo
 
     expect(r.done, r.out).toBe(true);
     expect(fs.existsSync(userUnit())).toBe(true);
-    expect(r.out).toContain(`Warning: could not remove ${userUnit()}`);
+    expect(r.out).toContain(`Warning: could not remove ${userUnit()}${NL}`);
+    // The file is still there and still stale, so the next run does find it.
     expect(r.out).toContain(
       `Stopped the legacy ${UNIT} (user scope), but could not remove ${userUnit()}; the next run retries: it runs whisper-server-gpu.py`,
     );
@@ -484,18 +485,29 @@ describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbo
     expect(r.retired).toBe("1");
   });
 
-  it("counts a drop-in directory that stayed as something it could not remove", () => {
+  it.each([
+    ["a directory", () => {
+      fs.mkdirSync(`${userUnit()}.d`);
+      fs.writeFileSync(path.join(`${userUnit()}.d`, "override.conf"), "[Service]\nRestartSec=10\n");
+    }],
+    ["a link to nowhere", () => fs.symlinkSync(path.join(tmp, "gone"), `${userUnit()}.d`)],
+  ] as const)("names a drop-in directory that stayed (%s), and promises no retry the next run cannot make", (_, plant) => {
     placeUnit(userDir(), LEGACY_UNIT, "default.target");
-    fs.mkdirSync(`${userUnit()}.d`);
-    fs.writeFileSync(path.join(`${userUnit()}.d`, "override.conf"), "[Service]\nRestartSec=10\n");
+    plant();
 
     const r = retireUser({ prelude: failAs("rm", "-rf") });
 
     expect(r.done, r.out).toBe(true);
     expect(fs.existsSync(userUnit()), "the unit file itself was removable").toBe(false);
-    expect(fs.existsSync(`${userUnit()}.d`)).toBe(true);
-    expect(r.out).toContain(`Warning: could not remove ${userUnit()}`);
-    expect(r.out).toContain(`Stopped the legacy ${UNIT} (user scope), but could not remove ${userUnit()}; the next run retries`);
+    expect(fs.lstatSync(`${userUnit()}.d`)).toBeTruthy();
+    expect(r.out).toContain(`Warning: could not remove ${userUnit()}.d${NL}`);
+    expect(r.out).not.toContain(`could not remove ${userUnit()}${NL}`);
+    // Without the unit file the next run finds nothing to retire, so the line
+    // promises nothing.
+    expect(r.out).toContain(
+      `Stopped the legacy ${UNIT} (user scope) and removed its unit file, but could not remove ${userUnit()}.d: it runs whisper-server-gpu.py`,
+    );
+    expect(r.out).not.toContain("the next run retries");
     expect(r.out).not.toContain("Retired");
     expect(r.retired).toBe("1");
   });

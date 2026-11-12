@@ -1122,8 +1122,8 @@ LEGACY_WHISPER_UNIT="clawbox-whisper.service"
 # Overridable, like $TTS_STATUS_FILE, so tests can point it somewhere writable.
 # install.sh does not export it, so a device always takes /etc.
 SYSTEMD_SYSTEM_DIR="${CLAWBOX_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
-# Set when this run retired one. It is the evidence whisper_adopt_legacy_engine
-# acts on.
+# Set when this run took one out of service, its files removed or not. It is the
+# evidence whisper_adopt_legacy_engine acts on.
 LEGACY_WHISPER_RETIRED=0
 
 # Why the unit file at $1 cannot run, printed on stdout. Prints nothing and
@@ -1265,17 +1265,21 @@ retire_legacy_whisper_scope() {
   # through any link the user planted on the way. A FragmentPath outside the
   # home is a system unit directory and stays root's, as in the system scope;
   # the case filter above limits it to a file named for this unit. The user's
-  # removal can fail where root's did not, so a file or drop-in directory that
-  # stayed is named, and the run says the unit was stopped but not removed; the
-  # next run finds it stale again and retries.
+  # removal can fail where root's did not, so what stayed is named and the unit
+  # is not reported retired. A unit file that stayed is found stale again by the
+  # next run, which retries. A drop-in directory alone is not: without its unit
+  # file the next run finds nothing, and the directory does nothing either.
   for f in "${files[@]}"; do
     case "$scope:$f" in
       user:"$CLAWBOX_HOME"/*)
         as_clawbox rm -f -- "$f" 2>/dev/null || true
         as_clawbox rm -rf -- "$f.d" 2>/dev/null || true
-        if [ -e "$f" ] || [ -L "$f" ] || [ -e "$f.d" ]; then
+        if [ -e "$f" ] || [ -L "$f" ]; then
           echo "  Warning: could not remove $f" >&2
           kept="$f"
+        elif [ -L "$f.d" ] || [ -e "$f.d" ]; then
+          echo "  Warning: could not remove $f.d" >&2
+          kept="${kept:-$f.d}"
         fi
         ;;
       *)
@@ -1303,11 +1307,11 @@ retire_legacy_whisper_scope() {
       systemctl --user daemon-reload
     " >/dev/null 2>&1 || true
   fi
-  if [ -n "$kept" ]; then
-    echo "  Stopped the legacy $unit ($scope scope), but could not remove $kept; the next run retries: $stale"
-  else
-    echo "  Retired the legacy $unit ($scope scope): $stale"
-  fi
+  case "$kept" in
+    "") echo "  Retired the legacy $unit ($scope scope): $stale" ;;
+    *.d) echo "  Stopped the legacy $unit ($scope scope) and removed its unit file, but could not remove $kept: $stale" ;;
+    *) echo "  Stopped the legacy $unit ($scope scope), but could not remove $kept; the next run retries: $stale" ;;
+  esac
   # Set either way: it gates the replacement whisper-server.service.
   LEGACY_WHISPER_RETIRED=1
 }
