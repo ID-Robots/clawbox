@@ -67,8 +67,10 @@ export async function GET(request: Request) {
       localOnlyMode: !!localOnly,
       hermesMinContextWindow: HERMES_MIN_CONTEXT_WINDOW,
       // What the Hermes edition does not take from these fields: it has no
-      // per-provider output cap or image switch (it decides vision itself).
-      unsupported: harness === "hermes" ? ["maxTokens", "imageInput"] : [],
+      // per-provider output cap or image switch (it decides vision itself), and
+      // no reasoning switch either — its custom-provider profile sends the
+      // chat's level as `reasoning_effort` on every turn (`none` for Off).
+      unsupported: harness === "hermes" ? ["maxTokens", "imageInput", "reasoning"] : [],
       ...(status ? { status } : {}),
     },
     { headers: { "Cache-Control": "no-store" } },

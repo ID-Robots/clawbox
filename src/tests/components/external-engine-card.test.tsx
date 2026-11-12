@@ -229,6 +229,19 @@ describe("ExternalEngineCard", () => {
     expect((screen.getByTestId("local-ai-external-image") as HTMLInputElement).disabled).toBe(true);
   });
 
+  it("greys the reasoning switch on Hermes and says Hermes sends the chat's level itself (TASK-2497)", async () => {
+    stub({ get: () => ({ ...CONFIGURED, reasoning: true, activeHarness: "hermes", unsupported: ["maxTokens", "imageInput", "reasoning"] }) });
+    renderCard();
+    fireEvent.click(await screen.findByTestId("local-ai-external-edit"));
+    const box = screen.getByTestId("local-ai-external-reasoning") as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    // The record's value is shown as it is, and a save on Hermes sends it back unchanged.
+    expect(box.checked).toBe(true);
+    expect(screen.getByText("Not used on Hermes: Hermes sends the chat's reasoning level to the engine itself on every turn.")).toBeTruthy();
+    // Hermes' summary does not claim OpenClaw's ladder.
+    expect(screen.queryByTestId("local-ai-external-reasoning-on")).toBeNull();
+  });
+
   it("sends no key over plain HTTP to another machine before the owner says yes", async () => {
     stub({});
     renderCard();
@@ -296,5 +309,66 @@ describe("ExternalEngineCard", () => {
     renderCard();
     fireEvent.click(await screen.findByTestId("local-ai-external-setup"));
     expect((screen.getByTestId("local-ai-external-save") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe("the reasoning switch (TASK-2497)", () => {
+    it("is off for a new engine and saves as off unless the owner turns it on", async () => {
+      stub({});
+      renderCard();
+      await fillForm();
+      const box = screen.getByRole("checkbox", { name: "The model reasons (thinking levels)" }) as HTMLInputElement;
+      expect(box.checked).toBe(false);
+      expect(box.disabled).toBe(false);
+      fireEvent.click(screen.getByTestId("local-ai-external-save"));
+      await screen.findByText("Saved. The chat now uses Qwen3-32B.");
+      const save = calls.find((c) => c.url === "/setup-api/local-ai/external" && c.method === "POST")!;
+      expect(save.body).toMatchObject({ reasoning: false });
+    });
+
+    it("saves it on, and the summary and a re-opened form say so", async () => {
+      let configured = false;
+      stub({
+        get: () => (configured ? { ...CONFIGURED, reasoning: true } : NOT_CONFIGURED),
+        save: () => { configured = true; return json({ success: true, ...CONFIGURED, reasoning: true }); },
+      });
+      renderCard();
+      await fillForm();
+      fireEvent.click(screen.getByRole("checkbox", { name: "The model reasons (thinking levels)" }));
+      fireEvent.click(screen.getByTestId("local-ai-external-save"));
+      expect(await screen.findByText("Reasoning: on. The chat offers Off, Low, Medium and High.")).toBeTruthy();
+      const save = calls.find((c) => c.url === "/setup-api/local-ai/external" && c.method === "POST")!;
+      expect(save.body).toMatchObject({ reasoning: true });
+      fireEvent.click(screen.getByTestId("local-ai-external-edit"));
+      expect((screen.getByTestId("local-ai-external-reasoning") as HTMLInputElement).checked).toBe(true);
+    });
+
+    it("Test asks the engine whether it reasons only while the switch is off, and offers to turn it on", async () => {
+      stub({ test: () => json({ ok: true, models: [MODEL], latencyMs: 12, reasoningDetected: true }) });
+      renderCard();
+      await fillForm();
+      fireEvent.click(screen.getByTestId("local-ai-external-test"));
+      expect(await screen.findByText("The engine returned reasoning for a test request. Turn on reasoning to use the chat's thinking levels.")).toBeTruthy();
+      expect(calls.find((c) => c.url.endsWith("/test"))!.body).toMatchObject({ detectReasoning: true, reasoning: false });
+      // The suggestion never flips the switch by itself; its button does.
+      const box = screen.getByTestId("local-ai-external-reasoning") as HTMLInputElement;
+      expect(box.checked).toBe(false);
+      fireEvent.click(screen.getByTestId("local-ai-external-reasoning-enable"));
+      expect(box.checked).toBe(true);
+      expect(screen.queryByTestId("local-ai-external-reasoning-suggest")).toBeNull();
+      // With it on, Test no longer asks.
+      calls = [];
+      fireEvent.click(screen.getByTestId("local-ai-external-test"));
+      await waitFor(() => expect(calls.some((c) => c.url.endsWith("/test"))).toBe(true));
+      expect(calls.find((c) => c.url.endsWith("/test"))!.body).not.toHaveProperty("detectReasoning");
+    });
+
+    it("suggests nothing when the engine does not reason", async () => {
+      stub({ test: () => json({ ok: true, models: [MODEL], latencyMs: 12, reasoningDetected: false }) });
+      renderCard();
+      await fillForm();
+      fireEvent.click(screen.getByTestId("local-ai-external-test"));
+      await screen.findByText(`The engine answers and lists ${MODEL} (12 ms).`);
+      expect(screen.queryByTestId("local-ai-external-reasoning-suggest")).toBeNull();
+    });
   });
 });

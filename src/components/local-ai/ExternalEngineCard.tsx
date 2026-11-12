@@ -28,6 +28,7 @@ interface EngineView {
   contextWindow?: number;
   maxTokens?: number;
   imageInput?: boolean;
+  reasoning?: boolean;
   apiKeySet?: boolean;
   activeHarness?: "openclaw" | "hermes";
   localOnlyMode?: boolean;
@@ -44,6 +45,7 @@ interface Form {
   contextWindow: string;
   maxTokens: string;
   imageInput: boolean;
+  reasoning: boolean;
 }
 
 /**
@@ -55,7 +57,8 @@ interface Form {
 type Message = { key: string; params?: Record<string, string | number> } | { raw: string };
 
 // "warn": done, but not all of it (the chat could not be switched, say).
-type Outcome = { kind: "ok" | "warn" | "error"; message: Message; models?: string[] };
+// `suggestReasoning`: Test saw the engine reason while the switch is off.
+type Outcome = { kind: "ok" | "warn" | "error"; message: Message; models?: string[]; suggestReasoning?: boolean };
 
 const INPUT = `w-full rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] ${FOCUS_RING}`;
 const LABEL = "block text-xs font-medium text-[var(--text-secondary)] mb-1";
@@ -85,6 +88,7 @@ function formFrom(view: EngineView | null): Form {
     contextWindow: String(view?.contextWindow ?? EXTERNAL_ENGINE_DEFAULTS.contextWindow),
     maxTokens: String(view?.maxTokens ?? EXTERNAL_ENGINE_DEFAULTS.maxTokens),
     imageInput: view?.imageInput ?? false,
+    reasoning: view?.reasoning ?? false,
   };
 }
 
@@ -117,6 +121,7 @@ function bodyFrom(form: Form): Record<string, unknown> {
     contextWindow: form.contextWindow.trim(),
     maxTokens: form.maxTokens.trim(),
     imageInput: form.imageInput,
+    reasoning: form.reasoning,
     ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
     ...(form.clearApiKey ? { clearApiKey: true } : {}),
   };
@@ -202,11 +207,17 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
       const res = await fetch("/setup-api/local-ai/external/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyFrom(form)),
+        // With the reasoning switch off, Test also asks whether the engine
+        // reasons, so the card can suggest the switch (it never flips it).
+        body: JSON.stringify({ ...bodyFrom(form), ...(form.reasoning || view?.activeHarness === "hermes" ? {} : { detectReasoning: true }) }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok === true) {
-        setOutcome({ kind: "ok", message: { key: "localModels.external.testOk", params: { model: form.modelId.trim(), ms: n(data.latencyMs) } } });
+        setOutcome({
+          kind: "ok",
+          message: { key: "localModels.external.testOk", params: { model: form.modelId.trim(), ms: n(data.latencyMs) } },
+          suggestReasoning: data.reasoningDetected === true,
+        });
       } else {
         setOutcome({ kind: "error", message: describe(data), models: Array.isArray(data.models) ? data.models : undefined });
       }
@@ -294,6 +305,14 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
           : "border border-red-500/20 bg-red-500/[0.06] text-red-300"}`}
     >
       {say(outcome.message)}
+      {outcome.suggestReasoning && editing && !form.reasoning && (
+        <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="local-ai-external-reasoning-suggest">
+          <span>{t("localModels.external.reasoningDetected")}</span>
+          <button type="button" className={BUTTON} data-testid="local-ai-external-reasoning-enable" onClick={() => set("reasoning", true)}>
+            {t("localModels.external.reasoningEnable")}
+          </button>
+        </div>
+      )}
       {outcome.models && outcome.models.length > 0 && editing && (
         <div className="mt-2 flex flex-wrap gap-1.5" data-testid="local-ai-external-listed">
           <span className="text-[var(--text-secondary)]">{t("localModels.external.listed")}</span>
@@ -320,6 +339,9 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               ? t("localModels.external.windowOnly", { context: n(view?.contextWindow) })
               : t("localModels.external.window", { context: n(view?.contextWindow), max: n(view?.maxTokens) })}
           </p>
+          {view?.reasoning && !onHermes && (
+            <p data-testid="local-ai-external-reasoning-on">{t("localModels.external.reasoningOn")}</p>
+          )}
           <p data-testid="local-ai-external-status">
             {/* A failed read says so even over an older status: that status may no longer hold. */}
             {readFailed
@@ -448,6 +470,16 @@ export default function ExternalEngineCard({ onChanged }: { onChanged?: () => vo
               onChange={(e) => set("imageInput", e.target.checked)} />
             {t("localModels.external.imageInput")}
           </label>
+          <div>
+            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+              <input type="checkbox" data-testid="local-ai-external-reasoning" disabled={onHermes} checked={form.reasoning}
+                aria-describedby="ext-reasoning-hint" onChange={(e) => set("reasoning", e.target.checked)} />
+              {t("localModels.external.reasoning")}
+            </label>
+            <p id="ext-reasoning-hint" className="text-[11px] text-[var(--text-muted)] mt-1 ml-5">
+              {onHermes ? t("localModels.external.reasoningHermes") : t("localModels.external.reasoningHint")}
+            </p>
+          </div>
           {onHermes && (
             <p className="text-[11px] text-[var(--text-muted)]" data-testid="local-ai-external-hermes-note">
               {t("localModels.external.hermesNote", { min: n(view?.hermesMinContextWindow ?? 64000) })}

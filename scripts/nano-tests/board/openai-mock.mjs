@@ -2,7 +2,7 @@
 // small OpenAI-compatible server standing in for an owner's external AI engine
 // (an inference cluster, a vLLM / SGLang server on the LAN) — TASK-2376.
 //
-//   node openai-mock.mjs --port N --model ID --key-file PATH --log PATH [--context N]
+//   node openai-mock.mjs --port N --model ID --key-file PATH --log PATH [--context N] [--reasoning]
 //
 // Listens on 127.0.0.1 only. Answers what the box asks of an engine:
 //
@@ -16,8 +16,19 @@
 // Every request must carry `Authorization: Bearer <the key in --key-file>`;
 // anything else is a 401, which is how the test proves the box sends the key
 // it was given. Each request is appended to --log as one JSON line — path,
-// model, stream, whether it was authorized, the end of the last user message
+// model, stream, whether it was authorized, the end of the last user message,
+// the `reasoning_effort` it carried (`effort`, null when the field was absent)
 // and the reply given — never the key. Prints READY once it listens.
+//
+// --reasoning (TASK-2497) makes it a reasoning engine the way a DeepSeek-class
+// model behind vLLM / SGLang is one: it takes `reasoning_effort`
+// none / minimal / low / medium / high / xhigh / max and answers a reasoning
+// part BEFORE the reply — `reasoning_content` (a `delta.reasoning_content`
+// chunk when streamed) reading `NANO-THINK[<reply>] effort=<value>` — for every
+// effort but `none`. A request without the field thinks at the server's own
+// default (`effort=default`), which is what such servers do. Any other value
+// is a 400, as a strict server answers it. Without --reasoning the field is
+// only logged.
 import http from "node:http";
 import fs from "node:fs";
 
@@ -31,6 +42,8 @@ const MODEL = arg("model", "nano-ci/echo-1");
 const CONTEXT = Number(arg("context", "131072"));
 const LOG = arg("log", "");
 const KEY = fs.readFileSync(arg("key-file"), "utf8").trim();
+const REASONING = args.includes("--reasoning");
+const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function record(entry) {
   if (!LOG) return;
@@ -83,6 +96,8 @@ const server = http.createServer((req, res) => {
     if (req.method === "POST" && path === "/v1/chat/completions") {
       const { last, reply } = replyFor(body.messages);
       const stream = body.stream === true;
+      const effort = Object.prototype.hasOwnProperty.call(body, "reasoning_effort") ? body.reasoning_effort : null;
+      const thought = REASONING && effort !== "none" ? `NANO-THINK[${reply}] effort=${effort ?? "default"}` : "";
       record({
         method: req.method, path, authorized: true, model: body.model, stream,
         messages: Array.isArray(body.messages) ? body.messages.length : 0,
@@ -90,7 +105,13 @@ const server = http.createServer((req, res) => {
         // The END of the message: a harness may put an envelope in front.
         lastUser: last.slice(-160),
         reply: reply.slice(0, 120),
+        effort,
+        thought: thought !== "",
       });
+      if (REASONING && effort !== null && !EFFORTS.has(effort)) {
+        send(res, 400, { error: { message: `reasoning_effort must be one of ${[...EFFORTS].join(", ")}`, type: "invalid_request_error" } });
+        return;
+      }
       if (body.model !== MODEL) {
         send(res, 404, { error: { message: `The model \`${body.model}\` does not exist.`, type: "invalid_request_error" } });
         return;
@@ -102,7 +123,7 @@ const server = http.createServer((req, res) => {
       if (!stream) {
         send(res, 200, {
           id, object: "chat.completion", created, model: MODEL,
-          choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }],
+          choices: [{ index: 0, message: { role: "assistant", content: reply, ...(thought ? { reasoning_content: thought } : {}) }, finish_reason: "stop" }],
           usage,
         });
         return;
@@ -111,6 +132,7 @@ const server = http.createServer((req, res) => {
       const chunk = (delta, finish = null, extra = {}) =>
         res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: MODEL, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`);
       chunk({ role: "assistant", content: "" });
+      if (thought) chunk({ reasoning_content: thought });
       chunk({ content: reply });
       chunk({}, "stop");
       if (body.stream_options?.include_usage) {

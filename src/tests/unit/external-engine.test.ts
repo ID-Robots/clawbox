@@ -32,6 +32,7 @@ import {
   externalEngineView,
   openclawExternalProviderDefinition,
   probeExternalEngine,
+  probeExternalEngineReasoning,
   readExternalEngineKey,
   writeExternalEngineKey,
 } from "@/lib/external-engine";
@@ -73,13 +74,22 @@ describe("validateExternalEngineInput", () => {
     const r = validateExternalEngineInput(base);
     expect(r).toEqual({
       ok: true,
-      value: { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 32768, maxTokens: 4096, imageInput: false },
+      value: { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 32768, maxTokens: 4096, imageInput: false, reasoning: false },
     });
   });
 
   it("accepts numbers typed as strings and the image switch", () => {
     const r = validateExternalEngineInput({ ...base, contextWindow: "131072", maxTokens: "8192", imageInput: true });
     expect(r.ok && r.value).toMatchObject({ contextWindow: 131072, maxTokens: 8192, imageInput: true });
+  });
+
+  it("takes the reasoning switch only as an explicit true (TASK-2497)", () => {
+    const on = validateExternalEngineInput({ ...base, reasoning: true });
+    expect(on.ok && on.value.reasoning).toBe(true);
+    for (const reasoning of [undefined, false, "true", 1, "on"]) {
+      const r = validateExternalEngineInput({ ...base, reasoning });
+      expect(r.ok && r.value.reasoning).toBe(false);
+    }
   });
 
   it.each([
@@ -154,6 +164,16 @@ describe("the key file", () => {
     expect(JSON.stringify(externalEngineSummary(record))).not.toContain(KEY);
   });
 
+  it("reads the reasoning switch back; a record from before it is off (TASK-2497)", () => {
+    const base = { baseUrl: "http://192.0.2.10:8000/v1", modelId: "m", contextWindow: 65536, maxTokens: 4096, previous: { store: {} } };
+    const on = externalEngineFromState({ external_engine: { ...base, reasoning: true } });
+    expect(on?.reasoning).toBe(true);
+    expect(externalEngineView(on)).toMatchObject({ reasoning: true });
+    expect(externalEngineSummary(on)).toMatchObject({ reasoning: true });
+    expect(externalEngineFromState({ external_engine: base })?.reasoning).toBe(false);
+    expect(externalEngineFromState({ external_engine: { ...base, reasoning: "yes" } })?.reasoning).toBe(false);
+  });
+
   it("a record ClawBox did not write is no record", () => {
     expect(externalEngineFromState({})).toBeNull();
     expect(externalEngineFromState({ external_engine: "x" })).toBeNull();
@@ -164,16 +184,30 @@ describe("the key file", () => {
 describe("openclawExternalProviderDefinition", () => {
   it("is an openai-completions provider with the window, output cap and modalities", () => {
     const def = openclawExternalProviderDefinition(
-      { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 131072, maxTokens: 8192, imageInput: true },
+      { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 131072, maxTokens: 8192, imageInput: true, reasoning: false },
       KEY,
     );
     expect(def).toMatchObject({ baseUrl: "http://192.0.2.10:8000/v1", api: "openai-completions", apiKey: KEY });
     expect(def.models[0]).toMatchObject({ id: "Qwen/Qwen3-32B", name: "Qwen3-32B", contextWindow: 131072, maxTokens: 8192, input: ["text", "image"], reasoning: false });
+    // Off: no reasoning contract at all, exactly the entry an engine had before TASK-2497.
+    expect(def.models[0]).not.toHaveProperty("compat");
+  });
+
+  it("a reasoning engine is `reasoning: true` with OpenClaw's effort contract, Off sent as none (TASK-2497)", () => {
+    const def = openclawExternalProviderDefinition(
+      { baseUrl: "http://192.0.2.10:8000/v1", modelId: "deepseek-ai/DeepSeek-V4", contextWindow: 131072, maxTokens: 8192, imageInput: false, reasoning: true },
+      KEY,
+    );
+    expect(def.models[0]).toMatchObject({ reasoning: true });
+    expect((def.models[0] as { compat?: unknown }).compat).toEqual({
+      supportedReasoningEfforts: ["none", "low", "medium", "high"],
+      reasoningEffortMap: { off: "none" },
+    });
   });
 
   it("carries a placeholder bearer when the engine needs no key", () => {
     const def = openclawExternalProviderDefinition(
-      { baseUrl: "http://192.0.2.10:8000/v1", modelId: "m", contextWindow: 8192, maxTokens: 1024, imageInput: false },
+      { baseUrl: "http://192.0.2.10:8000/v1", modelId: "m", contextWindow: 8192, maxTokens: 1024, imageInput: false, reasoning: false },
       null,
     );
     expect(def.apiKey).toBe("none");
@@ -239,5 +273,57 @@ describe("probeExternalEngine", () => {
       const r = await probeExternalEngine({ ...opts, apiKey: null, fetchImpl: vi.fn(async () => res) as unknown as typeof fetch });
       expect(r).toMatchObject({ ok: false, code: "bad_response" });
     }
+  });
+});
+
+describe("probeExternalEngineReasoning (TASK-2497)", () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  const opts = { baseUrl: "http://192.0.2.10:8000/v1", modelId: "deepseek-ai/DeepSeek-V4" };
+  const completion = (message: Record<string, unknown>) => json({ choices: [{ index: 0, message: { role: "assistant", ...message } }] });
+
+  it("asks one tiny completion at reasoning_effort low, with the key as a bearer and no redirects", async () => {
+    const fetchImpl = vi.fn(async () => completion({ content: "5", reasoning_content: "2 plus 3 is 5." }));
+    expect(await probeExternalEngineReasoning({ ...opts, apiKey: KEY, fetchImpl: fetchImpl as unknown as typeof fetch })).toBe(true);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://192.0.2.10:8000/v1/chat/completions");
+    expect(init.method).toBe("POST");
+    expect(init.redirect).toBe("manual");
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${KEY}`);
+    const body = JSON.parse(String(init.body));
+    expect(body).toMatchObject({ model: "deepseek-ai/DeepSeek-V4", reasoning_effort: "low", stream: false });
+    expect(body.max_tokens).toBeLessThanOrEqual(64);
+  });
+
+  it("reads `reasoning` too, and an answer without either is no reasoning", async () => {
+    const run = (res: Response) => probeExternalEngineReasoning({ ...opts, apiKey: null, fetchImpl: vi.fn(async () => res) as unknown as typeof fetch });
+    expect(await run(completion({ content: "5", reasoning: "thinking" }))).toBe(true);
+    expect(await run(completion({ content: "5" }))).toBe(false);
+    expect(await run(completion({ content: "5", reasoning_content: "  " }))).toBe(false);
+    expect(await run(completion({ content: "5", reasoning_content: null }))).toBe(false);
+  });
+
+  it("an engine that refuses the field (4xx) does not reason as OpenClaw would ask it to", async () => {
+    const r = await probeExternalEngineReasoning({ ...opts, apiKey: null, fetchImpl: vi.fn(async () => json({ error: "unknown field reasoning_effort" }, 400)) as unknown as typeof fetch });
+    expect(r).toBe(false);
+  });
+
+  it("cannot tell (null) on a timeout, a 5xx, a redirect-less 3xx, non-JSON or a body that is not a completion", async () => {
+    const timeout = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    expect(await probeExternalEngineReasoning({ ...opts, apiKey: null, fetchImpl: vi.fn(async () => { throw timeout; }) as unknown as typeof fetch })).toBeNull();
+    for (const res of [
+      new Response("busy", { status: 503 }),
+      new Response(null, { status: 302, headers: { Location: "http://elsewhere.example/" } }),
+      new Response("<html></html>", { status: 200 }),
+      json({ hello: "world" }),
+    ]) {
+      expect(await probeExternalEngineReasoning({ ...opts, apiKey: null, fetchImpl: vi.fn(async () => res) as unknown as typeof fetch })).toBeNull();
+    }
+  });
+
+  it("never asks an address an engine can never be", async () => {
+    const fetchImpl = vi.fn();
+    const r = await probeExternalEngineReasoning({ ...opts, baseUrl: "http://169.254.169.254/v1", apiKey: KEY, fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(r).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
