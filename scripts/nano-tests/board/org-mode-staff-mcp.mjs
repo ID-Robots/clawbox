@@ -284,8 +284,12 @@ async function openclawRun(port) {
   config = openclawConfig();
   const bEntries = grantedEntries(config, B_NAME);
   check(bEntries.length === 1 && bEntries[0] !== aEntries[0], "B gets an entry of their own, not A's", JSON.stringify(bEntries));
+  // The gateway hot-reloads openclaw.json on its own clock; give it a moment,
+  // then ask in a fresh conversation of B's (a tab), as a member would.
+  await new Promise((r) => setTimeout(r, 20_000));
+  const bTab = `agent:${policy.staffAgentId(B_NAME)}:clawbox-utab-${randomUUID().replace(/-/g, "").slice(0, 12)}-${B_NAME}`;
   since = calls.length;
-  const tb2 = await turn(b, bMain, `${ASK} (second try)`);
+  const tb2 = await turn(b, bTab, ASK);
   show("staff B (credential set)", tb2);
   const bCalls = whoamiCalls(since);
   note(`[${RUNTIME}] the server saw for B's turn: ${bCalls.map((c) => whose(c.auth)).join(", ") || "(nothing)"}`);
