@@ -2647,12 +2647,13 @@ uptime_s() {
 # startup runs on, the Telegram provider starts AFTER the signal and keeps a
 # retained consumer, and shutdown then waits out the unit's whole
 # TimeoutStopSec (330 s) and writes a `gateway.stop_shutdown_timeout` stability
-# bundle. An update on a box under 12 GB stops the gateway about 30 s after
+# bundle. An update on a box under 12 GB stopped the gateway about 30 s after
 # gateway_setup restarted it, so every such update paid five and a half
-# minutes. On the box's journal every stop that landed between the core's
-# SIGTERM handler (about 16 s into a start; a stop before it ends the process
-# at once) and its `ready` hit that deadline, and every stop after `ready`
-# settled in a second.
+# minutes; gateway_setup now starts it only when openclaw_install's full path
+# left it stopped, and this wait still covers that start. On the box's journal
+# every stop that landed between the core's SIGTERM handler (about 16 s into a
+# start; a stop before it ends the process at once) and its `ready` hit that
+# deadline, and every stop after `ready` settled in a second.
 #
 # The core's own word for "startup done" is /startupz 200 (docs/gateway/
 # health.md). It comes just BEFORE the channel providers start (a second on a
@@ -13182,6 +13183,48 @@ step_recover() {
   echo "Recovery complete"
 }
 
+# Whether step_gateway_setup restarts the gateway it has just configured:
+# prints `restart` or `leave`, and always returns 0.
+#
+# `leave` only inside the in-app update's OWN gateway_setup step (the updater
+# dispatching `--step gateway_setup` while it holds the box, asked the way
+# step_performance_mode asks it) and only for a gateway systemd calls `active`
+# or `reloading`. Every appliance update stops that gateway again before its
+# last step (the build pause on a box under 12 GB, post_update's quiesce on
+# every box), and gateway_verify starts it on the updated core, patches, unit
+# and pre-start, so a restart here was a whole gateway start thrown away a
+# minute later: 35-65 s of chat down on an 8 GB board, every update. What the
+# restart used to be for still holds:
+#  - openclaw_install's full path stops the gateway and leaves it stopped:
+#    `inactive`, so `restart`, as before;
+#  - openclaw_patch rewrote core files beside the running process (the fast
+#    path): it keeps the modules it loaded until the update stops it, and the
+#    patch replaces each file whole, a temp file and then a rename;
+#  - a changed unit or drop-in: daemon-reload has loaded it, and it applies at
+#    gateway_verify's start; nothing in between needs it.
+# post_update's own call, a harness swap or edition choice (both refused while
+# an update runs), a hand-run step and a full install all get `restart`.
+# `activating` is a start in progress OR a unit waiting in auto-restart after a
+# crash, so it gets reset-failed and the restart, like every other state. The
+# state is read as a WORD and asked once more when systemd answers nothing
+# (restart_services_after_update's rule); still nothing is `restart`. The lock
+# is a HINT (update_owns_the_box): the most a false one buys is a running
+# gateway not restarted by a hand-run `--step gateway_setup`.
+gateway_setup_restart_wanted() {
+  local state
+  if [ "${CLAWBOX_DISPATCHED_STEP:-}" != gateway_setup ] || ! update_owns_the_box; then
+    echo restart
+    return 0
+  fi
+  state="$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)"
+  [ -n "$state" ] || state="$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)"
+  case "$state" in
+    active|reloading) echo leave ;;
+    *) echo restart ;;
+  esac
+  return 0
+}
+
 step_gateway_setup() {
   # DO NOT DELETE THIS GUARD AS "REDUNDANT" NOW THAT THE UPDATER FILTERS STEPS.
   #
@@ -13270,6 +13313,10 @@ CONF
 
   systemctl daemon-reload
   systemctl enable clawbox-gateway.service
+  if [ "$(gateway_setup_restart_wanted)" = leave ]; then
+    echo "  Leaving the running clawbox-gateway.service as it is: this update stops it before its final check, which starts it on the updated core and pre-start (gateway_verify)"
+    return 0
+  fi
   # Clear any tripped start-limit (breaker) state so the restart isn't refused
   # on a box whose gateway had been crash-looping (issue #284 breaker).
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
@@ -15520,8 +15567,9 @@ if [ "${1:-}" = "--step" ]; then
   # Which step this shell was dispatched for, readable by the step itself. A
   # step that must behave differently inside an in-app update than in a full
   # install (step_performance_mode, which must not pin the clocks under the
-  # update's own heaviest work) asks this together with the update lock, rather
-  # than guessing from its surroundings.
+  # update's own heaviest work; step_gateway_setup, which leaves a running
+  # gateway to the update's last step) asks this together with the update lock,
+  # rather than guessing from its surroundings.
   CLAWBOX_DISPATCHED_STEP="$local_step"
   "step_${local_step}"
   exit 0
