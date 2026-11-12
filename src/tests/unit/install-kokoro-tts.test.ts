@@ -1614,6 +1614,23 @@ describe.skipIf(!hasBash || !CAN_LOCK_HOME)("install-voice.sh does its file work
     expect(r.rootInHome).toEqual([]);
   });
 
+  it("names a script the clawbox user could not copy and fails the deploy, still copying the rest", () => {
+    const scripts = path.join(root, "home", ".openclaw", "workspace", "scripts");
+    mkdirSync(path.join(scripts, "openclaw"), { recursive: true });
+    // A copy that user cannot write: the account's `cat >` fails where root's cp did not.
+    writeFileSync(path.join(scripts, "stt.py"), "old\n");
+    chmodSync(path.join(scripts, "stt.py"), 0o444);
+
+    const r = inHome('rc=0; deploy_voice_scripts || rc=$?; echo "RC=$rc"');
+
+    expect(r.rc, r.stderr).toBe("1");
+    expect(r.stderr).toContain("ERROR: could not copy stt.py");
+    expect(readFileSync(path.join(scripts, "stt.py"), "utf-8")).toBe("old\n");
+    expect(readFileSync(path.join(scripts, "kokoro-server.py")).equals(readFileSync(path.join(REPO, "scripts", "kokoro-server.py")))).toBe(true);
+    expect(existsSync(path.join(scripts, "openclaw", "clawbox-tts.sh"))).toBe(true);
+    expect(r.rootInHome).toEqual([]);
+  });
+
   it("appends the CUDA exports to ~/.bashrc as the clawbox user, creating a missing one 0644", () => {
     const r = inHome('rc=0; ensure_cuda_bashrc_exports || rc=$?; echo "RC=$rc"');
 
@@ -1643,6 +1660,20 @@ describe.skipIf(!hasBash || !CAN_LOCK_HOME)("install-voice.sh does its file work
     expect(second.rc).toBe("0");
     expect(readFileSync(bashrc, "utf-8")).toBe(after);
     expect([...first.rootInHome, ...second.rootInHome]).toEqual([]);
+  });
+
+  it("says so when the clawbox user cannot append to ~/.bashrc, and goes on", () => {
+    mkdirSync(path.join(root, "home"), { recursive: true });
+    const bashrc = path.join(root, "home", ".bashrc");
+    writeFileSync(bashrc, "# mine\n");
+    chmodSync(bashrc, 0o444);
+
+    const r = inHome('rc=0; ensure_cuda_bashrc_exports || rc=$?; echo "RC=$rc"');
+
+    expect(r.rc, r.stderr).toBe("0");
+    expect(r.stderr).toContain(`Warning: could not add the CUDA library path to ${bashrc}`);
+    expect(readFileSync(bashrc, "utf-8")).toBe("# mine\n");
+    expect(r.rootInHome).toEqual([]);
   });
 
   it.each([
@@ -1711,6 +1742,28 @@ describe.skipIf(!hasBash || !CAN_LOCK_HOME)("install-voice.sh does its file work
     expect(r.rc, r.stderr).toBe("0");
     expect(r.asClawbox).toContain(`cat -- ${file}`);
     expect(r.rootInHome, "root read the stamp, or wrote in the home").toEqual([]);
+  });
+
+  it("the full mode clears a Whisper cache with an empty blob as the clawbox user", () => {
+    // Step 5 of the full mode, cut from the shipped script with the cache path it uses.
+    const lines = INSTALL_VOICE_SH.split("\n");
+    const from = lines.indexOf('WHISPER_CACHE="$WHISPER_HF_CACHE"');
+    const to = lines.indexOf("fi", from);
+    const block = from < 0 || to < 0 ? "" : lines.slice(from, to + 1).join("\n");
+    expect(block, "the full mode's cache clearing was not found").toContain("rm -rf");
+    const cacheLine = lines.find((l) => l.startsWith("WHISPER_HF_CACHE=")) ?? "";
+    expect(cacheLine).not.toBe("");
+    const cache = path.join(root, "home", ".cache", "huggingface", "hub", "models--Systran--faster-whisper-base");
+    mkdirSync(path.join(cache, "blobs"), { recursive: true });
+    writeFileSync(path.join(cache, "blobs", "partial"), "");
+    writeFileSync(path.join(cache, "blobs", "whole"), "weights\n");
+
+    const r = inHome([cacheLine, block, 'echo "RC=0"'].join("\n"));
+
+    expect(r.rc, r.stderr).toBe("0");
+    expect(existsSync(cache), r.stderr).toBe(false);
+    expect(r.asClawbox).toContain(`rm -rf -- ${cache}`);
+    expect(r.rootInHome, "root removed the cache in the home").toEqual([]);
   });
 
   it("hands nothing over through a linked ~/.cache: the script runs no chown, and install.sh's walk stops at the link", () => {
