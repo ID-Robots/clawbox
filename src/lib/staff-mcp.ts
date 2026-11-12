@@ -238,13 +238,10 @@ export async function forgetStaffMcpUserStrict(username: string, file: string = 
   // credential write that already passed its own check under the lock
   // commits before this runs, never after it. A store that cannot be read
   // (anything but a missing file) throws, so the caller fails closed.
-  await updateStaffMcpStore((store) => {
-    const credentials = { ...store.credentials };
-    const relayTokens = { ...store.relayTokens };
-    delete credentials[username];
-    delete relayTokens[username];
-    return { ...store, credentials, relayTokens };
-  }, file);
+  // Rebuilt without the name rather than `delete map[name]`: no property is
+  // written or removed by a name a request supplied.
+  const without = <T>(map: Record<string, T>) => Object.fromEntries(Object.entries(map).filter(([key]) => key !== username));
+  await updateStaffMcpStore((store) => ({ ...store, credentials: without(store.credentials), relayTokens: without(store.relayTokens) }), file);
 }
 
 /**
