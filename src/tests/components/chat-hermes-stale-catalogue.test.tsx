@@ -322,6 +322,50 @@ describe("the Hermes chat header with the cloud providers hidden", () => {
     expect(labels).toHaveLength(1);
   });
 
+  it("follows the setting on a degraded answer too: rows already on screen are filtered while the dashboard is away", async () => {
+    // The setting is the box's, not the dashboard's: the models route sends it
+    // with the manifest fallback as well, so a header that is holding its last
+    // good list must not keep the cloud rows the owner has just hidden.
+    let hidden = false;
+    let degraded = false;
+    const box = installHermesBox();
+    const inner = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/setup-api/hermes/models")) {
+          box.fetchedUrls.push(url);
+          const scoped = new URL(url, "http://box").searchParams.get("provider");
+          if (scoped) return { ok: true, json: async () => ({ ...LIVE_SCOPE, provider: scoped, models: [] }) };
+          const live = {
+            providers: [
+              { id: "anthropic", name: "Anthropic", authenticated: true },
+              { id: "openrouter", name: "OpenRouter", authenticated: true },
+              { id: "clawext", name: "echo-1", authenticated: true },
+            ],
+            models: [], provider: "clawext", current: "acme/echo-1", reasoning: "medium", source: "dashboard", stale: false,
+          };
+          return { ok: true, json: async () => ({ ...(degraded ? { ...STALE_SEED, provider: "clawext", current: "acme/echo-1" } : live), cloudProvidersHidden: hidden }) };
+        }
+        return inner(input as RequestInfo, init);
+      }),
+    );
+    await mountHermesChat(box);
+    expect(await providerOptions()).toHaveLength(3);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    hidden = true;
+    degraded = true;
+    await act(async () => {
+      notifyHermesModelState();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    const labels = await providerOptions();
+    expect(labels).toHaveLength(1);
+    expect(labels.join(" ")).not.toMatch(/Anthropic|OpenRouter/);
+  });
+
   it("offers every signed-in provider when they are not hidden", async () => {
     await mountHermesChat(installEngineBox(false));
     const labels = await providerOptions();

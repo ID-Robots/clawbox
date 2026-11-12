@@ -210,3 +210,34 @@ describe("the chat header on a box with nothing pinned at all", () => {
     });
   });
 });
+
+// "Hide cloud AI providers" (TASK-2497) while the chat still answers on a cloud
+// model: the cloud rows are not offered, but the header says where the chat is
+// running instead of "No chat model" (the route sends the name in `activeLabel`).
+describe("the chat header while the cloud providers are hidden and the chat still runs on one", () => {
+  const HIDDEN_BUT_RUNNING = {
+    ...MIS_PINNED,
+    activeOptionId: null,
+    activeModel: "deepseek/deepseek-v4-flash",
+    activeLabel: "ClawBox AI",
+    options: [
+      { id: "__setup_local__", label: "Local AI", model: null, provider: null, available: false, settingsSection: "localAi", isLocal: true },
+    ],
+    primary: { available: false, label: null, model: null },
+  };
+
+  it("names the provider the chat runs on, and offers no cloud row", async () => {
+    installFetch(HIDDEN_BUT_RUNNING);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+
+    const trigger = await screen.findByRole("button", { name: /Chat provider/i });
+    await waitFor(() => {
+      expect(trigger.textContent).toContain("ClawBox AI");
+    });
+    expect(trigger.textContent).not.toContain(translations.en["chat.noChatModel"]);
+
+    fireEvent.click(trigger);
+    const rows = await screen.findAllByRole("option");
+    expect(rows.map((row) => row.textContent ?? "").some((text) => text.includes("ClawBox AI"))).toBe(false);
+  });
+});

@@ -7177,6 +7177,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       // Keep what is rendered and go back for the real list; only a header with
       // nothing on offer yet falls back to the device's own provider.
       if (degraded && hermesProvidersRef.current.length > 0) {
+        // The setting is the box's own, not the dashboard's: a degraded answer
+        // carries it too, so rows already on screen follow it while the
+        // dashboard is away (src/lib/cloud-providers.ts).
+        if (mData?.cloudProvidersHidden === true) {
+          const kept = hermesProvidersRef.current.filter(p => isLocalAiProviderId(p.id))
+          if (kept.length !== hermesProvidersRef.current.length) setHermesProviders(kept)
+        }
         retryLater()
         return
       }
@@ -9403,7 +9410,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
             const activeOption = chatModelState.options.find(o => o.id === activeId)
             const triggerLabel = activeOption
               ? getProviderPillText(activeOption)
-              : (unselectableActive ? t('chat.noChatModel') : activeId)
+              : (unselectableActive ? (chatModelState.activeLabel ?? t('chat.noChatModel')) : activeId)
             return (
               <HeaderDropdown
                 ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}

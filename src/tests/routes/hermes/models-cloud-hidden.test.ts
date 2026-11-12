@@ -103,6 +103,14 @@ describe("GET /setup-api/hermes/models — cloudProvidersHidden", () => {
     expect(body.providers.map((p) => p.id)).toEqual(expect.arrayContaining(["openrouter", "clawext"]));
   });
 
+  it("an unreadable settings file counts as hidden: the header is where a conversation could be sent from", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), "{ not json");
+    const mod = await import("@/app/setup-api/hermes/models/route");
+    const res = await mod.GET(new Request("http://127.0.0.1/setup-api/hermes/models"));
+    expect(res.status).toBe(200);
+    expect((await res.json()).cloudProvidersHidden).toBe(true);
+  });
+
   it("follows the owner's own choice either way", async () => {
     expect((await models({ org_mode: true, external_engine: ENGINE, hide_cloud_providers: false })).cloudProvidersHidden).toBe(false);
     expect((await models({ hide_cloud_providers: true })).cloudProvidersHidden).toBe(true);

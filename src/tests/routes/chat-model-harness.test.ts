@@ -28,6 +28,9 @@ vi.mock("@/lib/config-store", () => ({
   getAll: vi.fn(),
   // A successful switch records the owner's explicit model pick (TASK-713).
   getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  // One strict read of several keys: the picker asks whether the cloud providers
+  // are hidden (src/lib/cloud-providers-server.ts). Nothing set, store readable.
+  getKnownMany: vi.fn(async () => ({ values: {}, known: true })),
   setMany: vi.fn(),
 }));
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({

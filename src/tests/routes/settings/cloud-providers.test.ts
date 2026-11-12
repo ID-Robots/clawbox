@@ -140,6 +140,13 @@ describe("GET", () => {
     expect(await res.json()).toMatchObject({ hidden: true, canChange: false });
   });
 
+  it("says so when the settings file cannot be read, rather than reporting an unset switch", async () => {
+    fs.writeFileSync(storePath(), "{ not json");
+    const res = await get();
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("store_unreadable");
+  });
+
   it("refuses no session (the agent's bearer)", async () => {
     as(null);
     const res = await get();

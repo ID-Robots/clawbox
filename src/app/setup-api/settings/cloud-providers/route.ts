@@ -32,7 +32,9 @@ export async function GET(req: Request) {
   // Another user signed in on a home box reaches Settings → AI providers too
   // (an organisation's staff never do: the middleware refuses them this
   // route): they get the page as the owner set it, and no switch.
-  return NextResponse.json({ ...(await readCloudProvidersView()), canChange: who.isOwner === true }, { headers: NO_STORE });
+  const view = await readCloudProvidersView();
+  if (!view) return refuse(503, "store_unreadable", "The ClawBox settings file could not be read, so this setting is not known right now.");
+  return NextResponse.json({ ...view, canChange: who.isOwner === true }, { headers: NO_STORE });
 }
 
 export async function POST(req: Request) {
@@ -64,5 +66,7 @@ export async function POST(req: Request) {
     return refuse(500, "store_write_failed", "The setting could not be saved — the ClawBox settings file could not be written. Nothing was changed.");
   }
   console.log(`[cloud-providers] the owner turned "hide cloud AI providers" ${hide ? "on" : "off"}`);
-  return NextResponse.json(await readCloudProvidersView(), { headers: NO_STORE });
+  const view = await readCloudProvidersView();
+  if (!view) return refuse(503, "store_unreadable", "The setting was saved, but the ClawBox settings file could not be read back.");
+  return NextResponse.json({ ...view, canChange: true }, { headers: NO_STORE });
 }

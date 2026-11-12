@@ -19,6 +19,9 @@ vi.mock("@/lib/config-store", () => ({
   // The owner's explicit model pick is written here after a successful switch
   // (TASK-713): a picker click is the one place a choice is made.
   getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  // One strict read of several keys (src/lib/cloud-providers-server.ts); the
+  // suite answers it from the same `getAll` snapshot it hands everything else.
+  getKnownMany: vi.fn(),
   setMany: vi.fn(),
   // The compaction model ClawBox wrote (src/lib/local-compaction-model.ts).
   get: vi.fn(async () => undefined),
@@ -122,7 +125,7 @@ import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
-import { getKnown, setMany, get as configGet, set as configSet } from "@/lib/config-store";
+import { getKnown, getKnownMany, setMany, get as configGet, set as configSet } from "@/lib/config-store";
 import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { promisify } from "util";
 
@@ -164,6 +167,10 @@ describe("/setup-api/chat/model", () => {
       ai_model_provider: "clawai",
       local_ai_provider: "llamacpp",
       local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+    vi.mocked(getKnownMany).mockReset().mockImplementation(async (keys: readonly string[]) => {
+      const all = (await getAll()) as Record<string, unknown>;
+      return { values: Object.fromEntries(keys.map((key) => [key, all?.[key]])), known: true };
     });
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
@@ -334,6 +341,23 @@ describe("/setup-api/chat/model", () => {
       expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(false);
       store({});
       expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(true);
+    });
+
+    it("names a cloud model the chat still runs on without offering its row", async () => {
+      // Hidden by hand on a box whose primary is a cloud model: the header must
+      // not read "No chat model" while the box answers on it.
+      store({ hide_cloud_providers: true });
+      const body = await (await GET()).json();
+      expect(body.options.some((option: { isLocal: boolean }) => !option.isLocal)).toBe(false);
+      expect(body.activeOptionId).toBeNull();
+      expect(body.activeModel).toBe(`deepseek/${RETIRED_CHAT_ID}`);
+      expect(body.activeLabel).toBe("ClawBox AI");
+    });
+
+    it("a store that cannot be read counts as hidden on the picker (nothing is guessed)", async () => {
+      vi.mocked(getKnownMany).mockResolvedValue({ values: {}, known: false });
+      const options = await ids();
+      expect(options.some((option) => !option.isLocal)).toBe(false);
     });
 
     it("only the picker's own read hides them: the box's own move back to a cloud model still works", async () => {

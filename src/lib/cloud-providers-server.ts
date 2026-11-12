@@ -3,7 +3,7 @@
  * read and written on the server.
  */
 
-import { getAll, set } from "@/lib/config-store";
+import { getKnownMany, set } from "@/lib/config-store";
 import {
   HIDE_CLOUD_PROVIDERS_KEY,
   autoHideCloudProviders,
@@ -12,8 +12,17 @@ import {
   type CloudProvidersView,
 } from "@/lib/cloud-providers";
 import { externalEngineFromState } from "@/lib/external-engine";
-import { externalEngineDisplayName, externalEngineModelRef } from "@/lib/external-engine-shared";
+import { EXTERNAL_ENGINE_STORE_KEY, externalEngineDisplayName, externalEngineModelRef } from "@/lib/external-engine-shared";
 import { ORG_MODE_KEY, orgModeFrom } from "@/lib/org-mode";
+
+/** Every key the view is made of, read together so they cannot disagree. */
+const VIEW_KEYS = [
+  HIDE_CLOUD_PROVIDERS_KEY,
+  ORG_MODE_KEY,
+  EXTERNAL_ENGINE_STORE_KEY,
+  "local_only_mode",
+  "local_ai_model",
+] as const;
 
 /** The switch and what it resolves to, from one store snapshot. */
 export function cloudProvidersViewFrom(state: Record<string, unknown> | null | undefined): CloudProvidersView {
@@ -35,24 +44,26 @@ export function cloudProvidersViewFrom(state: Record<string, unknown> | null | u
   };
 }
 
-/** Are the cloud providers hidden in this store snapshot? */
-export function cloudProvidersHiddenIn(state: Record<string, unknown> | null | undefined): boolean {
-  return cloudProvidersViewFrom(state).hidden;
+/**
+ * The view as stored now, or null when the store could not be read at all:
+ * "we could not read the file" is not evidence that the owner never chose
+ * (src/lib/config-store.ts, getKnownMany), so nothing is guessed here.
+ */
+export async function readCloudProvidersView(): Promise<CloudProvidersView | null> {
+  const { values, known } = await getKnownMany(VIEW_KEYS);
+  return known ? cloudProvidersViewFrom(values) : null;
 }
 
-/** The view as stored now. A store that cannot be read hides nothing — the appliance default. */
-export async function readCloudProvidersView(): Promise<CloudProvidersView> {
-  let state: Record<string, unknown> = {};
-  try {
-    state = await getAll();
-  } catch {
-    state = {};
-  }
-  return cloudProvidersViewFrom(state);
-}
-
+/**
+ * Are the cloud providers hidden? For the surfaces a conversation can be sent
+ * from (the chat's model picker), a store that cannot be read counts as
+ * HIDDEN: failing open would offer, for as long as the file is unreadable, the
+ * very providers the owner may have hidden. Settings does not guess at all
+ * (the route answers 503 and the page keeps its old screen).
+ */
 export async function readCloudProvidersHidden(): Promise<boolean> {
-  return (await readCloudProvidersView()).hidden;
+  const view = await readCloudProvidersView();
+  return view === null ? true : view.hidden;
 }
 
 export async function writeHideCloudProviders(hide: boolean): Promise<void> {

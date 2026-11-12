@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { localAiFirst, type CloudProvidersView } from "@/lib/cloud-providers";
 import { notifyProvidersChanged } from "@/lib/ui-events";
@@ -189,29 +189,34 @@ export function CloudProvidersSettings({
   pitch,
   onOpenLocalAi,
   openRequest = 0,
-  openRequestSeen,
+  openRequestSeen = 0,
+  onOpenRequestSeen,
 }: {
   children: ReactNode;
   pitch?: ReactNode;
   onOpenLocalAi?: () => void;
   openRequest?: number;
   /** The last request this section acted on, kept by the page so that leaving and coming back is not the same link again. */
-  openRequestSeen?: { current: number };
+  openRequestSeen?: number;
+  onOpenRequestSeen?: (request: number) => void;
 }) {
   const { t } = useT();
   const { view, setView } = useCloudProvidersView();
   // Open when a deep link asked for a cloud provider this section has not yet
   // shown: one raised in the same breath as the section mounts (Settings opens
-  // the section and raises it together) or while it is on screen. The page
+  // the section and raises it together) or while it is on screen. Decided
+  // while rendering, so the section is open on its first paint. The page
   // keeps the last request acted on, so coming back to the section later —
   // which remounts it — is not taken for the same link again.
-  const ownSeen = useRef(0);
-  const seen = openRequestSeen ?? ownSeen;
-  const [open, setOpen] = useState(openRequest > seen.current);
+  const [open, setOpen] = useState(false);
+  const [handled, setHandled] = useState(openRequestSeen);
+  if (openRequest > handled) {
+    setHandled(openRequest);
+    setOpen(true);
+  }
   useEffect(() => {
-    if (openRequest > seen.current) setOpen(true);
-    seen.current = openRequest;
-  }, [openRequest, seen]);
+    onOpenRequestSeen?.(handled);
+  }, [handled, onOpenRequestSeen]);
   const onChange = useCallback((next: CloudProvidersView) => setView(next), [setView]);
 
   if (view === undefined) return <div data-testid="cloud-providers-loading" aria-busy="true" />;

@@ -6,6 +6,7 @@
  * local choice — or one that cannot answer — keeps the screen it had.
  * Rendered with a `t` that answers the KEY.
  */
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { CloudProvidersSettings, CloudProvidersWizardGate } from "@/components/CloudProvidersPanel";
@@ -159,25 +160,28 @@ describe("CloudProvidersSettings", () => {
 
   it("a later visit to Providers is not the same deep link again, a new link still opens", async () => {
     view = ENGINE;
-    const seen = { current: 0 };
-    const mount = (openRequest: number) => (
-      <CloudProvidersSettings openRequest={openRequest} openRequestSeen={seen}>
-        <CloudCards />
-      </CloudProvidersSettings>
-    );
-    const first = render(mount(2));
+    // Settings (the parent) outlives the section and keeps what it acted on.
+    function Page({ show, request }: { show: boolean; request: number }) {
+      const [seen, setSeen] = useState(0);
+      return show ? (
+        <CloudProvidersSettings openRequest={request} openRequestSeen={seen} onOpenRequestSeen={setSeen}>
+          <CloudCards />
+        </CloudProvidersSettings>
+      ) : <div data-testid="elsewhere" />;
+    }
+    const page = render(<Page show request={2} />);
     expect(await screen.findByTestId("cloud-cards")).toBeInTheDocument();
-    expect(seen.current).toBe(2);
-    first.unmount();
 
-    // Settings kept the counter at 2 while the section was away.
-    const second = render(mount(2));
+    // Away to another section and back, the counter untouched.
+    page.rerender(<Page show={false} request={2} />);
+    expect(screen.getByTestId("elsewhere")).toBeInTheDocument();
+    page.rerender(<Page show request={2} />);
     expect(await screen.findByTestId("cloud-providers-optional-toggle")).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("cloud-cards")).toBeNull();
 
-    second.rerender(mount(3));
+    // A new link still opens it.
+    page.rerender(<Page show request={3} />);
     expect(await screen.findByTestId("cloud-cards")).toBeInTheDocument();
-    expect(seen.current).toBe(3);
   });
 
   it("hidden (an organisation box running an engine): no cloud card at all, the switch on and saying why", async () => {

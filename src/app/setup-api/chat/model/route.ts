@@ -85,7 +85,7 @@ import {
   profileProviderId,
 } from "@/lib/chatgpt-subscription";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
-import { cloudProvidersHiddenIn } from "@/lib/cloud-providers-server";
+import { readCloudProvidersHidden } from "@/lib/cloud-providers-server";
 import {
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
@@ -984,7 +984,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // for it): a POST, the engine's own removal and every other caller still see
   // every row, or the box could not move the chat back to a cloud model it
   // had been on ("Selected AI provider is not configured").
-  const cloudHidden = read.hideCloud === true && cloudProvidersHiddenIn(configStore);
+  const cloudHidden = read.hideCloud === true && await readCloudProvidersHidden();
 
   // The owner's per-provider switch. A switched-off provider STAYS in the
   // list, greyed and carrying the reason, rather than vanishing: a row that
@@ -999,9 +999,8 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       : option;
   };
 
-  const primaryOptions = localOnlyMode || cloudHidden
-    ? []
-    : sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const allPrimaryOptions = sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const primaryOptions = localOnlyMode || cloudHidden ? [] : allPrimaryOptions;
   const localOption: ChatModelOption = applyOwnerSwitch(localModel
     ? {
         id: localModel,
@@ -1069,7 +1068,16 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
           && (!activeUiProvider || option.provider === activeUiProvider),
       ) ?? options.find((option) => option.model === activeModel) ?? null
     : null;
-  const activeLabel = activeOption?.label ?? null;
+  // A cloud model the chat is still running while its rows are hidden is NAMED,
+  // not offered: the header says where the chat is answering, and no hidden
+  // cloud row is in the list to pick.
+  const hiddenActiveOption = !activeOption && cloudHidden && activeModel
+    ? allPrimaryOptions.find(
+        (option) => option.model === canonicalChatModel(activeModel)
+          && (!activeUiProvider || option.provider === activeUiProvider),
+      ) ?? null
+    : null;
+  const activeLabel = activeOption?.label ?? hiddenActiveOption?.label ?? null;
 
   return {
     activeOptionId: activeOption?.id ?? null,
