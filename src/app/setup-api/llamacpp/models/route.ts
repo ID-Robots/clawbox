@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import { POST as disableLocalAi } from "@/app/setup-api/local-ai/route";
 import { liveBackgroundTasks } from "@/lib/background-tasks";
 import { LLAMACPP_INSTALL_KIND } from "@/lib/background-task-kinds";
+import { withCapabilityDrop } from "@/lib/capability-drop";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { checkInstallDisk, diskRefusal } from "@/lib/install-disk";
 import { getLlamaCppLaunchSpec, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
@@ -442,10 +443,18 @@ function runDownload(
   onStatus: (line: string) => void,
 ): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawn(hfBin, ["download", repo, file, "--local-dir", modelDir], {
+    const env = { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1" };
+    // Without the web server's network capabilities where it holds them.
+    // setpriv leads the group and execs hf in place, so the timeout's group
+    // kill below still ends the transfer.
+    const launch = withCapabilityDrop(hfBin, ["download", repo, file, "--local-dir", modelDir], {
+      label: "the model download",
+      env,
+    });
+    const child = spawn(launch.bin, launch.argv, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
-      env: { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1" },
+      env,
     });
     let settled = false;
     let stderr = "";

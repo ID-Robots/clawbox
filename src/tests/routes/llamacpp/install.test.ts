@@ -51,6 +51,26 @@ vi.mock("@/lib/harness", () => ({
   getActiveHarness: () => mockGetActiveHarness(),
 }));
 
+// The capability drop: a pass-through unless a case sets `wrap`, which is what
+// a host whose web server holds no ambient capabilities gets — so every other
+// assertion here pins that such a host spawns exactly as before.
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", () => ({
+  CAPABILITY_DROP_COMMAND: "setpriv",
+  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
+  SETPRIV_PATH: "/usr/bin/setpriv",
+  withCapabilityDrop: (bin: string, argv: string[], opts: unknown) => {
+    drop.calls.push([bin, argv, opts]);
+    return drop.wrap
+      ? { bin: "/usr/bin/setpriv", argv: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", `/resolved/${bin}`, ...argv], dropped: true }
+      : { bin, argv, dropped: false };
+  },
+}));
+beforeEach(() => {
+  drop.wrap = false;
+  drop.calls.length = 0;
+});
+
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fsp);
@@ -459,6 +479,33 @@ describe("POST /setup-api/llamacpp/install", () => {
 
     expect(mockSpawn.mock.calls[0]?.[1]?.at(-1)).toBe("65536");
     expect(mockConfigureAiModel).toHaveBeenCalled();
+  });
+
+  it("starts llama-server without the web server's capabilities on a host that holds them", async () => {
+    drop.wrap = true;
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) }));
+    mockSpawn.mockReturnValue(createSpawnedProcess());
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    await readStream(res);
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      "/usr/bin/setpriv",
+      expect.any(Array),
+      expect.objectContaining({ detached: true, stdio: "ignore" }),
+    );
+    const argv = mockSpawn.mock.calls[0]?.[1] as string[];
+    expect(argv.slice(0, 5)).toEqual(["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", "/resolved/bash"]);
+    expect(argv[5]).toContain("scripts/start-llamacpp.sh");
+    // After the script: the model folder, the repository, the file, the alias.
+    expect(argv.slice(7, 10)).toEqual([DEFAULT_LLAMACPP_HF_REPO, DEFAULT_LLAMACPP_HF_FILE, "gemma4-e2b-it-q4_0"]);
+    expect(argv.at(-1)).toBe("32768");
+    const [askedBin, , askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
+    expect(askedBin).toBe("bash");
+    expect(askedOpts.label).toBe("the local chat server");
+    expect(askedOpts.env).toBe((mockSpawn.mock.calls[0]?.[2] as { env: unknown }).env);
   });
 
   it("forwards local scope to the configure route during llama.cpp install", async () => {

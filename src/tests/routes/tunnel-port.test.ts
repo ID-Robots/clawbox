@@ -54,6 +54,15 @@ vi.mock("@/lib/named-tunnel", () => ({
   readTunnelMode: async () => "quick",
   readNamedTunnelCredential: async () => null,
 }));
+// A host whose web server holds no ambient capabilities, whatever the shell
+// running this suite holds: the capability drop passes the spawn through, so
+// the argv assertions below pin that such a host spawns exactly as before.
+vi.mock("@/lib/capability-drop", () => ({
+  CAPABILITY_DROP_COMMAND: "setpriv",
+  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
+  SETPRIV_PATH: "/usr/bin/setpriv",
+  withCapabilityDrop: (bin: string, argv: string[]) => ({ bin, argv, dropped: false }),
+}));
 
 type Route = { GET?: () => Promise<Response>; POST?: () => Promise<Response> };
 let enable: Route;

@@ -9,6 +9,7 @@ import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
 import { join } from "@/lib/runtime-path";
+import { withCapabilityDrop } from "@/lib/capability-drop";
 import {
   type TunnelUnitState,
   getTunnelServiceState,
@@ -277,7 +278,11 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
     // ClawBox web UI.
     // `--config` goes before `--url`, exactly as scripts/run-tunnel.sh runs it.
     const args = ["tunnel", "--no-autoupdate", "--config", isolatedConfig, "--url", target];
-    const proc = spawn("cloudflared", args, {
+    // Without the web server's network capabilities where it holds them, as
+    // clawbox-tunnel.service already runs cloudflared. setpriv execs it in
+    // place, so the pid recorded below is cloudflared's.
+    const launch = withCapabilityDrop("cloudflared", args, { label: "the tunnel route's quick tunnel" });
+    const proc = spawn(launch.bin, launch.argv, {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });

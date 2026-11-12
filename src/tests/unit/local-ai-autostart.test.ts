@@ -19,6 +19,27 @@ vi.mock("child_process", () => ({
   spawn: (...args: unknown[]) => spawnMock(...args),
 }));
 
+// The capability drop: a pass-through unless a case sets `wrap`, which is what
+// a host whose web server holds no ambient capabilities gets — so every other
+// assertion here pins that such a host spawns exactly as before.
+const DROP = ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"];
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", () => ({
+  CAPABILITY_DROP_COMMAND: "setpriv",
+  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
+  SETPRIV_PATH: "/usr/bin/setpriv",
+  withCapabilityDrop: (bin: string, argv: string[], opts: unknown) => {
+    drop.calls.push([bin, argv, opts]);
+    return drop.wrap
+      ? { bin: "/usr/bin/setpriv", argv: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", `/resolved/${bin}`, ...argv], dropped: true }
+      : { bin, argv, dropped: false };
+  },
+}));
+beforeEach(() => {
+  drop.wrap = false;
+  drop.calls.length = 0;
+});
+
 const readConfigMock = vi.fn();
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...args: unknown[]) => readConfigMock(...args),
@@ -162,6 +183,48 @@ describe("llama.cpp auto-start gate", () => {
     // The window reaches the launcher script as its last argument, --ctx-size.
     const [, argv] = spawnMock.mock.calls[0] as [string, string[]];
     expect(argv.at(-1)).toBe("65536");
+  });
+
+  it("starts the server without the web server's capabilities on a host that holds them", async () => {
+    readConfigMock.mockResolvedValue({});
+    getAllMock.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+
+    // The same start on a host without them, for its options.
+    expect(await (await loadModule()).startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+    const [plainBin, plainArgv, plainOpts] = spawnMock.mock.calls[0] as [string, string[], { env: unknown }];
+    expect(plainBin).toBe("bash");
+
+    drop.wrap = true;
+    drop.calls.length = 0;
+    spawnMock.mockClear();
+    expect(await (await loadModule()).startLlamaCppServer("gemma4-e2b-it-q4_0")).toBe("started");
+
+    const [bin, argv, opts] = spawnMock.mock.calls[0] as [string, string[], { env: unknown }];
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(argv.slice(0, 4)).toEqual(DROP);
+    expect(argv[4]).toBe("/resolved/bash");
+    expect(argv[5]).toBe(LAUNCH_SPEC.scriptPath);
+    expect(argv[5 + 4]).toBe("gemma4-e2b-it-q4_0");
+    expect(argv.at(-1)).toBe(`${LAUNCH_SPEC.contextWindow}`);
+    expect(argv.slice(5)).toEqual(plainArgv);
+    // cwd, detached false, stdio and env are the unwrapped call's.
+    expect(opts).toEqual(plainOpts);
+    expect(opts).toMatchObject({
+      detached: false,
+      stdio: "ignore",
+      env: expect.objectContaining({ HOME: expect.any(String), LLAMACPP_PID_PATH: LAUNCH_SPEC.pidPath }),
+    });
+    expect(drop.calls).toHaveLength(1);
+    const [askedBin, askedArgv, askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
+    expect(askedBin).toBe("bash");
+    expect(askedArgv).toEqual(plainArgv);
+    expect(askedOpts.label).toBe("the local chat server");
+    // The very env object the child gets, so the PATH lookup is the child's.
+    expect(askedOpts.env).toBe(opts.env);
   });
 
   it("auto-starts from the config store when OpenClaw has no primary (boot path, no alias)", async () => {

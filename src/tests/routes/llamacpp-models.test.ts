@@ -47,11 +47,29 @@ vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: (...a: unknown[]
 const disabled = vi.fn<(req: Request) => Promise<Response>>(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
 vi.mock("@/app/setup-api/local-ai/route", () => ({ POST: (req: Request) => disabled(req) }));
 
-/** The `hf download` child. */
+// The capability drop: a pass-through unless a case sets `wrap`, which is what
+// a host whose web server holds no ambient capabilities gets — so every other
+// case here pins that such a host spawns exactly as before.
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", () => ({
+  CAPABILITY_DROP_COMMAND: "setpriv",
+  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
+  SETPRIV_PATH: "/usr/bin/setpriv",
+  withCapabilityDrop: (bin: string, argv: string[], opts: unknown) => {
+    drop.calls.push([bin, argv, opts]);
+    return drop.wrap
+      ? { bin: "/usr/bin/setpriv", argv: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", `/resolved/${bin}`, ...argv], dropped: true }
+      : { bin, argv, dropped: false };
+  },
+}));
+
+/** The `hf download` child, and what each spawn was asked: (bin, args, options). */
 const child = { code: 0, stderr: "", writes: null as string | null, bytes: 32 };
+const spawned: unknown[][] = [];
 vi.mock("child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("child_process")>()),
-  spawn: () => {
+  spawn: (...call: unknown[]) => {
+    spawned.push(call);
     const handlers: Record<string, ((...a: unknown[]) => void)[]> = {};
     const errHandlers: ((chunk: string) => void)[] = [];
     const fake = {
@@ -110,6 +128,9 @@ beforeEach(() => {
   child.stderr = "";
   child.writes = "other.gguf";
   child.bytes = 32;
+  spawned.length = 0;
+  drop.wrap = false;
+  drop.calls.length = 0;
   hubTree.status = 200;
   hubTree.entries = [{ path: "other.gguf", size: 135, lfs: { size: 4 * 1024 * 1024 * 1024 } }];
   vi.stubGlobal("fetch", vi.fn(async () => ({
@@ -282,6 +303,32 @@ describe("POST /setup-api/llamacpp/models", () => {
     expect(lines[0]).toMatchObject({ total: 4 * 1024 * 1024 * 1024 });
     expect(lines.at(-1)).toMatchObject({ success: true, file: "other.gguf", bytes: 4096 });
     expect(fs.existsSync(path.join(modelDir, "other.gguf"))).toBe(true);
+    // A host without ambient capabilities: hf itself, as before.
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0][0]).toBe(spec.hfBin);
+    expect(spawned[0][1]).toEqual(["download", "owner/name", "other.gguf", "--local-dir", modelDir]);
+  });
+
+  it("starts the download without the web server's capabilities on a host that holds them", async () => {
+    drop.wrap = true;
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ repo: "owner/name", file: "other.gguf" })));
+
+    expect(lines.at(-1)).toMatchObject({ success: true, file: "other.gguf" });
+    expect(spawned).toHaveLength(1);
+    const [bin, args, opts] = spawned[0] as [string, string[], { detached: boolean; env: Record<string, string> }];
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(args).toEqual([
+      "--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--",
+      `/resolved/${spec.hfBin}`, "download", "owner/name", "other.gguf", "--local-dir", modelDir,
+    ]);
+    // Its own process group still, so the timeout's group kill ends the transfer.
+    expect(opts.detached).toBe(true);
+    expect(opts.env.HF_HUB_DISABLE_PROGRESS_BARS).toBe("1");
+    const [askedBin, , askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
+    expect(askedBin).toBe(spec.hfBin);
+    expect(askedOpts.label).toBe("the model download");
+    expect(askedOpts.env).toBe(opts.env);
   });
 
   it("leaves nothing half-written behind when the download fails", async () => {

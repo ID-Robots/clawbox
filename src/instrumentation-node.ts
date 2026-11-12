@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import path from '@/lib/runtime-path'
 import fs from 'fs'
+import { withCapabilityDrop } from './lib/capability-drop'
 import { CONFIG_ROOT } from './lib/config-store'
 import { envPort } from './lib/port-probe'
 
@@ -397,7 +398,17 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
     throw new Error('llama.cpp was stopped while it was starting')
   }
 
-  const child = spawn(
+  const env = {
+    ...process.env,
+    HOME: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
+    LLAMACPP_PID_PATH: spec.pidPath,
+  }
+  // Without the web server's network capabilities where it holds them (the
+  // Jetson unit); synchronous, so the check above still has no await between
+  // it and the spawn. setpriv execs bash in place, the launcher writes its own
+  // pid ($$) and ends `exec llama-server`, so child.pid below stays the
+  // server's pid, which stopLlamaCppServer signals.
+  const launch = withCapabilityDrop(
     'bash',
     [
       spec.scriptPath,
@@ -412,17 +423,14 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
       spec.hfBinPath,
       `${spec.contextWindow}`,
     ],
-    {
-      cwd: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
-      detached: false,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        HOME: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
-        LLAMACPP_PID_PATH: spec.pidPath,
-      },
-    },
+    { label: 'the local chat server', env },
   )
+  const child = spawn(launch.bin, launch.argv, {
+    cwd: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
+    detached: false,
+    stdio: 'ignore',
+    env,
+  })
 
   // Attached BEFORE the pid check below, because a spawn that failed emits
   // 'error' asynchronously and an 'error' event with no listener is an uncaught

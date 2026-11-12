@@ -32,6 +32,26 @@ vi.mock("child_process", () => ({
   },
 }));
 
+// The capability drop: a pass-through unless a case sets `wrap`, which is what
+// a host whose web server holds no ambient capabilities gets — so every other
+// assertion here pins that such a host spawns exactly as before.
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", () => ({
+  CAPABILITY_DROP_COMMAND: "setpriv",
+  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
+  SETPRIV_PATH: "/usr/bin/setpriv",
+  withCapabilityDrop: (bin: string, argv: string[], opts: unknown) => {
+    drop.calls.push([bin, argv, opts]);
+    return drop.wrap
+      ? { bin: "/usr/bin/setpriv", argv: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", `/resolved/${bin}`, ...argv], dropped: true }
+      : { bin, argv, dropped: false };
+  },
+}));
+beforeEach(() => {
+  drop.wrap = false;
+  drop.calls.length = 0;
+});
+
 /**
  * TASK-453 round 2 — the device's REAL tunnel is clawbox-tunnel.service, and
  * this module only ever knew about a cloudflared it spawned itself. The unit
@@ -477,6 +497,36 @@ describe.each([
     ]);
     expect(await fs.readFile(ISOLATED_CONFIG, "utf-8")).toBe("{}\n");
     expect((await tunnel.readState()).target).toBe(target);
+  });
+
+  it("spawns cloudflared without the web server's capabilities on a host that holds them", async () => {
+    drop.wrap = true;
+    execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
+    spawnMock.mockImplementation(() => makeFakeProc("Visit it at: https://port-check.trycloudflare.com"));
+
+    const result = await tunnel.startTunnel();
+
+    expect(result).toEqual({ success: true, tunnelUrl: "https://port-check.trycloudflare.com" });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0][0]).toBe("/usr/bin/setpriv");
+    expect(spawnMock.mock.calls[0][1]).toEqual([
+      "--ambient-caps=-all",
+      "--inh-caps=-all",
+      "--no-new-privs",
+      "--",
+      "/resolved/cloudflared",
+      "tunnel",
+      "--no-autoupdate",
+      "--config",
+      ISOLATED_CONFIG,
+      "--url",
+      target,
+    ]);
+    expect(spawnMock.mock.calls[0][2]).toEqual({ detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    expect(drop.calls[0]?.[0]).toBe("cloudflared");
+    expect((drop.calls[0]?.[2] as { label: string }).label).toBe("the tunnel route's quick tunnel");
+    // setpriv execs cloudflared in place, so the pid recorded is cloudflared's.
+    expect((await fs.readFile(PID_FILE, "utf-8")).split("\n")[0]).toBe("999999");
   });
 
   it("reports the target of a tunnel it spawned, and forgets it on disable", async () => {
