@@ -52,6 +52,8 @@ openclaw_version_is_v2() { [[ "$1" == 2026.8.* ]]; }
 chown() { :; }
 flush_core_to_disk() { :; }
 systemctl() { ctl system "$@"; }
+# The probes install.sh asks as the service account (runuser -u … -- cmd…).
+runuser() { shift 2; [ "\${1:-}" = "--" ] && shift; "$@"; }
 # npm is reached only when the core is being replaced, so its stub is the
 # CORE_REPLACEMENT sentinel — and it leaves npm's layout behind at the prefix
 # it was handed (the step stages the core, gates the launcher there, then

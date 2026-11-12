@@ -2,6 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  ARRAY_EXPANSION,
+  ARRAY_FILL,
+  blankSingleQuoted,
+  functionDefs,
+  logicalLines,
+  ownWords,
+  shellFiles,
+  sudoWrappers,
+  wrapperCalls,
+  wrapperPattern,
+} from "../helpers/shell-reader";
 
 /**
  * No credential-named variable on a sudo command line in the shipped shell:
@@ -14,9 +26,17 @@ import path from "node:path";
  * secret, password, key, auth, cookie and the like, unless the name ends in
  * _FILE, _PATH or _DIR and only the path goes on the line: a credential path
  * whose contents are read in place (`"$(cat "$TOKEN_FILE")"`) still counts.
- * Every sudo call on a line is read, chained ones included. A value under a
- * name that says nothing is out of its reach, so review still matters. systemd
- * units are not shell and are not read.
+ * A name part TOKENS right after a count word (MAX_TOKENS, PROMPT_TOKENS)
+ * counts tokens; API_TOKENS is still a credential. NOT_A_CREDENTIAL lists the
+ * names read and found to hold no secret, each with what it holds.
+ * Every sudo call on a line is read, chained ones included, and so is every
+ * call inside single-quoted text, which is often a program a shell runs: a
+ * trap, `bash -c '…'`, a program handed to the nano-tests' `board`, a variable
+ * that holds one. A call there is read up to the closing quote. A value under
+ * a name that says nothing is out of its reach, so review still matters, and
+ * so is a call inside double-quoted text whose credential sits between inner
+ * single quotes (`bash -c "sudo tool '$X'"`): that text is read as if the inner
+ * quotes were shell quotes. systemd units are not shell and are not read.
  */
 
 const REPO = path.resolve(__dirname, "../../..");
@@ -28,11 +48,44 @@ const WEAK_PARTS = new Set(["KEY", "AUTH", "PASS", "PSK", "CRED", "CREDS"]);
 /** A name for where a credential lives, which is what belongs on a command line. */
 const PATH_NAME = /_(?:FILE|PATH|DIR)$|[a-z0-9](?:File|Path|Dir)$/i;
 
+/**
+ * A TOKENS part counts tokens rather than holding them only after a word that
+ * says how many or which ones: `MAX_TOKENS`, `PROMPT_TOKENS`. `API_TOKENS` and
+ * `ACCESS_TOKENS` are still credentials.
+ */
+const COUNT_PART = "TOKENS";
+const COUNT_QUALIFIERS = new Set([
+  "MAX",
+  "MIN",
+  "NUM",
+  "TOTAL",
+  "PROMPT",
+  "COMPLETION",
+  "INPUT",
+  "OUTPUT",
+  "CONTEXT",
+  "CTX",
+  "REPLY",
+  "RESPONSE",
+]);
+/**
+ * Names that sound like a credential but were read and hold none. Unlike an
+ * ALLOWED entry these never expire: each reason says what the name holds, so
+ * reusing the name for a secret is a change a reviewer sees here.
+ */
+const NOT_A_CREDENTIAL = new Map([
+  ["SHIPPED_MAX_TOKENS", "the reply-length cap the local-AI test ships with, a token count"],
+  ["PROMPT_TOKENS", "the input-token count a local-AI reply reports in its usage"],
+  ["MEMORY_SEARCH_KEY", "a config key path: memory.search or agents.defaults.memorySearch"],
+]);
+
 /** A name that speaks of a credential, a path to one included. */
 function credentialWords(name: string): boolean {
-  if (STRONG_FRAGMENT.test(name)) return true;
+  if (NOT_A_CREDENTIAL.has(name)) return false;
   const parts = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase().split("_");
-  return parts.some((part) => WEAK_PARTS.has(part));
+  const named = parts.filter((part, j) => !(part === COUNT_PART && COUNT_QUALIFIERS.has(parts[j - 1])));
+  if (STRONG_FRAGMENT.test(named.length === parts.length ? name : named.join("_"))) return true;
+  return named.some((part) => WEAK_PARTS.has(part));
 }
 
 const credentialName = (name: string): boolean => !PATH_NAME.test(name) && credentialWords(name);
@@ -42,22 +95,6 @@ const CONTENT_READ = /\$\(\s*(?:<|(?:cat|head|tail|jq|base64|sed|awk|grep|cut|tr
 
 /** `$NAME` and `${NAME…}`; `$(…)` and positional `$1` are not names. */
 const VAR_REF = /\$\{?([A-Za-z_][A-Za-z0-9_]*)/g;
-/** A heredoc opener and its delimiter word, quoted (group 2 or 3) or bare (group 4). */
-const HEREDOC = /^<<(-?)\s*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"`]+))/;
-/**
- * A command that reads its script from the heredoc: a shell as the last word
- * before `<<`, with options but no `-c` (`bash -c '…' <<EOF` reads data).
- */
-const FEEDS_SHELL = /(?:^|[\s;&|(!`])(?:\S*\/)?(?:ba|da)?sh(?:\s+-(?!c\b)[A-Za-z]+)*\s*$/;
-/** A function head: `name()`, `function name`; its opener `{` or `(` (group 3) and the rest of the line (group 4). */
-const FUNCTION_HEAD =
-  /^\s*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?|([A-Za-z_][A-Za-z0-9_]*)\s*\(\))\s*(?:([{(])([\s\S]*))?$/;
-/** The caller's arguments: `$@`, `$*`, `$1`…`$9`, `${@}`, `${@:2}`, `${1}`. */
-const CALLER_ARGS = /\$\{?(?:[@*]|[1-9])/;
-/** An array filled in place, `arr=(…)` or `arr+=(…)`: the name is group 1, the contents group 2. */
-const ARRAY_FILL = /([A-Za-z_][A-Za-z0-9_]*)\+?=\(([^)]*)\)/g;
-/** An array expanded whole, `${arr[@]}`: the name is group 1. */
-const ARRAY_EXPANSION = /\$\{([A-Za-z_][A-Za-z0-9_]*)\[[@*]\]\}/g;
 /** A variable or array that holds a command: `NAME="cmd …"`, `NAME=(cmd …)`; the name is group 1, the command group 2. */
 const COMMAND_HOLDER = /(?:^|[\s;&(])([A-Za-z_][A-Za-z0-9_]*)=\(?\s*["']?(?:\S*\/)?([A-Za-z_][A-Za-z0-9_]*)(?=[\s"')]|$)/g;
 const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=/;
@@ -76,10 +113,13 @@ interface Allowed {
 /** Each entry needs a reason, an expiry date and exactly one live line. */
 const ALLOWED: Allowed[] = [];
 
-interface Line {
-  lineNo: number;
-  text: string;
-}
+/**
+ * The fewest sudo and wrapper calls the tree may read: the shipped shell had
+ * 344 when this was set and 352 when it was last checked. A drop past it means
+ * the reader lost a shape it read before, or the calls left the scripts on
+ * purpose, in which case lower it.
+ */
+const CALL_FLOOR = 335;
 
 interface Hit {
   file: string;
@@ -87,253 +127,6 @@ interface Hit {
   wrapper: string;
   names: string[];
   text: string;
-}
-
-type Context =
-  | { kind: "'" | '"' | "$'" | "`"; at: number }
-  | { kind: "$(" | "(("; at: number; depth: number };
-
-interface Pending {
-  word: string;
-  strip: boolean;
-  at: number;
-  feedsShell: boolean;
-  body: string[];
-}
-
-/**
- * The file one command line at a time, as bash reads it: backslash
- * continuations and newlines inside quotes, `$(…)`, `$((…))` or backquotes are
- * joined, comments dropped. Quoting nests the way bash nests it, so `'…"…'`
- * inside `"$(…)"` does not end the outer string, and `<<` inside arithmetic is
- * a shift. A heredoc body is dropped, unless its command is a shell: then it is
- * read as shell too. A reader that loses its place throws rather than skipping
- * the rest of the file, which would read as "nothing found".
- */
-function logicalLines(text: string, file: string, offset = 0): Line[] {
-  const out: Line[] = [];
-  const lines = text.split("\n");
-  const stack: Context[] = [];
-  let heredocs: Pending[] = [];
-  let buf = "";
-  let start = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const raw = lines[i];
-    if (heredocs.length) {
-      const [next] = heredocs;
-      if ((next.strip ? raw.replace(/^\t+/, "") : raw) === next.word) {
-        heredocs.shift();
-        if (next.feedsShell) out.push(...logicalLines(next.body.join("\n"), file, offset + next.at));
-      } else {
-        next.body.push(raw);
-      }
-      continue;
-    }
-    if (!buf && !stack.length) start = i + 1;
-    let code = "";
-    let continued = false;
-    const opened: Pending[] = [];
-    for (let j = 0; j < raw.length; j += 1) {
-      const c = raw[j];
-      const top = stack[stack.length - 1];
-      const kind = top ? top.kind : "code";
-      if (kind === "'") {
-        code += c;
-        if (c === "'") stack.pop();
-        continue;
-      }
-      if (c === "\\") {
-        if (kind !== "$'" && j === raw.length - 1) {
-          continued = true;
-          break;
-        }
-        code += c + (raw[j + 1] ?? "");
-        j += 1;
-        continue;
-      }
-      if (kind === "$'") {
-        code += c;
-        if (c === "'") stack.pop();
-        continue;
-      }
-      if (c === "$" && raw[j + 1] === "(") {
-        const arithmetic = raw[j + 2] === "(";
-        stack.push({ kind: arithmetic ? "((" : "$(", at: i + 1, depth: 0 });
-        code += arithmetic ? "$((" : "$(";
-        j += arithmetic ? 2 : 1;
-        continue;
-      }
-      if (c === "`") {
-        if (kind === "`") stack.pop();
-        else stack.push({ kind: "`", at: i + 1 });
-        code += c;
-        continue;
-      }
-      if (kind === '"') {
-        code += c;
-        if (c === '"') stack.pop();
-        continue;
-      }
-      if (top?.kind === "((") {
-        // Arithmetic: `<<` is a shift and nothing here is quoted or commented.
-        if (c === "(") top.depth += 1;
-        if (c === ")") {
-          if (top.depth) top.depth -= 1;
-          else {
-            stack.pop();
-            if (raw[j + 1] === ")") {
-              code += ")";
-              j += 1;
-            }
-          }
-        }
-        code += c;
-        continue;
-      }
-      // Unquoted: top level, inside `$(…)` or inside backquotes.
-      if (c === "#" && (j === 0 || /[\s;&|(]/.test(raw[j - 1]))) break;
-      if (c === "'" || c === '"') {
-        stack.push({ kind: c, at: i + 1 });
-        code += c;
-        continue;
-      }
-      if (c === "$" && raw[j + 1] === "'") {
-        stack.push({ kind: "$'", at: i + 1 });
-        code += "$'";
-        j += 1;
-        continue;
-      }
-      if (c === "(" && raw[j + 1] === "(") {
-        stack.push({ kind: "((", at: i + 1, depth: 0 });
-        code += "((";
-        j += 1;
-        continue;
-      }
-      if (top?.kind === "$(" && c === "(") top.depth += 1;
-      if (top?.kind === "$(" && c === ")") {
-        if (top.depth) top.depth -= 1;
-        else stack.pop();
-      }
-      if (c === "<" && raw[j + 1] === "<" && raw[j + 2] !== "<" && raw[j - 1] !== "<") {
-        const opener = HEREDOC.exec(raw.slice(j));
-        if (opener) {
-          const word = opener[2] ?? opener[3] ?? opener[4];
-          opened.push({ word, strip: opener[1] === "-", at: i + 1, feedsShell: FEEDS_SHELL.test(buf + code), body: [] });
-          code += opener[0];
-          j += opener[0].length - 1;
-          continue;
-        }
-      }
-      code += c;
-    }
-    // A heredoc body starts on the next line even inside an open `$(…)`.
-    heredocs = opened;
-    if (stack.length) {
-      buf += `${code}\n`;
-      continue;
-    }
-    if (continued) {
-      buf += `${code} `;
-      continue;
-    }
-    const line = buf + code;
-    buf = "";
-    if (line.trim()) out.push({ lineNo: offset + start, text: line });
-  }
-  const where = (at: number): string => `${file}:${offset + at}`;
-  if (stack.length) throw new Error(`${where(stack[0].at)}: ${stack[0].kind} never closes for this reader`);
-  if (heredocs.length) throw new Error(`${where(heredocs[0].at)}: heredoc ${heredocs[0].word} never closes for this reader`);
-  return out;
-}
-
-/** `text` with the contents of single-quoted strings blanked: nothing in them is expanded. */
-function blankSingleQuoted(text: string): string {
-  let out = "";
-  let state: "code" | "'" | '"' = "code";
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (state === "'") {
-      if (c === "'") state = "code";
-      out += c === "'" ? c : " ";
-      continue;
-    }
-    if (c === "\\") {
-      out += c + (text[i + 1] ?? "");
-      i += 1;
-      continue;
-    }
-    if (state === '"' && c === '"') state = "code";
-    else if (state === "code" && (c === "'" || c === '"')) state = c;
-    out += c;
-  }
-  return out;
-}
-
-/**
- * The words of the wrapper's own command, up to the first `;`, `|` or `&`
- * outside quotes and substitutions, with quote characters removed. A word that
- * opens with a single quote is literal text, a program more often than not.
- */
-function ownWords(rest: string): { text: string; literal: boolean }[] {
-  const words: { text: string; literal: boolean }[] = [];
-  const stack: string[] = [];
-  let current = "";
-  let literal = false;
-  let started = false;
-  const end = (): void => {
-    if (started) words.push({ text: current, literal });
-    current = "";
-    literal = false;
-    started = false;
-  };
-  for (let i = 0; i < rest.length; i += 1) {
-    const c = rest[i];
-    const top = stack[stack.length - 1];
-    if (top === "'") {
-      if (c === "'") stack.pop();
-      else current += c;
-      continue;
-    }
-    if (c === "\\") {
-      current += rest[i + 1] ?? "";
-      started = true;
-      i += 1;
-      continue;
-    }
-    if (c === "$" && rest[i + 1] === "(") {
-      stack.push(")");
-      current += "$(";
-      started = true;
-      i += 1;
-      continue;
-    }
-    if (top === '"') {
-      if (c === '"') stack.pop();
-      else current += c;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      if (!started) literal = c === "'";
-      started = true;
-      stack.push(c);
-      continue;
-    }
-    if (top === ")") {
-      if (c === "(") stack.push(")");
-      else if (c === ")") stack.pop();
-      current += c;
-      continue;
-    }
-    if (/\s/.test(c)) {
-      end();
-      continue;
-    }
-    if (c === ";" || c === "|" || c === "&") break;
-    current += c;
-    started = true;
-  }
-  end();
-  return words;
 }
 
 /**
@@ -353,116 +146,6 @@ function credentialsIn(rest: string): string[] {
     .flatMap((m) => [...m[0].matchAll(VAR_REF)].map((v) => v[1]))
     .filter(credentialWords);
   return [...[...assigned, ...referenced].filter(credentialName), ...readInPlace];
-}
-
-/** Every call through `wrapper` on a line, each with its own text: up to the next call. */
-function wrapperCalls(text: string, wrapper: RegExp): { name: string; rest: string }[] {
-  const found = [...text.matchAll(new RegExp(wrapper.source, "g"))];
-  return found.map((m, n) => ({
-    name: m[1],
-    rest: text.slice((m.index ?? 0) + m[0].length, found[n + 1]?.index ?? text.length),
-  }));
-}
-
-const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/**
- * A call through one of `names`, `su`, or a variable or array holding one of
- * them (`holders`). Group 1 names it. Every name is escaped, and each is a
- * shell name read from this repository's own scripts.
- */
-function wrapperPattern(names: Set<string>, holders: Set<string> = new Set()): RegExp {
-  const alternatives = [
-    ...[...names].map(escapeRe),
-    "su",
-    ...[...holders].flatMap((h) => [`\\$\\{${escapeRe(h)}\\[[@*]\\]\\}`, `\\$\\{?${escapeRe(h)}\\}?`]),
-  ].join("|");
-  return new RegExp(`(?:^|[\\s;&|(\`!{"'/\\\\])(${alternatives})["']?(?=\\s)`);
-}
-
-const indentOf = (text: string): number => /^\s*/.exec(text)?.[0].length ?? 0;
-
-interface FunctionDef {
-  name: string;
-  /** The function's own body lines: up to its closer, without the bodies of functions defined inside it. */
-  body: string[];
-}
-
-function functionDefs(lines: Line[]): FunctionDef[] {
-  const defs: FunctionDef[] = [];
-  lines.forEach((line, k) => {
-    const head = FUNCTION_HEAD.exec(line.text);
-    if (!head) return;
-    const name = head[1] ?? head[2];
-    let opener = head[3];
-    let rest = head[4] ?? "";
-    let from = k + 1;
-    if (!opener) {
-      // `name()` alone, its `{` on the next line.
-      const next = lines[k + 1]?.text.trimStart() ?? "";
-      if (next[0] !== "{" && next[0] !== "(") return;
-      opener = next[0];
-      rest = next.slice(1);
-      from = k + 2;
-    }
-    const closer = opener === "{" ? "}" : ")";
-    const oneLiner = (text: string, close: string): boolean => new RegExp(`\\${close}\\s*;?\\s*$`).test(text);
-    const body = [rest];
-    if (!oneLiner(rest, closer)) {
-      const indent = indentOf(line.text);
-      let nested: { indent: number; closer: string } | null = null;
-      for (const inner of lines.slice(from)) {
-        const trimmed = inner.text.trim();
-        if (nested) {
-          if (trimmed === nested.closer && indentOf(inner.text) <= nested.indent) nested = null;
-          continue;
-        }
-        if (trimmed === closer && indentOf(inner.text) <= indent) break;
-        // A function defined inside this one is judged on its own.
-        const innerHead = FUNCTION_HEAD.exec(inner.text);
-        if (innerHead) {
-          const innerCloser = innerHead[3] === "(" ? ")" : "}";
-          if (innerHead[3] && !oneLiner(innerHead[4], innerCloser)) {
-            nested = { indent: indentOf(inner.text), closer: innerCloser };
-          }
-          continue;
-        }
-        body.push(inner.text);
-      }
-    }
-    defs.push({ name, body });
-  });
-  return defs;
-}
-
-/**
- * sudo, the installers' own sudo helpers, and every function that passes its
- * own arguments on through one of them or `su`, directly, by position or
- * through an array filled from them: their call sites are sudo command lines
- * too.
- */
-function sudoWrappers(defs: FunctionDef[]): Set<string> {
-  const names = new Set(["sudo", "as_clawbox", "as_clawbox_login", "as_user", "as_user_runtime", "oc_config_set"]);
-  for (let grew = true; grew; ) {
-    grew = false;
-    const wrapper = wrapperPattern(names);
-    for (const { name, body } of defs) {
-      if (names.has(name)) continue;
-      const argArrays = new Set(
-        body.flatMap((text) => [...text.matchAll(ARRAY_FILL)].filter((a) => CALLER_ARGS.test(a[2])).map((a) => a[1])),
-      );
-      const forwards = body.some((text) =>
-        wrapperCalls(text, wrapper).some(
-          ({ rest }) => CALLER_ARGS.test(rest) || [...rest.matchAll(ARRAY_EXPANSION)].some((a) => argArrays.has(a[1])),
-        ),
-      );
-      if (forwards) {
-        names.add(name);
-        grew = true;
-      }
-    }
-  }
-  return names;
 }
 
 function scan(sources: { file: string; text: string }[]): { wrappers: Set<string>; calls: number; hits: Hit[] } {
@@ -496,27 +179,6 @@ function scan(sources: { file: string; text: string }[]): { wrappers: Set<string
     }
   }
   return { wrappers, calls, hits };
-}
-
-/** install.sh, install-x64.sh and every shell script under scripts/ and config/, with or without a `.sh` name. */
-function shellFiles(root = REPO): string[] {
-  const found = ["install.sh", "install-x64.sh"].filter((f) => fs.existsSync(path.join(root, f)));
-  const walk = (dir: string): void => {
-    if (!fs.existsSync(path.join(root, dir))) return;
-    for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
-      const rel = `${dir}/${entry.name}`;
-      if (entry.isDirectory()) walk(rel);
-      else if (!entry.isFile()) continue;
-      else if (entry.name.endsWith(".sh")) found.push(rel);
-      else if (!entry.name.includes(".")) {
-        const firstLine = fs.readFileSync(path.join(root, rel), "utf-8").split("\n", 1)[0];
-        if (/^#!.*\b(?:ba|da)?sh\b/.test(firstLine)) found.push(rel);
-      }
-    }
-  };
-  walk("scripts");
-  walk("config");
-  return found;
 }
 
 const tree = (): { wrappers: Set<string>; calls: number; hits: Hit[] } =>
@@ -556,7 +218,12 @@ describe("no credential-named variable reaches a sudo command line in the shippe
   it("finds sudo calls in the tree, so an empty result means something", () => {
     const { calls, wrappers } = tree();
     expect(shellFiles()).toEqual(expect.arrayContaining(["install.sh", "install-x64.sh"]));
-    expect(calls).toBeGreaterThan(100);
+    expect(
+      calls,
+      `the tree reads ${calls} sudo and wrapper calls, under the floor of ${CALL_FLOOR}. If a change to ` +
+        "src/tests/helpers/shell-reader.ts did this, it stopped reading a shape (quoted program text, a heredoc " +
+        "fed to a shell, a forwarding function); if the calls were removed from the scripts, lower CALL_FLOOR.",
+    ).toBeGreaterThanOrEqual(CALL_FLOOR);
     expect(wrappers.has("as_clawbox")).toBe(true);
   });
 
@@ -706,6 +373,92 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       [73, "as_clawbox", ["TOKEN_FILE"]],
       [74, "as_clawbox", ["KEY_FILE"]],
     ]);
+  });
+
+  it("reads a call inside quoted text on its own, without cutting the outer call short", () => {
+    const sample = [
+      `as_clawbox sh -c 'sudo true' sh "$API_KEY"`,
+      `as_clawbox bash -c 'as_clawbox x; echo' -- "$API_KEY"`,
+      `as_clawbox tool 'a sudo b' "$API_KEY"`,
+      'as_clawbox tool "a sudo b" "$API_KEY"',
+      'as_clawbox tool "a sudo b" API_KEY=secret',
+      "bash -s marker <<'EOF'",
+      'sudo -u clawbox tool "$HEREDOC_ARG_SECRET"',
+      "EOF",
+      "bash '-s' marker <<'EOF'",
+      'sudo -u clawbox tool "$QUOTED_S_SECRET"',
+      "EOF",
+      "bash -s -c 'true' <<'EOF'",
+      'sudo -u clawbox tool "$HEREDOC_DATA_SECRET"',
+      "EOF",
+    ].join("\n");
+    expect(scan([{ file: "sample.sh", text: sample }]).hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
+      [1, "as_clawbox", ["API_KEY"]],
+      [2, "as_clawbox", ["API_KEY"]],
+      [3, "as_clawbox", ["API_KEY"]],
+      [4, "as_clawbox", ["API_KEY"]],
+      [5, "as_clawbox", ["API_KEY"]],
+      [7, "sudo", ["HEREDOC_ARG_SECRET"]],
+      [10, "sudo", ["QUOTED_S_SECRET"]],
+    ]);
+  });
+
+  it("reads the sudo calls of a single-quoted program a shell runs, and a quoted sudo", () => {
+    const sample = [
+      `trap 'sudo -u clawbox tool --key "$OPENAI_API_KEY"' EXIT`,
+      `bash -c 'sudo -n tool "$API_KEY"'`,
+      `board 'sudo -n x --token "$GH_TOKEN"'`,
+      "RACE_ONCE='",
+      'sudo -n /usr/bin/tool enter "$RACE_SECRET"',
+      "'",
+      "board '",
+      '  if [ "$1" = system ]; then',
+      '    sudo -n /usr/bin/systemctl restart x "$BOARD_TOKEN"',
+      "  fi",
+      `' "$scope"`,
+      `'sudo' -n tool "$QUOTED_NAME_TOKEN"`,
+      `'/usr/bin/sudo' -u clawbox tool "$QUOTED_PATH_SECRET"`,
+      // Clean, and still read: install.sh's own trap, a path to a credential,
+      // and a quoted program whose wrapper is the line's own call.
+      `trap 'as_clawbox rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT`,
+      `board 'sudo -n x --token-file "$TOKEN_FILE"'`,
+      `as_clawbox sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"`,
+    ].join("\n");
+    const { calls, hits } = scan([{ file: "sample.sh", text: sample }]);
+    expect(hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
+      [1, "sudo", ["OPENAI_API_KEY"]],
+      [2, "sudo", ["API_KEY"]],
+      [3, "sudo", ["GH_TOKEN"]],
+      [4, "sudo", ["RACE_SECRET"]],
+      [7, "sudo", ["BOARD_TOKEN"]],
+      [12, "sudo", ["QUOTED_NAME_TOKEN"]],
+      [13, "sudo", ["QUOTED_PATH_SECRET"]],
+    ]);
+    expect(calls).toBe(10);
+  });
+
+  it("reads a token count and a config key path as no credential", () => {
+    const sample = [
+      'as_clawbox llama-server --n-predict "$MAX_TOKENS"',
+      'oc_config_set "$MEMORY_SEARCH_KEY" x',
+      'as_clawbox x "$API_TOKEN"',
+      'as_clawbox tool "$API_TOKENS"',
+      'as_clawbox tool "$ACCESS_TOKENS"',
+      'as_clawbox tool "$TOKENS"',
+      'as_clawbox llama-server --n-predict "$OUTPUT_TOKENS"',
+    ].join("\n");
+    expect(scan([{ file: "sample.sh", text: sample }]).hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
+      [3, "as_clawbox", ["API_TOKEN"]],
+      [4, "as_clawbox", ["API_TOKENS"]],
+      [5, "as_clawbox", ["ACCESS_TOKENS"]],
+      [6, "as_clawbox", ["TOKENS"]],
+    ]);
+  });
+
+  it("says what to do when it cannot see the end of a construct", () => {
+    expect(() => scan([{ file: "sample.sh", text: "echo 'never closed\n" }])).toThrow(
+      "sample.sh:1: ' never closes for this reader: check the quoting there, or teach src/tests/helpers/shell-reader.ts the construct",
+    );
   });
 
   it.each([

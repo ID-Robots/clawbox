@@ -1396,20 +1396,40 @@ GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 
-# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
-# answers when it can — it is the process that parses whatever we write — and
-# the pinned target only fills in before the first install. Used to route the
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED core
+# answers when there is one — it is what parses whatever we write — and the
+# pinned target only fills in before the first install. Used to route the
 # steps that speak different config dialects per generation.
 # The generation rule itself, callable with any version string, so the
-# installed-binary probe below and the freshly-pinned TARGET gate in
+# installed-core read below and the freshly-pinned TARGET gate in
 # step_openclaw_install cannot drift apart.
 openclaw_version_is_v2() {
   [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
 }
+# The installed core is asked through its package.json, read as data, not by
+# running `openclaw --version` as root. It is the file the gateway's pre-start
+# (scripts/gateway-pre-start.sh) and the web server
+# (src/lib/openclaw-core-generation.ts) read for the same question, so when it
+# is readable and its version is a date, all three agree on the generation.
+# The launcher still decides whether there is an installed core at all. An
+# unusable manifest is an empty answer and takes the pin, then OPENCLAW_VERSION.
+# The manifest read is quiet and never fails on its own. The answer is the exit
+# status, 1 before OpenClaw 2, so call it as a condition (`if`, `&&`): a bare
+# call under `set -e` ends its step on an older core. The program comes from a
+# heredoc, so a `while read` caller's input is left alone.
 openclaw_is_v2() {
   local v=""
   if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
-    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+    v=$(python3 -I - "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null <<'PY' || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("version")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")
+PY
+)
+    v=$(printf '%s\n' "$v" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
   fi
   if [ -z "$v" ] && [ -f "$SRC_DIR/config/openclaw-target.txt" ]; then
     v=$(head -1 "$SRC_DIR/config/openclaw-target.txt" | awk '{print $1}')
@@ -3009,7 +3029,10 @@ verify_build_present() {
     echo "  WARNING: scripts/verify-build-identity.sh is missing — the build's identity was not checked" >&2
     return 0
   fi
-  if ! bash "$project_dir/scripts/verify-build-identity.sh" --project-dir "$project_dir" --quiet; then
+  # As the service account: the script is a file in its checkout, and root runs
+  # nothing from the tree. It only reads the checkout and the build.
+  if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      bash "$project_dir/scripts/verify-build-identity.sh" --project-dir "$project_dir" --quiet; then
     echo "Error: the build on disk does not match the checked-out commit" >&2
     return 1
   fi
@@ -6414,7 +6437,9 @@ harness_swap_openclaw_runnable() {
     HARNESS_SWAP_PROBE_SAID="its command is missing"
     return 1
   fi
-  if said="$("$OPENCLAW_BIN" --version 2>&1 >/dev/null)"; then
+  # As the service account, like the Hermes probe above: the launcher is a file
+  # in its npm prefix, and root runs nothing from there.
+  if said="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$OPENCLAW_BIN" --version 2>&1 >/dev/null)"; then
     return 0
   fi
   harness_swap_print_probe "$said"
@@ -7599,8 +7624,9 @@ step_openclaw_install() {
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
     # we can compare exactly against the bare npm version. Literal "=" on the
-    # full string would always miss because of the prefix/hash.
-    INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
+    # full string would always miss because of the prefix/hash. Asked as the
+    # service account: the launcher is a file in its npm prefix.
+    INSTALLED=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
     INSTALLED_VER=$(echo "$INSTALLED" | awk '{print $2}')
     echo "  Installed: $INSTALLED, Target: $TARGET"
     if [ "$INSTALLED_VER" = "$TARGET" ]; then
@@ -7663,9 +7689,9 @@ step_openclaw_install() {
     #
     # Asked of the STAGED launcher, before anything is swapped: a core that
     # refuses this Node never reaches the live prefix, and the one already there
-    # keeps serving.
+    # keeps serving. Asked as the service account, whose npm filled the stage.
     local _oc_version_out _oc_engines
-    if ! _oc_version_out="$("$_oc_stage/bin/openclaw" --version 2>&1)"; then
+    if ! _oc_version_out="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$_oc_stage/bin/openclaw" --version 2>&1)"; then
       printf '%s\n' "$_oc_version_out" >&2
       # python3, not node: this arm exists because the Node on this box is the
       # problem, and asking it to read the file that says so is how a diagnosis
@@ -8677,10 +8703,13 @@ tts_write_local_provider_definition() {
   # nothing mid-restage. $3 is the copy ROOT EXECUTES for the timeout probe
   # below, which must be the root-owned one: this runs as root inside
   # step_openclaw_tts, `openclaw_tts` is on WEB_ROOT_STEPS, and the dispatcher's
-  # verify is long past by the time the step gets here — so `bash` on the tree
-  # copy is a foothold's payload with seconds to spare. Defaults to $2 for
-  # callers that are not inside a root step. TASK-733.
-  local TTS_HOME="$1" TTS_SCRIPT="$2" TTS_PROBE="${3:-$2}"
+  # verify is long past by the time the step gets here — so the probe runs the
+  # copy root holds, and with no $3 it refuses and runs nothing.
+  local TTS_HOME="$1" TTS_SCRIPT="$2" TTS_PROBE="${3:-}"
+  if [ -z "$TTS_PROBE" ]; then
+    echo "  ERROR: no root-held copy of clawbox-tts.sh was given to probe for the provider timeout" >&2
+    return 1
+  fi
   local TTS_TIMEOUT_MS
   TTS_TIMEOUT_MS=$(bash "$TTS_PROBE" --provider-timeout-ms 2>/dev/null || echo "")
   # Decimal digits, and more than zero: a 0 would let OpenClaw kill the

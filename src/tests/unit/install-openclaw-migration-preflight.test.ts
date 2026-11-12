@@ -162,6 +162,8 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     `systemctl() { printf 'systemctl %s\\n' "$*" >> ${log}; }`,
     "openclaw_version_is_v2() { return 0; }",
     'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+    // The probes install.sh asks as the service account (runuser -u … -- cmd…).
+    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
     "remove_shadowing_system_openclaw() { :; }",
     shellFunction("recover_parked_openclaw_core"),
     shellFunction("promote_staged_openclaw_core"),

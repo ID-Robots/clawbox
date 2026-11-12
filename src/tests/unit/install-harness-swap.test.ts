@@ -133,9 +133,11 @@ const STUB_INSTALL_SH = [
   "    esac ;;",
   "  openclaw_install)",
   '    mkdir -p "$(dirname "$STUB_OPENCLAW_BIN")"',
+  // The launcher sits in the service account's npm prefix: it says who ran it.
+  "    said_who='[ -n \"${AS_SERVICE_USER:-}\" ] && who=service || who=root; echo \"$who openclaw $*\" >> \"$LAUNCHER_RUNS\"'",
   '    case "${STUB_OPENCLAW_INSTALL:-runnable}" in',
-  "      runnable) printf '#!/bin/sh\\nexit 0\\n' > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
-  "      broken) printf '#!/bin/sh\\necho \"env: node: No such file or directory\" >&2\\nexit 127\\n' > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
+  "      runnable) printf '#!/bin/sh\\n%s\\nexit 0\\n' \"$said_who\" > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
+  "      broken) printf '#!/bin/sh\\n%s\\necho \"env: node: No such file or directory\" >&2\\nexit 127\\n' \"$said_who\" > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
   "      nothing) ;;",
   "    esac ;;",
   "  edition_lock)",
@@ -155,6 +157,7 @@ let lockFile: string;
 let systemctlCalls: string;
 let sleepCalls: string;
 let openclawBin: string;
+let launcherRuns: string;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-swap-"));
@@ -174,6 +177,8 @@ beforeEach(() => {
   sleepCalls = path.join(tmp, "sleep-calls");
   fs.writeFileSync(sleepCalls, "");
   openclawBin = path.join(home, ".npm-global", "bin", "openclaw");
+  launcherRuns = path.join(tmp, "launcher-runs");
+  fs.writeFileSync(launcherRuns, "");
 });
 
 afterEach(() => {
@@ -197,6 +202,7 @@ function driverEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     STUB_OPENCLAW_BIN: openclawBin,
     SYSTEMCTL_CALLS: systemctlCalls,
     SLEEP_CALLS: sleepCalls,
+    LAUNCHER_RUNS: launcherRuns,
     ...extra,
   });
 }
@@ -255,8 +261,11 @@ function runStep(recorded: string, extra: Record<string, string> = {}): StepRun 
     // install.sh initialises this at parse time; wait_for_gateway_port reads
     // it under `set -u`, and a fresh dispatch of the step starts it at 0.
     "GATEWAY_READY_SPENT=0",
-    // `runuser -u clawbox -- env HOME=… cmd…` → run cmd… as this user.
-    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
+    // `runuser -u clawbox -- env HOME=… cmd…` → run cmd… as this user, marked
+    // as the service account's run only when -u names it: a switch to root
+    // must still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     "systemctl() {",
     `  printf '%s\\n' "$*" >> ${JSON.stringify(systemctlCalls)}`,
     '  if [ "${1:-}" = "is-enabled" ]; then printf \'%s\\n\' "${STUB_UNIT_ENABLED:-enabled}"; fi',
@@ -665,6 +674,24 @@ d("step_harness_swap — hermes → openclaw", () => {
       expect(line, shape).toMatch(/OpenClaw does not run on this box after its install step/);
       expect(line, shape).toMatch(reasons[shape]);
       expect(line, shape).toMatch(/still the Hermes edition and nothing was changed/);
+    }
+  });
+
+  it("asks the OpenClaw launcher as the service account, never as root, whether or not it runs", () => {
+    // The launcher is a file in the service account's npm prefix, so root does
+    // not run it — the same rule the Hermes probe beside it keeps.
+    for (const shape of ["runnable", "broken"]) {
+      fs.rmSync(lockFile, { force: true });
+      fs.rmSync(openclawBin, { force: true });
+      fs.writeFileSync(callsFile, "");
+      fs.writeFileSync(launcherRuns, "");
+      writeRequest("openclaw");
+
+      const r = runStep("hermes", { STUB_OPENCLAW_INSTALL: shape });
+
+      expect(r.status === 0, shape).toBe(shape === "runnable");
+      const runs = fs.readFileSync(launcherRuns, "utf-8").split("\n").filter(Boolean);
+      expect(runs, shape).toEqual(["service openclaw --version"]);
     }
   });
 

@@ -239,6 +239,8 @@ interface Run {
   ptyRebuilds: number;
   /** Every build command handed to as_clawbox_login, verbatim, in order. */
   buildCommands: string[];
+  /** Each run of the checkout's identity script: `<root|service> <args>`. */
+  identityRuns: string[];
 }
 
 let sandbox: string;
@@ -250,6 +252,7 @@ let unwritableTmp: string;
 let ptyOk: string;
 let ptyCalls: string;
 let buildCommands: string;
+let identityRuns: string;
 
 /**
  * git with no config of the machine running the suite: no global or system
@@ -453,11 +456,15 @@ function run(scenario: Scenario = {}): Run {
     );
   }
 
+  rmSync(identityRuns, { force: true });
   if (identity !== "script-missing") {
     mkdirSync(path.join(projectDir, "scripts"), { recursive: true });
+    // The script is a file in the service account's checkout: it says who ran it.
+    const saidWho = `[ -n "\${AS_SERVICE_USER:-}" ] && who=service || who=root; echo "$who $*" >> ${JSON.stringify(identityRuns)}\n`;
     writeFileSync(
       path.join(projectDir, "scripts", "verify-build-identity.sh"),
-      identity === "ok" ? "#!/usr/bin/env bash\nexit 0\n" : "#!/usr/bin/env bash\necho 'BUILD IDENTITY: FAIL' >&2\nexit 1\n",
+      "#!/usr/bin/env bash\n" + saidWho
+        + (identity === "ok" ? "exit 0\n" : "echo 'BUILD IDENTITY: FAIL' >&2\nexit 1\n"),
       "utf-8",
     );
   }
@@ -545,6 +552,7 @@ function run(scenario: Scenario = {}): Run {
     // pressure free_memory_for_build exists for, or a full eMMC.
     "TMPDIR=" + JSON.stringify(buildLog === "unwritable" ? unwritableTmp : sandbox),
     "CLAWBOX_USER=clawbox",
+    "CLAWBOX_HOME=" + JSON.stringify(sandbox),
     "BUN=/nonexistent/bun",
     "FAKE_BUILD=" + JSON.stringify(fakeBuild),
     "SYSTEMCTL_LOG=" + JSON.stringify(systemctlLog),
@@ -568,8 +576,13 @@ function run(scenario: Scenario = {}): Run {
     "# attempts run instantly.",
     "sleep() { :; }",
     "# The cache carry moves the parked build's .next/cache as clawbox; here that",
-    "# is whoever runs the test.",
-    'as_clawbox() { "$@"; }',
+    "# is whoever runs the test. Both account switches mark what they run as the",
+    "# service account's.",
+    'as_clawbox() { AS_SERVICE_USER=1 "$@"; }',
+    // Marks the run as the service account only when -u names it: a switch to
+    // root must still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     // node-pty's state is a file: present while the module loads. The first
     // run is do_rebuild's own, before the build; a second can only be the
     // rebuild after a rollback. Logged beside systemctl so the order shows.
@@ -750,6 +763,7 @@ function run(scenario: Scenario = {}): Run {
     buildCommands: existsSync(buildCommands)
       ? readFileSync(buildCommands, "utf-8").split("\n").filter(Boolean)
       : [],
+    identityRuns: existsSync(identityRuns) ? readFileSync(identityRuns, "utf-8").split("\n").filter(Boolean) : [],
   };
 }
 
@@ -767,6 +781,7 @@ beforeEach(() => {
   ptyOk = path.join(sandbox, "node-pty-loads");
   ptyCalls = path.join(sandbox, "ensure-node-pty-calls.txt");
   buildCommands = path.join(sandbox, "build-commands.txt");
+  identityRuns = path.join(sandbox, "identity-runs.txt");
   writeFileSync(unwritableTmp, "", "utf-8");
 });
 
@@ -937,6 +952,21 @@ describe("do_rebuild verifies the build it produced", () => {
     const r = run({ build: "succeeds", identity: "script-missing" });
     expect(r.status).toBe(0);
     expect(r.stderr).toMatch(/verify-build-identity\.sh is missing/);
+  });
+
+  it("runs the checkout's identity script as the service account, never as root, with the same outcome", () => {
+    // The script is a file in the account's checkout, so root does not run it.
+    const asked = `service --project-dir ${projectDir} --quiet`;
+    const ok = run({ build: "succeeds", identity: "ok" });
+    expect(ok.status).toBe(0);
+    expect(ok.buildId).toBe("new-build-id");
+    expect(ok.identityRuns).toEqual([asked]);
+
+    const drift = run({ build: "succeeds", identity: "drift" });
+    expect(drift.status).not.toBe(0);
+    expect(drift.buildId).toBe("old-build-id");
+    expect(drift.stderr).toContain("BUILD IDENTITY: FAIL\nError: the build on disk does not match the checked-out commit\n");
+    expect(drift.identityRuns).toEqual([asked]);
   });
 });
 
@@ -1604,6 +1634,12 @@ describe("step_build asks the same two questions", () => {
     const r = run({ entry: "step_build", build: "oom-killed", previousBuild: "none", parkedBuild: "servable" });
     expect(r.status).not.toBe(0);
     expect(r.buildId).toBe("parked-build-id");
+  });
+
+  it("runs the checkout's identity script as the service account", () => {
+    const r = run({ entry: "step_build", build: "succeeds", previousBuild: "none" });
+    expect(r.status).toBe(0);
+    expect(r.identityRuns).toEqual([`service --project-dir ${projectDir} --quiet`]);
   });
 });
 
