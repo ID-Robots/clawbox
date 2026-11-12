@@ -22,6 +22,8 @@ import {
 } from "@/lib/publish-redaction";
 
 const r = (text: string, hostNames?: string[]) => redactForPublishing(text, { hostNames });
+/** The text as it goes out: what the GitHub door sends, with the quoted-value pass. */
+const sent = (text: string, hostNames?: string[]) => redactForPublishing(text, { hostNames, quotedValues: true });
 
 const GHP = `ghp_${"a1B2c3D4e5".repeat(4)}`;
 const GITHUB_PAT = `github_pat_${"11ABCDEFG0".repeat(3)}_${"x9Y8z7W6v5".repeat(5)}`;
@@ -180,6 +182,108 @@ describe("token-shaped strings", () => {
     expect(r("ADMIN_PWD=s3cret!x")).toBe(`ADMIN_PWD=${SECRET}`);
   });
 
+  it("replaces the value under a QUOTED name, the way JSON writes it", () => {
+    for (const [input, expected] of [
+      ['{"DB_PASSWORD": "hunter2hunter2"}', `{"DB_PASSWORD": "${SECRET}"}`],
+      [`{"DEPLOY_TOKEN": "${HEX40}"}`, `{"DEPLOY_TOKEN": "${SECRET}"}`],
+      [`{'APP_SECRET': '${B64}'}`, `{'APP_SECRET': '${SECRET}'}`],
+      [`{"token": "${HEX40}"}`, `{"token": "${SECRET}"}`],
+      ['{\\"DB_PASSWORD\\":\\"hunter2hunter2\\"}', `{\\"DB_PASSWORD\\":\\"${SECRET}\\"}`],
+      [`{\\"DEPLOY_TOKEN\\":\\"${HEX40}\\"}`, `{\\"DEPLOY_TOKEN\\":\\"${SECRET}\\"}`],
+    ]) {
+      expect(sent(input)).toBe(expected);
+      expect(sent(expected)).toBe(expected);
+    }
+  });
+
+  it("keeps redacting a value on the line after its name", () => {
+    expect(sent(`DEPLOY_TOKEN:\n  ${HEX40}`)).not.toContain(HEX40);
+    expect(sent("DB_PASSWORD:\n  hunter2hunter2")).not.toContain("hunter2hunter2");
+  });
+
+  it("replaces a quoted password whole, whichever way the name, quote and separator are written", () => {
+    // Spaces and the other quote character are part of a quoted value.
+    const otherQuote = (q: string) => (q === '"' ? "abcd'efghijklmnop" : 'abcd"efghijklmnop');
+    const leaked = ["password", "DB_PASSWORD"].flatMap((key) => ['"', "'"].flatMap((q) => [key, `${q}${key}${q}`].flatMap((k) =>
+      [":", ": ", " : ", "=", "= ", " = "].flatMap((sep) =>
+        ["correct horse battery staple", otherQuote(q)].map((v) => `${k}${sep}${q}${v}${q}`)))))
+      .filter((input) => {
+        const out = sent(input);
+        return /correct|horse|battery|staple|abcd|efghijklmnop/.test(out) || !out.includes(SECRET) || sent(out) !== out;
+      });
+    expect(leaked).toEqual([]);
+  });
+
+  it("reads a quoted password through its closing quote and keeps what follows", () => {
+    for (const [input, expected] of [
+      ['{"DB_PASSWORD": "correct horse battery staple"}', `{"DB_PASSWORD": "${SECRET}"}`],
+      ['DB_PASSWORD="correct horse battery staple" in the env file', `DB_PASSWORD="${SECRET}" in the env file`],
+      ['{"DB_PASSWORD":"abcd\'efghijklmnop"}', `{"DB_PASSWORD":"${SECRET}"}`],
+      ['{\\"DB_PASSWORD\\":\\"correct horse battery staple\\"}', `{\\"DB_PASSWORD\\":\\"${SECRET}\\"}`],
+      // No closing quote on the line: the value runs to the end of it, and the next line is kept.
+      ['NOTE="kept as is"\nDB_PASSWORD="correct horse battery staple', `NOTE="kept as is"\nDB_PASSWORD="${SECRET}`],
+      ['DB_PASSWORD="an unclosed value mid-text\nNOTE="kept as is"', `DB_PASSWORD="${SECRET}\nNOTE="kept as is"`],
+      // The shared rule keeps `Bearer` in a quoted value; this one leaves that alone.
+      [`DB_PASSWORD: "Bearer ${HEX40}"`, `DB_PASSWORD: "Bearer ${SECRET}"`],
+    ]) {
+      expect(sent(input)).toBe(expected);
+      expect(sent(expected)).toBe(expected);
+    }
+  });
+
+  it("leaves an empty quoted password and a reference as they were", () => {
+    for (const text of [
+      '{"DB_PASSWORD": "", "note": "a note with spaces"}',
+      '{"DB_PASSWORD": "${DB_PASSWORD}"}',
+      '{"DB_PASSWORD": "{{ .Values.dbPassword }}"}',
+      'Set the "password" field, then save.',
+    ]) expect(sent(text)).toBe(text);
+    const bearer = sent(`Authorization: "Bearer ${HEX40}"`);
+    expect(bearer).toBe(`Authorization: "Bearer ${SECRET}"`);
+    expect(sent(bearer)).toBe(bearer);
+  });
+
+  it("replaces a password with an escaped quote in it whole under a quoted name, however early or late the escape", () => {
+    const values = (q: string) => [`abcdefghij\\${q}klmnop`, `a\\${q}bcdefghijklmnop`, `abcdefghij\\${q}klm\\${q}nopqr`];
+    const leaked = ["password", "DB_PASSWORD"].flatMap((key) => ['"', "'"].flatMap((q) => values(q).flatMap((v) =>
+      [":", ": ", "=", " = "].map((sep) => `${q}${key}${q}${sep}${q}${v}${q} and the rest`))))
+      .filter((input) => {
+        const out = sent(input);
+        return /bcdefghij|klm|nopqr/.test(out) || !out.endsWith(" and the rest") || sent(out) !== out;
+      });
+    expect(leaked).toEqual([]);
+    expect(sent('{"DB_PASSWORD":"abcdef\\"ghijkl"}')).toBe(`{"DB_PASSWORD":"${SECRET}"}`);
+  });
+
+  it("keeps a placeholder and a reference in a quoted password as they are", () => {
+    for (const [input, expected] of [
+      // Already redacted by the shared rule, in a text quoted into a pull request.
+      ['password: "[redacted]"', 'password: "[redacted]"'],
+      ['token: "${{ secrets.GITHUB_TOKEN }}"', 'token: "${{ secrets.GITHUB_TOKEN }}"'],
+      ['{"password": "${DB_PASSWORD}"}', '{"password": "${DB_PASSWORD}"}'],
+    ]) {
+      expect(sent(input)).toBe(expected);
+      expect(sent(expected)).toBe(expected);
+    }
+  });
+
+  it("stays fast on a long line: 100 kB of prose, and a quote that never closes", () => {
+    const prose = "the password field is required and the token limit was hit. ".repeat(1_700);
+    const open = `DB_PASSWORD="${"a b ".repeat(25_000)}`;
+    const started = performance.now();
+    expect(sent(prose)).toBe(prose);
+    expect(sent(open)).toBe(`DB_PASSWORD="${SECRET}`);
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
+  it("stays fast on a quoted password holding a long run of escapes that ends in a key word", () => {
+    const run = `DB_PASSWORD="abcdefghij\\"${"\\\\".repeat(50_000)}token"`;
+    const started = performance.now();
+    sent(run);
+    sent(`${run}\nnext`);
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
   it("leaves prefixed names alone when what follows is code, a count or a reference", () => {
     for (const text of [
       "max_token: 4096",
@@ -188,6 +292,8 @@ describe("token-shaped strings", () => {
       "DB_PASSWORD=${DB_PASSWORD}",
       "pwd: /srv/www",
       "password_field: required",
+      '{"max_token": 4096}',
+      '{"dbPassword": "string"}',
     ]) expect(r(text)).toBe(text);
   });
 

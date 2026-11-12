@@ -223,6 +223,68 @@ function escapeLiteral(value: string): string {
 }
 
 /**
+ * A quoted value after a credential name and its separator, on one line. The
+ * name is bare or quoted (`token`, `"token"`, `'apiKey'`, `\"token\"`), and the
+ * value is in `"`, `'`, `\"` or `\'`. The value runs to the quote that opened
+ * it, a backslash escaping the character after it, or to the end of its line.
+ * A value that opens with an escaped quote also ends at a bare quote of the
+ * same kind: that is the end of the string it is escaped in. Groups: 1 the name
+ * with its quotes and separator, 2 the backslash of an escaped opening quote,
+ * 3 the quote, 4 the value, 5 the closing quote (empty at the end of a line or
+ * before a bare quote).
+ *
+ * Each character of a value is taken by exactly one branch, and a value always
+ * ends where one of the closing branches matches, so a match never backtracks
+ * into it. Exported for the publishing rules and the MCP gate, which pass
+ * their own names.
+ */
+export function quotedCredentialValueRule(names: string): RegExp {
+  return new RegExp(
+    String.raw`((?:\\?["'])?(?:${names})(?:\\?["'])?[^\S\r\n]*[:=][^\S\r\n]*)(\\?)(["'])((?:(?!\2\3|\3)(?:\\[^\r\n]|\\(?=[\r\n]|$)|[^\\\r\n]))*)(\2\3|(?=\3|[\r\n]|$))`,
+    "gi",
+  );
+}
+
+/** A value that only names a secret held elsewhere: `${DB_PASSWORD}`,
+ *  `${{ secrets.GITHUB_TOKEN }}`, `{{ .Values.apiToken }}`, `$TOKEN`, `%TOKEN%`. */
+export function isSecretReference(value: string): boolean {
+  return /^(?:\$?\{\{[^{}]*\}\}|\$\{[^{}]*\}|\$\w+|%\w+%)$/.test(value);
+}
+
+/** The names SECRET_KEYWORD_RE knows. */
+export const SECRET_KEYWORD_NAMES =
+  "token|authorization|api[_-]?key|apikey|password|passwd|secret|access_token|refresh_token|client_secret";
+
+const QUOTED_SECRET_RE = quotedCredentialValueRule(String.raw`\b(?:${SECRET_KEYWORD_NAMES})\b`);
+
+/**
+ * The quoted value under a credential name, replaced through its closing
+ * quote: `{"password": "correct horse battery staple"}` becomes
+ * `{"password": "[redacted]"}`. The keyword rule stops a value at its first
+ * space or quote and matches no quoted name, so such a value got through it.
+ *
+ * A caller runs it LAST, on the text it is about to hand on: after every other
+ * rule, and after any cut, cap or check of its own. It only puts the
+ * replacement in place of a value, so nothing taken out before it comes back;
+ * a rule, cut or check that ran after it could see text it changed, so none
+ * does. The name keeps its quotes and separator, except a bare name under
+ * another replacement than the placeholder: that is written as the keyword
+ * rule writes it (`token=<…>`, or nothing with the empty replacement), so a
+ * second pass leaves it as it is. A value under 6 characters, a placeholder
+ * (after `Bearer` or `Basic` too) and a reference stay as they are.
+ */
+export function redactQuotedCredentialValues(input: string, replacement: string = REDACTED): string {
+  if (typeof input !== "string" || input === "") return "";
+  return input.replace(QUOTED_SECRET_RE, (m, key: string, esc: string, quote: string, value: string, close: string) => {
+    const rest = value.replace(/^(?:bearer|basic)\s+/i, "");
+    if (value.length < 6 || rest === replacement || isPlaceholder(rest) || isSecretReference(value)) return m;
+    const masked = `${esc}${quote}${replacement}${close}`;
+    if (replacement === REDACTED || /["'][^\S\r\n]*[:=][^\S\r\n]*$/.test(key)) return `${key}${masked}`;
+    return replacement ? `${key.replace(/[^\S\r\n]*[:=][^\S\r\n]*$/, "=")}${masked}` : "";
+  });
+}
+
+/**
  * Every credential SHAPE this module knows, taken out of one string.
  *
  * Exported because it is the repo's inventory of "what may not reach a person",
@@ -259,8 +321,12 @@ export interface SanitizeOptions {
    * Short values are ignored (see MIN_SECRET_CHARS).
    */
   secrets?: string[];
-  /** Hard cap on the result. Applied last, so nothing is cut mid-redaction. */
+  /** Hard cap on the result. Applied after every rule but the quoted-value
+   *  pass, which only replaces text inside what the cap kept. */
   maxChars?: number;
+  /** `false` leaves the quoted-value pass out, for a caller that cuts or joins
+   *  the result and runs the pass itself, last. */
+  quotedValues?: boolean;
 }
 
 const DEFAULT_MAX_CHARS = 2_000;
@@ -307,7 +373,23 @@ export function sanitizeText(input: string, options: SanitizeOptions = {}): stri
   });
 
   const max = options.maxChars ?? DEFAULT_MAX_CHARS;
-  return out.length > max ? `${out.slice(0, max)}…` : out;
+  const capped = out.length > max ? `${out.slice(0, max)}…` : out;
+
+  // 7. Quoted values under a credential name, last, on what the cap kept.
+  return options.quotedValues === false ? capped : quotedValuesWithin(capped, max);
+}
+
+/** The quoted-value pass on a text a cap of `max` has already cut, so text the
+ *  cap cut off stays cut off. It runs on each line without the "…" a cut left
+ *  at its end, so a value read to the end of its line never takes that mark
+ *  with it; it cuts again, with the mark, only where a placeholder came out
+ *  longer than the value it replaced. */
+function quotedValuesWithin(capped: string, max: number): string {
+  const masked = capped
+    .split("\n")
+    .map((line) => (line.endsWith("…") ? `${redactQuotedCredentialValues(line.slice(0, -1))}…` : redactQuotedCredentialValues(line)))
+    .join("\n");
+  return masked.length > max && masked.length > capped.length ? `${masked.slice(0, max)}…` : masked;
 }
 
 /** How many stack frames a report may carry. Twelve is enough to see where a
@@ -331,9 +413,11 @@ export function sanitizeStack(stack: string | undefined | null, options: Sanitiz
   const kept = [...head, ...frames];
   if (!kept.length) return null;
   // Per line, so the cap applies to the whole trace rather than to each frame.
-  const text = kept.map((l) => sanitizeText(l, { ...options, maxChars: 400 })).join("\n");
+  // The quoted-value pass runs once, after the cap over the joined lines.
+  const text = kept.map((l) => sanitizeText(l, { ...options, maxChars: 400, quotedValues: false })).join("\n");
   const max = options.maxChars ?? 4_000;
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  const capped = text.length > max ? `${text.slice(0, max)}…` : text;
+  return options.quotedValues === false ? capped : quotedValuesWithin(capped, max);
 }
 
 /** How many context entries a report may carry, and how long each may be. */

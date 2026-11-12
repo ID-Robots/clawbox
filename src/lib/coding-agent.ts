@@ -10937,8 +10937,9 @@ async function refreshPrEvidence(origin: CodingRun, last: CodingRun): Promise<vo
   const found = visualEvidenceSection(last, origin);
   if (!found) return;
   // Only the box's own block is redacted: the rest of the body is whatever is
-  // on GitHub now, a person's edits included, and is put back as it was.
-  const section = redactForGitHub(found);
+  // on GitHub now, a person's edits included, and is put back as it was. The
+  // block is sent as it is, so it gets the quoted-value pass too.
+  const section = redactForGitHub(found, { quotedValues: true });
   try {
     const updated = await updatePullRequestBody({
       directory: origin.directory,

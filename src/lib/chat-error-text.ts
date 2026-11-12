@@ -18,7 +18,7 @@
 // `sanitizeErrorMessage`, and otherwise the customer gets our own sentence.
 // What is different about a chat turn is that the customer can *do* something
 // about it — send it again — so the fallback says that rather than apologising.
-import { redactCredentialShapes } from "@/lib/incident-sanitize";
+import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import {
   formatFreesUpAt,
@@ -286,7 +286,15 @@ function providerMessageFromDetail(detail: string | undefined): string | undefin
   if (!plain) return undefined;
   const safe = sanitizeErrorMessage(plain);
   if (!safe) return undefined;
-  return safe.length > PROVIDER_MESSAGE_MAX ? `${safe.slice(0, PROVIDER_MESSAGE_MAX - 1).trimEnd()}…` : safe;
+  const cut = safe.length > PROVIDER_MESSAGE_MAX;
+  const kept = cut ? safe.slice(0, PROVIDER_MESSAGE_MAX - 1).trimEnd() : safe;
+  // A quoted value under a credential name comes out last, after the check and
+  // the cut above, so they work on what they always did; with the empty
+  // replacement nothing it does can lengthen the sentence. The cut's "…" goes
+  // on after it, so a value read to the end of the sentence never takes it.
+  const masked = redactQuotedCredentialValues(kept, "").replace(/\s+/g, " ").trim();
+  if (!masked) return undefined;
+  return cut ? `${masked}…` : masked;
 }
 
 /** The human sentence inside a provider's error envelope, whichever shape it takes. */

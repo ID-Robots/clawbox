@@ -23,6 +23,8 @@
  * The replacement keeps nothing of the secret (no prefix/suffix "hints").
  */
 
+import { isSecretReference, quotedCredentialValueRule } from "../../src/lib/incident-sanitize";
+
 export const REDACTED = "[REDACTED]";
 
 /**
@@ -72,6 +74,17 @@ const FLAG_RE = new RegExp(
   String.raw`(--(?:${SECRET_KEY_SOURCE})(?:\s+|=))(["']?)([^\s"']{8,})\2`,
   "gi",
 );
+// A quoted value under a credential-shaped key, bare or quoted, read through
+// its closing quote: `{"DB_PASSWORD":"abcd'efghijklmnop"}`,
+// `password: "correct horse battery staple"`. The key rules above stop a value
+// at its first quote or space, and JSON_KEY_RE takes a quoted key only when the
+// whole key is a credential name; this one also takes `DB_PASSWORD` and
+// `APP_SECRET`, as ASSIGN_KEY_RE does for a bare key. The key is read as one
+// whole word first and only its end checked against the names, so a long word
+// is scanned once rather than from every `_` in it.
+const QUOTED_VALUE_RE = quotedCredentialValueRule(
+  String.raw`(?<![\w-])[\w-]+(?![\w-])(?<=(?:^|[^A-Za-z0-9])(?:${SECRET_KEY_SOURCE}))`,
+);
 
 const VALUE_PATTERNS: RegExp[] = [
   // Anthropic: API keys (sk-ant-api…), OAuth access (sk-ant-oat…) and refresh (sk-ant-ort…).
@@ -91,6 +104,30 @@ const VALUE_PATTERNS: RegExp[] = [
   /\bclaw_[A-Za-z0-9]{24,}/g,
   /\b\d{8,10}:AA[A-Za-z0-9_-]{30,}/g,
 ];
+
+/**
+ * The quoted-value pass: REDACTED in place of a quoted value under a credential
+ * key, keeping the key, its quotes and the separator. The tool-result gate
+ * (`capResult`) and `sanitize()` in errors.ts run it LAST, on the text they are
+ * about to hand on: it only replaces text, so nothing taken out before it comes
+ * back, and nothing runs after it that could read what it changed. As in the
+ * key rules above, a value needs 4+ characters under a quoted key and 8+ under
+ * a bare one; a placeholder (after a scheme word too) and a reference stay as
+ * they are. So does a value with no closing quote that starts with REDACTED
+ * and a space: that is what redact()'s label rule leaves of a value whose
+ * closing quote it took, and it stays as that rule left it.
+ */
+export function redactQuotedCredentialValues(text: string): string {
+  if (!text) return text;
+  return text.replace(QUOTED_VALUE_RE, (m, key: string, esc: string, quote: string, value: string, close: string) => {
+    const minChars = /["'][^\S\r\n]*[:=][^\S\r\n]*$/.test(key) ? 4 : 8;
+    const rest = value.replace(/^(?:bearer|basic|token)\s+/i, "");
+    const labelTrace = !close && value.startsWith(`${REDACTED} `);
+    return value.length < minChars || rest === REDACTED || isSecretReference(value) || labelTrace
+      ? m
+      : `${key}${esc}${quote}${REDACTED}${close}`;
+  });
+}
 
 /** Replace anything that looks like a credential with `[REDACTED]`. */
 export function redactCredentials(text: string): string {
