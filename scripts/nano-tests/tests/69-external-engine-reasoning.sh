@@ -70,16 +70,18 @@ note "chat model before: ${BEFORE:-none}"
 cleanup() {
   # The engine goes first, and only once it is confirmed gone does the mock
   # behind it stop: Remove is also what puts the chat back where it was.
-  local tries configured gone=0
+  local tries configured base model gone=0
   # Up to three removals, each confirmed by the GET of the next round.
   for tries in 1 2 3 4; do
     board_owner_api GET /setup-api/local-ai/external
+    # Only a clear answer confirms anything: `configured` a boolean and, when
+    # it is true, the engine's address and model both non-empty strings.
     configured=$(api_json '.configured | if type == "boolean" then tostring else empty end')
-    # An answer that is not a clear yes or no confirms nothing.
+    base=$(api_json '.baseUrl | strings | select(length > 0)')
+    model=$(api_json '.modelId | strings | select(length > 0)')
     if [ "$API_STATUS" != 200 ] || [ -z "$configured" ] \
-      || { [ "$configured" = true ] && [ -z "$(api_json '.baseUrl // empty')" ]; }; then sleep 5; continue; fi
-    if [ "$configured" = false ] || [ "$(api_json '.baseUrl')" != "http://127.0.0.1:$PORT/v1" ] \
-      || [ "$(api_json '.modelId')" != "$MODEL" ]; then
+      || { [ "$configured" = true ] && { [ -z "$base" ] || [ -z "$model" ]; }; }; then sleep 5; continue; fi
+    if [ "$configured" = false ] || [ "$base" != "http://127.0.0.1:$PORT/v1" ] || [ "$model" != "$MODEL" ]; then
       gone=1
       break
     fi
