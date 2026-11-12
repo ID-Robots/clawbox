@@ -404,10 +404,12 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
     LLAMACPP_PID_PATH: spec.pidPath,
   }
   // Without the web server's network capabilities where it holds them (the
-  // Jetson unit); synchronous, so the check above still has no await between
-  // it and the spawn. setpriv execs bash in place, the launcher writes its own
-  // pid ($$) and ends `exec llama-server`, so child.pid below stays the
-  // server's pid, which stopLlamaCppServer signals.
+  // Jetson unit), and on such a start without its own settings (launch.env);
+  // synchronous, so the check above still has no await between it and the
+  // spawn. setpriv
+  // execs bash in place, the launcher writes its own pid ($$) and ends
+  // `exec llama-server`, so child.pid below stays the server's pid, which
+  // stopLlamaCppServer signals.
   const launch = withCapabilityDrop(
     'bash',
     [
@@ -429,7 +431,7 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
     cwd: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
     detached: false,
     stdio: 'ignore',
-    env,
+    env: launch.env,
   })
 
   // Attached BEFORE the pid check below, because a spawn that failed emits

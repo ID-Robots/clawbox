@@ -444,9 +444,10 @@ function runDownload(
 ): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     const env = { ...process.env, HF_HUB_DISABLE_PROGRESS_BARS: "1" };
-    // Without the web server's network capabilities where it holds them.
-    // setpriv leads the group and execs hf in place, so the timeout's group
-    // kill below still ends the transfer.
+    // Without the web server's network capabilities where it holds them, and
+    // on such a start without its own settings (launch.env). setpriv leads the group and
+    // execs hf in place, so the timeout's group kill below still ends the
+    // transfer.
     const launch = withCapabilityDrop(hfBin, ["download", repo, file, "--local-dir", modelDir], {
       label: "the model download",
       env,
@@ -454,7 +455,7 @@ function runDownload(
     const child = spawn(launch.bin, launch.argv, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
-      env,
+      env: launch.env,
     });
     let settled = false;
     let stderr = "";

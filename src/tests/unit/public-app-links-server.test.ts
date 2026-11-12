@@ -6,7 +6,8 @@ import net from "net";
 import os from "os";
 import path from "path";
 import { EventEmitter } from "events";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
 
 /**
  * TASK-1478 — the serving half of public app links, attacked for real: the
@@ -491,7 +492,11 @@ describe("the supervisor", () => {
    * binary is a path that does not exist, so a spawn that ignored `spawnImpl`
    * would fail for real and the recorder would see nothing.
    */
-  type Drop = (bin: string, argv: string[], opts: { label: string }) => { bin: string; argv: string[]; dropped: boolean };
+  type Drop = (
+    bin: string,
+    argv: string[],
+    opts: { label: string },
+  ) => { bin: string; argv: string[]; env?: Record<string, string | undefined>; dropped: boolean };
   async function defaultSpawn(capabilityDrop: Drop) {
     const cloudflaredBin = path.join(root, "no-such-dir", "cloudflared");
     const calls: { bin: string; argv: string[]; opts: unknown }[] = [];
@@ -524,31 +529,48 @@ describe("the supervisor", () => {
   const OPTIONS = { stdio: ["ignore", "pipe", "pipe"] };
   // Loaded when a case runs, so the cases that do not need it never depend on it.
   const realDrop = () => require_("../../../scripts/capability-drop.js") as {
-    withCapabilityDrop: (bin: string, argv: string[], opts: { label: string; probes?: unknown }) => { bin: string; argv: string[]; dropped: boolean };
+    withCapabilityDrop: (bin: string, argv: string[], opts: { label: string; probes?: unknown }) => ReturnType<Drop>;
   };
   const probesFor = (capAmb: string, executables: string[]) => ({
     readStatus: () => `CapAmb:\t${capAmb}\n`,
     isExecutable: (p: string) => executables.includes(p),
   });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
 
-  it("starts each link's cloudflared through the capability drop", async () => {
+  it("starts each link's cloudflared through the capability drop, with the environment it hands back", async () => {
     const asked: unknown[] = [];
     const { cloudflaredBin, call, today } = await defaultSpawn((bin, argv, opts) => {
       asked.push(opts.label);
-      return { bin: "/usr/bin/setpriv", argv: [...DROP, `/resolved/${bin}`, ...argv], dropped: true };
+      return { bin: "/usr/bin/setpriv", argv: [...DROP, `/resolved/${bin}`, ...argv], env: { FROM_THE_GATE: "1" }, dropped: true };
     });
-    expect(call).toEqual({ bin: "/usr/bin/setpriv", argv: [...DROP, `/resolved/${cloudflaredBin}`, ...today], opts: OPTIONS });
+    expect(call).toStrictEqual({
+      bin: "/usr/bin/setpriv",
+      argv: [...DROP, `/resolved/${cloudflaredBin}`, ...today],
+      opts: { ...OPTIONS, env: { FROM_THE_GATE: "1" } },
+    });
     expect(asked).toEqual(["a public app link's tunnel"]);
   });
 
-  it("drops the capabilities with the real gate on a host whose web server holds them", async () => {
+  it("drops the capabilities and the web server's own settings with the real gate on a host that holds them", async () => {
+    stubWebServerSettings();
     let bin = "";
     const { cloudflaredBin, call, today } = await defaultSpawn((b, a, o) => {
       bin = b;
       return realDrop().withCapabilityDrop(b, a, { ...o, probes: probesFor("0000000000003400", ["/usr/bin/setpriv", b]) });
     });
     expect(bin).toBe(cloudflaredBin);
-    expect(call).toEqual({ bin: "/usr/bin/setpriv", argv: [...DROP, cloudflaredBin, ...today], opts: OPTIONS });
+    // The environment the child gets: its own when the spawn passes one, the web server's otherwise.
+    const childEnv = (call.opts as { env?: Record<string, string | undefined> }).env ?? process.env;
+    expect(Object.keys(childEnv).filter((key) => WEB_SERVER_SETTINGS.includes(key))).toEqual([]);
+    expect(call).toStrictEqual({
+      bin: "/usr/bin/setpriv",
+      argv: [...DROP, cloudflaredBin, ...today],
+      opts: { ...OPTIONS, env: withoutThem(process.env) },
+    });
+    // The web server keeps its own.
+    expect(WEB_SERVER_SETTINGS.filter((key) => process.env[key] === undefined)).toEqual([]);
   });
 
   it.each([
@@ -556,7 +578,9 @@ describe("the supervisor", () => {
     ["the real gate on a host that holds none", ((b, a, o) =>
       realDrop().withCapabilityDrop(b, a, { ...o, probes: probesFor("0000000000000000", ["/usr/bin/setpriv", b]) })) as Drop],
   ])("spawns exactly what it always did with %s", async (_name, capabilityDrop) => {
+    stubWebServerSettings();
     const { cloudflaredBin, call, today } = await defaultSpawn(capabilityDrop);
-    expect(call).toEqual({ bin: cloudflaredBin, argv: today, opts: OPTIONS });
+    // No env of its own: cloudflared inherits the web server's, settings and all.
+    expect(call).toStrictEqual({ bin: cloudflaredBin, argv: today, opts: OPTIONS });
   });
 });

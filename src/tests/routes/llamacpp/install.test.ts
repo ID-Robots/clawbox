@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as childProcess from "child_process";
 import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
@@ -9,6 +9,7 @@ import { getBackgroundTask, resetBackgroundTasksForTests } from "@/lib/backgroun
 // asserting a filename the app no longer asks for.
 import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
 import { startRootStep } from "@/lib/root-step-runner";
+import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
 
 vi.mock("@/lib/root-step-runner", () => ({
   ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
@@ -51,24 +52,18 @@ vi.mock("@/lib/harness", () => ({
   getActiveHarness: () => mockGetActiveHarness(),
 }));
 
-// The capability drop: a pass-through unless a case sets `wrap`, which is what
-// a host whose web server holds no ambient capabilities gets — so every other
-// assertion here pins that such a host spawns exactly as before.
+// The capability drop: the real gate, on a host whose web server holds no
+// ambient capabilities unless a case sets `wrap` — so every other assertion
+// here pins that such a host spawns exactly as before.
 const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
-vi.mock("@/lib/capability-drop", () => ({
-  CAPABILITY_DROP_COMMAND: "setpriv",
-  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
-  SETPRIV_PATH: "/usr/bin/setpriv",
-  withCapabilityDrop: (bin: string, argv: string[], opts: unknown) => {
-    drop.calls.push([bin, argv, opts]);
-    return drop.wrap
-      ? { bin: "/usr/bin/setpriv", argv: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", `/resolved/${bin}`, ...argv], dropped: true }
-      : { bin, argv, dropped: false };
-  },
-}));
+vi.mock("@/lib/capability-drop", async (importOriginal) =>
+  (await import("@/tests/helpers/capability-drop")).realGate(await importOriginal(), drop));
 beforeEach(() => {
   drop.wrap = false;
   drop.calls.length = 0;
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 const mockSpawn = vi.mocked(childProcess.spawn);
@@ -481,31 +476,70 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(mockConfigureAiModel).toHaveBeenCalled();
   });
 
-  it("starts llama-server without the web server's capabilities on a host that holds them", async () => {
-    drop.wrap = true;
+  /** The start as beta makes it: bin, argv and options. */
+  async function todaysCall() {
+    const { getLlamaCppLaunchSpec } = await import("@/lib/llamacpp-server");
+    const spec = getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0", "openclaw");
+    const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+    return [
+      "bash",
+      [
+        spec.scriptPath,
+        spec.modelDir,
+        spec.hfRepo,
+        spec.hfFile,
+        "gemma4-e2b-it-q4_0",
+        spec.host,
+        `${spec.port}`,
+        spec.logPath,
+        spec.binPath,
+        spec.hfBinPath,
+        `${spec.contextWindow}`,
+      ],
+      { cwd: home, detached: true, stdio: "ignore", env: { ...process.env, HOME: home } },
+    ] as const;
+  }
+
+  async function installGemma() {
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [] }) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }) }));
     mockSpawn.mockReturnValue(createSpawnedProcess());
+    await readStream(await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" })));
+  }
 
-    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
-    await readStream(res);
+  it("spawns exactly what it always did on a host whose web server holds no ambient capabilities", async () => {
+    stubWebServerSettings();
+    await installGemma();
 
-    expect(mockSpawn).toHaveBeenCalledWith(
-      "/usr/bin/setpriv",
-      expect.any(Array),
-      expect.objectContaining({ detached: true, stdio: "ignore" }),
-    );
-    const argv = mockSpawn.mock.calls[0]?.[1] as string[];
-    expect(argv.slice(0, 5)).toEqual(["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", "/resolved/bash"]);
+    // The web server's own settings are still in the environment.
+    expect(mockSpawn.mock.calls).toStrictEqual([await todaysCall()]);
+  });
+
+  it("starts llama-server without the web server's capabilities or its own settings on a host that holds them", async () => {
+    drop.wrap = true;
+    stubWebServerSettings();
+    vi.stubEnv("PATH", "/usr/bin:/bin");
+    await installGemma();
+
+    const [todayBin, todayArgv, todayOpts] = await todaysCall();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [bin, argv, opts] = mockSpawn.mock.calls[0] as unknown as [string, string[], { env: Record<string, string | undefined> }];
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(argv).toEqual(["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", "/usr/bin/bash", ...todayArgv]);
     expect(argv[5]).toContain("scripts/start-llamacpp.sh");
     // After the script: the model folder, the repository, the file, the alias.
     expect(argv.slice(7, 10)).toEqual([DEFAULT_LLAMACPP_HF_REPO, DEFAULT_LLAMACPP_HF_FILE, "gemma4-e2b-it-q4_0"]);
     expect(argv.at(-1)).toBe("32768");
-    const [askedBin, , askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
-    expect(askedBin).toBe("bash");
+    // The child's environment holds none of the web server's own settings, and
+    // everything else as today's, as do cwd, detached and stdio.
+    expect(Object.keys(opts.env).filter((key) => WEB_SERVER_SETTINGS.includes(key))).toEqual([]);
+    expect(opts).toStrictEqual({ ...todayOpts, env: withoutThem(todayOpts.env) });
+    const [askedBin, askedArgv, askedOpts] = drop.calls[0] as [string, string[], { label: string; env: unknown }];
+    expect(askedBin).toBe(todayBin);
+    expect(askedArgv).toEqual(todayArgv);
     expect(askedOpts.label).toBe("the local chat server");
-    expect(askedOpts.env).toBe((mockSpawn.mock.calls[0]?.[2] as { env: unknown }).env);
+    expect(askedOpts.env).toStrictEqual(todayOpts.env);
   });
 
   it("forwards local scope to the configure route during llama.cpp install", async () => {

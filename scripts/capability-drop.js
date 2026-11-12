@@ -44,6 +44,34 @@ const CAPABILITY_DROP_ARGS = [
 const SETPRIV_PATH = "/usr/bin/setpriv";
 const PROC_STATUS = "/proc/self/status";
 
+/**
+ * The settings production-server.js puts into its own environment for the web
+ * server itself. None of the programs started through the drop uses them:
+ * scripts/start-llamacpp.sh and what it runs (hf, llama-server), and
+ * cloudflared.
+ * @type {readonly string[]}
+ */
+const WEB_SERVER_OWN_SETTINGS = Object.freeze([
+  "SESSION_SECRET",
+  "CLAWBOX_TERMINAL_TOKEN",
+  "CLAWBOX_MCP_TOKEN",
+  "LOCAL_AI_TOKEN",
+  "CLAWBOX_INTERNAL_TOKEN",
+]);
+
+/**
+ * A copy of `env` without the web server's own settings; `env` itself is left
+ * as it is (it may be process.env).
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {NodeJS.ProcessEnv}
+ */
+function withoutWebServerSettings(env) {
+  const copy = { ...env };
+  for (const key of WEB_SERVER_OWN_SETTINGS) delete copy[key];
+  return copy;
+}
+
 /** @returns {string} */
 function readOwnStatus() {
   return fs.readFileSync(/* turbopackIgnore: true */ PROC_STATUS, "utf8");
@@ -92,7 +120,12 @@ function holdsAmbientCapabilities(readStatus) {
  * the CHILD's working directory, which the spawn may set. A path resolved here
  * against the web server's own directory could start a different file behind
  * setpriv, so the lookup stops at the first such entry instead of skipping it:
- * unwrapped, Node finds exactly what it always did.
+ * unwrapped, Node finds exactly what it always did. An empty PATH is one empty
+ * entry.
+ *
+ * With PATH unset, exec searches a default list of its own, which this lookup
+ * does not guess: the program starts unwrapped, found as it always was, and
+ * the warning says PATH is not set.
  *
  * @param {string} bin
  * @param {Record<string, string | undefined>} env
@@ -102,7 +135,7 @@ function holdsAmbientCapabilities(readStatus) {
 function resolveProgram(bin, env, isExecutable) {
   if (path.isAbsolute(bin)) return isExecutable(bin) ? { target: bin } : { miss: `${bin} not found` };
   if (bin.includes("/")) return { miss: `${bin} is a relative path` };
-  if (!env.PATH) return { miss: `${bin} not found` };
+  if (env.PATH === undefined) return { miss: "PATH is not set" };
   for (const dir of String(env.PATH).split(":")) {
     if (!dir) return { miss: `PATH has an empty entry before any ${bin}` };
     if (!path.isAbsolute(dir)) return { miss: `PATH has the relative entry "${dir}" before any ${bin}` };
@@ -122,33 +155,57 @@ function resolveProgram(bin, env, isExecutable) {
  * setpriv execs the program in place, so the child's pid, its process group
  * (with `detached`) and its stdio are the program's own.
  *
+ * A dropped start also gets an environment without the web server's own
+ * settings (`env`, to spawn as the child's environment). Every other start
+ * gets back exactly the `opts.env` it passed, none when it passed none, so it
+ * spawns as before.
+ *
  * @param {string} bin
  * @param {readonly string[]} argv
  * @param {{
  *   label: string,
- *   env?: Record<string, string | undefined>,
+ *   env?: NodeJS.ProcessEnv,
  *   probes?: { readStatus?: () => string, isExecutable?: (p: string) => boolean },
  * }} opts
  *   `label` names the program in a log line; `env` is the child's environment,
  *   whose PATH a bare name is looked up in (process.env when absent); `probes`
  *   are for tests.
- * @returns {{ bin: string, argv: readonly string[], dropped: boolean }}
+ * @returns {{
+ *   bin: string,
+ *   argv: readonly string[],
+ *   env: NodeJS.ProcessEnv | undefined,
+ *   dropped: boolean,
+ * }}
  */
 function withCapabilityDrop(bin, argv, opts) {
   const probes = opts.probes || {};
   const readStatus = probes.readStatus || readOwnStatus;
   const isExecutable = probes.isExecutable || isExecutableFile;
-  if (!holdsAmbientCapabilities(readStatus)) return { bin, argv, dropped: false };
+  const unchanged = { bin, argv, env: opts.env, dropped: false };
+  if (!holdsAmbientCapabilities(readStatus)) return unchanged;
   if (!isExecutable(SETPRIV_PATH)) {
     console.warn(`[capability-drop] setpriv not found: ${opts.label} starts with the web server's network capabilities`);
-    return { bin, argv, dropped: false };
+    return unchanged;
   }
-  const program = resolveProgram(bin, opts.env || process.env, isExecutable);
+  const env = opts.env || process.env;
+  const program = resolveProgram(bin, env, isExecutable);
   if ("miss" in program) {
     console.warn(`[capability-drop] ${opts.label}: ${program.miss}, started without the drop`);
-    return { bin, argv, dropped: false };
+    return unchanged;
   }
-  return { bin: SETPRIV_PATH, argv: [...CAPABILITY_DROP_ARGS, program.target, ...argv], dropped: true };
+  return {
+    bin: SETPRIV_PATH,
+    argv: [...CAPABILITY_DROP_ARGS, program.target, ...argv],
+    env: withoutWebServerSettings(env),
+    dropped: true,
+  };
 }
 
-module.exports = { CAPABILITY_DROP_COMMAND, CAPABILITY_DROP_ARGS, SETPRIV_PATH, withCapabilityDrop };
+module.exports = {
+  CAPABILITY_DROP_COMMAND,
+  CAPABILITY_DROP_ARGS,
+  SETPRIV_PATH,
+  WEB_SERVER_OWN_SETTINGS,
+  withoutWebServerSettings,
+  withCapabilityDrop,
+};

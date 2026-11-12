@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { WEB_SERVER_SETTINGS, stubWebServerSettings, withoutThem } from "@/tests/helpers/capability-drop";
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-tunnel-tests-${process.pid}-${Date.now()}`);
 const STATE_FILE = path.join(TEST_ROOT, "tunnel-state.json");
@@ -32,24 +33,18 @@ vi.mock("child_process", () => ({
   },
 }));
 
-// The capability drop: a pass-through unless a case sets `wrap`, which is what
-// a host whose web server holds no ambient capabilities gets — so every other
-// assertion here pins that such a host spawns exactly as before.
+// The capability drop: the real gate, on a host whose web server holds no
+// ambient capabilities unless a case sets `wrap` — so every other assertion
+// here pins that such a host spawns exactly as before.
 const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
-vi.mock("@/lib/capability-drop", () => ({
-  CAPABILITY_DROP_COMMAND: "setpriv",
-  CAPABILITY_DROP_ARGS: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"],
-  SETPRIV_PATH: "/usr/bin/setpriv",
-  withCapabilityDrop: (bin: string, argv: string[], opts: unknown) => {
-    drop.calls.push([bin, argv, opts]);
-    return drop.wrap
-      ? { bin: "/usr/bin/setpriv", argv: ["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--", `/resolved/${bin}`, ...argv], dropped: true }
-      : { bin, argv, dropped: false };
-  },
-}));
+vi.mock("@/lib/capability-drop", async (importOriginal) =>
+  (await import("@/tests/helpers/capability-drop")).realGate(await importOriginal(), drop));
 beforeEach(() => {
   drop.wrap = false;
   drop.calls.length = 0;
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 /**
@@ -477,30 +472,30 @@ describe.each([
   });
 
   it(`spawns cloudflared with --url ${target}`, async () => {
+    stubWebServerSettings();
     execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
     spawnMock.mockImplementation(() => makeFakeProc("Visit it at: https://port-check.trycloudflare.com"));
 
     const result = await tunnel.startTunnel();
 
     expect(result).toEqual({ success: true, tunnelUrl: "https://port-check.trycloudflare.com" });
-    expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock.mock.calls[0][0]).toBe("cloudflared");
-    // `--config` an empty map, ahead of --url, as scripts/run-tunnel.sh runs it:
-    // an owner's ~/.cloudflared/config.yml must not reroute the public URL.
-    expect(spawnMock.mock.calls[0][1]).toEqual([
-      "tunnel",
-      "--no-autoupdate",
-      "--config",
-      ISOLATED_CONFIG,
-      "--url",
-      target,
-    ]);
+    // The whole call as beta makes it on a host without ambient capabilities:
+    // `--config` an empty map, ahead of --url, as scripts/run-tunnel.sh runs it
+    // (an owner's ~/.cloudflared/config.yml must not reroute the public URL),
+    // and no env of its own, so cloudflared inherits the web server's.
+    expect(spawnMock.mock.calls).toStrictEqual([[
+      "cloudflared",
+      ["tunnel", "--no-autoupdate", "--config", ISOLATED_CONFIG, "--url", target],
+      { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    ]]);
     expect(await fs.readFile(ISOLATED_CONFIG, "utf-8")).toBe("{}\n");
     expect((await tunnel.readState()).target).toBe(target);
   });
 
-  it("spawns cloudflared without the web server's capabilities on a host that holds them", async () => {
+  it("spawns cloudflared without the web server's capabilities or its own settings on a host that holds them", async () => {
     drop.wrap = true;
+    stubWebServerSettings();
+    vi.stubEnv("PATH", "/usr/bin:/bin");
     execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
     spawnMock.mockImplementation(() => makeFakeProc("Visit it at: https://port-check.trycloudflare.com"));
 
@@ -508,13 +503,14 @@ describe.each([
 
     expect(result).toEqual({ success: true, tunnelUrl: "https://port-check.trycloudflare.com" });
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock.mock.calls[0][0]).toBe("/usr/bin/setpriv");
-    expect(spawnMock.mock.calls[0][1]).toEqual([
+    const [bin, argv, opts] = spawnMock.mock.calls[0] as [string, string[], { env?: Record<string, string | undefined> }];
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(argv).toEqual([
       "--ambient-caps=-all",
       "--inh-caps=-all",
       "--no-new-privs",
       "--",
-      "/resolved/cloudflared",
+      "/usr/bin/cloudflared",
       "tunnel",
       "--no-autoupdate",
       "--config",
@@ -522,10 +518,16 @@ describe.each([
       "--url",
       target,
     ]);
-    expect(spawnMock.mock.calls[0][2]).toEqual({ detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    // The environment the child gets holds none of the web server's own
+    // settings, and everything else the web server has.
+    const childEnv = opts.env ?? process.env;
+    expect(Object.keys(childEnv).filter((key) => WEB_SERVER_SETTINGS.includes(key))).toEqual([]);
+    expect(opts).toStrictEqual({ detached: true, stdio: ["ignore", "pipe", "pipe"], env: withoutThem(process.env) });
+    // The web server keeps its own.
+    expect(WEB_SERVER_SETTINGS.filter((key) => process.env[key] === undefined)).toEqual([]);
     expect(drop.calls[0]?.[0]).toBe("cloudflared");
     expect((drop.calls[0]?.[2] as { label: string }).label).toBe("the tunnel route's quick tunnel");
-    // setpriv execs cloudflared in place, so the pid recorded is cloudflared's.
+    // The pid recorded is the child's.
     expect((await fs.readFile(PID_FILE, "utf-8")).split("\n")[0]).toBe("999999");
   });
 
