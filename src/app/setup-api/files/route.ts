@@ -8,7 +8,7 @@ import Busboy from "busboy";
 import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { filesBrowseRoot } from "@/lib/file-guard";
-import { openInMemberView, type FilesFence } from "@/lib/files-scope";
+import { openInMemberView, unlinkInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/files-move";
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
@@ -551,24 +551,25 @@ export async function POST(req: NextRequest) {
           // upload worked.
           fileStream.on("limit", () => fail(new UploadRefused(DISK_FULL, 507, "disk_full")));
           // A member's destination is judged again by the descriptor opened.
-          let memberFd: number | null = null;
+          let member: { fd: number; real: string } | null = null;
           if (fence.scope.kind === "member") {
             try {
-              memberFd = openInMemberView(fence, destPath, "write");
+              member = openInMemberView(fence, destPath, "write");
             } catch (err) {
               fileStream.resume();
               fail(err);
               return;
             }
-            if (memberFd === null) {
+            if (member === null) {
               fileStream.resume();
               fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));
               return;
             }
           }
-          const ws = memberFd === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: memberFd });
+          const ws = member === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: member.fd });
           activeWrite = ws;
-          written.push(destPath);
+          // A member's file is taken back by the path its descriptor was judged at.
+          written.push(member === null ? destPath : member.real);
           const writePromise = pipeline(fileStream, ws).then(() => {});
           fileWrites.push(writePromise);
           pendingWrites.push(writePromise);
@@ -603,6 +604,10 @@ export async function POST(req: NextRequest) {
       // the fence uses; it never refuses a path that was written.
       for (const p of written) {
         const target = path.resolve(p);
+        if (fence.scope.kind === "member") {
+          unlinkInMemberView(fence, target);
+          continue;
+        }
         if (fence.resolve(fence.relOf(target)) !== target) continue;
         try { await fsp.unlink(target); } catch { /* best effort */ }
       }
@@ -682,21 +687,26 @@ export async function PUT(req: NextRequest) {
   }
 
   const bounded = boundedBody(req.body, { limit: uploadBudget(abs), message: DISK_FULL });
+  let member: { fd: number; real: string } | null = null;
   try {
     const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
-    let memberFd: number | null = null;
     if (fence.scope.kind === "member") {
       // Judged again by the descriptor opened, as a member's download is.
-      memberFd = openInMemberView(fence, destPath, "write");
-      if (memberFd === null) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+      member = openInMemberView(fence, destPath, "write");
+      if (member === null) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
     }
-    await pipeline(nodeReadable, memberFd === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: memberFd }));
+    await pipeline(nodeReadable, member === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: member.fd }));
   } catch (err) {
     // Whatever landed comes off the disk either way; only the STATUS differs,
     // and it is decided by the meter's flag, never by the error's text — the
     // pipeline surfaces the cut-off as a plain rejection indistinguishable
-    // from a genuine write error.
-    try { fs.unlinkSync(destPath); } catch { /* cleanup best-effort */ }
+    // from a genuine write error. A member's file goes by the path its
+    // descriptor was judged at — and nothing goes when nothing was opened.
+    if (fence.scope.kind === "member") {
+      if (member) unlinkInMemberView(fence, member.real);
+    } else {
+      try { fs.unlinkSync(destPath); } catch { /* cleanup best-effort */ }
+    }
     const { status, body } = refusal(bounded.overflowed() ? new UploadRefused(DISK_FULL, 507, "disk_full") : err);
     return NextResponse.json(body, { status });
   }

@@ -258,7 +258,7 @@ export function memberRoots(home: string, ownerBase: string = filesBrowseRoot())
  * fs errors (ENOENT, EACCES, EISDIR …) are thrown for the caller to map.
  * Linux only, as the box is: without /proc nothing is opened for a member.
  */
-export function openInMemberView(fence: FilesFence, abs: string, mode: "read" | "write"): number | null {
+export function openInMemberView(fence: FilesFence, abs: string, mode: "read" | "write"): { fd: number; real: string } | null {
   const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL } = fs.constants;
   let fd: number;
   let created = false;
@@ -287,5 +287,19 @@ export function openInMemberView(fence: FilesFence, abs: string, mode: "read" | 
     return null;
   }
   if (mode === "write" && !created) fs.ftruncateSync(fd, 0);
-  return fd;
+  return { fd, real: opened };
+}
+
+/**
+ * Take back a member's failed upload: by the path its descriptor was judged
+ * at (`real`), judged once more just before — never by the path as typed,
+ * which a swapped parent could now lead elsewhere.
+ */
+export function unlinkInMemberView(fence: FilesFence, real: string): void {
+  if (!fence.allows(real)) return;
+  try {
+    fs.unlinkSync(/* turbopackIgnore: true */ real);
+  } catch {
+    // best effort
+  }
 }

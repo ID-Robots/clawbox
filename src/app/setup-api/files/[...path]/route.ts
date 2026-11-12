@@ -142,8 +142,9 @@ export async function GET(req: NextRequest, { params }: Params) {
       // A member's file is judged again by the descriptor actually opened
       // (src/lib/files-scope.ts): a link swapped in after the check above
       // does not carry the read out of their view.
-      const fd = openInMemberView(fence, abs, "read");
-      if (fd === null) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+      const opened = openInMemberView(fence, abs, "read");
+      if (opened === null) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+      const { fd } = opened;
       stat = fs.fstatSync(fd);
       if (!stat.isFile()) {
         fs.closeSync(fd);

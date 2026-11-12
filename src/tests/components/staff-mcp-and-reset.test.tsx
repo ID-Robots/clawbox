@@ -131,6 +131,10 @@ describe("the staff tools card", () => {
     fireEvent.change(await screen.findByTestId("staff-mcp-header-docs"), { target: { value: "X-Api-Key" } });
     fireEvent.click(screen.getByTestId("staff-mcp-save-grants"));
     expect(await screen.findByText("users.staffMcp.notApplied")).toBeInTheDocument();
+    const posts = () => fetchMock.mock.calls.filter(([, i]) => i?.method === "POST").length;
+    expect(posts()).toBe(1);
+    fireEvent.click(screen.getByTestId("staff-mcp-apply-retry"));
+    await waitFor(() => expect(posts()).toBe(2));
   });
 
   it("says members of staff get no MCP tools on Hermes", async () => {

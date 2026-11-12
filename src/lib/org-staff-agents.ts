@@ -409,17 +409,20 @@ async function syncStaffAgentsNow(): Promise<boolean> {
     const ownerWorkspace = openclawWorkspaceDir();
     const config = await readConfigStrict();
     const marksBefore = readMarks(await get(ORG_STAFF_ROSTER_KEY));
-    const mcp = await staffMcpPlan(staff, config);
+    const mcpPlan = await staffMcpPlan(staff, config);
     // The guard's record first: a grant taken away is refused by the guard
     // before the policy catches up, and one added is refused by the policy
-    // until it does — never the other way round.
-    const grantsWritten = await writeStaffMcpGrants(OPENCLAW_HOME, mcp);
+    // until it does — never the other way round. A record that could not be
+    // written grants nothing in the config either (fail closed: revocations
+    // still go through), and the sync says it did not land.
+    const grantsWritten = await writeStaffMcpGrants(OPENCLAW_HOME, mcpPlan.entries);
+    const mcp = grantsWritten ? mcpPlan.entries : new Map<string, StaffMcpEntry[]>();
     const plan = planStaffRoster(config, { staff, openclawHome: OPENCLAW_HOME, ownerWorkspace, marks: marksBefore, mcp });
 
     for (const username of staff) {
       await seedStaffWorkspace(staffWorkspaceDir(OPENCLAW_HOME, username), username, ownerWorkspace);
     }
-    let ok = grantsWritten;
+    let ok = grantsWritten && mcpPlan.ok;
     if (plan.writes.length > 0) {
       // Record the marks FIRST (a crash after the write must not leave a
       // roster nobody remembers making).
@@ -464,18 +467,19 @@ async function syncStaffAgentsNow(): Promise<boolean> {
  * owner's store and the servers openclaw.json defines. A store that cannot be
  * read grants nothing (fail closed); members without a relay token get one.
  */
-async function staffMcpPlan(staff: readonly string[], config: unknown): Promise<Map<string, StaffMcpEntry[]>> {
-  if (staff.length === 0) return new Map();
+async function staffMcpPlan(staff: readonly string[], config: unknown): Promise<{ entries: Map<string, StaffMcpEntry[]>; ok: boolean }> {
+  if (staff.length === 0) return { entries: new Map(), ok: true };
   try {
     const { ensureRelayTokens, planStaffMcpEntries } = await import("@/lib/staff-mcp");
     const { openclawServerEntries } = await import("@/lib/project-mcp-servers");
     const { getLocalAiProxyRootUrl } = await import("@/lib/local-ai-proxy-url");
     const store = await ensureRelayTokens(staff);
     const mcpConfig = isRecord(config) && isRecord(config.mcp) ? config.mcp : {};
-    return planStaffMcpEntries({ staff, store, servers: openclawServerEntries(mcpConfig.servers), relayBase: getLocalAiProxyRootUrl() });
+    return { entries: planStaffMcpEntries({ staff, store, servers: openclawServerEntries(mcpConfig.servers), relayBase: getLocalAiProxyRootUrl() }), ok: true };
   } catch (err) {
+    // Fail closed — no grant — and say the sync did not land.
     console.error("[org-staff] the staff MCP grants could not be read; none are given:", err instanceof Error ? err.message : err);
-    return new Map();
+    return { entries: new Map(), ok: false };
   }
 }
 

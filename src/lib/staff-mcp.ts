@@ -33,7 +33,6 @@
  */
 
 import crypto from "crypto";
-import fs from "fs";
 import { promises as fsp } from "fs";
 import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
@@ -234,7 +233,15 @@ export function updateStaffMcpStore(
  * account of a name whose earlier owner's credentials it could not clear.
  */
 export async function forgetStaffMcpUserStrict(username: string, file: string = STAFF_MCP_STORE_PATH): Promise<void> {
-  if (!isStaffUsername(username) || !fs.existsSync(file)) return;
+  if (!isStaffUsername(username)) return;
+  // Only a store that is really not there is nothing to clear: any other
+  // error (EACCES, an unreadable link) throws, so the caller fails closed.
+  try {
+    await fsp.stat(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    throw new StaffMcpStoreError("the staff MCP store could not be checked");
+  }
   const current = await readStaffMcpStore(file);
   if (!Object.hasOwn(current.credentials, username) && !Object.hasOwn(current.relayTokens, username)) return;
   await updateStaffMcpStore((store) => {
@@ -291,7 +298,9 @@ export type StaffUnusableReason = "unusable" | "transport" | "urlCredential" | "
 /** A host that never leaves the box: plain HTTP to it carries a credential nowhere. */
 function isLoopbackHost(hostname: string): boolean {
   const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return h === "localhost" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+  // Literal addresses only: a NAME (`localhost` included) is whatever the
+  // resolver says, and a credential must not ride on that.
+  return h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
 export function staffServerVerdict(server: ServerRead): StaffUnusableReason | null {

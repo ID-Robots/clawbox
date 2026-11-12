@@ -81,6 +81,22 @@ describe("the store", () => {
     expect(after.relayTokens.constructor).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("fails closed when the store cannot even be checked", async () => {
+    if (process.getuid?.() === 0) return;
+    const dir = path.join(ROOT, "locked-store");
+    fs.mkdirSync(dir);
+    await mcp.updateStaffMcpStore(() => ({ servers: {}, credentials: { ivan: { docs: "t" } }, relayTokens: {} }), path.join(dir, "s.json"));
+    fs.chmodSync(dir, 0o000);
+    try {
+      await expect(mcp.forgetStaffMcpUserStrict("ivan", path.join(dir, "s.json"))).rejects.toThrow();
+    } finally {
+      fs.chmodSync(dir, 0o755);
+    }
+    await mcp.forgetStaffMcpUserStrict("ivan", path.join(dir, "s.json"));
+    expect((await mcp.readStaffMcpStore(path.join(dir, "s.json"))).credentials).toEqual({});
+    await mcp.forgetStaffMcpUserStrict("ivan", path.join(dir, "missing.json"));
+  });
+
   it("masks a credential and never shows more than its last four characters", () => {
     expect(mcp.maskCredential("abcdefghijklmnop-1234")).toBe("••••1234");
     expect(mcp.maskCredential("short")).toBe("••••");
@@ -123,7 +139,8 @@ describe("which servers members of staff can be handed", () => {
     expect(mcp.staffServerVerdict(httpServer("plain", "http://docs.example.com/mcp"))).toBe("insecure");
     expect(mcp.staffServerVerdict(httpServer("local", "http://127.0.0.1:8080/mcp"))).toBeNull();
     expect(mcp.staffServerVerdict(httpServer("local6", "http://[::1]:8080/mcp"))).toBeNull();
-    expect(mcp.staffServerVerdict(httpServer("localname", "http://localhost/mcp"))).toBeNull();
+    // A NAME is whatever the resolver says: `localhost` is not trusted with a credential in clear.
+    expect(mcp.staffServerVerdict(httpServer("localname", "http://localhost/mcp"))).toBe("insecure");
   });
 });
 

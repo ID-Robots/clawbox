@@ -36,6 +36,9 @@ import {
  */
 
 const NO_STORE = { "Cache-Control": "no-store" };
+
+/** The member a credential was for went away while the change waited for the store. */
+class UserGoneError extends Error {}
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_GRANTED = 32;
 
@@ -138,7 +141,7 @@ export async function POST(req: Request) {
     return refuse(409, "unsupported_harness", "Members of staff get MCP tools on the OpenClaw assistant only.");
   }
 
-  let change: (store: StaffMcpStore) => StaffMcpStore;
+  let change: (store: StaffMcpStore) => StaffMcpStore | Promise<StaffMcpStore>;
   if (body.servers !== undefined) {
     // The granted list, whole. Every name must be a server openclaw.json
     // defines that members of staff can use — or one already granted, so a
@@ -185,7 +188,12 @@ export async function POST(req: Request) {
       credential = normalizeCredential(body.credential);
       if (!credential) return refuse(400, "bad_credential", "The credential must be 1–4096 characters with no line breaks or control characters.");
     }
-    change = (store) => {
+    change = async (store) => {
+      // Checked again UNDER the store's lock, which removal's and creation's
+      // clean-ups take too: a credential is never written for an account that
+      // was removed (or replaced by a new one of the same name) meanwhile.
+      const { listUsers: usersNow } = await import("@/lib/clawbox-users");
+      if (!(await usersNow()).some((u) => u.username === username)) throw new UserGoneError();
       const mine = { ...(store.credentials[username] ?? {}) };
       if (credential) mine[server] = credential;
       else delete mine[server];
@@ -201,7 +209,8 @@ export async function POST(req: Request) {
   let store: StaffMcpStore;
   try {
     store = await updateStaffMcpStore(change);
-  } catch {
+  } catch (err) {
+    if (err instanceof UserGoneError) return refuse(400, "unknown_user", "That user is not a member of staff on this box any more.");
     return refuse(500, "store_write_failed", "The staff tools settings could not be saved. Nothing was changed.");
   }
   console.log("[staff-mcp] the owner changed the staff MCP grants");

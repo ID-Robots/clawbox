@@ -271,7 +271,20 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
       )}
 
       {saved === "grants" && !notApplied && <StatusMessage type="success" message={t("users.staffMcp.saved")} />}
-      {notApplied && <StatusMessage type="error" message={t("users.staffMcp.notApplied")} />}
+      {notApplied && (
+        <div className="space-y-2" data-testid="staff-mcp-not-applied">
+          <StatusMessage type="error" message={t("users.staffMcp.notApplied")} />
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void post("grants", { servers: Object.fromEntries(Object.entries(granted).map(([name, header]) => [name, { header }])) })}
+            className="px-3 h-8 rounded-lg text-xs text-white bg-white/10 hover:bg-white/15 cursor-pointer disabled:opacity-50"
+            data-testid="staff-mcp-apply-retry"
+          >
+            {t("users.staffMcp.retry")}
+          </button>
+        </div>
+      )}
       {error && <StatusMessage type="error" message={error} />}
     </div>
   );

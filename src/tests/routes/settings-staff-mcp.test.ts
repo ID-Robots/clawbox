@@ -135,6 +135,18 @@ describe("the grants", () => {
     expect(await (await get()).text()).not.toContain("ivan-secret-token-0001");
   });
 
+  it("never writes a credential for a member removed while the change waited for the store", async () => {
+    await post({ servers: { docs: {} } });
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const users = vi.mocked(listUsers);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "x", sv: "1" }]); // the route's first check
+    users.mockImplementationOnce(async () => []); // under the store's lock
+    const res = await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_user");
+    expect(fs.readFileSync(storePath, "utf-8")).not.toContain("ivan-secret-token-0001");
+  });
+
   it("clears a credential with null", async () => {
     await post({ servers: { docs: {} } });
     await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });

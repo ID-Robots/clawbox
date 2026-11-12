@@ -141,6 +141,38 @@ describe("the member's fence", () => {
   });
 });
 
+describe("a member's open is judged by the file actually opened", () => {
+  it("refuses to read or write through a link that leads out, and leaves nothing behind outside", () => {
+    const fence = memberFence();
+    // A path the fence would have taken lexically, made a link after the check.
+    const swapped = path.join(HOME, "Documents", "swapped.txt");
+    fs.symlinkSync(path.join(OWNER, "secret-project", "plan.txt"), swapped);
+    expect(scope.openInMemberView(fence, swapped, "read")).toBeNull();
+    expect(scope.openInMemberView(fence, swapped, "write")).toBeNull();
+    expect(fs.readFileSync(path.join(OWNER, "secret-project", "plan.txt"), "utf-8")).toBe("owner's");
+    // A parent folder swapped for a link: a NEW file would be created outside — and is removed again.
+    const dirLink = path.join(HOME, "swapped-dir");
+    fs.symlinkSync(path.join(OWNER, "secret-project"), dirLink);
+    expect(scope.openInMemberView(fence, path.join(dirLink, "new.txt"), "write")).toBeNull();
+    expect(fs.existsSync(path.join(OWNER, "secret-project", "new.txt"))).toBe(false);
+  });
+
+  it("opens a file inside the view, and a write truncates only after the check", () => {
+    const fence = memberFence();
+    const file = path.join(HOME, "Documents", "notes.txt");
+    const opened = scope.openInMemberView(fence, file, "write");
+    expect(opened?.real).toBe(file);
+    fs.writeSync(opened!.fd, "new");
+    fs.closeSync(opened!.fd);
+    expect(fs.readFileSync(file, "utf-8")).toBe("new");
+    const read = scope.openInMemberView(fence, file, "read");
+    expect(read).not.toBeNull();
+    fs.closeSync(read!.fd);
+    scope.unlinkInMemberView(fence, path.join(OWNER, "secret-project", "plan.txt"));
+    expect(fs.existsSync(path.join(OWNER, "secret-project", "plan.txt"))).toBe(true);
+  });
+});
+
 describe("the owner's fence", () => {
   it("is the browse root exactly as before: no virtual top folder, absolute paths under it accepted", () => {
     const fence = scope.fenceFor(scope.ownerScope(OWNER));
