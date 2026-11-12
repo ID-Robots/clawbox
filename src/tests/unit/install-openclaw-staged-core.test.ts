@@ -541,19 +541,28 @@ exit 0
     }
   });
 
-  it("still starts the gateway on the pre-flight's way out when the stage cannot be removed, under errexit", () => {
+  (CAN_LOCK_HOME ? it : it.skip)("still starts the gateway on the pre-flight's way out when the stage cannot be removed, under errexit", () => {
     const p = makePrefix({});
     try {
       // Only the removal of a stage npm filled fails: the step's own first
-      // emptying of the stage is bare, as it always was.
+      // emptying of the stage is bare, as it always was. The prefix is one
+      // only the account can write to, so a root removal standing in for the
+      // account's would be logged.
+      const aux = path.join(p.dir, "aux");
+      mkdirSync(aux);
+      const account = accountOnlyHome(p.prefix, aux);
       const failRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__ok_as_clawbox /\')"\n'
         + 'as_clawbox() { [ "$1" = rm ] && [ -e "${@: -1}/bin" ] && return 1; __ok_as_clawbox "$@"; }';
-      const r = runStep(p, { npm: "ok", preflightFails: true, errexit: true, prelude: failRm });
+      const r = runStep(p, { npm: "ok", preflightFails: true, errexit: true, prelude: failRm, account });
+      unlockTree(p.prefix);
       expect(r.status).toBe(1);
       expect(r.stderr).toMatch(/cannot take over the databases on this box/);
       expect(p.calls()).toContain("systemctl start clawbox-gateway.service");
+      expect(account.rootInHome().filter((l) => l.includes(".openclaw-stage"))).toEqual([]);
+      expect(existsSync(path.join(p.prefix, ".openclaw-stage", "bin"))).toBe(true);
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
     } finally {
+      unlockTree(p.dir);
       rmSync(p.dir, { recursive: true, force: true });
     }
   });

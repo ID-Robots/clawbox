@@ -577,7 +577,9 @@ d("the checkout's .git is handed over with the checkout whole, never by its name
     return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
   }
 
-  it("use_tree_owner_for_git changes no owner when nothing under .git is someone else's", () => {
+  // The two cases below need a checkout owned by someone other than root:
+  // under uid 0 the fixture is root's, and the function keeps root's git.
+  it.skipIf(process.getuid?.() === 0)("use_tree_owner_for_git changes no owner when nothing under .git is someone else's", () => {
     const r = runOwnerForGit(checkout);
     expect(r.status, r.out).toBe(0);
     expect(landed()).toEqual([]);
@@ -592,7 +594,7 @@ d("the checkout's .git is handed over with the checkout whole, never by its name
     expect(landed()).toEqual([]);
   });
 
-  it("use_tree_owner_for_git hands a stray under .git back with the checkout itself as the operand", () => {
+  it.skipIf(process.getuid?.() === 0)("use_tree_owner_for_git hands a stray under .git back with the checkout itself as the operand", () => {
     const r = runOwnerForGit(checkout, STRAY_IN_GIT);
     expect(r.status, r.out).toBe(0);
     expect(landed()).toEqual([checkout]);

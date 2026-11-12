@@ -497,7 +497,10 @@ d("step_edition_select on a unified-image box", () => {
       account.shell,
       // The hand-over, modelled: what it is handed becomes the account's to change.
       handOverHelps ? 'chown() { [ "$1" = -R ] && command chmod -R u+w -- "${@: -1}"; return 0; }' : "chown() { :; }",
-      'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=1 "$@"; }',
+      // Marks the run as the service account only when -u names it: a switch to
+      // root must still read as root.
+      'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+        + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
       shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
       account.recordHandOvers,
       extractShellFunction("edition_select_remove_other"),

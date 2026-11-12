@@ -234,12 +234,17 @@ d("install.sh::step_chpasswd", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(fedToChpasswd()).toBe("clawbox:hunter2\n");
     expect(r.stderr).toBe(`  Warning: could not remove ${inputFile}\n`);
+    // No root removal stands in for the account's: root only read the record.
+    expect(r.rootInHome).toEqual([`cat ${inputFile}`]);
+    expect(fs.existsSync(inputFile)).toBe(true);
 
     fs.rmSync(inputFile, { force: true });
     fs.symlinkSync("/etc/shadow", inputFile);
     const link = runLocked("step_chpasswd", failRm);
     expect(link.status).toBe(64);
     expect(link.stderr).toBe("Error: password input file is a symlink; refusing\n");
+    expect(link.rootInHome).toEqual([]);
+    expect(fs.lstatSync(inputFile).isSymbolicLink()).toBe(true);
   });
 
   // As step_user_add and step_user_remove capture it: only the record reaches
@@ -280,6 +285,9 @@ d("install.sh::step_chpasswd", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toBe("[alice:pw]");
     expect(r.stderr).toBe(`  Warning: could not remove ${userInput()}\n`);
+    // No root removal stands in for the account's: root only read the record.
+    expect(r.rootInHome).toEqual([`cat ${userInput()}`]);
+    expect(fs.existsSync(userInput())).toBe(true);
 
     fs.rmSync(userInput());
     const missing = runLocked(capture());

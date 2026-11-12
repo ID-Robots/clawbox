@@ -146,7 +146,8 @@ describe("clawbox-vnc.service: x11vnc's exit 2 on SIGTERM is a clean stop", () =
       for (const dir of [aux, units, libexec, path.join(project, "scripts"), path.join(src, "config")]) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      for (const name of SCRIPTS) fs.writeFileSync(path.join(project, "scripts", name), "#!/bin/sh\n", { mode: 0o755 });
+      // Not executable yet, so the account's chmod is what the modes show.
+      for (const name of SCRIPTS) fs.writeFileSync(path.join(project, "scripts", name), "#!/bin/sh\n", { mode: 0o644 });
       fs.writeFileSync(path.join(libexec, "ensure-vnc-on-first-boot.sh"), "#!/bin/sh\n", { mode: 0o755 });
       fs.writeFileSync(path.join(src, "config", "clawbox-browser.service"), "[Unit]\n");
       const account = accountOnlyHome(project, aux);
@@ -218,5 +219,8 @@ describe("clawbox-vnc.service: x11vnc's exit 2 on SIGTERM is a clean stop", () =
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain("  VNC (x11vnc + Xvfb fallback) and websockify installed and started\n");
     expect(r.stderr).toBe("  Warning: could not make the VNC scripts executable\n".repeat(2));
+    // Root sets no mode in the account's place.
+    expect(r.rootInHome).toEqual([]);
+    expect(r.modes).toEqual(["644", "644", "644"]);
   });
 });
