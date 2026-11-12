@@ -1205,7 +1205,7 @@ legacy_whisper_unit_stale() {
 # or /etc/systemd/user as well as /etc. A unit masked to /dev/null cannot start,
 # so a mask alone is left as it is.
 retire_legacy_whisper_scope() {
-  local scope="$1" unit="$LEGACY_WHISPER_UNIT" dir frag f reason stale="" live=""
+  local scope="$1" unit="$LEGACY_WHISPER_UNIT" dir frag f reason stale="" live="" kept=""
   local -a files=()
   if [ "$scope" = "system" ]; then
     dir="$SYSTEMD_SYSTEM_DIR"
@@ -1265,16 +1265,17 @@ retire_legacy_whisper_scope() {
   # through any link the user planted on the way. A FragmentPath outside the
   # home is a system unit directory and stays root's, as in the system scope;
   # the case filter above limits it to a file named for this unit. The user's
-  # removal can fail where root's did not, so a file that stayed is named. The
-  # run still reports the unit retired: stop, disable and reset-failed above
-  # already took it out of service.
+  # removal can fail where root's did not, so a file or drop-in directory that
+  # stayed is named, and the run says the unit was stopped but not removed; the
+  # next run finds it stale again and retries.
   for f in "${files[@]}"; do
     case "$scope:$f" in
       user:"$CLAWBOX_HOME"/*)
         as_clawbox rm -f -- "$f" 2>/dev/null || true
         as_clawbox rm -rf -- "$f.d" 2>/dev/null || true
-        if [ -e "$f" ] || [ -L "$f" ]; then
+        if [ -e "$f" ] || [ -L "$f" ] || [ -e "$f.d" ]; then
           echo "  Warning: could not remove $f" >&2
+          kept="$f"
         fi
         ;;
       *)
@@ -1302,7 +1303,12 @@ retire_legacy_whisper_scope() {
       systemctl --user daemon-reload
     " >/dev/null 2>&1 || true
   fi
-  echo "  Retired the legacy $unit ($scope scope): $stale"
+  if [ -n "$kept" ]; then
+    echo "  Stopped the legacy $unit ($scope scope), but could not remove $kept; the next run retries: $stale"
+  else
+    echo "  Retired the legacy $unit ($scope scope): $stale"
+  fi
+  # Set either way: it gates the replacement whisper-server.service.
   LEGACY_WHISPER_RETIRED=1
 }
 

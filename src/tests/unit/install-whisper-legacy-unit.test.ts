@@ -406,14 +406,27 @@ describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbo
       prelude,
       "__ao_lock",
       "retire_legacy_whisper_scope user 2>&1 || true",
-      "echo DONE",
+      // The flag whisper_adopt_legacy_engine reads to write the replacement unit.
+      'echo "DONE RETIRED=$LEGACY_WHISPER_RETIRED"',
     ].join(NL);
     const file = path.join(aux, "prog.sh");
     fs.writeFileSync(file, program);
     const r = spawnSync("bash", [file, VOICE_SH_PATH], { encoding: "utf-8", timeout: SPAWN_TIMEOUT_MS });
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
-    return { out, done: out.includes("DONE"), rootInHome: account.rootInHome(), asClawbox: account.asClawbox() };
+    return {
+      out,
+      done: out.includes("DONE"),
+      retired: /DONE RETIRED=(\S*)/.exec(out)?.[1] ?? "",
+      rootInHome: account.rootInHome(),
+      asClawbox: account.asClawbox(),
+    };
   }
+  /** Fails every `as_clawbox <argv0> <argv1>…` whose leading words are `words`, as a removal the account cannot make. */
+  const failAs = (...words: string[]) =>
+    [
+      'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+      `as_clawbox() { [ "\${*:1:${words.length}}" = "${words.join(" ")}" ] && return 1; __real_as_clawbox "$@"; }`,
+    ].join(NL);
   const userUnit = () => path.join(userDir(), UNIT);
   const wantsDir = () => path.join(userDir(), "default.target.wants");
 
@@ -431,6 +444,8 @@ describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbo
     // existsSync follows it.
     expect(fs.readdirSync(wantsDir()), "the .wants link is still there").toEqual([]);
     expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
+    expect(r.out).not.toContain("could not remove");
+    expect(r.retired).toBe("1");
     expect(r.asClawbox).toContain(`rm -f -- ${userUnit()}`);
     expect(r.asClawbox).toContain(`rm -rf -- ${userUnit()}.d`);
     expect(r.asClawbox.some((c) => c.startsWith(`find ${userDir()} `) && c.endsWith("-delete"))).toBe(true);
@@ -452,19 +467,37 @@ describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbo
     expect(r.asClawbox.filter((c) => c.includes(outside))).toEqual([]);
   });
 
-  it("names a file it could not remove, and still reports the unit taken out of service", () => {
+  it("names a file it could not remove, and says the unit was stopped, not retired", () => {
     placeUnit(userDir(), LEGACY_UNIT, "default.target");
-    const failRm = [
-      'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
-      'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }',
-    ].join(NL);
 
-    const r = retireUser({ prelude: failRm });
+    const r = retireUser({ prelude: failAs("rm") });
 
     expect(r.done, r.out).toBe(true);
     expect(fs.existsSync(userUnit())).toBe(true);
     expect(r.out).toContain(`Warning: could not remove ${userUnit()}`);
-    expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
+    expect(r.out).toContain(
+      `Stopped the legacy ${UNIT} (user scope), but could not remove ${userUnit()}; the next run retries: it runs whisper-server-gpu.py`,
+    );
+    expect(r.out).not.toContain("Retired");
+    // Still set: it gates the replacement whisper-server.service, which the
+    // box needs whether or not the old file could be removed.
+    expect(r.retired).toBe("1");
+  });
+
+  it("counts a drop-in directory that stayed as something it could not remove", () => {
+    placeUnit(userDir(), LEGACY_UNIT, "default.target");
+    fs.mkdirSync(`${userUnit()}.d`);
+    fs.writeFileSync(path.join(`${userUnit()}.d`, "override.conf"), "[Service]\nRestartSec=10\n");
+
+    const r = retireUser({ prelude: failAs("rm", "-rf") });
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(userUnit()), "the unit file itself was removable").toBe(false);
+    expect(fs.existsSync(`${userUnit()}.d`)).toBe(true);
+    expect(r.out).toContain(`Warning: could not remove ${userUnit()}`);
+    expect(r.out).toContain(`Stopped the legacy ${UNIT} (user scope), but could not remove ${userUnit()}; the next run retries`);
+    expect(r.out).not.toContain("Retired");
+    expect(r.retired).toBe("1");
   });
 });
 
