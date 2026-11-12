@@ -213,7 +213,9 @@ async function refusalBeforeSignOut(harness: Harness, row: string, label: string
         .then(({ getBackgroundTask }) => getBackgroundTask(session.taskId as string)?.state !== "running")
         .catch(() => false)
       : false;
-    if (session && !taskEnded && isClawAiSessionConfiguring(session)) {
+    // A subscription linked for its plan alone (TASK-2501) writes no ClawBox AI
+    // credential, so it cannot sign the box back in behind this sign-out.
+    if (session && session.scope !== "entitlement" && !taskEnded && isClawAiSessionConfiguring(session)) {
       return {
         ok: false,
         kind: "sign_in_in_progress",

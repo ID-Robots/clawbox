@@ -20,6 +20,10 @@ const PORTAL_HEARTBEAT_URL = migrateLegacyPortalUrl(
   "https://clawbox.com/api/portal/devices/heartbeat",
 );
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+// Spelled here rather than imported from `./subscription-link`, which would pull
+// the portal-tier lookup into the heartbeat's graph for one string; the
+// subscription-link suite pins the two spellings together.
+const SUBSCRIPTION_LINK_TOKEN_KEY = "subscription_link_token";
 const MACHINE_ID_FILE = "/etc/machine-id";
 
 // In-memory cache of the last URL we successfully pushed. Survives the lifetime
@@ -92,15 +96,27 @@ function deriveDeviceName(deviceId: string): string {
   return `ClawBox-${suffix}`;
 }
 
-async function readClawAiToken(): Promise<string | null> {
+async function readPortalToken(key: string): Promise<string | null> {
   try {
-    const raw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY);
+    const raw = await getConfigValue(key);
     if (typeof raw !== "string") return null;
     const trimmed = raw.trim();
     return trimmed.startsWith("claw_") ? trimmed : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The credential the heartbeat names the owner's account with: the ClawBox AI
+ * token, or — on a box whose subscription is linked for its plan alone
+ * (TASK-2501) — the link's. The heartbeat registers the DEVICE with the
+ * account (Remote Control's tunnel hangs off it); it spends no AI, so the
+ * link's token is as good an account credential here as the chat one.
+ */
+async function readClawAiToken(): Promise<string | null> {
+  return (await readPortalToken(CLAWBOX_AI_TOKEN_CONFIG_KEY))
+    ?? (await readPortalToken(SUBSCRIPTION_LINK_TOKEN_KEY));
 }
 
 /**

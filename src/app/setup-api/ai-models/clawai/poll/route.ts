@@ -196,6 +196,38 @@ async function recordClawaiEnd(session: ClawAiConnectSession, end: ProviderSignI
   await writeClawAiSession({ ...session, status: "error", error: formatUserFacingError(end.error) });
 }
 
+/**
+ * The token of a link for the PLAN alone (TASK-2501): record it as the box's
+ * subscription link and nothing else.
+ *
+ * None of the ClawBox AI finaliser above runs. No configure route, no Hermes
+ * apply, no gateway restart, no provider sign-in task: the chat model the box
+ * runs on is exactly what it was, and `clawai_token` — the credential every
+ * cloud feature looks for — is not written. That is the whole difference
+ * between linking a subscription and signing in to ClawBox AI.
+ *
+ * Inline rather than detached, because there is nothing slow left to wait out:
+ * one portal round trip, bounded at four seconds, and one store write. The
+ * session goes through `configuring` first all the same, so a second poll that
+ * lands meanwhile answers "configuring" instead of linking a second time.
+ */
+async function finishSubscriptionLink(session: ClawAiConnectSession, accessToken: string): Promise<NextResponse> {
+  const linking: ClawAiConnectSession = { ...session, status: "configuring", error: null, configuringStartedAt: Date.now() };
+  await writeClawAiSession(linking);
+  const { linkSubscription } = await import("@/lib/subscription-link");
+  const outcome = await linkSubscription(accessToken);
+  if (!outcome.ok) {
+    console.error("[clawai/poll] Subscription link failed:", outcome.code);
+    await writeClawAiSession({ ...linking, status: "error", error: outcome.message });
+    return NextResponse.json(
+      { status: "error", error: outcome.message },
+      { status: outcome.code === "store_failed" ? 500 : 409 },
+    );
+  }
+  await writeClawAiSession({ ...linking, status: "complete", error: null, warning: null, completedAt: Date.now() });
+  return NextResponse.json({ status: "complete" });
+}
+
 export async function POST() {
   const session = await readClawAiSession();
   if (!session) {
@@ -336,6 +368,10 @@ export async function POST() {
       { status: "error", error: "This ClawBox AI sign-in was cancelled. Request a new code to sign in." },
       { status: 410 },
     );
+  }
+
+  if (session.scope === "entitlement") {
+    return finishSubscriptionLink(session, accessToken);
   }
 
   // Upstream issued a token. Mark the session as `configuring` first so

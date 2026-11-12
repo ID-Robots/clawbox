@@ -12,6 +12,17 @@ import { DATA_DIR } from "@/lib/config-store";
 export type ClawAiConnectStatus = "pending" | "configuring" | "complete" | "error";
 export type ClawAiTier = "free" | "flash" | "pro";
 
+/**
+ * What the token the portal issues is FOR.
+ *
+ * - `primary` / `local` — ClawBox AI becomes a chat model of this box, in that
+ *   slot; the poll hands the token to the configure route (or to Hermes).
+ * - `entitlement` — the subscription is linked for its PLAN alone
+ *   (`@/lib/subscription-link`, TASK-2501): plan-gated features unlock, and no
+ *   provider, model or gateway setting is touched.
+ */
+export type ClawAiConnectScope = "primary" | "local" | "entitlement";
+
 // Device-authorization session: a code the user types on the portal,
 // plus the device_id we use to poll the upstream service for token
 // issuance. Modelled after RFC 8628 device-flow state — same shape used
@@ -24,7 +35,7 @@ export interface ClawAiConnectSession {
   createdAt: number;
   status: ClawAiConnectStatus;
   provider: "clawai";
-  scope: "primary" | "local";
+  scope: ClawAiConnectScope;
   tier?: ClawAiTier;
   deviceName?: string;
   verificationUrl?: string;

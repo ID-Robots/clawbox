@@ -203,7 +203,7 @@ import { registerOrStartServerApp } from "@/lib/app-server-start";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
 import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
-import { CLAWAI_PLAN_TIER_KEY, clawaiEntitlementTier } from "@/lib/clawai-plan-tier";
+import { planEntitlementFromStore } from "@/lib/plan-entitlement";
 import {
   concretePrefix,
   deriveAllowRule,
@@ -4367,11 +4367,12 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   return {
     enabled,
     // Off the SAME config snapshot as everything else here — the app polls
-    // this route, and `readClawaiEntitlementTier` would open the file again
-    // for two keys we already hold. `clawaiEntitlementTier` is the one rule
-    // for reading the plan/badge pair, so this cannot disagree with the
-    // routes that refuse on it.
-    planGate: planGateFor(clawaiEntitlementTier(config[CLAWAI_PLAN_TIER_KEY], config.clawai_tier)),
+    // this route, and `readPlanEntitlement` would open the file again for keys
+    // we already hold. `planEntitlementFromStore` is the same rule over the
+    // snapshot — the ClawBox AI plan/badge pair, or a subscription linked for
+    // its plan alone (TASK-2501) — so this cannot disagree with the routes
+    // that refuse on it.
+    planGate: planGateFor(planEntitlementFromStore(config).tier),
     defaultDirectory,
     suggestedDirectory: suggestedDefaultDirectory(),
     ready: enabled && readiness.ready,

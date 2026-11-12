@@ -427,8 +427,11 @@ export function clawaiTokenRejectedByPortal(): boolean {
  *
  * Bounded, because an interception page can be arbitrarily large and this sits
  * on the render path of the chat header.
+ *
+ * Exported for the subscription link (`@/lib/subscription-link`), which asks
+ * the same endpoint about a different credential and must hold the same bar.
  */
-async function portalRefusedTheToken(res: Response): Promise<boolean> {
+export async function portalRefusedTheToken(res: Response): Promise<boolean> {
   if (res.status !== 401 && res.status !== 403) return false;
   const body = res.body;
   if (!body) return false;
