@@ -426,6 +426,14 @@ export function stoppedMarker(): ChatMessage {
 }
 
 /**
+ * The status line under a running turn: when it started (the clock counts from
+ * here), what the harness last said it was doing, the spinner verb picked for
+ * it, and whether the model has been heard from. Kept with a tab its owner
+ * leaves mid-run, so coming back shows the same turn's line (TASK-2494).
+ */
+type TurnLine = { startedAt: number; status: string | null; verb: string | null; heardFrom: boolean }
+
+/**
  * Whether the latest question already has this answer under it — a followed
  * turn's reply that the history read had already brought in (see `attachTurn`).
  */
@@ -1205,8 +1213,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   // than pick a verb (see `onLocalAi`). Latched for the turn, so a stream
   // that is cleared between tool steps does not bring the words back.
   const [turnHeardFrom, setTurnHeardFrom] = useState(false)
+  // The line as it stands, for the tab switch to put down with the tab it
+  // leaves (TASK-2494): a turn still running there keeps its own clock and
+  // words, and coming back picks them up instead of starting a new count.
+  const turnLineRef = useRef<TurnLine>({ startedAt: 0, status: null, verb: null, heardFrom: false })
   useEffect(() => {
+    turnLineRef.current = { startedAt: turnStartedAt, status: turnStatus, verb: turnVerbRef.current, heardFrom: turnHeardFrom }
+  }, [turnStartedAt, turnStatus, turnHeardFrom])
+  // Set by `switchSession` when the tab it enters has a run still going; the
+  // line is already back on screen, so the `sending` flip that comes with the
+  // switch must not restart it. Read once — any later flip clears it.
+  const resumedTurnRef = useRef(false)
+  useEffect(() => {
+    const resumed = resumedTurnRef.current
+    resumedTurnRef.current = false
     if (!sending) { setTurnStatus(null); setTurnStartedAt(0); setTurnHeardFrom(false); return }
+    if (resumed) return
     turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
     setTurnStartedAt(Date.now())
   }, [sending])
@@ -2098,7 +2120,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   // The composer a tab was left with: its draft and the turns queued behind
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
-  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null }>>(new Map())
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null; turn: TurnLine | null }>>(new Map())
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -3532,6 +3554,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
               // first is a race — merging them put two players on one answer
               // whenever the box spoke for the chat first. The chat's clip
               // stays in its ring, which releases it.
+              // Its run rides along: a read that painted this reply first — the
+              // one a tab switch makes on return (TASK-2494) — has it under the
+              // same run, and the append below then changes nothing.
+              const finalRun = typeof payload.runId === 'string' && payload.runId ? payload.runId : undefined
               const reply: ChatMessage = {
                 role: 'assistant',
                 text,
@@ -3539,6 +3565,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
                 images,
                 audio,
                 ...(files.length ? { files } : {}),
+                ...(finalRun ? { idempotencyKey: finalRun } : {}),
               }
               setMessages(prev => withAssistantReply(prev, reply, { ownClips: new Set(spokenUrlsRef.current) }))
               // The picture reached us over the socket after all — nothing
@@ -4317,7 +4344,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // whether the frame belongs to the run this popup is showing, and a tab
     // returned to with the id dropped would take its own reply as a stranger's
     // and stop painting it.
-    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current, askedTurnKey: askedTurnKeyRef.current })
+    // The status line of a run left going rides with it too: its clock counts
+    // from when the turn started, not from when the owner came back (TASK-2494).
+    const turn = sendingRef.current && turnLineRef.current.startedAt > 0 ? { ...turnLineRef.current, verb: turnVerbRef.current } : null
+    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current, askedTurnKey: askedTurnKeyRef.current, turn })
     voiceTurnKeyRef.current = null
     // Rides with the tab for the same reason: a question typed in THIS tab and
     // still running is owed its clip when the owner comes back, and a single
@@ -4389,6 +4419,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       runIdRef.current = stash?.runId ?? null
       voiceTurnKeyRef.current = stash?.voiceTurnKey ?? null
       askedTurnKeyRef.current = stash?.askedTurnKey ?? null
+      // Its status line as it was left — the same start, the harness's own
+      // words, the same verb — set here rather than by the `sending` effect,
+      // which does not run at all when the tab left was busy too.
+      // A run whose start this popup never saw counts from now, as before.
+      const turn = stash?.turn
+      resumedTurnRef.current = true
+      turnVerbRef.current = turn?.verb ?? pickSpinnerVerb(turnVerbRef.current)
+      setTurnStartedAt(turn?.startedAt || Date.now())
+      setTurnStatus(turn?.status ?? null)
+      setTurnHeardFrom(turn?.heardFrom ?? false)
     }
     // A spoken question whose run finished while the owner was elsewhere:
     // the reply is in the history about to load, and it is still owed aloud.
@@ -6501,10 +6541,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // from busy to unread (settleRun).
     if (sessionKeyRef.current !== keyAtSend) return
     const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
-    // A followed turn can have landed in the transcript the page just read —
-    // it ended between that read and the attach — and the same answer twice
-    // is a second reply the agent never gave.
-    setMessages(prev => attach && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
+    // The answer can already be on screen from the transcript: the route writes
+    // it down and only then answers, so a followed turn that ended between the
+    // read and the attach, and a tab the owner left and came back to inside
+    // that window (TASK-2494), both read it before this promise settles. The
+    // same answer twice under one question is a second reply the agent never
+    // gave.
+    setMessages(prev => answerAlreadyShown(prev, result.text) ? prev : [...prev, {
       role: 'assistant',
       // A reply that is nothing BUT a picture is still a real answer — don't
       // call it '(no response)'.
