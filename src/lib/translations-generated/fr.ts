@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Par défaut",
   "cloudProviders.externalEngineHint": "Moteur externe sur votre propre réseau — vos conversations ne partent vers aucun service d'IA cloud.",
   "cloudProviders.failed": "Le réglage n'a pas pu être enregistré.",
-  "cloudProviders.hiddenNote": "Les fournisseurs d'IA cloud sont masqués sur ce boîtier. Désactivez l'interrupteur ci-dessous pour les afficher à nouveau.",
+  "cloudProviders.hiddenNote": "Les fournisseurs d'IA cloud sont masqués sur ce boîtier.",
   "cloudProviders.hideHint": "Retire ClawBox AI, OpenAI, Anthropic et les autres services cloud des Paramètres, de l'assistant de configuration et du sélecteur de modèle du chat, pour que l'IA de l'assistant reste sur ce boîtier ou sur votre propre réseau.",
   "cloudProviders.hideTitle": "Masquer les fournisseurs d'IA cloud",
   "cloudProviders.localAi": "IA locale",

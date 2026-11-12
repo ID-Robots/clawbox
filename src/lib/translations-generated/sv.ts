@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Standard",
   "cloudProviders.externalEngineHint": "Extern motor i ditt eget nätverk — dina samtal går inte till någon moln-AI-tjänst.",
   "cloudProviders.failed": "Inställningen kunde inte sparas.",
-  "cloudProviders.hiddenNote": "Moln-AI-leverantörer är dolda på den här enheten. Stäng av reglaget nedan för att visa dem igen.",
+  "cloudProviders.hiddenNote": "Moln-AI-leverantörer är dolda på den här enheten.",
   "cloudProviders.hideHint": "Tar bort ClawBox AI, OpenAI, Anthropic och de andra molntjänsterna från Inställningar, installationsguiden och chattens modellväljare, så att assistentens AI stannar på den här enheten eller i ditt eget nätverk.",
   "cloudProviders.hideTitle": "Dölj moln-AI-leverantörer",
   "cloudProviders.localAi": "Lokal AI",

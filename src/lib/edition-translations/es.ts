@@ -1859,7 +1859,7 @@ export const es: Record<string, string> = {
   "cloudProviders.noLocalAi": "Todavía no hay ninguna IA local configurada. Configura una en IA local.",
   "cloudProviders.openLocalAi": "Ajustes de IA local",
   "cloudProviders.optionalSection": "Proveedores en la nube (opcional, envían datos fuera de este equipo)",
-  "cloudProviders.hiddenNote": "Los proveedores de IA en la nube están ocultos en este equipo. Desactiva el interruptor de abajo para volver a mostrarlos.",
+  "cloudProviders.hiddenNote": "Los proveedores de IA en la nube están ocultos en este equipo.",
   "cloudProviders.wizardTitle": "Tu IA se queda en local",
   "cloudProviders.wizardBody": "Los proveedores de IA en la nube están ocultos en este equipo. Tu asistente usa la IA propia del equipo.",
   "cloudProviders.continue": "Continuar",

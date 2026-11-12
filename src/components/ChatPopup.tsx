@@ -7198,7 +7198,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       // The configured provider always belongs in the list even if Hermes
       // reports it unauthenticated — it is what this chat is running on,
       // so the header must be able to show it.
-      if (deviceProvider && !rows.some(r => r.id === deviceProvider)) {
+      // Not a cloud one while they are hidden: the header offers the box's own
+      // AI alone, and falls back to its plain label without a row.
+      if (deviceProvider && !rows.some(r => r.id === deviceProvider)
+        && (mData?.cloudProvidersHidden !== true || isLocalAiProviderId(deviceProvider))) {
         rows.unshift({ id: deviceProvider, name: deviceProvider })
       }
       setHermesProviders(rows)

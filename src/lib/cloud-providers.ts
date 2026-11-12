@@ -68,6 +68,8 @@ export interface CloudProvidersView {
   externalEngine: { displayName: string; modelRef: string } | null;
   /** The Local AI model ref the box names (local_ai_model), or null. */
   localModel: string | null;
+  /** May the person asking move the switch (the owner alone)? Absent: yes. */
+  canChange?: boolean;
 }
 
 /**

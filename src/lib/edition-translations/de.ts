@@ -1863,7 +1863,7 @@ export const de: Record<string, string> = {
   "cloudProviders.noLocalAi": "Noch keine lokale KI eingerichtet. Richten Sie eine unter Lokale KI ein.",
   "cloudProviders.openLocalAi": "Einstellungen für lokale KI",
   "cloudProviders.optionalSection": "Cloud-Anbieter (optional, senden Daten von dieser Box weg)",
-  "cloudProviders.hiddenNote": "Cloud-KI-Anbieter sind auf dieser Box ausgeblendet. Schalten Sie den Schalter unten aus, um sie wieder anzuzeigen.",
+  "cloudProviders.hiddenNote": "Cloud-KI-Anbieter sind auf dieser Box ausgeblendet.",
   "cloudProviders.wizardTitle": "Ihre KI bleibt lokal",
   "cloudProviders.wizardBody": "Cloud-KI-Anbieter sind auf dieser Box ausgeblendet. Ihr Assistent nutzt die eigene KI der Box.",
   "cloudProviders.continue": "Weiter",

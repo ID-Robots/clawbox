@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Predeterminado",
   "cloudProviders.externalEngineHint": "Motor externo en tu propia red: tus conversaciones no van a ningún servicio de IA en la nube.",
   "cloudProviders.failed": "No se pudo guardar el ajuste.",
-  "cloudProviders.hiddenNote": "Los proveedores de IA en la nube están ocultos en este equipo. Desactiva el interruptor de abajo para volver a mostrarlos.",
+  "cloudProviders.hiddenNote": "Los proveedores de IA en la nube están ocultos en este equipo.",
   "cloudProviders.hideHint": "Quita ClawBox AI, OpenAI, Anthropic y los demás servicios en la nube de Ajustes, del asistente de configuración y del selector de modelo del chat, para que la IA del asistente se quede en este equipo o en tu propia red.",
   "cloudProviders.hideTitle": "Ocultar proveedores de IA en la nube",
   "cloudProviders.localAi": "IA local",

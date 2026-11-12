@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "デフォルト",
   "cloudProviders.externalEngineHint": "ご自身のネットワーク上の外部エンジン — 会話がクラウド AI サービスに送られることはありません。",
   "cloudProviders.failed": "設定を保存できませんでした。",
-  "cloudProviders.hiddenNote": "このボックスではクラウド AI プロバイダーが非表示です。再表示するには下のスイッチをオフにしてください。",
+  "cloudProviders.hiddenNote": "このボックスではクラウド AI プロバイダーが非表示です。",
   "cloudProviders.hideHint": "ClawBox AI、OpenAI、Anthropic などのクラウドサービスを設定、セットアップウィザード、チャットのモデル選択から外し、アシスタントの AI をこのボックスまたはご自身のネットワーク内にとどめます。",
   "cloudProviders.hideTitle": "クラウド AI プロバイダーを非表示にする",
   "cloudProviders.localAi": "ローカル AI",

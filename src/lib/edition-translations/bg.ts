@@ -1850,7 +1850,7 @@ export const bg: Record<string, string> = {
   "cloudProviders.noLocalAi": "Все още няма настроен локален AI. Настройте го в Локален AI.",
   "cloudProviders.openLocalAi": "Настройки на локалния AI",
   "cloudProviders.optionalSection": "Облачни доставчици (по избор, изпращат данни извън тази кутия)",
-  "cloudProviders.hiddenNote": "Облачните AI доставчици са скрити на тази кутия. Изключете превключвателя по-долу, за да ги покажете отново.",
+  "cloudProviders.hiddenNote": "Облачните AI доставчици са скрити на тази кутия.",
   "cloudProviders.wizardTitle": "Вашият AI остава локален",
   "cloudProviders.wizardBody": "Облачните AI доставчици са скрити на тази кутия. Асистентът ви използва собствения AI на кутията.",
   "cloudProviders.continue": "Продължи",

@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "По подразбиране",
   "cloudProviders.externalEngineHint": "Външен двигател във вашата собствена мрежа — разговорите ви не отиват към облачна AI услуга.",
   "cloudProviders.failed": "Настройката не можа да бъде запазена.",
-  "cloudProviders.hiddenNote": "Облачните AI доставчици са скрити на тази кутия. Изключете превключвателя по-долу, за да ги покажете отново.",
+  "cloudProviders.hiddenNote": "Облачните AI доставчици са скрити на тази кутия.",
   "cloudProviders.hideHint": "Премахва ClawBox AI, OpenAI, Anthropic и другите облачни услуги от Настройки, съветника за настройка и избора на модел в чата, така че AI на асистента остава на тази кутия или във вашата собствена мрежа.",
   "cloudProviders.hideTitle": "Скриване на облачните AI доставчици",
   "cloudProviders.localAi": "Локален AI",

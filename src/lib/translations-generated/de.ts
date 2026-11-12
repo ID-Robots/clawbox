@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Standard",
   "cloudProviders.externalEngineHint": "Externe Engine in Ihrem eigenen Netzwerk — Ihre Unterhaltungen gehen an keinen Cloud-KI-Dienst.",
   "cloudProviders.failed": "Die Einstellung konnte nicht gespeichert werden.",
-  "cloudProviders.hiddenNote": "Cloud-KI-Anbieter sind auf dieser Box ausgeblendet. Schalten Sie den Schalter unten aus, um sie wieder anzuzeigen.",
+  "cloudProviders.hiddenNote": "Cloud-KI-Anbieter sind auf dieser Box ausgeblendet.",
   "cloudProviders.hideHint": "Entfernt ClawBox AI, OpenAI, Anthropic und die anderen Cloud-Dienste aus den Einstellungen, dem Einrichtungsassistenten und der Modellauswahl im Chat, damit die KI des Assistenten auf dieser Box oder in Ihrem eigenen Netzwerk bleibt.",
   "cloudProviders.hideTitle": "Cloud-KI-Anbieter ausblenden",
   "cloudProviders.localAi": "Lokale KI",

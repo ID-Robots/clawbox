@@ -1872,7 +1872,7 @@ export const zh: Record<string, string> = {
   "cloudProviders.noLocalAi": "尚未设置本地 AI。请在“本地 AI”中设置。",
   "cloudProviders.openLocalAi": "本地 AI 设置",
   "cloudProviders.optionalSection": "云端提供商（可选，会将数据发送到本设备之外）",
-  "cloudProviders.hiddenNote": "本设备已隐藏云端 AI 提供商。关闭下方开关即可重新显示。",
+  "cloudProviders.hiddenNote": "本设备已隐藏云端 AI 提供商。",
   "cloudProviders.wizardTitle": "您的 AI 保持在本地",
   "cloudProviders.wizardBody": "本设备已隐藏云端 AI 提供商。您的助手使用设备自身的 AI。",
   "cloudProviders.continue": "继续",

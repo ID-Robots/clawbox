@@ -667,6 +667,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
+  // The last of the two requests above the cloud-provider fold acted on, so a
+  // later visit to Providers does not open it again (CloudProvidersSettings).
+  const cloudOpenSeen = useRef(0);
   // A deep link asked for Providers with the Anthropic accounts open and in
   // view (the usage-limit notices). Held until the list says it showed them,
   // then cleared, so a later visit to Providers is not the same ask again.
@@ -4381,6 +4384,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
             <CloudProvidersSettings
               onOpenLocalAi={() => setSectionGated("localAi")}
               openRequest={openClawAIOfferRequest + providerSelectionRequest}
+              openRequestSeen={cloudOpenSeen}
               pitch={aiProvider?.clawaiConfigured === false && !sessionUser?.orgMode && (
               <ClawboxAiPitchCard
                 onConnect={() => {

@@ -1864,7 +1864,7 @@ export const nl: Record<string, string> = {
   "cloudProviders.noLocalAi": "Er is nog geen lokale AI ingesteld. Stel er een in bij Lokale AI.",
   "cloudProviders.openLocalAi": "Instellingen lokale AI",
   "cloudProviders.optionalSection": "Cloudproviders (optioneel, sturen gegevens buiten dit apparaat)",
-  "cloudProviders.hiddenNote": "Cloud-AI-providers zijn verborgen op dit apparaat. Zet de schakelaar hieronder uit om ze weer te tonen.",
+  "cloudProviders.hiddenNote": "Cloud-AI-providers zijn verborgen op dit apparaat.",
   "cloudProviders.wizardTitle": "Je AI blijft lokaal",
   "cloudProviders.wizardBody": "Cloud-AI-providers zijn verborgen op dit apparaat. Je assistent gebruikt de eigen AI van het apparaat.",
   "cloudProviders.continue": "Doorgaan",

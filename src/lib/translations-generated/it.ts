@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Predefinito",
   "cloudProviders.externalEngineHint": "Motore esterno sulla tua rete: le tue conversazioni non vanno a nessun servizio di IA cloud.",
   "cloudProviders.failed": "Non è stato possibile salvare l'impostazione.",
-  "cloudProviders.hiddenNote": "I provider di IA cloud sono nascosti su questo dispositivo. Disattiva l'interruttore qui sotto per mostrarli di nuovo.",
+  "cloudProviders.hiddenNote": "I provider di IA cloud sono nascosti su questo dispositivo.",
   "cloudProviders.hideHint": "Toglie ClawBox AI, OpenAI, Anthropic e gli altri servizi cloud dalle Impostazioni, dalla procedura di configurazione e dal selettore di modello della chat, così l'IA dell'assistente resta su questo dispositivo o sulla tua rete.",
   "cloudProviders.hideTitle": "Nascondi i provider di IA cloud",
   "cloudProviders.localAi": "IA locale",

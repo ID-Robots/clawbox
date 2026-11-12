@@ -157,6 +157,29 @@ describe("CloudProvidersSettings", () => {
     expect(await screen.findByTestId("cloud-cards")).toBeInTheDocument();
   });
 
+  it("a later visit to Providers is not the same deep link again, a new link still opens", async () => {
+    view = ENGINE;
+    const seen = { current: 0 };
+    const mount = (openRequest: number) => (
+      <CloudProvidersSettings openRequest={openRequest} openRequestSeen={seen}>
+        <CloudCards />
+      </CloudProvidersSettings>
+    );
+    const first = render(mount(2));
+    expect(await screen.findByTestId("cloud-cards")).toBeInTheDocument();
+    expect(seen.current).toBe(2);
+    first.unmount();
+
+    // Settings kept the counter at 2 while the section was away.
+    const second = render(mount(2));
+    expect(await screen.findByTestId("cloud-providers-optional-toggle")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("cloud-cards")).toBeNull();
+
+    second.rerender(mount(3));
+    expect(await screen.findByTestId("cloud-cards")).toBeInTheDocument();
+    expect(seen.current).toBe(3);
+  });
+
   it("hidden (an organisation box running an engine): no cloud card at all, the switch on and saying why", async () => {
     view = ORG_ENGINE;
     renderSettings();
@@ -192,6 +215,21 @@ describe("CloudProvidersSettings", () => {
     expect(screen.queryByTestId("cloud-cards")).toBeNull();
     expect(screen.getByTestId("cloud-providers-local-choice")).toHaveTextContent("cloudProviders.noLocalAi");
     expect(screen.getByTestId("cloud-providers-local-choice")).not.toHaveTextContent("recommended");
+  });
+
+  it("another user on a home box sees the page as the owner set it, without the switch", async () => {
+    view = { ...ORG_ENGINE, canChange: false };
+    renderSettings();
+    expect(await screen.findByTestId("cloud-providers-hidden-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("cloud-cards")).toBeNull();
+    expect(screen.queryByTestId("cloud-providers-hide")).toBeNull();
+  });
+
+  it("opens the fold at once when Settings mounts it with a deep link already raised", async () => {
+    view = ENGINE;
+    renderSettings({ openRequest: 2 });
+    expect(await screen.findByTestId("cloud-cards")).toBeInTheDocument();
+    expect(screen.getByTestId("cloud-providers-optional-toggle")).toHaveAttribute("aria-expanded", "true");
   });
 
   it("a refused save leaves the switch where it was and says so", async () => {

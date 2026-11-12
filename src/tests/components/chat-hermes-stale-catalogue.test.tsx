@@ -276,7 +276,7 @@ describe("the Hermes chat header during the dashboard's boot window", () => {
 // them, and the header then offers the box's own AI alone — the external
 // engine here — never the cloud rows the same answer lists.
 describe("the Hermes chat header with the cloud providers hidden", () => {
-  function installEngineBox(hidden: boolean): HermesBox {
+  function installEngineBox(hidden: boolean, device = "clawext"): HermesBox {
     const box = installHermesBox();
     const inner = globalThis.fetch;
     const seed = {
@@ -286,8 +286,8 @@ describe("the Hermes chat header with the cloud providers hidden", () => {
         { id: "clawext", name: "echo-1", authenticated: true },
       ],
       models: [],
-      provider: "clawext",
-      current: "acme/echo-1",
+      provider: device,
+      current: device === "clawext" ? "acme/echo-1" : "some-model",
       reasoning: "medium",
       source: "dashboard",
       stale: false,
@@ -313,6 +313,13 @@ describe("the Hermes chat header with the cloud providers hidden", () => {
     const labels = await providerOptions();
     expect(labels).toHaveLength(1);
     expect(labels.join(" ")).not.toMatch(/Anthropic|OpenRouter/);
+  });
+
+  it("does not put a cloud device provider back while they are hidden", async () => {
+    await mountHermesChat(installEngineBox(true, "nous"));
+    const labels = await providerOptions();
+    expect(labels.join(" ")).not.toMatch(/nous/i);
+    expect(labels).toHaveLength(1);
   });
 
   it("offers every signed-in provider when they are not hidden", async () => {

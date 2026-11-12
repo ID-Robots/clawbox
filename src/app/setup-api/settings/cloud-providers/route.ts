@@ -12,11 +12,12 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * switch (src/lib/cloud-providers.ts says what it hides and its AUTO rule).
  * Both editions: the switch lives in ClawBox's own store, not in a harness.
  *
- * GET (owner only): the switch, what it resolves to now, and the box's local
- * choice (the external engine, Local-only mode) Settings and the setup wizard
- * lead with. POST `{ hide: boolean }` (owner only, from the owner's own
- * browser and our own page) stores the owner's choice, which then wins over
- * AUTO either way.
+ * GET (a signed-in person; `canChange` true for the owner alone): the switch,
+ * what it resolves to now, and the box's local choice (the external engine,
+ * Local-only mode) Settings and the setup wizard lead with.
+ *
+ * POST `{ hide: boolean }` (owner only, from the owner's own browser and our
+ * own page) stores the owner's choice, which then wins over AUTO either way.
  */
 
 const NO_STORE = { "Cache-Control": "no-store" };
@@ -27,8 +28,11 @@ function refuse(status: number, code: string, error: string): NextResponse {
 
 export async function GET(req: Request) {
   const who = await personSession(req);
-  if (!who?.isOwner) return refuse(403, "owner_only", "Only the box owner can see this setting.");
-  return NextResponse.json(await readCloudProvidersView(), { headers: NO_STORE });
+  if (!who) return refuse(403, "owner_only", "Only the box owner can see this setting.");
+  // Another user signed in on a home box reaches Settings → AI providers too
+  // (an organisation's staff never do: the middleware refuses them this
+  // route): they get the page as the owner set it, and no switch.
+  return NextResponse.json({ ...(await readCloudProvidersView()), canChange: who.isOwner === true }, { headers: NO_STORE });
 }
 
 export async function POST(req: Request) {

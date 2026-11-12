@@ -1860,7 +1860,7 @@ export const sv: Record<string, string> = {
   "cloudProviders.noLocalAi": "Ingen lokal AI är konfigurerad ännu. Konfigurera en under Lokal AI.",
   "cloudProviders.openLocalAi": "Inställningar för lokal AI",
   "cloudProviders.optionalSection": "Molnleverantörer (valfritt, skickar data från den här enheten)",
-  "cloudProviders.hiddenNote": "Moln-AI-leverantörer är dolda på den här enheten. Stäng av reglaget nedan för att visa dem igen.",
+  "cloudProviders.hiddenNote": "Moln-AI-leverantörer är dolda på den här enheten.",
   "cloudProviders.wizardTitle": "Din AI stannar lokalt",
   "cloudProviders.wizardBody": "Moln-AI-leverantörer är dolda på den här enheten. Din assistent använder enhetens egen AI.",
   "cloudProviders.continue": "Fortsätt",

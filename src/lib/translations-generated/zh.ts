@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "默认",
   "cloudProviders.externalEngineHint": "您自己网络中的外部引擎 — 您的对话不会发送到云端 AI 服务。",
   "cloudProviders.failed": "无法保存该设置。",
-  "cloudProviders.hiddenNote": "本设备已隐藏云端 AI 提供商。关闭下方开关即可重新显示。",
+  "cloudProviders.hiddenNote": "本设备已隐藏云端 AI 提供商。",
   "cloudProviders.hideHint": "从设置、设置向导和聊天的模型选择器中移除 ClawBox AI、OpenAI、Anthropic 及其他云服务，让助手的 AI 留在本设备或您自己的网络中。",
   "cloudProviders.hideTitle": "隐藏云端 AI 提供商",
   "cloudProviders.localAi": "本地 AI",

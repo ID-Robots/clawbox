@@ -1864,7 +1864,7 @@ export const fr: Record<string, string> = {
   "cloudProviders.noLocalAi": "Aucune IA locale n'est encore configurée. Configurez-en une dans IA locale.",
   "cloudProviders.openLocalAi": "Paramètres de l'IA locale",
   "cloudProviders.optionalSection": "Fournisseurs cloud (facultatif, envoient des données hors de ce boîtier)",
-  "cloudProviders.hiddenNote": "Les fournisseurs d'IA cloud sont masqués sur ce boîtier. Désactivez l'interrupteur ci-dessous pour les afficher à nouveau.",
+  "cloudProviders.hiddenNote": "Les fournisseurs d'IA cloud sont masqués sur ce boîtier.",
   "cloudProviders.wizardTitle": "Votre IA reste locale",
   "cloudProviders.wizardBody": "Les fournisseurs d'IA cloud sont masqués sur ce boîtier. Votre assistant utilise l'IA propre du boîtier.",
   "cloudProviders.continue": "Continuer",

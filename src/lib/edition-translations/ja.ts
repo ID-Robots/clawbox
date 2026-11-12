@@ -1864,7 +1864,7 @@ export const ja: Record<string, string> = {
   "cloudProviders.noLocalAi": "ローカル AI はまだ設定されていません。ローカル AI で設定してください。",
   "cloudProviders.openLocalAi": "ローカル AI の設定",
   "cloudProviders.optionalSection": "クラウドプロバイダー（任意、データをこのボックスの外に送信します）",
-  "cloudProviders.hiddenNote": "このボックスではクラウド AI プロバイダーが非表示です。再表示するには下のスイッチをオフにしてください。",
+  "cloudProviders.hiddenNote": "このボックスではクラウド AI プロバイダーが非表示です。",
   "cloudProviders.wizardTitle": "AI はローカルのままです",
   "cloudProviders.wizardBody": "このボックスではクラウド AI プロバイダーが非表示です。アシスタントはボックス自身の AI を使います。",
   "cloudProviders.continue": "続行",

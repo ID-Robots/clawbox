@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Default",
   "cloudProviders.externalEngineHint": "External engine on your own network — your conversations do not go to a cloud AI service.",
   "cloudProviders.failed": "The setting could not be saved.",
-  "cloudProviders.hiddenNote": "Cloud AI providers are hidden on this box. Turn the switch below off to show them again.",
+  "cloudProviders.hiddenNote": "Cloud AI providers are hidden on this box.",
   "cloudProviders.hideHint": "Takes ClawBox AI, OpenAI, Anthropic and the other cloud services off Settings, the setup wizard and the chat's model picker, so the assistant's AI stays on this box or your own network.",
   "cloudProviders.hideTitle": "Hide cloud AI providers",
   "cloudProviders.localAi": "Local AI",

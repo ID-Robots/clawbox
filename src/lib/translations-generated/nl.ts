@@ -1020,7 +1020,7 @@ const table: Record<string, string> = {
   "cloudProviders.default": "Standaard",
   "cloudProviders.externalEngineHint": "Externe engine in je eigen netwerk — je gesprekken gaan niet naar een cloud-AI-dienst.",
   "cloudProviders.failed": "De instelling kon niet worden opgeslagen.",
-  "cloudProviders.hiddenNote": "Cloud-AI-providers zijn verborgen op dit apparaat. Zet de schakelaar hieronder uit om ze weer te tonen.",
+  "cloudProviders.hiddenNote": "Cloud-AI-providers zijn verborgen op dit apparaat.",
   "cloudProviders.hideHint": "Haalt ClawBox AI, OpenAI, Anthropic en de andere clouddiensten weg uit Instellingen, de installatiewizard en de modelkiezer van de chat, zodat de AI van de assistent op dit apparaat of in je eigen netwerk blijft.",
   "cloudProviders.hideTitle": "Cloud-AI-providers verbergen",
   "cloudProviders.localAi": "Lokale AI",

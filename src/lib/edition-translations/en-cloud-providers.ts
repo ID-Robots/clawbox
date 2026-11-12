@@ -13,7 +13,7 @@ export const cloudProvidersEn: Record<string, string> = {
   "cloudProviders.noLocalAi": "No Local AI is set up yet. Set one up in Local AI.",
   "cloudProviders.openLocalAi": "Local AI settings",
   "cloudProviders.optionalSection": "Cloud providers (optional, send data off this box)",
-  "cloudProviders.hiddenNote": "Cloud AI providers are hidden on this box. Turn the switch below off to show them again.",
+  "cloudProviders.hiddenNote": "Cloud AI providers are hidden on this box.",
   "cloudProviders.wizardTitle": "Your AI stays local",
   "cloudProviders.wizardBody": "Cloud AI providers are hidden on this box. Your assistant uses the box's own AI.",
   "cloudProviders.continue": "Continue",

@@ -74,6 +74,7 @@ describe("GET", () => {
     const res = await get();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
+      canChange: true,
       hidden: false,
       setting: "auto",
       autoHidden: false,
@@ -127,11 +128,20 @@ describe("GET", () => {
     expect(await (await get()).json()).toMatchObject({ hidden: false, setting: "auto" });
   });
 
-  it.each([
-    ["another user", { username: "alice", isOwner: false }],
-    ["no session (the agent's bearer)", null],
-  ] as const)("refuses %s", async (_label, who) => {
-    as(who);
+  it("the owner may change it", async () => {
+    expect((await (await get()).json()).canChange).toBe(true);
+  });
+
+  it("another user signed in on a home box reads it as the owner set it, and may not change it", async () => {
+    writeStore({ hide_cloud_providers: true });
+    as({ username: "alice", isOwner: false });
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ hidden: true, canChange: false });
+  });
+
+  it("refuses no session (the agent's bearer)", async () => {
+    as(null);
     const res = await get();
     expect(res.status).toBe(403);
     expect((await res.json()).code).toBe("owner_only");

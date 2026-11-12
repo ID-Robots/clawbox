@@ -189,25 +189,37 @@ export function CloudProvidersSettings({
   pitch,
   onOpenLocalAi,
   openRequest = 0,
+  openRequestSeen,
 }: {
   children: ReactNode;
   pitch?: ReactNode;
   onOpenLocalAi?: () => void;
   openRequest?: number;
+  /** The last request this section acted on, kept by the page so that leaving and coming back is not the same link again. */
+  openRequestSeen?: { current: number };
 }) {
   const { t } = useT();
   const { view, setView } = useCloudProvidersView();
-  const [open, setOpen] = useState(false);
-  const firstRequest = useRef(openRequest);
+  // Open when a deep link asked for a cloud provider this section has not yet
+  // shown: one raised in the same breath as the section mounts (Settings opens
+  // the section and raises it together) or while it is on screen. The page
+  // keeps the last request acted on, so coming back to the section later —
+  // which remounts it — is not taken for the same link again.
+  const ownSeen = useRef(0);
+  const seen = openRequestSeen ?? ownSeen;
+  const [open, setOpen] = useState(openRequest > seen.current);
   useEffect(() => {
-    if (openRequest !== firstRequest.current) setOpen(true);
-  }, [openRequest]);
+    if (openRequest > seen.current) setOpen(true);
+    seen.current = openRequest;
+  }, [openRequest, seen]);
   const onChange = useCallback((next: CloudProvidersView) => setView(next), [setView]);
 
   if (view === undefined) return <div data-testid="cloud-providers-loading" aria-busy="true" />;
   if (view === null) return <>{pitch}{children}</>;
 
-  const hideSwitch = <HideCloudSwitch view={view} onChange={onChange} />;
+  // The switch is the owner's; another user signed in on a home box sees the
+  // page as the owner set it, without it.
+  const hideSwitch = view.canChange === false ? null : <HideCloudSwitch view={view} onChange={onChange} />;
   if (!view.hidden && !localAiFirst(view)) {
     return <>{pitch}{children}{hideSwitch}</>;
   }
