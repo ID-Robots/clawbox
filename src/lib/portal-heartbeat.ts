@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "./runtime-path";
 import { CLOUDFLARED_DIR, getTunnelServiceState, startTunnelService } from "./cloudflared";
-import { get as getConfigValue } from "./config-store";
+import { get as getConfigValue, getKnownMany } from "./config-store";
 import { migrateLegacyPortalUrl } from "./portal-legacy-domain";
 import {
   type NamedTunnelCredential,
@@ -120,6 +120,42 @@ async function readClawAiToken(): Promise<string | null> {
 }
 
 /**
+ * Does the store POSITIVELY hold no account credential — neither the ClawBox AI
+ * token nor a linked subscription's? False when it cannot be read: a store that
+ * failed to open is not an unpaired box, and revoking on it would take the
+ * owner's named hostname away over a read error.
+ */
+async function storeHoldsNoAccountToken(): Promise<boolean> {
+  const { values, known } = await getKnownMany([CLAWBOX_AI_TOKEN_CONFIG_KEY, SUBSCRIPTION_LINK_TOKEN_KEY]);
+  if (!known) return false;
+  const isToken = (raw: unknown) => typeof raw === "string" && raw.trim().startsWith("claw_");
+  return !isToken(values[CLAWBOX_AI_TOKEN_CONFIG_KEY]) && !isToken(values[SUBSCRIPTION_LINK_TOKEN_KEY]);
+}
+
+/**
+ * The account left the box — a subscription unlinked, a ClawBox AI sign-out —
+ * and no other account credential remains: the named tunnel the heartbeat
+ * provisioned for that account must not go on serving its hostname. Revokes it
+ * and drops the tunnel back to the quick one (only restarting a tunnel that is
+ * running). A box still holding either token keeps its tunnel: the hostname is
+ * the device's under that account. Never throws.
+ *
+ * Called by the unlink at once (`/setup-api/ai-models/subscription-link`), and
+ * by every heartbeat that finds no account token, which covers a sign-out.
+ */
+export async function revokeNamedTunnelWithoutAccount(reason: string): Promise<boolean> {
+  try {
+    if (!(await storeHoldsNoAccountToken())) return false;
+    if (!(await readNamedTunnelCredential())) return false;
+    await revokeNamedTunnel(reason);
+    return true;
+  } catch (err) {
+    console.warn("[portal-heartbeat] could not revoke the named tunnel:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
  * Internal: actually do the POST. Caller must hold the inFlight slot
  * (the two public entry points below check `if (inFlight) return` and
  * assign to it). Always clears `inFlight` on settle so a stuck
@@ -128,7 +164,12 @@ async function readClawAiToken(): Promise<string | null> {
 async function pushNow(tunnelUrl: string): Promise<void> {
   try {
     const token = await readClawAiToken();
-    if (!token) return;
+    if (!token) {
+      // No account on the box any more: whatever named tunnel an earlier
+      // account was given is not this box's to serve.
+      await revokeNamedTunnelWithoutAccount("no ClawBox account is linked to this box");
+      return;
+    }
 
     const deviceId = await getOrCreateDeviceId();
     const name = deriveDeviceName(deviceId);

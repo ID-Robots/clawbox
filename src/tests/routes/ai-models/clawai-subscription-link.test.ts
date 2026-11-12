@@ -34,6 +34,7 @@ vi.mock("@/lib/gateway-hot-apply", () => ({ waitForGatewayBack: vi.fn(async () =
 vi.mock("@/lib/provider-status", () => ({
   readProviderStatus: vi.fn(async () => ({ harness: "openclaw", providers: [], defaultProvider: null, unrunnable: [], degraded: false })),
 }));
+vi.mock("@/lib/portal-heartbeat", () => ({ revokeNamedTunnelWithoutAccount: vi.fn(async () => true) }));
 vi.mock("@/lib/subscription-link", () => ({
   linkSubscription: vi.fn(),
   refreshSubscriptionLink: vi.fn(),
@@ -241,13 +242,19 @@ describe("/setup-api/ai-models/subscription-link", () => {
     expect(await (await GET()).json()).toEqual({ linked: false, plan: null, rejected: false });
   });
 
-  it("DELETE removes the link", async () => {
+  it("DELETE removes the link, then the named tunnel no account is left to own", async () => {
     mockUnlink.mockResolvedValue(true);
+    const { revokeNamedTunnelWithoutAccount } = await import("@/lib/portal-heartbeat");
     const { DELETE } = await import("@/app/setup-api/ai-models/subscription-link/route");
     const res = await DELETE();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ linked: false, wasLinked: true });
+    expect(await res.json()).toEqual({ linked: false, wasLinked: true, tunnelRevoked: true });
     expect(mockUnlink).toHaveBeenCalledTimes(1);
+    // After the unlink, so the heartbeat module reads a store without the link.
+    expect(vi.mocked(revokeNamedTunnelWithoutAccount)).toHaveBeenCalledTimes(1);
+    expect(mockUnlink.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(revokeNamedTunnelWithoutAccount).mock.invocationCallOrder[0],
+    );
   });
 
   it("DELETE says so when the store cannot be written", async () => {
