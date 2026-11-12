@@ -10007,6 +10007,7 @@ step_system_config() {
   # start_services ever ran. A hardening step must never brick a flash.
   step_firewall || echo "  Warning: firewall step failed (non-fatal)"
   step_persistent_journal
+  step_bluetooth_no_debug || echo "  Warning: bluetooth debug step failed (non-fatal)"
   step_uefi_boot_order || echo "  Warning: UEFI boot order step failed (non-fatal)"
 }
 
@@ -10111,6 +10112,147 @@ step_persistent_journal() {
   # monotonic ~10 s. `journalctl -b` timestamps before that handoff are bogus and
   # `--list-boots` shows one "boot" spanning the gap. This is a hardware/BSP
   # property of the Orin Nano dev kit, not something install.sh can correct.
+}
+
+step_bluetooth_no_debug() {
+  # Start bluetoothd without -d on a Jetson.
+  #
+  # The -d is NVIDIA's, not ClawBox's: L4T's drop-in nv-bluetooth-service.conf
+  # replaces bluetooth.service's ExecStart with `bluetoothd -d --noplugin=…`, and
+  # while Bluetooth was busy its debug lines filled 74 % of a box's retained
+  # journal (55,866 lines in one hour). ClawBox itself uses no Bluetooth.
+  #
+  # The fix is a drop-in of ClawBox's own, named to sort after NVIDIA's (drop-ins
+  # apply in lexicographic order across directories), holding the vendor's own
+  # ExecStart minus every `-d` token. It is DERIVED from the vendor file on every
+  # run, never copied once: a BSP that changes its arguments is followed, and one
+  # that stops passing -d gets this file removed. Any shape this step does not
+  # expect (no vendor file, an operator's own drop-in, quoting, `--debug`, a
+  # bundled short option) changes nothing except removing a stale file of
+  # ClawBox's own, so the vendor's line stays in force.
+  #
+  # Nothing is restarted: an owner may have paired a keyboard or headset with
+  # the box's desktop, and a restart would drop it. The drop-in applies at the
+  # next start of bluetooth.service, which is the next boot.
+  #
+  # Both callers (`|| echo` and optional_step) run this with errexit off, so every
+  # write and reload checks its own result. Returns 1 only when a write or a
+  # daemon-reload it attempted failed.
+  local vendor="${CLAWBOX_BLUETOOTH_VENDOR_DROPIN:-/usr/lib/systemd/system/bluetooth.service.d/nv-bluetooth-service.conf}"
+  local dest_dir="${CLAWBOX_BLUETOOTH_DROPIN_DIR:-/etc/systemd/system/bluetooth.service.d}"
+  local dest="$dest_dir/zz-clawbox-bluetoothd-no-debug.conf"
+  local mark="# ClawBox: bluetoothd without -d"
+  local why="" out="" p="" line="" exec_start="" tok="" derived="" first="" tmp=""
+  local has_d=0 odd=0 dest_state="absent"
+  local -a paths=() toks=()
+
+  if [ -L "$vendor" ] || [ ! -f "$vendor" ]; then
+    why="No L4T bluetooth drop-in at $vendor"
+  else
+    # An operator's own drop-in (`systemctl edit bluetooth`, anything under /run)
+    # means someone configured this unit by hand: leave all of it alone. Compared
+    # by file, not by text: systemd may spell the vendor's path /lib/systemd/…
+    if ! out="$(systemctl show bluetooth.service -p DropInPaths --value 2>/dev/null)"; then
+      echo "  Could not read bluetooth.service's drop-ins; bluetoothd left as it is"
+      return 0
+    fi
+    read -r -a paths <<< "$out"
+    for p in "${paths[@]}"; do
+      if [ "$p" -ef "$vendor" ] || [ "$p" = "$dest" ] || [ "$p" -ef "$dest" ]; then
+        continue
+      fi
+      echo "  bluetooth.service has a drop-in ClawBox did not write ($p); bluetoothd left as it is"
+      return 0
+    done
+
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        ExecStart=?*) exec_start="${line#ExecStart=}" ;;
+      esac
+    done < "$vendor"
+    read -r -a toks <<< "$exec_start"
+    # The first word is the program (it may carry a systemd prefix like `-`).
+    for tok in "${toks[@]:1}"; do
+      case "$tok" in
+        -d) has_d=1 ;;
+        --debug | --debug=*) odd=1 ;;
+        --*) ;;
+        -*d*) odd=1 ;;
+      esac
+    done
+    case "$exec_start" in
+      *\"* | *\'* | *\\* | *\;*) odd=1 ;;
+    esac
+    if [ "$odd" = 1 ]; then
+      why="The L4T bluetooth ExecStart= is not a shape this step edits"
+    elif [ "$has_d" = 0 ]; then
+      why="The L4T bluetooth drop-in starts bluetoothd without -d"
+    fi
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    dest_state="foreign"
+    # A last line without a newline still lands in $first.
+    { IFS= read -r first < "$dest"; } 2>/dev/null || :
+    case "$first" in
+      "$mark"*) dest_state="ours" ;;
+    esac
+  fi
+
+  if [ -n "$why" ]; then
+    if [ "$dest_state" != "ours" ]; then
+      echo "  $why; nothing to change"
+      return 0
+    fi
+    if ! rm -f -- "$dest"; then
+      echo "  Warning: $why, but $dest could not be removed" >&2
+      return 1
+    fi
+    if ! systemctl daemon-reload; then
+      echo "  Warning: removed $dest, but systemctl daemon-reload failed" >&2
+      return 1
+    fi
+    echo "  $why; removed $dest, which leaves bluetooth.service as configured without it from its next start"
+    return 0
+  fi
+
+  if [ "$dest_state" = "foreign" ]; then
+    echo "  $dest was not written by ClawBox; left as it is"
+    return 0
+  fi
+
+  derived="${toks[0]}"
+  for tok in "${toks[@]:1}"; do
+    [ "$tok" = "-d" ] || derived="$derived $tok"
+  done
+  # The temp file lives outside $dest_dir: systemd reads every *.conf there.
+  if ! tmp="$(mktemp)"; then
+    echo "  Warning: could not create a temporary file for $dest" >&2
+    return 1
+  fi
+  if ! printf '%s\n' \
+    "$mark, derived from $vendor by install.sh; delete this file to restore the vendor's debug output" \
+    "[Service]" "ExecStart=" "ExecStart=$derived" > "$tmp"; then
+    rm -f -- "$tmp"
+    echo "  Warning: could not write the bluetooth drop-in to $tmp" >&2
+    return 1
+  fi
+  if [ "$dest_state" = "ours" ] && cmp -s -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    echo "  bluetoothd's no-debug drop-in is already in place ($dest)"
+    return 0
+  fi
+  if ! mkdir -p -m 0755 -- "$dest_dir" || ! install_root_file "$tmp" "$dest" 0644; then
+    rm -f -- "$tmp"
+    echo "  Warning: could not write $dest; bluetoothd's configuration is unchanged" >&2
+    return 1
+  fi
+  rm -f -- "$tmp"
+  if ! systemctl daemon-reload; then
+    echo "  Warning: wrote $dest, but systemctl daemon-reload failed" >&2
+    return 1
+  fi
+  echo "  Wrote $dest (ExecStart=$derived); bluetoothd runs without -d from the next start of bluetooth.service, the next boot, and is not restarted now"
 }
 
 # ── Root-owned entrypoints ───────────────────────────────────────────────────
@@ -11069,6 +11211,9 @@ step_post_update() {
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   optional_step persistent_journal step_persistent_journal
+  # Without this call the bluetoothd fix would be fresh-install-only, and every
+  # box already in the field would keep NVIDIA's -d.
+  optional_step bluetooth_no_debug step_bluetooth_no_debug
   # Without this call the NVMe-first boot order guard would be factory-only, and
   # every box flashed before it would keep a BootOrder the firmware can push the
   # SSD to the bottom of. TASK-1636.
