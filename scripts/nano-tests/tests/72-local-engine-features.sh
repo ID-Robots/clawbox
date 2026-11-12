@@ -184,9 +184,10 @@ const call = async (method, p, body) => {
             const d = await call("DELETE", "/setup-api/prime-radiant/pages/" + page.split("/").map(encodeURIComponent).join("/"));
             if (d.status === 200) undone++;
           }
-          out.pagesAdded = added.length;
-          out.pagesDeleted = undone;
-          out.pagesChangedSince = changed;
+          // Summed over every commit that needed the fallback, never overwritten.
+          out.pagesAdded = (out.pagesAdded ?? 0) + added.length;
+          out.pagesDeleted = (out.pagesDeleted ?? 0) + undone;
+          out.pagesChangedSince = (out.pagesChangedSince ?? 0) + changed;
           if (added.length > 0 && undone === added.length) out.reverted++;
         }
       } catch (err) {
