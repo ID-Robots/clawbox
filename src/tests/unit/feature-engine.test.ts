@@ -17,6 +17,9 @@ vi.mock("@/lib/config-store", () => ({
     if (storeFails.get) throw new Error("unreadable");
     return store.get(key);
   },
+  set: async (key: string, value: unknown) => {
+    store.set(key, value);
+  },
 }));
 
 const token = vi.fn(async (): Promise<string | null> => "claw_test");

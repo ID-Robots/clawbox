@@ -231,12 +231,13 @@ else
   not_ok "Prime Radiant's client is not the local one: $(j -c '.client')"
 fi
 
-if [ "$(sj '.start.status')" = 202 ] && [ "$(sj '.ingest.status')" = done ] && [ "$(sj '.ingest.done')" -ge 1 ] 2>/dev/null && [ "$(sj '.ingest.pages')" -ge 1 ] 2>/dev/null; then
+if [ "$(sj '.start.status')" = 202 ] && [ "$(sj '.ingest.status')" = "done" ] && [ "$(sj '.ingest.done')" -ge 1 ] 2>/dev/null && [ "$(sj '.ingest.pages')" -ge 1 ] 2>/dev/null; then
   ok "an ingest through the running server was written by the box's own engine: $(sj '.ingest.done')/$(sj '.ingest.total') documents, $(sj '.ingest.pages') pages, $(sj '.ingest.calls') calls in $(sj '.ingest.seconds') s"
 else
   not_ok "the ingest on the box's own engine did not write pages: start $(sj -c '.start'), job $(sj -c '.ingest')"
 fi
 
+# shellcheck disable=SC2016  # $r is jq's
 if [ "$(sj '.costModels | length')" -ge 1 ] 2>/dev/null && [ "$(sj --arg r "$ENGINE_REF" '[.costModels[] | select(. != $r)] | length')" = 0 ]; then
   ok "every cost row of the job names the engine's own ref ($(sj -c '.costModels'))"
 else
@@ -257,6 +258,8 @@ else
   not_ok "the job's commits were not all undone: $(sj '.reverted')/$(sj '.commits') ($(sj '.revertError // empty'))"
 fi
 
+# shellcheck disable=SC2016  # $r is jq's
+VISION_ELSEWHERE=$(j --arg r "$ENGINE_REF" '[.vision.asked[] | select(. != $r)] | length')
 if [ "$(j '.engine.imageInput')" = false ]; then
   if [ "$(j '.vision.error')" = "$(j '.vision.blindError')" ] && [ "$(j '.vision.asked | length')" = 0 ]; then
     ok "a picture is refused in words, asking nothing, by an engine that cannot see ($(j '.engine.runtime'))"
@@ -265,7 +268,7 @@ if [ "$(j '.engine.imageInput')" = false ]; then
   fi
 elif [ -n "$(j '.vision.text // empty')" ]; then
   ok "the box's own engine described the picture: $(j '.vision.text' | head -c 80)"
-elif [ "$(j --arg r "$ENGINE_REF" '[.vision.asked[] | select(. != $r)] | length')" = 0 ]; then
+elif [ "$VISION_ELSEWHERE" = 0 ]; then
   ok "the picture went to the box's own engine only, which did not describe it: $(j -c '.vision')"
 else
   not_ok "the picture went to another model: $(j -c '.vision.asked')"
