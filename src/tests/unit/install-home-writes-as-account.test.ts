@@ -247,7 +247,8 @@ d("~/.codex is made private by the clawbox user", () => {
   it("is cut from install.sh with nothing but the ~/.codex lines in it", () => {
     const commands = block.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
     expect(commands.length).toBeGreaterThan(0);
-    for (const c of commands) expect(c).toContain('"$CLAWBOX_HOME/.codex"');
+    // Every command names ~/.codex; the warning arm only says that one failed.
+    for (const c of commands.filter((l) => !/^(then|fi|echo )/.test(l))) expect(c).toContain('"$CLAWBOX_HOME/.codex"');
   });
 
   it("creates a missing ~/.codex with mode 0700", () => {
@@ -273,6 +274,50 @@ d("~/.codex is made private by the clawbox user", () => {
     expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(fs.statSync(codex()).mode & 0o777).toBe(0o700);
     expect(fs.readFileSync(path.join(codex(), "auth.json"), "utf-8")).toBe("{}\n");
+  });
+});
+
+d("a ~/.codex the clawbox user cannot make private is reported, and the step goes on", () => {
+  // step_systemd_services is dispatched on its own under errexit, where a bare
+  // failure here ended it, and the update runs it as a fixup with errexit off,
+  // where it passed with no word.
+  const block = sliceLines(
+    shellFunction("step_systemd_services"),
+    "# The sync unit runs under ProtectSystem=strict",
+    "systemctl enable --now clawbox-codex-auth-sync.timer",
+  );
+  const stepWarningLine = (() => {
+    const source = fs.readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
+    const m = /^const STEP_WARNING_LINE = \/(.+)\/([a-z]*);$/m.exec(source);
+    if (!m) throw new Error("STEP_WARNING_LINE is not in src/lib/updater.ts");
+    return new RegExp(m[1], m[2]);
+  })();
+  // The warning names the command that tries again, from the checkout.
+  const projectDir = "PROJECT_DIR=/home/clawbox/clawbox";
+  const failing = (cmd: string) => [
+    projectDir,
+    'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+    `as_clawbox() { [ "$1" = ${cmd} ] && return 1; __real_as_clawbox "$@"; }`,
+  ].join("\n");
+
+  it.each(["mkdir", "chmod"])("when its %s fails", (cmd) => {
+    const r = runAsInstaller(`${block}\necho "RC=0"`, failing(cmd));
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("RC=0");
+    expect(r.stderr).toContain("Warning: could not prepare ~/.codex");
+    const warnings = r.stdout.split("\n").filter((l) => l.startsWith("CLAWBOX-WARN"));
+    expect(warnings).toHaveLength(1);
+    expect(stepWarningLine.exec(warnings[0])?.[1]).toBe("codex-dir-not-ready");
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("says nothing of the kind when ~/.codex is made", () => {
+    const r = runAsInstaller(`${block}\necho "RC=0"`, projectDir);
+
+    expect(r.stdout, r.stderr).toContain("RC=0");
+    expect(r.stdout).not.toContain("CLAWBOX-WARN");
+    expect(r.stderr).not.toContain("could not prepare");
   });
 });
 

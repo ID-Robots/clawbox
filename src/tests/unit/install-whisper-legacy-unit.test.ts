@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { accountOnlyHome, CAN_LOCK_HOME, unlockTree } from "../helpers/account-only-home";
 
 /**
  * The legacy `clawbox-whisper.service` (TASK-1214, the report's "Half 2").
@@ -59,7 +60,11 @@ let tmp: string;
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "whisper-legacy-"));
 });
-afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => {
+  // A run the account-only home below left locked cannot be removed otherwise.
+  unlockTree(tmp);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
 const sysDir = () => path.join(tmp, "etc-systemd-system");
 const home = () => path.join(tmp, "home", "clawbox");
@@ -145,6 +150,8 @@ function update({
     `sed -n '/^LEGACY_WHISPER_UNIT=/p;/^LEGACY_WHISPER_RETIRED=/p' "$1" > "${tmp}/f.sh"`,
     ...fns.map((fn) => `sed -n '/^${fn}() {/,/^}/p' "$1" >> "${tmp}/f.sh"`),
     `. "${tmp}/f.sh"`,
+    // The script's own helper when it is not root: the command itself.
+    'as_clawbox() { "$@"; }',
     `SYSTEMD_SYSTEM_DIR="${sysDir()}"`,
     `${entry} 2>&1`,
     "echo DONE",
@@ -359,6 +366,150 @@ describe("retire_legacy_whisper_unit — what it leaves alone", () => {
     const r = update({ userFragment: "Welcome to Ubuntu 22.04.5 LTS" });
     expect(r.done, r.out).toBe(true);
     expect(mutations(r.calls)).toEqual([]);
+  });
+});
+
+/**
+ * The user scope's files are in the clawbox user's home, and root removing
+ * them there acts through any link that user planted on the way. So the unit,
+ * its drop-ins and the links beside it are removed AS that user. Run against a
+ * home only `as_clawbox` can write to (src/tests/helpers/account-only-home.ts):
+ * a removal root made there fails, and a file command root ran there is
+ * recorded in `rootInHome`.
+ */
+describe.skipIf(!CAN_LOCK_HOME)("retire_legacy_whisper_scope user — the clawbox user's files are removed by that user", () => {
+  function retireUser({ userFragment = "", prelude = "" } = {}) {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    fs.mkdirSync(home(), { recursive: true });
+    const account = accountOnlyHome(home(), aux);
+    const program = [
+      "set -euo pipefail",
+      'CLAWBOX_USER="clawbox"',
+      `CLAWBOX_HOME="${home()}"`,
+      `SYSTEMD_USER="${userDir()}"`,
+      `USER_FRAGMENT="${userFragment}"`,
+      "systemctl() { return 0; }",
+      "su() {",
+      '  local cmd=""',
+      '  while [ $# -gt 0 ]; do case "$1" in -c) cmd="$2"; shift 2 ;; *) shift ;; esac; done',
+      '  case "$cmd" in *FragmentPath*) printf "%s\\n" "$USER_FRAGMENT" ;; esac',
+      "  return 0",
+      "}",
+      `sed -n '/^LEGACY_WHISPER_UNIT=/p;/^LEGACY_WHISPER_RETIRED=/p' "$1" > "${aux}/f.sh"`,
+      ...["legacy_whisper_unit_stale", "retire_legacy_whisper_scope"].map(
+        (fn) => `sed -n '/^${fn}() {/,/^}/p' "$1" >> "${aux}/f.sh"`,
+      ),
+      `. "${aux}/f.sh"`,
+      // After the functions, so `as_clawbox` is the account's.
+      account.shell,
+      prelude,
+      "__ao_lock",
+      "retire_legacy_whisper_scope user 2>&1 || true",
+      // The flag whisper_adopt_legacy_engine reads to write the replacement unit.
+      'echo "DONE RETIRED=$LEGACY_WHISPER_RETIRED"',
+    ].join(NL);
+    const file = path.join(aux, "prog.sh");
+    fs.writeFileSync(file, program);
+    const r = spawnSync("bash", [file, VOICE_SH_PATH], { encoding: "utf-8", timeout: SPAWN_TIMEOUT_MS });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    return {
+      out,
+      done: out.includes("DONE"),
+      retired: /DONE RETIRED=(\S*)/.exec(out)?.[1] ?? "",
+      rootInHome: account.rootInHome(),
+      asClawbox: account.asClawbox(),
+    };
+  }
+  /** Fails every `as_clawbox <argv0> <argv1>…` whose leading words are `words`, as a removal the account cannot make. */
+  const failAs = (...words: string[]) =>
+    [
+      'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+      `as_clawbox() { [ "\${*:1:${words.length}}" = "${words.join(" ")}" ] && return 1; __real_as_clawbox "$@"; }`,
+    ].join(NL);
+  const userUnit = () => path.join(userDir(), UNIT);
+  const wantsDir = () => path.join(userDir(), "default.target.wants");
+
+  it("removes the unit, its drop-ins and its .wants link as the clawbox user", () => {
+    placeUnit(userDir(), LEGACY_UNIT, "default.target");
+    fs.mkdirSync(`${userUnit()}.d`);
+    fs.writeFileSync(path.join(`${userUnit()}.d`, "override.conf"), "[Service]\nRestartSec=10\n");
+
+    const r = retireUser();
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(userUnit()), r.out).toBe(false);
+    expect(fs.existsSync(`${userUnit()}.d`)).toBe(false);
+    // Listed, not stat'ed: once the unit is gone the link dangles, and
+    // existsSync follows it.
+    expect(fs.readdirSync(wantsDir()), "the .wants link is still there").toEqual([]);
+    expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
+    expect(r.out).not.toContain("could not remove");
+    expect(r.retired).toBe("1");
+    expect(r.asClawbox).toContain(`rm -f -- ${userUnit()}`);
+    expect(r.asClawbox).toContain(`rm -rf -- ${userUnit()}.d`);
+    expect(r.asClawbox.some((c) => c.startsWith(`find ${userDir()} `) && c.endsWith("-delete"))).toBe(true);
+    expect(r.rootInHome, "no rm by root in the home").toEqual([]);
+  });
+
+  it("removes a FragmentPath outside the home as root, as before", () => {
+    // A system unit directory: the case filter keeps it to a file named for
+    // this unit, and the clawbox user could not remove it anyway.
+    const outside = path.join(tmp, "etc-systemd-user");
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, UNIT), LEGACY_UNIT);
+
+    const r = retireUser({ userFragment: path.join(outside, UNIT) });
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(path.join(outside, UNIT))).toBe(false);
+    expect(r.out).toContain(`Retired the legacy ${UNIT} (user scope)`);
+    expect(r.asClawbox.filter((c) => c.includes(outside))).toEqual([]);
+  });
+
+  it("names a file it could not remove, and says the unit was stopped, not retired", () => {
+    placeUnit(userDir(), LEGACY_UNIT, "default.target");
+
+    const r = retireUser({ prelude: failAs("rm") });
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(userUnit())).toBe(true);
+    expect(r.out).toContain(`Warning: could not remove ${userUnit()}${NL}`);
+    // The file is still there and still stale, so the next run does find it.
+    expect(r.out).toContain(
+      `Stopped the legacy ${UNIT} (user scope), but could not remove ${userUnit()}; the next run retries: it runs whisper-server-gpu.py`,
+    );
+    expect(r.out).not.toContain("Retired");
+    // Still set: it gates the replacement whisper-server.service, which the
+    // box needs whether or not the old file could be removed.
+    expect(r.retired).toBe("1");
+  });
+
+  it.each([
+    ["a directory", () => {
+      fs.mkdirSync(`${userUnit()}.d`);
+      fs.writeFileSync(path.join(`${userUnit()}.d`, "override.conf"), "[Service]\nRestartSec=10\n");
+    }],
+    ["a link to nowhere", () => fs.symlinkSync(path.join(tmp, "gone"), `${userUnit()}.d`)],
+  ] as const)("names a drop-in directory that stayed (%s), and promises no retry the next run cannot make", (_, plant) => {
+    placeUnit(userDir(), LEGACY_UNIT, "default.target");
+    plant();
+
+    const r = retireUser({ prelude: failAs("rm", "-rf") });
+
+    expect(r.done, r.out).toBe(true);
+    expect(fs.existsSync(userUnit()), "the unit file itself was removable").toBe(false);
+    expect(fs.lstatSync(`${userUnit()}.d`)).toBeTruthy();
+    expect(r.out).toContain(`Warning: could not remove ${userUnit()}.d${NL}`);
+    expect(r.out).not.toContain(`could not remove ${userUnit()}${NL}`);
+    // Without the unit file the next run finds nothing to retire, so the line
+    // promises nothing.
+    expect(r.out).toContain(
+      `Stopped the legacy ${UNIT} (user scope) and removed its unit file, but could not remove ${userUnit()}.d: it runs whisper-server-gpu.py`,
+    );
+    expect(r.out).not.toContain("the next run retries");
+    expect(r.out).not.toContain("Retired");
+    expect(r.retired).toBe("1");
   });
 });
 
