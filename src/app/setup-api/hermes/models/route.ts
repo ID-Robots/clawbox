@@ -25,6 +25,7 @@ import {
   type ScopedModelsReply,
 } from "@/lib/hermes-model-options";
 import { readProviderVerified } from "@/lib/provider-verified";
+import { readCloudProvidersHidden } from "@/lib/cloud-providers-server";
 
 // Hermes' provider/model configuration.
 //
@@ -198,6 +199,10 @@ export async function GET(request: Request) {
       source: payload.source,
       stale: payload.stale,
       fetchedAt: payload.fetchedAt,
+      // "Hide cloud AI providers" (src/lib/cloud-providers.ts): the chat
+      // header offers only the box's own AI while it is on. A flag, not a
+      // filter — the panels and the sign-out code read this list too.
+      cloudProvidersHidden: await readCloudProvidersHidden(),
       ...(await catalogAge()),
       ...(payload.degraded ? { degraded: payload.degraded } : {}),
       ...(refreshDenied ? { refreshDenied: true } : {}),

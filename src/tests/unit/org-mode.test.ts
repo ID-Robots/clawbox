@@ -240,6 +240,10 @@ describe("an organisation box narrows a user to Chat, Files and their own Settin
     ["channels", "GET", "/setup-api/email/pending"],
     ["the owner's switches", "POST", "/setup-api/settings/org-mode"],
     ["the owner's switches", "POST", "/setup-api/settings/openclaw-sharing"],
+    // "Hide cloud AI providers" (TASK-2497): owner-only, and a member of
+    // staff never sees the AI section it lives in.
+    ["the owner's switches", "GET", "/setup-api/settings/cloud-providers"],
+    ["the owner's switches", "POST", "/setup-api/settings/cloud-providers"],
     // The box's own stores and jobs.
     ["box state", "GET", "/setup-api/kv"],
     ["box state", "GET", "/setup-api/background-jobs"],

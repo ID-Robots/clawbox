@@ -103,6 +103,8 @@ describe("translations", () => {
         "jobAlerts",
         // Settings → System Update → Weekly update check, and the notice's own words.
         "updateNotice",
+        // Settings → AI providers: "Hide cloud AI providers" and the local-first page (TASK-2497).
+        "cloudProviders",
         // The desktop's corner card for long work Settings started (background tasks).
         "backgroundTasks",
         "clawaiUsage",

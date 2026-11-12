@@ -589,6 +589,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import VoiceSecureNotice from '@/components/VoiceSecureNotice'
 import { chatProviderPillLabel, shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { isLocalAiProviderId } from '@/lib/cloud-providers'
 import {
   chatKeepsEarlierModel,
   conversationModelFor,
@@ -7148,6 +7149,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         current?: unknown
         reasoning?: unknown
         stale?: unknown
+        cloudProvidersHidden?: unknown
       }
       // `aborted` alone is not enough: a response can resolve before the abort
       // lands, and `json()` adds a second await for a newer seed to start in.
@@ -7184,6 +7186,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       // `null` means the source couldn't tell — keep those.
       const rows: HermesChatProvider[] = reported
         .filter(p => typeof p?.id === 'string' && p.id && p.authenticated !== false)
+        // "Hide cloud AI providers" (src/lib/cloud-providers.ts): the box's
+        // own AI only.
+        .filter(p => mData?.cloudProvidersHidden !== true || isLocalAiProviderId(p.id))
         .map(p => ({
           id: p.id as string,
           name: typeof p.name === 'string' ? p.name : (p.id as string),

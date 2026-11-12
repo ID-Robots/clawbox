@@ -295,6 +295,57 @@ describe("/setup-api/chat/model", () => {
     ]);
   });
 
+  describe("Hide cloud AI providers (TASK-2497)", () => {
+    const ENGINE = {
+      baseUrl: "http://127.0.0.1:18931/v1",
+      modelId: "acme/echo-1",
+      contextWindow: 131072,
+      maxTokens: 4096,
+      imageInput: false,
+      harness: "openclaw",
+      savedAt: "2026-11-12T00:00:00.000Z",
+      previous: { store: {} },
+    };
+    const store = (extra: Record<string, unknown>) => vi.mocked(getAll).mockResolvedValue({
+      ai_model_provider: "clawai",
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      ...extra,
+    });
+    const ids = async () => ((await (await GET()).json()).options as { id: string; isLocal: boolean }[]);
+
+    it("on: the picker offers the box's own AI alone — no cloud row, no 'Set up in Settings' row", async () => {
+      store({ hide_cloud_providers: true });
+      const options = await ids();
+      expect(options.map((option) => option.id)).toEqual(["llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(options.every((option) => option.isLocal)).toBe(true);
+    });
+
+    it("AUTO on an organisation box whose AI is an external engine hides them by itself", async () => {
+      store({ org_mode: true, external_engine: ENGINE });
+      const options = await ids();
+      expect(options.some((option) => !option.isLocal)).toBe(false);
+      expect(options.some((option) => option.id === "__setup_ai__")).toBe(false);
+    });
+
+    it("on a box with no cloud provider at all, the 'AI Provider - Set up in Settings' row is gone too", async () => {
+      vi.mocked(readConfig).mockResolvedValue({} as never);
+      store({ org_mode: true, external_engine: ENGINE });
+      expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(false);
+      store({});
+      expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(true);
+    });
+
+    it.each([
+      ["an external engine on a normal box", { external_engine: ENGINE }],
+      ["organisation mode without an engine", { org_mode: true }],
+      ["the owner's 'off' on an organisation box running an engine", { org_mode: true, external_engine: ENGINE, hide_cloud_providers: false }],
+    ])("off for %s: the cloud rows stay", async (_label, extra) => {
+      store(extra);
+      expect((await ids()).map((option) => option.id)).toContain("deepseek/deepseek-v4-flash");
+    });
+  });
+
   it("names the Local AI row after the model the box actually runs", async () => {
     // A workstation runs Qwen through llama.cpp (install-x64.sh seeds it on a
     // 128 GB DGX Spark). Settings named it "Qwen 3.6" from the model; the chat

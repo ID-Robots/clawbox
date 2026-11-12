@@ -85,6 +85,7 @@ import {
   profileProviderId,
 } from "@/lib/chatgpt-subscription";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
+import { cloudProvidersHiddenIn } from "@/lib/cloud-providers-server";
 import {
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
@@ -977,6 +978,10 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // pick GPT/Claude/DeepSeek in the chat dropdown while Local-only is
   // lit up, and the chat then quietly talks to the cloud provider.
   const localOnlyMode = !!configStore.local_only_mode;
+  // "Hide cloud AI providers" (src/lib/cloud-providers.ts): no cloud row and
+  // no "AI Provider - Set up in Settings" row either — the box's own AI is
+  // the only choice the picker offers.
+  const cloudHidden = cloudProvidersHiddenIn(configStore);
 
   // The owner's per-provider switch. A switched-off provider STAYS in the
   // list, greyed and carrying the reason, rather than vanishing: a row that
@@ -991,7 +996,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       : option;
   };
 
-  const primaryOptions = localOnlyMode
+  const primaryOptions = localOnlyMode || cloudHidden
     ? []
     : sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
   const localOption: ChatModelOption = applyOwnerSwitch(localModel
@@ -1020,7 +1025,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
         isLocal: true,
       });
 
-  const options = primaryOptions.length > 0
+  const options = primaryOptions.length > 0 || cloudHidden
     ? [...primaryOptions, localOption]
     : [{
         id: "__setup_ai__",

@@ -12,6 +12,7 @@ import { clawaiPitchEn } from "./edition-translations/en-clawai-pitch";
 import { anthropicAccountsEn } from "./edition-translations/en-anthropic-accounts";
 import { whatsNewEn } from "./edition-translations/en-whats-new";
 import { usersEn } from "./edition-translations/en-users";
+import { cloudProvidersEn } from "./edition-translations/en-cloud-providers";
 import { dbMaintenanceEn } from "./edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "./edition-translations/en-model-availability";
 import { jobAlertsEn } from "./edition-translations/en-job-alerts";
@@ -71,6 +72,7 @@ export const editionEn: Record<string, string> = {
   ...anthropicAccountsEn,
   ...whatsNewEn,
   ...usersEn,
+  ...cloudProvidersEn,
   ...dbMaintenanceEn,
   ...modelAvailabilityEn,
   ...jobAlertsEn,

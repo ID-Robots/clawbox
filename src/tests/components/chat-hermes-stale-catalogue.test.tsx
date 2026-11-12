@@ -271,3 +271,53 @@ describe("the Hermes chat header during the dashboard's boot window", () => {
     expect(screen.getByLabelText(/^Chat provider:/).textContent).toContain("Codex");
   }, 15000);
 });
+
+// "Hide cloud AI providers" (TASK-2497): the models route says the box hides
+// them, and the header then offers the box's own AI alone — the external
+// engine here — never the cloud rows the same answer lists.
+describe("the Hermes chat header with the cloud providers hidden", () => {
+  function installEngineBox(hidden: boolean): HermesBox {
+    const box = installHermesBox();
+    const inner = globalThis.fetch;
+    const seed = {
+      providers: [
+        { id: "anthropic", name: "Anthropic", authenticated: true },
+        { id: "openrouter", name: "OpenRouter", authenticated: true },
+        { id: "clawext", name: "echo-1", authenticated: true },
+      ],
+      models: [],
+      provider: "clawext",
+      current: "acme/echo-1",
+      reasoning: "medium",
+      source: "dashboard",
+      stale: false,
+      cloudProvidersHidden: hidden,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/setup-api/hermes/models")) {
+          box.fetchedUrls.push(url);
+          const scoped = new URL(url, "http://box").searchParams.get("provider");
+          return { ok: true, json: async () => (scoped ? { ...LIVE_SCOPE, provider: scoped, models: [] } : seed) };
+        }
+        return inner(input as RequestInfo, init);
+      }),
+    );
+    return box;
+  }
+
+  it("offers the engine alone", async () => {
+    await mountHermesChat(installEngineBox(true));
+    const labels = await providerOptions();
+    expect(labels).toHaveLength(1);
+    expect(labels.join(" ")).not.toMatch(/Anthropic|OpenRouter/);
+  });
+
+  it("offers every signed-in provider when they are not hidden", async () => {
+    await mountHermesChat(installEngineBox(false));
+    const labels = await providerOptions();
+    expect(labels).toHaveLength(3);
+  });
+});
