@@ -353,6 +353,16 @@ describe("an ingest job", () => {
     expect(fake.calls).toBe(0);
   });
 
+  it("does not ask a lone document too short to cut again as it was: it stays failed after one too-long call", async () => {
+    write("short.md", "Acme ships blue widgets to Globex every Tuesday.");
+    const budget = { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 };
+    const tooLong = fakeClient(() => new FlashCallError("too_long", "The model on this box did not answer within 15 minutes."));
+    const local: FlashClient = { ...tooLong.client, engine: "local", budget, complete: (r) => tooLong.client.complete(r) };
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: local }));
+    expect(tooLong.calls).toBe(1);
+    expect(job).toMatchObject({ done: 0, failed: 1, requeued: 0 });
+  });
+
   it("asks a lone document too long for the box's own model again with half its text, once", async () => {
     write("long.md", `Acme notes. ${"Acme ships blue widgets to Globex every Tuesday, and the invoice follows. ".repeat(80)}`);
     const budget = { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 };

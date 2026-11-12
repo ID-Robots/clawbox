@@ -27,6 +27,7 @@ import {
   parseWriterResponse,
   readWriterItems,
   writerLimits,
+  capEncodedLength,
   type BuildContext,
   type PageDraft,
   type WriterItem,
@@ -493,5 +494,18 @@ describe("the writer's batch on a bounded window (the box's own engine)", () => 
   it("is null when not one document fits: the window is too small to write with", () => {
     expect(writerLimits({ contextTokens: 2_048, maxOutputTokens: 1_024 })).toBeNull();
     expect(writerLimits({ contextTokens: 0, maxOutputTokens: 0 })).toBeNull();
+  });
+});
+
+describe("a document cut by its encoded length", () => {
+  it("keeps the longest start whose JSON-encoded text fits, never splitting a surrogate pair", () => {
+    expect(capEncodedLength("plain text", 100)).toBe("plain text");
+    const quoted = 'a"b\\c\nd'.repeat(50);
+    const cut = capEncodedLength(quoted, 100);
+    expect(JSON.stringify(cut).length - 2).toBeLessThanOrEqual(100);
+    expect(JSON.stringify(quoted.slice(0, cut.length + 1)).length - 2).toBeGreaterThan(100);
+    expect(quoted.startsWith(cut)).toBe(true);
+    const emoji = "x".repeat(9) + "😀";
+    expect(capEncodedLength(emoji, 10)).toBe("x".repeat(9));
   });
 });

@@ -113,13 +113,20 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
                   {weeklyAt ? ` · ${t("primeRadiant.usage.allowance.freesUp", { at: weeklyAt })}` : ""}
                 </p>
               )}
-              {spent && (
+              {/* A spent ClawBox AI allowance stops nothing the box's own engine writes. */}
+              {spent && meter.engine !== "local" && (
                 <p role="status" className="text-[11px] text-amber-200" data-testid="prime-radiant-usage-allowance-spent">
                   {spentAt ? t("primeRadiant.usage.allowance.spentAt", { at: spentAt }) : t("primeRadiant.usage.allowance.spent")}
                 </p>
               )}
               {meter.engine === "local" && (
-                <p className="text-[11px] text-[var(--text-secondary)] tabular-nums" data-testid="prime-radiant-usage-local">
+                <p className="text-[11px] text-[var(--text-secondary)]" data-testid="prime-radiant-usage-engine-local">
+                  {t("primeRadiant.usage.engineLocal")}
+                </p>
+              )}
+              {/* The window's calls to the box's own engine, whichever engine writes now. */}
+              {(meter.local?.calls ?? 0) > 0 && (
+                <p className="text-[11px] text-[var(--text-muted)] tabular-nums" data-testid="prime-radiant-usage-local">
                   {t("primeRadiant.usage.local", {
                     days: n(meter.windowDays),
                     tokens: tok((meter.local?.tokensIn ?? 0) + (meter.local?.tokensOut ?? 0)),

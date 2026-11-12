@@ -37,7 +37,7 @@
 
 import { estimateUsd, type CostRates } from "./cost-rates";
 import { mergeClaimIndex, previewMerge } from "./edit";
-import { ALLOWANCE_SPENT, allowanceStopOf, completeWithRetry, flashClient, itemsThatFit, type AllowanceStop, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, FlashCallError, allowanceStopOf, completeWithRetry, flashClient, itemsThatFit, type AllowanceStop, type FlashClient } from "./flash-client";
 import { recordCost } from "./ingest-store";
 import {
   buildSummaryPrompt,
@@ -211,12 +211,16 @@ export async function runSummaries(
   const rest = modelOn ? plan.jobs.slice(s.maxPages) : plan.jobs;
   const client = forModel.length > 0 ? (options.client ?? (await flashClient())) : null;
   let stopped = false;
+  /** Nodes before this index are asked one a call: their batch was too long for the box's own model. */
+  let singlesUntil = 0;
   for (let i = 0; i < forModel.length; ) {
     // As many nodes a call as the box's own model's window holds (ClawBox AI: SUMMARY_BATCH).
     const at = i;
     const size = stopped || !client
       ? SUMMARY_BATCH
-      : itemsThatFit(client.budget, Math.min(SUMMARY_BATCH, forModel.length - at), (n) => ({
+      : at < singlesUntil
+        ? 1
+        : itemsThatFit(client.budget, Math.min(SUMMARY_BATCH, forModel.length - at), (n) => ({
           ...buildSummaryPrompt(forModel.slice(at, at + n).map((j) => shownNeighbourhood(j.hood))),
           maxTokens: summaryMaxTokens(n),
         }));
@@ -257,6 +261,16 @@ export async function runSummaries(
       }
       answer = parseSummaryResponse(response.text, batch.length);
     } catch (err) {
+      // Too long for the box's own model: the batch is asked again a node at a
+      // time; a node still too long alone gets its facts' summary, and the rest
+      // are still asked.
+      if (err instanceof FlashCallError && err.kind === "too_long") {
+        if (batch.length > 1) {
+          singlesUntil = at + batch.length;
+          i = at;
+        } else batch.forEach(fromFacts);
+        continue;
+      }
       const spent = allowanceStopOf(err);
       if (spent) {
         result.model.skipped = ALLOWANCE_SPENT;

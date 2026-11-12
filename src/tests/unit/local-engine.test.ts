@@ -111,6 +111,12 @@ describe("which engine holds the Local AI slot", () => {
     expect((await resolveLocalEngine())?.contextTokens).toBe(OLLAMA_DEFAULT_CONTEXT_TOKENS);
   });
 
+  it("is none for an Ollama model Ollama says it does not have", async () => {
+    state.value = { local_ai_configured: true, local_ai_provider: "ollama", local_ai_model: "ollama/gone:1b" };
+    show.mockResolvedValue({ status: "not-installed" });
+    expect(await resolveLocalEngine()).toBeNull();
+  });
+
   it("is the External engine when one is selected, asked directly with the owner's key", async () => {
     state.value = { external_engine: EXTERNAL, local_ai_configured: true, local_ai_provider: "clawext", local_ai_model: "clawext/qwen3-32b" };
     state.key = "sk-owner";
@@ -146,6 +152,7 @@ describe("one request", () => {
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(engine.chatUrl);
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer local-install-token");
+    expect(init.redirect).toBe("manual");
     expect(JSON.parse(String(init.body))).toEqual({
       model: "gemma4-e2b-it-q4_0",
       stream: false,

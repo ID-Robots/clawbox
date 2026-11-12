@@ -112,12 +112,13 @@ const call = async (method, p, body) => {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "acme-delivery.md"), "# Acme delivery terms " + tag + "\n\nAcme Widgets Ltd ships blue widgets to Globex every Tuesday. Orders placed before noon leave the same day. The standard delivery fee is 12 EUR per order. Reference " + tag + ".\n");
   fs.writeFileSync(path.join(dir, "globex-purchasing.md"), "# Globex purchasing " + tag + "\n\nИван Иванов ръководи покупките в Globex. Той одобрява всяка поръчка над 500 EUR. Справка " + tag + ".\n");
+  let id = null;
   try {
     const before = await call("GET", "/setup-api/prime-radiant/costs?allowance=1");
-    out.before = { status: before.status, engine: before.body?.allowance?.engine ?? null, cloudCalls: before.body?.allowance?.primeRadiant?.calls ?? null };
+    out.before = { status: before.status, engine: before.body?.allowance?.engine ?? null, cloudCalls: before.body?.allowance?.primeRadiant?.calls ?? null, localCalls: before.body?.allowance?.local?.calls ?? 0 };
     const start = await call("POST", "/setup-api/prime-radiant/ingest", { folders: [rel] });
     out.start = { status: start.status, code: start.body?.code ?? null, error: start.body?.error ?? null };
-    const id = start.body?.job?.id;
+    id = start.body?.job?.id ?? null;
     if (id) {
       const t0 = Date.now();
       let job = start.body.job;
@@ -132,20 +133,37 @@ const call = async (method, p, body) => {
       out.costModels = (costs.body?.byModel ?? []).map((m) => m.model);
       const after = await call("GET", "/setup-api/prime-radiant/costs?allowance=1");
       out.after = { engine: after.body?.allowance?.engine ?? null, cloudCalls: after.body?.allowance?.primeRadiant?.calls ?? null, localCalls: after.body?.allowance?.local?.calls ?? null };
-      const vault = process.env.PRIME_RADIANT_DIR ? path.join(process.env.PRIME_RADIANT_DIR, "vault") : path.join(REPO, "data/prime-radiant/vault");
-      let shas = [];
-      try { shas = cp.execFileSync("git", ["-C", vault, "log", "--format=%H", "--fixed-strings", "--grep=(" + id + ")"], { encoding: "utf8" }).split("\n").filter(Boolean); } catch {}
-      out.commits = shas.length;
-      out.reverted = 0;
-      for (const sha of shas) {
-        const r = await call("POST", "/setup-api/prime-radiant/revert", { commit: sha });
-        if (r.status === 200) out.reverted++;
-        else out.revertError = r.body?.code ?? r.status;
-      }
     }
   } catch (err) {
     out.crash = String((err && err.stack) || err).slice(0, 400);
   } finally {
+    // Whatever happened above, the job is stopped if it still runs and every
+    // commit it made is undone, before its documents go.
+    if (id) {
+      try {
+        const now = await call("GET", "/setup-api/prime-radiant/ingest/" + id);
+        if (now.body?.job?.status === "running") {
+          await call("DELETE", "/setup-api/prime-radiant/ingest/" + id);
+          for (let k = 0; k < 30; k++) {
+            await new Promise((r) => setTimeout(r, 2_000));
+            const s = await call("GET", "/setup-api/prime-radiant/ingest/" + id);
+            if (s.body?.job?.status !== "running") break;
+          }
+        }
+        const vault = process.env.PRIME_RADIANT_DIR ? path.join(process.env.PRIME_RADIANT_DIR, "vault") : path.join(REPO, "data/prime-radiant/vault");
+        let shas = [];
+        try { shas = cp.execFileSync("git", ["-C", vault, "log", "--format=%H", "--fixed-strings", "--grep=(" + id + ")"], { encoding: "utf8" }).split("\n").filter(Boolean); } catch {}
+        out.commits = shas.length;
+        out.reverted = 0;
+        for (const sha of shas) {
+          const r = await call("POST", "/setup-api/prime-radiant/revert", { commit: sha });
+          if (r.status === 200) out.reverted++;
+          else out.revertError = r.body?.code ?? r.status;
+        }
+      } catch (err) {
+        out.cleanupCrash = String((err && err.message) || err).slice(0, 200);
+      }
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   }
   console.log("SERVER " + JSON.stringify(out));
@@ -163,10 +181,12 @@ keys() {
   node -e "
     const fs = require(\"fs\");
     const [cfgPath, savedPath, mode, alias] = process.argv.slice(1);
-    const read = () => { try { return JSON.parse(fs.readFileSync(cfgPath, \"utf8\")); } catch { return {}; } };
+    // Strict: a store that cannot be read or is no JSON object is never written over.
+    const read = () => { const c = JSON.parse(fs.readFileSync(cfgPath, \"utf8\")); if (!c || typeof c !== \"object\" || Array.isArray(c)) throw new Error(\"not an object\"); return c; };
     const write = (c) => { const t = cfgPath + \".nano-tmp\"; fs.writeFileSync(t, JSON.stringify(c, null, 2), { mode: 0o600 }); fs.renameSync(t, cfgPath); };
     const KEYS = [\"ai_cloud_lock\", \"local_ai_configured\", \"local_ai_provider\", \"local_ai_model\"];
-    const c = read();
+    let c;
+    try { c = read(); } catch (err) { console.log(\"CONFIG_UNREADABLE \" + (err && err.message)); process.exit(0); }
     if (mode === \"on\") {
       const before = Object.fromEntries(KEYS.map((k) => [k, Object.prototype.hasOwnProperty.call(c, k) ? c[k] : null]));
       fs.writeFileSync(savedPath, JSON.stringify(before));
@@ -254,8 +274,8 @@ else
   not_ok "the job's cost rows name another model: $(sj -c '.costModels')"
 fi
 
-if [ "$(sj '.after.engine')" = local ] && [ "$(sj '.after.cloudCalls')" = "$(sj '.before.cloudCalls')" ] && [ "$(sj '.after.localCalls')" -ge 1 ] 2>/dev/null; then
-  ok "the running server's Usage meter names the box's own engine and counts nothing against ClawBox AI (cloud calls $(sj '.before.cloudCalls') → $(sj '.after.cloudCalls'), local $(sj '.after.localCalls'))"
+if [ "$(sj '.after.engine')" = local ] && [ "$(sj '.after.cloudCalls')" = "$(sj '.before.cloudCalls')" ] && [ "$(sj '.after.localCalls')" -gt "$(sj '.before.localCalls')" ] 2>/dev/null; then
+  ok "the running server's Usage meter names the box's own engine and counts nothing against ClawBox AI (cloud calls $(sj '.before.cloudCalls') → $(sj '.after.cloudCalls'), local $(sj '.before.localCalls') → $(sj '.after.localCalls'))"
 else
   not_ok "the running server's Usage meter: before $(sj -c '.before'), after $(sj -c '.after')"
 fi
@@ -270,18 +290,20 @@ fi
 
 # shellcheck disable=SC2016  # $r is jq's
 VISION_ELSEWHERE=$(j --arg r "$ENGINE_REF" '[.vision.asked[] | select(. != $r)] | length')
-if [ "$(j '.engine.imageInput')" = false ]; then
-  if [ "$(j '.vision.error')" = "$(j '.vision.blindError')" ] && [ "$(j '.vision.asked | length')" = 0 ]; then
-    ok "a picture is refused in words, asking nothing, by an engine that cannot see ($(j '.engine.runtime'))"
+VISION_ASKED=$(j '.vision.asked | length')
+if [ "$VISION_ASKED" = 0 ]; then
+  # Nothing asked: only right for an engine that cannot see, refused in words.
+  if [ "$(j '.engine.imageInput')" != true ] && [ -n "$(j '.vision.error // empty')" ] && [ -z "$(j '.vision.text // empty')" ]; then
+    ok "a picture is refused in words, asking nothing, by an engine that cannot see ($(j '.engine.runtime'): $(j '.vision.error'))"
   else
-    not_ok "the picture on a blind engine was not refused as one: $(j -c '.vision')"
+    not_ok "the picture was not asked of an engine that sees, or not refused in words: $(j -c '.vision')"
   fi
+elif [ "$VISION_ELSEWHERE" != 0 ]; then
+  not_ok "the picture went to another model: $(j -c '.vision.asked')"
 elif [ -n "$(j '.vision.text // empty')" ]; then
   ok "the box's own engine described the picture: $(j '.vision.text' | head -c 80)"
-elif [ "$VISION_ELSEWHERE" = 0 ]; then
-  ok "the picture went to the box's own engine only, which did not describe it: $(j -c '.vision')"
 else
-  not_ok "the picture went to another model: $(j -c '.vision.asked')"
+  not_ok "the box's own engine was asked and did not describe the picture: $(j -c '.vision')"
 fi
 
 if [ "$(j '.embedder.source')" = local ] && [ "$(j '.embedder.onBox')" = true ]; then

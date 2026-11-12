@@ -117,6 +117,7 @@ import {
   buildWriterPrompt,
   parseWriterResponse,
   boundedTextChars,
+  capEncodedLength,
   writerLimits,
   MIN_TEXT_CHARS_PER_FILE,
   type BuildContext,
@@ -650,10 +651,18 @@ async function runJob(
         const bySeq = new Map(files.map((f) => [f.seq, f]));
         updates = updates.filter((u) => {
           const f = u.status === "failed" && results.transient.has(u.seq) ? bySeq.get(u.seq) : undefined;
+          if (!f) return true;
           // Too long for the box's own model: asked again smaller — in half the
           // batch, and a document alone with half its text — never as it was.
-          if (f) requeue.push(limits && u.error === TOO_LONG_FAILURE ? { ...f, text: f.text.slice(0, Math.max(MIN_TEXT_CHARS_PER_FILE, Math.floor(f.text.length / 2))) } : f);
-          return !f;
+          // A document alone that cannot be cut further stays failed.
+          if (limits && u.error === TOO_LONG_FAILURE) {
+            const text = f.text.slice(0, Math.max(MIN_TEXT_CHARS_PER_FILE, Math.floor(f.text.length / 2)));
+            if (files.length === 1 && text.length >= f.text.length) return true;
+            requeue.push({ ...f, text });
+            return false;
+          }
+          requeue.push(f);
+          return false;
         });
       }
       settle(updates, labels);
@@ -705,7 +714,10 @@ async function runJob(
         publish();
         continue;
       }
-      const prepared = prepareText(raw, limits ? boundedTextChars(limits, file.label) : undefined);
+      const cap = limits ? boundedTextChars(limits, file.label) : undefined;
+      const prepared = prepareText(raw, cap);
+      // On a bounded window the cap is in the prompt's own (JSON-encoded) characters.
+      if (cap !== undefined) prepared.text = capEncodedLength(prepared.text, cap);
       if (prepared.text.trim() === "") {
         settle([{ seq, status: "skipped", sha256: read.sha256, bytes, error: "empty" }], labels);
         publish();

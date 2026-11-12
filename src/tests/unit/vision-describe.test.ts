@@ -35,6 +35,7 @@ vi.mock("@/lib/feature-engine", () => feature);
 
 import {
   DESCRIBE_TIMEOUT_MS,
+  EXTERNAL_NO_VISION_ERROR,
   LOCAL_NO_VISION_ERROR,
   LOCKED_NO_ENGINE_ERROR,
   MIN_RETRY_MS,
@@ -225,6 +226,18 @@ describe("on the box's own engine (TASK-2501 PR-C)", () => {
   it("says so in words, asking nothing, when the box's model cannot look at pictures", async () => {
     feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: { ...EXTERNAL, kind: "llamacpp", imageInput: false } });
     expect(await describeNow()).toEqual({ text: null, error: LOCAL_NO_VISION_ERROR });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reads a JSON null answer as no description, never a throw", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: EXTERNAL });
+    fetchMock.mockResolvedValueOnce(new Response("null", { status: 200 }));
+    expect(await describeNow()).toMatchObject({ text: null, error: "the vision model answered without a description" });
+  });
+
+  it("names the External engine's own setting when it was saved without image input", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: { ...EXTERNAL, imageInput: false } });
+    expect(await describeNow()).toEqual({ text: null, error: EXTERNAL_NO_VISION_ERROR });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

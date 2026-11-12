@@ -158,6 +158,9 @@ export async function resolveLocalEngine(): Promise<LocalEngine | null> {
     if (!model) return null;
     // The model's own num_ctx when its Modelfile sets one; ClawBox's Ollama default otherwise.
     const show = await ollamaShow(model);
+    // Ollama answered that it does not have the model: no engine to write with.
+    // Unreachable is no verdict about the model (the proxy starts Ollama on the call).
+    if (show.status === "not-installed") return null;
     const { ollamaServedContext } = await import("@/lib/ollama-model-context");
     const contextTokens = (show.status === "ok" ? ollamaServedContext(show.payload) : null) ?? OLLAMA_DEFAULT_CONTEXT_TOKENS;
     return {
@@ -230,6 +233,10 @@ export async function postLocalChat(
     headers: { "content-type": "application/json", authorization: engine.authorization },
     body: JSON.stringify(payload),
     cache: "no-store",
+    // Never followed: a redirect would resend the owner's text to wherever it
+    // points (an https engine answering 307 to an http address). A 3xx is an
+    // answer the caller refuses like any other non-OK one.
+    redirect: "manual",
     signal: options.signal,
   });
 }

@@ -89,6 +89,27 @@ export function boundedTextChars(limits: WriterLimits, label: string): number {
   return Math.max(MIN_TEXT_CHARS_PER_FILE, limits.textChars - Math.max(0, label.length - WRITER_LABEL_ALLOWANCE));
 }
 
+/**
+ * The longest start of `text` whose JSON-encoded length (what the prompt
+ * carries: quotes, backslashes, newlines and tabs each take two characters
+ * there) is at most `max`. A bounded window is sized in those characters, so
+ * a document full of escapes is cut before it can crowd out its card's room.
+ * Never cuts between the two halves of a surrogate pair.
+ */
+export function capEncodedLength(text: string, max: number): string {
+  const encoded = (t: string) => JSON.stringify(t).length - 2;
+  if (encoded(text) <= max) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (encoded(text.slice(0, mid)) <= max) lo = mid;
+    else hi = mid - 1;
+  }
+  const code = text.charCodeAt(lo - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? lo - 1 : lo);
+}
+
 export function writerLimits(budget: WriterBudget): WriterLimits | null {
   const system = estimateTokens(WRITER_SYSTEM_PROMPT) + estimateTokens(WRITER_ITEMS_MARKER) + FRAME_TOKENS;
   const room = budget.contextTokens - system;

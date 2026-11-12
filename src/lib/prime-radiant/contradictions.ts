@@ -808,15 +808,18 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
         // box's own model (its window, or its time), and the pairs a readable
         // answer left out, are asked once more in small calls; a call that
         // failed for another reason waits for the next pass.
-        // A pair or two still too long to ask is not asked smaller as it was: it waits for the next pass.
-        if (!first.ok && (first.kind === "too_long" ? batch.length <= JUDGE_RETRY_PAIRS : first.kind !== "bad_response")) {
+        // Too long for the box's own model: asked again one pair a call, never
+        // as it was; a single pair still too long waits for the next pass.
+        const tooLong = !first.ok && first.kind === "too_long";
+        if (!first.ok && (tooLong ? batch.length === 1 : first.kind !== "bad_response")) {
           batchFailed(first.kind);
           return;
         }
         const again = first.ok ? first.missing : batch;
-        for (let at = 0; at < again.length; at += JUDGE_RETRY_PAIRS) {
+        const step = tooLong ? 1 : JUDGE_RETRY_PAIRS;
+        for (let at = 0; at < again.length; at += step) {
           if (stop || options.signal?.aborted) return;
-          const small = await judgeOnce(again.slice(at, at + JUDGE_RETRY_PAIRS));
+          const small = await judgeOnce(again.slice(at, at + step));
           if (!small.ok) batchFailed(small.kind);
         }
       } catch (err) {

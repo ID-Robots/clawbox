@@ -89,6 +89,8 @@ let cachedModel: { id: string | null; at: number } | null = null;
 export const NO_VISION_MODEL_ERROR = "ClawBox AI cannot look at pictures right now";
 /** What it says when the box's AI runs on its own engine and that model cannot look at a picture. */
 export const LOCAL_NO_VISION_ERROR = "The model on this box cannot look at pictures";
+/** The same for an External engine the owner saved without image input. */
+export const EXTERNAL_NO_VISION_ERROR = "The External engine is not set to take pictures (Settings → Local AI)";
 /** What it says when the local-only AI lock is on and the box has no model of its own. */
 export const LOCKED_NO_ENGINE_ERROR = "Local-only AI is on, and no model on this box can look at pictures";
 /**
@@ -206,6 +208,10 @@ async function answerOf(res: Response, metric: VisionAttempt): Promise<Attempt> 
     // A 200 whose body did not arrive whole is a transport failure, not an answer.
     return { text: null, error: "the vision request failed", transient: true };
   }
+  // JSON that is no object (`null`, a number) is no answer, and never a throw.
+  if (!data || typeof data !== "object") {
+    return { text: null, error: "the vision model answered without a description", transient: false };
+  }
   metric.responseModel = typeof data.model === "string" ? data.model : null;
   if (data.usage && typeof data.usage === "object") {
     metric.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"].flatMap((key) => {
@@ -279,7 +285,9 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
   const engine = await resolveFeatureEngine();
   if (engine.kind === "local") {
     const deadline = Date.now() + DESCRIBE_TIMEOUT_MS;
-    if (!(await localEngineSeesPictures(engine.engine))) return { text: null, error: LOCAL_NO_VISION_ERROR };
+    if (!(await localEngineSeesPictures(engine.engine))) {
+      return { text: null, error: engine.engine.kind === "clawext" ? EXTERNAL_NO_VISION_ERROR : LOCAL_NO_VISION_ERROR };
+    }
     const attempts: VisionAttempt[] = [];
     return await withOneRetry((ms) => askLocal(engine.engine, prompt, imageBase64, mime, ms, attempts), attempts, deadline);
   }
