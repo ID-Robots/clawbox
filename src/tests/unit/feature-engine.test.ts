@@ -11,7 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const store = new Map<string, unknown>();
-/** `unreadable`: the store is there and cannot be read (getKnown says so); `throws`: no tri-state reader at all. */
+/** `unreadable`: the store is there and cannot be read (getKnown says so); `throws`: the reader itself rejects. */
 const storeFails = { unreadable: false, throws: false };
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
@@ -67,11 +67,10 @@ describe("the local-only AI lock, as the store holds it", () => {
     expect(token).not.toHaveBeenCalled();
   });
 
-  it("reads the plain way where the store has no tri-state reader", async () => {
+  it("reads as ON when the reader itself rejects: no answer is never \"off\"", async () => {
     storeFails.throws = true;
-    expect(await cloudAiLockOn()).toBe(false);
-    store.set(CLOUD_AI_LOCK_KEY, "pinned");
     expect(await cloudAiLockOn()).toBe(true);
+    expect(await resolveFeatureEngine()).toEqual({ kind: "local", engine: LOCAL });
   });
 });
 

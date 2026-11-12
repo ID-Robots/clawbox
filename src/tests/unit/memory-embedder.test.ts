@@ -14,6 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
+  // The local-only AI lock is read with the tri-state reader (feature-engine.ts).
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
   set: async (key: string, value: unknown) => { store.set(key, value); },
 }));
 
