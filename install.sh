@@ -11589,8 +11589,20 @@ except Exception:
     # already have made one.
     return "$SMOKE_FINDINGS"
   fi
+  # The token reaches curl on its stdin, as a line of curl's own config
+  # format, never as an argument: every local account can read a running
+  # process's arguments. Inside the quotes curl turns \\ \" \n \r back into
+  # the bytes they stand for, so it requests the very URL the argument named,
+  # and the value is left no quote to close early and no line break to start
+  # a second option. printf is a builtin: the value is on no exec'd argv.
+  local tg_url_token="$TG_TOKEN"
+  tg_url_token=${tg_url_token//\\/\\\\}
+  tg_url_token=${tg_url_token//\"/\\\"}
+  tg_url_token=${tg_url_token//$'\n'/\\n}
+  tg_url_token=${tg_url_token//$'\r'/\\r}
   local getme
-  getme=$(curl -s -m 8 "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null \
+  getme=$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$tg_url_token" 2>/dev/null \
+    | curl -s -m 8 -K - 2>/dev/null \
     | python3 -c 'import json,sys
 try: print("yes" if json.load(sys.stdin).get("ok") else "no")
 except Exception: print("no")' 2>/dev/null || echo "no")
@@ -11605,7 +11617,8 @@ except Exception: print("no")' 2>/dev/null || echo "no")
   #    devices skip it. Confirms the bot can actually deliver a message.
   if [ -n "${CLAWBOX_SMOKE_TELEGRAM_CHAT_ID:-}" ]; then
     local msg_id
-    msg_id=$(curl -s -m 10 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    msg_id=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$tg_url_token" 2>/dev/null \
+      | curl -s -m 10 -K - \
       --data-urlencode "chat_id=${CLAWBOX_SMOKE_TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=ClawBox post-update smoke" 2>/dev/null \
       | python3 -c 'import json,sys

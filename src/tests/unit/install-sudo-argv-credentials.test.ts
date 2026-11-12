@@ -79,14 +79,23 @@ const NOT_A_CREDENTIAL = new Map([
   ["MEMORY_SEARCH_KEY", "a config key path: memory.search or agents.defaults.memorySearch"],
 ]);
 
+/** A name's parts without a TOKENS that counts tokens, and the text the strong fragments are read in. */
+function nameParts(name: string): { parts: string[]; text: string } {
+  const parts = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase().split("_");
+  const named = parts.filter((part, j) => !(part === COUNT_PART && COUNT_QUALIFIERS.has(parts[j - 1])));
+  return { parts: named, text: named.length === parts.length ? name : named.join("_") };
+}
+
 /** A name that speaks of a credential, a path to one included. */
 function credentialWords(name: string): boolean {
   if (NOT_A_CREDENTIAL.has(name)) return false;
-  const parts = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase().split("_");
-  const named = parts.filter((part, j) => !(part === COUNT_PART && COUNT_QUALIFIERS.has(parts[j - 1])));
-  if (STRONG_FRAGMENT.test(named.length === parts.length ? name : named.join("_"))) return true;
-  return named.some((part) => WEAK_PARTS.has(part));
+  const { parts, text } = nameParts(name);
+  return STRONG_FRAGMENT.test(text) || parts.some((part) => WEAK_PARTS.has(part));
 }
+
+/** The same through the strong fragments alone: TOKEN and SECRET say credential, KEY and AUTH alone do not. */
+const strongCredentialWords = (name: string): boolean =>
+  !NOT_A_CREDENTIAL.has(name) && STRONG_FRAGMENT.test(nameParts(name).text);
 
 const credentialName = (name: string): boolean => !PATH_NAME.test(name) && credentialWords(name);
 
@@ -487,6 +496,244 @@ describe("no credential-named variable reaches a sudo command line in the shippe
       // Exactly one live line: an entry that matches nothing hides the next line
       // that reuses its text, and one that matches two waves a copy through.
       const matched = hits.filter((h) => allowedFor(h) === entry);
+      expect(matched.map((h) => h.names), where).toEqual([entry.names]);
+    }
+  });
+});
+
+/**
+ * No credential in the arguments of a curl or wget call. Every local account
+ * can read a running process's arguments, so a token, a bearer or a password
+ * reaches curl on its stdin: as a line of curl's own config format, the value
+ * escaped for curl's quoted form (`printf 'header = "Authorization: Bearer
+ * %s"\n' "$v" | curl -K - …`), or as a body read from stdin (`--data-binary @-`).
+ *
+ * The check covers the installer and the scripts it or a unit runs. Each call
+ * is judged on its own command, up to the first `;`, `|` or `&`, an unmatched
+ * `)` or a line break outside quotes and substitutions, and is a hit when that
+ * command holds:
+ * - a variable whose name says token, secret, password, bearer or cookie: the
+ *   strong fragments above, since KEY or AUTH alone name public things around
+ *   curl here, such as the address of a package-signing key;
+ * - a file read in place whose variable or literal path says credential;
+ * - a credential option with an expansion in its value: an Authorization,
+ *   Cookie or token, key, secret or auth header, or a user, bearer, cookie or
+ *   password option;
+ * - a URL or body field that names a credential right before an expansion:
+ *   `/bot$`, `token=$`, `"password":"$`.
+ * A value under a name that says nothing, or one passed through an array, is
+ * out of its reach. systemd units are not shell and are not read.
+ */
+const CURL_EXCLUDED = ["install-x64.sh", "scripts/x64-migration/", "scripts/nano-tests/"];
+const curlFiles = (root?: string): string[] =>
+  shellFiles(root).filter((file) => !CURL_EXCLUDED.some((prefix) => file.startsWith(prefix)));
+
+const CURL_CALL = /(?:^|[\s;&|(`!{"'/\\])(curl|wget)["']?(?=\s)/;
+/** `$NAME`, `${…}`, `$(…)`, `$1`, `$@` or a backquote. */
+const EXPANSION = /\$[{(A-Za-z0-9_@*]|`/;
+/** A literal path that names a credential file. */
+const CREDENTIAL_PATH = /token|secret|passw|cookie|credential|bearer|api_key|[._-]key(?=$|[/"'\s)])/i;
+/** A header whose name says it carries a credential: Authorization, Cookie, X-Api-Key, X-Auth-Token. */
+const CREDENTIAL_HEADER = /^[^:]*(?:token|key|secret|auth|cookie)[^:]*:/i;
+const HEADER_OPTIONS = new Set(["-H", "--header"]);
+const CREDENTIAL_OPTIONS = new Set([
+  "-u",
+  "--user",
+  "--proxy-user",
+  "--oauth2-bearer",
+  "-b",
+  "--cookie",
+  "--password",
+  "--http-password",
+  "--proxy-password",
+]);
+/** A URL or body field that names a credential right before an expansion. */
+const CREDENTIAL_FIELDS: [RegExp, string][] = [
+  [/\/bot["']?\$/, "/bot"],
+  [/(?:^|[^A-Za-z0-9_])(?:access_token|api_key|apikey|token|key|password|secret|auth)=["']?\$/i, "field"],
+  [/\\?"password\\?"\s*:\s*\\?"\$/i, "field"],
+];
+
+/** A call's own command: its text up to the first `;`, `|` or `&`, an unmatched `)` or a line break outside quotes and substitutions. */
+function ownCommand(rest: string): string {
+  const stack: string[] = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const c = rest[i];
+    const top = stack[stack.length - 1];
+    if (top === "'") {
+      if (c === "'") stack.pop();
+      continue;
+    }
+    if (c === "\\") {
+      i += 1;
+      continue;
+    }
+    if (c === "$" && rest[i + 1] === "(") {
+      stack.push(")");
+      i += 1;
+      continue;
+    }
+    if (top === '"') {
+      if (c === '"') stack.pop();
+      continue;
+    }
+    if (c === "'" || c === '"') stack.push(c);
+    else if (c === "(") stack.push(")");
+    else if (c === ")") {
+      if (!stack.length) return rest.slice(0, i);
+      stack.pop();
+    } else if (!stack.length && /[;|&\n]/.test(c)) {
+      // `2>&1`, `<&0`, `&>` and `>|` are redirections, not the end of the command.
+      const redirect = c === "&" ? /[<>]/.test(rest[i - 1] ?? "") || rest[i + 1] === ">" : c === "|" && rest[i - 1] === ">";
+      if (!redirect) return rest.slice(0, i);
+    }
+  }
+  return rest;
+}
+
+/** What in a curl or wget call's own command puts a credential on its arguments: variable names, or the shape. */
+function curlCredentials(command: string): string[] {
+  const found: string[] = [];
+  const expanded = blankSingleQuoted(command);
+  for (const m of expanded.matchAll(VAR_REF)) {
+    if (!PATH_NAME.test(m[1]) && strongCredentialWords(m[1])) found.push(m[1]);
+  }
+  for (const m of expanded.matchAll(CONTENT_READ)) {
+    const names = [...m[0].matchAll(VAR_REF)].map((v) => v[1]).filter(credentialWords);
+    if (names.length) found.push(...names);
+    else if (CREDENTIAL_PATH.test(m[0].replace(VAR_REF, ""))) found.push("file");
+  }
+  const words = ownWords(command.replace(/([<>])&/g, "$1 ").replace(/&>/g, " >")).map((w) => w.text);
+  words.forEach((word, j) => {
+    const attached = /^(--[A-Za-z0-9-]+)=([\s\S]*)$/.exec(word) ?? /^(-[Hub])(.+)$/.exec(word);
+    const [option, value] = attached ? [attached[1], attached[2]] : [word, words[j + 1] ?? ""];
+    if (!EXPANSION.test(value)) return;
+    if (HEADER_OPTIONS.has(option) && CREDENTIAL_HEADER.test(value)) found.push("header");
+    else if (CREDENTIAL_OPTIONS.has(option)) found.push(option);
+  });
+  for (const [shape, label] of CREDENTIAL_FIELDS) if (shape.test(command)) found.push(label);
+  return [...new Set(found)];
+}
+
+function scanCurl(sources: { file: string; text: string }[]): { calls: number; hits: Hit[] } {
+  const hits: Hit[] = [];
+  let calls = 0;
+  for (const { file, text } of sources) {
+    for (const { lineNo, text: line } of logicalLines(text, file)) {
+      for (const call of wrapperCalls(line, CURL_CALL)) {
+        calls += 1;
+        const names = curlCredentials(ownCommand(call.rest));
+        if (names.length) hits.push({ file, lineNo, wrapper: call.name, names, text: line.trim() });
+      }
+    }
+  }
+  return { calls, hits };
+}
+
+const curlTree = (): { calls: number; hits: Hit[] } =>
+  scanCurl(curlFiles().map((file) => ({ file, text: fs.readFileSync(path.join(REPO, file), "utf-8") })));
+
+/** Each entry needs a reason, an expiry date and exactly one live line. */
+const CURL_ALLOWED: Allowed[] = [];
+
+/**
+ * The fewest curl and wget calls the checked files may read: 31 when this was
+ * set. A drop past it means the reader lost a shape it read before, or the
+ * calls left the scripts on purpose, in which case lower it.
+ */
+const CURL_CALL_FLOOR = 28;
+
+const curlAllowedFor = (hit: Hit): Allowed | undefined =>
+  CURL_ALLOWED.find((a) => a.file === hit.file && hit.text.includes(a.line));
+
+describe("no credential reaches the arguments of a curl or wget call in the shipped shell", () => {
+  let fixture: string;
+
+  beforeEach(() => {
+    fixture = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-curl-files-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  });
+
+  it("reads the installer and the scripts it or a unit runs", () => {
+    for (const rel of [
+      "install.sh",
+      "install-x64.sh",
+      "scripts/a.sh",
+      "scripts/x64-migration/b.sh",
+      "scripts/nano-tests/c.sh",
+      "config/d.sh",
+    ]) {
+      fs.mkdirSync(path.dirname(path.join(fixture, rel)), { recursive: true });
+      fs.writeFileSync(path.join(fixture, rel), "true\n");
+    }
+    expect(curlFiles(fixture).sort()).toEqual(["config/d.sh", "install.sh", "scripts/a.sh"]);
+  });
+
+  it("finds curl and wget calls in the tree, so an empty result means something", () => {
+    const { calls } = curlTree();
+    expect(curlFiles()).toContain("install.sh");
+    expect(
+      calls,
+      `the checked files read ${calls} curl and wget calls, under the floor of ${CURL_CALL_FLOOR}. If a change to ` +
+        "src/tests/helpers/shell-reader.ts did this, it stopped reading a shape; if the calls were removed from " +
+        "the scripts, lower CURL_CALL_FLOOR.",
+    ).toBeGreaterThanOrEqual(CURL_CALL_FLOOR);
+  });
+
+  it("finds the shapes it exists for", () => {
+    const sample = [
+      'curl -s "https://api.telegram.org/bot${TG_TOKEN}/getMe"',
+      'curl -H "Authorization: Bearer $TOKEN" u',
+      `x 'curl -H "Authorization: Bearer $(cat "$DIR/.local-ai-token")" u'`,
+      'curl --data-binary "{\\"password\\":\\"$P\\"}" u',
+      'curl -u "me:$PW" u',
+      'curl -H "X-Api-Key: $K" u',
+      'curl "u?api_key=$K"',
+      'wget --header="Authorization: Bearer $T" u',
+      'as_clawbox curl -H "Cookie: s=$C" u',
+      // Clean: a bearer and a body on stdin, a public key's address, a plain
+      // URL, a comment, and a name that only starts with curl.
+      `printf 'header = "Authorization: Bearer %s"\\n' "$TOKEN" | curl -K - u`,
+      'printf "%s" "$BODY" | curl --data-binary @- u',
+      'curl -fsSL "$GOOGLE_CHROME_KEY_URL" -o "$key"',
+      'curl -s "$installer_url"',
+      '# curl -H "Authorization: Bearer $TOKEN" u',
+      'curl_config_line x "$TOKEN"',
+    ].join("\n");
+    const { calls, hits } = scanCurl([{ file: "sample.sh", text: sample }]);
+    expect(hits.map((h) => [h.lineNo, h.wrapper, h.names])).toEqual([
+      [1, "curl", ["TG_TOKEN", "/bot"]],
+      [2, "curl", ["TOKEN", "header"]],
+      [3, "curl", ["file", "header"]],
+      [4, "curl", ["field"]],
+      [5, "curl", ["-u"]],
+      [6, "curl", ["header"]],
+      [7, "curl", ["field"]],
+      [8, "wget", ["header"]],
+      [9, "curl", ["header"]],
+    ]);
+    expect(calls).toBe(13);
+  });
+
+  it("finds no credential in the arguments of a curl or wget call", () => {
+    const unexpected = curlTree()
+      .hits.filter((hit) => !curlAllowedFor(hit))
+      .map((h) => `${h.file}:${h.lineNo} ${h.wrapper} [${h.names.join(", ")}]: ${h.text}`);
+    expect(unexpected).toEqual([]);
+  });
+
+  it("keeps every allowlist entry live, exact, reasoned and unexpired", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const { hits } = curlTree();
+    for (const entry of CURL_ALLOWED) {
+      const where = `${entry.file}: ${entry.line}`;
+      expect(entry.reason.trim().length, where).toBeGreaterThan(40);
+      expect(entry.expires, where).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(entry.expires >= today, `${where}: expired ${entry.expires}: ${entry.reason}`).toBe(true);
+      const matched = hits.filter((h) => curlAllowedFor(h) === entry);
       expect(matched.map((h) => h.names), where).toEqual([entry.names]);
     }
   });
