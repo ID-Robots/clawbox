@@ -234,16 +234,10 @@ export function updateStaffMcpStore(
  */
 export async function forgetStaffMcpUserStrict(username: string, file: string = STAFF_MCP_STORE_PATH): Promise<void> {
   if (!isStaffUsername(username)) return;
-  // Only a store that is really not there is nothing to clear: any other
-  // error (EACCES, an unreadable link) throws, so the caller fails closed.
-  try {
-    await fsp.stat(file);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return;
-    throw new StaffMcpStoreError("the staff MCP store could not be checked");
-  }
-  const current = await readStaffMcpStore(file);
-  if (!Object.hasOwn(current.credentials, username) && !Object.hasOwn(current.relayTokens, username)) return;
+  // Always THROUGH the store's lock, whatever is in the store now: a
+  // credential write that already passed its own check under the lock
+  // commits before this runs, never after it. A store that cannot be read
+  // (anything but a missing file) throws, so the caller fails closed.
   await updateStaffMcpStore((store) => {
     const credentials = { ...store.credentials };
     const relayTokens = { ...store.relayTokens };

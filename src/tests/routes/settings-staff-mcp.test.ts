@@ -147,6 +147,18 @@ describe("the grants", () => {
     expect(fs.readFileSync(storePath, "utf-8")).not.toContain("ivan-secret-token-0001");
   });
 
+  it("never writes the old account's credential for an account removed and created again under the same name", async () => {
+    await post({ servers: { docs: {} } });
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const users = vi.mocked(listUsers);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-01T00:00:00Z", sv: "1" }]); // the old account
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-12T00:00:00Z", sv: "9" }]); // re-created meanwhile
+    const res = await post({ username: "ivan", server: "docs", credential: "old-account-token-0001" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_user");
+    expect(fs.readFileSync(storePath, "utf-8")).not.toContain("old-account-token-0001");
+  });
+
   it("clears a credential with null", async () => {
     await post({ servers: { docs: {} } });
     await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });

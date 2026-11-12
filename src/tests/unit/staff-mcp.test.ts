@@ -97,6 +97,22 @@ describe("the store", () => {
     await mcp.forgetStaffMcpUserStrict("ivan", path.join(dir, "missing.json"));
   });
 
+  it("clears a credential written by a change that was already under way when the user went", async () => {
+    const file = path.join(ROOT, "store-race.json");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    // A credential write that passed its check and holds the lock…
+    const write = mcp.updateStaffMcpStore(async (s) => {
+      await gate;
+      return { ...s, credentials: { ...s.credentials, ivan: { docs: "late-token" } } };
+    }, file);
+    // …and the removal's clean-up, asked meanwhile (the store does not exist yet).
+    const forget = mcp.forgetStaffMcpUserStrict("ivan", file);
+    release();
+    await Promise.all([write, forget]);
+    expect((await mcp.readStaffMcpStore(file)).credentials).toEqual({});
+  });
+
   it("masks a credential and never shows more than its last four characters", () => {
     expect(mcp.maskCredential("abcdefghijklmnop-1234")).toBe("••••1234");
     expect(mcp.maskCredential("short")).toBe("••••");
