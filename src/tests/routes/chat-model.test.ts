@@ -336,6 +336,29 @@ describe("/setup-api/chat/model", () => {
       expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(true);
     });
 
+    it("only the picker's own read hides them: the box's own move back to a cloud model still works", async () => {
+      // Removing the engine on an organisation box moves the chat back to the
+      // cloud model it was on before the engine (src/lib/external-engine-ops.ts)
+      // through this very POST. Judged against a list without the cloud rows it
+      // answered 400 "Selected AI provider is not configured" and the engine
+      // could not be removed.
+      store({ org_mode: true, external_engine: ENGINE });
+      const res = await POST(new Request("http://localhost/setup-api/chat/model", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "deepseek/deepseek-v4-flash", automatic: true }),
+      }));
+      expect(res.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalled();
+
+      const { readChatModelStateUnfiltered } = await import("@/app/setup-api/chat/model/route");
+      const unfiltered = await readChatModelStateUnfiltered();
+      expect(unfiltered.options.some((option) => !option.isLocal)).toBe(true);
+      expect(unfiltered.primary.model).toBe("deepseek/deepseek-v4-flash");
+      // …while the picker's read of the same box still shows the box's own AI alone.
+      expect((await ids()).some((option) => !option.isLocal)).toBe(false);
+    });
+
     it.each([
       ["an external engine on a normal box", { external_engine: ENGINE }],
       ["organisation mode without an engine", { org_mode: true }],
