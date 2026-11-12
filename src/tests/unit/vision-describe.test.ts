@@ -28,8 +28,15 @@ vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
   readClawboxAiVision: vi.fn(async () => null),
 }));
 
+// Which engine answers is feature-engine.ts's question, with its own suite;
+// here it is stated: ClawBox AI unless a case says the box's own engine.
+const feature = vi.hoisted(() => ({ resolveFeatureEngine: vi.fn() }));
+vi.mock("@/lib/feature-engine", () => feature);
+
 import {
   DESCRIBE_TIMEOUT_MS,
+  LOCAL_NO_VISION_ERROR,
+  LOCKED_NO_ENGINE_ERROR,
   MIN_RETRY_MS,
   NO_VISION_MODEL_ERROR,
   RETRY_DELAY_MS,
@@ -60,6 +67,7 @@ beforeEach(() => {
   mocks.configGet.mockResolvedValue("tok-1234567890");
   mocks.probe.mockReset();
   mocks.probe.mockResolvedValue(SEES);
+  feature.resolveFeatureEngine.mockReset().mockResolvedValue({ kind: "clawbox-ai" });
   _resetVisionModelCacheForTests();
 });
 
@@ -173,5 +181,57 @@ describe("which model looks", () => {
     await describeImage("aGk=");
     await describeImage("aGk=");
     expect(mocks.probe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("on the box's own engine (TASK-2501 PR-C)", () => {
+  const EXTERNAL = {
+    kind: "clawext",
+    model: "qwen2.5-vl-7b",
+    modelRef: "clawext/qwen2.5-vl-7b",
+    chatUrl: "http://engine.example:8000/v1/chat/completions",
+    authorization: "Bearer sk-owner",
+    contextTokens: 32768,
+    maxOutputTokens: 4096,
+    parallel: 1,
+    imageInput: true as boolean | null,
+  };
+
+  it("asks the engine that can see, with the picture, and never the cloud", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: EXTERNAL });
+    fetchMock.mockResolvedValueOnce(answer("A login form with a blue button."));
+    const out = await describeNow();
+    expect(out).toMatchObject({ text: "A login form with a blue button.", error: null });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(EXTERNAL.chatUrl);
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer sk-owner");
+    const body = JSON.parse(String(init.body));
+    expect(body.model).toBe("qwen2.5-vl-7b");
+    expect(body.max_tokens).toBe(2048);
+    expect(body.messages[0].content[1]).toEqual({ type: "image_url", image_url: { url: "data:image/png;base64,aGk=" } });
+    expect(mocks.probe).not.toHaveBeenCalled();
+    expect(mocks.configGet).not.toHaveBeenCalled();
+    expect((out as { vision?: { attempts: Array<{ requestedModel: string }> } }).vision?.attempts[0].requestedModel).toBe("clawext/qwen2.5-vl-7b");
+  });
+
+  it("retries a transient failure once there too", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: EXTERNAL });
+    fetchMock.mockResolvedValueOnce(status(502)).mockResolvedValueOnce(answer("A chart."));
+    expect(await describeNow()).toMatchObject({ text: "A chart.", error: null });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("says so in words, asking nothing, when the box's model cannot look at pictures", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: { ...EXTERNAL, kind: "llamacpp", imageInput: false } });
+    expect(await describeNow()).toEqual({ text: null, error: LOCAL_NO_VISION_ERROR });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never falls back to the cloud under the lock with no model on the box", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "none", reason: "cloud_ai_locked" });
+    expect(await describeNow()).toEqual({ text: null, error: LOCKED_NO_ENGINE_ERROR });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.configGet).not.toHaveBeenCalled();
   });
 });

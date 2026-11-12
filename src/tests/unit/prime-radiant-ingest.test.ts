@@ -6,14 +6,17 @@
  * events, uploads, one job at a time, and restart settlement.
  */
 import fs from "fs";
+import http from "http";
 import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
+import { FlashCallError, createLocalFlashClient, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
+import { createStubFlashClient } from "@/lib/prime-radiant/flash-stub";
 import {
   DEFAULT_PARALLEL,
   IngestBusyError,
+  IngestWindowError,
   NothingToRetryError,
   UnknownJobError,
   getIngestJob,
@@ -37,7 +40,8 @@ import { resolveReviewItem } from "@/lib/prime-radiant/review";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { withStateDb } from "@/lib/prime-radiant/state-db";
-import { readWriterItems, type WriterItem } from "@/lib/prime-radiant/writer";
+import { readWriterItems, writerLimits, type WriterItem } from "@/lib/prime-radiant/writer";
+import { estimateTokens } from "@/lib/token-estimate";
 import { serializePage } from "@/lib/prime-radiant/frontmatter";
 import { claim, frontmatter } from "../helpers/prime-radiant-fixtures";
 
@@ -319,6 +323,109 @@ describe("an ingest job", () => {
     const job = await run({ kind: "folders", folders: [docs] }, deps({ client: slow.client, batchSize: 1, parallel: 3 }));
     expect(job).toMatchObject({ done: 9, commits: 9 });
     expect(slow.maxInFlight).toBe(3);
+  });
+
+  it("sizes every call to a bounded window (the box's own engine): a few documents a call, one call at a time, texts cut to fit", async () => {
+    for (let i = 0; i < 9; i++) write(`f${i}.md`, `Document ${i} about Acme. ${"Acme ships blue widgets to Globex every Tuesday, and the invoice follows. ".repeat(140)}`);
+    const slow = fakeClient(undefined, 10);
+    const budget = { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 };
+    const limits = writerLimits(budget)!;
+    const local: FlashClient = { ...slow.client, engine: "local", budget, complete: (r) => slow.client.complete(r) };
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: local, parallel: 128 }));
+    expect(job).toMatchObject({ status: "done", done: 9 });
+    expect(slow.maxInFlight).toBe(1);
+    const sizes = slow.prompts.map((p) => readWriterItems(p.user)!.length);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(limits.batchFiles);
+    for (const p of slow.prompts) {
+      for (const item of readWriterItems(p.user)!) expect(item.text.length).toBeLessThanOrEqual(limits.textChars);
+      // The prompt and the longest answer it may ask for fit the window, by the conservative estimate.
+      expect(estimateTokens(p.system) + estimateTokens(p.user) + 320 + Math.min(p.maxTokens, budget.maxOutputTokens)).toBeLessThanOrEqual(budget.contextTokens);
+    }
+  });
+
+  it("refuses to start, naming the window, when the box's own model is too small to write with: no job, no dead letter", async () => {
+    write("a.md", "Doc a.");
+    const fake = fakeClient();
+    const tiny: FlashClient = { ...fake.client, engine: "local", budget: { contextTokens: 2_048, maxOutputTokens: 1_024, parallel: 1 }, complete: (r) => fake.client.complete(r) };
+    await expect(startIngest({ kind: "folders", folders: [docs] }, deps({ client: tiny }))).rejects.toBeInstanceOf(IngestWindowError);
+    await expect(startIngest({ kind: "folders", folders: [docs] }, deps({ client: tiny }))).rejects.toThrow(/window of 2048 tokens, too small to write pages/);
+    expect(listIngestJobs(vault)).toEqual([]);
+    expect(fake.calls).toBe(0);
+  });
+
+  it("asks a lone document too long for the box's own model again with half its text, once", async () => {
+    write("long.md", `Acme notes. ${"Acme ships blue widgets to Globex every Tuesday, and the invoice follows. ".repeat(80)}`);
+    const budget = { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 };
+    const sizes: number[] = [];
+    const tooLong = fakeClient((items) => {
+      sizes.push(items[0].text.length);
+      return sizes.length === 1 ? new FlashCallError("too_long", "The model on this box did not answer within 15 minutes.") : items.map(cardFor);
+    });
+    const local: FlashClient = { ...tooLong.client, engine: "local", budget, complete: (r) => tooLong.client.complete(r) };
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: local }));
+    expect(job).toMatchObject({ status: "done", done: 1, requeued: 1 });
+    expect(sizes).toHaveLength(2);
+    expect(sizes[1]).toBe(Math.floor(sizes[0] / 2));
+  });
+
+  it("asks a batch too long for the box's own model again in half the batch, and words its refusal in the engine's own words", async () => {
+    for (let i = 0; i < 4; i++) write(`f${i}.md`, `Document ${i}.`);
+    const budget = { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 };
+    const tooLong = fakeClient((items) => (items.length > 2 ? new FlashCallError("too_long", "The model on this box did not answer within 15 minutes.") : items.map(cardFor)));
+    const local: FlashClient = { ...tooLong.client, engine: "local", budget, complete: (r) => tooLong.client.complete(r) };
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: local, batchSize: 4 }));
+    expect(job).toMatchObject({ status: "done", done: 4, failed: 0, requeued: 4 });
+
+    for (let i = 0; i < 2; i++) write(`g${i}.md`, `Another document ${i}.`);
+    const refused = fakeClient(() => new FlashCallError("auth", "The External engine refused this box's key. Check it in Settings → Local AI.", 401));
+    const external: FlashClient = { ...refused.client, engine: "local", budget, complete: (r) => refused.client.complete(r) };
+    const failed = await run({ kind: "folders", folders: [docs] }, deps({ client: external }));
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toBe("The External engine refused this box's key. Check it in Settings → Local AI.");
+  });
+
+  it("writes pages end to end through the box's own engine over HTTP: its ref on every cost row, every request inside its window", async () => {
+    for (let i = 0; i < 6; i++) write(`acme-${i}.md`, `# Acme note ${i}\n\nAcme Widgets Ltd ships order ${i} to Globex on Tuesday. ${"The invoice follows the delivery. ".repeat(40)}`);
+    const stub = createStubFlashClient();
+    const bodies: Array<{ max_tokens: number; reasoning_effort?: string; messages: Array<{ content: string }> }> = [];
+    const server = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (d) => (raw += d)).on("end", async () => {
+        const body = JSON.parse(raw);
+        bodies.push(body);
+        const answer = await stub.complete({ system: body.messages[0].content, user: body.messages[1].content, maxTokens: body.max_tokens });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ model: "gemma", choices: [{ message: { content: answer.text }, finish_reason: "stop" }], usage: { prompt_tokens: 2_000, completion_tokens: 400 } }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const engine = {
+        kind: "llamacpp" as const,
+        model: "gemma4-e2b-it-q4_0",
+        modelRef: "llamacpp/gemma4-e2b-it-q4_0",
+        chatUrl: `http://127.0.0.1:${port}/setup-api/local-ai/llamacpp/v1/chat/completions`,
+        authorization: "Bearer local-install-token",
+        contextTokens: 32_768,
+        maxOutputTokens: 8_192,
+        parallel: 1,
+        imageInput: false,
+      };
+      const job = await run({ kind: "folders", folders: [docs] }, deps({ client: createLocalFlashClient(engine) }));
+      expect(job).toMatchObject({ status: "done", done: 6, failed: 0 });
+      expect(job.pages).toBeGreaterThanOrEqual(6);
+      expect(bodies.length).toBe(Math.ceil(6 / writerLimits(engine)!.batchFiles));
+      for (const b of bodies) {
+        expect(b.reasoning_effort).toBe("none");
+        expect(b.max_tokens).toBeLessThanOrEqual(8_192);
+        expect(estimateTokens(b.messages[0].content) + estimateTokens(b.messages[1].content) + 320 + b.max_tokens).toBeLessThanOrEqual(32_768);
+      }
+      expect(new Set(readCosts(vault, job.id).map((c) => c.model))).toEqual(new Set(["llamacpp/gemma4-e2b-it-q4_0"]));
+      expect(readCosts(vault, job.id).every((c) => c.usdEstimate === 0)).toBe(true);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 
   it("splits a batch at the character budget", async () => {

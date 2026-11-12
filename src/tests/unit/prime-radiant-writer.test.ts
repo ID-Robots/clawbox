@@ -7,8 +7,12 @@ import { describe, expect, it } from "vitest";
 import { buildClaimIndex } from "@/lib/prime-radiant/claims";
 import { scanSecrets } from "@/lib/prime-radiant/redact";
 import {
+  BOUNDED_WRITER_BATCH,
+  CARD_TOKENS,
   DEFAULT_OWNER,
   MAX_CLAIM_CHARS,
+  MAX_TEXT_CHARS_PER_FILE,
+  MIN_TEXT_CHARS_PER_FILE,
   MAX_FACTS_PER_PAGE,
   MAX_SUMMARY_CHARS,
   WRITER_ITEMS_MARKER,
@@ -22,11 +26,13 @@ import {
   indexLine,
   parseWriterResponse,
   readWriterItems,
+  writerLimits,
   type BuildContext,
   type PageDraft,
   type WriterItem,
 } from "@/lib/prime-radiant/writer";
 import { validateFrontmatter } from "@/lib/prime-radiant/schema";
+import { estimateTokens } from "@/lib/token-estimate";
 import { claim, frontmatter } from "../helpers/prime-radiant-fixtures";
 
 const FAKE_KEY = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6";
@@ -455,5 +461,37 @@ describe("index.md", () => {
     }
     // Only the entry goes; prose and the other entries keep their lines.
     expect(removeFromIndex("# Index\n\n- [[a]] — A\n- [[b]] — B\n", "a.md")).toBe("# Index\n\n- [[b]] — B\n");
+  });
+});
+
+describe("the writer's batch on a bounded window (the box's own engine)", () => {
+  const fits = (budget: { contextTokens: number; maxOutputTokens: number }) => {
+    const limits = writerLimits(budget)!;
+    const items = Array.from({ length: limits.batchFiles }, (_, i) => ({ i, path: `upload/acme-${i}.md`, kind: "md", text: "щ".repeat(limits.textChars) }));
+    const { system, user } = buildWriterPrompt(items);
+    return { limits, used: estimateTokens(system) + estimateTokens(user) + 320 };
+  };
+
+  it("sends a few whole documents a call to a 32k model, and leaves a card's room each", () => {
+    const { limits, used } = fits({ contextTokens: 32_768, maxOutputTokens: 8_192 });
+    expect(limits).toEqual({ batchFiles: BOUNDED_WRITER_BATCH, batchChars: BOUNDED_WRITER_BATCH * MAX_TEXT_CHARS_PER_FILE, textChars: MAX_TEXT_CHARS_PER_FILE });
+    expect(32_768 - used).toBeGreaterThanOrEqual(limits.batchFiles * CARD_TOKENS);
+  });
+
+  it("sends one shortened document a call to ClawBox's 4k Ollama, still with a card's room", () => {
+    const { limits, used } = fits({ contextTokens: 4_096, maxOutputTokens: 2_048 });
+    expect(limits.batchFiles).toBe(1);
+    expect(limits.textChars).toBeLessThan(MAX_TEXT_CHARS_PER_FILE);
+    expect(limits.textChars).toBeGreaterThanOrEqual(MIN_TEXT_CHARS_PER_FILE);
+    expect(4_096 - used).toBeGreaterThanOrEqual(CARD_TOKENS);
+  });
+
+  it("holds no more cards than the longest answer does", () => {
+    expect(writerLimits({ contextTokens: 131_072, maxOutputTokens: 3_000 })!.batchFiles).toBe(2);
+  });
+
+  it("is null when not one document fits: the window is too small to write with", () => {
+    expect(writerLimits({ contextTokens: 2_048, maxOutputTokens: 1_024 })).toBeNull();
+    expect(writerLimits({ contextTokens: 0, maxOutputTokens: 0 })).toBeNull();
   });
 });

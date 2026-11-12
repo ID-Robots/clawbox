@@ -152,6 +152,39 @@ describe("the field switch", () => {
   });
 });
 
+describe("the box's own engine, where the cloud cannot answer (TASK-2501 PR-C)", () => {
+  it("embeds a cloud-pinned box on the box when it holds no ClawBox AI credential, the pin kept", async () => {
+    await writeEmbedderPin("cloud");
+    token.mockResolvedValue(null);
+    const embedder = await resolveMemoryEmbedder();
+    expect(embedder.source).toBe("local");
+    expect(embedder.requestUrl).toBe(`${PROXY}/embeddings`);
+    expect(await readEmbedderPin()).toBe("cloud");
+    // Signed in again: the cloud the owner chose comes back.
+    token.mockResolvedValue("claw_test");
+    expect((await resolveMemoryEmbedder()).source).toBe("cloud");
+  });
+
+  it("embeds on the box under the local-only AI lock, signed in or not, the pin kept", async () => {
+    await writeEmbedderPin("cloud");
+    for (const lock of [true, "pinned"]) {
+      store.set("ai_cloud_lock", lock);
+      expect((await resolveMemoryEmbedder()).source, String(lock)).toBe("local");
+    }
+    expect(await readEmbedderPin()).toBe("cloud");
+    store.delete("ai_cloud_lock");
+    expect((await resolveMemoryEmbedder()).source).toBe("cloud");
+  });
+
+  it("never hands out a cloud embedder without the bearer it needs", async () => {
+    token.mockResolvedValue(null);
+    for (const fallback of ["cloud", undefined] as const) {
+      const embedder = await resolveMemoryEmbedder(fallback);
+      expect(embedder.source === "local" || embedder.token !== null).toBe(true);
+    }
+  });
+});
+
 describe("the width each embedder answers with", () => {
   it("is carried, because the index's memory budget is a function of it", async () => {
     // The chunk ceiling and the vector cache are derived from this
