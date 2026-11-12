@@ -43,9 +43,13 @@ answer?" — and say yes only when all of these hold:
      after a failure (systemd's NRestarts is 0) and that the PREVIOUS start
      reached `gateway ready` after it began. A reused answer that turned out
      wrong would have kept the gateway from becoming ready, and the very next
-     start then runs the full checks. A run the updater makes itself, with
-     the gateway stopped and outside its unit, is recorded as `outsideUnit`
-     and is never that previous start: no gateway starts from it. For the
+     start then runs the full checks. That is NOT claimed for `codex-absent`:
+     whether a Codex left without its install-and-consent step keeps the
+     gateway from becoming ready is not settled, so a stale "no Codex" is
+     bounded only by its key and the age in 2. A run the updater makes
+     itself, with the gateway stopped and outside its unit, is recorded as
+     `outsideUnit` and is never that previous start: no gateway starts from
+     it. For the
      same reason it may take a recorded answer but never records one. On a core
      without the start-guard (before 2026.10) there is no such proof, and
      nothing is ever reused;
@@ -53,7 +57,8 @@ answer?" — and say yes only when all of these hold:
      the script pass --no-reuse).
 
 Anything this helper cannot read is a miss, never a hit: a miss costs what
-every boot cost before, a wrong hit could cost a gateway that does not start.
+every boot cost before, a wrong hit could cost a gateway that does not start
+(for `codex-absent`, a skipped Codex install-and-consent step).
 
 Usage (stdout is one tab-separated line; the exit status is 0 for both):
 
