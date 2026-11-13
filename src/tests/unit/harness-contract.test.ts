@@ -396,16 +396,17 @@ describe("the checker", () => {
     recorded?: Record<string, Record<string, number>>; event?: string;
     hermesConfig?: Record<string, unknown>; routes?: [string, string][];
     hermesCli?: unknown[]; chatRules?: unknown; openrpc?: Record<string, string[]>;
+    installerEngine?: string; coreEngine?: string;
   }) => {
     const dir = tree({
       "config/harness-contract-allowlist.json": JSON.stringify({ entries: opts.allow ?? [] }),
       "config/harness-contract-unchecked.json": JSON.stringify(opts.recorded ?? {}),
       "src/lib/updater.ts": `const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {\n  "${PIN}": ${opts.stateRow ?? 20},\n};\n`
         + `const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {\n  "${PIN}": ${opts.agentRow ?? 24},\n};\n`,
-      "install.sh": 'OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"\nHERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-' + "a".repeat(40) + '}"\n',
+      "install.sh": `OPENCLAW_NODE_ENGINE="${opts.installerEngine ?? ">=24.16.0 <25, or >=26.1.0"}"\nHERMES_PIN_COMMIT="\${HERMES_PIN_COMMIT:-${"a".repeat(40)}}"\n`,
       "usage.json": JSON.stringify({ usages: opts.usages, unchecked: opts.unchecked ?? [] }),
       "openclaw.json": JSON.stringify({
-        version: PIN, build: "abc", schemaVersions: { state: 20, agent: 24 }, engines: { node: ">=24.16.0 <25 || >=26.1.0" },
+        version: PIN, build: "abc", schemaVersions: { state: 20, agent: 24 }, engines: { node: opts.coreEngine ?? ">=24.16.0 <25 || >=26.1.0" },
         cli: {
           "": { usage: "Usage: openclaw [options] [command]", canonical: [], aliases: [], positional: [], children: ["config"], options: ["--version"] },
           config: { usage: "Usage: openclaw config [options] [command]", canonical: ["config"], aliases: [], positional: [], children: ["set"], options: [] },
@@ -465,6 +466,25 @@ describe("the checker", () => {
     expect(onPr.code).toBe(0);
     expect(onPr.out).toMatch(/WARN .*expired 2000-01-01/);
     expect(run({ usages: [bad], allow: expired, event: "push" }).code).toBe(1);
+  });
+
+  it("lets install.sh keep a Node floor stricter than the core's, and only that", () => {
+    // 2026.11.3 accepts 24.16.0 again; ClawBox keeps the October 2026 security floor.
+    const stricter = run({ usages: [good], installerEngine: ">=24.22.1 <25, or >=26.12.1" });
+    expect(stricter.code).toBe(0);
+    expect(stricter.out).toMatch(/INFO    openclaw@2026\.10\.3 engine OPENCLAW_NODE_ENGINE — is ">=24\.22\.1 <25 \|\| >=26\.12\.1", stricter than/);
+    expect(stricter.out).not.toMatch(/FAIL .*engine/);
+    // The other way round the guard would pass a Node the core refuses.
+    const looser = run({ usages: [good], installerEngine: ">=24.16.0 <25, or >=26.1.0", coreEngine: ">=24.22.1 <25 || >=26.12.1" });
+    expect(looser.code).toBe(1);
+    expect(looser.out).toMatch(/FAIL    openclaw@2026\.10\.3 engine OPENCLAW_NODE_ENGINE — .*does not accept every Node this does/);
+    // An open-ended clause is not inside a capped one, a dropped `<25` cap is caught, and a
+    // shape the check cannot read fails rather than passing.
+    expect(run({ usages: [good], installerEngine: ">=26.1.0", coreEngine: ">=24.16.0 <25 || >=26.1.0 <27" }).code).toBe(1);
+    expect(run({ usages: [good], installerEngine: ">=24.22.1, or >=26.12.1" }).code).toBe(1);
+    expect(run({ usages: [good], installerEngine: "^24.22.1" }).code).toBe(1);
+    // Equal is silent, as before.
+    expect(run({ usages: [good] }).out).not.toContain("OPENCLAW_NODE_ENGINE");
   });
 
   it("does not let the dashboard's catch-all route vouch for a route that is not there", () => {

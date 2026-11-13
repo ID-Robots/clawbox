@@ -1330,7 +1330,7 @@ OPENCLAW_RETRY=/usr/bin/env
 if [ -n "${SRC_DIR:-}" ] && [ -x "$SRC_DIR/scripts/openclaw-maintenance-retry.sh" ]; then
   OPENCLAW_RETRY="$SRC_DIR/scripts/openclaw-maintenance-retry.sh"
 fi
-OPENCLAW_VERSION="2026.10.9"
+OPENCLAW_VERSION="2026.11.3"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1904,6 +1904,13 @@ PATHEOF
 # Node runtime required"). Every outbound HTTPS call the box makes — ClawBox's
 # own included — runs on this one Node, so a box on 24.16.0–24.22.0 takes the
 # apt transaction below on its next update like a box on 22 did.
+#
+# 2026.11.3 lowered its own `engines.node` back to `>=24.16.0 <25 || >=26.1.0`
+# and calls 24.22.1+/26.12.1+ "strongly recommended for security" (its
+# node-version.mjs prints that warning below them). ClawBox KEEPS the security
+# floor: the reason above is ClawBox's as much as the core's, and every Node
+# this range accepts the core accepts too. The harness-contract check allows a
+# range stricter than the core's, never a looser one.
 OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"
 
 # The table itself, over a VERSION STRING rather than over whatever `node` is on
@@ -8296,9 +8303,11 @@ step_clawkeep_install_pip_user_fallback() {
 # OpenClaw 2026.10.9 holds a reasoning model's answer until the model is done
 # and then hands the chat all of it at once (TASK-2228): ClawBox AI streams its
 # reasoning first, so no answer streamed. The script back-ports the upstream
-# fix (2026.10.10) onto the pinned core's transport, as the user who owns the
-# core, and says what it did. Never fatal: an answer that arrives in one piece
-# is no reason to fail an install or an update.
+# fix (2026.10.10) onto that core's transport, as the user who owns the core,
+# and says what it did. From the 2026.11.3 pin the core streams these answers
+# itself and the script reports "not needed" and writes nothing; it stays for a
+# box that still runs (or is taken back to) 2026.10.9. Never fatal: an answer
+# that arrives in one piece is no reason to fail an install or an update.
 openclaw_reasoning_stream_patch() {
   local script="$PROJECT_DIR/scripts/openclaw-reasoning-stream-patch.mjs"
   if [ ! -f "$script" ]; then

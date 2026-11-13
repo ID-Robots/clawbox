@@ -110,9 +110,44 @@ if (need(oc.hooks, "the plugin hook names (pluginHookNameSet)")) {
   const installer = fs.readFileSync(path.join(repo, "install.sh"), "utf-8");
   const engineLine = installer.split("\n").findIndex((l) => l.startsWith("OPENCLAW_NODE_ENGINE="));
   const ours = /^OPENCLAW_NODE_ENGINE="([^"]*)"/m.exec(installer)?.[1]?.replace(/,\s*or\s+/g, " || ");
+  // ClawBox may ask for MORE than the core does, never less: the installer's
+  // guard must not pass a Node the core refuses, but it may keep a floor the
+  // core only recommends (2026.11.3 accepts 24.16.0 again and calls the
+  // October 2026 security releases, 24.22.1 / 26.12.1, "strongly
+  // recommended"; install.sh keeps them required).
   if (ours !== oc.engines?.node) {
-    fail("openclaw", "engine", "OPENCLAW_NODE_ENGINE", `is "${ours}"; the pinned package.json says engines.node = "${oc.engines?.node}"`, `install.sh:${engineLine + 1}`);
+    if (engineWithin(ours, oc.engines?.node)) {
+      info("openclaw", "engine", "OPENCLAW_NODE_ENGINE", `is "${ours}", stricter than the pinned package.json's engines.node = "${oc.engines?.node}"; every Node it accepts the core accepts too`, `install.sh:${engineLine + 1}`);
+    } else {
+      fail("openclaw", "engine", "OPENCLAW_NODE_ENGINE", `is "${ours}"; the pinned package.json says engines.node = "${oc.engines?.node}" and does not accept every Node this does`, `install.sh:${engineLine + 1}`);
+    }
   }
+}
+
+/**
+ * A Node range of the shape the core publishes (`>=24.16.0 <25 || >=26.1.0`)
+ * as intervals: one `{lo, hi}` per `||` clause, `hi` null when open-ended.
+ * Null for any other shape, which the caller then refuses rather than guesses.
+ */
+function engineIntervals(range) {
+  if (typeof range !== "string" || !range.trim()) return null;
+  const version = (major, minor, patch) => [Number(major), Number(minor ?? 0), Number(patch ?? 0)];
+  const out = [];
+  for (const clause of range.split("||")) {
+    const m = /^\s*>=\s*(\d+)\.(\d+)\.(\d+)\s*(?:<\s*(\d+)(?:\.(\d+)\.(\d+))?\s*)?$/.exec(clause);
+    if (!m) return null;
+    out.push({ lo: version(m[1], m[2], m[3]), hi: m[4] === undefined ? null : version(m[4], m[5], m[6]) });
+  }
+  return out;
+}
+
+/** True when every Node `ours` accepts, `theirs` accepts too (both in engineIntervals' shape). */
+function engineWithin(ours, theirs) {
+  const a = engineIntervals(ours);
+  const b = engineIntervals(theirs);
+  if (!a || !b) return false;
+  const cmp = (x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+  return a.every((x) => b.some((y) => cmp(y.lo, x.lo) <= 0 && (y.hi === null || (x.hi !== null && cmp(x.hi, y.hi) <= 0))));
 }
 
 // ── Hermes ──────────────────────────────────────────────────────────────────
