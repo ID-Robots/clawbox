@@ -1308,7 +1308,7 @@ const table: Record<string, string> = {
   "codingAgent.genMediaFailed": "メディア設定を変更できませんでした。",
   "codingAgent.genMediaHint": "実行はプロジェクトのために、この本体に画像を描かせたり、セリフを音声ファイルに読み上げさせたりできます。1 回の実行につき画像は最大 20 枚、音声は最大 40 本です。画像は ClawBox AI の割り当てから消費され、音声はこの本体の声（ローカル、または別途課金されるクラウド提供者のもの）を使います。",
   "codingAgent.genMediaLabel": "実行に画像と音声の生成を許可",
-  "codingAgent.genMediaLocked": "オフ：ローカル AI 専用ロックがオンです。コーディング実行の画像と音声は ClawBox AI のクラウドで作られるためです。",
+  "codingAgent.genMediaLocked": "オフ：ローカル AI 専用ロックがオンのため、コーディング実行は画像も音声も作りません。",
   "codingAgent.gitCommits": "コミット数: {n}",
   "codingAgent.gitNoRemote": "まだGitHubにありません",
   "codingAgent.githubConnect": "接続",

@@ -1308,7 +1308,7 @@ const table: Record<string, string> = {
   "codingAgent.genMediaFailed": "Impossibile modificare l'impostazione dei media.",
   "codingAgent.genMediaHint": "Un'esecuzione può far disegnare immagini a questo dispositivo e far pronunciare frasi in file audio per il suo progetto: al massimo venti immagini e quaranta clip per esecuzione. Le immagini attingono alla tua quota ClawBox AI; il parlato usa la voce di questo dispositivo, locale o di un fornitore cloud fatturato a parte.",
   "codingAgent.genMediaLabel": "Consenti immagini e voce alle esecuzioni",
-  "codingAgent.genMediaLocked": "Disattivato: il blocco «solo IA locale» è attivo, e immagini e parlato per le esecuzioni di codice sono prodotti dal cloud di ClawBox AI.",
+  "codingAgent.genMediaLocked": "Disattivato: il blocco «solo IA locale» è attivo, quindi le esecuzioni di codice non producono immagini né parlato.",
   "codingAgent.gitCommits": "Commit: {n}",
   "codingAgent.gitNoRemote": "Non ancora su GitHub",
   "codingAgent.githubConnect": "Connetti",

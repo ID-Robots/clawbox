@@ -1308,7 +1308,7 @@ const table: Record<string, string> = {
   "codingAgent.genMediaFailed": "Kunde inte ändra medieinställningen.",
   "codingAgent.genMediaHint": "En körning får låta den här boxen rita bilder och tala in repliker i ljudfiler för sitt projekt — högst tjugo bilder och fyrtio klipp per körning. Bilder tas ur din ClawBox AI-kvot; talet använder boxens röst, lokal eller från en molnleverantör som fakturerar separat.",
   "codingAgent.genMediaLabel": "Låt körningar skapa bilder och tal",
-  "codingAgent.genMediaLocked": "Av: låset ”endast lokal AI” är på, och bilder och tal för kodkörningar görs av ClawBox AI:s moln.",
+  "codingAgent.genMediaLocked": "Av: låset ”endast lokal AI” är på, så kodkörningar gör inga bilder eller tal.",
   "codingAgent.gitCommits": "Antal commits: {n}",
   "codingAgent.gitNoRemote": "Inte på GitHub ännu",
   "codingAgent.githubConnect": "Anslut",

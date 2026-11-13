@@ -1308,7 +1308,7 @@ const table: Record<string, string> = {
   "codingAgent.genMediaFailed": "Could not change the media setting.",
   "codingAgent.genMediaHint": "A run may have this box draw pictures and speak lines into sound files for its project — at most twenty pictures and forty clips per run. Pictures come out of your ClawBox AI allowance; speech uses this box's voice, local or a cloud provider's that bills on its own.",
   "codingAgent.genMediaLabel": "Let runs make pictures and speech",
-  "codingAgent.genMediaLocked": "Off: the local-only AI lock is on, and pictures and speech for coding runs are made by ClawBox AI's cloud.",
+  "codingAgent.genMediaLocked": "Off: the local-only AI lock is on, so coding runs make no pictures or speech.",
   "codingAgent.gitCommits": "Commits: {n}",
   "codingAgent.gitNoRemote": "Not on GitHub yet",
   "codingAgent.githubConnect": "Connect",

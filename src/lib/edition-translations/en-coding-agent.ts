@@ -701,7 +701,7 @@ export const codingAgentEn: Record<string, string> = {
   // synthesis slot the chat shares.
   "codingAgent.genMediaLabel": "Let runs make pictures and speech",
   "codingAgent.genMediaHint": "A run may have this box draw pictures and speak lines into sound files for its project — at most twenty pictures and forty clips per run. Pictures come out of your ClawBox AI allowance; speech uses this box's voice, local or a cloud provider's that bills on its own.",
-  "codingAgent.genMediaLocked": "Off: the local-only AI lock is on, and pictures and speech for coding runs are made by ClawBox AI's cloud.",
+  "codingAgent.genMediaLocked": "Off: the local-only AI lock is on, so coding runs make no pictures or speech.",
   "codingAgent.genMediaFailed": "Could not change the media setting.",
   "codingAgent.realBrowserLabel": "Verify in this box's browser",
   "codingAgent.realBrowserHint": "A run checks its work in the Chromium on this box's screen, which you can watch in the Agent Browser app; off, it uses an invisible browser.",

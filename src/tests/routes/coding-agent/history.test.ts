@@ -85,7 +85,8 @@ describe("GET history", () => {
     expect(body.usage.olderRuns).toBeGreaterThan(0);
     expect(body.usage.total).toBeGreaterThanOrEqual(body.usage.olderRuns + body.usage.evidence);
     expect(typeof body.disk.low).toBe("boolean");
-    expect(body.transcripts.map((t: { label: string }) => t.label)).toEqual(["~/.claude-ds/settings.json", "~/.claude/settings.json"]);
+    // A `local` run's own Claude Code state too (TASK-2501 PR-E).
+    expect(body.transcripts.map((t: { label: string }) => t.label)).toEqual(["~/.claude-ds/settings.json", "~/.claude/settings.json", "~/.claude-ds-local/settings.json"]);
   });
 
   it("has no archive to page or clear any more", () => {

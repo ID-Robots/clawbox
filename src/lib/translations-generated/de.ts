@@ -1308,7 +1308,7 @@ const table: Record<string, string> = {
   "codingAgent.genMediaFailed": "Die Medieneinstellung konnte nicht geändert werden.",
   "codingAgent.genMediaHint": "Ein Lauf darf diese Box Bilder zeichnen und Sätze in Tondateien sprechen lassen, für sein Projekt — höchstens zwanzig Bilder und vierzig Clips pro Lauf. Bilder gehen von Ihrem ClawBox-AI-Kontingent ab; Sprache nutzt die Stimme dieser Box, lokal oder von einem Cloud-Anbieter, der sie gesondert abrechnet.",
   "codingAgent.genMediaLabel": "Läufe dürfen Bilder und Sprache erzeugen",
-  "codingAgent.genMediaLocked": "Aus: Die Sperre „nur lokale KI“ ist aktiv, und Bilder und Sprache für Coding-Läufe entstehen in der Cloud von ClawBox AI.",
+  "codingAgent.genMediaLocked": "Aus: Die Sperre „nur lokale KI“ ist aktiv, daher erstellen Coding-Läufe keine Bilder und keine Sprache.",
   "codingAgent.gitCommits": "Anzahl Commits: {n}",
   "codingAgent.gitNoRemote": "Noch nicht auf GitHub",
   "codingAgent.githubConnect": "Verbinden",

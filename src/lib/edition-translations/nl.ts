@@ -1124,7 +1124,7 @@ export const nl: Record<string, string> = {
   "codingAgent.prBodyIncludesTaskFailed": "Kon niet wijzigen hoeveel van de taak de pull request toont.",
   "codingAgent.genMediaLabel": "Runs mogen afbeeldingen en spraak maken",
   "codingAgent.genMediaHint": "Een run mag deze box afbeeldingen laten tekenen en zinnen in geluidsbestanden laten inspreken voor zijn project — hoogstens twintig afbeeldingen en veertig clips per run. Afbeeldingen gaan van je ClawBox AI-tegoed af; spraak gebruikt de stem van deze box, lokaal of van een cloudaanbieder die apart factureert.",
-  "codingAgent.genMediaLocked": "Uit: de vergrendeling ‘alleen lokale AI’ staat aan, en afbeeldingen en spraak voor coderuns worden gemaakt door de cloud van ClawBox AI.",
+  "codingAgent.genMediaLocked": "Uit: de vergrendeling ‘alleen lokale AI’ staat aan, dus coderuns maken geen afbeeldingen of spraak.",
   "codingAgent.genMediaFailed": "De media-instelling kon niet worden gewijzigd.",
   "codingAgent.realBrowserLabel": "Controleren in de browser van deze box",
   "codingAgent.realBrowserHint": "Een run controleert zijn werk in de Chromium op het scherm van deze box, waar je in de Agentbrowser-app kunt meekijken; uitgeschakeld gebruikt hij een onzichtbare browser.",

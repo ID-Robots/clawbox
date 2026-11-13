@@ -130,6 +130,12 @@ describe("POST /v1/messages", () => {
     const empty = await handleLocalMessages(post("/messages", { messages: [] }), { fetchImpl: vi.fn() });
     expect(empty.status).toBe(400);
     expect((await empty.json()).error.message).toMatch(/at least one message/);
+    // A message with no content is refused as a request, not thrown on.
+    const engine = vi.fn();
+    const nothing = await handleLocalMessages(post("/messages", { messages: [{ role: "user", content: null }] }), { fetchImpl: engine });
+    expect(nothing.status).toBe(400);
+    expect((await nothing.json()).error).toMatchObject({ type: "invalid_request_error", message: expect.stringMatching(/string or a list of blocks/) });
+    expect(engine).not.toHaveBeenCalled();
   });
 
   it("asks the box's engine, with the box's key and the engine's model, and answers a whole message", async () => {
@@ -208,6 +214,41 @@ describe("POST /v1/messages", () => {
     const fetchImpl = vi.fn(async () => new Response(sseBody(["[DONE]"]), { status: 200, headers: { "content-type": "text/event-stream" } }));
     const res = await handleLocalMessages(post("/messages", { stream: true, messages: [{ role: "user", content: "x" }] }), { fetchImpl });
     expect(parseEvents(await res.text()).at(-1)![1]).toMatchObject({ error: { message: expect.stringMatching(/before saying anything/) } });
+  });
+
+  // One network chunk per SSE event, the way an engine writes them. The
+  // finish-only delta and `[DONE]` make no event of their own, and a pull that
+  // passes nothing on is not called again while the reader waits: the stream
+  // has to keep reading through them, or the run hangs on a finished answer.
+  it("keeps reading through chunks that make no event, to the end of the answer", async () => {
+    const enc = new TextEncoder();
+    const frames = [
+      JSON.stringify({ choices: [{ delta: { content: "Done." } }] }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      "[DONE]",
+    ].map((p) => enc.encode(`data: ${p}\n\n`));
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = frames.shift();
+        if (next) controller.enqueue(next);
+        else controller.close();
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const res = await handleLocalMessages(post("/messages", { stream: true, messages: [{ role: "user", content: "x" }] }), { fetchImpl });
+    const evs = parseEvents(await res.text());
+    expect(evs.map(([e]) => e)).toEqual(["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]);
+    expect(evs.at(-2)![1]).toMatchObject({ delta: { stop_reason: "end_turn" } });
+  });
+
+  it("passes on an answer the engine cut off as a failure, never as a whole message", async () => {
+    const fetchImpl = vi.fn(async () => new Response(sseBody([
+      JSON.stringify({ choices: [{ delta: { content: "Half of an ans" } }] }),
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const res = await handleLocalMessages(post("/messages", { stream: true, messages: [{ role: "user", content: "x" }] }), { fetchImpl });
+    const evs = parseEvents(await res.text());
+    expect(evs.at(-1)).toEqual(["error", { type: "error", error: { type: "api_error", message: "The box's engine stopped before finishing its answer." } }]);
+    expect(evs.some(([e]) => e === "message_stop")).toBe(false);
   });
 
   it("maps the engine's refusal — a conversation too long reaches Claude Code as the one it compacts on", async () => {

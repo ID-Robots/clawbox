@@ -1595,7 +1595,11 @@ const HARD_HOME_SUBTREES: readonly string[] = PROTECTED_HOME_DIRS;
  * settings panel can judge a rule too; `fileDenyRules` below is what actually
  * leaves a deny rule out of one run's argv.
  */
-const HARNESS_STATE_SUBTREES: readonly string[] = [".claude", ".claude-ds"];
+//
+// `.claude-ds-local` is a `local` run's own (harnessStateDir, TASK-2501 PR-E):
+// a `~/.claude-ds/**` rule does not reach it, so it is named. No project in it
+// opens (SOFT_HOME_SUBTREES names none), so it is always denied whole.
+const HARNESS_STATE_SUBTREES: readonly string[] = [".claude", ".claude-ds", ".claude-ds-local"];
 
 /**
  * Everything Claude Code's file tools are denied outside the working folder,
@@ -3252,6 +3256,9 @@ function adoptHistoryPolicy(raw: unknown): { policy: HistoryPolicy; rewritten: P
 }
 
 /** What the box keeps of finished runs. Absent means standard — see coding-run-history.ts. */
+/** The providers whose runs are Claude Code, each with a state folder of its own (harnessStateDir). */
+const CLAUDE_CODE_STATE_PROVIDERS = ["clawbox-ai", "anthropic", "local"] as const satisfies readonly CodingProvider[];
+
 export async function getHistoryPolicy(): Promise<HistoryPolicy> {
   const { policy, rewritten } = adoptHistoryPolicy(await configGet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY));
   await rewritten;
@@ -3260,11 +3267,12 @@ export async function getHistoryPolicy(): Promise<HistoryPolicy> {
 
 /**
  * The Claude Code settings files whose transcripts a run leaves behind: the
- * box's own harness folder (ClawBox AI runs) and the default one an Anthropic
- * run uses — harnessStateDir, both ways. One file when both are the same.
+ * box's own harness folder (ClawBox AI runs), the default one an Anthropic
+ * run uses and a `local` run's own — harnessStateDir, every Claude Code way.
+ * One file where two are the same.
  */
 export function harnessSettingsFiles(): string[] {
-  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "settings.json")))];
+  return [...new Set(CLAUDE_CODE_STATE_PROVIDERS.map((p) => path.join(harnessStateDir(p), "settings.json")))];
 }
 
 export interface HistoryRetentionChange {
@@ -5981,9 +5989,9 @@ export interface RunHistorySummary {
   transcripts: HarnessTranscriptState[];
 }
 
-/** The Claude Code folders a run's transcript lands in (both providers'). */
+/** The Claude Code folders a run's transcript lands in (every Claude Code provider's). */
 function harnessTranscriptDirs(): string[] {
-  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "projects")))];
+  return [...new Set(CLAUDE_CODE_STATE_PROVIDERS.map((p) => path.join(harnessStateDir(p), "projects")))];
 }
 
 export async function runHistorySummary(): Promise<RunHistorySummary> {
@@ -7233,7 +7241,12 @@ export function runAllowRules(rules: readonly string[], directory: string | null
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: RunArgsOptions): string[] {
+export function buildRunArgs(given: RunArgsOptions): string[] {
+  // A run on the box's own engine never runs on ultracode (effortOnProvider),
+  // whatever effort reaches here: every start clamps it before recording it,
+  // and this holds for a record from before the clamp too — the read-only
+  // rule's belt and braces, the same way round.
+  const opts: RunArgsOptions = given.provider && given.effort ? { ...given, effort: effortOnProvider(given.provider, given.effort) } : given;
   // Does this run hold the browser and media tools? See runHoldsVisualTools.
   const visual = runHoldsVisualTools(opts.visual);
   // The project's extra servers: a writing run's only (prepareRunMcp hands a
@@ -14050,6 +14063,17 @@ export function requireBaseBranch(raw: unknown): string | null {
   return name;
 }
 
+/**
+ * The effort a run on this provider runs at. A run on the box's own engine
+ * (TASK-2501 PR-E) never runs on ultracode: the engine answers one request at
+ * a time and is asked with thinking off, so the Workflow fan-out would only
+ * queue on it — the same xhigh, without the Workflow tool. Asked by every
+ * start that records an effort: `startRun` (a resume too) and a draft's start.
+ */
+function effortOnProvider(provider: CodingProvider, effort: CodingEffort): CodingEffort {
+  return runsOnLocalEngine(provider) && effort === ULTRACODE_EFFORT ? "xhigh" : effort;
+}
+
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let task = normalizeTask(input.task, isBoxWrittenTask(input));
   /** A Fix CI continuation's place in its chain — see StartRunInput.fixCi. */
@@ -14214,10 +14238,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // (buildRunArgs hands it no Workflow tool). The thinking half stays. The
     // shell reviewer is not read-only and keeps whatever its role resolved.
     if (input.readOnly === true && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
-    // Nor does a run on the box's own engine (TASK-2501 PR-E): the engine
-    // answers one request at a time and is asked with thinking off, so the
-    // fan-out would only queue on it. The same xhigh, without the Workflow tool.
-    if (runsOnLocalEngine(settings.provider) && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
+    // Nor does a run on the box's own engine (effortOnProvider).
+    settings.effort = effortOnProvider(settings.provider, settings.effort);
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
     // that run's account and folder — the automatic review pass and every
@@ -15314,6 +15336,9 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     const settings = await readRunSettings();
     const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== run.id).length;
     run.cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: writersLive + 1, onBattery: await onBatteryPower() });
+    // The owner's effort, as the draft's provider runs it — before it is
+    // recorded and before spawnOrSettle builds the arguments from it.
+    settings.effort = effortOnProvider(run.provider, settings.effort);
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };

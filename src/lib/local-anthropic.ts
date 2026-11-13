@@ -104,23 +104,38 @@ function textOf(content: unknown): string {
     .join("\n");
 }
 
-/** A tool result's content as the one string a `tool` message carries. */
-function toolResultText(block: AnthropicBlock): string {
+/** Said in a tool result where a picture it returned is shown to the engine in the turn after. */
+export const PICTURE_FOLLOWS = "[The tool returned a picture here; it is shown in the next message.]";
+
+type ImagePart = { type: "image_url"; image_url: { url: string } };
+
+/**
+ * A tool result's content as the one string a `tool` message carries, and the
+ * pictures in it an engine that sees is shown after: an OpenAI `tool` message
+ * holds text only, so a picture a tool returned (Claude Code's Read of a
+ * screenshot) goes in the user turn that follows the results.
+ */
+function toolResult(block: AnthropicBlock, target: EngineTarget): { text: string; images: ImagePart[] } {
   const parts: string[] = [];
+  const images: ImagePart[] = [];
   if (typeof block.content === "string") parts.push(block.content);
   else if (Array.isArray(block.content)) {
     for (const b of block.content as AnthropicBlock[]) {
       if (!b || typeof b !== "object") continue;
       if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
-      else if (b.type === "image") parts.push(PICTURE_NOT_SEEN);
+      else if (b.type === "image") {
+        const image = imagePart(b, target);
+        if (image) images.push(image);
+        parts.push(image ? PICTURE_FOLLOWS : PICTURE_NOT_SEEN);
+      }
     }
   }
   const text = parts.join("\n");
   // An OpenAI tool message has no error flag: the words carry it.
-  return block.is_error === true ? `Error: ${text || "the tool failed"}` : text;
+  return { text: block.is_error === true ? `Error: ${text || "the tool failed"}` : text, images };
 }
 
-function imagePart(block: AnthropicBlock, target: EngineTarget): { type: "image_url"; image_url: { url: string } } | null {
+function imagePart(block: AnthropicBlock, target: EngineTarget): ImagePart | null {
   if (!target.imageInput) return null;
   const s = block.source;
   if (!s) return null;
@@ -134,13 +149,20 @@ function imagePart(block: AnthropicBlock, target: EngineTarget): { type: "image_
 function userMessages(content: string | AnthropicBlock[], target: EngineTarget): ChatMessage[] {
   if (typeof content === "string") return [{ role: "user", content }];
   const out: ChatMessage[] = [];
-  const parts: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [];
+  const parts: Array<{ type: "text"; text: string } | ImagePart> = [];
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
     if (block.type === "tool_result") {
       // An OpenAI `tool` message must follow the assistant turn that called
       // it, before any user text: every result comes first, in its order.
-      out.push({ role: "tool", tool_call_id: String(block.tool_use_id ?? ""), content: toolResultText(block) });
+      const callId = String(block.tool_use_id ?? "");
+      const result = toolResult(block, target);
+      out.push({ role: "tool", tool_call_id: callId, content: result.text });
+      // Its pictures, for an engine that sees: in the user turn after the
+      // results, each named by the call it came from.
+      if (result.images.length > 0) {
+        parts.push({ type: "text", text: `The ${result.images.length === 1 ? "picture" : "pictures"} tool call ${callId} returned:` }, ...result.images);
+      }
     } else if (block.type === "text" && typeof block.text === "string") {
       parts.push({ type: "text", text: block.text });
     } else if (block.type === "image") {
@@ -220,6 +242,11 @@ export function anthropicToChat(req: AnthropicRequest, target: EngineTarget): Tr
       continue;
     }
     started = true;
+    // Checked before either is read: `content: null` would otherwise throw
+    // inside the translation instead of being refused as a request.
+    if (typeof m.content !== "string" && !Array.isArray(m.content)) {
+      return { ok: false, error: "messages: every message's content must be a string or a list of blocks." };
+    }
     if (m.role === "user") messages.push(...userMessages(m.content, target));
     else if (m.role === "assistant") {
       const a = assistantMessage(m.content);
@@ -444,6 +471,7 @@ export class ChatToAnthropicStream {
   private index = 0;
   private textOpen = false;
   private finish: unknown = null;
+  private done = false;
   private usage = { input_tokens: 0, output_tokens: 0 };
   private calls = new Map<number, { id: string; name: string; args: string }>();
   private failed: string | null = null;
@@ -483,9 +511,21 @@ export class ChatToAnthropicStream {
     return this.started;
   }
 
+  /**
+   * Did the engine say its answer is over — a `finish_reason`, or `[DONE]`?
+   * A stream that ends before either was cut off, not finished: the route
+   * answers that as an error rather than as a whole message.
+   */
+  get completed(): boolean {
+    return this.done || this.finish !== null;
+  }
+
   /** One `data:` payload from the engine; answers the events it makes. */
   push(payload: string): string[] {
-    if (payload.trim() === "[DONE]") return [];
+    if (payload.trim() === "[DONE]") {
+      this.done = true;
+      return [];
+    }
     let chunk: ChatChunk;
     try {
       chunk = JSON.parse(payload) as ChatChunk;
