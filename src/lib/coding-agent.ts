@@ -167,9 +167,19 @@ import {
   offeredProviders,
   resolveRunProvider,
   runsOnCodex,
+  runsOnLocalEngine,
+  lockedConnectedProviders,
+  lockedDefaultProvider,
+  lockedProviderRefusal,
+  providersUnderLock,
   DEFAULT_OPENAI_MODEL,
   type CodingProvider,
 } from "@/lib/coding-provider";
+// The local-only AI lock (TASK-2501), read by its stored value and FAILING
+// CLOSED, and the box's own engine a `local` run answers from (PR-E).
+import { cloudAiLockOn } from "@/lib/feature-engine";
+import { localCodingEngine } from "@/lib/local-anthropic-route";
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { getAnthropicConnection, verifyAnthropicKey, type AnthropicSource } from "@/lib/coding-anthropic";
 import {
   buildCodexArgs,
@@ -425,6 +435,7 @@ import {
   ROLE_AUTO,
   roleMaxTurns,
   roleModelsFrom,
+  roleModelsUnderLock,
   roleModelsView,
   type ModelRole,
   type RoleModels,
@@ -1344,6 +1355,9 @@ export const HELPER_MODEL: Readonly<Record<CodingProvider, string>> = {
   // A Codex run is never handed `--agents` (Codex has no such flag); the entry
   // is the provider's economy model so the table stays whole.
   openai: "gpt-5.6-luna",
+  // The alias the wrapper fills with the engine's one model
+  // (ANTHROPIC_DEFAULT_HAIKU_MODEL on the `local` branch of scripts/claude-ds).
+  local: "haiku",
 };
 
 /** The helpers that run a command: a read-only run has no shell to hand them. */
@@ -2541,6 +2555,16 @@ export interface CodingAgentStatus {
   providers: readonly CodingProvider[];
   /** The providers the owner connected to the coding agent (a subset of `providers`, never empty): what a team's roles may be pinned to. */
   connectedProviders: CodingProvider[];
+  /**
+   * The local-only AI lock (TASK-2501): on, every run is on the box's own
+   * engine (`provider` reads `local`, `providers` and `connectedProviders`
+   * hold it alone) and no run draws pictures or speaks clips
+   * (`generateMedia` reads false). The stored choices are kept, and come back
+   * when the lock is lifted.
+   */
+  cloudAiLocked: boolean;
+  /** The model a `local` run answers on (the box's engine), or null when the box has no engine fit for a run. */
+  localEngineModel: string | null;
   /** How hard a run thinks per turn. */
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
@@ -2987,6 +3011,9 @@ export function harnessStateDir(provider: CodingProvider): string {
   // An `openai` run is Codex, whose state is the coding agent's own CODEX_HOME
   // under the box's data folder (src/lib/coding-openai.ts) — never ~/.codex.
   if (runsOnCodex(provider)) return codexHome();
+  // A `local` run keeps a state of its own: its settings carry the deny rules
+  // the wrapper writes for it (scripts/claude-ds), which are not ClawBox AI's.
+  if (runsOnLocalEngine(provider)) return process.env.CLAUDE_DS_LOCAL_CONFIG_DIR || path.join(homeDir(), ".claude-ds-local");
   return process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
 }
 
@@ -3040,6 +3067,17 @@ export async function getRoleModels(): Promise<RoleModels> {
 }
 
 /**
+ * The per-role choices a run STARTS with: the stored ones, and under the
+ * local-only AI lock without any role pinned to a cloud provider
+ * (`roleModelsUnderLock`). Never written back — the settings still show and
+ * edit what the owner stored.
+ */
+async function getRunRoleModels(): Promise<RoleModels> {
+  const [roles, locked] = await Promise.all([getRoleModels(), cloudAiLockOn()]);
+  return locked ? roleModelsUnderLock(roles) : roles;
+}
+
+/**
  * The owner's edit to the per-role choices, checked WHOLE before anything is
  * written — the enable route calls `checkRoleModelsPatch` in its
  * refuse-before-any-write block and this after it.
@@ -3074,20 +3112,22 @@ export async function checkRoleModelsPatch(patch: unknown): Promise<string | nul
  * verdict the spawn gate reaches for that provider — nothing new is checked.
  */
 export async function teamRoleModelMap(): Promise<TeamRoleModelMap> {
-  const config = await configGetAll();
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
   const readiness = await readinessWith(
     config.clawai_token,
     config[HARNESS_FAULT_CONFIG_KEY],
-    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+    lockedDefaultProvider(codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]), locked),
+    locked,
   );
-  return roleModelMapFrom(config, readiness);
+  return roleModelMapFrom(config, readiness, locked);
 }
 
 /** The map off one config snapshot and the readiness already worked out from it — so the status pays for neither twice. */
-function roleModelMapFrom(config: Record<string, unknown>, readiness: CodingHarnessReadiness): TeamRoleModelMap {
-  const ownerProvider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
+function roleModelMapFrom(config: Record<string, unknown>, readiness: CodingHarnessReadiness, locked: boolean): TeamRoleModelMap {
+  const ownerProvider = lockedDefaultProvider(codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]), locked);
   const ownerEffort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
-  const stored = roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY]);
+  const storedRoles = roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY]);
+  const stored = locked ? roleModelsUnderLock(storedRoles) : storedRoles;
   const shared = sharedProblems(readiness);
   const map = {} as TeamRoleModelMap;
   for (const role of MODEL_ROLES) {
@@ -4084,11 +4124,12 @@ export async function clearHarnessFault(): Promise<void> {
 }
 
 export async function checkReadiness(): Promise<CodingHarnessReadiness> {
-  const config = await configGetAll();
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
   return readinessWith(
     config.clawai_token,
     config[HARNESS_FAULT_CONFIG_KEY],
-    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+    lockedDefaultProvider(codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]), locked),
+    locked,
   );
 }
 
@@ -4120,8 +4161,8 @@ const CODEX_MISSING =
  * unconnected on the other. `ready` is the box's half plus the DEFAULT
  * provider's, because that is the run a caller who names nothing gets.
  */
-async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope] = await Promise.all([
+async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider, locked: boolean): Promise<CodingHarnessReadiness> {
+  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope, localEngine] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
@@ -4130,6 +4171,9 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     // Cached for a minute inside the module, so a status poll pays for the bus
     // round trip at most once a minute.
     probeSystemdRun(),
+    // The box's own engine, for `local` (TASK-2501 PR-E): a store read, and
+    // for an Ollama model one `show` — no inference.
+    localCodingEngine(),
   ]);
   const claudeInstalled = claudePath !== null;
   const capabilityDropAvailable = setprivPath !== null;
@@ -4170,6 +4214,10 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   const faultProblem = fault ? harnessFaultProblem(fault) : null;
   if (faultProblem) shared.push(faultProblem);
   const credentialProblem = (id: CodingProvider): string[] => {
+    // Under the local-only AI lock a cloud provider cannot run at all, whatever
+    // it holds: the lock's words, before any credential's.
+    if (locked && !providersUnderLock(true).includes(id)) return [lockedProviderRefusal(id)];
+    if (runsOnLocalEngine(id)) return localEngine.ok ? [] : [localEngine.error];
     if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
     if (id === "openai") {
       // The CLI first: a connected account with nothing to run it on is the
@@ -4234,7 +4282,10 @@ function sharedProblems(readiness: CodingHarnessReadiness): string[] {
 
 /** The owner's default provider. Anything unrecognised reads as ClawBox AI. */
 export async function getCodingProvider(): Promise<CodingProvider> {
-  return codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
+  const [stored, locked] = await Promise.all([configGet(CODING_AGENT_PROVIDER_CONFIG_KEY), cloudAiLockOn()]);
+  // Under the local-only AI lock the box's engine, whatever is stored: the
+  // stored choice is kept for the day the lock is lifted.
+  return lockedDefaultProvider(codingProviderFrom(stored), locked);
 }
 
 /**
@@ -4248,6 +4299,9 @@ export async function getCodingProvider(): Promise<CodingProvider> {
 export async function setCodingProvider(provider: string): Promise<CodingProvider> {
   if (!isCodingProvider(provider)) {
     throw new CodingAgentError("invalid", `Provider must be one of: ${CODING_PROVIDERS.join(", ")}.`);
+  }
+  if (!providersUnderLock(await cloudAiLockOn()).includes(provider)) {
+    throw new CodingAgentError("invalid", lockedProviderRefusal(provider));
   }
   await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, provider);
   return provider;
@@ -4271,6 +4325,9 @@ export async function setConnectedProviders(raw: unknown): Promise<{ providers: 
   if (raw.length === 0) {
     throw new CodingAgentError("invalid", "At least one provider must stay connected: runs need an account to start on.");
   }
+  const allowed = providersUnderLock(await cloudAiLockOn());
+  const refused = providers.find((id) => !allowed.includes(id));
+  if (refused) throw new CodingAgentError("invalid", lockedProviderRefusal(refused));
   await configSet(CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY, providers);
   const current = codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
   if (!providers.includes(current)) await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, providers[0]);
@@ -4290,8 +4347,9 @@ export async function setConnectedProviders(raw: unknown): Promise<{ providers: 
 
 /** The connected providers as stored (the default provider alone on a record from before the list). */
 export async function getConnectedProviders(): Promise<CodingProvider[]> {
-  const config = await configGetAll();
-  return connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]));
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
+  // Under the lock the box's engine alone: what a role may be pinned to then.
+  return lockedConnectedProviders(connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY])), locked);
 }
 
 /**
@@ -4334,6 +4392,16 @@ function normalizeRequestedModel(provider: unknown, raw: unknown): string | null
  * "Claude Code is not installed": a sentence for the owner, not a retry.
  */
 async function assertProviderReady(provider: CodingProvider): Promise<void> {
+  // The lock is checked here too, and last before anything spawns: whatever
+  // route a cloud provider reached this far by, the run does not start.
+  if (!providersUnderLock(await cloudAiLockOn()).includes(provider)) {
+    throw new CodingAgentError("not_ready", lockedProviderRefusal(provider));
+  }
+  if (runsOnLocalEngine(provider)) {
+    const engine = await localCodingEngine();
+    if (!engine.ok) throw new CodingAgentError("not_ready", engine.error);
+    return;
+  }
   if (provider === "anthropic") {
     const anthropic = await getAnthropicConnection();
     if (!anthropic.connected) throw new CodingAgentError("not_ready", ANTHROPIC_MISSING);
@@ -4354,16 +4422,20 @@ async function assertProviderReady(provider: CodingProvider): Promise<void> {
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   // One read of config.json for every setting the status carries — the app
   // polls this, and each getter above opens and parses the file on its own.
-  const config = await configGetAll();
+  // The lock is its own read: it fails CLOSED on a store it cannot read,
+  // which a snapshot that came back empty cannot say.
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
   const enabled = codingAgentEnabledFrom(config[CODING_AGENT_CONFIG_KEY]);
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
-  const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
-  const [readiness, projectFolders] = await Promise.all([
-    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
+  const storedProvider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
+  const provider = lockedDefaultProvider(storedProvider, locked);
+  const [readiness, projectFolders, localEngine] = await Promise.all([
+    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider, locked),
     readFolderNames(defaultDirectory),
+    localCodingEngine(),
   ]);
-  const connectedProviders = connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider);
+  const connectedProviders = lockedConnectedProviders(connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], storedProvider), locked);
   return {
     enabled,
     // Off the SAME config snapshot as everything else here — the app polls
@@ -4392,8 +4464,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // A retired value is rewritten in the background; the status does not wait.
     historyRetention: adoptHistoryPolicy(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY]).policy.mode,
     historyLiveKept: MAX_RUNS_KEPT,
-    // One switch over the two keys: on only when both are.
-    generateMedia: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]) && generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
+    // One switch over the two keys: on only when both are. Off under the
+    // local-only AI lock: pictures and clips are drawn by ClawBox AI's cloud.
+    generateMedia: !locked && generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]) && generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
     teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels
@@ -4421,8 +4494,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
       openaiConnected: readiness.openaiConnected,
       connected: connectedProviders,
       defaultProvider: provider,
+      locked,
     }),
     connectedProviders,
+    cloudAiLocked: locked,
+    localEngineModel: localEngine.ok ? localEngine.engine.model : null,
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with
@@ -4434,7 +4510,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // never chose answers all "auto" and runs on the role defaults.
     roleModels: roleModelsView(roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY])),
     // Off the same snapshot and the readiness above: no second probe per poll.
-    roleModelMap: roleModelMapFrom(config, readiness),
+    roleModelMap: roleModelMapFrom(config, readiness, locked),
     projectFolders,
     // The ceiling a writing run gets — a safety net the panel no longer
     // edits (SCA3), so no range travels with it.
@@ -7282,7 +7358,8 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // outranks the whole-server approval above.
     // A read-only run, which has Bash for read-only git, is refused all of it
     // and every mutating git command too, in a team or not (READ_ONLY_BASH_DENYLIST).
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? READ_ONLY_BASH_DENYLIST : [...BASH_KILL_DENYLIST, ...(opts.run?.team ? TEAM_MERGE_DENYLIST : [])]), ...(mcp?.disallowedTools ?? []));
+    // A `local` run is refused the web tools by rule as well (LOCAL_DENIED_TOOLS).
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? READ_ONLY_BASH_DENYLIST : [...BASH_KILL_DENYLIST, ...(opts.run?.team ? TEAM_MERGE_DENYLIST : [])]), ...(mcp?.disallowedTools ?? []), ...(opts.provider && runsOnLocalEngine(opts.provider) ? LOCAL_DENIED_TOOLS : []));
   }
   return args;
 }
@@ -7685,6 +7762,28 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
+/**
+ * Where a `local` run's wrapper finds the box's Messages-API route (TASK-2501
+ * PR-E): the Local AI proxy's loopback authority, which knows the port the
+ * web server listens on. The wrapper asks the route itself for the engine's
+ * model and window, and derives the token that opens it from the box's own
+ * Local AI token (scripts/claude-ds) — so nothing here is async, and the
+ * engine's own key is never anywhere near a run.
+ */
+export function localRunBaseUrl(): string {
+  return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/anthropic`;
+}
+
+/**
+ * The Claude Code tools a `local` run is DENIED by rule, beside not being
+ * listed in `--tools` (CLAUDE_TOOLS): WebSearch is a tool Anthropic's own
+ * servers run, which the box's engine cannot, and WebFetch would carry what a
+ * run reads off the web through a model's summary the lock exists to keep
+ * local. The wrapper writes the same pair into the local harness's settings
+ * (scripts/claude-ds), so a terminal session on `local` is refused them too.
+ */
+export const LOCAL_DENIED_TOOLS: readonly string[] = Object.freeze(["WebSearch", "WebFetch"]);
+
 export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null; appId?: string | null } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
@@ -7728,6 +7827,16 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   if (runsOnCodex(provider)) {
     for (const key of Object.keys(env)) if (key.startsWith("CLAUDE_") || key === "CLAWBOX_AI_PROXY_URL") delete env[key];
     env.CODEX_HOME = codexHome();
+  }
+  // A `local` run is Claude Code on the box's own engine: no ClawBox AI proxy,
+  // no model override (the engine serves one model, which the wrapper puts in
+  // every slot), no ClawBox AI state folder. What the wrapper needs to reach
+  // the engine's route comes from the box, here, not from anything inherited.
+  if (runsOnLocalEngine(provider)) {
+    for (const key of ["CLAWBOX_AI_PROXY_URL", "CLAUDE_DS_MODEL", "CLAUDE_DS_SMALL_MODEL", "CLAUDE_DS_CONFIG_DIR"]) delete env[key];
+    const localDir = process.env.CLAUDE_DS_LOCAL_CONFIG_DIR;
+    if (typeof localDir === "string" && localDir) env.CLAUDE_DS_LOCAL_CONFIG_DIR = localDir;
+    env.CLAUDE_DS_LOCAL_BASE_URL = localRunBaseUrl();
   }
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
@@ -9644,6 +9753,9 @@ async function noteOwnCommit(run: CodingRun): Promise<void> {
  * picture is cosmetic where a run that waited on one is not.
  */
 async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon: boolean }> {
+  // The icon is drawn by ClawBox AI's cloud: never under the local-only AI
+  // lock (TASK-2501), not even for a run started before the owner turned it on.
+  if (await cloudAiLockOn()) return { icon: "", favicon: false };
   // The PROJECT's folder name, never the worktree's — a worktree is named
   // after the run, and the icon is one per project. The picture itself is
   // still drawn into `run.directory`, so the run can link to a favicon that
@@ -14087,7 +14199,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // session was opened on (applyProviderChoice already carried them) and
     // takes only the effort.
     if (modelRole) {
-      const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRoleModels());
+      const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRunRoleModels());
       settings.effort = role.effort;
       // A reading role's step cap (ROLE_DEFAULTS.turnsCap): the safety net
       // (DEFAULT_MAX_TURNS) is sized for the worker that writes.
@@ -14102,6 +14214,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // (buildRunArgs hands it no Workflow tool). The thinking half stays. The
     // shell reviewer is not read-only and keeps whatever its role resolved.
     if (input.readOnly === true && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
+    // Nor does a run on the box's own engine (TASK-2501 PR-E): the engine
+    // answers one request at a time and is asked with thinking off, so the
+    // fan-out would only queue on it. The same xhigh, without the Workflow tool.
+    if (runsOnLocalEngine(settings.provider) && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
     // that run's account and folder — the automatic review pass and every
@@ -14458,24 +14574,27 @@ interface RunSettings {
 async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvider> {
   const owner = await getCodingProvider();
   if (!role) return owner;
-  return resolveRoleRun(role, owner, defaultModelForProvider(owner), DEFAULT_EFFORT, await getRoleModels()).provider;
+  return resolveRoleRun(role, owner, defaultModelForProvider(owner), DEFAULT_EFFORT, await getRunRoleModels()).provider;
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules, locked] = await Promise.all([
     getCodingProvider(), getEffort(), getMaxTurns(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
     getAllowRules(allowRuleContext()),
+    cloudAiLockOn(),
   ]);
   return {
     provider,
     model: defaultModelForProvider(provider),
     effort,
     maxTurns,
-    generateImages,
-    generateAudio,
+    // Pictures and clips are drawn by ClawBox AI's cloud: none under the
+    // local-only AI lock (TASK-2501), whatever the owner's switch says.
+    generateImages: generateImages && !locked,
+    generateAudio: generateAudio && !locked,
     reviewPass,
     allowRules,
   };
@@ -14500,6 +14619,12 @@ async function applyProviderChoice(
   const fallback = !named && inherited ? inherited.provider : settings.provider;
   const resolved = resolveRunProvider(input.provider, input.model, fallback);
   if (!resolved.ok) throw new ProviderChoiceError(resolved.error);
+  // Under the local-only AI lock only the box's engine runs: a cloud provider
+  // the caller named — or the one a resumed run was opened on — is refused in
+  // words, never moved to the engine behind the caller's back.
+  if (!providersUnderLock(await cloudAiLockOn()).includes(resolved.provider)) {
+    throw new ProviderChoiceError(lockedProviderRefusal(resolved.provider));
+  }
   // The SAME "the caller named nothing" test the provider half uses, and for
   // the same reason: a client that always serialises the field sends
   // `"model": null`, which resolveRunProvider reads as unnamed. Tested only

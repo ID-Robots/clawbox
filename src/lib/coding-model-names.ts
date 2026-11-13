@@ -18,6 +18,9 @@ import { isRetiredClawboxAiChatModel } from "@/lib/clawbox-ai-retired-models";
 
 const NAMES: Readonly<Record<string, string>> = {
   "deepseek-v4-flash": "DeepSeek Flash",
+  // A `local` run's record before its init event names the engine's own model
+  // (LOCAL_ENGINE_MODEL in coding-provider.ts).
+  "local-engine": "Local engine",
   "claude-opus-5-5": "Opus 5.5",
   "claude-fable-5-2": "Fable 5.2",
   "claude-fable-5-1": "Fable 5.1",
