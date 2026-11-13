@@ -2134,7 +2134,7 @@ export const it: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "Nessun server vocale salvato.",
   "localModels.sttEndpoint.setUp": "Aggiungi un server",
   "localModels.sttEndpoint.baseUrl": "Indirizzo del server",
-  "localModels.sttEndpoint.baseUrlHint": "La radice /v1 del server, su questo box o nella tua rete locale, per esempio http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "La radice /v1 del server, su questo box o nella tua rete locale, per esempio http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Modello",
   "localModels.sttEndpoint.modelHint": "Lascia vuoto per whisper-1.",
   "localModels.sttEndpoint.apiKey": "Chiave API (facoltativa)",
@@ -2161,7 +2161,7 @@ export const it: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "Impossibile raggiungere il server. Controlla l'indirizzo e che sia in esecuzione.",
   "localModels.sttEndpoint.error.unauthorized": "Il server ha rifiutato la chiave API.",
   "localModels.sttEndpoint.error.addressRefused": "Il server vocale deve essere su questo box o nella tua rete locale, non su internet.",
-  "localModels.sttEndpoint.error.baseUrl": "Inserisci un indirizzo http:// o https://, per esempio http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Inserisci un indirizzo http:// o https://, per esempio http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "Il nome del modello deve essere una riga di massimo 200 caratteri.",
   "localModels.sttEndpoint.error.apiKey": "La chiave API deve essere una riga senza spazi.",
   "localModels.sttEndpoint.error.badResponse": "La risposta del server non è quella di un server di trascrizione vocale.",

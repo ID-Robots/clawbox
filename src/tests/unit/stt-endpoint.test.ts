@@ -21,20 +21,20 @@ import {
   STT_ENDPOINT_DEFAULT_MODEL,
 } from "@/lib/stt-endpoint";
 
-const RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" };
+const RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
 const AUDIO = { file: new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" }), name: "recording.webm" };
-const lanLookup = async () => [{ address: "192.168.1.20" }];
+const lanLookup = async () => [{ address: "192.168.1.20" }]; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 describe("isLanAddress", () => {
-  it.each(["127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.7.3", "100.64.0.7", "::1", "fd00::1", "::ffff:192.168.1.2"])(
+  it.each(["127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.7.3", "100.64.0.7", "::1", "fd00::1", "::ffff:192.168.1.2"])( // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
     "admits %s",
     (ip) => expect(isLanAddress(ip)).toBe(true),
   );
-  it.each(["8.8.8.8", "1.1.1.1", "169.254.169.254", "fe80::1", "0.0.0.0", "224.0.0.1", "ff02::1", "2606:4700::1", "::ffff:8.8.8.8", "not-an-ip"])(
+  it.each(["8.8.8.8", "1.1.1.1", "169.254.169.254", "fe80::1", "0.0.0.0", "224.0.0.1", "ff02::1", "2606:4700::1", "::ffff:8.8.8.8", "not-an-ip"])( // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
     "refuses %s",
     (ip) => expect(isLanAddress(ip)).toBe(false),
   );
@@ -42,14 +42,14 @@ describe("isLanAddress", () => {
 
 describe("normalizeSttEndpointUrl and validation", () => {
   it("keeps a LAN or loopback address, without its trailing slash", () => {
-    expect(normalizeSttEndpointUrl("http://192.168.1.20:8000/v1/")).toBe("http://192.168.1.20:8000/v1");
-    expect(normalizeSttEndpointUrl("https://[fd00::5]:9000/v1")).toBe("https://[fd00::5]:9000/v1");
+    expect(normalizeSttEndpointUrl("http://192.168.1.20:8000/v1/")).toBe("http://192.168.1.20:8000/v1"); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+    expect(normalizeSttEndpointUrl("https://[fd00::5]:9000/v1")).toBe("https://[fd00::5]:9000/v1"); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
     // A name is resolved when it is used.
     expect(normalizeSttEndpointUrl("http://asr.lan:8000/v1")).toBe("http://asr.lan:8000/v1");
   });
 
   it("refuses a public or metadata literal, credentials, a query and other schemes", () => {
-    for (const raw of ["http://8.8.8.8/v1", "http://169.254.169.254/v1", "http://u:p@10.0.0.2/v1", "http://10.0.0.2/v1?x=1", "ftp://10.0.0.2/v1", ""]) {
+    for (const raw of ["http://8.8.8.8/v1", "http://169.254.169.254/v1", "http://u:p@10.0.0.2/v1", "http://10.0.0.2/v1?x=1", "ftp://10.0.0.2/v1", ""]) { // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
       expect(normalizeSttEndpointUrl(raw)).toBeNull();
     }
   });
@@ -57,11 +57,11 @@ describe("normalizeSttEndpointUrl and validation", () => {
   it("names a public address as refused, a malformed one as invalid, and defaults the model", () => {
     expect(validateSttEndpointInput({ baseUrl: "http://8.8.8.8/v1" })).toMatchObject({ ok: false, code: "address_refused" });
     expect(validateSttEndpointInput({ baseUrl: "nonsense" })).toMatchObject({ ok: false, code: "invalid_base_url" });
-    expect(validateSttEndpointInput({ baseUrl: "http://10.0.0.2/v1", model: "a\nb" })).toMatchObject({ ok: false, code: "invalid_model" });
-    expect(validateSttEndpointInput({ baseUrl: "http://10.0.0.2/v1", apiKey: "two words" })).toMatchObject({ ok: false, code: "invalid_api_key" });
-    expect(validateSttEndpointInput({ baseUrl: "http://10.0.0.2/v1", model: "", apiKey: " k " })).toEqual({
+    expect(validateSttEndpointInput({ baseUrl: "http://10.0.0.2/v1", model: "a\nb" })).toMatchObject({ ok: false, code: "invalid_model" }); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+    expect(validateSttEndpointInput({ baseUrl: "http://10.0.0.2/v1", apiKey: "two words" })).toMatchObject({ ok: false, code: "invalid_api_key" }); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+    expect(validateSttEndpointInput({ baseUrl: "http://10.0.0.2/v1", model: "", apiKey: " k " })).toEqual({ // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
       ok: true,
-      value: { baseUrl: "http://10.0.0.2/v1", model: STT_ENDPOINT_DEFAULT_MODEL },
+      value: { baseUrl: "http://10.0.0.2/v1", model: STT_ENDPOINT_DEFAULT_MODEL }, // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
       apiKey: "k",
       clearApiKey: false,
     });
@@ -79,14 +79,14 @@ describe("endpointHostRefusal (at use)", () => {
   it("admits loopback names and LAN literals without a lookup", async () => {
     const lookup = vi.fn();
     expect(await endpointHostRefusal("http://localhost:9000/v1", lookup)).toBeNull();
-    expect(await endpointHostRefusal("http://10.0.0.4/v1", lookup)).toBeNull();
+    expect(await endpointHostRefusal("http://10.0.0.4/v1", lookup)).toBeNull(); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
     expect(lookup).not.toHaveBeenCalled();
   });
 
   it("refuses a name that resolves outside the network, even once", async () => {
-    expect(await endpointHostRefusal("http://asr.example/v1", async () => [{ address: "192.168.1.5" }, { address: "93.184.216.34" }]))
+    expect(await endpointHostRefusal("http://asr.example/v1", async () => [{ address: "192.168.1.5" }, { address: "93.184.216.34" }])) // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
       .toMatch(/outside the local network/);
-    expect(await endpointHostRefusal("http://asr.example/v1", async () => [{ address: "192.168.1.5" }])).toBeNull();
+    expect(await endpointHostRefusal("http://asr.example/v1", async () => [{ address: "192.168.1.5" }])).toBeNull(); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
   });
 
   it("fails closed on a name that does not resolve and on a metadata name", async () => {

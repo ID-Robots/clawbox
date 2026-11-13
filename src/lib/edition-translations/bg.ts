@@ -2109,7 +2109,7 @@ export const bg: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "Няма запазен сървър за реч.",
   "localModels.sttEndpoint.setUp": "Добави сървър",
   "localModels.sttEndpoint.baseUrl": "Адрес на сървъра",
-  "localModels.sttEndpoint.baseUrlHint": "Коренът /v1 на сървъра, на тази кутия или в локалната ви мрежа, например http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "Коренът /v1 на сървъра, на тази кутия или в локалната ви мрежа, например http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Модел",
   "localModels.sttEndpoint.modelHint": "Оставете празно за whisper-1.",
   "localModels.sttEndpoint.apiKey": "API ключ (по избор)",
@@ -2136,7 +2136,7 @@ export const bg: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "Сървърът не е достъпен. Проверете адреса и дали работи.",
   "localModels.sttEndpoint.error.unauthorized": "Сървърът отказа API ключа.",
   "localModels.sttEndpoint.error.addressRefused": "Сървърът за реч трябва да е на тази кутия или в локалната ви мрежа, не в интернет.",
-  "localModels.sttEndpoint.error.baseUrl": "Въведете адрес с http:// или https://, например http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Въведете адрес с http:// или https://, например http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "Името на модела трябва да е един ред до 200 знака.",
   "localModels.sttEndpoint.error.apiKey": "API ключът трябва да е един ред без интервали.",
   "localModels.sttEndpoint.error.badResponse": "Отговорът на сървъра не е като на сървър за реч към текст.",

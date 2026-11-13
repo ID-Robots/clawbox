@@ -1053,7 +1053,7 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
           provider: "elevenlabs",
           providers: {
             "tts-local-cli": local,
-            openai: { baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" },
+            openai: { baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" }, // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
             elevenlabs: { apiKey: "el-own" },
             microsoft: { enabled: true },
           },

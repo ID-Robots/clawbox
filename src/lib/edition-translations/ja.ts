@@ -2123,7 +2123,7 @@ export const ja: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "音声サーバーは保存されていません。",
   "localModels.sttEndpoint.setUp": "サーバーを追加",
   "localModels.sttEndpoint.baseUrl": "サーバーのアドレス",
-  "localModels.sttEndpoint.baseUrlHint": "このボックスまたはローカルネットワーク上のサーバーの /v1 ルート。例: http://192.168.1.20:8000/v1",
+  "localModels.sttEndpoint.baseUrlHint": "このボックスまたはローカルネットワーク上のサーバーの /v1 ルート。例: http://192.168.1.20:8000/v1", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "モデル",
   "localModels.sttEndpoint.modelHint": "空欄の場合は whisper-1 を使います。",
   "localModels.sttEndpoint.apiKey": "API キー(任意)",
@@ -2150,7 +2150,7 @@ export const ja: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "サーバーに接続できません。アドレスと、サーバーが動作していることを確認してください。",
   "localModels.sttEndpoint.error.unauthorized": "サーバーが API キーを拒否しました。",
   "localModels.sttEndpoint.error.addressRefused": "音声サーバーはこのボックスかローカルネットワーク上にある必要があります。インターネット上のサーバーは使えません。",
-  "localModels.sttEndpoint.error.baseUrl": "http:// または https:// のアドレスを入力してください。例: http://192.168.1.20:8000/v1",
+  "localModels.sttEndpoint.error.baseUrl": "http:// または https:// のアドレスを入力してください。例: http://192.168.1.20:8000/v1", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "モデル名は 200 文字以内の 1 行にしてください。",
   "localModels.sttEndpoint.error.apiKey": "API キーは空白を含まない 1 行にしてください。",
   "localModels.sttEndpoint.error.badResponse": "サーバーの応答が音声認識サーバーのものではありません。",

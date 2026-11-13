@@ -2119,7 +2119,7 @@ export const sv: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "Ingen talserver sparad.",
   "localModels.sttEndpoint.setUp": "Lägg till en server",
   "localModels.sttEndpoint.baseUrl": "Serveradress",
-  "localModels.sttEndpoint.baseUrlHint": "Serverns /v1-rot, på den här boxen eller i ditt lokala nätverk, till exempel http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "Serverns /v1-rot, på den här boxen eller i ditt lokala nätverk, till exempel http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Modell",
   "localModels.sttEndpoint.modelHint": "Lämna tomt för whisper-1.",
   "localModels.sttEndpoint.apiKey": "API-nyckel (valfri)",
@@ -2146,7 +2146,7 @@ export const sv: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "Servern gick inte att nå. Kontrollera adressen och att den körs.",
   "localModels.sttEndpoint.error.unauthorized": "Servern nekade API-nyckeln.",
   "localModels.sttEndpoint.error.addressRefused": "Talservern måste finnas på den här boxen eller i ditt lokala nätverk, inte på internet.",
-  "localModels.sttEndpoint.error.baseUrl": "Ange en http://- eller https://-adress, till exempel http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Ange en http://- eller https://-adress, till exempel http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "Modellnamnet måste vara en rad på högst 200 tecken.",
   "localModels.sttEndpoint.error.apiKey": "API-nyckeln måste vara en rad utan mellanslag.",
   "localModels.sttEndpoint.error.badResponse": "Serverns svar ser inte ut som en tal-till-text-servers.",
