@@ -284,6 +284,38 @@ describe("what the first Index now click actually runs", () => {
     expect(await resolveIndexMode("incremental")).toBe("incremental");
   });
 
+  // OpenClaw 2026.11.3 refuses `memory status` while its gateway runs: the
+  // gateway's own memory.status answers (v2: health + details.legacy).
+  async function fromGateway(health: "ready" | "degraded", message?: string) {
+    const failing = path.join(tmpDir, "openclaw-refuses");
+    await fs.writeFile(failing, "#!/bin/sh\necho 'Cannot admit memory.cli' >&2\nexit 1\n", { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = failing;
+    const { getMemoryStatus } = await lib();
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    const { dbPath: _dbPath, workspaceDir: _workspaceDir, extraPaths: _extraPaths, ...legacy } = REAL_STATUS[0].status;
+    const vector = { ...legacy.vector };
+    delete vector.available;
+    delete vector.semanticAvailable;
+    vi.mocked(ws.gatewayWsCall).mockResolvedValueOnce({
+      version: 2, agentId: "main", providerId: "memory-core", status: health, ...(message ? { message } : {}),
+      details: { legacy: { ...legacy, vector } },
+    });
+    return { status: await getMemoryStatus(), ws };
+  }
+
+  it("reads the status from the running gateway's memory.status, not the CLI", async () => {
+    const { status, ws } = await fromGateway("ready");
+    expect(vi.mocked(ws.gatewayWsCall)).toHaveBeenCalledWith("memory.status", { agentId: expect.any(String) }, expect.anything());
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("healthy");
+  });
+
+  it("takes the gateway's own degraded health for the index's", async () => {
+    const { status } = await fromGateway("degraded", "Memory embeddings are pending. Search results may be incomplete.");
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("degraded");
+  });
+
   it("uses the server Node runtime when the CLI lives beside an obsolete Node", async () => {
     const cli = path.join(tmpDir, "openclaw");
     await fs.writeFile(path.join(tmpDir, "node"), "#!/bin/sh\nexit 42\n", { mode: 0o755 });

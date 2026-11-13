@@ -698,9 +698,25 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
     if (err instanceof GatewayWsUnavailableError) return null;
     throw new Error(`memory status unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const legacy = asRecord(asRecord(asRecord(answer).details).legacy);
+  const health = asRecord(answer);
+  const legacy = asRecord(asRecord(health.details).legacy);
   if (Object.keys(legacy).length === 0) throw new Error("memory status unavailable: the gateway reported no index details");
-  return [{ agentId, status: { ...legacy, dbPath: openclawAgentDbPath(agentId) } }];
+  // `vector.available` was the CLI's `--deep` probe; the gateway says the same
+  // thing as its own health (`ready`, else `degraded` with a sentence such as
+  // "Memory embeddings are pending"), which stands in for it here.
+  const ready = cleanString(health.status) === "ready";
+  const vector = asRecord(legacy.vector);
+  const custom = asRecord(legacy.custom);
+  const message = cleanString(health.message);
+  return [{
+    agentId,
+    status: {
+      ...legacy,
+      dbPath: openclawAgentDbPath(agentId),
+      vector: { ...vector, available: ready && vector.enabled !== false },
+      custom: !ready && message && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: message } : custom,
+    },
+  }];
 }
 
 /** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
