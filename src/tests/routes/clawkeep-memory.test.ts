@@ -19,6 +19,18 @@ const DATA_DIR = path.join(TEST_ROOT, "clawkeep");
 // so the suite does not leak a real timer, and so we can assert the re-arm
 // happened — a saved schedule that only takes effect at the next reboot is the
 // bug this panel is meant to make impossible.
+// OpenClaw 2026.11.3: the status probe asks the gateway's memory.status first
+// (no gateway in these tests: the CLI answers, as before), and an OpenClaw
+// index pass runs with the gateway stopped and started again (recorded here).
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>();
+  return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
+});
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
+  startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
   start: vi.fn(async () => {}),
   refresh: vi.fn(async () => {}),

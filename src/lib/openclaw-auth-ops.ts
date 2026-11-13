@@ -169,6 +169,22 @@ export async function setOpenclawAuthOrder(provider: string, order: string[] | n
 }
 
 /**
+ * Stop the gateway through its service owner for offline work that runs on
+ * its own lifecycle (a memory index pass); `startOpenclawGatewayAfterOffline`
+ * starts it again. Neither does anything on a box with no gateway.
+ */
+export async function stopOpenclawGatewayForOffline(): Promise<void> {
+  if (gatewayIsAbsent()) return;
+  await deps.stopGateway();
+}
+
+/** Start the gateway after `stopOpenclawGatewayForOffline`. */
+export async function startOpenclawGatewayAfterOffline(): Promise<void> {
+  if (gatewayIsAbsent()) return;
+  await deps.startGateway();
+}
+
+/**
  * Run `work` (CLI commands that 2026.11.3 accepts only offline) with the
  * gateway stopped through its service owner, and start the gateway again
  * whatever `work` did. A box with no gateway answering runs `work` as it is.

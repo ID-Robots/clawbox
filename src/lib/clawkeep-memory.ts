@@ -32,6 +32,8 @@ import { readPlanGate } from "@/lib/paid-plan-gate-server";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
+import { gatewayWsCall, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
+import { startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
@@ -671,11 +673,34 @@ function terminate(child: ChildProcess): void {
  * with `--agent`: left out, the core probes every configured agent in turn,
  * and `--deep` costs seconds per agent on a Jetson.
  */
-function collectMemoryStatusJson(agentId: string): Promise<unknown> {
+async function collectMemoryStatusJson(agentId: string): Promise<unknown> {
+  // OpenClaw 2026.11.3 refuses `memory status` while the gateway owns the
+  // state; the gateway's own `memory.status` answers the same manager status
+  // (`details.legacy`, paths left out). The CLI only when no gateway answers.
+  const live = await memoryStatusFromGateway(agentId);
+  if (live !== null) return live;
   return withOpenclawMaintenanceRetry(
     (timeoutMs) => collectMemoryStatusJsonOnce(timeoutMs, agentId),
     { timeoutMs: STATUS_TIMEOUT_MS, label: "openclaw memory status" },
   );
+}
+
+/**
+ * `memory.status` over the running gateway, in the CLI's row shape
+ * (`[{agentId, status}]`, `status.dbPath` the agent database the core keeps the
+ * index in). Null when no gateway is there to answer.
+ */
+async function memoryStatusFromGateway(agentId: string): Promise<unknown | null> {
+  let answer: unknown;
+  try {
+    answer = await gatewayWsCall("memory.status", { agentId }, { timeoutMs: STATUS_TIMEOUT_MS });
+  } catch (err) {
+    if (err instanceof GatewayWsUnavailableError) return null;
+    throw new Error(`memory status unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const legacy = asRecord(asRecord(asRecord(answer).details).legacy);
+  if (Object.keys(legacy).length === 0) throw new Error("memory status unavailable: the gateway reported no index details");
+  return [{ agentId, status: { ...legacy, dbPath: openclawAgentDbPath(agentId) } }];
 }
 
 /** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
@@ -2194,7 +2219,7 @@ export async function startMemoryIndex(
 ): Promise<{
   accepted: boolean;
   run: MemoryRunState;
-  declined?: "running" | "disabled" | "full_reindex_required" | "agent_changed";
+  declined?: "running" | "disabled" | "full_reindex_required" | "agent_changed" | "gateway_indexes";
 }> {
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
@@ -2219,6 +2244,14 @@ export async function startMemoryIndex(
     return { accepted: false, declined: "agent_changed", run: await readMemoryRunState() };
   }
   if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
+  // OpenClaw 2026.11.3 runs `memory index` only with the gateway stopped, and
+  // its running gateway keeps the index current by itself (it syncs on file
+  // changes and on search, docs/cli/memory.md). A schedule's incremental slot
+  // is that same work, so on OpenClaw it does not stop the chat for it; an
+  // owner's pass (and a full one the box itself needs) still runs, offline.
+  if (trigger === "schedule" && mode === "incremental" && !openclawIsAbsent()) {
+    return { accepted: false, declined: "gateway_indexes", run: await readMemoryRunState() };
+  }
   if (!await acquireRunLock()) {
     return { accepted: false, declined: "running", run: await readMemoryRunState() };
   }
@@ -2284,9 +2317,26 @@ export async function startMemoryIndex(
       .finally(() => { reportInFlight = false; });
   };
   const localArm = openclawIsAbsent();
-  const pass = localArm
-    ? startLocalPass(mode, publishProgress, trigger !== "schedule")
-    : startOpenclawPass(mode, publishProgress, agentId);
+  // OpenClaw 2026.11.3: `memory index` needs exclusive offline ownership of the
+  // state, so the pass runs with the gateway stopped through its service owner
+  // and starts it again however the pass ends (done, failed, stopped, timed
+  // out, abandoned).
+  if (!localArm) await stopOpenclawGatewayForOffline();
+  let pass: IndexPass;
+  try {
+    pass = localArm
+      ? startLocalPass(mode, publishProgress, trigger !== "schedule")
+      : startOpenclawPass(mode, publishProgress, agentId);
+  } catch (err) {
+    if (!localArm) await startOpenclawGatewayAfterOffline().catch(() => undefined);
+    throw err;
+  }
+  if (!localArm) {
+    const ended = pass.ended.finally(() => startOpenclawGatewayAfterOffline().catch((err) => {
+      console.error("[clawkeep-memory] the gateway did not start again after the index pass:", err instanceof Error ? err.message : err);
+    }));
+    pass = { ...pass, ended };
+  }
   if (pass.pid) settlingPasses().add(pass.pid);
   state = { ...state, childPid: pass.pid };
   try {

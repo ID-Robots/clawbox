@@ -32,6 +32,18 @@ let tmpDir = "";
 // written to the config store, whose file is shared with every other test in
 // the worker.
 const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+// OpenClaw 2026.11.3: the status probe asks the gateway's memory.status first
+// (no gateway in these tests: the CLI answers, as before), and an OpenClaw
+// index pass runs with the gateway stopped and started again (recorded here).
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>();
+  return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
+});
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
+  startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/lib/memory-shard", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/memory-shard")>(),
   getMemoryShardEnabled: async () => shard.enabled,
@@ -1097,14 +1109,32 @@ describe("what a scheduled slot runs against a disowned index (TASK-1197)", () =
     expect(await resolveIndexMode("incremental", "schedule")).toBe("full");
   });
 
-  it("leaves a scheduled pass over a valid index incremental", async () => {
+  it("leaves a scheduled pass over a valid index to the running gateway on OpenClaw", async () => {
+    // OpenClaw 2026.11.3 runs `memory index` only with the gateway stopped,
+    // and the running gateway syncs the index itself: a schedule's
+    // incremental slot stops nothing and runs no CLI pass.
     await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
     const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
-    expect((await startMemoryIndex("incremental", "schedule")).accepted).toBe(true);
-    const run = await settledMemoryRun(tmpDir);
-    expect(run.mode).toBe("incremental");
-    const [index] = await indexCalls();
-    expect(index).not.toContain("--force");
+    const { stopOpenclawGatewayForOffline } = await import("@/lib/openclaw-auth-ops");
+    const started = await startMemoryIndex("incremental", "schedule");
+    expect(started).toMatchObject({ accepted: false, declined: "gateway_indexes" });
+    expect(await indexCalls()).toEqual([]);
+    expect(vi.mocked(stopOpenclawGatewayForOffline)).not.toHaveBeenCalled();
+  });
+
+  it("runs an owner's OpenClaw pass with the gateway stopped, and starts it again when the pass ends", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.stopOpenclawGatewayForOffline).mockClear();
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockClear();
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    await settledMemoryRun(tmpDir);
+    await vi.waitFor(() => expect(vi.mocked(ops.startOpenclawGatewayAfterOffline)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(ops.stopOpenclawGatewayForOffline)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ops.stopOpenclawGatewayForOffline).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(ops.startOpenclawGatewayAfterOffline).mock.invocationCallOrder[0]);
+    expect((await indexCalls()).length).toBe(1);
   });
 
   it("asks a FRESH status for the schedule, so a cached empty reading cannot send --force over a built index", async () => {

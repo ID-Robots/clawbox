@@ -99,7 +99,9 @@ async function runSlot(): Promise<void> {
       ? "[clawkeep-memory-scheduler] skipped: Memory Shard was switched off before the run started"
       : declined === "full_reindex_required"
         ? "[clawkeep-memory-scheduler] skipped: the index needs a full reindex, which a schedule never starts on its own — run Full reindex from Memory Shard"
-        : "[clawkeep-memory-scheduler] skipped: an index run is in progress",
+        : declined === "gateway_indexes"
+          ? "[clawkeep-memory-scheduler] skipped: the OpenClaw gateway keeps the index current itself (2026.11.3 indexes from the CLI only with the gateway stopped)"
+          : "[clawkeep-memory-scheduler] skipped: an index run is in progress",
   );
 }
 
