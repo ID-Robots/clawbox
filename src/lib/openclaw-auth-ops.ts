@@ -34,7 +34,7 @@ import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
 import { readUnitState, runUnitJob } from "@/lib/gateway-unit-job";
 import { DATA_DIR } from "@/lib/config-store";
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 
 /**
  * On disk while ClawBox holds the gateway stopped for offline work (a memory
