@@ -770,3 +770,74 @@ describe.skipIf(!hasPython3)("a box whose ClawBox AI profile is not recorded as 
     }
   });
 });
+
+// TASK-2501 PR-D: the local-only AI lock, and the owner's own speech server.
+describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the local-only AI lock", () => {
+  /** Run with a device store, the way the shell exports it. */
+  function withStore(store: unknown, fn: () => void): void {
+    const file = path.join(dir, "device-store.json");
+    writeFileSync(file, typeof store === "string" ? store : JSON.stringify(store));
+    const saved = process.env.CLAWBOX_DEVICE_STORE;
+    process.env.CLAWBOX_DEVICE_STORE = file;
+    try {
+      fn();
+    } finally {
+      if (saved === undefined) delete process.env.CLAWBOX_DEVICE_STORE;
+      else process.env.CLAWBOX_DEVICE_STORE = saved;
+    }
+  }
+  const ENDPOINT_STORE = { stt_primary: "endpoint", stt_endpoint: { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" } };
+
+  it("seeds no cloud row and no endpoint on a locked box", () => {
+    withStore({ ai_cloud_lock: true }, () => {
+      const { cfg } = migrate({});
+      expect(audio(cfg)?.baseUrl).toBeUndefined();
+      expect(JSON.stringify(cfg)).not.toContain(PROXY);
+    });
+  });
+
+  it("takes back the cloud row and our endpoint, and keeps the box's own engine", () => {
+    withStore({ ai_cloud_lock: "pinned" }, () => {
+      const { cfg, changed, log } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [LOCAL_CLI, CLOUD] } } } });
+      expect(changed).toBe(true);
+      expect(audio(cfg)).toEqual({ models: [LOCAL_CLI] });
+      expect(log).toMatch(/local-only AI is on/);
+    });
+  });
+
+  it("reads a store it cannot parse as locked", () => {
+    withStore("{ torn", () => {
+      const { cfg } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [CLOUD] } } } });
+      expect(audio(cfg)).toEqual({ models: [] });
+    });
+  });
+
+  it("leaves a box that is not locked exactly as before", () => {
+    withStore({ ai_cloud_lock: false }, () => {
+      expect(audio(migrate({}).cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+    });
+  });
+
+  it("seeds the owner's own speech server first when it is the chosen engine, and alone under the lock", () => {
+    withStore(ENDPOINT_STORE, () => {
+      const models = audio(migrate({}).cfg)?.models as Record<string, unknown>[];
+      expect(models[0]).toMatchObject({ type: "cli", command: "/usr/bin/python3", timeoutSeconds: 120 });
+      expect((models[0].args as string[])[0]).toMatch(/scripts\/stt-endpoint-client\.py$/);
+      expect(models[1]).toEqual(CLOUD);
+    });
+    withStore({ ...ENDPOINT_STORE, ai_cloud_lock: true }, () => {
+      const models = audio(migrate({}).cfg)?.models as Record<string, unknown>[];
+      expect(models).toHaveLength(1);
+      expect((models[0].args as string[])[0]).toMatch(/stt-endpoint-client\.py$/);
+    });
+  });
+
+  it("calls a list holding the server's row ours, so it is repaired rather than skipped", () => {
+    const endpointRow = { type: "cli", command: "/usr/bin/python3", args: ["/home/clawbox/clawbox/scripts/stt-endpoint-client.py", "{{MediaPath}}"], timeoutSeconds: 120 };
+    withStore({ ai_cloud_lock: true }, () => {
+      const { cfg, log } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [endpointRow, CLOUD] } } } });
+      expect(log).not.toMatch(/already names its own transcription route/);
+      expect(audio(cfg)).toEqual({ models: [endpointRow] });
+    });
+  });
+});

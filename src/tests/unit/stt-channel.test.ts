@@ -47,6 +47,16 @@ const store = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
+  // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
+  // a reader that is not there reads as LOCKED, so the mock answers it.
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
+  resolveConfigRoot: () => "/home/clawbox/clawbox",
+  setMany: async (entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) store.delete(key);
+      else store.set(key, value);
+    }
+  },
 }));
 
 type Lib = typeof import("@/lib/stt-channel");
@@ -392,5 +402,83 @@ describe("reconcileChannelAudio — boot, a Whisper install, a provider save", (
     config.batch.mockClear();
     expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(false);
     expect(config.batch).not.toHaveBeenCalled();
+  });
+});
+
+// TASK-2501 PR-D: the owner's own speech server, and the local-only AI lock.
+const ENDPOINT_ROW = {
+  type: "cli",
+  command: "/usr/bin/python3",
+  args: ["/home/clawbox/clawbox/scripts/stt-endpoint-client.py", "{{MediaPath}}"],
+  timeoutSeconds: 120,
+  capabilities: ["audio"],
+};
+const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" };
+
+describe("the local-only AI lock on channel voice notes", () => {
+  it("reads no cloud backing under the lock, whatever the credential", async () => {
+    store.set("ai_cloud_lock", true);
+    expect(await lib.readCloudSttBacking()).toEqual({ usable: false, reason: "cloud_ai_locked" });
+  });
+
+  it("takes the cloud row and our endpoint back, and writes the box's engine alone", async () => {
+    store.set("ai_cloud_lock", true);
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
+    expect(await lib.syncChannelAudio(["cloud", "local"], true)).toBe(true);
+    expect(written()).toEqual(["tools.media.models", "-tools.media.audio.baseUrl"]);
+    const models = writtenModels();
+    expect(models).toHaveLength(1);
+    expect(isLocal(models[0])).toBe(true);
+  });
+
+  it("writes the owner's server alone when it is chosen, and recognises the row as ours at boot", async () => {
+    store.set("ai_cloud_lock", true);
+    store.set("stt_primary", "endpoint");
+    store.set("stt_endpoint", ENDPOINT_RECORD);
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
+    expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(true);
+    expect(writtenModels()).toEqual([ENDPOINT_ROW]);
+    // The next boot finds it ours and in force: nothing to write.
+    config.batch.mockClear();
+    config.unset.mockClear();
+    config.read.mockResolvedValue(linked({ tools: { media: { models: [ENDPOINT_ROW] } } }));
+    expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(false);
+    expect(written()).toEqual([]);
+  });
+
+  it("switches transcription off when the lock leaves no engine, and back on once it is lifted", async () => {
+    store.set("ai_cloud_lock", true);
+    local.installed = false;
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
+    expect(await lib.syncChannelAudio(["cloud", "local"], false)).toBe(true);
+    expect(written()).toEqual(["tools.media.models", "-tools.media.audio.baseUrl", "tools.media.audio.enabled"]);
+    expect(writtenModels()).toEqual([]);
+    expect(store.get(lib.CHANNEL_AUDIO_LOCK_OFF_KEY)).toBe(true);
+
+    // Lifted: the switch ClawBox turned off is turned back on, the cloud row returns.
+    config.batch.mockClear();
+    config.unset.mockClear();
+    store.set("ai_cloud_lock", false);
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { enabled: false }, models: [] } } }));
+    expect(await lib.syncChannelAudio(["cloud", "local"], false)).toBe(true);
+    expect(written()).toEqual(["tools.media.audio.baseUrl", "tools.media.models", "-tools.media.audio.enabled"]);
+    expect(store.get(lib.CHANNEL_AUDIO_LOCK_OFF_KEY)).toBeUndefined();
+  });
+
+  it("never turns on a switch the owner turned off", async () => {
+    store.set("ai_cloud_lock", false);
+    config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY, enabled: false }, models: [CLOUD] } } }));
+    local.installed = false;
+    expect(await lib.syncChannelAudio(["cloud", "local"], false)).toBe(false);
+    expect(written()).toEqual([]);
+  });
+
+  it("without the lock puts the owner's server first with the old chain behind it", async () => {
+    store.set("stt_endpoint", ENDPOINT_RECORD);
+    expect(await lib.syncChannelAudio(["endpoint", "local", "cloud"], true)).toBe(true);
+    const models = writtenModels();
+    expect(models[0]).toEqual(ENDPOINT_ROW);
+    expect(isLocal(models[1])).toBe(true);
+    expect(models[2]).toEqual(CLOUD);
   });
 });
