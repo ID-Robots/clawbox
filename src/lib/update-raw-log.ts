@@ -966,6 +966,10 @@ function describeExit(err: unknown): string {
   const e = (err ?? {}) as { code?: unknown; signal?: unknown; killed?: unknown; message?: unknown };
   if (e.killed) return `killed${e.signal ? ` by ${String(e.signal)}` : ""}`;
   if (typeof e.code === "number") return `exit ${e.code}`;
+  // node sets `killed` only for a kill it sent (the updater's own timeout); a
+  // signal without it came from elsewhere (the OOM killer, a stray kill, the
+  // command's own crash), and node's message would name only the command.
+  if (typeof e.signal === "string") return `killed by ${e.signal} from outside the updater`;
   return typeof e.message === "string" ? e.message.split("\n")[0] : "failed";
 }
 

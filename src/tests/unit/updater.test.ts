@@ -2269,6 +2269,12 @@ describe("updater", () => {
       const ASK_RUN = "systemctl show clawbox-gateway.service -p InvocationID";
       /** systemd's id for the gateway's n-th run in a case: a new one at every restart. */
       const runId = (n: number) => `a${n.toString(16).padStart(31, "0")}`;
+      /** The one line each doctor run of the full repair logs after its bound line: what its record now says. */
+      const DOCTOR_LINE = "[Updater] openclaw doctor --fix: ";
+      const doctorOutcomes = () => logged.filter((line) => line.startsWith(DOCTOR_LINE) && !line.startsWith(`${DOCTOR_LINE}bound `));
+      const RECORDED_LINE = `${DOCTOR_LINE}completed; its run is recorded complete`;
+      const DUE = "its recorded run is due, so the next update runs doctor again";
+      const NOT_DUE = "its recorded run could not be marked due, so the record stays as it was";
 
       let logged: string[];
       let logSpy: MockInstance<typeof console.log>;
@@ -2695,12 +2701,25 @@ describe("updater", () => {
         expect(doctorRecorded[0]).toBeGreaterThan(indexesOf(DOCTOR)[0]);
         expect(doctorRecorded[0]).toBeLessThanOrEqual(indexesOf(LEAVE)[1]);
         expect(doctorMarkedDue).toHaveLength(0);
+        // …and the update's log says so, once.
+        expect(doctorOutcomes()).toEqual([RECORDED_LINE]);
       });
 
-      it.each<[string, string | Error]>([
-        ["doctor failed", new Error("Command failed: openclaw doctor --fix")],
-        ["doctor says its migration did not finish", "Legacy session store requires migration; run doctor again\n"],
-      ])("records no verdict, and marks the recorded run due again, when %s", async (_what, doctor) => {
+      it("never says the run is recorded when the helper could not record it", async () => {
+        mockDoctorRefusal.mockResolvedValue(RECORD_OLD);
+        mockRecordDoctorComplete.mockResolvedValueOnce(false);
+        await verifyAfterPostUpdate({ doctor: "Doctor complete.\n" });
+        expect(doctorOutcomes()).toEqual([`${DOCTOR_LINE}completed, but its run could not be recorded; the record stays as it was`]);
+        expect(logged.some((line) => line.includes("its run is recorded"))).toBe(false);
+      });
+
+      const NOT_COMPLETED: [string, string | Error, string][] = [
+        ["doctor failed", new Error("Command failed: openclaw doctor --fix"), "did not complete"],
+        ["doctor says its migration did not finish", "Legacy session store requires migration; run doctor again\n",
+          "exited 0 but its migration did not finish"],
+      ];
+
+      it.each(NOT_COMPLETED)("records no verdict, and marks the recorded run due again, when %s", async (_what, doctor, how) => {
         // A `complete` from before this run must not stand in for it: the next
         // update runs doctor again, as it did at every update before.
         mockDoctorRefusal.mockResolvedValue("the gateway journal names legacy state");
@@ -2711,6 +2730,15 @@ describe("updater", () => {
         expect(doctorMarkedDue[0]).toBeGreaterThan(indexesOf(DOCTOR)[0]);
         expect(doctorMarkedDue[0]).toBeLessThanOrEqual(indexesOf(LEAVE)[1]);
         expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+        expect(doctorOutcomes()).toEqual([`${DOCTOR_LINE}${how}; ${DUE}`]);
+      });
+
+      it.each(NOT_COMPLETED)("never says the run is marked due when the helper could not mark it, when %s", async (_what, doctor, how) => {
+        mockDoctorRefusal.mockResolvedValue("the gateway journal names legacy state");
+        mockMarkDoctorDue.mockResolvedValueOnce(false);
+        await verifyAfterPostUpdate({ doctor });
+        expect(doctorOutcomes()).toEqual([`${DOCTOR_LINE}${how}; ${NOT_DUE}`]);
+        expect(logged.some((line) => line.includes(DUE))).toBe(false);
       });
 
       it("records nothing on a routine start, which runs no doctor", async () => {
@@ -2718,6 +2746,7 @@ describe("updater", () => {
         expect(indexesOf(DOCTOR)).toHaveLength(0);
         expect(doctorRecorded).toHaveLength(0);
         expect(doctorMarkedDue).toHaveLength(0);
+        expect(logged.filter((line) => line.startsWith(DOCTOR_LINE))).toEqual([]);
       });
 
       it.each([
@@ -4235,12 +4264,24 @@ describe("updater", () => {
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
-      const result = await updater.checkContinuation();
-      expect(result).toBe(true);
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const result = await updater.checkContinuation();
+        expect(result).toBe(true);
 
-      await vi.waitFor(() => {
-        expect(updater.getUpdateState().phase).toBe("completed");
-      });
+        await vi.waitFor(() => {
+          expect(updater.getUpdateState().phase).toBe("completed");
+        });
+        // Doctor ran twice, in the full repair and again after the quarantine:
+        // one outcome line for each run.
+        expect(log.mock.calls.map((args) => args.map(String).join(" "))
+          .filter((line) => line.startsWith("[Updater] openclaw doctor --fix: ") && !line.includes("--fix: bound "))).toEqual([
+          "[Updater] openclaw doctor --fix: completed; its run is recorded complete",
+          "[Updater] openclaw doctor --fix: completed; its run is recorded complete",
+        ]);
+      } finally {
+        log.mockRestore();
+      }
       const bashCall = mockExecFile.mock.calls.find(([cmd]) => cmd === "/bin/bash");
       expect(bashCall?.[1]).toEqual(expect.arrayContaining(["-lc", expect.stringContaining("installs.json")]));
       expect(String((bashCall?.[1] as string[] | undefined)?.[1])).toContain("carl_pir.sqlite");
@@ -4611,6 +4652,7 @@ describe("updater", () => {
 
     it("never restarts the PC's gateway over the appliance's gateway setup note", async () => {
       const dir = mkdtempSync(nodePath.join(tmpdir(), "clawbox-x64-note-"));
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
       try {
         process.env.CLAWBOX_GATEWAY_LEFT_RUNNING = nodePath.join(dir, "gateway-left-running");
         writeFileSync(process.env.CLAWBOX_GATEWAY_LEFT_RUNNING, "0123456789abcdef0123456789abcdef\n");
@@ -4620,7 +4662,11 @@ describe("updater", () => {
         await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
         expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
         expect(commands().some((call) => call.includes("-p InvocationID"))).toBe(false);
+        // The PC runs no full repair, so its log has no doctor line of any kind.
+        expect(log.mock.calls.map((args) => args.map(String).join(" "))
+          .filter((line) => line.startsWith("[Updater] openclaw doctor --fix:"))).toEqual([]);
       } finally {
+        log.mockRestore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
