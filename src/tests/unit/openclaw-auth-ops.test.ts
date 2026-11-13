@@ -1,0 +1,125 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/openclaw-config", () => ({
+  spawnOpenclawCli: vi.fn(),
+  restartGateway: vi.fn(),
+  gatewayIsAbsent: () => false,
+}));
+vi.mock("@/lib/openclaw-auth-store", () => ({ readGatewayProviderAuth: vi.fn() }));
+vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn() }));
+
+import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
+import {
+  _setAuthOpsDepsForTests,
+  logoutOpenclawAuthProfiles,
+  saveOpenclawApiKey,
+  setOpenclawAuthOrder,
+  withOpenclawGatewayStopped,
+} from "@/lib/openclaw-auth-ops";
+
+/**
+ * OpenClaw 2026.11.3 refuses `models auth` writes from the CLI while its
+ * gateway owns the state (docs/cli/models.md "Auth profiles"): with the
+ * gateway up these go to its RPCs, and only a gateway that is not there gets
+ * the CLI, offline.
+ */
+function harness(opts: { up?: boolean; held?: string[] | null; refuse?: string } = {}) {
+  const rpc = vi.fn(async (method: string, params: Record<string, unknown>) => {
+    if (opts.up === false) throw new GatewayWsUnavailableError("connect ECONNREFUSED");
+    if (opts.refuse) throw new GatewayRpcError(opts.refuse, "UNAVAILABLE");
+    if (method === "models.authSetApiKey") return { provider: params.provider, profileId: `${String(params.provider)}:default` };
+    return { ok: true };
+  });
+  const cli = vi.fn(async () => "");
+  const stopGateway = vi.fn(async () => {});
+  const startGateway = vi.fn(async () => {});
+  _setAuthOpsDepsForTests({ rpc, cli, stopGateway, startGateway, storeProfiles: () => (opts.held === undefined ? [] : opts.held) });
+  return { rpc, cli, stopGateway, startGateway };
+}
+
+afterEach(() => _setAuthOpsDepsForTests(null));
+
+describe("saveOpenclawApiKey", () => {
+  it("hands the key to the gateway's models.authSetApiKey while it runs, never to the CLI", async () => {
+    const h = harness();
+    const saved = await saveOpenclawApiKey("google", "google:default", "AIza-test-key");
+    expect(h.rpc).toHaveBeenCalledWith("models.authSetApiKey", { provider: "google", apiKey: "AIza-test-key" }, 60_000);
+    expect(h.cli).not.toHaveBeenCalled();
+    expect(saved).toEqual({ via: "gateway", profileId: "google:default" });
+  });
+
+  it("pastes offline through the CLI, key on stdin, when no gateway answers", async () => {
+    const h = harness({ up: false });
+    const saved = await saveOpenclawApiKey("deepseek", "deepseek:default", "claw_test");
+    expect(h.cli).toHaveBeenCalledWith(
+      ["models", "auth", "paste-api-key", "--provider", "deepseek", "--profile-id", "deepseek:default"],
+      { stdinData: "claw_test\n", timeoutMs: 60_000 },
+    );
+    expect(saved.via).toBe("cli");
+  });
+
+  it("passes the gateway's refusal on and does not retry it through the CLI", async () => {
+    const h = harness({ refuse: "The API-key profile belongs to another sign-in. Manage that saved sign-in first" });
+    await expect(saveOpenclawApiKey("openai", "openai:default", "sk-test")).rejects.toThrow(/belongs to another sign-in/);
+    expect(h.cli).not.toHaveBeenCalled();
+  });
+});
+
+describe("logoutOpenclawAuthProfiles", () => {
+  it("asks models.authLogout for the ids the store holds, and only those", async () => {
+    const h = harness({ held: ["deepseek:default", "deepseek:other"] });
+    const removed = await logoutOpenclawAuthProfiles("deepseek", ["deepseek:default", "deepseek:ghost"]);
+    expect(h.rpc).toHaveBeenCalledWith("models.authLogout", { provider: "deepseek", profileIds: ["deepseek:default"] }, 60_000);
+    expect(removed).toEqual(["deepseek:default"]);
+  });
+
+  it("asks nothing when the store holds none of them", async () => {
+    const h = harness({ held: [] });
+    expect(await logoutOpenclawAuthProfiles("xai", ["xai:default"])).toEqual([]);
+    expect(h.rpc).not.toHaveBeenCalled();
+  });
+
+  it("logs out offline through the CLI, one id at a time, when no gateway answers", async () => {
+    const h = harness({ up: false, held: null });
+    await logoutOpenclawAuthProfiles("anthropic", ["anthropic:a", "anthropic:b"]);
+    expect(h.cli.mock.calls.map((c) => (c as unknown[])[0])).toEqual([
+      ["models", "auth", "logout", "anthropic:a", "--yes"],
+      ["models", "auth", "logout", "anthropic:b", "--yes"],
+    ]);
+  });
+});
+
+describe("setOpenclawAuthOrder", () => {
+  it("names every profile the store holds, the asked ones first", async () => {
+    const h = harness({ held: ["openai:chatgpt", "openai:default", "openai:work"] });
+    await setOpenclawAuthOrder("openai", ["openai:default", "openai:missing"]);
+    expect(h.rpc).toHaveBeenCalledWith("models.authOrderSet", { provider: "openai", profileIds: ["openai:default", "openai:chatgpt", "openai:work"] }, 60_000);
+  });
+
+  it("clears the order by leaving the ids out", async () => {
+    const h = harness({ held: [] });
+    await setOpenclawAuthOrder("openai", null);
+    expect(h.rpc).toHaveBeenCalledWith("models.authOrderSet", { provider: "openai" }, 60_000);
+  });
+
+  it("sets or clears offline through the CLI when no gateway answers", async () => {
+    const h = harness({ up: false, held: ["anthropic:a"] });
+    await setOpenclawAuthOrder("anthropic", ["anthropic:a"]);
+    await setOpenclawAuthOrder("anthropic", []);
+    expect(h.cli.mock.calls.map((c) => (c as unknown[])[0])).toEqual([
+      ["models", "auth", "order", "set", "--provider", "anthropic", "anthropic:a"],
+      ["models", "auth", "order", "clear", "--provider", "anthropic"],
+    ]);
+  });
+});
+
+describe("withOpenclawGatewayStopped", () => {
+  it("stops the gateway, runs the offline work and starts it again, also when the work fails", async () => {
+    const h = harness();
+    const order: string[] = [];
+    h.stopGateway.mockImplementation(async () => { order.push("stop"); });
+    h.startGateway.mockImplementation(async () => { order.push("start"); });
+    await expect(withOpenclawGatewayStopped(async () => { order.push("work"); throw new Error("refused"); })).rejects.toThrow("refused");
+    expect(order).toEqual(["stop", "work", "start"]);
+  });
+});

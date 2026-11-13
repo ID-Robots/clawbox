@@ -89,6 +89,29 @@ vi.mock("@/lib/hermes-telegram", () => ({
   retireHermesUserGateway: vi.fn(async () => true),
 }));
 // PARTIAL, over the real module — see openclaw-config-mock-completeness.test.ts.
+// OpenClaw 2026.11.3's credential writes go through src/lib/openclaw-auth-ops.ts
+// (the gateway's RPCs while it runs; its own unit tests cover that). Here they
+// take its offline arm, the CLI argv this file has always asserted.
+vi.mock("@/lib/openclaw-auth-ops", async () => {
+  const { spawnOpenclawCli } = await import("@/lib/openclaw-config");
+  const cli = (args: string[], opts: Record<string, unknown> = {}) => spawnOpenclawCli(args, { timeoutMs: 60_000, ...opts });
+  return {
+    providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+    saveOpenclawApiKey: async (provider: string, profileId: string, key: string) => {
+      await cli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], { stdinData: key + "\n" });
+      return { via: "cli", profileId };
+    },
+    logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+      for (const id of ids) await cli(["models", "auth", "logout", id, "--yes"]);
+      return ids;
+    },
+    setOpenclawAuthOrder: async (provider: string, order: string[] | null) => {
+      await cli(order && order.length ? ["models", "auth", "order", "set", "--provider", provider, ...order] : ["models", "auth", "order", "clear", "--provider", provider]);
+    },
+    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>) => work(),
+  };
+});
+
 vi.mock("@/lib/openclaw-config", async (orig) => ({
   ...(await orig<typeof import("@/lib/openclaw-config")>()),
   readConfig: h.readConfig,
