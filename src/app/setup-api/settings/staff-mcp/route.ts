@@ -83,8 +83,11 @@ async function view(store: StaffMcpStore) {
     unreadable = true;
   }
   type Listed = { name: string; transport: string | null; usable: boolean; reason?: string; granted: boolean; header: string; needsCredential: boolean; writeTools: boolean; members: string[] | null };
+  // Grants made on the other runtime (a dual box switched) are kept, not shown.
+  const active = harness === "hermes" ? "hermes" : "openclaw";
+  const ours = (name: string) => Object.hasOwn(store.servers, name) && (store.servers[name].harness ?? "openclaw") === active;
   const settingOf = (name: string) => {
-    const setting = Object.hasOwn(store.servers, name) ? store.servers[name] : undefined;
+    const setting = ours(name) ? store.servers[name] : undefined;
     return {
       granted: Boolean(setting),
       header: setting?.header ?? "Authorization",
@@ -104,7 +107,7 @@ async function view(store: StaffMcpStore) {
     };
   });
   // A grant whose server is gone from the assistant's config is still shown, so the owner can take it away.
-  for (const name of Object.keys(store.servers)) {
+  for (const name of Object.keys(store.servers).filter(ours)) {
     if (!listed.some((s) => s.name === name)) {
       listed.push({ name, transport: null, usable: false, reason: "missing", ...settingOf(name) });
     }
@@ -176,13 +179,15 @@ export async function POST(req: Request) {
     const current = await readStoreOr500();
     if (current instanceof NextResponse) return current;
     const { listUsers } = await import("@/lib/clawbox-users");
-    const staffNames = new Set((await listUsers()).map((user) => user.username));
+    const accounts = new Map((await listUsers()).map((user) => [user.username, user]));
+    const staffNames = new Set(accounts.keys());
     const next: StaffMcpStore["servers"] = {};
     for (const [name, setting] of requested) {
       if (!isServerName(name)) return refuse(400, "bad_server", `"${String(name).slice(0, 64)}" is not a server name.`);
       const server = known.find((s) => s.name === name);
-      if (!server && !current.servers[name]) return refuse(400, "unknown_server", `There is no MCP server named "${name}" on this box.`);
-      if (server && staffServerVerdict(server) !== null && !current.servers[name]) {
+      const ownGrant = Object.hasOwn(current.servers, name) && (current.servers[name].harness ?? "openclaw") === harness;
+      if (!server && !ownGrant) return refuse(400, "unknown_server", `There is no MCP server named "${name}" on this box.`);
+      if (server && staffServerVerdict(server) !== null && !ownGrant) {
         return refuse(400, "server_not_usable", `"${name}" cannot be offered to members of staff (only Streamable HTTP servers without a credential in the URL can).`);
       }
       const fields = setting && typeof setting === "object" && !Array.isArray(setting) ? (setting as Record<string, unknown>) : {};
@@ -198,9 +203,38 @@ export async function POST(req: Request) {
           return refuse(400, "bad_members", `The members of staff named for "${name}" are not all users of this box.`);
         }
       }
-      next[name] = serverSetting(header, fields);
+      // The grant is for the runtime it is made on, whatever the body says.
+      next[name] = serverSetting(header, { ...fields, harness });
     }
-    change = (store) => ({ ...store, servers: next });
+    // The other runtime's grants (a dual box switched) stay as they are.
+    for (const [name, setting] of Object.entries(current.servers)) {
+      if ((setting.harness ?? "openclaw") !== harness && !Object.hasOwn(next, name)) next[name] = setting;
+    }
+    const named = [...new Set(Object.values(next).flatMap((setting) => setting.members ?? []))];
+    change = async (store) => {
+      // Checked again UNDER the store's lock, which removal's and creation's
+      // clean-ups take too: a grant naming a member is never written for an
+      // account removed (or replaced by a new one of the same name) meanwhile.
+      const { listUsers: usersNow } = await import("@/lib/clawbox-users");
+      const now = new Map((await usersNow()).map((user) => [user.username, user]));
+      for (const name of named) {
+        const before = accounts.get(name);
+        const after = now.get(name);
+        if (!before || !after || before.createdAt !== after.createdAt || before.sv !== after.sv) throw new UserGoneError();
+      }
+      // A withdrawn grant takes its credentials with it, and so does a grant
+      // that moved to the other runtime: a credential set for one server is
+      // never sent to another that happens to share its name.
+      const kept = (server: string) => Object.hasOwn(next, server)
+        && Object.hasOwn(store.servers, server)
+        && (store.servers[server].harness ?? "openclaw") === next[server].harness;
+      const credentials: StaffMcpStore["credentials"] = {};
+      for (const [user, byServer] of Object.entries(store.credentials)) {
+        const mine = Object.fromEntries(Object.entries(byServer).filter(([server]) => kept(server)));
+        if (Object.keys(mine).length > 0) credentials[user] = mine;
+      }
+      return { ...store, servers: next, credentials };
+    };
   } else if (body.username !== undefined || body.server !== undefined) {
     const { username, server } = body;
     if (!isStaffUsername(username)) return refuse(400, "bad_username", "That is not a username.");
@@ -217,7 +251,11 @@ export async function POST(req: Request) {
     }
     const current = await readStoreOr500();
     if (current instanceof NextResponse) return current;
-    if (!current.servers[server]) return refuse(400, "unknown_server", `"${server}" is not granted to members of staff.`);
+    const { getActiveHarness: activeNow } = await import("@/lib/harness");
+    const runtime = (await activeNow()) === "hermes" ? "hermes" : "openclaw";
+    if (!Object.hasOwn(current.servers, server) || (current.servers[server].harness ?? "openclaw") !== runtime) {
+      return refuse(400, "unknown_server", `"${server}" is not granted to members of staff.`);
+    }
     let credential: string | null = null;
     if (body.credential !== null) {
       credential = normalizeCredential(body.credential);

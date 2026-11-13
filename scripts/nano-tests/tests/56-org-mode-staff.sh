@@ -61,7 +61,7 @@ owner_cookie() {
     const secret = fs.readFileSync(process.argv[1], "utf8").trim();
     let gen = 0;
     try { const c = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); if (Number.isFinite(c.session_generation)) gen = c.session_generation; } catch {}
-    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, gen })).toString("base64url");
+    const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 7200, gen })).toString("base64url");
     process.stdout.write(payload + "." + crypto.createHmac("sha256", secret).update(payload).digest("hex"));
   '"'"' "$SECRET_FILE" "$REPO/data/config.json"
 }

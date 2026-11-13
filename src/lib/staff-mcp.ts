@@ -89,6 +89,13 @@ export interface StaffMcpServerSetting {
    * credential still reaches only members who have one.
    */
   members?: string[] | null;
+  /**
+   * The runtime the grant was made on (absent: OpenClaw, the only one before
+   * TASK-2516). A grant reaches only that runtime's server of the name: after
+   * the owner switches runtime, a same-named server of the other one
+   * inherits nothing.
+   */
+  harness?: "openclaw" | "hermes";
 }
 
 /** At most this many names in one grant's member list. */
@@ -162,8 +169,14 @@ export function maskCredential(value: string): string {
  * drops the per-member credential and only a literal `true` lets write tools
  * through, so a missing or odd value is always the stricter reading.
  */
-export function serverSetting(header: string, raw: { needsCredential?: unknown; writeTools?: unknown; members?: unknown }): StaffMcpServerSetting {
-  return { header, needsCredential: raw.needsCredential !== false, writeTools: raw.writeTools === true, members: grantMembers(raw.members) };
+export function serverSetting(header: string, raw: { needsCredential?: unknown; writeTools?: unknown; members?: unknown; harness?: unknown }): StaffMcpServerSetting {
+  return {
+    header,
+    needsCredential: raw.needsCredential !== false,
+    writeTools: raw.writeTools === true,
+    members: grantMembers(raw.members),
+    harness: raw.harness === "hermes" ? "hermes" : "openclaw",
+  };
 }
 
 /**
@@ -405,6 +418,8 @@ export function planStaffMcpEntries(input: {
   store: StaffMcpStore;
   servers: readonly ServerRead[];
   relayBase: string;
+  /** The runtime the entries are for: only its grants count (default OpenClaw). */
+  harness?: "openclaw" | "hermes";
 }): Map<string, StaffMcpEntry[]> {
   const byName = new Map(input.servers.map((server) => [server.name, server]));
   const out = new Map<string, StaffMcpEntry[]>();
@@ -420,6 +435,7 @@ export function planStaffMcpEntries(input: {
       // A server that takes no credential is every member's; any other only
       // theirs who have one. Either way the entry carries THEIR relay token.
       const setting = input.store.servers[server];
+      if ((setting.harness ?? "openclaw") !== (input.harness ?? "openclaw")) continue;
       if (!token || !grantReaches(setting, username) || (setting.needsCredential !== false && !(Object.hasOwn(credentials, server) && credentials[server]))) continue;
       const name = staffEntryName(username, server, taken);
       taken.add(name);

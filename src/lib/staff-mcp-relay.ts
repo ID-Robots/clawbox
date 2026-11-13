@@ -29,6 +29,7 @@
  */
 
 import { readOrgModeStrict } from "@/lib/org-mode-server";
+import { stringsIn } from "../../scripts/chat-reply-media.js";
 import {
   credentialHeaderValue,
   grantReaches,
@@ -76,7 +77,7 @@ function bearerOf(req: Request): string | null {
 
 /** The relayed request's caller and target, or the refusal. */
 type Admission =
-  | { ok: true; username: string; url: string; header: string; credential: string | null; filter: ToolFilter; cacheKey: string }
+  | { ok: true; username: string; harness: "openclaw" | "hermes"; url: string; header: string; credential: string | null; filter: ToolFilter; cacheKey: string }
   | { ok: false; response: Response };
 
 /**
@@ -109,9 +110,15 @@ export async function admitRelayRequest(req: Request, server: string): Promise<A
   // The server as the box's assistant defines it now: openclaw.json's
   // `mcp.servers` on OpenClaw, config.yaml's `mcp_servers` on Hermes.
   const [{ readServersOf }, { getActiveHarness }] = await Promise.all([import("@/lib/project-mcp-servers"), import("@/lib/harness")]);
+  const harness: "openclaw" | "hermes" = (await getActiveHarness()) === "hermes" ? "hermes" : "openclaw";
+  // A grant is for the runtime it was made on: after the owner switches
+  // runtime, a same-named server of the other one inherits nothing.
+  if ((setting.harness ?? "openclaw") !== harness) {
+    return { ok: false, response: refuse(404, "not_granted", "The owner has not granted this server to members of staff on this assistant.") };
+  }
   let read;
   try {
-    read = (await readServersOf((await getActiveHarness()) === "hermes" ? "hermes" : "openclaw")).find((entry) => entry.name === server);
+    read = (await readServersOf(harness)).find((entry) => entry.name === server);
   } catch {
     return { ok: false, response: refuse(503, "config_unreadable", "The assistant's configuration could not be read.") };
   }
@@ -121,11 +128,14 @@ export async function admitRelayRequest(req: Request, server: string): Promise<A
   return {
     ok: true,
     username,
+    harness,
     url: read.config.url,
     header: setting.header,
     credential: credential ?? null,
     filter: { include: read.include ?? null, exclude: read.exclude ?? [], writeTools: setting.writeTools === true },
-    cacheKey: `${username}\0${server}`,
+    // Keyed by the runtime and the server's URL too: what one server said
+    // about a tool is never used to judge another's.
+    cacheKey: `${username}\0${server}\0${harness}\0${read.config.url}`,
   };
 }
 
@@ -329,6 +339,9 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   }
 
   const listIds = new Set(messages.filter((m) => m.method === "tools/list" && m.id !== undefined).map((m) => JSON.stringify(m.id)));
+  const callIds = new Set(messages.filter((m) => m.method === "tools/call" && m.id !== undefined).map((m) => JSON.stringify(m.id)));
+  // The files a call's result names are the member's — provenance, TASK-2516.
+  const recordOutputs = callIds.size > 0 ? await toolOutputRecorder(admission, Date.now()) : null;
   let upstream: Response;
   try {
     upstream = await fetch(admission.url, {
@@ -347,12 +360,13 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   }
   const headers = downstreamHeaders(upstream);
   if (listIds.size === 0 || !upstream.ok) {
+    const sse = (upstream.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
+    let body = upstream.body;
     // A streamed answer is still read event by event: any tool list in it
     // (whatever asked for it) reaches the member filtered.
-    if (upstream.body && (upstream.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream")) {
-      return new Response(filteredSse(upstream.body, admission.filter, cache), { status: upstream.status, headers });
-    }
-    return new Response(upstream.body, { status: upstream.status, headers });
+    if (body && sse) body = filteredSse(body, admission.filter, cache);
+    if (body && upstream.ok && recordOutputs) body = recordingToolResults(body, sse, callIds, recordOutputs);
+    return new Response(body, { status: upstream.status, headers });
   }
   const body = await readBounded(upstream.body, MAX_LIST_RESPONSE_BYTES);
   if (body === null) return refuse(502, "upstream_too_large", "The MCP server's tool list is too large to check.");
@@ -361,6 +375,112 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
     ? filterSseBody(body, listIds, admission.filter, cache)
     : filterJsonBody(body, listIds, admission.filter, cache);
   return new Response(filtered, { status: upstream.status, headers });
+}
+
+/** A tool result is read for the files it names up to this size; a larger one passes unread (its files stay nobody's). */
+const MAX_TOOL_RESULT_SCAN_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Records, as the calling member's, the files a tool result names in the chat
+ * media tree or their own assistant folder and that were written since the
+ * call began (src/lib/chat-reply-media.ts `recordToolOutputFiles`). The roots
+ * are the active runtime's.
+ */
+async function toolOutputRecorder(admission: Extract<Admission, { ok: true }>, since: number): Promise<((strings: unknown[]) => void) | null> {
+  try {
+    const [{ chatMediaRoot }, { recordToolOutputFiles }] = await Promise.all([import("@/lib/harness/media-root"), import("@/lib/chat-reply-media")]);
+    const mediaRoot = await chatMediaRoot().catch(() => null);
+    let ownFolder: string | null = null;
+    if (admission.harness === "hermes") {
+      const { staffHermesProfilePaths } = await import("@/lib/hermes-staff-profile");
+      ownFolder = staffHermesProfilePaths(admission.username)?.folder ?? null;
+    } else {
+      const [{ staffWorkspaceDir }, { OPENCLAW_HOME }] = await Promise.all([import("@/lib/org-staff-agents"), import("@/lib/openclaw-config")]);
+      ownFolder = staffWorkspaceDir(OPENCLAW_HOME, admission.username);
+    }
+    return (strings) => {
+      const { recorded, refused } = recordToolOutputFiles({ username: admission.username, strings, mediaRoot, ownFolder, since });
+      if (recorded.length > 0) console.log(`[staff-mcp] a tool result named ${recorded.length} file(s), recorded as the member's${refused.length ? ` (${refused.length} not)` : ""}`);
+    };
+  } catch (err) {
+    // Nothing recorded: the member's files stay nobody's (fail closed); the call itself goes on.
+    console.error("[staff-mcp] a tool result's files could not be recorded:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/** The `result` strings of the answers to `callIds` in one JSON-RPC text (a message or a batch). */
+function callResultStrings(text: string, callIds: Set<string>): unknown[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const out: unknown[] = [];
+  for (const m of Array.isArray(parsed) ? parsed : [parsed]) {
+    if (isObject(m) && callIds.has(JSON.stringify(m.id)) && m.result !== undefined) out.push(...stringsIn(m.result));
+  }
+  return out;
+}
+
+/**
+ * Pass a tool call's answer through unchanged, recording the files its
+ * result names before the gateway can act on it: an SSE answer event by
+ * event (each event's text goes on only after it was read), a JSON one when
+ * it ends.
+ */
+function recordingToolResults(body: ReadableStream<Uint8Array>, sse: boolean, callIds: Set<string>, record: (strings: unknown[]) => void): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let pending = "";
+  let seen = 0;
+  const readEvent = (event: string) => {
+    const data = event.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
+    if (data) {
+      const strings = callResultStrings(data, callIds);
+      if (strings.length > 0) record(strings);
+    }
+  };
+  return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > MAX_TOOL_RESULT_SCAN_BYTES) {
+        if (pending) controller.enqueue(encoder.encode(pending));
+        pending = "";
+        controller.enqueue(chunk);
+        return;
+      }
+      const text = decoder.decode(chunk, { stream: true });
+      if (!sse) {
+        pending += text;
+        controller.enqueue(chunk);
+        return;
+      }
+      pending += text.replace(/\r\n?/g, "\n");
+      for (;;) {
+        const m = /\n\n/.exec(pending);
+        if (!m) break;
+        const event = pending.slice(0, m.index);
+        readEvent(event);
+        controller.enqueue(encoder.encode(`${event}\n\n`));
+        pending = pending.slice(m.index + 2);
+      }
+    },
+    flush(controller) {
+      if (seen > MAX_TOOL_RESULT_SCAN_BYTES) return;
+      pending += decoder.decode();
+      if (!sse) {
+        const strings = callResultStrings(pending, callIds);
+        if (strings.length > 0) record(strings);
+        return;
+      }
+      if (pending.trim()) {
+        readEvent(pending);
+        controller.enqueue(encoder.encode(pending));
+      }
+    },
+  }));
 }
 
 /** Any message in `text` that carries a tool list, filtered (whatever request it answers). */

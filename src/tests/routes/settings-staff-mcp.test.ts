@@ -201,7 +201,7 @@ describe("the grants", () => {
     // Ungranted: listed for the owner, granted to nobody.
     expect(body.servers.find((s: { name: string }) => s.name === "local")).toMatchObject({ granted: false });
     const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
-    expect(stored.servers).toEqual({ docs: { header: "Authorization", needsCredential: false, writeTools: true, members: ["ivan", "maria"] } });
+    expect(stored.servers).toEqual({ docs: { header: "Authorization", needsCredential: false, writeTools: true, members: ["ivan", "maria"], harness: "openclaw" } });
     // Every member of staff (no list), and back to the strict defaults.
     expect((await (await post({ servers: { docs: {} } })).json()).servers.find((s: { name: string }) => s.name === "docs")).toMatchObject({ needsCredential: true, writeTools: false, members: null });
   });
@@ -219,6 +219,36 @@ describe("the grants", () => {
       expect((await res.json()).code).toBe(code);
     }
     expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("refuses a member grant whose account was replaced while the change waited for the store", async () => {
+    const { listUsers } = await import("@/lib/clawbox-users");
+    vi.mocked(listUsers)
+      .mockResolvedValueOnce([{ username: "ivan", createdAt: "x", sv: "1" }, { username: "maria", createdAt: "x", sv: "1" }] as never)
+      .mockResolvedValueOnce([{ username: "ivan", createdAt: "y", sv: "2" }, { username: "maria", createdAt: "x", sv: "1" }] as never);
+    const res = await post({ servers: { docs: { needsCredential: false, members: ["ivan"] } } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_user");
+    expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("keeps a grant to the runtime it was made on: hidden and untouched on the other, its credentials never carried over", async () => {
+    expect((await post({ servers: { docs: {} } })).status).toBe(200);
+    expect((await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" })).status).toBe(200);
+    h.harness = "hermes";
+    const onHermes = await (await get()).json();
+    expect(onHermes.servers.some((s: { name: string; granted: boolean }) => s.name === "docs" && s.granted)).toBe(false);
+    // A credential cannot be set for the OpenClaw grant from the Hermes side.
+    expect((await post({ username: "ivan", server: "docs", credential: "x-token-0000000002" })).status).toBe(400);
+    // Saving Hermes' (empty) list leaves the OpenClaw grant and its credential as they were.
+    expect((await post({ servers: {} })).status).toBe(200);
+    const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    expect(stored.servers.docs).toMatchObject({ harness: "openclaw" });
+    expect(stored.credentials.ivan).toEqual({ docs: "ivan-secret-token-0001" });
+    h.harness = "openclaw";
+    // Withdrawn on its own runtime, it takes its credentials with it.
+    expect((await post({ servers: {} })).status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(storePath, "utf-8")).credentials).toEqual({});
   });
 
   it("is offered on a Hermes box too since TASK-2516 (each member's own profile carries the relay entries)", async () => {
