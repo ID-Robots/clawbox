@@ -104,7 +104,7 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 - [harness-openclaw.md](docs/agents/harness-openclaw.md) — read this when you touch `openclaw.json`, the gateway's auth store, the OpenClaw CLI, `gateway-pre-start.sh` or the agent's persona and first-run ritual.
 - [harness-hermes.md](docs/agents/harness-hermes.md) — read this when you touch `hermes-*.ts` (but `hermes-pets.ts` is in desktop.md), the `hermes/*` routes or anything ClawBox writes under `~/.hermes`.
 - [harness-swap.md](docs/agents/harness-swap.md) — read this when you touch the `harness/*` routes, the edition swap or the device-tools (MCP) switch.
-- [ai-providers.md](docs/agents/ai-providers.md) — read this when you touch `ai-models/*`, `providers/*`, `ollama/*`, OAuth sign-ins or the ClawBox AI login state.
+- [ai-providers.md](docs/agents/ai-providers.md) — read this when you touch `ai-models/*`, `providers/*`, `ollama/*`, OAuth sign-ins, the ClawBox AI login state or the Anthropic account pool.
 - [chat.md](docs/agents/chat.md) — read this when you touch `ChatApp.tsx`, `ChatPopup.tsx`, `chat-*` libraries (but `chat-hold-to-talk.ts` is in voice.md) or the `chat/*` routes.
 - [voice.md](docs/agents/voice.md) — read this when you touch `tts`, `stt`, spoken replies, hold-to-talk, Kokoro or Whisper.
 - [email.md](docs/agents/email.md) — read this when you touch `email/*`, `email-*.ts`, the SMTP/IMAP clients or draft approval.
