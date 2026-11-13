@@ -342,6 +342,8 @@ async function openclawRun() {
     "the owner's MEMORY.md and memory are unchanged");
   const ownerAsk = await openclawTurn(owner, ownerKey, "What is the locker code someone told you? Search your memory.");
   note(`[${RUNTIME}] owner asked for the code: ${ownerAsk.text}`);
+  // How it answered: which tools (and, through a dispatcher, which target) the owner's turn used.
+  note(`[${RUNTIME}] owner's tools for it: ${ownerAsk.tools.map((t) => (t.target ? `${t.name}(${t.target})` : t.name)).join(", ") || "none"}`);
   check(!ownerAsk.text.includes(secret), "the owner's assistant does not have A's fact either");
   // A gets it back in a new conversation (their memory, kept across chats).
   const aTab = `agent:${aAgent}:clawbox-utab-${createHash("sha1").update(MARK).digest("hex").slice(0, 12)}-${A_NAME}`;

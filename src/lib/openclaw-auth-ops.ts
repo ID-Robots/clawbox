@@ -91,7 +91,13 @@ const defaultDeps: AuthOpsDeps = {
       // By name, not `instanceof`: every module this one reaches is imported by
       // suites that mock openclaw-config, and a name needs no class there.
       if (err instanceof Error && err.name === "GatewayNotReadyError") {
-        console.warn("[openclaw-auth] the gateway was started again and is still coming up");
+        // Waited for once more, so the work's caller (a memory pass reporting
+        // "done", a key save answering) does not hand the owner an assistant
+        // that cannot answer yet; past that it is still not a failure.
+        console.warn("[openclaw-auth] the gateway was started again and is still coming up; waiting for it");
+        if (!(await waitForGatewayRpcReady(gatewayReadyWaitMs() * 3))) {
+          console.warn("[openclaw-auth] the gateway is still coming up after the extra wait");
+        }
         return;
       }
       throw err;

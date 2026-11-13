@@ -13,6 +13,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   },
 }));
 vi.mock("@/lib/openclaw-auth-store", () => ({ readGatewayProviderAuth: vi.fn() }));
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()),
+  waitForGatewayRpcReady: vi.fn(async () => true),
+}));
 vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn() }));
 
 import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
@@ -196,6 +200,9 @@ describe("withOpenclawGatewayStopped", () => {
     vi.mocked(restartGateway).mockRejectedValueOnce(new GatewayNotReadyError("gateway did not come back"));
     _setAuthOpsDepsForTests({ stopGateway: async () => undefined });
     await expect(withOpenclawGatewayStopped(async () => "done")).resolves.toBe("done");
+    // ...after waiting for it once more, so nobody is handed an assistant that cannot answer yet.
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    expect(vi.mocked(waitForGatewayRpcReady)).toHaveBeenCalledWith(3000);
     vi.mocked(restartGateway).mockRejectedValueOnce(new Error("Job for clawbox-gateway.service failed"));
     await expect(withOpenclawGatewayStopped(async () => "done")).rejects.toThrow(/failed/);
   });
