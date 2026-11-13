@@ -6671,8 +6671,12 @@ for plugin in plugins:
     break
 else:
     # "-": the CLI answered in its own shape and listed no Codex, the one answer
-    # a later start may take on trust. Any other shape prints nothing.
-    if all(isinstance(plugin, dict) for plugin in plugins):
+    # a later start may take on trust: every entry an object that names its
+    # plugin id, as the stamps helper asks of the core index. An entry without
+    # one could be a Codex this reader cannot see, so any other shape prints
+    # nothing.
+    if all(isinstance(plugin, dict) and isinstance(plugin.get("id"), str) and plugin["id"]
+           for plugin in plugins):
         print("-")'
   )" || CODEX_PLUGIN_DIR_FOUND=""
   # Recorded only from a CLI that exited 0 (pipefail sends any other exit to
