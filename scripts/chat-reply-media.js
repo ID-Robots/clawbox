@@ -35,7 +35,7 @@
  */
 
 const fs = require("fs");
-const path = require("path");
+const path = require("./runtime-path.js");
 
 /** A turn whose start is unknown (a relay that opened mid-turn) is taken to have begun this long before its reply. */
 const DEFAULT_TURN_MS = 30 * 60_000;

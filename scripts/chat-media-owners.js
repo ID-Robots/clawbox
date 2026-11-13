@@ -14,7 +14,7 @@
  */
 
 const fs = require("fs");
-const path = require("path");
+const path = require("./runtime-path.js");
 
 /** Records kept, for everyone together (see src/lib/chat-media-owners.ts). */
 const MAX_MEDIA_OWNER_RECORDS = 20_000;
