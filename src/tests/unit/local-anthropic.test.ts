@@ -52,6 +52,32 @@ describe("a Messages request as a Chat Completions body", () => {
     expect(out.body.stream).toBe(false);
   });
 
+  it("folds Claude Code's own system notes into the one system turn, and says a later one where it came", () => {
+    // Measured on a board (TASK-2501 PR-E): Claude Code puts system notes in
+    // the list itself, which an engine's chat template may refuse anywhere
+    // but first.
+    const out = anthropicToChat({
+      system: "You are a coder.",
+      messages: [
+        { role: "system", content: [{ type: "text", text: "Today is Friday." }] },
+        { role: "user", content: "Fix it." },
+        { role: "assistant", content: "On it." },
+        { role: "system", content: "The file changed on disk." },
+        { role: "system", content: "" },
+        { role: "user", content: "Go on." },
+      ],
+    }, TARGET);
+    expect(out.ok && out.body.messages).toEqual([
+      { role: "system", content: "You are a coder.\n\nToday is Friday." },
+      { role: "user", content: "Fix it." },
+      { role: "assistant", content: "On it." },
+      { role: "user", content: "The file changed on disk." },
+      { role: "user", content: "Go on." },
+    ]);
+    const only = anthropicToChat({ messages: [{ role: "system", content: "Be brief." }, { role: "user", content: "x" }] }, TARGET);
+    expect(only.ok && (only.body.messages as unknown[])[0]).toEqual({ role: "system", content: "Be brief." });
+  });
+
   it("never asks for more than the engine's longest answer", () => {
     const out = anthropicToChat({ max_tokens: 64_000, messages: [{ role: "user", content: "x" }] }, TARGET);
     expect(out.ok && out.body.max_tokens).toBe(8_192);
@@ -177,7 +203,7 @@ describe("a Messages request as a Chat Completions body", () => {
 
   it("refuses a request it cannot translate, in words", () => {
     expect(anthropicToChat({ messages: [] }, TARGET)).toEqual({ ok: false, error: expect.stringMatching(/at least one message/) });
-    expect(anthropicToChat({ messages: [{ role: "system" as never, content: "x" }] }, TARGET).ok).toBe(false);
+    expect(anthropicToChat({ messages: [{ role: "tool" as never, content: "x" }] }, TARGET).ok).toBe(false);
   });
 });
 

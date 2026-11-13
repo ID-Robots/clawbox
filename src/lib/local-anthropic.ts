@@ -36,7 +36,8 @@ export interface AnthropicBlock {
 }
 
 export interface AnthropicMessage {
-  role: "user" | "assistant";
+  /** `system` too: Claude Code puts some of its notes in the list itself. */
+  role: "user" | "assistant" | "system";
   content: string | AnthropicBlock[];
 }
 
@@ -201,16 +202,31 @@ export function anthropicToChat(req: AnthropicRequest, target: EngineTarget): Tr
   if (!req || typeof req !== "object") return { ok: false, error: "The request body must be a JSON object." };
   if (!Array.isArray(req.messages) || req.messages.length === 0) return { ok: false, error: "messages: at least one message is required." };
   const messages: ChatMessage[] = [];
-  const system = textOf(req.system);
-  if (system) messages.push({ role: "system", content: system });
+  // ONE system message, first: many chat templates refuse a system turn
+  // anywhere else. Claude Code's own system notes that come in the list
+  // before the conversation starts join it; one that comes later is said
+  // where it came, as a user turn, so its place in the conversation holds.
+  const systemParts: string[] = [];
+  const top = textOf(req.system);
+  if (top) systemParts.push(top);
+  let started = false;
   for (const m of req.messages) {
     if (!m || typeof m !== "object") return { ok: false, error: "messages: every message must be an object." };
+    if (m.role === "system") {
+      const note = textOf(m.content);
+      if (!note) continue;
+      if (!started) systemParts.push(note);
+      else messages.push({ role: "user", content: note });
+      continue;
+    }
+    started = true;
     if (m.role === "user") messages.push(...userMessages(m.content, target));
     else if (m.role === "assistant") {
       const a = assistantMessage(m.content);
       if (a) messages.push(a);
     } else return { ok: false, error: `messages: unknown role ${JSON.stringify(m.role)}.` };
   }
+  if (systemParts.length > 0) messages.unshift({ role: "system", content: systemParts.join("\n\n") });
   const requested = typeof req.max_tokens === "number" && Number.isFinite(req.max_tokens) && req.max_tokens > 0 ? Math.floor(req.max_tokens) : target.maxOutputTokens;
   const body: Record<string, unknown> = {
     model: target.model,
