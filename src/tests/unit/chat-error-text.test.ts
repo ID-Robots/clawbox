@@ -24,6 +24,15 @@ function leaks(text: string): boolean {
 }
 
 describe("describeChatFailure", () => {
+  it("tells a turn OpenClaw 2026.11.3 lost to a settings reload to send it again, and leaks nothing", () => {
+    const raw = "Error: Skills discovery was retired before publication";
+    const shown = describeChatFailure(raw);
+    expect(shown).toMatch(/reloading its settings/);
+    expect(shown).toMatch(/Send it again/);
+    expect(leaks(shown)).toBe(false);
+    expect(shown).not.toContain("Skills discovery");
+  });
+
   it("never renders the session-takeover error a customer actually saw", () => {
     for (const raw of [TAKEOVER_RAW, FOLLOWUP_RAW]) {
       const shown = describeChatFailure(raw);

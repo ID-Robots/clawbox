@@ -491,6 +491,17 @@ export function isUnacknowledgedTurn(raw: unknown): boolean {
   return /^request timeout$/i.test(text.trim());
 }
 
+/**
+ * OpenClaw 2026.11.3 fails a turn whose skills were being published while a
+ * settings change reloaded the gateway ("Skills discovery was retired before
+ * publication", its dist/refresh-*.mjs): nothing is wrong, the next send works.
+ */
+function isSkillsReloadRace(raw: string): boolean {
+  return /skills discovery was retired before publication/i.test(raw);
+}
+
+const SKILLS_RELOAD = "That message did not go through — the assistant was reloading its settings at that moment. Send it again.";
+
 /** The conversation changed under the turn; retry may work, New chat always does. */
 const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
 
@@ -745,6 +756,7 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
+  if (isSkillsReloadRace(evidence)) return SKILLS_RELOAD;
   // Ahead of everything that reads the reason or a status: the gateway tags a
   // missing sign-in `reason=auth`, which the refused-credential rule below
   // would answer with a sentence that is false here, and its line quotes a
