@@ -141,7 +141,7 @@ hermes_provider() {
     const m = await import(process.cwd() + \"/src/lib/hermes-tts.ts\");
     const v = await m.readHermesVoice();
     console.log(\"PROVIDER \" + JSON.stringify(v.provider));
-  " 2>/dev/null | sed -n \"s/^PROVIDER //p\" | tail -n 1
+  " 2>/dev/null | sed -n "s/^PROVIDER //p" | tail -n 1
 }
 hermes_set_provider() {
   timeout 60 bun -e "
