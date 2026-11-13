@@ -13,7 +13,7 @@ vi.mock("@/lib/config-store", () => ({
   // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
   // a reader that is not there reads as LOCKED, so the mock answers it.
   getKnown: async (key: string) => ({ value: store.get(key), known: true }),
-  resolveConfigRoot: () => "/home/testbox/clawbox",
+  resolveConfigRoot: () => "/home/testbox/clawbox", // public-hygiene: allow a fixture path in a test
   setMany: async (entries: Record<string, unknown>) => {
     for (const [key, value] of Object.entries(entries)) {
       if (value === undefined) store.delete(key);
@@ -265,7 +265,7 @@ describe("cloudTranscribeProblem — the chat microphone's half", () => {
 });
 
 // TASK-2501 PR-D: the owner's own speech server, and the local-only AI lock.
-const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" };
+const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
 
 describe("the owner's own speech server and the local-only AI lock", () => {
   it("is first only when chosen AND saved; a removed server hands the box back to the old rule", () => {

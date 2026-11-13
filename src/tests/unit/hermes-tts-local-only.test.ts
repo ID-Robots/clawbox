@@ -128,7 +128,7 @@ describe("what the move remembers, so lifting the lock gives it back", () => {
     await lib.speakWithHermes("hello");
     expect(markers.lock).toHaveBeenCalledWith("elevenlabs");
     markers.lock.mockClear();
-    hermesConfig.values = { ...LOCAL, "tts.provider": "openai", "tts.openai.base_url": "http://192.168.7.9:8880/v1", "tts.openai.api_key": "sk-own" };
+    hermesConfig.values = { ...LOCAL, "tts.provider": "openai", "tts.openai.base_url": "http://192.168.7.9:8880/v1", "tts.openai.api_key": "sk-own" }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
     await lib.speakWithHermes("hello");
     expect(markers.lock).toHaveBeenCalledWith("openai");
     expect(markers.standdown).not.toHaveBeenCalled();
