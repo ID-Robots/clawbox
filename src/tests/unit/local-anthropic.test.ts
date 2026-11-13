@@ -327,6 +327,9 @@ describe("server-sent events off the engine", () => {
     const event = new SseDataDecoder();
     const piece = "data: " + "y".repeat(64 * 1024) + "\n";
     expect(() => { for (let i = 0; i < 20; i++) event.push(piece); }).toThrow(/event longer than/);
+    // Empty data lines count as well: their separators make the event.
+    const empties = new SseDataDecoder();
+    expect(() => empties.push("data:\n".repeat(MAX_SSE_PENDING_CHARS + 1))).toThrow(/event longer than/);
     // Ended events reset the count: a long answer in many events is fine.
     const many = new SseDataDecoder();
     for (let i = 0; i < 40; i++) expect(many.push(piece + "\n")).toHaveLength(1);
