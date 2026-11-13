@@ -2,7 +2,7 @@
 """Stamps for the gateway pre-start: re-use a check whose inputs have not changed.
 
 scripts/gateway-pre-start.sh runs as the BLOCKING ExecStartPre of
-clawbox-gateway.service, and each of these four checks costs a CLI cold start
+clawbox-gateway.service, and each of these checks costs a CLI cold start
 whenever it runs, on a box whose answer has not changed in weeks — 2.4-12 s
 apiece on a Jetson, with the gateway (and every chat) down while they run:
 
