@@ -402,13 +402,23 @@ export function messageAsEvents(message: Record<string, unknown>): string[] {
 }
 
 /**
+ * The longest line, and the longest event, an engine may send before the
+ * decoder gives up: an engine that keeps streaming without a newline (or
+ * without the blank line that ends an event) would otherwise grow the buffer
+ * without limit. A token stream's lines are a few hundred bytes.
+ */
+export const MAX_SSE_PENDING_CHARS = 1024 * 1024;
+
+/**
  * Server-sent events off a byte stream, one `data:` payload at a time. Lines
  * may arrive split across chunks; a comment (`:`) and the other fields are
- * skipped. Multi-line `data:` fields are joined, as the spec says.
+ * skipped. Multi-line `data:` fields are joined, as the spec says. Throws
+ * when a line or an event outgrows {@link MAX_SSE_PENDING_CHARS}.
  */
 export class SseDataDecoder {
   private buffer = "";
   private data: string[] = [];
+  private dataChars = 0;
 
   /** Feed text; answers every payload a blank line completed. */
   push(text: string): string[] {
@@ -422,9 +432,18 @@ export class SseDataDecoder {
       if (line === "") {
         if (this.data.length > 0) out.push(this.data.join("\n"));
         this.data = [];
+        this.dataChars = 0;
       } else if (line.startsWith("data:")) {
-        this.data.push(line.slice(5).replace(/^ /, ""));
+        const payload = line.slice(5).replace(/^ /, "");
+        this.data.push(payload);
+        this.dataChars += payload.length;
       }
+    }
+    if (this.buffer.length > MAX_SSE_PENDING_CHARS) {
+      throw new Error(`the engine sent a line longer than ${MAX_SSE_PENDING_CHARS} characters without ending it`);
+    }
+    if (this.dataChars > MAX_SSE_PENDING_CHARS) {
+      throw new Error(`the engine sent an event longer than ${MAX_SSE_PENDING_CHARS} characters without ending it`);
     }
     return out;
   }

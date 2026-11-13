@@ -18,6 +18,7 @@ import {
   messageAsEvents,
   PICTURE_FOLLOWS,
   PICTURE_NOT_SEEN,
+  MAX_SSE_PENDING_CHARS,
   SseDataDecoder,
   stopReasonFrom,
   toolInputFrom,
@@ -318,6 +319,17 @@ describe("server-sent events off the engine", () => {
     expect(d.push(": keep-alive\n\nda")).toEqual([]);
     expect(d.push("ta: {\"a\":1}\r\nid: 7\r\n\r\ndata: [DO")).toEqual(["{\"a\":1}"]);
     expect(d.push("NE]\n\n")).toEqual(["[DONE]"]);
+  });
+
+  it("gives up on a line, or an event, that never ends instead of growing without limit", () => {
+    const line = new SseDataDecoder();
+    expect(() => line.push("data: " + "x".repeat(MAX_SSE_PENDING_CHARS))).toThrow(/longer than/);
+    const event = new SseDataDecoder();
+    const piece = "data: " + "y".repeat(64 * 1024) + "\n";
+    expect(() => { for (let i = 0; i < 20; i++) event.push(piece); }).toThrow(/event longer than/);
+    // Ended events reset the count: a long answer in many events is fine.
+    const many = new SseDataDecoder();
+    for (let i = 0; i < 40; i++) expect(many.push(piece + "\n")).toHaveLength(1);
   });
 
   it("joins a multi-line data field, and hands back what is left at the end", () => {

@@ -421,9 +421,14 @@ elif [ "$PROVIDER" = "local" ]; then
   # inherited HTTP(S)_PROXY must not carry it through a proxy. Loopback goes
   # first in NO_PROXY — both spellings, which Claude Code reads — rather than
   # the proxy being unset, so the run's own tools (a package install behind
-  # the owner's proxy) still reach it.
-  export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
-  export no_proxy="127.0.0.1,localhost,::1${no_proxy:+,$no_proxy}"
+  # the owner's proxy) still reach it. Both spellings get the SAME list: the
+  # exclusions inherited under either one (curl reads the lowercase one
+  # first), so a host the owner excluded in NO_PROXY stays excluded.
+  NO_PROXY_LIST="${no_proxy:-}"
+  if [ -n "${NO_PROXY:-}" ] && [ "$NO_PROXY" != "$NO_PROXY_LIST" ]; then NO_PROXY_LIST="${NO_PROXY_LIST:+$NO_PROXY_LIST,}$NO_PROXY"; fi
+  NO_PROXY_LIST="127.0.0.1,localhost,::1${NO_PROXY_LIST:+,$NO_PROXY_LIST}"
+  export NO_PROXY="$NO_PROXY_LIST" no_proxy="$NO_PROXY_LIST"
+  unset NO_PROXY_LIST
 
   MODEL="$LOCAL_MODEL"
   # Claude Code believes a 200k window for a model it does not know, and a 1M

@@ -241,6 +241,25 @@ describe("POST /v1/messages", () => {
     expect(evs.at(-2)![1]).toMatchObject({ delta: { stop_reason: "end_turn" } });
   });
 
+  it("ends with an error, and lets go of the engine, when it streams a line that never ends", async () => {
+    const enc = new TextEncoder();
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(enc.encode("x".repeat(256 * 1024)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const res = await handleLocalMessages(post("/messages", { stream: true, messages: [{ role: "user", content: "x" }] }), { fetchImpl });
+    const evs = parseEvents(await res.text());
+    expect(evs.at(-1)![0]).toBe("error");
+    expect(String((evs.at(-1)![1] as { error: { message: string } }).error.message)).toMatch(/^The box's engine stopped answering: the engine sent a line longer than/);
+    expect(cancelled).toBe(true);
+  });
+
   it("passes on an answer the engine cut off as a failure, never as a whole message", async () => {
     const fetchImpl = vi.fn(async () => new Response(sseBody([
       JSON.stringify({ choices: [{ delta: { content: "Half of an ans" } }] }),

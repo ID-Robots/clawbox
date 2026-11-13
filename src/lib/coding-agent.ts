@@ -5738,6 +5738,9 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     settings: { effort: run.effort, maxTurns: run.maxTurns },
     commandMayHaveSideEffects: false,
     timeout: setInterval(() => {
+      // The local-only AI lock (TASK-2501), asked every minute: a cloud run
+      // already going when it went on is paused (pauseCloudRunUnderLock).
+      if (!runsOnLocalEngine(run.provider)) void pauseCloudRunUnderLock(run, state).catch(() => {});
       const idleFor = Date.now() - run.lastActivityAt;
       if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
@@ -13366,6 +13369,9 @@ function spawnRun(
     // A rolling check, not a deadline: a run that keeps producing events is
     // allowed to work for as long as it needs.
     timeout: setInterval(() => {
+      // The local-only AI lock (TASK-2501), asked every minute: a cloud run
+      // already going when it went on is paused (pauseCloudRunUnderLock).
+      if (!runsOnLocalEngine(run.provider)) void pauseCloudRunUnderLock(run, state).catch(() => {});
       const idleFor = Date.now() - run.lastActivityAt;
       if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
@@ -14926,6 +14932,41 @@ function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): voi
   pushProgress(run, kind === "stop" ? RUNNER_STEP.stopRequested : RUNNER_STEP.pauseRequested);
   endProcess(state);
   persist();
+}
+
+/** What a cloud run's feed says when the local-only AI lock paused it. */
+export const PAUSED_BY_CLOUD_AI_LOCK = "Paused: the local-only AI lock went on, and this run's model is in the cloud. Resume it on the box's own engine, or once the lock is off.";
+
+/**
+ * A run on a cloud model (ClawBox AI, Anthropic, OpenAI) that was already
+ * going when the local-only AI lock went on (TASK-2501) is PAUSED: its CLI
+ * talks to the provider directly, with no hop on the box a request could be
+ * refused at, so the lock can only end the process. A pause, not a stop: the
+ * session and the work are kept, and the run resumes on the box's own engine
+ * (`provider: "local"`), or on its own provider once the lock is off. A run
+ * on the box's engine is left alone. Every new process a run starts asks the
+ * lock already (`assertProviderReady`, the resume's provider check), so this
+ * covers the one that was running when the lock went on — within a minute,
+ * from each live run's own check. Answers whether it paused the run.
+ */
+async function pauseCloudRunUnderLock(run: CodingRun, state: LiveRun): Promise<boolean> {
+  if (runsOnLocalEngine(run.provider) || state.endRequested !== null) return false;
+  if (!(await cloudAiLockOn())) return false;
+  // Asked again after the read: the run may have ended meanwhile.
+  if (run.status !== "running" || live.get(run.id) !== state || state.endRequested !== null) return false;
+  pushProgress(run, PAUSED_BY_CLOUD_AI_LOCK);
+  requestEnd(run, state, "pause");
+  return true;
+}
+
+/** {@link pauseCloudRunUnderLock} over every live run now; how many it paused. */
+export async function pauseCloudRunsUnderLock(): Promise<number> {
+  let paused = 0;
+  for (const run of loadRuns()) {
+    const state = run.status === "running" ? live.get(run.id) : undefined;
+    if (state && (await pauseCloudRunUnderLock(run, state))) paused++;
+  }
+  return paused;
 }
 
 /** Idempotent: stopping a finished run just returns it. */
