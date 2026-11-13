@@ -146,20 +146,41 @@ export interface SavedApiKey {
  * with no other API-key profile). The key never touches argv.
  */
 export async function saveOpenclawApiKey(provider: string, profileId: string, key: string): Promise<SavedApiKey> {
-  const answer = await askGatewayForAuth<{ profileId?: unknown; warning?: unknown }>("models.authSetApiKey", { provider, apiKey: key });
-  if (answer.answered) {
-    const landed = typeof answer.result?.profileId === "string" && answer.result.profileId ? answer.result.profileId : profileId;
-    if (landed !== profileId) {
-      console.warn(`[openclaw-auth] the gateway saved the ${provider} key at ${landed}, not ${profileId}`);
+  // The gateway's models.authSetApiKey takes no profile id: it writes over
+  // the provider's API-key profile, or — when the store holds none — creates
+  // `<provider>:manual` (2026.11.3's resolveDefaultTokenProfileId), not the id
+  // ClawBox names and checks. So the gateway takes the key only when the store
+  // already holds `profileId`; a first save at it runs the documented offline
+  // way (`paste-api-key --profile-id`), with the gateway stopped and started
+  // again around it when one is up.
+  const held = gatewayIsAbsent() ? null : deps.storeProfiles(provider);
+  if (held === null || held.includes(profileId)) {
+    const answer = await askGatewayForAuth<{ profileId?: unknown; warning?: unknown }>("models.authSetApiKey", { provider, apiKey: key });
+    if (answer.answered) {
+      const landed = typeof answer.result?.profileId === "string" && answer.result.profileId ? answer.result.profileId : profileId;
+      if (landed !== profileId) {
+        console.warn(`[openclaw-auth] the gateway saved the ${provider} key at ${landed}, not ${profileId}`);
+      }
+      const warning = typeof answer.result?.warning === "string" && answer.result.warning ? answer.result.warning : undefined;
+      return { via: "gateway", profileId: landed, ...(warning ? { warning } : {}) };
     }
-    const warning = typeof answer.result?.warning === "string" && answer.result.warning ? answer.result.warning : undefined;
-    return { via: "gateway", profileId: landed, ...(warning ? { warning } : {}) };
+    await pasteOffline(provider, profileId, key);
+    return { via: "cli", profileId };
   }
+  if (await deps.gatewayUnitUp()) {
+    await withOpenclawGatewayStopped(() => pasteOffline(provider, profileId, key));
+  } else {
+    await pasteOffline(provider, profileId, key);
+  }
+  return { via: "cli", profileId };
+}
+
+/** `paste-api-key --profile-id`, which 2026.11.3 runs only with no gateway owning the state. */
+async function pasteOffline(provider: string, profileId: string, key: string): Promise<void> {
   await deps.offlineAuthCli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], {
     stdinData: key + "\n",
     timeoutMs: AUTH_TIMEOUT_MS,
   });
-  return { via: "cli", profileId };
 }
 
 /** The provider a profile id names (`deepseek:default` → `deepseek`). */

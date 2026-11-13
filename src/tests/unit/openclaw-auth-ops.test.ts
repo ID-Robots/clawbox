@@ -53,12 +53,30 @@ function harness(opts: { up?: boolean; held?: string[] | null; refuse?: string; 
 afterEach(() => _setAuthOpsDepsForTests(null));
 
 describe("saveOpenclawApiKey", () => {
-  it("hands the key to the gateway's models.authSetApiKey while it runs, never to the CLI", async () => {
-    const h = harness();
+  it("hands the key to the gateway's models.authSetApiKey while it runs, when the store holds the profile", async () => {
+    const h = harness({ held: ["google:default"] });
     const saved = await saveOpenclawApiKey("google", "google:default", "AIza-test-key");
     expect(h.rpc).toHaveBeenCalledWith("models.authSetApiKey", { provider: "google", apiKey: "AIza-test-key" }, 60_000);
     expect(h.cli).not.toHaveBeenCalled();
     expect(saved).toEqual({ via: "gateway", profileId: "google:default" });
+  });
+
+  it("saves a FIRST key at ClawBox's id offline, the gateway stopped and started around it", async () => {
+    // models.authSetApiKey would create `<provider>:manual` for a provider the
+    // store holds no API-key profile of.
+    const h = harness({ held: [], unitUp: true });
+    const order: string[] = [];
+    h.stopGateway.mockImplementation(async () => { order.push("stop"); });
+    h.cli.mockImplementation(async () => { order.push("paste"); return ""; });
+    h.startGateway.mockImplementation(async () => { order.push("start"); });
+    const saved = await saveOpenclawApiKey("openrouter", "openrouter:default", "sk-or-test");
+    expect(h.rpc).not.toHaveBeenCalled();
+    expect(h.cli).toHaveBeenCalledWith(
+      ["models", "auth", "paste-api-key", "--provider", "openrouter", "--profile-id", "openrouter:default"],
+      { stdinData: "sk-or-test\n", timeoutMs: 60_000 },
+    );
+    expect(order).toEqual(["stop", "paste", "start"]);
+    expect(saved).toEqual({ via: "cli", profileId: "openrouter:default" });
   });
 
   it("pastes offline through the CLI, key on stdin, when no gateway answers", async () => {
@@ -74,7 +92,7 @@ describe("saveOpenclawApiKey", () => {
   it("waits for a gateway that is starting — it already owns the state — and asks it, never the CLI", async () => {
     // Seen in CI: the wizard restarted the gateway, and the key save that came
     // while it started went to the CLI with --profile-id, which it refused.
-    const h = harness({ up: false, unitUp: true, comesUp: true });
+    const h = harness({ up: false, unitUp: true, comesUp: true, held: ["deepseek:default"] });
     const saved = await saveOpenclawApiKey("deepseek", "deepseek:default", "claw_test");
     expect(h.waitForGateway).toHaveBeenCalledTimes(1);
     expect(h.rpc).toHaveBeenCalledTimes(2);
@@ -83,13 +101,13 @@ describe("saveOpenclawApiKey", () => {
   });
 
   it("says the assistant is starting when a gateway that owns the state never answers, and writes nothing around it", async () => {
-    const h = harness({ up: false, unitUp: true, comesUp: false });
+    const h = harness({ up: false, unitUp: true, comesUp: false, held: ["deepseek:default"] });
     await expect(saveOpenclawApiKey("deepseek", "deepseek:default", "claw_test")).rejects.toThrow(/starting/);
     expect(h.cli).not.toHaveBeenCalled();
   });
 
   it("passes the gateway's refusal on and does not retry it through the CLI", async () => {
-    const h = harness({ refuse: "The API-key profile belongs to another sign-in. Manage that saved sign-in first" });
+    const h = harness({ held: ["openai:default"], refuse: "The API-key profile belongs to another sign-in. Manage that saved sign-in first" });
     await expect(saveOpenclawApiKey("openai", "openai:default", "sk-test")).rejects.toThrow(/belongs to another sign-in/);
     expect(h.cli).not.toHaveBeenCalled();
   });
