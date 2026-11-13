@@ -150,7 +150,25 @@ note "Memory Shard before: enabled ${WAS_ENABLED:-?}, location $(api_json '.loca
 
 DIR=/home/clawbox/nano-ci-embed-${NANO_RUN_ID:-$$}
 PHRASE="The lighthouse keeper on Sveti Ivan paints his bicycle teal every April"
-SOURCE_ADDED=0 SWITCHED=0 ENABLED_HERE=0 RESTORED=0
+SOURCE_ADDED=0 SWITCHED=0 ENABLED_HERE=0 RESTORED=0 PASS_ASKED=0
+# The full pass restore() asks for, waited out, and the runtime settled after
+# it: on OpenClaw 2026.11.3 an owner's pass runs with the gateway held offline
+# (src/lib/clawkeep-memory.ts), and the next test's first turn must not be
+# sent into that hold. Notes only: the box is being put back, not judged.
+wait_restore_pass() {
+  local run=
+  for _ in $(seq 1 90); do
+    board_owner_api GET /setup-api/clawkeep/memory
+    run=$(api_json '.run.status // empty')
+    case "$run" in running|queued) sleep 5 ;; *) break ;; esac
+  done
+  note "the restore's full pass: ${run:-no run}"
+  if wait_runtime_settled 300; then
+    note "the runtime settled after the restore's pass (${SETTLE_WAITED}s)"
+  else
+    note "the runtime did not settle after the restore's pass: ${SETTLE_STATE:-unknown}"
+  fi
+}
 restore() {
   [ "$RESTORED" = 1 ] && return 0
   RESTORED=1
@@ -168,6 +186,7 @@ restore() {
     board_owner_api POST /setup-api/clawkeep/memory/provider "{\"source\":\"local\",\"localModel\":\"$BEFORE_MODEL\"}"
     if [ "$API_STATUS" = 200 ]; then
       board_owner_api POST /setup-api/clawkeep/memory/index '{"mode":"full"}'
+      PASS_ASKED=1
       note "the index is back on $BEFORE_MODEL; full pass asked for: $API_STATUS"
     else
       not_ok "could not put the index back on $BEFORE_MODEL: $(api_error)"
@@ -179,6 +198,7 @@ restore() {
       note "the index is back on the cloud embedder"
       # It belongs to the model that wrote it: the full pass the switch needs.
       board_owner_api POST /setup-api/clawkeep/memory/index '{"mode":"full"}'
+      PASS_ASKED=1
       note "full pass for the cloud index asked for: $API_STATUS"
     else
       not_ok "could not put the index back on the cloud: $(api_error)"
@@ -188,6 +208,7 @@ restore() {
     board_owner_api POST /setup-api/clawkeep/memory/enable '{"enabled":false}'
     note "Memory Shard switched off again (this test switched it on): $API_STATUS"
   fi
+  [ "$PASS_ASKED" = 1 ] && wait_restore_pass
   # shellcheck disable=SC2016  # expanded on the board
   board 'rm -rf -- "$1"' "$DIR" >/dev/null
 }
