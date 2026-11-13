@@ -82,6 +82,23 @@ describe("a member of staff's relay", () => {
     expect(claims).toEqual([{ paths: [DOC], since: 1_790_000_000_000, until: 1_790_000_060_000 }]);
   });
 
+  it("reads a delta history answer's envelopes too (the chat's read after every turn)", () => {
+    const state = member();
+    relay.filterClientFrame(state, { type: "req", id: "h3", method: "chat.history", params: { sessionKey: MAIN, cursor: "c1" } });
+    const claims = relay.replyMediaClaims(state, {
+      type: "res", id: "h3", ok: true,
+      payload: {
+        kind: "delta",
+        sessionKey: MAIN,
+        messages: [
+          { sessionKey: MAIN, messageId: "m1", message: { role: "user", content: "write it", timestamp: 1_790_002_000_000 } },
+          { sessionKey: MAIN, messageId: "m2", message: reply(`Here it is.\nMEDIA:${DOC}`, { timestamp: 1_790_002_030_000 }) },
+        ],
+      },
+    });
+    expect(claims).toEqual([{ paths: [DOC], since: 1_790_002_000_000, until: 1_790_002_030_000 }]);
+  });
+
   it("ignores a history answer to a request it did not send, and one for another member's key", () => {
     const state = member();
     expect(relay.replyMediaClaims(state, { type: "res", id: "never", ok: true, payload: { messages: [reply(`MEDIA:${DOC}`)] } })).toEqual([]);
