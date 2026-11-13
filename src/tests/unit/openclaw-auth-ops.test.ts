@@ -61,6 +61,28 @@ describe("saveOpenclawApiKey", () => {
     expect(saved).toEqual({ via: "gateway", profileId: "google:default" });
   });
 
+  it("takes out a copy the gateway made under another id, and saves at ClawBox's id offline", async () => {
+    // A provider with a `models.providers` entry: the gateway writes
+    // `<provider>:manual` even beside `<provider>:default`.
+    const h = harness({ held: ["openrouter:default"] });
+    h.rpc.mockImplementation(async (method: string) => (method === "models.authSetApiKey" ? { provider: "openrouter", profileId: "openrouter:manual" } : {}));
+    const saved = await saveOpenclawApiKey("openrouter", "openrouter:default", "sk-or-test");
+    expect(h.rpc).toHaveBeenCalledWith("models.authLogout", { provider: "openrouter", profileIds: ["openrouter:manual"] }, 60_000);
+    expect(h.cli).toHaveBeenCalledWith(
+      ["models", "auth", "paste-api-key", "--provider", "openrouter", "--profile-id", "openrouter:default"],
+      { stdinData: "sk-or-test\n", timeoutMs: 60_000 },
+    );
+    expect(h.stopGateway).toHaveBeenCalledTimes(1);
+    expect(saved).toEqual({ via: "cli", profileId: "openrouter:default" });
+  });
+
+  it("never takes out a profile the store held before, even when the gateway wrote into it", async () => {
+    const h = harness({ held: ["openrouter:default", "openrouter:manual"] });
+    h.rpc.mockImplementation(async (method: string) => (method === "models.authSetApiKey" ? { provider: "openrouter", profileId: "openrouter:manual" } : {}));
+    await saveOpenclawApiKey("openrouter", "openrouter:default", "sk-or-test");
+    expect(h.rpc).not.toHaveBeenCalledWith("models.authLogout", expect.anything(), expect.anything());
+  });
+
   it("saves a FIRST key at ClawBox's id offline, the gateway stopped and started around it", async () => {
     // models.authSetApiKey would create `<provider>:manual` for a provider the
     // store holds no API-key profile of.

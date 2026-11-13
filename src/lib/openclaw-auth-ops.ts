@@ -158,11 +158,18 @@ export async function saveOpenclawApiKey(provider: string, profileId: string, ke
     const answer = await askGatewayForAuth<{ profileId?: unknown; warning?: unknown }>("models.authSetApiKey", { provider, apiKey: key });
     if (answer.answered) {
       const landed = typeof answer.result?.profileId === "string" && answer.result.profileId ? answer.result.profileId : profileId;
-      if (landed !== profileId) {
-        console.warn(`[openclaw-auth] the gateway saved the ${provider} key at ${landed}, not ${profileId}`);
-      }
       const warning = typeof answer.result?.warning === "string" && answer.result.warning ? answer.result.warning : undefined;
-      return { via: "gateway", profileId: landed, ...(warning ? { warning } : {}) };
+      if (landed === profileId) return { via: "gateway", profileId: landed, ...(warning ? { warning } : {}) };
+      // A provider with a `models.providers` entry gets `<provider>:manual`
+      // from the gateway even beside an existing API-key profile (measured on
+      // a board). The copy it just made goes again — never one it held
+      // before — and the key is saved at ClawBox's id the offline way.
+      console.warn(`[openclaw-auth] the gateway saved the ${provider} key at ${landed}, not ${profileId}; saving it at ${profileId} offline`);
+      if (held !== null && !held.includes(landed)) {
+        await askGatewayForAuth("models.authLogout", { provider, profileIds: [landed] });
+      }
+      await withOpenclawGatewayStopped(() => pasteOffline(provider, profileId, key));
+      return { via: "cli", profileId };
     }
     await pasteOffline(provider, profileId, key);
     return { via: "cli", profileId };
