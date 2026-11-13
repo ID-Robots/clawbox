@@ -678,6 +678,18 @@ export async function register() {
     console.error('[instrumentation] Could not start the Hermes plugin watcher:', err instanceof Error ? err.message : err)
   }
   try {
+    // OpenClaw 2026.11.3 indexes memory only with the gateway stopped; a web
+    // server that exited during such a pass left the gateway stopped and a
+    // hold on disk saying so (src/lib/openclaw-auth-ops.ts).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { restoreOpenclawGatewayAfterCrash } = require('./lib/openclaw-auth-ops')
+    void restoreOpenclawGatewayAfterCrash().catch((err: unknown) => {
+      console.error('[instrumentation] Could not start the gateway after an interrupted offline hold:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not check for an interrupted offline hold:', err instanceof Error ? err.message : err)
+  }
+  try {
     // On the OpenClaw arm the memory-status probe boots a whole OpenClaw
     // process (~8 s on a Jetson), so it is paid once, after the boot rush
     // (gateway restart, schedulers, Next's own warm-up) has passed, and the

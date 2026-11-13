@@ -756,7 +756,9 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
-  if (isSkillsReloadRace(evidence)) return SKILLS_RELOAD;
+  // The turn's own error only: a fallback attempt's detail must not answer
+  // for the requested model's (a missing credential is not cured by a resend).
+  if (isSkillsReloadRace(text)) return SKILLS_RELOAD;
   // Ahead of everything that reads the reason or a status: the gateway tags a
   // missing sign-in `reason=auth`, which the refused-credential rule below
   // would answer with a sentence that is false here, and its line quotes a

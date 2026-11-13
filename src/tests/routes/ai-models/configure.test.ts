@@ -2845,23 +2845,16 @@ describe("POST /setup-api/ai-models/configure", () => {
       // Both modes live at `xai:default`, and picking the API Key tab is the
       // owner switching. The guard that protects a Claude sign-in would make
       // that switch impossible from the UI, so xAI does not ask it.
-      vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
-        Array.isArray(args) && args.includes("list")
-          ? storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }])
-          : "");
-      try {
-        const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
+      vi.mocked(readGatewayAuthProfile).mockClear();
+      const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
 
-        expect(res.status).toBe(200);
-        expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
-          ([args]) => Array.isArray(args) && args.includes("list"),
-        )).toBe(false);
-        expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
-        const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-        expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
-      } finally {
-        vi.mocked(spawnOpenclawCli).mockReset().mockResolvedValue("");
-      }
+      expect(res.status).toBe(200);
+      // No sign-in guard read for xAI (the store reader), and the paste goes ahead.
+      expect(vi.mocked(readGatewayAuthProfile)).not.toHaveBeenCalledWith("xai:default");
+      expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
     });
 
     it("still requires a key for an xai API-key save", async () => {

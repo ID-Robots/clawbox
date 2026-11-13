@@ -581,6 +581,18 @@ describe("readXaiStoredProfiles", () => {
 });
 
 describe("replacing a stored xAI sign-in", () => {
+  it("spawns nothing when the sign-in is cancelled while the old profiles are taken out", async () => {
+    vi.mocked(readGatewayProviderAuth).mockReturnValueOnce({ kind: "present", profiles: [{ profileId: "xai:default", type: "api_key", fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null }], order: null, failures: {} });
+    vi.mocked(logoutOpenclawAuthProfiles).mockImplementationOnce(async (_p: string, ids: string[]) => {
+      cancelXaiLogin();
+      return ids;
+    });
+    const spawn = vi.spyOn(xaiLoginSpawn, "spawn");
+    expect(await startXaiLogin({ replaceExisting: true })).toMatchObject({ status: "failed", detail: expect.stringMatching(/cancelled/) });
+    expect(spawn).not.toHaveBeenCalled();
+    spawn.mockRestore();
+  });
+
   it("takes the stored xAI profiles out through the gateway before the login starts", async () => {
     vi.mocked(readGatewayProviderAuth).mockReturnValueOnce({ kind: "present", profiles: [{ profileId: "xai:default", type: "api_key", fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null }], order: null, failures: {} });
     const spawn = vi.spyOn(xaiLoginSpawn, "spawn").mockImplementation(() => { throw new Error("no CLI here"); });

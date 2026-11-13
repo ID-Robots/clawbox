@@ -1164,6 +1164,23 @@ describe("what a scheduled slot runs against a disowned index (TASK-1197)", () =
     expect(vi.mocked(stopOpenclawGatewayForOffline)).not.toHaveBeenCalled();
   });
 
+  it("records a pass whose assistant could not be started again as failed, after one more try", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const mod = await import("@/lib/clawkeep-memory");
+    mod._setGatewayRestartRetryPauseForTests(1);
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockClear();
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockRejectedValue(new Error("restart refused"));
+    try {
+      expect((await mod.startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+      const run = await settledMemoryRun(tmpDir);
+      expect(run.status).not.toBe("succeeded");
+      expect(vi.mocked(ops.startOpenclawGatewayAfterOffline)).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.mocked(ops.startOpenclawGatewayAfterOffline).mockResolvedValue(undefined);
+    }
+  });
+
   it("runs an owner's OpenClaw pass with the gateway stopped, and starts it again when the pass ends", async () => {
     await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
     const { startMemoryIndex } = await import("@/lib/clawkeep-memory");

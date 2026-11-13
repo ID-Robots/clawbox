@@ -281,6 +281,14 @@ const STATUS_CACHE_MS = 120_000;
 const STATUS_TIMEOUT_MS = memoryStatusTimeoutMs(process.env.CLAWKEEP_MEMORY_STATUS_TIMEOUT_MS);
 const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const LOCK_START_GRACE_MS = 30_000;
+
+/** The pause before the one retry of the gateway start after an OpenClaw index pass. */
+let gatewayRestartRetryPauseMs = 15_000;
+
+/** Tests only. */
+export function _setGatewayRestartRetryPauseForTests(ms: number): void {
+  gatewayRestartRetryPauseMs = ms;
+}
 const MAX_STATUS_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 const EMPTY_RUN_STATE: PersistedMemoryRunState = {
@@ -2279,7 +2287,7 @@ export async function startMemoryIndex(
     return { accepted: false, declined: "disabled", run: await readMemoryRunState() };
   }
 
-  const startedAtMs = Date.now();
+  let startedAtMs = Date.now();
   let state: PersistedMemoryRunState = {
     status: "running",
     mode,
@@ -2339,7 +2347,36 @@ export async function startMemoryIndex(
   // state, so the pass runs with the gateway stopped through its service owner
   // and starts it again however the pass ends (done, failed, stopped, timed
   // out, abandoned).
-  if (!localArm) await stopOpenclawGatewayForOffline();
+  if (!localArm) {
+    // The stop can take a minute (the gateway drains first), longer than a
+    // run may sit with no child before the reconcile calls it interrupted and
+    // frees the lock — so the claim is re-stamped while it waits.
+    const keepClaim = setInterval(() => {
+      state = { ...state, startedAtMs: Date.now() };
+      void writeRunState(state).catch(() => { /* the next stamp tries again */ });
+    }, 10_000);
+    try {
+      await stopOpenclawGatewayForOffline();
+    } catch (err) {
+      clearInterval(keepClaim);
+      await startOpenclawGatewayAfterOffline().catch(() => undefined);
+      await markInterrupted({ ...state, startedAtMs: Date.now() }).catch(() => undefined);
+      throw err;
+    } finally {
+      clearInterval(keepClaim);
+    }
+    // Still this run's? Nothing may have taken the lock over in the meantime;
+    // if something did, the gateway goes back and this call steps aside.
+    const now = await readPersistedRunState();
+    if (now.status !== "running" || now.mode !== mode || now.trigger !== trigger) {
+      await startOpenclawGatewayAfterOffline().catch(() => undefined);
+      return { accepted: false, declined: "running", run: await readMemoryRunState() };
+    }
+    // The pass starts now; the stop's own time is not the pass's.
+    startedAtMs = Date.now();
+    state = { ...state, startedAtMs };
+    await writeRunState(state);
+  }
   let pass: IndexPass;
   try {
     pass = localArm
@@ -2350,9 +2387,23 @@ export async function startMemoryIndex(
     throw err;
   }
   if (!localArm) {
-    const ended = pass.ended.finally(() => startOpenclawGatewayAfterOffline().catch((err) => {
-      console.error("[clawkeep-memory] the gateway did not start again after the index pass:", err instanceof Error ? err.message : err);
-    }));
+    // However the pass ended, the assistant is started again — once more after
+    // a pause if the first start fails — and a pass whose assistant could not
+    // be brought back is recorded as failed, not succeeded.
+    const ended = pass.ended.then(async (outcome): Promise<PassOutcome> => {
+      let lastError: unknown = null;
+      for (let tryNo = 0; tryNo < 2; tryNo += 1) {
+        try {
+          await startOpenclawGatewayAfterOffline();
+          return outcome;
+        } catch (err) {
+          lastError = err;
+          console.error("[clawkeep-memory] the gateway did not start again after the index pass:", err instanceof Error ? err.message : err);
+          if (tryNo === 0) await new Promise((resolve) => setTimeout(resolve, gatewayRestartRetryPauseMs));
+        }
+      }
+      return { kind: "threw", error: new Error(`The assistant could not be started again after the index pass: ${lastError instanceof Error ? lastError.message : String(lastError)}`) };
+    });
     pass = { ...pass, ended };
   }
   if (pass.pid) settlingPasses().add(pass.pid);

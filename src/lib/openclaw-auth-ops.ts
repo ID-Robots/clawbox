@@ -32,6 +32,16 @@ import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs }
 import { gatewayWsCall, GatewayWsUnavailableError, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
 import { readUnitState, runUnitJob } from "@/lib/gateway-unit-job";
+import { DATA_DIR } from "@/lib/config-store";
+import fs from "fs";
+import path from "path";
+
+/**
+ * On disk while ClawBox holds the gateway stopped for offline work (a memory
+ * index pass): a web server that exits in between leaves it behind, and its
+ * next start puts the gateway back (`restoreOpenclawGatewayAfterCrash`).
+ */
+const OFFLINE_HOLD_PATH = path.join(DATA_DIR, ".openclaw-offline-hold.json");
 
 
 /** One CLI start-up on a Jetson is 10-12 s; the gateway's own write is quicker. */
@@ -250,6 +260,11 @@ export async function setOpenclawAuthOrder(provider: string, order: string[] | n
  */
 export async function stopOpenclawGatewayForOffline(): Promise<void> {
   if (gatewayIsAbsent()) return;
+  try {
+    fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
+  } catch (err) {
+    console.warn("[openclaw-auth] could not record the offline hold:", err instanceof Error ? err.message : err);
+  }
   await deps.stopGateway();
 }
 
@@ -257,6 +272,34 @@ export async function stopOpenclawGatewayForOffline(): Promise<void> {
 export async function startOpenclawGatewayAfterOffline(): Promise<void> {
   if (gatewayIsAbsent()) return;
   await deps.startGateway();
+  fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
+}
+
+/**
+ * At the web server's start: an offline hold left by a server that exited
+ * during it (its pid is gone) means the gateway may still be stopped, so it is
+ * started again. A hold of this very process, or none, does nothing.
+ */
+export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
+  let hold: { pid?: unknown } | null = null;
+  try {
+    hold = JSON.parse(fs.readFileSync(OFFLINE_HOLD_PATH, "utf8")) as { pid?: unknown };
+  } catch {
+    return false;
+  }
+  const pid = typeof hold?.pid === "number" ? hold.pid : 0;
+  if (pid === process.pid) return false;
+  if (pid > 0) {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      /* gone: the hold is an orphan */
+    }
+  }
+  console.warn("[openclaw-auth] the gateway was held stopped by a web server that has since exited; starting it again");
+  await startOpenclawGatewayAfterOffline();
+  return true;
 }
 
 /**
@@ -266,8 +309,13 @@ export async function startOpenclawGatewayAfterOffline(): Promise<void> {
  */
 export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>): Promise<T> {
   if (gatewayIsAbsent()) return work();
-  await deps.stopGateway();
+  // The stop is inside the `try`: a stop that throws (a job still running when
+  // its client gave up) may still stop the unit afterwards, and the gateway
+  // must be started again on every way out. A start issued while that stop is
+  // pending cancels it; `work` then meets a gateway that owns the state, and
+  // says so, rather than leaving the assistant stopped.
   try {
+    await deps.stopGateway();
     return await work();
   } finally {
     await deps.startGateway();

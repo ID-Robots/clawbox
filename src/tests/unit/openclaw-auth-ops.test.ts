@@ -184,6 +184,15 @@ describe("setOpenclawAuthOrder", () => {
 });
 
 describe("withOpenclawGatewayStopped", () => {
+  it("starts the gateway again when the stop itself throws", async () => {
+    const h = harness();
+    h.stopGateway.mockRejectedValueOnce(new Error("the gateway is still stopping"));
+    const work = vi.fn(async () => "done");
+    await expect(withOpenclawGatewayStopped(work)).rejects.toThrow(/still stopping/);
+    expect(work).not.toHaveBeenCalled();
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("stops the gateway, runs the offline work and starts it again, also when the work fails", async () => {
     const h = harness();
     const order: string[] = [];

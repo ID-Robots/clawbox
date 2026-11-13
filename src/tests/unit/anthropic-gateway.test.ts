@@ -76,6 +76,10 @@ function fakeCore() {
     agent: [] as string[] | null,
     /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
     pasteExitsAfterWrite: false,
+    /** OpenClaw 2026.11.3 keeps every other profile of the provider after the order asked for. */
+    orderKeepsOthers: false,
+    /** The gateway could not be stopped and started again around the pastes. */
+    offlineFails: false,
   };
   offlineWindows = 0;
   gw._setGatewayDepsForTests({
@@ -93,7 +97,9 @@ function fakeCore() {
     // run in one window with the gateway stopped (counted here).
     offline: async (work) => {
       offlineWindows += 1;
-      return work();
+      const done = await work();
+      if (core.offlineFails) throw new Error("the gateway did not start again");
+      return done;
     },
     paste: async (profileId, token) => {
       if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
@@ -114,7 +120,7 @@ function fakeCore() {
     order: async (ids) => {
       if (core.refuseOrder) throw new Error("the auth state is busy");
       core.orders.push([...ids]);
-      core.order = ids.length > 0 ? [...ids] : null;
+      core.order = ids.length > 0 ? [...ids, ...(core.orderKeepsOthers ? [...core.profiles.keys()].filter((id) => !ids.includes(id)) : [])] : null;
       if (core.orderReadsBackOtherwise && core.order) core.order = [...core.order].reverse();
     },
     unsetConfigOrder: async () => {
@@ -202,6 +208,26 @@ describe("the pool in the gateway", () => {
     expect(core.pastes.length + core.orders.length).toBe(asked);
     // ...and stops nothing.
     expect(offlineWindows).toBe(1);
+  });
+
+  it("takes an order the gateway completed with the provider's other profiles as landed (OpenClaw 2026.11.3)", async () => {
+    const core = fakeCore();
+    core.orderKeepsOthers = true;
+    const { work, personal } = await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.order?.slice(0, 2)).toEqual([p(work.id), p(personal.id)]);
+    // A second pass finds the order leading with the pool's and writes nothing.
+    const orders = core.orders.length;
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(core.orders.length).toBe(orders);
+  });
+
+  it("fails the pass when the gateway did not start again after the token pastes, whatever the store shows", async () => {
+    const core = fakeCore();
+    core.offlineFails = true;
+    await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).not.toBe("synced");
+    expect(core.pastes.length).toBe(2);
   });
 
   it("moves the order when the pool moves — a limit seen elsewhere, the owner's new order — and never restarts anything", async () => {

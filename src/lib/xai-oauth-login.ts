@@ -478,6 +478,9 @@ export async function startXaiLogin(opts: {
     return { status: "failed", detail: "The sign-in was cancelled, or replaced by another one, before it started." };
   }
   cancelXaiLogin();
+  // A cancel or a newer start during the awaits below moves this on: nothing
+  // is spawned for a login nobody is waiting for any more.
+  const generation = attempts;
   if (opts.replaceExisting) {
     // Only when the store already holds an xAI profile (or could not say):
     // the old profiles out first, through the gateway's models.authLogout.
@@ -487,6 +490,9 @@ export async function startXaiLogin(opts: {
     } catch (err) {
       console.warn("[xai-login] could not take the stored xAI profiles out before the sign-in:", err instanceof Error ? err.message : err);
     }
+  }
+  if (attempts !== generation) {
+    return { status: "failed", detail: "The sign-in was cancelled, or replaced by another one, before it started." };
   }
   // One launch, used again when the core refused the start for maintenance.
   const launch = (): ChildProcess => xaiLoginSpawn.spawn(findOpenclawBin(), xaiLoginArgs());

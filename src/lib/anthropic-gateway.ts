@@ -376,7 +376,15 @@ function otherProfiles(store: Extract<GatewayProviderAuthRead, { kind: "present"
   return [...ordered, ...profiles.filter((p) => !ordered.includes(p))];
 }
 
-const sameList = (a: readonly string[] | null, b: readonly string[]) => a !== null && a.length === b.length && a.every((id, i) => id === b[i]);
+/**
+ * Does the stored order lead with `wanted`? OpenClaw 2026.11.3 takes an order
+ * only when it names every profile the store holds for the provider, so the
+ * gateway keeps the pool's order first and the provider's other profiles
+ * after it (src/lib/openclaw-auth-ops.ts); an empty `wanted` is a cleared one.
+ */
+const leadsWith = (stored: readonly string[] | null, wanted: readonly string[]) => wanted.length === 0
+  ? stored === null || stored.length === 0
+  : stored !== null && stored.length >= wanted.length && wanted.every((id, i) => id === stored[i]);
 
 interface OrderMarker {
   /** The pool wrote core's stored order. */
@@ -457,6 +465,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // the pass owes runs in ONE offline window (`d.offline`).
   const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
   const toPaste: { id: string; account: string; token: { access: string; expires: number | null } }[] = [];
+  let offlineFailed = false;
   let pasted = 0;
   for (const account of wanted) {
     const id = poolProfileId(account.id);
@@ -478,6 +487,9 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     try {
       await (d.offline ? d.offline(pasteAll) : pasteAll());
     } catch (err) {
+      // Stored credentials do not prove the gateway is answering again: the
+      // pass fails below, whatever the read-back shows.
+      offlineFailed = true;
       console.error("[anthropic-gateway] the gateway could not be stopped and started again around the token pastes:", err instanceof Error ? err.message : err);
     }
   }
@@ -514,13 +526,13 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // Core said it wrote the order: whatever the read-back shows, taking the
   // pool out later clears it (an order that is not there clears without fuss).
   let orderWritten = false;
-  if (!sameList(after.order, order)) {
+  if (!leadsWith(after.order, order)) {
     if (await attempt("the account order", () => d.order(order, agent))) orderWritten = true;
     const reread = d.read();
     if (reread.kind !== "present") return outcome("failed", "write_lost", changed);
     final = reread;
   }
-  const orderLanded = sameList(final.order ?? (order.length === 0 ? [] : null), order);
+  const orderLanded = leadsWith(final.order, order);
   if (!orderLanded) owed.push("order");
 
   if ((orderLanded || orderWritten) && !marker.stored) await writeOrderMarker({ ...marker, stored: true });
@@ -569,6 +581,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const first = target ? `${target.id} first` : onSignIn ? `none of them in the order, every one limited: the owner's own sign-in (${order[0]}) first` : "none first";
     console.error(`[anthropic-gateway] the gateway holds ${held.size} Anthropic account(s) of the pool, ${first}${owed.length > 0 ? `; still owed: ${owed.join(", ")}` : ""}`);
   }
+  if (offlineFailed) return outcome("failed", "gateway_restart_failed", held.size);
   if (!leadOk) return outcome("failed", "write_failed", held.size);
   if (active && active.kind !== "oauth") return outcome("skipped", "not_transferable", held.size);
   // `pending` is the keeper's to finish without failing the move it serves.
