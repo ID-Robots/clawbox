@@ -221,12 +221,11 @@ export function createClawboxAiFlashClient(options: ClawboxAiFlashOptions = {}):
       // the lock, not "not signed in": the box usually still is.
       if (await isCloudAiLocked()) throw new FlashCallError("no_engine", CLOUD_AI_LOCKED_MESSAGE);
       const token = await resolveClawaiToken();
-      if (!token) {
-        // The lock can go on between the check above and this read, which
-        // then answers null for AI use: that is still the lock, not a sign-out.
-        if (await isCloudAiLocked()) throw new FlashCallError("no_engine", CLOUD_AI_LOCKED_MESSAGE);
-        throw new FlashCallError("no_credential", "This box is not signed in to ClawBox AI.");
-      }
+      // Asked again after the read, the last await before the request: the
+      // lock can go on while the credential was read — whether the read then
+      // answered null (that is the lock, not a sign-out) or a token.
+      if (await isCloudAiLocked()) throw new FlashCallError("no_engine", CLOUD_AI_LOCKED_MESSAGE);
+      if (!token) throw new FlashCallError("no_credential", "This box is not signed in to ClawBox AI.");
       const generation = clawaiCredentialGeneration();
       const signals = [AbortSignal.timeout(timeoutMs)];
       if (request.signal) signals.push(request.signal);
