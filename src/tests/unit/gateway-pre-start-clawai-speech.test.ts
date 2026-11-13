@@ -1080,7 +1080,7 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
   it("removes the held file only after the gateway config write has landed", () => {
     const script = readFileSync(SCRIPT, "utf-8");
     const write = script.indexOf('os.replace(tmp_path, cfg_path)\n        print("  Updated gateway config")');
-    const unlink = script.indexOf("os.unlink(_clawbox_tts_held_to_remove)");
+    const unlink = script.indexOf('os.unlink(globals()["_clawbox_tts_held_to_remove"])');
     expect(write).toBeGreaterThan(0);
     expect(unlink).toBeGreaterThan(write);
     expect(script.slice(write, unlink)).not.toMatch(/except/);
