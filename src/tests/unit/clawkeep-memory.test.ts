@@ -1164,6 +1164,23 @@ describe("what a scheduled slot runs against a disowned index (TASK-1197)", () =
     expect(vi.mocked(stopOpenclawGatewayForOffline)).not.toHaveBeenCalled();
   });
 
+  it("steps aside, and starts the gateway again, when another run took the record over while the gateway stopped", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const mod = await import("@/lib/clawkeep-memory");
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockClear();
+    const file = path.join(tmpDir, "memory-index-state.json");
+    vi.mocked(ops.stopOpenclawGatewayForOffline).mockImplementationOnce(async () => {
+      // Another run's record lands during the stop (its own start time).
+      const other = JSON.parse(await fs.readFile(file, "utf8"));
+      await fs.writeFile(file, JSON.stringify({ ...other, status: "running", startedAtMs: other.startedAtMs - 123_456 }));
+    });
+    const started = await mod.startMemoryIndex("incremental", "manual");
+    expect(started).toMatchObject({ accepted: false, declined: "running" });
+    expect(vi.mocked(ops.startOpenclawGatewayAfterOffline)).toHaveBeenCalledTimes(1);
+    expect(await indexCalls()).toEqual([]);
+  });
+
   it("records a pass whose assistant could not be started again as failed, after one more try", async () => {
     await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
     const mod = await import("@/lib/clawkeep-memory");

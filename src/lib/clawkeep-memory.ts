@@ -2347,6 +2347,8 @@ export async function startMemoryIndex(
   // state, so the pass runs with the gateway stopped through its service owner
   // and starts it again however the pass ends (done, failed, stopped, timed
   // out, abandoned).
+  // Ends the run claim's heartbeat (the OpenClaw arm below); a no-op otherwise.
+  let releaseClaim: () => Promise<void> = async () => {};
   if (!localArm) {
     // The stop can take a minute (the gateway drains first), longer than a
     // run may sit with no child before the reconcile calls it interrupted and
@@ -2355,35 +2357,50 @@ export async function startMemoryIndex(
     // call's only while it carries one of them (another run's record carries
     // its own start time).
     const ourStamps = new Set<number>([state.startedAtMs]);
-    const keepClaim = setInterval(() => {
-      const stamp = Math.max(Date.now(), state.startedAtMs + 1);
-      ourStamps.add(stamp);
-      state = { ...state, startedAtMs: stamp };
-      void writeRunState(state).catch(() => { /* the next stamp tries again */ });
-    }, 10_000);
+    // The claim's writes run one after another, so none still in flight can
+    // land over a record written after it; the heartbeat keeps going until the
+    // pass has been spawned, so a stalled write cannot let the claim lapse
+    // between the ownership check and the spawn.
+    let claimWrites: Promise<void> = Promise.resolve();
+    const writeClaim = (next: PersistedMemoryRunState) => {
+      claimWrites = claimWrites.then(() => writeRunState(next)).catch(() => { /* the next stamp tries again */ });
+      return claimWrites;
+    };
+    const stamp = () => {
+      const at = Math.max(Date.now(), state.startedAtMs + 1);
+      ourStamps.add(at);
+      state = { ...state, startedAtMs: at };
+      return state;
+    };
+    let keepClaim: ReturnType<typeof setInterval> | null = setInterval(() => { void writeClaim(stamp()); }, 10_000);
+    releaseClaim = async () => {
+      if (keepClaim) clearInterval(keepClaim);
+      keepClaim = null;
+      await claimWrites;
+    };
     try {
       await stopOpenclawGatewayForOffline();
     } catch (err) {
-      clearInterval(keepClaim);
+      await releaseClaim();
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
       // The record as it stands, so markInterrupted recognises it as this run's.
       const onRecord = await readPersistedRunState();
       if (onRecord.status === "running" && ourStamps.has(onRecord.startedAtMs)) await markInterrupted(onRecord).catch(() => undefined);
       throw err;
-    } finally {
-      clearInterval(keepClaim);
     }
-    // Still this run's? Nothing may have taken the lock over in the meantime;
-    // if something did, the gateway goes back and this call steps aside.
+    // Still this run's? Every claim write issued so far has landed first;
+    // if another run has taken the lock over, the gateway goes back and this
+    // call steps aside.
+    await claimWrites;
     const now = await readPersistedRunState();
     if (now.status !== "running" || !ourStamps.has(now.startedAtMs)) {
+      await releaseClaim();
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
       return { accepted: false, declined: "running", run: await readMemoryRunState() };
     }
     // The pass starts now; the stop's own time is not the pass's.
-    startedAtMs = Date.now();
-    state = { ...state, startedAtMs };
-    await writeRunState(state);
+    await writeClaim(stamp());
+    startedAtMs = state.startedAtMs;
   }
   let pass: IndexPass;
   try {
@@ -2391,8 +2408,12 @@ export async function startMemoryIndex(
       ? startLocalPass(mode, publishProgress, trigger !== "schedule")
       : startOpenclawPass(mode, publishProgress, agentId);
   } catch (err) {
+    await releaseClaim();
     if (!localArm) await startOpenclawGatewayAfterOffline().catch(() => undefined);
     throw err;
+  } finally {
+    // Spawned (or not): the claim's last write lands before the record names the child.
+    await releaseClaim();
   }
   if (!localArm) {
     // However the pass ended, the assistant is started again — once more after

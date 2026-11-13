@@ -311,6 +311,13 @@ export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
       /* gone: the hold is an orphan */
     }
   }
+  // A server that exited after writing the hold but before (or without)
+  // stopping the gateway leaves a running gateway: that one is left alone and
+  // only the hold goes.
+  if (await deps.gatewayUnitUp()) {
+    fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
+    return false;
+  }
   console.warn("[openclaw-auth] the gateway was held stopped by a web server that has since exited; starting it again");
   await startOpenclawGatewayAfterOffline();
   return true;

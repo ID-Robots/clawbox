@@ -38,8 +38,9 @@ const HOLD = path.join(tmp, ".openclaw-offline-hold.json");
 function deps() {
   const stopGateway = vi.fn(async () => undefined);
   const startGateway = vi.fn(async () => undefined);
-  _setAuthOpsDepsForTests({ stopGateway, startGateway });
-  return { stopGateway, startGateway };
+  const unitUp = { value: false };
+  _setAuthOpsDepsForTests({ stopGateway, startGateway, gatewayUnitUp: async () => unitUp.value });
+  return { stopGateway, startGateway, unitUp };
 }
 
 afterEach(() => {
@@ -72,6 +73,15 @@ describe("the offline hold", () => {
     fs.writeFileSync(HOLD, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));
     expect(await restoreOpenclawGatewayAfterCrash()).toBe(true);
     expect(d.startGateway).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(HOLD)).toBe(false);
+  });
+
+  it("leaves a gateway that is still running alone, and only drops the orphaned hold", async () => {
+    const d = deps();
+    d.unitUp.value = true;
+    fs.writeFileSync(HOLD, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));
+    expect(await restoreOpenclawGatewayAfterCrash()).toBe(false);
+    expect(d.startGateway).not.toHaveBeenCalled();
     expect(fs.existsSync(HOLD)).toBe(false);
   });
 
