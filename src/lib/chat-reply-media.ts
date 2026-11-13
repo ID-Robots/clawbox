@@ -45,8 +45,8 @@ export function recordMemberReplyMedia(input: { username: string; text: string; 
  * PROVENANCE: the result of a tool call `username`'s assistant made through
  * the staff MCP relay with their own relay token named these files, and the
  * call began at `since`. A file it names in the chat media tree (not
- * ClawBox's own folders) or in the member's own folder, written during the
- * call, is theirs. Never throws.
+ * ClawBox's own folders) or in the member's own folder, CREATED during the
+ * call (its birth time), is theirs. Never throws.
  */
 export function recordToolOutputFiles(input: { username: string; strings: readonly unknown[]; mediaRoot: string | null; ownFolder: string | null; since: number }): Claimed {
   const paths = pathsInText(input.strings);
@@ -54,5 +54,6 @@ export function recordToolOutputFiles(input: { username: string; strings: readon
   const roots: Array<{ dir: string; skip?: readonly string[] }> = [];
   if (input.mediaRoot) roots.push({ dir: input.mediaRoot, skip: MEDIA_TREE_OWN_FOLDERS });
   if (input.ownFolder) roots.push({ dir: input.ownFolder });
-  return claimReplyMedia({ username: input.username, paths, since: input.since, until: Date.now(), roots, record: recordMediaOwnerReturning });
+  // `created`: written by THIS call — born after it began — not merely named by it.
+  return claimReplyMedia({ username: input.username, paths, since: input.since, until: Date.now(), roots, created: true, record: recordMediaOwnerReturning });
 }

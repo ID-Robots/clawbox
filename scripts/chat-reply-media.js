@@ -46,6 +46,8 @@ const path = require("./runtime-path.js");
 const DEFAULT_TURN_MS = 30 * 60_000;
 /** Clock slack either side of the turn: a file's mtime and the gateway's timestamps come from one clock, but not one instant. */
 const SLACK_MS = 5_000;
+/** A file's birth time is read against the call's start with only the file system clock's coarseness to spare. */
+const CREATED_SLACK_MS = 20;
 /** Paths read from one message: a reply naming more is cut, as the chat's own card list is. */
 const MAX_PATHS_PER_MESSAGE = 16;
 const MAX_PATH_CHARS = 4096;
@@ -200,7 +202,7 @@ function inside(base, target) {
  * file's real path when it can. Pure but for the file system reads.
  * @param {string} raw
  * @param {ReadonlyArray<{ dir: string, skip?: ReadonlyArray<string> }>} roots
- * @param {{ since: number | null, until: number }} turn
+ * @param {{ since: number | null, until: number, created?: boolean }} turn
  * @returns {{ ok: true, real: string } | { ok: false, reason: string }}
  */
 function claimable(raw, roots, turn) {
@@ -238,6 +240,14 @@ function claimable(raw, roots, turn) {
     if (!stat || !stat.isFile()) return { ok: false, reason: "not_a_file" };
     if (stat.nlink !== 1) return { ok: false, reason: "link" };
     const since = turn.since ?? turn.until - DEFAULT_TURN_MS;
+    // PROVENANCE of a tool call (`created`): the file must have been CREATED
+    // during the call — its birth time, which no write or utimes moves —
+    // not merely touched, so a result naming someone else's recent file
+    // proves nothing. A file system that keeps no birth time grants nothing.
+    if (turn.created) {
+      if (!(stat.birthtimeMs > 0)) return { ok: false, reason: "no_birth_time" };
+      if (turn.since === null || stat.birthtimeMs < turn.since - CREATED_SLACK_MS || stat.birthtimeMs > turn.until + SLACK_MS) return { ok: false, reason: "not_this_call" };
+    }
     if (stat.mtimeMs < since - SLACK_MS || stat.mtimeMs > turn.until + SLACK_MS) return { ok: false, reason: "not_this_turn" };
     return { ok: true, real: current };
   }
@@ -253,6 +263,7 @@ function claimable(raw, roots, turn) {
  *   roots: ReadonlyArray<{ dir: string, skip?: ReadonlyArray<string> }>,
  *   since?: number | null,
  *   until?: number | null,
+ *   created?: boolean,
  *   record: (username: string, files: string[]) => string[] | void,
  * }} input
  * @returns {{ recorded: string[], refused: Array<{ path: string, reason: string }> }}
@@ -262,7 +273,7 @@ function claimReplyMedia(input) {
   const refused = [];
   try {
     const until = timeOf(input.until) ?? Date.now();
-    const turn = { since: timeOf(input.since), until };
+    const turn = { since: timeOf(input.since), until, created: input.created === true };
     const accepted = [];
     for (const raw of (input.paths || []).slice(0, MAX_PATHS_PER_MESSAGE)) {
       const verdict = claimable(raw, input.roots || [], turn);

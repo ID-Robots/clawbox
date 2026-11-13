@@ -200,13 +200,15 @@ describe("a tool on the box that takes no credential (TASK-2516)", () => {
     expect((await call("worddoc", TOKENS.maria, whoami)).status).toBe(200);
   });
 
-  it("records the files a member's own tool call wrote as theirs (provenance), never an older file it merely names", async () => {
+  it("records the files a member's own tool call CREATED as theirs (provenance), never a recent owner's file it merely names", async () => {
     await grant({ needsCredential: false, writeTools: true });
+    // The owner's document: written just before the call and touched again
+    // DURING it (a recent mtime), but not created by it.
     const old = path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx");
     fs.mkdirSync(path.dirname(old), { recursive: true });
     fs.writeFileSync(old, "PK");
-    const hourAgo = (Date.now() - 3_600_000) / 1000;
-    fs.utimesSync(old, hourAgo, hourAgo);
+    await new Promise((r) => setTimeout(r, 60));
+    fs.writeFileSync(old, "PK again");
     for (const as of [sse, !sse]) {
       sse = as;
       const res = await call("worddoc", TOKENS.olga, { ...createDoc, params: { name: "create_word_document", arguments: { title: `olga-${as ? "sse" : "json"}` } } });
