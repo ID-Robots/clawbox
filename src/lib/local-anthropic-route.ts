@@ -134,22 +134,33 @@ function translatedStream(upstream: ReadableStream<Uint8Array>, requestedModel: 
     controller.close();
   };
   return new ReadableStream<Uint8Array>({
+    // Reads until it has something to pass on or the stream is over: a pull
+    // that enqueues nothing is not called again while the reader waits (the
+    // Streams spec), and a chunk can make no event at all — half an SSE frame,
+    // a finish-only delta, `[DONE]`.
     async pull(controller) {
       try {
-        const { done, value } = await reader.read();
-        if (done) {
-          const rest = sse.end().flatMap((p) => out.push(p));
-          for (const e of rest) controller.enqueue(enc.encode(e));
-          if (out.error) finish(controller, [errorEvent("api_error", `The box's engine failed mid-answer: ${out.error}`)]);
-          else if (!out.answered) finish(controller, [errorEvent("api_error", "The box's engine ended its answer before saying anything.")]);
-          else finish(controller, out.end());
-          return;
-        }
-        const events = sse.push(decoder.decode(value, { stream: true })).flatMap((p) => out.push(p));
-        for (const e of events) controller.enqueue(enc.encode(e));
-        if (out.error) {
-          await reader.cancel().catch(() => {});
-          finish(controller, [errorEvent("api_error", `The box's engine failed mid-answer: ${out.error}`)]);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            const rest = sse.end().flatMap((p) => out.push(p));
+            for (const e of rest) controller.enqueue(enc.encode(e));
+            if (out.error) finish(controller, [errorEvent("api_error", `The box's engine failed mid-answer: ${out.error}`)]);
+            else if (!out.answered) finish(controller, [errorEvent("api_error", "The box's engine ended its answer before saying anything.")]);
+            // Cut off: no finish_reason and no [DONE]. Passed on as a failure,
+            // never closed as though the answer were whole.
+            else if (!out.completed) finish(controller, [errorEvent("api_error", "The box's engine stopped before finishing its answer.")]);
+            else finish(controller, out.end());
+            return;
+          }
+          const events = sse.push(decoder.decode(value, { stream: true })).flatMap((p) => out.push(p));
+          for (const e of events) controller.enqueue(enc.encode(e));
+          if (out.error) {
+            await reader.cancel().catch(() => {});
+            finish(controller, [errorEvent("api_error", `The box's engine failed mid-answer: ${out.error}`)]);
+            return;
+          }
+          if (events.length > 0) return;
         }
       } catch (err) {
         finish(controller, [errorEvent("api_error", `The box's engine stopped answering: ${err instanceof Error ? err.message : String(err)}`)]);

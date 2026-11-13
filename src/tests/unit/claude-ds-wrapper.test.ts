@@ -962,7 +962,29 @@ describe("the box's own engine (`local`, TASK-2501 PR-E)", () => {
     const env = capturedEnv();
     expect(env.ANTHROPIC_MODEL).toBe("qwen3-coder");
     expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(131_072 * 84 / 100)));
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBeUndefined();
     expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("4000");
+  });
+
+  // Claude Code takes no auto-compact window under 100k: an engine whose 84%
+  // is below that gets the window AT 100k and the point inside it moved, or
+  // the session would grow past the engine's window before compacting.
+  it("compacts a small engine's session inside its window, below Claude Code's smallest window", async () => {
+    engine.body = { data: [{ type: "model", id: "small-coder", clawbox: { engine: "ollama", context_tokens: 65_536, max_output_tokens: 8_192 } }] };
+    expect((await runLocal({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "95" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("100000");
+    // 84% of 65,536 is 55,050 tokens: 55% of the 100k window, rounded down.
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBe("55");
+    expect(Number(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) * 1_000).toBeLessThanOrEqual(Math.floor(65_536 * 84 / 100));
+  });
+
+  it("keeps the session's token off any proxy the box's environment names, and leaves the proxy to the run's tools", async () => {
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", NO_PROXY: "git.corp.example" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.NO_PROXY).toBe("127.0.0.1,localhost,::1,git.corp.example");
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1");
+    expect(env.HTTPS_PROXY).toBe("http://proxy.corp.example:3128");
   });
 
   it("denies WebSearch and WebFetch in the local harness's own settings, beside the rules already there", async () => {

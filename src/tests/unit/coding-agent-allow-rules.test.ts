@@ -107,7 +107,9 @@ describe("fileDenyRules with no owner rules", () => {
   it("denies each harness state directory wholesale", async () => {
     const { fileDenyRules } = await import("@/lib/coding-agent");
     const rules = fileDenyRules();
-    for (const harness of [".claude", ".claude-ds"]) {
+    // `.claude-ds-local`: a `local` run's own state (TASK-2501 PR-E), which a
+    // `~/.claude-ds/**` rule does not reach.
+    for (const harness of [".claude", ".claude-ds", ".claude-ds-local"]) {
       expect(rules, harness).toContain(`Read(/${pathMod.join(home, harness)}/**)`);
       expect(denied(rules, pathMod.join(home, harness, "projects", "app", "memory", "notes.md"))).toBe(true);
     }

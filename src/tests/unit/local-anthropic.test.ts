@@ -16,6 +16,7 @@ import {
   engineFailure,
   ENGINE_ERROR_QUOTE_CHARS,
   messageAsEvents,
+  PICTURE_FOLLOWS,
   PICTURE_NOT_SEEN,
   SseDataDecoder,
   stopReasonFrom,
@@ -176,6 +177,37 @@ describe("a Messages request as a Chat Completions body", () => {
     }]);
   });
 
+  // A tool's picture — Claude Code's Read of a screenshot. An OpenAI `tool`
+  // message carries text only, so an engine that sees is shown it in the user
+  // turn after the results; a blind one is told it was left out.
+  it("shows a picture a tool returned to an engine that sees, after the results", () => {
+    const picture = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+    const turn = (target: EngineTarget) => anthropicToChat({
+      messages: [
+        { role: "user", content: "Look at the page." },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "Read", input: { file_path: "shot.png" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "shot.png" }, picture] }, { type: "text", text: "Is it right?" }] },
+      ],
+    }, target);
+    const blind = turn(TARGET);
+    expect(blind.ok && blind.body.messages.slice(2)).toEqual([
+      { role: "tool", tool_call_id: "call_1", content: `shot.png\n${PICTURE_NOT_SEEN}` },
+      { role: "user", content: "Is it right?" },
+    ]);
+    const seeing = turn({ ...TARGET, imageInput: true });
+    expect(seeing.ok && seeing.body.messages.slice(2)).toEqual([
+      { role: "tool", tool_call_id: "call_1", content: `shot.png\n${PICTURE_FOLLOWS}` },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "The picture tool call call_1 returned:" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+          { type: "text", text: "Is it right?" },
+        ],
+      },
+    ]);
+  });
+
   it("passes on no thinking request, and asks the box's own runtimes for none", () => {
     const external = anthropicToChat({ messages: [{ role: "user", content: "x" }], thinking: { type: "enabled", budget_tokens: 4_000 } }, TARGET);
     expect(external.ok && external.body.thinking).toBeUndefined();
@@ -204,6 +236,12 @@ describe("a Messages request as a Chat Completions body", () => {
   it("refuses a request it cannot translate, in words", () => {
     expect(anthropicToChat({ messages: [] }, TARGET)).toEqual({ ok: false, error: expect.stringMatching(/at least one message/) });
     expect(anthropicToChat({ messages: [{ role: "tool" as never, content: "x" }] }, TARGET).ok).toBe(false);
+    for (const content of [null, undefined, 3, { type: "text", text: "x" }]) {
+      for (const role of ["user", "assistant"] as const) {
+        expect(anthropicToChat({ messages: [{ role, content: content as never }] }, TARGET), `${role}: ${JSON.stringify(content)}`)
+          .toEqual({ ok: false, error: expect.stringMatching(/string or a list of blocks/) });
+      }
+    }
   });
 });
 

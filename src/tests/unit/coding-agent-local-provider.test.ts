@@ -143,6 +143,20 @@ describe("a local run's environment and command line", () => {
     expect(args[args.indexOf("--tools") + 1]).not.toMatch(/WebSearch|WebFetch/);
   });
 
+  // startRun and a draft's start both clamp the owner's ultracode to xhigh for
+  // the engine; the argv holds it too, for whatever effort reaches it — a
+  // draft started before the clamp was shared, an older record resumed.
+  it("never runs on ultracode, whatever effort its start carries — no flag, no Workflow tool, no brief", () => {
+    const run = { id: "run-k3x9q2ab", directory: "/tmp/x" };
+    const local = buildRunArgs({ provider: "local", effort: "ultracode", run });
+    expect(local).not.toContain("ultracode");
+    expect(local.join("\n")).not.toMatch(/\bWorkflow\b/);
+    // A cloud run on the same effort keeps it.
+    const cloud = buildRunArgs({ provider: "clawbox-ai", effort: "ultracode", run });
+    expect(cloud[cloud.indexOf("--effort") + 1]).toBe("ultracode");
+    expect(cloud).toContain("Workflow");
+  });
+
   it("runs its helpers on the alias the wrapper fills with the engine's model", () => {
     expect(HELPER_MODEL.local).toBe("haiku");
     for (const def of Object.values(subagentDefinitionsFor("local"))) expect((def as { model: string }).model).toBe("haiku");
