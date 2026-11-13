@@ -5044,7 +5044,11 @@ def _clawbox_tts_lock_pass():
         # Never written over (it may hold an owner's key), never trusted.
         _held = None
         _held_unreadable = True
+    _held_foreign = False
     if not (isinstance(_held, dict) and _held.get("version") == 1 and isinstance(_held.get("homes"), dict)):
+        # A file there in a shape ClawBox did not write is left alone too,
+        # never written over: the lock then holds in place.
+        _held_foreign = _held is not None
         _held = None
 
     if globals().get("_clawai_speech_locked"):
@@ -5078,7 +5082,7 @@ def _clawbox_tts_lock_pass():
                 _moves.append((_home, _chosen, "select"))
         if not _moves:
             return
-        _in_file = not _held_unreadable
+        _in_file = not (_held_unreadable or _held_foreign)
         if _in_file:
             try:
                 _tmp = _held_path + ".tmp"
@@ -5110,7 +5114,7 @@ def _clawbox_tts_lock_pass():
             print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
         else:
             print("  WARNING: local-only AI is on and the held speech providers file could not be "
-                  + ("read" if _held_unreadable else "written")
+                  + ("read" if _held_unreadable else "used (it is not one ClawBox wrote)" if _held_foreign else "written")
                   + "; the cloud voices are held in place in the gateway config instead (out of its speech chain, nothing lost)")
         return
 
@@ -5587,7 +5591,11 @@ if changed:
             # The one exception to "carry on" above: under the local-only AI
             # lock (TASK-2501) the config on disk still lets cloud voices
             # speak, so starting on it would break the lock. Failing closed
-            # costs the gateway this start; the next one tries the write again.
+            # costs the gateway its start: systemd retries until its start
+            # limit, and past it the gateway stays down until a start can
+            # write the config (a restart once there is room, or the next
+            # boot). Under the lock that is the chosen trade: no chat rather
+            # than a cloud voice.
             print(
                 "  ERROR: local-only AI is on and the gateway config that holds the cloud voices aside could not be written (%s: %s); the gateway is not started on the old config"
                 % (type(exc).__name__, exc),

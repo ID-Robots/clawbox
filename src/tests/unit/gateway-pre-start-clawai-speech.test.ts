@@ -1173,6 +1173,19 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
     expect(locked.log).toMatch(/could not be read/);
   });
 
+  it("never writes over a held file it did not write, and holds in place instead", () => {
+    const heldFile = path.join(dir, ".tts-local-only-held.json");
+    writeFileSync(heldFile, JSON.stringify({ someone: "else" }));
+    const own = { messages: { tts: { provider: "openai", providers: { "tts-local-cli": { command: "/x" }, openai: { apiKey: "sk-own" } } } } };
+    const locked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    const tts = (locked.cfg.messages as { tts: { provider: string; providers: Record<string, unknown> } }).tts;
+    expect(tts.provider).toBe("tts-local-cli");
+    expect(tts.providers["clawbox-held--openai"]).toEqual({ apiKey: "sk-own" });
+    expect(JSON.parse(readFileSync(heldFile, "utf-8"))).toEqual({ someone: "else" });
+    expect(locked.log).toMatch(/not one ClawBox wrote/);
+    expect(migrate(locked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: false } }).cfg).toEqual(own);
+  });
+
   it("gives the owner's selection back only over the voice the lock chose", () => {
     const own = {
       messages: {
