@@ -254,7 +254,10 @@ function historyClaims(messages) {
   if (!Array.isArray(messages)) return [];
   const out = [];
   let lastUser = null;
-  for (const message of messages) {
+  for (const row of messages) {
+    // A delta answer's rows are envelopes, `{ sessionKey, message, messageId, … }`
+    // around the message a page carries (src/lib/harness/openclaw-gateway-adapter.ts).
+    const message = isRecord(row) && !("role" in row) && isRecord(row.message) ? row.message : row;
     if (!isRecord(message)) continue;
     if (message.role === "user") {
       lastUser = timeOf(message.timestamp ?? message.createdAt ?? message.ts);

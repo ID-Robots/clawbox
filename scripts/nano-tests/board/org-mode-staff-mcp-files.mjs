@@ -262,6 +262,16 @@ async function openclawTurn(sock, key, text) {
   runId = typeof sent.payload?.runId === "string" ? sent.payload.runId : null;
   await Promise.race([finished, new Promise((r) => setTimeout(r, TURN_MS))]);
   off();
+  // OpenClaw 2026.10 takes the `MEDIA:` line out of the live final event and
+  // keeps it in the transcript; the chat reads `chat.history` after every
+  // turn and draws the card from that, so this does the same read.
+  if (completed) {
+    const history = await sock.request("chat.history", { sessionKey: key, limit: 6 });
+    const last = (history.payload?.messages || []).filter((m) => m?.role === "assistant").pop();
+    const blocks = Array.isArray(last?.content) ? last.content : [];
+    const fromHistory = typeof last?.content === "string" ? last.content : blocks.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\n");
+    if (fromHistory) finalText = fromHistory;
+  }
   return { tools, text: finalText, completed };
 }
 
