@@ -33,7 +33,7 @@ function harness(opts: { up?: boolean; held?: string[] | null; refuse?: string }
   const cli = vi.fn(async () => "");
   const stopGateway = vi.fn(async () => {});
   const startGateway = vi.fn(async () => {});
-  _setAuthOpsDepsForTests({ rpc, cli, stopGateway, startGateway, storeProfiles: () => (opts.held === undefined ? [] : opts.held) });
+  _setAuthOpsDepsForTests({ gatewayAuthRpc: rpc, offlineAuthCli: cli, stopGateway, startGateway, storeProfiles: () => (opts.held === undefined ? [] : opts.held) });
   return { rpc, cli, stopGateway, startGateway };
 }
 

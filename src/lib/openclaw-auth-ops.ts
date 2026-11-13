@@ -38,8 +38,8 @@ import { runUnitJob } from "@/lib/gateway-unit-job";
 const AUTH_TIMEOUT_MS = 60_000;
 
 export interface AuthOpsDeps {
-  rpc: (method: string, params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
-  cli: (args: string[], options: { stdinData?: string; timeoutMs: number }) => Promise<string>;
+  gatewayAuthRpc: (method: string, params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
+  offlineAuthCli: (args: string[], options: { stdinData?: string; timeoutMs: number }) => Promise<string>;
   /** The provider's profile ids in the gateway's store, or null when it cannot be read. */
   storeProfiles: (provider: string) => string[] | null;
   stopGateway: () => Promise<void>;
@@ -47,8 +47,8 @@ export interface AuthOpsDeps {
 }
 
 const defaultDeps: AuthOpsDeps = {
-  rpc: (method, params, timeoutMs) => gatewayWsCall(method, params, { timeoutMs }),
-  cli: (args, options) => spawnOpenclawCli(args, options),
+  gatewayAuthRpc: (method, params, timeoutMs) => gatewayWsCall(method, params, { timeoutMs }),
+  offlineAuthCli: (args, options) => spawnOpenclawCli(args, options),
   storeProfiles: (provider) => {
     const read = readGatewayProviderAuth(provider);
     if (read.kind === "no-store") return [];
@@ -86,10 +86,10 @@ function agentArgs(agentId: string | undefined): string[] {
 type Online<T> = { answered: true; result: T } | { answered: false };
 
 /** The gateway's answer, or `answered: false` when no gateway is there to give one. */
-async function online<T>(method: string, params: Record<string, unknown>): Promise<Online<T>> {
+async function askGatewayForAuth<T>(method: string, params: Record<string, unknown>): Promise<Online<T>> {
   if (gatewayIsAbsent()) return { answered: false };
   try {
-    return { answered: true, result: (await deps.rpc(method, params, AUTH_TIMEOUT_MS)) as T };
+    return { answered: true, result: (await deps.gatewayAuthRpc(method, params, AUTH_TIMEOUT_MS)) as T };
   } catch (err) {
     if (err instanceof GatewayWsUnavailableError) return { answered: false };
     throw err;
@@ -109,7 +109,7 @@ export interface SavedApiKey {
  * with no other API-key profile). The key never touches argv.
  */
 export async function saveOpenclawApiKey(provider: string, profileId: string, key: string): Promise<SavedApiKey> {
-  const answer = await online<{ profileId?: unknown; warning?: unknown }>("models.authSetApiKey", { provider, apiKey: key });
+  const answer = await askGatewayForAuth<{ profileId?: unknown; warning?: unknown }>("models.authSetApiKey", { provider, apiKey: key });
   if (answer.answered) {
     const landed = typeof answer.result?.profileId === "string" && answer.result.profileId ? answer.result.profileId : profileId;
     if (landed !== profileId) {
@@ -118,7 +118,7 @@ export async function saveOpenclawApiKey(provider: string, profileId: string, ke
     const warning = typeof answer.result?.warning === "string" && answer.result.warning ? answer.result.warning : undefined;
     return { via: "gateway", profileId: landed, ...(warning ? { warning } : {}) };
   }
-  await deps.cli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], {
+  await deps.offlineAuthCli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], {
     stdinData: key + "\n",
     timeoutMs: AUTH_TIMEOUT_MS,
   });
@@ -142,10 +142,10 @@ export async function logoutOpenclawAuthProfiles(provider: string, profileIds: s
   const held = deps.storeProfiles(provider);
   const wanted = held === null ? ids : ids.filter((id) => held.includes(id));
   if (wanted.length === 0) return [];
-  const answer = await online("models.authLogout", { provider, profileIds: wanted, ...agentParam(agentId) });
+  const answer = await askGatewayForAuth("models.authLogout", { provider, profileIds: wanted, ...agentParam(agentId) });
   if (answer.answered) return wanted;
   for (const id of wanted) {
-    await deps.cli(["models", "auth", "logout", id, "--yes", ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
+    await deps.offlineAuthCli(["models", "auth", "logout", id, "--yes", ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
   }
   return wanted;
 }
@@ -160,12 +160,13 @@ export async function setOpenclawAuthOrder(provider: string, order: string[] | n
   const asked = [...new Set((order ?? []).filter((id) => typeof id === "string" && id.trim()))];
   const held = asked.length > 0 ? deps.storeProfiles(provider) : null;
   const full = asked.length === 0 ? [] : held === null ? asked : [...asked.filter((id) => held.includes(id)), ...held.filter((id) => !asked.includes(id))];
-  const answer = await online("models.authOrderSet", { provider, ...(full.length > 0 ? { profileIds: full } : {}), ...agentParam(agentId) });
+  const answer = await askGatewayForAuth("models.authOrderSet", { provider, ...(full.length > 0 ? { profileIds: full } : {}), ...agentParam(agentId) });
   if (answer.answered) return;
-  await deps.cli(
-    [...(full.length > 0 ? ["models", "auth", "order", "set", "--provider", provider, ...full] : ["models", "auth", "order", "clear", "--provider", provider]), ...agentArgs(agentId)],
-    { timeoutMs: AUTH_TIMEOUT_MS },
-  );
+  if (full.length > 0) {
+    await deps.offlineAuthCli(["models", "auth", "order", "set", "--provider", provider, ...full, ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
+  } else {
+    await deps.offlineAuthCli(["models", "auth", "order", "clear", "--provider", provider, ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
+  }
 }
 
 /**
