@@ -52,9 +52,15 @@ function textOf(content) {
   return "";
 }
 
+// OpenClaw 2026.11.3 sends its per-turn context as a user message of its own
+// AFTER the owner's prompt ("OpenClaw runtime context: … End OpenClaw runtime
+// context."), so the prompt is the last user message that is not that block.
+const RUNTIME_CONTEXT = /^\s*OpenClaw runtime context:/;
+
 function replyFor(messages) {
   const users = Array.isArray(messages) ? messages.filter((m) => m?.role === "user") : [];
-  const last = textOf(users.at(-1)?.content);
+  const prompts = users.filter((m) => !RUNTIME_CONTEXT.test(textOf(m?.content)));
+  const last = textOf((prompts.length ? prompts : users).at(-1)?.content);
   const m = /nothing else:\s*([^\n]+)/i.exec(last);
   return { last, reply: m ? m[1].trim() : "NANO-EXT-MOCK" };
 }
