@@ -1143,3 +1143,83 @@ exec "${real}" "$@"
     expect(configCalls()).toEqual([]);
   });
 });
+
+// TASK-2501 PR-D: under the local-only AI lock a Hermes box speaks with its
+// own voice (Kokoro) only — Hermes' factory `edge` is Microsoft's cloud.
+const LOCAL_DEF = "tts:\n  providers:\n    clawbox-local:\n      type: command\n      command: /home/clawbox/clawbox/scripts/openclaw/clawbox-tts.sh --text-file={input_path} -- {output_path}\n";
+const lockMarker = () => `${configPath}.clawbox-voice-lock.json`;
+
+d("register-mcp.sh — the voice under the local-only AI lock", () => {
+  it("replaces Hermes' factory `edge` with the box's own voice, and remembers nothing", () => {
+    writeStore({ ai_cloud_lock: true });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: edge\n`);
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(at("tts.provider")).toBe("clawbox-local");
+    expect(fs.existsSync(lockMarker())).toBe(false);
+    expect(r.stdout).toContain("local-only AI is on: this box now speaks with its own voice");
+  });
+
+  it("selects the box's voice for an unset selection too — unset is Edge to Hermes", () => {
+    writeStore({ ai_cloud_lock: "pinned" });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}`);
+    run();
+    expect(at("tts.provider")).toBe("clawbox-local");
+  });
+
+  it("withdraws our own cloud voice to the box's, and the renewed plan brings it back once the lock is lifted", () => {
+    writeStore({ ai_cloud_lock: true, clawai_token: TOKEN, clawai_plan_tier: ENTITLED_TIER });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: openai\n  openai:\n    base_url: ${PROXY}\n    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n`);
+
+    run();
+
+    expect(at("tts.provider")).toBe("clawbox-local");
+    expect(at("tts.openai")).toBeUndefined();
+
+    writeStore({ ai_cloud_lock: false, clawai_token: TOKEN, clawai_plan_tier: ENTITLED_TIER });
+    run();
+    expect(at("tts.provider")).toBe("openai");
+    expect(at("tts.openai.base_url")).toBe(PROXY);
+  });
+
+  it("moves an owner's own cloud pick off, and gives it back when the lock is lifted", () => {
+    writeStore({ ai_cloud_lock: true });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: elevenlabs\n`);
+
+    run();
+    expect(at("tts.provider")).toBe("clawbox-local");
+    expect(JSON.parse(fs.readFileSync(lockMarker(), "utf-8"))).toEqual({ version: 1, provider: "elevenlabs" });
+
+    writeStore({ ai_cloud_lock: false });
+    const r = run();
+    expect(at("tts.provider")).toBe("elevenlabs");
+    expect(fs.existsSync(lockMarker())).toBe(false);
+    expect(r.stdout).toContain("local-only AI is off");
+  });
+
+  it("reads a device store it cannot parse as locked", () => {
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(storePath, "{ torn");
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: edge\n`);
+    run();
+    expect(at("tts.provider")).toBe("clawbox-local");
+  });
+
+  it("holds, and says why, when there is no on-box voice to move to", () => {
+    writeStore({ ai_cloud_lock: true });
+    writeYaml(`${BASE_CONFIG}tts:\n  provider: edge\n`);
+    const r = run();
+    expect(at("tts.provider")).toBe("edge");
+    expect(r.stdout).toContain("no on-device voice registered");
+  });
+
+  it("leaves a box already on its own voice as it is", () => {
+    writeStore({ ai_cloud_lock: true });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: clawbox-local\n`);
+    const r = run();
+    expect(configCalls()).toEqual([]);
+    expect(r.stdout).toContain("already speaks for itself");
+  });
+});

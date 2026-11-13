@@ -12,6 +12,15 @@ const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
+  // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
+  // a reader that is not there reads as LOCKED, so the mock answers it.
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
+  setMany: async (entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) store.delete(key);
+      else store.set(key, value);
+    }
+  },
 }));
 
 const entitlement = vi.fn(async () => "pro" as string | null);
