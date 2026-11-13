@@ -381,16 +381,41 @@ d("step_bluetooth_no_debug starts bluetoothd without NVIDIA's -d", () => {
       expectIndented(result);
     });
 
-    it("leaves a ClawBox drop-in already there as it is too", () => {
+    it("removes a ClawBox drop-in already there, so the operator's ExecStart is the one in force", () => {
+      // Ours sorts after `override.conf`: kept, its `ExecStart=` reset would
+      // silently replace the operator's own ExecStart at the next start.
       writeVendor(VENDOR_EXEC);
       writeStaleMarkedDest();
-      const before = fs.readFileSync(dest, "utf-8");
+      const operator = path.join(destDir, "override.conf");
+      const owners = "[Service]\nExecStart=\nExecStart=/usr/lib/bluetooth/bluetoothd -d -n\n";
+      fs.writeFileSync(operator, owners);
+      expect(path.basename(operator) < DEST_NAME).toBe(true);
 
-      const result = runStep({ dropIns: [vendor, path.join(sandbox, "run", "override.conf"), dest] });
+      const result = runStep({ dropIns: [vendor, operator, dest] });
 
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-      expect(fs.readFileSync(dest, "utf-8")).toBe(before);
+      expect(fs.existsSync(dest)).toBe(false);
+      expect(fs.readFileSync(operator, "utf-8")).toBe(owners);
+      expect(installCalls()).toEqual([]);
+      expect(reloads()).toHaveLength(1);
+      expect(stepLines(result)).toHaveLength(1);
+      expect(result.stdout).toContain(operator);
+      expectIndented(result);
+    });
+
+    it("leaves a file of ClawBox's name it did not write alone, beside the operator's", () => {
+      writeVendor(VENDOR_EXEC);
+      fs.mkdirSync(destDir, { recursive: true });
+      const unmarked = "[Service]\nExecStart=\nExecStart=/usr/lib/bluetooth/bluetoothd -d\n";
+      fs.writeFileSync(dest, unmarked);
+      const operator = path.join(sandbox, "run", "override.conf");
+
+      const result = runStep({ dropIns: [vendor, operator, dest] });
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(fs.readFileSync(dest, "utf-8")).toBe(unmarked);
       expect(reloads()).toEqual([]);
+      expect(stepLines(result)).toHaveLength(1);
     });
 
     it("leaves everything when systemd cannot say which drop-ins there are", () => {

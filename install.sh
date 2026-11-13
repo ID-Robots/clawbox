@@ -10150,8 +10150,11 @@ step_bluetooth_no_debug() {
     why="No L4T bluetooth drop-in at $vendor"
   else
     # An operator's own drop-in (`systemctl edit bluetooth`, anything under /run)
-    # means someone configured this unit by hand: leave all of it alone. Compared
-    # by file, not by text: systemd may spell the vendor's path /lib/systemd/…
+    # means someone configured this unit by hand: it is left as they configured
+    # it, which takes removing a drop-in of ClawBox's own too. Ours sorts after
+    # `override.conf`, so its `ExecStart=` reset would silently replace theirs.
+    # Compared by file, not by text: systemd may spell the vendor's path
+    # /lib/systemd/…
     if ! out="$(systemctl show bluetooth.service -p DropInPaths --value 2>/dev/null)"; then
       echo "  Could not read bluetooth.service's drop-ins; bluetoothd left as it is"
       return 0
@@ -10161,8 +10164,8 @@ step_bluetooth_no_debug() {
       if [ "$p" -ef "$vendor" ] || [ "$p" = "$dest" ] || [ "$p" -ef "$dest" ]; then
         continue
       fi
-      echo "  bluetooth.service has a drop-in ClawBox did not write ($p); bluetoothd left as it is"
-      return 0
+      why="bluetooth.service has a drop-in ClawBox did not write ($p)"
+      break
     done
 
     while IFS= read -r line || [ -n "$line" ]; do
@@ -10183,7 +10186,9 @@ step_bluetooth_no_debug() {
     case "$exec_start" in
       *\"* | *\'* | *\\* | *\;*) odd=1 ;;
     esac
-    if [ "$odd" = 1 ]; then
+    if [ -n "$why" ]; then
+      :
+    elif [ "$odd" = 1 ]; then
       why="The L4T bluetooth ExecStart= is not a shape this step edits"
     elif [ "$has_d" = 0 ]; then
       why="The L4T bluetooth drop-in starts bluetoothd without -d"
