@@ -132,6 +132,22 @@ describe("the ClawBox AI client", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("sends nothing when the lock goes on while a valid token is being read (TASK-2501)", async () => {
+    creds.resolveClawaiToken.mockImplementation(async () => {
+      lock.on = true;
+      return "claw_test_token";
+    });
+    const fetchImpl = vi.fn();
+    try {
+      await expect(createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch }).complete(req)).rejects.toMatchObject({
+        kind: "no_engine",
+      });
+    } finally {
+      lock.on = false;
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("sends nothing once the lock is on, though the client was chosen before it (TASK-2501)", async () => {
     const fetchImpl = vi.fn();
     lock.on = true;
