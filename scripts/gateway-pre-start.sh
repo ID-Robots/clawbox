@@ -4564,6 +4564,77 @@ if _clawai_openai_route_is_ours:
             changed = True
 
 
+# THE LOCAL-ONLY AI LOCK AND AUDIO AUTO-DETECTION (TASK-2501 PR-D).
+#
+# With no audio row at all the core AUTO-DETECTS a transcription engine — the
+# reply model, then any provider holding a key for a transcription API (OpenAI,
+# Groq, Deepgram …), then local CLIs (OpenClaw docs/nodes/audio.md). On a
+# locked box with no engine of its own that would send a voice note to
+# whichever cloud it finds, so the switch is turned off; once there is a row
+# again, or the lock is lifted, the switch ClawBox turned off — and only that
+# one, marked by `data/.channel-audio-lock-off` — is turned back on.
+# `syncChannelAudio` (src/lib/stt-channel.ts) keeps the same switch and the
+# same mark. An endpoint of the owner's own with no rows is their route and is
+# left as it is. Outside the `claw_` gate on purpose: a locked box with no
+# ClawBox AI link at all is the one this is most for.
+def _clawbox_audio_lock_off_marker():
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    return os.path.join(os.path.dirname(_store_path), ".channel-audio-lock-off") if _store_path else ""
+
+
+def _clawbox_audio_lock_switch():
+    import os
+
+    global changed
+    _marker = _clawbox_audio_lock_off_marker()
+    _tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
+    _media = _tools.get("media") if isinstance(_tools.get("media"), dict) else {}
+    _audio = _media.get("audio") if isinstance(_media.get("audio"), dict) else {}
+    if bool(globals().get("CLAWBOX_OPENCLAW_V2", False)):
+        _list = _media.get("models")
+        _rows = [
+            _r for _r in (_list if isinstance(_list, list) else [])
+            if isinstance(_r, dict) and "audio" in (_r.get("capabilities") or [])
+        ]
+    else:
+        _list = _audio.get("models")
+        _rows = list(_list) if isinstance(_list, list) else []
+    _base = _audio.get("baseUrl")
+    _proxy = globals().get("_clawai_proxy_base_url") or ""
+    _owner_route = (
+        isinstance(_base, str) and bool(_base.strip())
+        and not (_proxy and _base.strip().rstrip("/") == _proxy.rstrip("/"))
+    )
+    if globals().get("_clawbox_ai_locked") and not _rows and not _owner_route:
+        if _audio.get("enabled") is not False:
+            if _marker:
+                try:
+                    with open(_marker, "w") as _fh:
+                        _fh.write("")
+                except OSError:
+                    print("  WARNING: could not mark the audio switch as ClawBox's; turning it off anyway")
+            _audio["enabled"] = False
+            _media["audio"] = _audio
+            _tools["media"] = _media
+            cfg["tools"] = _tools
+            changed = True
+            print("  Channel transcription off: local-only AI is on and this box has no engine of its own")
+    elif _marker and os.path.exists(_marker):
+        if _audio.get("enabled") is False:
+            del _audio["enabled"]
+            changed = True
+            print("  Channel transcription back on: the switch local-only AI turned off is no longer needed")
+        try:
+            os.unlink(_marker)
+        except OSError:
+            pass
+
+
+_clawbox_audio_lock_switch()
+
+
 # Migration: ClawBox AI cloud voice (text to speech).
 #
 # The mirror image of the block above, and it went wrong the same way. Cloud
@@ -4907,6 +4978,150 @@ elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_sp
             )
             changed = True
 
+
+
+# THE GATEWAY'S OWN VOICES UNDER THE LOCAL-ONLY AI LOCK (TASK-2501 PR-D).
+#
+# The arm above stands down and our stamped entry is withdrawn, but the gateway
+# speaks a channel reply with `tts.provider` and falls through EVERY other
+# configured speech provider (`resolveTtsProviderOrder`), so an owner's own
+# ElevenLabs or OpenAI entry — or Microsoft's Edge switched on — would still be
+# a cloud leg. Under the lock the box speaks with its own voice only:
+#   - every speech provider that is not on the box is HELD: moved out of the
+#     config into `data/.tts-local-only-held.json` (0600; it can carry the
+#     owner's own key, like the other key files beside it), Microsoft's switch
+#     turned off, and a cloud `provider` pointed at the on-box one;
+#   - lifting the lock puts back exactly what was held, and the selection only
+#     where it still names the voice the lock chose.
+# The held file is written BEFORE the config moves, and a box whose held file
+# cannot be written keeps its entries: an owner's key is never lost to a lock.
+# "Local" is `isLocalProviderId` (src/lib/voice-output.ts), transcribed.
+CLAWBOX_TTS_LOCAL_PROVIDER_ID = "tts-local-cli"
+
+
+def _clawbox_tts_is_local(_id):
+    import re as _re
+
+    _id = str(_id).strip().lower()
+    return _id == CLAWBOX_TTS_LOCAL_PROVIDER_ID or bool(
+        _re.search(r"(?:^|[-_.])(local|cli|piper|kokoro)(?:$|[-_.])", _id)
+    )
+
+
+def _clawbox_tts_lock_pass():
+    import os
+
+    global changed
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return
+    _held_path = os.path.join(os.path.dirname(_store_path), ".tts-local-only-held.json")
+    _v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+    _messages = cfg.get("messages") if isinstance(cfg.get("messages"), dict) else {}
+    _homes = []
+    if _v2 and isinstance(cfg.get("tts"), dict):
+        _homes.append(("tts", cfg.get("tts")))
+    if isinstance(_messages.get("tts"), dict):
+        _homes.append(("messages.tts", _messages.get("tts")))
+    try:
+        with open(_held_path) as _fh:
+            _held = json.load(_fh)
+    except FileNotFoundError:
+        _held = None
+    except Exception:
+        print("  WARNING: the held speech providers could not be read; leaving the voices as they are")
+        return
+    if not (isinstance(_held, dict) and _held.get("version") == 1 and isinstance(_held.get("homes"), dict)):
+        _held = None
+
+    if globals().get("_clawai_speech_locked"):
+        _next = _held if _held is not None else {"version": 1, "homes": {}}
+        _moves = []
+        for _name, _home in _homes:
+            _providers = _home.get("providers")
+            if not isinstance(_providers, dict):
+                continue
+            _record = _next["homes"].setdefault(_name, {"providers": {}})
+            _locals = [_id for _id in _providers if _clawbox_tts_is_local(_id)]
+            for _id, _entry in list(_providers.items()):
+                if _clawbox_tts_is_local(_id):
+                    continue
+                if _id == "microsoft":
+                    _cur = _entry.get("enabled") if isinstance(_entry, dict) else None
+                    if _cur is not False:
+                        _record.setdefault("microsoft", {"enabled": _cur} if isinstance(_entry, dict) and "enabled" in _entry else {})
+                        _moves.append((_providers, _id, "off"))
+                    continue
+                _record["providers"][_id] = _entry
+                _moves.append((_providers, _id, "hold"))
+            _provider = _home.get("provider")
+            if isinstance(_provider, str) and _provider.strip() and not _clawbox_tts_is_local(_provider) and _locals:
+                _record.setdefault("provider", _provider)
+                _moves.append((_home, (CLAWBOX_TTS_LOCAL_PROVIDER_ID if CLAWBOX_TTS_LOCAL_PROVIDER_ID in _locals else _locals[0]), "select"))
+        if not _moves:
+            return
+        try:
+            _tmp = _held_path + ".tmp"
+            _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(_fd, "w") as _fh:
+                json.dump(_next, _fh)
+            os.replace(_tmp, _held_path)
+        except OSError:
+            print("  WARNING: local-only AI is on but the cloud voices could not be held aside; they are left in place")
+            return
+        for _target, _key, _how in _moves:
+            if _how == "hold":
+                del _target[_key]
+            elif _how == "off":
+                _entry = _target.get(_key) if isinstance(_target.get(_key), dict) else {}
+                _entry["enabled"] = False
+                _target[_key] = _entry
+            else:
+                _target["provider"] = _key
+        changed = True
+        print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
+        return
+
+    if _held is None:
+        if os.path.exists(_held_path):
+            print("  WARNING: the held speech providers file is not one ClawBox wrote; leaving it")
+        return
+    for _name, _record in _held["homes"].items():
+        if not isinstance(_record, dict):
+            continue
+        if _name == "tts":
+            _home = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else None
+            if _home is None and _v2:
+                _home = {}
+                cfg["tts"] = _home
+        else:
+            _home = _messages.get("tts") if isinstance(_messages.get("tts"), dict) else None
+        if _home is None:
+            continue
+        _providers = _home.get("providers") if isinstance(_home.get("providers"), dict) else {}
+        for _id, _entry in (_record.get("providers") or {}).items():
+            if _id not in _providers:
+                _providers[_id] = _entry
+        _ms = _record.get("microsoft")
+        if isinstance(_ms, dict) and isinstance(_providers.get("microsoft"), dict) and _providers["microsoft"].get("enabled") is False:
+            if "enabled" in _ms:
+                _providers["microsoft"]["enabled"] = _ms["enabled"]
+            else:
+                del _providers["microsoft"]["enabled"]
+        _home["providers"] = _providers
+        _prev = _record.get("provider")
+        _now = _home.get("provider")
+        if isinstance(_prev, str) and isinstance(_now, str) and _clawbox_tts_is_local(_now):
+            _home["provider"] = _prev
+    try:
+        os.unlink(_held_path)
+    except OSError:
+        pass
+    changed = True
+    print("  Local-only AI is off: the speech providers it held aside are back")
+
+
+_clawbox_tts_lock_pass()
 
 # --- memory index defaults ---
 # The memory-search index lives in each agent's database

@@ -135,6 +135,18 @@ describe("applyClawaiCloudDefaults", () => {
     expect(startIndex).toHaveBeenCalledWith("full", "manual", { embedderChanged: true });
   });
 
+  it("never moves transcription to the cloud under the local-only AI lock (TASK-2501), so no boot loops on it", async () => {
+    store.set("ai_cloud_lock", true);
+    try {
+      const applied = await applyClawaiCloudDefaults();
+      expect(applied.moved).not.toContain("stt");
+      expect(syncChannel).not.toHaveBeenCalled();
+      expect(store.get("stt_primary")).toBeUndefined();
+    } finally {
+      store.delete("ai_cloud_lock");
+    }
+  });
+
   it("touches nothing on a box with no subscription", async () => {
     token.mockResolvedValue(null);
     entitlement.mockResolvedValue(null);

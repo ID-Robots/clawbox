@@ -44,13 +44,15 @@ vi.mock("@/lib/stt-local", async (importOriginal) => ({
   forgetLocalSttProbe: () => local.forget(),
 }));
 const store = vi.hoisted(() => new Map<string, unknown>());
+/** The app's root: the owner's server's client script and the audio switch's mark live under it. */
+const root = vi.hoisted(() => ({ dir: "/home/clawbox/clawbox" }));
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
   // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
   // a reader that is not there reads as LOCKED, so the mock answers it.
   getKnown: async (key: string) => ({ value: store.get(key), known: true }),
-  resolveConfigRoot: () => "/home/clawbox/clawbox",
+  resolveConfigRoot: () => root.dir,
   setMany: async (entries: Record<string, unknown>) => {
     for (const [key, value] of Object.entries(entries)) {
       if (value === undefined) store.delete(key);
@@ -406,13 +408,13 @@ describe("reconcileChannelAudio — boot, a Whisper install, a provider save", (
 });
 
 // TASK-2501 PR-D: the owner's own speech server, and the local-only AI lock.
-const ENDPOINT_ROW = {
+const endpointRow = () => ({
   type: "cli",
   command: "/usr/bin/python3",
-  args: ["/home/clawbox/clawbox/scripts/stt-endpoint-client.py", "{{MediaPath}}"],
+  args: [`${root.dir}/scripts/stt-endpoint-client.py`, "{{MediaPath}}"],
   timeoutSeconds: 120,
   capabilities: ["audio"],
-};
+});
 const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" };
 
 describe("the local-only AI lock on channel voice notes", () => {
@@ -437,23 +439,29 @@ describe("the local-only AI lock on channel voice notes", () => {
     store.set("stt_endpoint", ENDPOINT_RECORD);
     config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
     expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(true);
-    expect(writtenModels()).toEqual([ENDPOINT_ROW]);
+    expect(writtenModels()).toEqual([endpointRow()]);
     // The next boot finds it ours and in force: nothing to write.
     config.batch.mockClear();
     config.unset.mockClear();
-    config.read.mockResolvedValue(linked({ tools: { media: { models: [ENDPOINT_ROW] } } }));
+    config.read.mockResolvedValue(linked({ tools: { media: { models: [endpointRow()] } } }));
     expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(false);
     expect(written()).toEqual([]);
   });
 
   it("switches transcription off when the lock leaves no engine, and back on once it is lifted", async () => {
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    root.dir = fs.mkdtempSync(path.join(os.tmpdir(), "stt-channel-root-"));
+    const marker = path.join(root.dir, "data", ".channel-audio-lock-off");
     store.set("ai_cloud_lock", true);
     local.installed = false;
     config.read.mockResolvedValue(linked({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
     expect(await lib.syncChannelAudio(["cloud", "local"], false)).toBe(true);
     expect(written()).toEqual(["tools.media.models", "-tools.media.audio.baseUrl", "tools.media.audio.enabled"]);
     expect(writtenModels()).toEqual([]);
-    expect(store.get(lib.CHANNEL_AUDIO_LOCK_OFF_KEY)).toBe(true);
+    expect(fs.existsSync(marker)).toBe(true);
+    expect(lib.channelAudioLockOffPath()).toBe(marker);
 
     // Lifted: the switch ClawBox turned off is turned back on, the cloud row returns.
     config.batch.mockClear();
@@ -462,7 +470,9 @@ describe("the local-only AI lock on channel voice notes", () => {
     config.read.mockResolvedValue(linked({ tools: { media: { audio: { enabled: false }, models: [] } } }));
     expect(await lib.syncChannelAudio(["cloud", "local"], false)).toBe(true);
     expect(written()).toEqual(["tools.media.audio.baseUrl", "tools.media.models", "-tools.media.audio.enabled"]);
-    expect(store.get(lib.CHANNEL_AUDIO_LOCK_OFF_KEY)).toBeUndefined();
+    expect(fs.existsSync(marker)).toBe(false);
+    fs.rmSync(root.dir, { recursive: true, force: true });
+    root.dir = "/home/clawbox/clawbox";
   });
 
   it("never turns on a switch the owner turned off", async () => {
@@ -477,7 +487,7 @@ describe("the local-only AI lock on channel voice notes", () => {
     store.set("stt_endpoint", ENDPOINT_RECORD);
     expect(await lib.syncChannelAudio(["endpoint", "local", "cloud"], true)).toBe(true);
     const models = writtenModels();
-    expect(models[0]).toEqual(ENDPOINT_ROW);
+    expect(models[0]).toEqual(endpointRow());
     expect(isLocal(models[1])).toBe(true);
     expect(models[2]).toEqual(CLOUD);
   });

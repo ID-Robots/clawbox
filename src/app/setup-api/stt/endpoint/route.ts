@@ -140,9 +140,12 @@ export async function POST(req: Request) {
       // pin over an unchanged engine, which the cloud default reads as "leave
       // this box alone" — the safe direction.
       await noteOwnerChoice("stt");
-      if (apiKey) writeSttEndpointKey(apiKey);
-      else deleteSttEndpointKey();
+      // The key off first, then the record, then the new key: every state a
+      // failure can leave sends no key, or the right key, to the address on
+      // file — never one server's key to another.
+      deleteSttEndpointKey();
       await writeSttEndpoint(input.value);
+      if (apiKey) writeSttEndpointKey(apiKey);
       await setSttPrimary("endpoint");
       const warning = await alignChannels();
       return noStore({ ...(await view()), ok: true, latencyMs: probe.latencyMs, ...(warning ? { warning } : {}) });

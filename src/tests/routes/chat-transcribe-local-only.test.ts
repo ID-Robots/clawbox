@@ -1,6 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
 import fs from "fs";
+import http from "http";
+import type { AddressInfo } from "net";
 import os from "os";
 import path from "path";
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
@@ -29,7 +31,12 @@ vi.mock("@/lib/stt-remux", async (importOriginal) => {
 });
 
 const PROXY_TRANSCRIBE = "https://clawbox.com/api/ai/audio/transcriptions";
-const ENDPOINT = "http://127.0.0.1:18999/v1";
+// The owner's server is a real one on loopback: the endpoint leg dials it on
+// Node's own http client (stt-endpoint.ts `lanFetch`), never through `fetch`.
+let ENDPOINT = "";
+let server: http.Server;
+let seen: { url?: string; auth?: string; body: string }[];
+let answer: { status: number; body: string } | null;
 const TOKEN = "claw_testtoken0000000000000000000";
 
 let tmpHome: string;
@@ -76,11 +83,26 @@ beforeEach(async () => {
   remux.audioForCloud.mockImplementation(async (audio: { file: Blob; name: string }) => ({ ...audio, prepared: "as-is" }));
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
+  seen = [];
+  answer = { status: 200, body: JSON.stringify({ text: " The harbour lantern turns amber. " }) };
+  server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      seen.push({ url: req.url, auth: req.headers.authorization, body: Buffer.concat(chunks).toString("latin1") });
+      if (!answer) { req.socket.destroy(); return; }
+      res.writeHead(answer.status, { "content-type": "application/json" });
+      res.end(answer.body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  ENDPOINT = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
   vi.resetModules();
   POST = (await import("@/app/setup-api/chat/transcribe/route")).POST;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   vi.unstubAllGlobals();
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[key];
@@ -93,29 +115,38 @@ describe("the owner's own speech server", () => {
   it("transcribes with it when it is the chosen engine, sending the model and the key", async () => {
     writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "asr-small" } });
     fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), "lan-key-1", { mode: 0o600 });
-    fetchMock.mockResolvedValue(jsonResponse({ text: " The harbour lantern turns amber. " }));
 
     const res = await POST(audioRequest());
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, text: "The harbour lantern turns amber.", engine: "endpoint" });
-    expect(urls()).toEqual([`${ENDPOINT}/audio/transcriptions`]);
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer lan-key-1");
-    expect(init.redirect).toBe("manual");
-    expect((init.body as FormData).get("model")).toBe("asr-small");
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("/v1/audio/transcriptions");
+    expect(seen[0].auth).toBe("Bearer lan-key-1");
+    expect(seen[0].body).toContain('name="model"\r\n\r\nasr-small');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not follow a redirect off the network", async () => {
+    writeStore({ ai_cloud_lock: true, stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "whisper-1" } });
+    answer = { status: 307, body: "" };
+    const res = await POST(audioRequest());
+    expect(res.status).toBe(502);
+    expect(seen).toHaveLength(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("without the lock, a failed server falls through to the chain the box always had", async () => {
     writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "whisper-1" } });
-    fetchMock.mockImplementation(async (url: string) =>
-      url.startsWith(ENDPOINT) ? jsonResponse({ error: "busy" }, 503) : jsonResponse({ text: "from the cloud" }));
+    answer = { status: 503, body: JSON.stringify({ error: "busy" }) };
+    fetchMock.mockResolvedValue(jsonResponse({ text: "from the cloud" }));
 
     const res = await POST(audioRequest());
 
     expect(res.status).toBe(200);
     expect((await res.json()).engine).toBe("cloud");
-    expect(urls()).toEqual([`${ENDPOINT}/audio/transcriptions`, PROXY_TRANSCRIBE]);
+    expect(seen).toHaveLength(1);
+    expect(urls()).toEqual([PROXY_TRANSCRIBE]);
   });
 
   it("never sends a recording to a saved address outside the local network", async () => {
@@ -134,7 +165,10 @@ describe("under the local-only AI lock", () => {
     // The on-box engine is there too: under the lock it is not a fallback either.
     localStt.installed.mockResolvedValue({ installed: true, detail: "faster-whisper" });
     localStt.transcribe.mockResolvedValue({ ok: true, text: "from whisper" });
-    fetchMock.mockRejectedValue(Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }));
+    // The server is stopped: the connection is refused.
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    server = http.createServer();
+    server.listen(0, "127.0.0.1");
 
     const res = await POST(audioRequest());
 
@@ -143,8 +177,7 @@ describe("under the local-only AI lock", () => {
     expect(body.code).toBe("cloud_ai_locked");
     expect(body.error).toMatch(/Could not reach the speech server/);
     expect(body.error).toMatch(/not sent to the cloud/);
-    expect(urls()).toEqual([`${ENDPOINT}/audio/transcriptions`]);
-    expect(urls().some((u) => u.includes("clawbox.com"))).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(localStt.transcribe).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -808,7 +808,36 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the loca
   it("reads a store it cannot parse as locked", () => {
     withStore("{ torn", () => {
       const { cfg } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [CLOUD] } } } });
-      expect(audio(cfg)).toEqual({ models: [] });
+      // No row left, so the core's auto-detection is switched off too.
+      expect(audio(cfg)).toEqual({ models: [], enabled: false });
+    });
+  });
+
+  it("switches audio auto-detection off on a locked box with no engine, and back on once the lock is lifted", () => {
+    const marker = path.join(dir, ".channel-audio-lock-off");
+    withStore({ ai_cloud_lock: true }, () => {
+      // An unlinked box (the claw_ gate closed): the switch is still kept.
+      const { cfg, changed } = migrate({}, false);
+      expect(changed).toBe(true);
+      expect(audio(cfg)).toEqual({ enabled: false });
+      expect(existsSync(marker)).toBe(true);
+    });
+    withStore({ ai_cloud_lock: false }, () => {
+      const { cfg } = migrate({ tools: { media: { audio: { enabled: false } } } }, false);
+      expect(audio(cfg)).toEqual({});
+      expect(existsSync(marker)).toBe(false);
+    });
+  });
+
+  it("never turns on a switch the owner turned off, and leaves an owner's own route alone", () => {
+    withStore({ ai_cloud_lock: false }, () => {
+      const { cfg, changed } = migrate({ tools: { media: { audio: { enabled: false } } } }, false);
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual({ enabled: false });
+    });
+    withStore({ ai_cloud_lock: true }, () => {
+      const own = { tools: { media: { audio: { baseUrl: "http://192.168.7.9:9000/v1" } } } };
+      expect(audio(migrate(own, false).cfg)).toEqual({ baseUrl: "http://192.168.7.9:9000/v1" });
     });
   });
 
