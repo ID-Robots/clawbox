@@ -77,6 +77,7 @@ function fakeCore() {
     /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
     pasteExitsAfterWrite: false,
   };
+  offlineWindows = 0;
   gw._setGatewayDepsForTests({
     absent: () => false,
     chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null, agent: core.agent }),
@@ -88,6 +89,12 @@ function fakeCore() {
         failures: core.failures,
       }
       : { kind: "unreadable" },
+    // OpenClaw 2026.11.3 takes `paste-token` only offline: the pass's pastes
+    // run in one window with the gateway stopped (counted here).
+    offline: async (work) => {
+      offlineWindows += 1;
+      return work();
+    },
     paste: async (profileId, token) => {
       if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
       core.pastes.push({ profileId, ...token });
@@ -168,6 +175,9 @@ const rateLimited = (now = Date.now(), until = now + 30_000): Failure => ({
   cooldownUntil: until, cooldownReason: "rate_limit", disabledUntil: null, disabledReason: null, blockedUntil: null, lastFailureAt: now - 1_000,
 });
 
+/** How many offline windows (gateway stopped) the pool asked for. */
+let offlineWindows = 0;
+
 describe("the pool in the gateway", () => {
   it("puts every Claude account in as its own profile — the access token only — the active one first and the chat's own sign-in last", async () => {
     const core = fakeCore();
@@ -178,6 +188,8 @@ describe("the pool in the gateway", () => {
     expect(core.pastes.map((w) => w.profileId).sort()).toEqual([p(work.id), p(personal.id)].sort());
     expect(core.pastes.find((w) => w.profileId === p(work.id))).toMatchObject({ access: "sk-ant-oat01-work", expires: expect.any(Number) });
     expect(JSON.stringify(core.pastes)).not.toContain("refresh-");
+    // Both pastes in ONE offline window: the gateway is stopped once a pass.
+    expect(offlineWindows).toBe(1);
     expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:default"]);
     // The chat's own sign-in is never written or taken out.
     expect(core.profiles.get("anthropic:default")?.secret).toBe(OWN);
@@ -188,6 +200,8 @@ describe("the pool in the gateway", () => {
     const asked = core.pastes.length + core.orders.length;
     expect(await gw.keepGatewayMirror()).toBe("fresh");
     expect(core.pastes.length + core.orders.length).toBe(asked);
+    // ...and stops nothing.
+    expect(offlineWindows).toBe(1);
   });
 
   it("moves the order when the pool moves — a limit seen elsewhere, the owner's new order — and never restarts anything", async () => {

@@ -47,6 +47,23 @@ vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
   gatewayWsCall: vi.fn(async (method: string) => (method === "cron.list" ? { jobs: [] } : {})),
 }));
 // PARTIAL, over the real module — see openclaw-config-mock-completeness.test.ts.
+// OpenClaw 2026.11.3: the pool's logout/order go to the gateway's RPCs and its
+// token pastes run with the gateway stopped (src/lib/openclaw-auth-ops.ts,
+// tested on its own). Here they take the offline CLI arm, into fakeCli.
+vi.mock("@/lib/openclaw-auth-ops", async () => {
+  const { spawnOpenclawCli } = await import("@/lib/openclaw-config");
+  const agent = (id?: string) => (id ? ["--agent", id] : []);
+  return {
+    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>) => work(),
+    logoutOpenclawAuthProfiles: async (_provider: string, ids: string[], agentId?: string) => {
+      for (const id of ids) await spawnOpenclawCli(["models", "auth", "logout", id, "--yes", ...agent(agentId)], { timeoutMs: 60_000 });
+      return ids;
+    },
+    setOpenclawAuthOrder: async (provider: string, order: string[] | null, agentId?: string) => {
+      await spawnOpenclawCli([...(order && order.length ? ["models", "auth", "order", "set", "--provider", provider, ...order] : ["models", "auth", "order", "clear", "--provider", provider]), ...agent(agentId)], { timeoutMs: 60_000 });
+    },
+  };
+});
 vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
   gatewayIsAbsent: () => false,

@@ -73,6 +73,16 @@ export function _setAuthOpsDepsForTests(next: Partial<AuthOpsDeps> | null): void
   deps = next ? { ...defaultDeps, ...next } : defaultDeps;
 }
 
+/** An agent named for the gateway request, or nothing (the core's default agent). */
+function agentParam(agentId: string | undefined): { agentId?: string } {
+  return agentId ? { agentId } : {};
+}
+
+/** The same agent for the offline CLI. */
+function agentArgs(agentId: string | undefined): string[] {
+  return agentId ? ["--agent", agentId] : [];
+}
+
 type Online<T> = { answered: true; result: T } | { answered: false };
 
 /** The gateway's answer, or `answered: false` when no gateway is there to give one. */
@@ -126,16 +136,16 @@ export function providerOfProfileId(profileId: string): string {
  * id held only in openclaw.json metadata is the caller's to unset.
  * Returns the ids asked for.
  */
-export async function logoutOpenclawAuthProfiles(provider: string, profileIds: string[]): Promise<string[]> {
+export async function logoutOpenclawAuthProfiles(provider: string, profileIds: string[], agentId?: string): Promise<string[]> {
   const ids = [...new Set(profileIds.filter((id) => typeof id === "string" && id.trim()))];
   if (ids.length === 0) return [];
   const held = deps.storeProfiles(provider);
   const wanted = held === null ? ids : ids.filter((id) => held.includes(id));
   if (wanted.length === 0) return [];
-  const answer = await online("models.authLogout", { provider, profileIds: wanted });
+  const answer = await online("models.authLogout", { provider, profileIds: wanted, ...agentParam(agentId) });
   if (answer.answered) return wanted;
   for (const id of wanted) {
-    await deps.cli(["models", "auth", "logout", id, "--yes"], { timeoutMs: AUTH_TIMEOUT_MS });
+    await deps.cli(["models", "auth", "logout", id, "--yes", ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
   }
   return wanted;
 }
@@ -146,14 +156,14 @@ export async function logoutOpenclawAuthProfiles(provider: string, profileIds: s
  * profile it holds for the provider, so the store's other profiles follow
  * the ones asked for, and ids it does not hold are dropped.
  */
-export async function setOpenclawAuthOrder(provider: string, order: string[] | null): Promise<void> {
+export async function setOpenclawAuthOrder(provider: string, order: string[] | null, agentId?: string): Promise<void> {
   const asked = [...new Set((order ?? []).filter((id) => typeof id === "string" && id.trim()))];
   const held = asked.length > 0 ? deps.storeProfiles(provider) : null;
   const full = asked.length === 0 ? [] : held === null ? asked : [...asked.filter((id) => held.includes(id)), ...held.filter((id) => !asked.includes(id))];
-  const answer = await online("models.authOrderSet", full.length > 0 ? { provider, profileIds: full } : { provider });
+  const answer = await online("models.authOrderSet", { provider, ...(full.length > 0 ? { profileIds: full } : {}), ...agentParam(agentId) });
   if (answer.answered) return;
   await deps.cli(
-    full.length > 0 ? ["models", "auth", "order", "set", "--provider", provider, ...full] : ["models", "auth", "order", "clear", "--provider", provider],
+    [...(full.length > 0 ? ["models", "auth", "order", "set", "--provider", provider, ...full] : ["models", "auth", "order", "clear", "--provider", provider]), ...agentArgs(agentId)],
     { timeoutMs: AUTH_TIMEOUT_MS },
   );
 }
