@@ -47,7 +47,7 @@ note "agent runtime: $RUNTIME"
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
 # shellcheck disable=SC2016,SC2317
 cleanup() {
-  local out
+  local out rc=0
   out=$(board '
     [ -f "$1/sampler.stop" ] || touch "$1/sampler.stop" 2>/dev/null
     [ -f "$1/mock.pid" ] && kill "$(cat "$1/mock.pid")" 2>/dev/null
@@ -60,9 +60,13 @@ cleanup() {
       esac
     fi
     rm -rf "$1"
-  ' "$DIR")
-  printf '%s\n' "$out" | sed 's/^/# cleanup: /'
-  if printf '%s\n' "$out" | grep -q '^KEYS_KEPT '; then
+  ' "$DIR") || rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/# cleanup: /'
+  # The board script itself ends 0 on every path, so a failure here is the
+  # call: nothing on the board can be said to be back as it was.
+  if [ "$rc" -ne 0 ]; then
+    not_ok "the cleanup could not run on the board (exit $rc): the box's keys may not be back, and a saved copy may be on the board in $DIR"
+  elif printf '%s\n' "$out" | grep -q '^KEYS_KEPT '; then
     not_ok "the box's keys were not put back; the saved copy is kept on the board in $DIR"
   fi
   remove_project_dir

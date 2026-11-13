@@ -979,6 +979,19 @@ describe("the box's own engine (`local`, TASK-2501 PR-E)", () => {
     expect(Number(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) * 1_000).toBeLessThanOrEqual(Math.floor(65_536 * 84 / 100));
   });
 
+  // The runner clamps a local run's ultracode to xhigh (effortOnProvider); an
+  // older run record resumed, or the owner's stored ultracode in a terminal,
+  // reaches the wrapper as ultracode all the same, and is clamped here too.
+  it("never runs the engine on ultracode, whoever asked for it, as xhigh", async () => {
+    expect((await runLocal({ CLAUDE_DS_EFFORT: "ultracode" })).status).toBe(0);
+    expect(readFileSync(claudeLog, "utf-8")).not.toContain("ultracode");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
+    writeDeviceConfig({ coding_agent_effort: "ultracode" });
+    expect((await runLocal()).status).toBe(0);
+    expect(readFileSync(claudeLog, "utf-8")).not.toContain("ultracode");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
+  });
+
   it("keeps the session's token off any proxy the box's environment names, and leaves the proxy to the run's tools", async () => {
     expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", NO_PROXY: "git.corp.example" })).status).toBe(0);
     const env = capturedEnv();
