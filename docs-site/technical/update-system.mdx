@@ -15,7 +15,7 @@ ClawBox updates are **git-based**: the device tracks the [ID-Robots/clawbox](htt
 1. **Resolve the branch it follows**: the branch recorded in `.update-branch`, else the branch the checkout is on, else `main` (see [Update channels](#update-channels)).
 2. **Ask origin, twice and anonymously**: the release tags (`git ls-remote`, only `vX.Y.Z` counts) and a fetch of the followed branch. There is deliberately no `git fetch --tags`.
 3. **Offer what the box is behind.** On `main` the update is offered by its release name (`v4.3.0`) when a newer tag exists; on any other branch, or on a `main` that moved on with no newer tag, it is named by the commit it installs (`beta@1a2b3c4`). A box whose served build was made from a different commit than its checkout is offered a **Rebuild**.
-4. The "Installed" version is read from `package.json`; OpenClaw's target version comes from the pin file `config/openclaw-target.txt` (2026.10.9 on 4.3), Hermes Agent's from `install.sh` (v0.22.5 on 4.3). On a Hermes box the OpenClaw half reports nothing to update.
+4. The "Installed" version is read from `package.json`; OpenClaw's target version comes from the pin file `config/openclaw-target.txt` (2026.11.3 on beta, 2026.10.9 on 4.3), Hermes Agent's from `install.sh` (v0.23.1 on beta, v0.22.5 on 4.3). On a Hermes box the OpenClaw half reports nothing to update.
 
 A check that reached origin is cached for 30 minutes (a refusal for 60 seconds); **Check for updates** (`?force=1`), a finished update or a change of branch drops the cache. A check that could not reach origin reports **Couldn't reach the update server** rather than "up to date".
 
