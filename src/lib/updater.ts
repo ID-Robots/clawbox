@@ -2509,9 +2509,14 @@ function logDoctorMarkedDue(how: string, markedDue: boolean): void {
  * problem.
  */
 function describeDoctorFailure(err: unknown, timeoutMs: number): string {
-  if ((err as { killed?: boolean } | null)?.killed) {
+  const ended = err as { killed?: boolean; signal?: unknown } | null;
+  if (ended?.killed) {
     return `it was still running after ${Math.round(timeoutMs / 1000)}s and was stopped`;
   }
+  // node sets `killed` only for a kill it sent (the bound above); a signal
+  // without it came from elsewhere (the OOM killer, a stray kill, doctor's own
+  // crash), and doctor's last line is then progress, not the reason.
+  if (typeof ended?.signal === "string") return `it was killed by ${ended.signal} from outside the updater`;
   const said = commandOutput(err)
     .split(/\r?\n/)
     .map((line) => line.trim())
