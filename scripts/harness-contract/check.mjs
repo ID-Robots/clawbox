@@ -141,13 +141,31 @@ function engineIntervals(range) {
   return out;
 }
 
-/** True when every Node `ours` accepts, `theirs` accepts too (both in engineIntervals' shape). */
+/**
+ * True when every Node `ours` accepts, `theirs` accepts too (both in
+ * engineIntervals' shape). `theirs` is taken as the union of its clauses:
+ * overlapping or touching ones (`<27 || >=27.0.0`) are merged first, so a
+ * clause of ours that spans two of theirs is still inside.
+ */
 function engineWithin(ours, theirs) {
   const a = engineIntervals(ours);
   const b = engineIntervals(theirs);
   if (!a || !b) return false;
   const cmp = (x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
-  return a.every((x) => b.some((y) => cmp(y.lo, x.lo) <= 0 && (y.hi === null || (x.hi !== null && cmp(x.hi, y.hi) <= 0))));
+  const merged = [];
+  for (const y of [...b].sort((p, q) => cmp(p.lo, q.lo))) {
+    const last = merged[merged.length - 1];
+    // `hi` is exclusive and `lo` inclusive: a clause starting at or before the
+    // last one's cap continues it.
+    if (last && last.hi !== null && cmp(y.lo, last.hi) <= 0) {
+      if (y.hi === null || cmp(y.hi, last.hi) > 0) last.hi = y.hi;
+    } else if (last && last.hi === null) {
+      // The last clause is open-ended: it already covers this one.
+    } else {
+      merged.push({ lo: y.lo, hi: y.hi });
+    }
+  }
+  return a.every((x) => merged.some((y) => cmp(y.lo, x.lo) <= 0 && (y.hi === null || (x.hi !== null && cmp(x.hi, y.hi) <= 0))));
 }
 
 // ── Hermes ──────────────────────────────────────────────────────────────────

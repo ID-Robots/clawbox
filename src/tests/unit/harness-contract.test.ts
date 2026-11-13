@@ -483,6 +483,11 @@ describe("the checker", () => {
     expect(run({ usages: [good], installerEngine: ">=26.1.0", coreEngine: ">=24.16.0 <25 || >=26.1.0 <27" }).code).toBe(1);
     expect(run({ usages: [good], installerEngine: ">=24.22.1, or >=26.12.1" }).code).toBe(1);
     expect(run({ usages: [good], installerEngine: "^24.22.1" }).code).toBe(1);
+    // The core's range is a union: a clause of ours that spans two touching or
+    // overlapping clauses of the core's is inside it, one across a gap is not.
+    expect(run({ usages: [good], installerEngine: ">=26.12.1", coreEngine: ">=26.1.0 <27 || >=27.0.0" }).code).toBe(0);
+    expect(run({ usages: [good], installerEngine: ">=24.22.1 <27", coreEngine: ">=24.16.0 <26 || >=25.0.0 <28" }).code).toBe(0);
+    expect(run({ usages: [good], installerEngine: ">=26.12.1", coreEngine: ">=26.1.0 <27 || >=27.0.1" }).code).toBe(1);
     // Equal is silent, as before.
     expect(run({ usages: [good] }).out).not.toContain("OPENCLAW_NODE_ENGINE");
   });
