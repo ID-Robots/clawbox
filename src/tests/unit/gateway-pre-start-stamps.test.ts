@@ -286,20 +286,25 @@ const INDEX_DDL = "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PR
 
 /**
  * The core's state database, `<state dir>/state/openclaw.sqlite`, holding the
- * `plugins.installedIndex` row as `valueJson` (no row when it is null).
+ * `plugins.installedIndex` row as `valueJson` (no row when it is null) and,
+ * when `bundledDiscovery` is given, the `plugins.bundledDiscovery` row as that
+ * value_json.
  */
-function writeIndex(valueJson: string | null, updatedAtMs = 1_794_522_213_591): string {
+function writeIndex(valueJson: string | null, updatedAtMs = 1_794_522_213_591, bundledDiscovery?: string): string {
   const db = path.join(home, "state", "openclaw.sqlite");
   mkdirSync(path.dirname(db), { recursive: true });
+  const rows = [
+    ...(valueJson === null ? [] : [["plugins.installedIndex", valueJson, updatedAtMs]]),
+    ...(bundledDiscovery === undefined ? [] : [["plugins.bundledDiscovery", bundledDiscovery, updatedAtMs]]),
+  ];
   const res = spawnSync("python3", ["-I", "-c", [
-    "import sqlite3, sys",
+    "import json, sqlite3, sys",
     "con = sqlite3.connect(sys.argv[1])",
     "con.execute('DROP TABLE IF EXISTS config_machine_state')",
     "con.execute(sys.argv[2])",
-    "if len(sys.argv) > 3:",
-    "    con.execute('INSERT INTO config_machine_state VALUES (?, ?, ?)', ('plugins.installedIndex', sys.argv[3], int(sys.argv[4])))",
+    "con.executemany('INSERT INTO config_machine_state VALUES (?, ?, ?)', json.loads(sys.argv[3]))",
     "con.commit()",
-  ].join("\n"), db, INDEX_DDL, ...(valueJson === null ? [] : [valueJson, String(updatedAtMs)])], { encoding: "utf-8" });
+  ].join("\n"), db, INDEX_DDL, JSON.stringify(rows)], { encoding: "utf-8" });
   expect(res.stderr).toBe("");
   expect(res.status).toBe(0);
   return db;
@@ -361,11 +366,12 @@ function canonicalJson(value: unknown): string {
 /**
  * A box with no Codex anywhere paid a `plugins list --json` cold start (2.4-2.8 s
  * on an 8 GB Jetson) on every gateway start to hear "no Codex" again. The
- * pre-start may now take that answer on trust, and only under a key over every
- * input that command answers from: the core's persisted plugin index (its
+ * pre-start may now take that answer on trust under a key that adds, to what
+ * the `plugins` key already covers: the core's persisted plugin index (its
  * install records and its cached plugin view), every agent workspace's
- * `.openclaw/extensions` and every `plugins.load.paths` entry — on top of what
- * the `plugins` key already covers.
+ * `.openclaw/extensions`, every `plugins.load.paths` entry, each channel's
+ * `enabled` switch and the core's bundled-discovery mode. What it does not
+ * read is listed in the helper's docstring; its 24 h age bounds those.
  */
 describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
   const ws = (root: string) => path.join(root, ".openclaw", "extensions", "codex", "openclaw.plugin.json");
@@ -375,6 +381,8 @@ describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
     ...BASE_CONFIG,
     plugins: { ...BASE_CONFIG.plugins, load: { paths: paths() } },
   });
+  const withChannels = (channels: unknown) => () => writeJson(config, { ...BASE_CONFIG, channels });
+  const withDiscovery = (valueJson: string) => () => writeIndex(JSON.stringify(indexValue()), undefined, valueJson);
 
   it.each<[string, { setUp?: () => void; change: () => void; env?: () => Record<string, string> }]>([
     ["the core records a new install", {
@@ -438,6 +446,21 @@ describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
       },
       change: () => writeFileSync(path.join(dir, "plugin.js"), "export default {id: 'codex'};\n"),
     }],
+    // The core answers from its persisted index only while the index's policy
+    // hash matches; a channel's switch and the bundled-discovery mode are in it.
+    ["a channel is switched off", {
+      setUp: withChannels({ telegram: { enabled: true } }),
+      change: withChannels({ telegram: { enabled: false } }),
+    }],
+    ["a channel gains an enabled switch", {
+      setUp: withChannels({ telegram: {} }),
+      change: withChannels({ telegram: { enabled: true } }),
+    }],
+    ["the bundled-discovery row appears", { change: withDiscovery('"compat"') }],
+    ["the bundled-discovery mode changes", {
+      setUp: withDiscovery('"compat"'),
+      change: withDiscovery('"allowlist"'),
+    }],
   ])("moves when %s", (_what, { setUp, change, env }) => {
     writeIndex(JSON.stringify(indexValue()));
     setUp?.();
@@ -472,6 +495,41 @@ describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
     expect(indexCheck()).toEqual({ state: "hit", key: before.key, rest: "absent" });
   });
 
+  // What the core's policy hash leaves out leaves this key alone too: it keeps
+  // only a boolean `enabled` of an object entry of `channels`, and a mode
+  // other than "compat" or "allowlist" reads as no row (null).
+  it.each<[string, { setUp?: () => void; change: () => void }]>([
+    ["a channel's enabled is not a boolean", { change: withChannels({ telegram: { enabled: "yes" }, discord: { enabled: 1 } }) }],
+    ["a channel entry is not an object", { change: withChannels({ telegram: "on", discord: [{ enabled: true }], slack: null }) }],
+    ["channels is a list", { change: withChannels([{ id: "telegram", enabled: true }]) }],
+    ["another field of a channel changes", {
+      setUp: withChannels({ telegram: { enabled: true } }),
+      change: withChannels({ telegram: { enabled: true, dmPolicy: "pairing" } }),
+    }],
+    ["the bundled-discovery row holds a mode the core does not know", { change: withDiscovery('"off"') }],
+    ["the bundled-discovery row holds a mode in another case", { change: withDiscovery('"Compat"') }],
+    ["the bundled-discovery row holds JSON null", { change: withDiscovery("null") }],
+  ])("stays put when %s", (_what, { setUp, change }) => {
+    writeIndex(JSON.stringify(indexValue()));
+    setUp?.();
+    const before = indexCheck();
+    expect(remember("codex-absent", before.key, "absent")).toBe(0);
+
+    change();
+
+    expect(indexCheck()).toEqual({ state: "hit", key: before.key, rest: "absent" });
+  });
+
+  it("keys a missing bundled-discovery row as a stable part, never a miss", () => {
+    writeIndex(JSON.stringify(indexValue()));
+    const first = indexCheck();
+    expect(first).toEqual({ state: "miss", key: expect.stringMatching(/^[0-9a-f]{64}$/), rest: "no earlier full check on record" });
+    expect(indexCheck().key).toBe(first.key);
+    expect(remember("codex-absent", first.key, "absent")).toBe(0);
+
+    expect(indexCheck()).toEqual({ state: "hit", key: first.key, rest: "absent" });
+  });
+
   it.each<[string, () => void]>([
     ["there is no state database", () => rmSync(path.join(home, "state"), { recursive: true, force: true })],
     ["the state database is not a database", () => writeFileSync(path.join(home, "state", "openclaw.sqlite"), "not sqlite at all, not even close")],
@@ -489,6 +547,7 @@ describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
       writeIndex(JSON.stringify(indexValue()));
       writeJson(config, { ...BASE_CONFIG, agents: { entries: [{ id: "ops" }] } });
     }],
+    ["the bundled-discovery row is not JSON", () => writeIndex(JSON.stringify(indexValue()), undefined, "{ not json")],
   ])("is a miss with no key, never a constant, when %s", (_what, setUp) => {
     writeIndex(JSON.stringify(indexValue()));
     setUp();
@@ -513,7 +572,8 @@ describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
       `plugins-config=${canonicalJson(BASE_CONFIG.plugins)}`,
     ].join("\n")).digest("hex");
 
-    writeIndex(JSON.stringify(indexValue()));
+    writeIndex(JSON.stringify(indexValue()), undefined, '"compat"');
+    writeJson(config, { ...BASE_CONFIG, channels: { telegram: { enabled: true }, whatsapp: { enabled: false } } });
     writeJson(ws(path.join(home, "workspace")), { id: "codex" });
     expect(check("plugin-consent", ["--openclaw-home", empty]).key).toBe(today);
     expect(check("codex-registry", ["--openclaw-home", empty]).key).toBe(today);

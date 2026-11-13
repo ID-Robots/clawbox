@@ -223,7 +223,7 @@ export CLAWBOX_OPENCLAW_V2
 # variable on purpose: the test suites run single sections of this file on
 # their own, and in such a slice the call is `:` and does nothing.
 #
-# STAMPS. The four checks that cost a CLI cold start on every boot whatever
+# STAMPS. The checks that cost a CLI cold start whenever they run, whatever
 # their answer — the Codex plugin's registry dependencies, the registry's "no
 # Codex" on a Jetson with no Codex payload, the core's plugin-consent report and
 # the Claude Code version report — ask
@@ -6611,10 +6611,8 @@ fi
 # On a Jetson that answer may be the last full check's. A box with no Codex
 # anywhere paid this cold start (2.4-2.8 s on an 8 GB Jetson) on every start to
 # hear "no Codex" again, so a well-formed "no Codex" is recorded (`codex-absent`)
-# and taken on trust while nothing `plugins list` answers from has changed: the
-# stamps' `plugins` key and, with --plugin-index, the core's own persisted plugin
-# index read only (its install records and its cached plugin view), every agent
-# workspace's `.openclaw/extensions` and every `plugins.load.paths` entry.
+# and taken on trust while none of the inputs its key reads has changed (the
+# stamps helper's docstring lists them, and what it does not read).
 # Workspace-origin plugins stay disabled unless `plugins.entries` or
 # `plugins.allow` names them (OpenClaw 2026.10.9 docs/tools/plugin.md), and both
 # are keyed. That key and the record's 24 h age are what bound a stale "no
