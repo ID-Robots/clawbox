@@ -161,6 +161,10 @@ export interface AgentStatus {
   providers?: CodingProviderId[];
   /** The providers the owner connected (a subset of `providers`, never empty). Optional: a server from before the list answers without it, and the default provider reads as the one connected. */
   connectedProviders?: CodingProviderId[];
+  /** The local-only AI lock (TASK-2501): runs are on the box's own engine alone and make no media. Optional: an older server answers without it. */
+  cloudAiLocked?: boolean;
+  /** The model a `local` run answers on, or null when the box has no engine fit for a run. */
+  localEngineModel?: string | null;
   subagents: boolean;
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
@@ -832,6 +836,16 @@ export default function CodingAgentSettingsPanel() {
                 );
               })}
             </ul>
+            {/* Under the local-only AI lock the box's engine is the one
+                account: said in words, with the model it serves, so the owner
+                knows why the cloud accounts are not in the list. */}
+            {status?.cloudAiLocked && (
+              <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-providers-locked">
+                {status.localEngineModel
+                  ? t("codingAgent.providers.locked", { model: status.localEngineModel })
+                  : t("codingAgent.providers.lockedNoEngine")}
+              </p>
+            )}
             <button
               type="button"
               onClick={() => dispatchOpenSettingsSection("ai")}
@@ -1354,12 +1368,17 @@ export default function CodingAgentSettingsPanel() {
               <Switch
                 checked={status?.generateMedia ?? true}
                 busy={busy === "genMedia"}
-                disabled={!status || saving}
+                disabled={!status || saving || status.cloudAiLocked === true}
                 label={t("codingAgent.genMediaLabel")}
                 testId="coding-agent-gen-media"
                 onChange={(next) => void saveSetting({ generateMedia: next }, "genMedia", t("codingAgent.genMediaFailed"))}
               />
             </div>
+            {status?.cloudAiLocked && (
+              <p className="mt-1 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-gen-media-locked">
+                {t("codingAgent.genMediaLocked")}
+              </p>
+            )}
           </div>
           <div className="mt-5">
             <p className={SECTION_LABEL}>{t("codingAgent.janitorGroup")}</p>
