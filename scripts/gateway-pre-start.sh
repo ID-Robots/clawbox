@@ -5569,9 +5569,10 @@ if changed:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
         print("  Updated gateway config")
-        if _clawbox_tts_held_to_remove:
+        # Read through globals(): the block is also run on its own (tests).
+        if globals().get("_clawbox_tts_held_to_remove"):
             try:
-                os.unlink(_clawbox_tts_held_to_remove)
+                os.unlink(globals()["_clawbox_tts_held_to_remove"])
             except OSError:
                 pass
         _record_memory_rebuild(_memory_index_changes)
@@ -5582,7 +5583,7 @@ if changed:
                 os.unlink(tmp_path)
             except Exception:
                 pass
-        if _clawbox_tts_lock_applied:
+        if globals().get("_clawbox_tts_lock_applied"):
             # The one exception to "carry on" above: under the local-only AI
             # lock (TASK-2501) the config on disk still lets cloud voices
             # speak, so starting on it would break the lock. Failing closed
