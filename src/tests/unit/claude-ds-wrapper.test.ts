@@ -996,8 +996,18 @@ describe("the box's own engine (`local`, TASK-2501 PR-E)", () => {
     expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", NO_PROXY: "git.corp.example" })).status).toBe(0);
     const env = capturedEnv();
     expect(env.NO_PROXY).toBe("127.0.0.1,localhost,::1,git.corp.example");
-    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1");
+    // curl reads the lowercase spelling first: the owner's exclusion is there too.
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example");
     expect(env.HTTPS_PROXY).toBe("http://proxy.corp.example:3128");
+  });
+
+  it("keeps the exclusions inherited under either spelling, in both", async () => {
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", no_proxy: "git.corp.example", NO_PROXY: "pkg.corp.example" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example,pkg.corp.example");
+    expect(env.NO_PROXY).toBe(env.no_proxy);
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", no_proxy: "git.corp.example", NO_PROXY: "git.corp.example" })).status).toBe(0);
+    expect(capturedEnv().no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example");
   });
 
   it("denies WebSearch and WebFetch in the local harness's own settings, beside the rules already there", async () => {

@@ -163,6 +163,9 @@ function translatedStream(upstream: ReadableStream<Uint8Array>, requestedModel: 
           if (events.length > 0) return;
         }
       } catch (err) {
+        // Released either way: a decoder that gave up leaves the engine's
+        // connection open otherwise.
+        await reader.cancel().catch(() => {});
         finish(controller, [errorEvent("api_error", `The box's engine stopped answering: ${err instanceof Error ? err.message : String(err)}`)]);
       }
     },
