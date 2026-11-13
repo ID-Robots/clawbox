@@ -439,3 +439,41 @@ describe("when the reason stops being true", () => {
     expect(stopped.pauseReason).toBeNull();
   });
 });
+
+describe("the local-only AI lock going on under a cloud run (TASK-2501)", () => {
+  it("pauses it with its session kept, says why in its feed, and leaves it at that", async () => {
+    const id = await liveRun("locked");
+    // Lock off: a cloud run is the owner's to run.
+    expect(await lib.pauseCloudRunsUnderLock()).toBe(0);
+    expect(lib.getRun(id)?.status).toBe("running");
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    expect(await lib.pauseCloudRunsUnderLock()).toBe(1);
+    // Asked twice, it is one pause.
+    expect(await lib.pauseCloudRunsUnderLock()).toBe(0);
+    const run = await settled(id);
+    expect(run.status).toBe("paused");
+    expect(run.sessionId).toBe("sess-abc-123");
+    expect(run.progress.join("\n")).toContain(lib.PAUSED_BY_CLOUD_AI_LOCK);
+  });
+});
+
+describe("the local-only AI lock reaching a cloud run through its own minute check (TASK-2501)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is paused by the run's own check, without anyone asking", async () => {
+    // Only setInterval is faked: the run's minute check is created with it,
+    // while the spawn, its pipes and the waits below keep real time.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const id = await liveRun("ticked");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lib.getRun(id)?.status).toBe("running");
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    vi.useRealTimers();
+    const run = await settled(id);
+    expect(run.status).toBe("paused");
+    expect(run.progress.join("\n")).toContain(lib.PAUSED_BY_CLOUD_AI_LOCK);
+  });
+});

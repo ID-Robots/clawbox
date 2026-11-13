@@ -19,6 +19,13 @@
  * src/lib/coding-anthropic.ts, and everything that spawns lives in
  * src/lib/coding-agent.ts.
  *
+ * The fourth is the BOX'S OWN ENGINE — `local` (TASK-2501 PR-E): Claude Code
+ * on the model in the Local AI slot (the owner's External engine, or Local
+ * AI's llama.cpp / Ollama), through the box's own Messages-API route
+ * (src/lib/local-anthropic-route.ts). Nobody pays and nothing leaves for a
+ * cloud model. It is what a box under the local-only AI lock runs on, and the
+ * only provider it offers then (`providersUnderLock`).
+ *
  * THE TWO CREDENTIALS NEVER MEET. `clawbox-ai` runs must not see the owner's
  * Anthropic key, and `anthropic` runs must not inherit the proxy's base URL
  * or its portal token — an inherited ANTHROPIC_AUTH_TOKEN outranks an API key
@@ -29,7 +36,7 @@
  */
 
 /** The providers a run may be started against, default first. */
-export const CODING_PROVIDERS = ["clawbox-ai", "anthropic", "openai"] as const;
+export const CODING_PROVIDERS = ["clawbox-ai", "anthropic", "openai", "local"] as const;
 
 export type CodingProvider = (typeof CODING_PROVIDERS)[number];
 
@@ -144,6 +151,16 @@ export const OPENAI_SECRET_SCOPE = "@openai-coding";
 export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
 
 /**
+ * What a `local` run's record says it was started on: the model the box's
+ * engine serves, whichever that is when the run starts. Not a model id any
+ * server knows — the wrapper puts the engine's own id in every slot
+ * (scripts/claude-ds) and the route asks the engine for its model whatever a
+ * request names — so a record keeps this label, and the run's init event
+ * records the id that actually answered.
+ */
+export const LOCAL_ENGINE_MODEL = "local-engine";
+
+/**
  * The CHEAPER model of each provider: what a coding team's role runs on when
  * the owner stored the `economy` tier for it (src/lib/coding-role-models.ts;
  * a role with nothing stored runs on `ROLE_DEFAULT_MODELS` there instead).
@@ -158,6 +175,8 @@ export const OPENAI_API_KEY_SECRET_NAME = "OPENAI_API_KEY";
  */
 export const ECONOMY_MODELS: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "deepseek-v4-flash",
+  // The box's engine serves one model, whichever it is: every tier is it.
+  local: LOCAL_ENGINE_MODEL,
   // Haiku 5.5 since 2026-11-10: Sonnet 5.5 became a worker's default, so the
   // cheaper tier is the model under it — it scored 111 of 111 on the same
   // hidden cases for a fraction of Sonnet's cost.
@@ -195,6 +214,7 @@ export const CODING_PROVIDER_NAME_KEY: Readonly<Record<CodingProvider, string>> 
   "clawbox-ai": "codingAgent.providerName.clawboxAi",
   anthropic: "codingAgent.providerName.anthropic",
   openai: "codingAgent.providerName.openai",
+  local: "codingAgent.providerName.local",
 };
 
 export function isCodingProvider(value: unknown): value is CodingProvider {
@@ -219,7 +239,8 @@ export function connectedProvidersFrom(raw: unknown, fallback: CodingProvider): 
  * Empty for `clawbox-ai` — and that is a fact, not a gap: the ClawBox AI plan
  * decides which DeepSeek tier answers (see scripts/claude-ds), so a model
  * named here would either be ignored or 403'd upstream. The route refuses one
- * rather than pretending to honour it.
+ * rather than pretending to honour it. Empty for `local` too: the box's
+ * engine serves one model.
  */
 export function modelsForProvider(provider: CodingProvider): readonly string[] {
   if (provider === "anthropic") return ANTHROPIC_MODELS;
@@ -234,6 +255,54 @@ export function defaultModelForProvider(provider: CodingProvider): string | null
   return null;
 }
 
+/** Does this provider's run answer from the box's own engine rather than a cloud account? */
+export function runsOnLocalEngine(provider: CodingProvider): boolean {
+  return provider === "local";
+}
+
+// ─── The local-only AI lock (TASK-2501) ──────────────────────────────────────
+
+/**
+ * The providers a box under the local-only AI lock may run on: its own engine
+ * alone. ClawBox AI, Anthropic and OpenAI all send the run's code to a cloud
+ * model, which is exactly what the lock forbids.
+ */
+export const LOCKED_CODING_PROVIDERS: readonly CodingProvider[] = Object.freeze(["local"]);
+
+/** The providers a box may run on: all of them, or the box's engine alone under the lock. */
+export function providersUnderLock(locked: boolean): readonly CodingProvider[] {
+  return locked ? LOCKED_CODING_PROVIDERS : CODING_PROVIDERS;
+}
+
+/** The provider a run is on with nothing named: the owner's under no lock, the box's engine under it. */
+export function lockedDefaultProvider(stored: CodingProvider, locked: boolean): CodingProvider {
+  return locked && !LOCKED_CODING_PROVIDERS.includes(stored) ? "local" : stored;
+}
+
+/** The connected list as the box runs it: under the lock, the box's engine alone. */
+export function lockedConnectedProviders(stored: readonly CodingProvider[], locked: boolean): CodingProvider[] {
+  return locked ? [...LOCKED_CODING_PROVIDERS] : [...stored];
+}
+
+/**
+ * Why Codex does not run under the lock. Checked against the pinned CLI
+ * (config/codex-target.txt, 0.153.4): its provider config refuses
+ * `wire_api = "chat"` ("no longer supported … set wire_api = \"responses\""),
+ * so Codex reaches a model only through the Responses API (`/v1/responses`).
+ * The box's engines serve Chat Completions, and the route that carries a
+ * local run (src/lib/local-anthropic-route.ts) speaks Anthropic's Messages
+ * API to Claude Code — so a Codex run pointed at the engine would fail on its
+ * first request. Refused up front, in these words, instead.
+ */
+export const CODEX_LOCAL_REFUSAL =
+  "Codex cannot run on the box's own engine: the Codex CLI this box runs (0.153.4) reaches a model only through the Responses API (/v1/responses), and the box's engine serves Chat Completions only. Coding runs under the local-only AI lock use Claude Code on the engine: provider \"local\".";
+
+/** The words a refused cloud provider gets under the lock. */
+export function lockedProviderRefusal(provider: CodingProvider): string {
+  if (runsOnCodex(provider)) return `The local-only AI lock is on. ${CODEX_LOCAL_REFUSAL}`;
+  return `The local-only AI lock is on: a coding run may not send its code to ${provider === "anthropic" ? "Anthropic" : "ClawBox AI"}'s cloud models. Use provider "local" (the box's own engine).`;
+}
+
 /** Does this provider's run go through the Codex CLI rather than Claude Code? */
 export function runsOnCodex(provider: CodingProvider): boolean {
   return provider === "openai";
@@ -244,7 +313,9 @@ export function runsOnCodex(provider: CodingProvider): boolean {
  * selects and the OpenAI card, which all read `status.providers` — as against
  * CODING_PROVIDERS, what the box can run at all.
  *
- * Every provider but `openai` is always offered. `openai` runs on the Codex
+ * Under the local-only AI lock the box's engine alone is offered. Otherwise
+ * `local` is offered only where the owner already put it (connected or
+ * default), and every other provider but `openai` is always offered. `openai` runs on the Codex
  * CLI (install.sh's `codex_cli` step, `isCodexInstalled` in coding-openai.ts),
  * and on a box without it the row and the card could only ever say "install
  * the CLI": noise on every box whose owner never asked for OpenAI (2026-10-30).
@@ -261,14 +332,21 @@ export function offeredProviders(state: {
   openaiConnected: boolean;
   connected: readonly CodingProvider[];
   defaultProvider: CodingProvider;
+  /** The local-only AI lock: the box's engine is then the one provider offered. */
+  locked?: boolean;
 }): CodingProvider[] {
-  return CODING_PROVIDERS.filter((id) =>
-    !runsOnCodex(id)
-    || state.codexInstalled
-    || state.openaiConnected
-    || state.connected.includes(id)
-    || state.defaultProvider === id,
-  );
+  if (state.locked === true) return [...LOCKED_CODING_PROVIDERS];
+  return CODING_PROVIDERS.filter((id) => {
+    // The box's engine is the locked box's provider. On any other box it is
+    // offered only where the owner already put it — nothing changes for a
+    // box that never asked for it.
+    if (runsOnLocalEngine(id)) return state.connected.includes(id) || state.defaultProvider === id;
+    return !runsOnCodex(id)
+      || state.codexInstalled
+      || state.openaiConnected
+      || state.connected.includes(id)
+      || state.defaultProvider === id;
+  });
 }
 
 /**
@@ -310,7 +388,9 @@ export function resolveRunProvider(
     // selector exists to make visible.
     return {
       ok: false,
-      error: "ClawBox AI chooses the model from the box's plan, so a model cannot be named for it. Use provider \"anthropic\" or \"openai\" to choose a model.",
+      error: resolved === "local"
+        ? "A local run answers on the one model the box's engine serves, so a model cannot be named for it."
+        : "ClawBox AI chooses the model from the box's plan, so a model cannot be named for it. Use provider \"anthropic\" or \"openai\" to choose a model.",
     };
   }
   if (!allowed.includes(model)) {

@@ -1271,6 +1271,35 @@ describe("ai_set_provider is not a one-way door", () => {
   });
 });
 
+// ── The coding tools under the local-only AI lock ───────────────────────────
+
+describe("the coding tools follow the device's providers under the local-only AI lock (TASK-2501 PR-E)", () => {
+  function deviceAnswers(status: Record<string, unknown>) {
+    hasBinary.mockResolvedValue(false);
+    spawnArgv.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "", timedOut: false });
+    apiTry.mockImplementation(async (p: unknown) => (p === "/setup-api/coding-agent/status" ? status : null));
+  }
+
+  it("narrows the providers to the box's engine when the device says the lock is on", async () => {
+    deviceAnswers({ enabled: true, ready: true, readiness: { anyProviderReady: true }, cloudAiLocked: true, providers: ["local"] });
+    const built = await buildContext("openclaw", "openclaw", "full", "openclaw");
+    expect(built.codingAgent).toBe(true);
+    expect(built.codingProviders).toEqual(["local"]);
+  });
+
+  it("leaves them alone on a box with no lock, and on a server that predates it", async () => {
+    deviceAnswers({ enabled: true, ready: true, readiness: { anyProviderReady: true }, cloudAiLocked: false, providers: ["clawbox-ai", "anthropic"] });
+    expect((await buildContext("openclaw", "openclaw", "full", "openclaw")).codingProviders).toBeNull();
+    deviceAnswers({ enabled: true, ready: true });
+    expect((await buildContext("openclaw", "openclaw", "full", "openclaw")).codingProviders).toBeNull();
+  });
+
+  it("registers no coding tool on a locked box whose engine cannot run one", async () => {
+    deviceAnswers({ enabled: true, ready: false, readiness: { anyProviderReady: false }, cloudAiLocked: true, providers: ["local"] });
+    expect((await buildContext("openclaw", "openclaw", "full", "openclaw")).codingAgent).toBe(false);
+  });
+});
+
 // ── Drawing, on a box that cannot ────────────────────────────────────────────
 //
 // Image generation on this device is not a ClawBox MCP tool at all: on Hermes

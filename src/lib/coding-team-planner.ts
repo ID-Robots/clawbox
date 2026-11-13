@@ -100,6 +100,7 @@ const PROVIDER_WORDS: Readonly<Record<CodingProvider, string>> = {
   "clawbox-ai": "ClawBox AI",
   anthropic: "Anthropic",
   openai: "OpenAI",
+  local: "the box's own engine",
 };
 
 export function providerWords(provider: CodingProvider): string {

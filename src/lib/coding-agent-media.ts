@@ -34,6 +34,7 @@ import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import { isProtectedFilePath } from "@/lib/file-guard";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 import {
   activeRunMedia,
   MAX_AUDIO_PER_RUN,
@@ -56,6 +57,10 @@ export type MediaErrorCode =
   | "bad_request"
   | "no_run"
   | "switched_off"
+  // The local-only AI lock (TASK-2501): pictures are drawn by ClawBox AI's
+  // cloud and a clip may be spoken by a cloud voice, so a locked box makes
+  // none, whatever a run was given.
+  | "cloud_ai_locked"
   | "cap"
   | "outside"
   | "bad_extension"
@@ -142,6 +147,18 @@ export async function resolveMediaTarget(request: MediaRequest): Promise<
           ? "Generating pictures is switched off for coding runs in the Coding Agent settings."
           : "Generating audio is switched off for coding runs in the Coding Agent settings.",
         "switched_off",
+        409,
+      ),
+    };
+  }
+  // The lock outranks what the run was started with: a run that began before
+  // the owner turned it on still sends nothing to the cloud after.
+  if (await cloudAiLockOn()) {
+    return {
+      ok: false,
+      response: mediaError(
+        "The local-only AI lock is on, so coding runs on this box make no pictures or speech.",
+        "cloud_ai_locked",
         409,
       ),
     };
