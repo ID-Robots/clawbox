@@ -94,7 +94,7 @@ describe("the prompt build answer", () => {
   it("names every lean tool it teaches, in the form the tool surface takes", () => {
     const viaSearch = leanSystemPrompt({});
     for (const tool of LEAN_TOOLS.filter((t: string) => t !== "read" && t !== "write")) {
-      expect(viaSearch).toContain(`call tool_call with {"id": "${tool}", `);
+      expect(viaSearch).toContain(`call dispatch_action with {"id": "${tool}", `);
     }
     expect(viaSearch).toContain('call read with {"path": "..."}');
     expect(viaSearch).toContain('or write with {"path": "...", "content": "..."}');
@@ -103,14 +103,14 @@ describe("the prompt build answer", () => {
 
     const direct = leanSystemPrompt({ toolSearch: false });
     expect(direct).toContain('call clawbox__webapp_create with {"app_id": ');
-    expect(direct).not.toContain("tool_call");
+    expect(direct).not.toContain("dispatch_action");
   });
 
   it("follows the core's Tool Search setting", () => {
     const off = promptBuild({ prompt: "x" }, { modelProviderId: "llamacpp" }, { tools: { toolSearch: false } }, NOW) as { systemPrompt: string };
-    expect(off.systemPrompt).not.toContain("tool_call");
+    expect(off.systemPrompt).not.toContain("dispatch_action");
     const on = promptBuild({ prompt: "x" }, { modelProviderId: "llamacpp" }, {}, NOW) as { systemPrompt: string };
-    expect(on.systemPrompt).toContain("tool_call");
+    expect(on.systemPrompt).toContain("dispatch_action");
   });
 
   it("reads Tool Search exactly as the core's resolveToolSearchConfig does", () => {

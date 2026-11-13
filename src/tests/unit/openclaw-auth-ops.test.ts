@@ -4,6 +4,8 @@ vi.mock("@/lib/openclaw-config", () => ({
   spawnOpenclawCli: vi.fn(),
   restartGateway: vi.fn(),
   gatewayIsAbsent: () => false,
+  gatewayReadyWaitMs: () => 1000,
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {},
 }));
 vi.mock("@/lib/openclaw-auth-store", () => ({ readGatewayProviderAuth: vi.fn() }));
 vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn() }));
@@ -184,6 +186,15 @@ describe("setOpenclawAuthOrder", () => {
 });
 
 describe("withOpenclawGatewayStopped", () => {
+  it("takes a gateway that was started but is still coming up as started", async () => {
+    const { restartGateway, GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    vi.mocked(restartGateway).mockRejectedValueOnce(new GatewayNotReadyError("gateway did not come back"));
+    _setAuthOpsDepsForTests({ stopGateway: async () => undefined });
+    await expect(withOpenclawGatewayStopped(async () => "done")).resolves.toBe("done");
+    vi.mocked(restartGateway).mockRejectedValueOnce(new Error("Job for clawbox-gateway.service failed"));
+    await expect(withOpenclawGatewayStopped(async () => "done")).rejects.toThrow(/failed/);
+  });
+
   it("reports the stop's own failure when the start after it fails too", async () => {
     const h = harness();
     h.stopGateway.mockRejectedValueOnce(new Error("the gateway is still stopping"));

@@ -28,7 +28,7 @@
  * run offline, the gateway started again.
  */
 
-import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs } from "@/lib/openclaw-config";
+import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs, GatewayNotReadyError } from "@/lib/openclaw-config";
 import { gatewayWsCall, GatewayWsUnavailableError, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
 import { readUnitState, runUnitJob } from "@/lib/gateway-unit-job";
@@ -80,7 +80,21 @@ const defaultDeps: AuthOpsDeps = {
     });
     if (stop.kind === "in-flight") throw new Error("the gateway is still stopping");
   },
-  startGateway: () => restartGateway(),
+  startGateway: async () => {
+    try {
+      await restartGateway();
+    } catch (err) {
+      // The unit was started and is still coming up (a Jetson after heavy work
+      // can take longer than the ready wait): not a failure of the offline
+      // work, and every gateway request after this waits for a starting
+      // gateway anyway (askOpenclawGateway). A refused start still throws.
+      if (err instanceof GatewayNotReadyError) {
+        console.warn("[openclaw-auth] the gateway was started again and is still coming up");
+        return;
+      }
+      throw err;
+    }
+  },
   gatewayUnitUp: async () => {
     const state = await readUnitState("clawbox-gateway.service");
     // A unit that cannot be asked is treated as up: the gateway's refusal is
