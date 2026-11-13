@@ -2350,7 +2350,7 @@ if isinstance(_lai_providers, dict):
 # Settings -> Local AI -> External engine makes an OpenAI-compatible endpoint
 # the owner runs the box's Local AI: `models.providers.clawext` in this file,
 # the primary through chat/model, and a record in the device store
-# (`external_engine`: base URL, model, window, output cap, image input — the
+# (`external_engine`: base URL, model, window, output cap, image input, reasoning — the
 # key in its own 0600 file, data/.external-engine-key). Nothing above touches a
 # provider it does not own, so a start keeps the entry as it is; this block is
 # the half that PUTS IT BACK when the store says an engine is selected and the
@@ -2432,19 +2432,30 @@ if _ext_record is not None:
             # No key file: keep whatever key the entry already carries.
             _ext_key = _ext_entry.get("apiKey") if isinstance(_ext_entry.get("apiKey"), str) and _ext_entry.get("apiKey") else "none"
         _ext_name = [p for p in _ext_model.split("/") if p][-1]
+        # TASK-2497: a reasoning engine keeps `reasoning: true` and its effort
+        # contract (EXTERNAL_ENGINE_REASONING_COMPAT in src/lib/external-engine.ts:
+        # Off sent as `none`, low/medium/high as they are); anything but an
+        # explicit true in the record — a record from before the switch — is off.
+        _ext_reasoning = _ext_record.get("reasoning") is True
+        _ext_model_entry = {
+            "id": _ext_model,
+            "name": _ext_name,
+            "reasoning": _ext_reasoning,
+            "input": ["text", "image"] if _ext_record.get("imageInput") is True else ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": _ext_ctx,
+            "maxTokens": min(_ext_max, _ext_ctx),
+        }
+        if _ext_reasoning:
+            _ext_model_entry["compat"] = {
+                "supportedReasoningEfforts": ["none", "low", "medium", "high"],
+                "reasoningEffortMap": {"off": "none"},
+            }
         _ext_want = {
             "baseUrl": _ext_base,
             "api": "openai-completions",
             "apiKey": _ext_key,
-            "models": [{
-                "id": _ext_model,
-                "name": _ext_name,
-                "reasoning": False,
-                "input": ["text", "image"] if _ext_record.get("imageInput") is True else ["text"],
-                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                "contextWindow": _ext_ctx,
-                "maxTokens": min(_ext_max, _ext_ctx),
-            }],
+            "models": [_ext_model_entry],
         }
         _ext_merged = dict(_ext_entry)
         _ext_merged.update(_ext_want)
