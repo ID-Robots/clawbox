@@ -191,7 +191,9 @@ async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voic
   const facts = await readCloudDefaultsFacts();
   const defaults = resolveClawaiCloudDefaults(facts);
   const [stt, voice, embeddings, owners] = await Promise.all([
-    getSttPrimary(),
+    // The owner's own speech server (TASK-2501 PR-D) is on the owner's
+    // network: for the cloud defaults it is a local source like the box's own.
+    getSttPrimary().then((engine): CapabilitySource => (engine === "cloud" ? "cloud" : "local")),
     readVoiceSnapshot(),
     currentEmbeddingSource(defaults.embeddings.source),
     readOwnerChoices(),

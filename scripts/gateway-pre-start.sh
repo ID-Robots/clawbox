@@ -3969,6 +3969,43 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 # import a TS constant. It must name a model production allows, because the
 # proxy matches the bare id and answers 400 on a miss.
 CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
+
+
+def _clawbox_cloud_ai_locked():
+    """Is the local-only AI lock on (TASK-2501)? FAILING CLOSED.
+
+    The device-store key `ai_cloud_lock`: `true` or `"pinned"` is on. An
+    absent store is a box that never wrote a setting, so unlocked; a store that
+    is there and cannot be read or parsed is not known to be unlocked, so it
+    reads as LOCKED — `cloudAiLockOn` in src/lib/feature-engine.ts, the rule
+    the web server reads it by; keep the two in step. The lock's own module
+    (PR-A, `ai-cloud-lock.ts`) replaces both readers once it is on beta.
+
+    Under the lock the speech migrations below write no cloud row and take
+    back the ones ClawBox wrote: the transcription row and its endpoint, and
+    the stamped cloud voice. `except Exception`, as wide as the sibling store
+    readers, because this runs inside the unguarded heredoc under `set -e`.
+    """
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return False
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+    if not isinstance(_store, dict):
+        return True
+    _lock = _store.get("ai_cloud_lock")
+    return _lock is True or _lock == "pinned"
+# end of the local-only AI lock reader
+
+
+_clawbox_ai_locked = _clawbox_cloud_ai_locked()
 # The auth profile the cloud row names as its OWN bearer, and it is now
 # load-bearing rather than belt-and-braces. This row's provider is `openai` —
 # the only bundled media-understanding provider that speaks the proxy's
@@ -4009,6 +4046,12 @@ CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL = {
 # matched by name rather than full path because HOME is the script's to
 # resolve, and a path check here would call a moved workspace foreign.
 CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+# The owner's own speech server (TASK-2501 PR-D): a CLI row running the app's
+# scripts/stt-endpoint-client.py, which reads `stt_endpoint` and its key from
+# the device store and keeps the private-address rule. Ours like the on-box
+# row; `buildAudioModels` (src/lib/stt-preference.ts) writes it field for field.
+CLAWBOX_STT_ENDPOINT_SCRIPT = "stt-endpoint-client.py"
+CLAWBOX_STT_SCRIPTS = (CLAWBOX_STT_CLIENT_SCRIPT, CLAWBOX_STT_ENDPOINT_SCRIPT)
 # The modes `isKeyModeProfile` (src/lib/auth-profile-mode.ts) reads as a
 # key of the profile's own; anything else — `oauth` above all — is not.
 CLAWBOX_KEY_PROFILE_MODES = ("token", "api_key", "api-key")
@@ -4031,7 +4074,10 @@ def _is_clawbox_audio_model(_entry):
     if _entry.get("type") == "cli":
         _args = _entry.get("args")
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
-        return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
+        return any(
+            isinstance(_v, str) and any(_v.endswith(_script) for _script in CLAWBOX_STT_SCRIPTS)
+            for _v in _named
+        )
     return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
 
 
@@ -4137,6 +4183,44 @@ def _clawbox_local_stt_row():
         "type": "cli",
         "command": "/usr/bin/python3",
         "args": [_script, "{{MediaPath}}"],
+        "timeoutSeconds": 120,
+    }
+
+
+def _clawbox_endpoint_stt_row():
+    """The owner's own speech server's CLI row when it is the chosen engine, else None.
+
+    Chosen means `stt_primary` is `endpoint` and an `stt_endpoint` record with
+    an http(s) base URL and a model is saved — `resolveSttPrimary` and
+    `sttEndpointFromValue` (src/lib/stt-preference.ts, src/lib/stt-endpoint.ts)
+    say the rest. Unreadable reads as not chosen: the seed then falls back to
+    the box's own engine, and the web server's boot pass writes the list from
+    the same store a moment later.
+    """
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return None
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except Exception:
+        return None
+    if not isinstance(_store, dict) or _store.get("stt_primary") != "endpoint":
+        return None
+    _record = _store.get("stt_endpoint")
+    if not isinstance(_record, dict):
+        return None
+    _base = _record.get("baseUrl")
+    _model = _record.get("model")
+    if not (isinstance(_base, str) and _base.startswith(("http://", "https://")) and isinstance(_model, str) and _model.strip()):
+        return None
+    _root = os.environ.get("CLAWBOX_ROOT") or os.path.dirname(os.path.dirname(_store_path))
+    return {
+        "type": "cli",
+        "command": "/usr/bin/python3",
+        "args": [os.path.join(_root, "scripts", CLAWBOX_STT_ENDPOINT_SCRIPT), "{{MediaPath}}"],
         "timeoutSeconds": 120,
     }
 
@@ -4337,7 +4421,11 @@ if _clawai_openai_route_is_ours:
     # Asked once: the seed and the repair below both stand down on it. The
     # reason why, or None while a ClawBox AI credential backs the cloud row.
     _audio_cloud_refused = (
-        "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
+        # The local-only AI lock first (TASK-2501): no cloud row is seeded or
+        # kept, and the withdrawal below takes ours and our endpoint back.
+        "local-only AI is on, so no recording is sent to a cloud transcription engine"
+        if _clawbox_ai_locked
+        else "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
         if _openai_signed_in_with_oauth(cfg)
         else _clawai_transcribe_profile_problem(cfg)
     )
@@ -4354,10 +4442,18 @@ if _clawai_openai_route_is_ours:
     _audio_seed = None
     if not _audio_route_taken and _audio_models is None and not _audio_models_move_in_flight:
         _audio_local_row = _clawbox_local_stt_row()
-        _audio_seed = ([_audio_local_row] if _audio_local_row else []) + (
-            [] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)]
-        )
-        if _audio_local_row:
+        # The owner's own speech server leads when it is the chosen engine
+        # (`sttEngineOrder("endpoint")`); under the lock it is the whole list,
+        # as is the box's own engine without one (`lockedSttOrder`).
+        _audio_endpoint_row = _clawbox_endpoint_stt_row()
+        _audio_seed = ([_audio_endpoint_row] if _audio_endpoint_row else []) + (
+            [_audio_local_row] if _audio_local_row else []
+        ) + ([] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)])
+        if _clawbox_ai_locked:
+            _audio_seed = _audio_seed[:1]
+        if _audio_endpoint_row:
+            print("  Channel voice notes go to the owner's own speech server first")
+        elif _audio_local_row:
             print("  Channel voice notes try the Whisper engine installed on this box first")
 
     def _audio_write_seed(_rows):
@@ -4603,7 +4699,15 @@ _clawai_speech_withdrawable = bool(
     _clawai_plan_tier and _clawai_plan_tier != CLAWBOX_SPEECH_DEVICE_TIER
 )
 
-if _clawai_openai_route_is_ours and _clawai_speech_entitled:
+# THE LOCAL-ONLY AI LOCK (TASK-2501) overrides the plan in both directions: a
+# locked box is never armed, and the cloud voice ClawBox stamped is withdrawn
+# by the arm below — the same delete a downgrade gets, so lifting the lock on
+# an entitled box arms it again at the next start. `tts.provider` is left as
+# it is, for the downgrade's reason: with our entry gone the gateway falls
+# through to the voice on the box. The reader is the transcription block's.
+_clawai_speech_locked = bool(globals().get("_clawbox_cloud_ai_locked", lambda: False)())
+
+if _clawai_openai_route_is_ours and _clawai_speech_entitled and not _clawai_speech_locked:
     _messages = cfg.get("messages")
     if not isinstance(_messages, dict):
         _messages = {}
@@ -4702,7 +4806,7 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
                     cfg["messages"] = _messages
                 changed = True
 
-elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
+elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_speech_locked):
     # ONLY OVER A PLAN WE HAVE ACTUALLY BEEN TOLD. This condition used to be
     # `_clawai_openai_route_is_ours` alone, so every reading that was not a
     # positive "pro" reached the delete: a device store that was absent, or
@@ -4794,7 +4898,12 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
         ):
             del _tts_providers["openai"]
             print(
-                "  Removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+                "  Removed the ClawBox AI cloud voice: %s"
+                % (
+                    "local-only AI is on, so this box speaks with its own voice only"
+                    if _clawai_speech_locked
+                    else "this box's plan no longer includes it"
+                )
             )
             changed = True
 

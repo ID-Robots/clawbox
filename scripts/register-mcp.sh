@@ -1380,9 +1380,10 @@ CLAWBOX_VOICE_PLAN=$(
   CLAWBOX_VOICE_LOCAL="$CLAWBOX_VOICE_LOCAL" \
   CLAWBOX_KOKORO_STAMP="$HOME_DIR/.cache/clawbox/kokoro-installed" \
   python3 - <<'PY' || echo "hold the voice plan could not be computed"
-import json, os, sys, traceback
+import json, os, re, sys, traceback
 
-# One verdict on stdout: `arm <target>`, `withdraw <target>`, or `hold <why>`.
+# One verdict on stdout: `arm <target>`, `withdraw <target>`, `lock <prev>`,
+# `unlock <prev>` or `hold <why>`.
 # Everything this block decides is decided here, so the shell below is only the
 # writes.
 def say(verdict):
@@ -1487,12 +1488,26 @@ def load(path, loader):
 
 
 store, why = load(os.environ["CLAWBOX_DEVICE_STORE"], json.load)
-if why == "absent":
-    say("hold this box has no ClawBox AI link on record")
-if why is not None:
-    say("hold the device store could not be read (%s)" % why)
+# THE LOCAL-ONLY AI LOCK (TASK-2501), read FAILING CLOSED the way
+# `cloudAiLockOn` (src/lib/feature-engine.ts) and gateway-pre-start.sh read it:
+# `ai_cloud_lock` true or "pinned" is on; an absent store is unlocked; a store
+# that is there and cannot be read, or is not an object, is not known to be
+# unlocked, so it reads as locked. Under it this box speaks with its own voice
+# only — see the lock verdicts below.
+LOCKED = (
+    (why is not None and why != "absent")
+    or (why is None and not isinstance(store, dict))
+    or (isinstance(store, dict) and (store.get("ai_cloud_lock") is True or store.get("ai_cloud_lock") == "pinned"))
+)
+if not LOCKED:
+    if why == "absent":
+        say("hold this box has no ClawBox AI link on record")
+    if why is not None:
+        say("hold the device store could not be read (%s)" % why)
+    if not isinstance(store, dict):
+        say("hold the device store is not an object")
 if not isinstance(store, dict):
-    say("hold the device store is not an object")
+    store = {}
 
 token = text(store.get("clawai_token"))
 
@@ -1567,6 +1582,73 @@ restore_cloud = (
     and provider == LOCAL_PROVIDER
     and (slot_is_empty or base_url.rstrip("/") in OUR_PROXIES)
 )
+
+def local_resolvable():
+    """Is `tts.providers.clawbox-local` a definition the harness can resolve?
+
+    `_is_command_provider_config` (tts_tool.py:846), transcribed: a non-empty
+    `command`, and `type` either absent or `command`. Selecting a name that is
+    not one lands in Hermes' `else: # Default: Edge TTS` — Microsoft's cloud.
+    """
+    providers = tts.get("providers")
+    providers = providers if isinstance(providers, dict) else {}
+    local = providers.get(LOCAL_PROVIDER)
+    if not isinstance(local, dict):
+        local = tts.get(LOCAL_PROVIDER)
+    local = local if isinstance(local, dict) else {}
+    local_command = local.get("command")
+    local_type = local.get("type")
+    local_type = local_type.strip().lower() if isinstance(local_type, str) else local_type
+    return bool(
+        isinstance(local_command, str)
+        and local_command.strip()
+        and local_type in (None, "", "command")
+    )
+
+
+# What a lock moved this box off, so lifting the lock gives it back. Only a
+# provider NAME (no credential), and only a plain identifier.
+lock_marker, lock_marker_error = load(os.environ["CLAWBOX_HERMES_CONFIG"] + ".clawbox-voice-lock.json", json.load)
+lock_marker_provider = (
+    text(lock_marker.get("provider"))
+    if lock_marker_error is None and isinstance(lock_marker, dict) and lock_marker.get("version") == 1
+    else ""
+)
+
+if LOCKED:
+    # UNDER THE LOCAL-ONLY AI LOCK THE BOX SPEAKS FOR ITSELF, and only for
+    # itself (TASK-2501 PR-D). Hermes' factory `edge` is Microsoft's cloud,
+    # `openai` is ours or the owner's cloud, and every other built-in provider
+    # is a cloud of its own — so the selection moves to `clawbox-local`, the
+    # Kokoro voice install.sh registers, whatever it was.
+    #
+    # Two of those moves are remembered so lifting the lock undoes them: our
+    # own cloud voice through the downgrade path's stand-down marker (the arm
+    # restores it on an entitled box), and any other choice of the owner's
+    # through the lock marker (the `unlock` verdict below). `edge` and an
+    # unset key are not remembered: they are the factory's, not a choice.
+    ours_slot = not slot_is_empty and (key_is_ours or base_url.rstrip("/") in OUR_PROXIES)
+    if provider == LOCAL_PROVIDER:
+        if ours_slot:
+            say("withdraw keep")
+        say("hold local-only AI is on and this box already speaks for itself")
+    if not local_resolvable():
+        # Nowhere safe to move it: a name the harness cannot resolve is Edge.
+        # The app refuses to speak through anything but the box's own voice
+        # meanwhile (`speakWithHermes`); `install.sh` registers the definition
+        # on the next update.
+        say("hold local-only AI is on but this box has no on-device voice registered to move to")
+    if provider == CLOUD_PROVIDER and ours_slot:
+        say("withdraw %s" % LOCAL_PROVIDER)
+    remembered = provider if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", provider) and provider != FACTORY_PROVIDER else "-"
+    say("lock %s" % remembered)
+
+# THE LOCK WAS LIFTED: put back the owner's own selection it moved — only while
+# the box still speaks with the voice the lock chose, and only a name.
+if lock_marker_provider:
+    if provider == LOCAL_PROVIDER and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", lock_marker_provider):
+        say("unlock %s" % lock_marker_provider)
+    say("unlock -")
 
 if token and arm_tier == ENTITLED_TIER:
     # ALREADY SPEAKING THROUGH US. The selection is not touched again; the
@@ -1754,6 +1836,25 @@ elif action == "voice":
 STAMPPY
 }
 
+# The local-only AI lock's own marker (TASK-2501): the provider NAME the lock
+# moved this box off, so lifting the lock puts it back. No credential in it.
+hermes_voice_lock_marker() {
+  CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" CLAWBOX_LOCK_ACTION="$1" CLAWBOX_LOCK_PROVIDER="${2:-}" python3 - <<'LOCKPY'
+import json, os, tempfile
+path = os.environ["CLAWBOX_HERMES_CONFIG"] + ".clawbox-voice-lock.json"
+if os.environ["CLAWBOX_LOCK_ACTION"] == "clear":
+    try: os.unlink(path)
+    except FileNotFoundError: pass
+else:
+    fd, tmp = tempfile.mkstemp(prefix=".voice-lock-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as f: json.dump({"version": 1, "provider": os.environ["CLAWBOX_LOCK_PROVIDER"]}, f)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+LOCKPY
+}
+
 hermes_voice_restore_name() {
   [ "$CLAWBOX_VOICE_VERDICT" = restore ] || return 0
   local voice
@@ -1904,6 +2005,31 @@ TOKENPY
       else
         log "moved this box off the ClawBox AI cloud voice but could not remove its definition (exit $CLAWBOX_VOICE_RC) — nothing points at it, so no request is made; the next start will try again"
       fi
+    fi
+    ;;
+  lock)
+    # The local-only AI lock (TASK-2501): the box speaks with Kokoro only.
+    # The marker first, so a selection that lands is always one the lifted
+    # lock can give back; a marker with nothing moved is cleared again.
+    CLAWBOX_VOICE_PREVIOUS="${CLAWBOX_VOICE_PLAN#lock }"
+    if [ "$CLAWBOX_VOICE_PREVIOUS" != "-" ] && ! hermes_voice_lock_marker remember "$CLAWBOX_VOICE_PREVIOUS"; then
+      log "local-only AI is on but the previous voice could not be remembered — leaving the selection for retry"
+    elif ! hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_LOCAL"; then
+      [ "$CLAWBOX_VOICE_PREVIOUS" = "-" ] || hermes_voice_lock_marker clear || true
+      log "local-only AI is on but this box could not be moved to its own voice (exit $CLAWBOX_VOICE_RC) — the next start will try again"
+    else
+      log "local-only AI is on: this box now speaks with its own voice (Kokoro), not a cloud voice"
+    fi
+    ;;
+  unlock)
+    CLAWBOX_VOICE_PREVIOUS="${CLAWBOX_VOICE_PLAN#unlock }"
+    if [ "$CLAWBOX_VOICE_PREVIOUS" = "-" ]; then
+      hermes_voice_lock_marker clear || log "could not clear the local-only voice marker"
+    elif hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_PREVIOUS"; then
+      hermes_voice_lock_marker clear || log "could not clear the local-only voice marker"
+      log "local-only AI is off: gave this box back the voice the lock had moved it off"
+    else
+      log "local-only AI is off but the previous voice could not be selected again (exit $CLAWBOX_VOICE_RC) — the next start will try again"
     fi
     ;;
   *)
