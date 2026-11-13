@@ -36,7 +36,9 @@ const PROXY_TRANSCRIBE = "https://clawbox.com/api/ai/audio/transcriptions";
 let ENDPOINT = "";
 let server: http.Server;
 let seen: { url?: string; auth?: string; body: string }[];
-let answer: { status: number; body: string } | null;
+let answer: { status: number; body: string; headers?: Record<string, string> } | null;
+/** Run as a request reaches the owner's server, before it answers. */
+let onRequest: (() => void) | null;
 const TOKEN = "claw_testtoken0000000000000000000";
 
 let tmpHome: string;
@@ -85,13 +87,15 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", fetchMock);
   seen = [];
   answer = { status: 200, body: JSON.stringify({ text: " The harbour lantern turns amber. " }) };
+  onRequest = null;
   server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       seen.push({ url: req.url, auth: req.headers.authorization, body: Buffer.concat(chunks).toString("latin1") });
+      onRequest?.();
       if (!answer) { req.socket.destroy(); return; }
-      res.writeHead(answer.status, { "content-type": "application/json" });
+      res.writeHead(answer.status, { "content-type": "application/json", ...(answer.headers ?? {}) });
       res.end(answer.body);
     });
   });
@@ -128,12 +132,68 @@ describe("the owner's own speech server", () => {
   });
 
   it("does not follow a redirect off the network", async () => {
-    writeStore({ ai_cloud_lock: true, stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "whisper-1" } });
-    answer = { status: 307, body: "" };
+    // A second server the redirect points at: it must never be asked.
+    const elsewhere: string[] = [];
+    const other = http.createServer((req, res) => { elsewhere.push(String(req.url)); res.writeHead(200); res.end("{}"); });
+    await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+    try {
+      const target = `http://127.0.0.1:${(other.address() as AddressInfo).port}/v1/audio/transcriptions`;
+      writeStore({ ai_cloud_lock: true, stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "whisper-1" } });
+      answer = { status: 307, body: "", headers: { location: target } };
+      const res = await POST(audioRequest());
+      expect(res.status).toBe(502);
+      expect(seen).toHaveLength(1);
+      expect(elsewhere).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  });
+
+  it("never sends a key saved for another server to the address it read first", async () => {
+    // Server B, which a save makes the owner's server while the recording is
+    // being prepared for the first one.
+    const atB: { auth?: string }[] = [];
+    const other = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        atB.push({ auth: req.headers.authorization });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ text: "from B" }));
+      });
+    });
+    await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+    try {
+      const B = `http://127.0.0.1:${(other.address() as AddressInfo).port}/v1`;
+      writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "asr-a" } });
+      fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), "key-A", { mode: 0o600 });
+      remux.audioForCloud.mockImplementation(async (audio: { file: Blob; name: string }) => {
+        // The save's own order: key off, record, new key.
+        fs.rmSync(path.join(tmpHome, "data", ".stt-endpoint-key"), { force: true });
+        writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: B, model: "asr-b" } });
+        fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), "key-B", { mode: 0o600 });
+        return { ...audio, prepared: "as-is" };
+      });
+      const res = await POST(audioRequest());
+      expect(res.status).toBe(200);
+      // The pair read after the save: B, with B's key. A never sees B's key.
+      expect(seen.map((r) => r.auth)).not.toContain("Bearer key-B");
+      expect(atB).toEqual([{ auth: "Bearer key-B" }]);
+    } finally {
+      await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  });
+
+  it("uploads nothing to the cloud when the lock goes on while the owner's server was asked", async () => {
+    writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "whisper-1" } });
+    answer = { status: 500, body: JSON.stringify({ error: "busy" }) };
+    // The owner turns the lock on while the server is answering.
+    onRequest = () => writeStore({ ai_cloud_lock: true, stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "whisper-1" } });
     const res = await POST(audioRequest());
-    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("cloud_ai_locked");
     expect(seen).toHaveLength(1);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(urls().filter((u) => u === PROXY_TRANSCRIBE)).toEqual([]);
   });
 
   it("without the lock, a failed server falls through to the chain the box always had", async () => {

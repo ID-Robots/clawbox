@@ -12,7 +12,7 @@ import {
 } from "@/lib/harness/credentials";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
-import { readSttEndpoint, readSttEndpointKey, transcribeAtEndpoint } from "@/lib/stt-endpoint";
+import { readSttEndpoint, readSttEndpointSnapshot, transcribeAtEndpoint } from "@/lib/stt-endpoint";
 import {
   cloudTranscribeProblem,
   getSttRoute,
@@ -20,6 +20,7 @@ import {
   type SttEngine,
 } from "@/lib/stt-preference";
 import { audioForCloud } from "@/lib/stt-remux";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 
 export const dynamic = "force-dynamic";
 
@@ -112,7 +113,7 @@ const UPSTREAM_TIMEOUT_MS = 120_000;
  * Everything the caller needs to be told, without saying how we are built.
  * `detail` is for the box's log only and never reaches the response.
  */
-type Failure = { status: number; error: string; detail?: string };
+type Failure = { status: number; error: string; detail?: string; locked?: true };
 
 // Enough for the proxy's error envelope, which is all that is read out of it.
 const MAX_ERROR_BODY_BYTES = 4096;
@@ -358,6 +359,13 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
   upstream.set("file", upload.file, upload.name);
   upstream.set("model", TRANSCRIBE_MODEL);
 
+  // Asked again right before the upload, the last await before it: the chain
+  // was read once, and the lock can go on while an engine before this one ran
+  // or while the recording was remuxed. Fails closed, uploading nothing.
+  if (await cloudAiLockOn()) {
+    return { status: 409, error: LOCKED_NO_ENGINE, detail: "the local-only AI lock went on mid-request, nothing uploaded", locked: true };
+  }
+
   let res: Response;
   try {
     res = await fetch(`${CLAWBOX_AI_PROXY_URL}/audio/transcriptions`, {
@@ -425,13 +433,19 @@ type Unavailable = { unavailable: string };
  * refusal here before a byte is sent.
  */
 async function transcribeAtOwnEndpoint(req: NextRequest, audio: Audio): Promise<Transcript | Failure | Unavailable> {
-  const record = await readSttEndpoint();
-  if (!record) return { unavailable: "no speech server of the owner's is saved" };
+  if (!(await readSttEndpoint())) return { unavailable: "no speech server of the owner's is saved" };
   // The same duration-carrying WebM the cloud leg sends: ASR servers decode
   // with ffmpeg or soundfile, and a file that states its length is the one
   // every one of them reads.
   const upload = await audioForCloud(audio, req.signal);
-  const result = await transcribeAtEndpoint(record, readSttEndpointKey(), upload, { signal: req.signal });
+  // The address and its key read as one pair AFTER the remux: a save that
+  // lands meanwhile must not send the new server's key to the old address.
+  const snapshot = await readSttEndpointSnapshot();
+  if (snapshot === null) return { unavailable: "the owner's speech server was removed while the recording was prepared" };
+  if (snapshot === "changing") {
+    return { status: 503, error: "The speech server settings changed while the recording was sent. Try again.", detail: "endpoint record kept changing" };
+  }
+  const result = await transcribeAtEndpoint(snapshot.record, snapshot.key, upload, { signal: req.signal });
   if (!result.ok) return { status: result.status, error: result.error, detail: result.detail };
   return { text: result.text };
 }
@@ -524,6 +538,11 @@ export async function POST(req: NextRequest) {
     if ("unavailable" in result) {
       if (firstFailure) console.warn(`[chat/transcribe] no ${engine} engine to fall back to: ${result.unavailable}`);
       continue;
+    }
+    if ("status" in result && result.locked) {
+      // The lock went on while this request ran: its answer, with its code.
+      console.warn(`[chat/transcribe] ${engine} engine not asked (${result.detail})`);
+      return NextResponse.json({ error: firstFailure ? `${firstFailure.error}${LOCKED_SUFFIX}` : result.error, code: "cloud_ai_locked" }, { status: firstFailure?.status ?? 409 });
     }
     if ("status" in result) {
       console.warn(

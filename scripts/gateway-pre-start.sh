@@ -4993,10 +4993,18 @@ elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_sp
 #     turned off, and a cloud `provider` pointed at the on-box one;
 #   - lifting the lock puts back exactly what was held, and the selection only
 #     where it still names the voice the lock chose.
-# The held file is written BEFORE the config moves, and a box whose held file
-# cannot be written keeps its entries: an owner's key is never lost to a lock.
+# The held file is written BEFORE the config moves. A box whose held file cannot
+# be written (or read) still FAILS CLOSED, and still loses nothing: each cloud
+# entry is held IN PLACE, renamed to `clawbox-held--<id>` under the same
+# `providers` record — a key no speech plugin registers, so it is out of the
+# gateway's chain, with every value kept for the next unlock — and the previous
+# selection beside them as `clawbox-held--provider`. An owner's key is never
+# lost to a lock, and no cloud voice speaks under it.
 # "Local" is `isLocalProviderId` (src/lib/voice-output.ts), transcribed.
 CLAWBOX_TTS_LOCAL_PROVIDER_ID = "tts-local-cli"
+CLAWBOX_TTS_HELD_PREFIX = "clawbox-held--"
+# The held file, removed only once the config it was restored into is written.
+_clawbox_tts_held_to_remove = None
 
 
 def _clawbox_tts_is_local(_id):
@@ -5023,14 +5031,16 @@ def _clawbox_tts_lock_pass():
         _homes.append(("tts", cfg.get("tts")))
     if isinstance(_messages.get("tts"), dict):
         _homes.append(("messages.tts", _messages.get("tts")))
+    _held_unreadable = False
     try:
         with open(_held_path) as _fh:
             _held = json.load(_fh)
     except FileNotFoundError:
         _held = None
     except Exception:
-        print("  WARNING: the held speech providers could not be read; leaving the voices as they are")
-        return
+        # Never written over (it may hold an owner's key), never trusted.
+        _held = None
+        _held_unreadable = True
     if not (isinstance(_held, dict) and _held.get("version") == 1 and isinstance(_held.get("homes"), dict)):
         _held = None
 
@@ -5042,9 +5052,10 @@ def _clawbox_tts_lock_pass():
             if not isinstance(_providers, dict):
                 continue
             _record = _next["homes"].setdefault(_name, {"providers": {}})
-            _locals = [_id for _id in _providers if _clawbox_tts_is_local(_id)]
+            _locals = [_id for _id in _providers if _clawbox_tts_is_local(_id) and not str(_id).startswith(CLAWBOX_TTS_HELD_PREFIX)]
             for _id, _entry in list(_providers.items()):
-                if _clawbox_tts_is_local(_id):
+                # Already held in place by an earlier locked start.
+                if _clawbox_tts_is_local(_id) or str(_id).startswith(CLAWBOX_TTS_HELD_PREFIX):
                     continue
                 if _id == "microsoft":
                     _cur = _entry.get("enabled") if isinstance(_entry, dict) else None
@@ -5056,34 +5067,54 @@ def _clawbox_tts_lock_pass():
                 _moves.append((_providers, _id, "hold"))
             _provider = _home.get("provider")
             if isinstance(_provider, str) and _provider.strip() and not _clawbox_tts_is_local(_provider) and _locals:
+                _chosen = CLAWBOX_TTS_LOCAL_PROVIDER_ID if CLAWBOX_TTS_LOCAL_PROVIDER_ID in _locals else _locals[0]
                 _record.setdefault("provider", _provider)
-                _moves.append((_home, (CLAWBOX_TTS_LOCAL_PROVIDER_ID if CLAWBOX_TTS_LOCAL_PROVIDER_ID in _locals else _locals[0]), "select"))
+                # The voice the lock chose, so the unlock gives the owner's
+                # selection back only over that one, never over a later pick.
+                _record["selected"] = _chosen
+                _moves.append((_home, _chosen, "select"))
         if not _moves:
             return
-        try:
-            _tmp = _held_path + ".tmp"
-            _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(_fd, "w") as _fh:
-                json.dump(_next, _fh)
-            os.replace(_tmp, _held_path)
-        except OSError:
-            print("  WARNING: local-only AI is on but the cloud voices could not be held aside; they are left in place")
-            return
+        _in_file = not _held_unreadable
+        if _in_file:
+            try:
+                _tmp = _held_path + ".tmp"
+                _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(_fd, "w") as _fh:
+                    json.dump(_next, _fh)
+                os.replace(_tmp, _held_path)
+            except OSError:
+                _in_file = False
         for _target, _key, _how in _moves:
             if _how == "hold":
+                if not _in_file:
+                    _target.setdefault(CLAWBOX_TTS_HELD_PREFIX + _key, _target[_key])
                 del _target[_key]
             elif _how == "off":
                 _entry = _target.get(_key) if isinstance(_target.get(_key), dict) else {}
+                if not _in_file:
+                    _target.setdefault(CLAWBOX_TTS_HELD_PREFIX + _key, {"enabled": _entry["enabled"]} if "enabled" in _entry else {})
                 _entry["enabled"] = False
                 _target[_key] = _entry
             else:
+                if not _in_file and isinstance(_target.get("providers"), dict):
+                    _target["providers"].setdefault(CLAWBOX_TTS_HELD_PREFIX + "provider", {"provider": _target.get("provider"), "selected": _key})
                 _target["provider"] = _key
         changed = True
-        print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
+        if _in_file:
+            print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
+        else:
+            print("  WARNING: local-only AI is on and the held speech providers file could not be "
+                  + ("read" if _held_unreadable else "written")
+                  + "; the cloud voices are held in place in the gateway config instead (out of its speech chain, nothing lost)")
         return
 
+    _clawbox_tts_restore_in_place(_homes)
+
     if _held is None:
-        if os.path.exists(_held_path):
+        if _held_unreadable:
+            print("  WARNING: the held speech providers could not be read; leaving them for the next start")
+        elif os.path.exists(_held_path):
             print("  WARNING: the held speech providers file is not one ClawBox wrote; leaving it")
         return
     for _name, _record in _held["homes"].items():
@@ -5109,16 +5140,53 @@ def _clawbox_tts_lock_pass():
             else:
                 del _providers["microsoft"]["enabled"]
         _home["providers"] = _providers
-        _prev = _record.get("provider")
-        _now = _home.get("provider")
-        if isinstance(_prev, str) and isinstance(_now, str) and _clawbox_tts_is_local(_now):
-            _home["provider"] = _prev
-    try:
-        os.unlink(_held_path)
-    except OSError:
-        pass
+        _clawbox_tts_restore_selection(_home, _record.get("provider"), _record.get("selected"))
+    # Removed only after the config these entries went back into is written
+    # (below, after the gateway config write): a failed write keeps them here.
+    global _clawbox_tts_held_to_remove
+    _clawbox_tts_held_to_remove = _held_path
     changed = True
     print("  Local-only AI is off: the speech providers it held aside are back")
+
+
+def _clawbox_tts_restore_selection(_home, _prev, _selected):
+    """The owner's selection back, only over the voice the lock chose: an owner
+    who picked another voice while locked keeps it. A record from before the
+    lock remembered its choice falls back to any voice on the box."""
+    _now = _home.get("provider")
+    if not (isinstance(_prev, str) and isinstance(_now, str)):
+        return
+    if (_now == _selected) if isinstance(_selected, str) else _clawbox_tts_is_local(_now):
+        _home["provider"] = _prev
+
+
+def _clawbox_tts_restore_in_place(_homes):
+    """Unlocked: put back what a lock held IN PLACE (see the header above)."""
+    global changed
+    _restored = False
+    for _name, _home in _homes:
+        _providers = _home.get("providers")
+        if not isinstance(_providers, dict):
+            continue
+        for _key in [k for k in list(_providers) if isinstance(k, str) and k.startswith(CLAWBOX_TTS_HELD_PREFIX)]:
+            _id = _key[len(CLAWBOX_TTS_HELD_PREFIX):]
+            _val = _providers.pop(_key)
+            _restored = True
+            if _id == "provider":
+                if isinstance(_val, dict):
+                    _clawbox_tts_restore_selection(_home, _val.get("provider"), _val.get("selected"))
+            elif _id == "microsoft":
+                _ms = _providers.get("microsoft")
+                if isinstance(_val, dict) and isinstance(_ms, dict) and _ms.get("enabled") is False:
+                    if "enabled" in _val:
+                        _ms["enabled"] = _val["enabled"]
+                    else:
+                        del _ms["enabled"]
+            elif _id and _id not in _providers:
+                _providers[_id] = _val
+    if _restored:
+        changed = True
+        print("  Local-only AI is off: the speech providers it held in place are back")
 
 
 _clawbox_tts_lock_pass()
@@ -5496,6 +5564,11 @@ if changed:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
         print("  Updated gateway config")
+        if _clawbox_tts_held_to_remove:
+            try:
+                os.unlink(_clawbox_tts_held_to_remove)
+            except OSError:
+                pass
         _record_memory_rebuild(_memory_index_changes)
         _record_keyword_only_rebuild()
     except Exception as exc:

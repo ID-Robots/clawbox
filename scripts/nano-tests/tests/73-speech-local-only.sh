@@ -164,6 +164,10 @@ KEY_EXISTED=0
 MARKERS="$HOME/.hermes/config.yaml.clawbox-voice-lock.json $HOME/.hermes/config.yaml.clawbox-voice-standdown.json"
 mkdir -p "$WORK/markers"
 for m in $MARKERS; do [ -f "$m" ] && cp -p "$m" "$WORK/markers/"; done
+# The channel-audio lock marker (stt-channel.ts) is part of what tools.media
+# means on a locked box: kept or absent exactly as it was before the test.
+AUDIO_MARK=data/.channel-audio-lock-off
+[ -e "$AUDIO_MARK" ] && cp -p "$AUDIO_MARK" "$WORK/audio-mark"
 cleanup() {
   [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null
   keys restore
@@ -186,7 +190,9 @@ cleanup() {
     for part in media tts legacyTts; do
       [ "$(printf "%s" "$after" | njc "v && v.$part")" = "$(printf "%s" "$BEFORE_OC" | njc "v && v.$part")" ] || differs="$differs $part"
     done
-    say "{\"restoredSame\":$([ -z "$differs" ] && echo true || echo false),\"differs\":$(printf "%s" "$differs" | njs),\"heldLeft\":$([ -e data/.tts-local-only-held.json ] && echo true || echo false),\"audioMarkLeft\":$([ -e data/.channel-audio-lock-off ] && echo true || echo false)}"
+    # After the restore and any restart: the marker back to what it was.
+    if [ -e "$WORK/audio-mark" ]; then [ -e "$AUDIO_MARK" ] || cp -p "$WORK/audio-mark" "$AUDIO_MARK"; else rm -f "$AUDIO_MARK"; fi
+    say "{\"restoredSame\":$([ -z "$differs" ] && echo true || echo false),\"differs\":$(printf "%s" "$differs" | njs),\"heldLeft\":$([ -e data/.tts-local-only-held.json ] && echo true || echo false),\"audioMarkSame\":$([ -e "$AUDIO_MARK" ] && [ -e "$WORK/audio-mark" ] || { [ ! -e "$AUDIO_MARK" ] && [ ! -e "$WORK/audio-mark" ]; } && echo true || echo false)}"
   else
     [ "$(hermes_provider)" != "$BEFORE_PROVIDER" ] && hermes_set_provider "$BEFORE_PROVIDER" >/dev/null
     for m in $MARKERS; do
@@ -394,10 +400,10 @@ note "control, lock lifted, server stopped: HTTP $(r '.control.status'), $CONTRO
 # Restored.
 if [ "$(r '.keys')" = KEYS_SAME ]; then ok "every data/config.json key the test changed is back as it was"; else not_ok "data/config.json keys after the test: $(r '.keys')"; fi
 if [ "$RUNTIME" = openclaw ]; then
-  if [ "$(r '.restoredSame')" = true ] && [ "$(r '.heldLeft')" = false ] && [ "$(r '.audioMarkLeft')" = false ]; then
+  if [ "$(r '.restoredSame')" = true ] && [ "$(r '.heldLeft')" = false ] && [ "$(r '.audioMarkSame')" = true ]; then
     ok "openclaw.json's speech blocks are back as they were, and no lock-time file is left behind"
   else
-    not_ok "openclaw.json after the test: differs in [$(r '.differs')], held voices left $(r '.heldLeft'), audio mark left $(r '.audioMarkLeft')"
+    not_ok "openclaw.json after the test: differs in [$(r '.differs')], held voices left $(r '.heldLeft'), audio mark as before $(r '.audioMarkSame')"
   fi
 elif [ "$(r '.restoredProvider')" = true ]; then
   ok "Hermes' voice selection is back as it was"

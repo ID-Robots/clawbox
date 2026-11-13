@@ -73,6 +73,18 @@ describe("SttEndpointCard", () => {
     expect(await screen.findByText("The speech server must be on this box or on your local network, not on the internet.")).toBeTruthy();
   });
 
+  it("reads the status again when the panel says another card changed the engine (TASK-2501)", async () => {
+    let primary = "endpoint";
+    stub({ status: () => ({ ...SAVED, primary }) });
+    const { rerender } = render(<I18nProvider><SttEndpointCard refreshSignal={1} /></I18nProvider>);
+    expect(await screen.findByText(`Dictation and channel voice notes are transcribed by ${BASE} (whisper-1).`)).toBeTruthy();
+    // Whisper's Use, in the panel: the box's engine is the primary now.
+    primary = "local";
+    rerender(<I18nProvider><SttEndpointCard refreshSignal={2} /></I18nProvider>);
+    expect(await screen.findByText(`Saved: ${BASE} (whisper-1). Not in use.`)).toBeTruthy();
+    expect(screen.getByTestId("local-ai-stt-endpoint-use")).toBeTruthy();
+  });
+
   it("offers Use for a saved server not in use, and a two-tap Remove", async () => {
     stub({ status: () => ({ ...SAVED, primary: "local" }) });
     render(<I18nProvider><SttEndpointCard /></I18nProvider>);

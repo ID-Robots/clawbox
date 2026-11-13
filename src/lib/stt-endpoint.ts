@@ -136,6 +136,26 @@ export async function readSttEndpoint(): Promise<SttEndpointRecord | null> {
   }
 }
 
+/**
+ * The saved server and its key as ONE pair, for a request that is about to
+ * send the key: the record, then the key, then the record again, accepted only
+ * when both record reads agree. The save writes key-off, record, new key (see
+ * the endpoint route), so a key read between two equal records is that
+ * record's key or none — never the key a save meanwhile stored for another
+ * server. `null`: no server is saved. `"changing"`: it kept changing over a
+ * few tries, and nothing should be sent.
+ */
+export async function readSttEndpointSnapshot(): Promise<{ record: SttEndpointRecord; key: string | null } | null | "changing"> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const first = await readSttEndpoint();
+    if (!first) return null;
+    const key = readSttEndpointKey();
+    const again = await readSttEndpoint();
+    if (again && again.baseUrl === first.baseUrl && again.model === first.model) return { record: first, key };
+  }
+  return "changing";
+}
+
 export async function writeSttEndpoint(record: SttEndpointRecord): Promise<void> {
   await setMany({ [STT_ENDPOINT_STORE_KEY]: { baseUrl: record.baseUrl, model: record.model } });
 }
@@ -271,21 +291,24 @@ export async function endpointHostRefusal(baseUrl: string, lookupImpl: LookupFn 
 }
 
 /**
- * The address a connection to `hostname` may dial, resolved ONCE and checked:
- * every answer must be on the owner's network, and the first is the one used.
+ * The addresses a connection to `hostname` may dial, resolved ONCE and
+ * checked: every answer must be on the owner's network. All of them are kept,
+ * in the resolver's order, so a connection that asks for every address (Node's
+ * happy-eyeballs `autoSelectFamily`) can fall back from one that does not
+ * answer — `::1` before `127.0.0.1` for a server that listens on IPv4 only —
+ * the way the channel client already does (scripts/stt-endpoint-client.py).
  */
-async function checkedAddress(hostname: string, lookupImpl: LookupFn): Promise<{ address: string; family: 4 | 6 }> {
+async function checkedAddresses(hostname: string, lookupImpl: LookupFn): Promise<{ address: string; family: 4 | 6 }[]> {
   const host = hostname.replace(/^\[|\]$/g, "");
   if (net.isIP(host)) {
     if (!isLanAddress(host)) throw new Error("address outside the local network");
-    return { address: host, family: net.isIPv6(host) ? 6 : 4 };
+    return [{ address: host, family: net.isIPv6(host) ? 6 : 4 }];
   }
   const answers = await lookupImpl(host);
   if (answers.length === 0 || !answers.every(({ address }) => isLanAddress(address))) {
     throw new Error("name resolves outside the local network");
   }
-  const address = answers[0].address;
-  return { address, family: net.isIPv6(address) ? 6 : 4 };
+  return answers.map(({ address }) => ({ address, family: net.isIPv6(address) ? 6 as const : 4 as const }));
 }
 
 type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | { address: string; family: number }[], family?: number) => void;
@@ -318,8 +341,8 @@ export function lanFetch(lookupImpl: LookupFn = defaultLookup): typeof fetch {
         signal: init.signal ?? undefined,
         agent: false,
         lookup: ((hostname: string, options: { all?: boolean }, callback: LookupCallback) => {
-          checkedAddress(hostname, lookupImpl).then(
-            ({ address, family }) => (options?.all ? callback(null, [{ address, family }]) : callback(null, address, family)),
+          checkedAddresses(hostname, lookupImpl).then(
+            (all) => (options?.all ? callback(null, all) : callback(null, all[0].address, all[0].family)),
             (err: Error) => callback(Object.assign(err, { code: "ECLAWBOXREFUSED" }), "", 4),
           );
         }) as unknown as net.LookupFunction,

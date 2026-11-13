@@ -1627,7 +1627,10 @@ if LOCKED:
     # restores it on an entitled box), and any other choice of the owner's
     # through the lock marker (the `unlock` verdict below). `edge` and an
     # unset key are not remembered: they are the factory's, not a choice.
-    ours_slot = not slot_is_empty and (key_is_ours or base_url.rstrip("/") in OUR_PROXIES)
+    # Ours by ADDRESS alone, as the withdrawal below decides it: a `claw_` key
+    # on an owner's own endpoint does not make the slot ours to delete — the
+    # lock then moves only the selection, and the slot stays as the owner set it.
+    ours_slot = not slot_is_empty and base_url.rstrip("/") in OUR_PROXIES
     if provider == LOCAL_PROVIDER:
         if ours_slot:
             # Our slot goes, but a stand-down the app wrote when it moved the
