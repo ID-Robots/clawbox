@@ -4125,6 +4125,39 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# Ubuntu's logrotate and its daily timer, for step_apt_update. Jetson images can
+# ship without the package, and then rsyslog's /var/log/syslog, kern.log,
+# auth.log and ufw.log are never rotated (one board's syslog held 61 days in
+# 179 MB) although the rsyslog and ufw packages' own weekly policy sits in
+# /etc/logrotate.d. ClawBox adds no policy of its own and never forces a
+# rotation: the package's first run only records state, and its weekly rules
+# take it from there.
+#
+# Never fails the step. Its own apt line, because under errexit a mirror that
+# cannot serve logrotate would fail the base install with it; a box left without
+# it retries on its next update. The package's postinst enables and starts the
+# timer on a first install, so the timer line is a safety net for a box where it
+# was disabled or stopped since; a masked timer stays masked. The closing line
+# is read back from systemd, never taken from an exit code above it.
+ensure_logrotate() {
+  if [ "$(dpkg-query -W -f='${Status}' logrotate 2>/dev/null || true)" != 'install ok installed' ]; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate \
+      || [ "$(dpkg-query -W -f='${Status}' logrotate 2>/dev/null || true)" != 'install ok installed' ]; then
+      echo "  Warning: logrotate not installed - /var/log text logs keep growing until an update installs it" >&2
+      return 0
+    fi
+  fi
+  if ! { systemctl is-enabled --quiet logrotate.timer && systemctl is-active --quiet logrotate.timer; }; then
+    # The verdict is the read-back below: enable can succeed and the start fail.
+    systemctl enable --now logrotate.timer || true
+  fi
+  if systemctl is-enabled --quiet logrotate.timer && systemctl is-active --quiet logrotate.timer; then
+    echo "  logrotate: installed, daily timer enabled"
+  else
+    echo "  Warning: logrotate.timer could not be enabled and started - /var/log text logs are not rotated" >&2
+  fi
+}
+
 # refresh_root_update_log_limit [UNIT_DIR] — makes the NEXT root step start
 # under the root update unit's journald rate limit (the LogRateLimit* lines of
 # config/clawbox-root-update@.service). The update screen's raw log is these
@@ -4200,6 +4233,8 @@ step_apt_update() {
   # through the ACL config/clawbox-user-helper.sh `home_access` lays on it
   # (TASK-2377). Ubuntu images carry it already; naming it keeps it true.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer acl
+  # Never part of the line above: see ensure_logrotate.
+  ensure_logrotate
   # Document libraries for the agent: Word (python-docx), Excel (openpyxl) and
   # PDF writing (reportlab). "Make me an offer / a quote / a spreadsheet" is an
   # everyday chat request, and without these the agent spent the first minutes
@@ -9972,6 +10007,7 @@ step_system_config() {
   # start_services ever ran. A hardening step must never brick a flash.
   step_firewall || echo "  Warning: firewall step failed (non-fatal)"
   step_persistent_journal
+  step_bluetooth_no_debug || echo "  Warning: bluetooth debug step failed (non-fatal)"
   step_uefi_boot_order || echo "  Warning: UEFI boot order step failed (non-fatal)"
 }
 
@@ -10076,6 +10112,152 @@ step_persistent_journal() {
   # monotonic ~10 s. `journalctl -b` timestamps before that handoff are bogus and
   # `--list-boots` shows one "boot" spanning the gap. This is a hardware/BSP
   # property of the Orin Nano dev kit, not something install.sh can correct.
+}
+
+step_bluetooth_no_debug() {
+  # Start bluetoothd without -d on a Jetson.
+  #
+  # The -d is NVIDIA's, not ClawBox's: L4T's drop-in nv-bluetooth-service.conf
+  # replaces bluetooth.service's ExecStart with `bluetoothd -d --noplugin=…`, and
+  # while Bluetooth was busy its debug lines filled 74 % of a box's retained
+  # journal (55,866 lines in one hour). ClawBox itself uses no Bluetooth.
+  #
+  # The fix is a drop-in of ClawBox's own, named to sort after NVIDIA's (drop-ins
+  # apply in lexicographic order across directories), holding the vendor's own
+  # ExecStart minus every `-d` token. It is DERIVED from the vendor file on every
+  # run, never copied once: a BSP that changes its arguments is followed, and one
+  # that stops passing -d gets this file removed. Any shape this step does not
+  # expect (no vendor file, an operator's own drop-in, quoting, `--debug`, a
+  # bundled short option) changes nothing except removing a stale file of
+  # ClawBox's own, so the vendor's line stays in force.
+  #
+  # Nothing is restarted: an owner may have paired a keyboard or headset with
+  # the box's desktop, and a restart would drop it. The drop-in applies at the
+  # next start of bluetooth.service, which is the next boot.
+  #
+  # Both callers (`|| echo` and optional_step) run this with errexit off, so every
+  # write and reload checks its own result. Returns 1 only when a write or a
+  # daemon-reload it attempted failed.
+  local vendor="${CLAWBOX_BLUETOOTH_VENDOR_DROPIN:-/usr/lib/systemd/system/bluetooth.service.d/nv-bluetooth-service.conf}"
+  local dest_dir="${CLAWBOX_BLUETOOTH_DROPIN_DIR:-/etc/systemd/system/bluetooth.service.d}"
+  local dest="$dest_dir/zz-clawbox-bluetoothd-no-debug.conf"
+  local mark="# ClawBox: bluetoothd without -d"
+  local why="" out="" p="" line="" exec_start="" tok="" derived="" first="" tmp=""
+  local has_d=0 odd=0 dest_state="absent"
+  local -a paths=() toks=()
+
+  if [ -L "$vendor" ] || [ ! -f "$vendor" ]; then
+    why="No L4T bluetooth drop-in at $vendor"
+  else
+    # An operator's own drop-in (`systemctl edit bluetooth`, anything under /run)
+    # means someone configured this unit by hand: it is left as they configured
+    # it, which takes removing a drop-in of ClawBox's own too. Ours sorts after
+    # `override.conf`, so its `ExecStart=` reset would silently replace theirs.
+    # Compared by file, not by text: systemd may spell the vendor's path
+    # /lib/systemd/…
+    if ! out="$(systemctl show bluetooth.service -p DropInPaths --value 2>/dev/null)"; then
+      echo "  Could not read bluetooth.service's drop-ins; bluetoothd left as it is"
+      return 0
+    fi
+    read -r -a paths <<< "$out"
+    for p in "${paths[@]}"; do
+      if [ "$p" -ef "$vendor" ] || [ "$p" = "$dest" ] || [ "$p" -ef "$dest" ]; then
+        continue
+      fi
+      why="bluetooth.service has a drop-in ClawBox did not write ($p)"
+      break
+    done
+
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        ExecStart=?*) exec_start="${line#ExecStart=}" ;;
+      esac
+    done < "$vendor"
+    read -r -a toks <<< "$exec_start"
+    # The first word is the program (it may carry a systemd prefix like `-`).
+    for tok in "${toks[@]:1}"; do
+      case "$tok" in
+        -d) has_d=1 ;;
+        --debug | --debug=*) odd=1 ;;
+        --*) ;;
+        -*d*) odd=1 ;;
+      esac
+    done
+    case "$exec_start" in
+      *\"* | *\'* | *\\* | *\;*) odd=1 ;;
+    esac
+    if [ -n "$why" ]; then
+      :
+    elif [ "$odd" = 1 ]; then
+      why="The L4T bluetooth ExecStart= is not a shape this step edits"
+    elif [ "$has_d" = 0 ]; then
+      why="The L4T bluetooth drop-in starts bluetoothd without -d"
+    fi
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    dest_state="foreign"
+    # A last line without a newline still lands in $first.
+    { IFS= read -r first < "$dest"; } 2>/dev/null || :
+    case "$first" in
+      "$mark"*) dest_state="ours" ;;
+    esac
+  fi
+
+  if [ -n "$why" ]; then
+    if [ "$dest_state" != "ours" ]; then
+      echo "  $why; nothing to change"
+      return 0
+    fi
+    if ! rm -f -- "$dest"; then
+      echo "  Warning: $why, but $dest could not be removed" >&2
+      return 1
+    fi
+    if ! systemctl daemon-reload; then
+      echo "  Warning: removed $dest, but systemctl daemon-reload failed" >&2
+      return 1
+    fi
+    echo "  $why; removed $dest, which leaves bluetooth.service as configured without it from its next start"
+    return 0
+  fi
+
+  if [ "$dest_state" = "foreign" ]; then
+    echo "  $dest was not written by ClawBox; left as it is"
+    return 0
+  fi
+
+  derived="${toks[0]}"
+  for tok in "${toks[@]:1}"; do
+    [ "$tok" = "-d" ] || derived="$derived $tok"
+  done
+  # The temp file lives outside $dest_dir: systemd reads every *.conf there.
+  if ! tmp="$(mktemp)"; then
+    echo "  Warning: could not create a temporary file for $dest" >&2
+    return 1
+  fi
+  if ! printf '%s\n' \
+    "$mark, derived from $vendor by install.sh; delete this file to restore the vendor's debug output" \
+    "[Service]" "ExecStart=" "ExecStart=$derived" > "$tmp"; then
+    rm -f -- "$tmp"
+    echo "  Warning: could not write the bluetooth drop-in to $tmp" >&2
+    return 1
+  fi
+  if [ "$dest_state" = "ours" ] && cmp -s -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    echo "  bluetoothd's no-debug drop-in is already in place ($dest)"
+    return 0
+  fi
+  if ! mkdir -p -m 0755 -- "$dest_dir" || ! install_root_file "$tmp" "$dest" 0644; then
+    rm -f -- "$tmp"
+    echo "  Warning: could not write $dest; bluetoothd's configuration is unchanged" >&2
+    return 1
+  fi
+  rm -f -- "$tmp"
+  if ! systemctl daemon-reload; then
+    echo "  Warning: wrote $dest, but systemctl daemon-reload failed" >&2
+    return 1
+  fi
+  echo "  Wrote $dest (ExecStart=$derived); bluetoothd runs without -d from the next start of bluetooth.service, the next boot, and is not restarted now"
 }
 
 # ── Root-owned entrypoints ───────────────────────────────────────────────────
@@ -11034,6 +11216,9 @@ step_post_update() {
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   optional_step persistent_journal step_persistent_journal
+  # Without this call the bluetoothd fix would be fresh-install-only, and every
+  # box already in the field would keep NVIDIA's -d.
+  optional_step bluetooth_no_debug step_bluetooth_no_debug
   # Without this call the NVMe-first boot order guard would be factory-only, and
   # every box flashed before it would keep a BootOrder the firmware can push the
   # SSD to the bottom of. TASK-1636.

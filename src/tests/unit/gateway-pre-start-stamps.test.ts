@@ -7,12 +7,14 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { GATEWAY_PRE_START, inspectAllJson, repairHelpers, sliceScript } from "@/tests/helpers/gateway-pre-start";
 
@@ -114,7 +116,12 @@ interface CheckAnswer {
   rest: string;
 }
 
-function check(step: string, extra: string[] = [], kind: "plugins" | "claude" = "plugins"): CheckAnswer {
+function check(
+  step: string,
+  extra: string[] = [],
+  kind: "plugins" | "claude" = "plugins",
+  env: Record<string, string> = {},
+): CheckAnswer {
   const args = [
     "-I", STAMPS, "check", "--step", step, "--kind", kind,
     "--record", path.join(root, "data", "gateway-pre-start-stamps.json"),
@@ -124,7 +131,7 @@ function check(step: string, extra: string[] = [], kind: "plugins" | "claude" = 
     ...(kind === "plugins" ? ["--config", config, "--openclaw-home", home, "--global-modules", path.join(dir, "global")] : []),
     ...extra,
   ];
-  const res = spawnSync("python3", args, { encoding: "utf-8" });
+  const res = spawnSync("python3", args, { encoding: "utf-8", env: { ...process.env, ...env } });
   expect(res.status).toBe(0);
   const [state, key, ...rest] = res.stdout.replace(/\n$/, "").split("\t");
   return { state, key, rest: rest.join("\t") };
@@ -273,19 +280,268 @@ describe.skipIf(!hasPython3)("the stamp helper", () => {
   });
 });
 
-/** A fake `openclaw` that logs every call and answers the two plugin questions. */
-function fakeOpenclaw(options: { inspect?: string; registryDepsOk?: boolean } = {}): { log: string; calls: () => string[] } {
+/** The pinned core's DDL for the table its plugin index lives in (OpenClaw 2026.10.9, state schema). */
+const INDEX_DDL = "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, "
+  + "value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT";
+
+/**
+ * The core's state database, `<state dir>/state/openclaw.sqlite`, holding the
+ * `plugins.installedIndex` row as `valueJson` (no row when it is null).
+ */
+function writeIndex(valueJson: string | null, updatedAtMs = 1_794_522_213_591): string {
+  const db = path.join(home, "state", "openclaw.sqlite");
+  mkdirSync(path.dirname(db), { recursive: true });
+  const res = spawnSync("python3", ["-I", "-c", [
+    "import sqlite3, sys",
+    "con = sqlite3.connect(sys.argv[1])",
+    "con.execute('DROP TABLE IF EXISTS config_machine_state')",
+    "con.execute(sys.argv[2])",
+    "if len(sys.argv) > 3:",
+    "    con.execute('INSERT INTO config_machine_state VALUES (?, ?, ?)', ('plugins.installedIndex', sys.argv[3], int(sys.argv[4])))",
+    "con.commit()",
+  ].join("\n"), db, INDEX_DDL, ...(valueJson === null ? [] : [valueJson, String(updatedAtMs)])], { encoding: "utf-8" });
+  expect(res.stderr).toBe("");
+  expect(res.status).toBe(0);
+  return db;
+}
+
+/**
+ * A `plugins.installedIndex` value in the shape the pinned core writes and an
+ * 8 GB box held (read-only, 2026-11-13): `{revision, index}`, the install
+ * records an object keyed by plugin id, the cached view a list of entries keyed
+ * by `pluginId`.
+ */
+function indexValue(change: {
+  records?: Record<string, unknown>;
+  plugins?: unknown[];
+  index?: Record<string, unknown>;
+  revision?: number;
+} = {}): Record<string, unknown> {
+  const deepseekRoot = path.join(home, "npm", "projects", "abc123", "node_modules", "@openclaw", "deepseek");
+  const bundled = path.join(path.dirname(corePkg), "dist", "extensions", "telegram");
+  return {
+    revision: change.revision ?? 1_794_522_213_591,
+    index: {
+      version: 1,
+      generatedAtMs: 1_794_522_213_591,
+      refreshReason: "migration",
+      policyHash: "p".repeat(64),
+      workspaceDir: path.join(home, "workspace"),
+      diagnostics: [],
+      installRecords: change.records ?? {
+        deepseek: { source: "npm", spec: "@openclaw/deepseek@2026.10.7", installPath: deepseekRoot, installedAt: "2026-11-12T22:23:33.000Z" },
+      },
+      plugins: change.plugins ?? [
+        { pluginId: "deepseek", rootDir: deepseekRoot, source: path.join(deepseekRoot, "dist", "index.js"), manifestHash: "a".repeat(64), origin: "global", enabled: true },
+        { pluginId: "telegram", rootDir: bundled, source: path.join(bundled, "index.js"), manifestHash: "b".repeat(64), origin: "bundled", enabled: false },
+      ],
+      ...change.index,
+    },
+  };
+}
+
+/** `check` with the plugin index, as the pre-start asks it for the "no Codex" answer. */
+function indexCheck(env: Record<string, string> = {}): CheckAnswer {
+  return check("codex-absent", ["--plugin-index", path.join(home, "state", "openclaw.sqlite")], "plugins", {
+    OPENCLAW_WORKSPACE_DIR: "",
+    ...env,
+  });
+}
+
+/** Python's `json.dumps(sort_keys=True, separators=(",", ":"))`, for the keys pinned below. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A box with no Codex anywhere paid a `plugins list --json` cold start (2.4-2.8 s
+ * on an 8 GB Jetson) on every gateway start to hear "no Codex" again. The
+ * pre-start may now take that answer on trust, and only under a key over every
+ * input that command answers from: the core's persisted plugin index (its
+ * install records and its cached plugin view), every agent workspace's
+ * `.openclaw/extensions` and every `plugins.load.paths` entry — on top of what
+ * the `plugins` key already covers.
+ */
+describe.skipIf(!hasPython3)("the plugin index key (--plugin-index)", () => {
+  const ws = (root: string) => path.join(root, ".openclaw", "extensions", "codex", "openclaw.plugin.json");
+  // Thunks: the table is built before any case's temp directory exists.
+  const withAgents = (agents: () => Record<string, unknown>) => () => writeJson(config, { ...BASE_CONFIG, agents: agents() });
+  const withLoadPaths = (paths: () => string[]) => () => writeJson(config, {
+    ...BASE_CONFIG,
+    plugins: { ...BASE_CONFIG.plugins, load: { paths: paths() } },
+  });
+
+  it.each<[string, { setUp?: () => void; change: () => void; env?: () => Record<string, string> }]>([
+    ["the core records a new install", {
+      change: () => writeIndex(JSON.stringify(indexValue({
+        records: { ...(indexValue().index as { installRecords: object }).installRecords, codex: { source: "npm", spec: "@openclaw/codex" } },
+      }))),
+    }],
+    ["a plugin joins the core's cached view", {
+      change: () => writeIndex(JSON.stringify(indexValue({
+        plugins: [...(indexValue().index as { plugins: unknown[] }).plugins, { pluginId: "codex", rootDir: path.join(dir, "g", "codex"), manifestHash: "c".repeat(64) }],
+      }))),
+    }],
+    ["only a cached plugin's manifest hash changed", {
+      change: () => writeIndex(JSON.stringify(indexValue({
+        plugins: (indexValue().index as { plugins: Array<Record<string, unknown>> }).plugins
+          .map((p) => (p.pluginId === "deepseek" ? { ...p, manifestHash: "d".repeat(64) } : p)),
+      }))),
+    }],
+    ["a manifest appears in the default workspace", { change: () => writeJson(ws(path.join(home, "workspace")), { id: "codex" }) }],
+    ["a manifest appears in the workspace the index was built for", {
+      setUp: () => writeIndex(JSON.stringify(indexValue({ index: { workspaceDir: path.join(dir, "built-for") } }))),
+      change: () => writeJson(ws(path.join(dir, "built-for")), { id: "codex" }),
+    }],
+    ["a manifest appears in agents.defaults.workspace", {
+      setUp: withAgents(() => ({ defaults: { workspace: path.join(dir, "ws-default") } })),
+      change: () => writeJson(ws(path.join(dir, "ws-default")), { id: "codex" }),
+    }],
+    ["a manifest appears in an agent's own workspace", {
+      setUp: withAgents(() => ({ entries: { main: {}, ops: { workspace: path.join(dir, "ws-ops") } } })),
+      change: () => writeJson(ws(path.join(dir, "ws-ops")), { id: "codex" }),
+    }],
+    ["a manifest appears in a roster agent's derived workspace under the state directory", {
+      setUp: withAgents(() => ({ entries: { main: {}, ops: {} } })),
+      change: () => writeJson(ws(path.join(home, "workspace-ops")), { id: "codex" }),
+    }],
+    ["a manifest appears in a roster agent's derived workspace under the shared root", {
+      setUp: withAgents(() => ({ defaults: { workspace: path.join(dir, "shared") }, entries: { main: {}, ops: {} } })),
+      change: () => writeJson(ws(path.join(dir, "shared", "ops")), { id: "codex" }),
+    }],
+    ["a manifest appears in a workspace named with ~", {
+      setUp: withAgents(() => ({ entries: { ops: { workspace: "~/ws-tilde" } } })),
+      change: () => writeJson(ws(path.join(dir, "home", "ws-tilde")), { id: "codex" }),
+      env: () => ({ HOME: path.join(dir, "home") }),
+    }],
+    ["a manifest appears in OPENCLAW_WORKSPACE_DIR", {
+      change: () => writeJson(ws(path.join(dir, "ws-env")), { id: "codex" }),
+      env: () => ({ OPENCLAW_WORKSPACE_DIR: path.join(dir, "ws-env") }),
+    }],
+    ["a Codex root appears under a plugins.load.paths entry", {
+      setUp: withLoadPaths(() => [path.join(dir, "local-plugins")]),
+      change: () => writeJson(path.join(dir, "local-plugins", "codex", "package.json"), { name: "@openclaw/codex" }),
+    }],
+    ["a plugins.load.paths entry becomes a plugin itself", {
+      setUp: withLoadPaths(() => [path.join(dir, "one-plugin")]),
+      change: () => writeJson(path.join(dir, "one-plugin", "openclaw.plugin.json"), { id: "codex" }),
+    }],
+    ["a plugins.load.paths file is edited", {
+      setUp: () => {
+        withLoadPaths(() => [path.join(dir, "plugin.js")])();
+        writeFileSync(path.join(dir, "plugin.js"), "export default {id: 'other'};\n");
+      },
+      change: () => writeFileSync(path.join(dir, "plugin.js"), "export default {id: 'codex'};\n"),
+    }],
+  ])("moves when %s", (_what, { setUp, change, env }) => {
+    writeIndex(JSON.stringify(indexValue()));
+    setUp?.();
+    const before = indexCheck(env?.());
+    expect(before.state).toBe("miss");
+    expect(before.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(remember("codex-absent", before.key, "absent")).toBe(0);
+    expect(indexCheck(env?.())).toEqual({ state: "hit", key: before.key, rest: "absent" });
+
+    change();
+
+    const after = indexCheck(env?.());
+    expect(after).toEqual({ state: "miss", key: expect.stringMatching(/^[0-9a-f]{64}$/), rest: "something it reads changed since the last full check" });
+    expect(after.key).not.toBe(before.key);
+  });
+
+  it("stays put when the core only rewrote the row's times and revision, and over a provider or model switch", () => {
+    writeIndex(JSON.stringify(indexValue()));
+    const before = indexCheck();
+    expect(remember("codex-absent", before.key, "absent")).toBe(0);
+
+    writeIndex(JSON.stringify(indexValue({
+      revision: 1_794_600_000_000,
+      index: { generatedAtMs: 1_794_600_000_000, refreshReason: "manual" },
+    })), 1_794_600_000_000);
+    writeJson(config, {
+      ...BASE_CONFIG,
+      agents: { defaults: { model: { primary: "deepseek/deepseek-chat" } } },
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+    });
+
+    expect(indexCheck()).toEqual({ state: "hit", key: before.key, rest: "absent" });
+  });
+
+  it.each<[string, () => void]>([
+    ["there is no state database", () => rmSync(path.join(home, "state"), { recursive: true, force: true })],
+    ["the state database is not a database", () => writeFileSync(path.join(home, "state", "openclaw.sqlite"), "not sqlite at all, not even close")],
+    ["the core keeps no plugin index row", () => writeIndex(null)],
+    ["the row is not JSON", () => writeIndex("{ not json")],
+    ["the row is not an object", () => writeIndex("[]")],
+    ["the row has no index object", () => writeIndex(JSON.stringify({ revision: 1, installRecords: {}, plugins: [] }))],
+    ["the index has no install records object", () => writeIndex(JSON.stringify({ revision: 1, index: { plugins: [] } }))],
+    ["the install records are a list", () => writeIndex(JSON.stringify({ revision: 1, index: { installRecords: [], plugins: [] } }))],
+    ["the index has no plugin list", () => writeIndex(JSON.stringify({ revision: 1, index: { installRecords: {} } }))],
+    ["the cached plugins are not a list", () => writeIndex(JSON.stringify({ revision: 1, index: { installRecords: {}, plugins: {} } }))],
+    ["a cached plugin is not an object", () => writeIndex(JSON.stringify({ revision: 1, index: { installRecords: {}, plugins: ["codex"] } }))],
+    ["a cached plugin has no id", () => writeIndex(JSON.stringify({ revision: 1, index: { installRecords: {}, plugins: [{ rootDir: "/x" }] } }))],
+    ["agents.entries is not an object", () => {
+      writeIndex(JSON.stringify(indexValue()));
+      writeJson(config, { ...BASE_CONFIG, agents: { entries: [{ id: "ops" }] } });
+    }],
+  ])("is a miss with no key, never a constant, when %s", (_what, setUp) => {
+    writeIndex(JSON.stringify(indexValue()));
+    setUp();
+
+    const answer = indexCheck();
+    expect(answer.state).toBe("miss");
+    expect(answer.key).toBe("-");
+    expect(answer.rest).toMatch(/^its inputs could not be read/);
+  });
+
+  it("adds nothing to a key asked for without it: the other checks' keys are what they were", () => {
+    const empty = path.join(dir, "empty-home");
+    mkdirSync(empty);
+    const sha = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+    const core = statSync(corePkg, { bigint: true });
+    // The parts the `plugins` key has always had, re-derived here, not read back.
+    const today = createHash("sha256").update([
+      "record=1",
+      "kind=plugins",
+      `script=${sha(script)}`,
+      `core=${sha(corePkg)} ${core.size}:${core.mtimeNs}`,
+      `plugins-config=${canonicalJson(BASE_CONFIG.plugins)}`,
+    ].join("\n")).digest("hex");
+
+    writeIndex(JSON.stringify(indexValue()));
+    writeJson(ws(path.join(home, "workspace")), { id: "codex" });
+    expect(check("plugin-consent", ["--openclaw-home", empty]).key).toBe(today);
+    expect(check("codex-registry", ["--openclaw-home", empty]).key).toBe(today);
+  });
+});
+
+/**
+ * A fake `openclaw` that logs every call and answers the two plugin questions.
+ * `registry` is the whole `plugins list --json` answer, printed before exiting
+ * with `registryExit`; by default the registry lists Codex.
+ */
+function fakeOpenclaw(options: {
+  inspect?: string;
+  registryDepsOk?: boolean;
+  registry?: string;
+  registryExit?: number;
+} = {}): { log: string; calls: () => string[] } {
   const log = path.join(dir, "openclaw-calls.log");
   const inspect = path.join(dir, "inspect.json");
   writeFileSync(inspect, options.inspect ?? inspectAllJson([{ id: "deepseek" }, { id: "codex" }]));
-  const registry = JSON.stringify({
+  const registry = options.registry ?? JSON.stringify({
     plugins: [{ id: "codex", dependencyStatus: { requiredInstalled: options.registryDepsOk !== false } }],
   });
   writeFileSync(path.join(bin, "openclaw"), [
     "#!/usr/bin/env bash",
     `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
     `if [ "$1 $2" = "plugins inspect" ]; then cat ${JSON.stringify(inspect)}; exit 0; fi`,
-    `if [ "$1 $2" = "plugins list" ]; then printf '%s' '${registry}'; exit 0; fi`,
+    `if [ "$1 $2" = "plugins list" ]; then printf '%s' '${registry}'; exit ${options.registryExit ?? 0}; fi`,
     "exit 0",
   ].join("\n"));
   chmodSync(path.join(bin, "openclaw"), 0o755);
@@ -310,6 +566,9 @@ function runBash(program: string, env: Record<string, string> = {}): { status: n
       OPENCLAW_HOME_DIR: home,
       CLAWBOX_OPENCLAW_V2: "1",
       CLAWBOX_PRESTART_FULL: "",
+      // Never the host's own marker: a case says whether it runs on a Jetson.
+      CLAWBOX_TEGRA_RELEASE: path.join(dir, "no-nv_tegra_release"),
+      OPENCLAW_WORKSPACE_DIR: "",
       ...env,
     },
   });
@@ -436,12 +695,140 @@ describe.skipIf(!hasPython3)("the Codex registry-dependency check, on the boot p
     expect(cli.calls().filter((c) => c.startsWith("plugins list"))).toHaveLength(1);
   });
 
-  it("never records a negative verdict", () => {
+  it("never records a negative dependency verdict", () => {
     const cli = fakeOpenclaw({ registryDepsOk: false });
     expect(runBash(PROGRAM).out).toContain("deps=0");
     proveLastStart();
     expect(runBash(PROGRAM).out).toContain("deps=0");
     expect(cli.calls().filter((c) => c.startsWith("plugins list"))).toHaveLength(2);
+  });
+
+  describe("with no Codex in either managed layout", () => {
+    const LOCATE = `${SETUP}\n${RESOLVER}\necho "dir=$CODEX_PLUGIN_DIR layout=$CODEX_PLUGIN_LAYOUT deps=$CODEX_REGISTRY_DEPS_OK"`;
+    const NO_CODEX = JSON.stringify({
+      plugins: [{ id: "deepseek", rootDir: "/opt/deepseek", dependencyStatus: { requiredInstalled: true } }],
+    });
+    const TODAY = () => `dir=${path.join(home, "npm", "node_modules", "@openclaw", "codex")} layout=flat-managed deps=0`;
+    const asked = (cli: { calls: () => string[] }) => cli.calls().filter((c) => c.startsWith("plugins list")).length;
+    const recorded = () => {
+      const file = path.join(root, "data", "gateway-pre-start-stamps.json");
+      return existsSync(file) ? (readJson(file).steps as Record<string, { value: string }>)["codex-absent"] : undefined;
+    };
+    /** The Jetson marker, present. */
+    const JETSON = () => {
+      const marker = path.join(dir, "nv_tegra_release");
+      writeFileSync(marker, "# R36 (release), REVISION: 4.4\n");
+      return { CLAWBOX_TEGRA_RELEASE: marker };
+    };
+
+    beforeEach(() => {
+      rmSync(path.join(home, "npm", "projects", "abc123", "node_modules", "@openclaw", "codex"), { recursive: true });
+      writeIndex(JSON.stringify(indexValue()));
+    });
+
+    it("takes the registry's recorded \"no Codex\" on the next start instead of `plugins list`", () => {
+      const cli = fakeOpenclaw({ registry: NO_CODEX });
+      const first = runBash(LOCATE, JETSON());
+      expect(first.status).toBe(0);
+      expect(first.out).toContain(TODAY());
+      expect(first.out).toContain("Codex plugin: asking the core's registry (no earlier full check on record)");
+      expect(asked(cli)).toBe(1);
+      expect(recorded()).toEqual(expect.objectContaining({ value: "absent" }));
+
+      proveLastStart();
+      const second = runBash(LOCATE, JETSON());
+      expect(second.status).toBe(0);
+      expect(second.out).toContain(TODAY());
+      expect(second.out).toContain(
+        "Codex plugin: the core's registry listed no Codex at the last full check and nothing it reads has changed; not asked again",
+      );
+      expect(second.out).toContain("reused instead of re-checked: codex-absent");
+      expect(asked(cli)).toBe(1);
+    });
+
+    it.each<[string, { registry: string; registryExit?: number }]>([
+      ["garbage", { registry: "Error: not json at all" }],
+      ["JSON that is not an object", { registry: "[]" }],
+      ["an object whose plugins are not a list", { registry: JSON.stringify({ plugins: { deepseek: {} } }) }],
+      ["a list with an entry that is not an object", { registry: JSON.stringify({ plugins: ["deepseek"] }) }],
+      ["an entry without a plugin id", { registry: JSON.stringify({ plugins: [{ rootDir: "/opt/codex" }] }) }],
+      ["an entry whose plugin id is empty", { registry: JSON.stringify({ plugins: [{ id: "", rootDir: "/opt/codex" }] }) }],
+      // The pinned core always lists the plugins it bundles: an empty list is no answer.
+      ["an empty plugin list", { registry: JSON.stringify({ plugins: [] }) }],
+      ["no Codex, then a failed exit", { registry: NO_CODEX, registryExit: 1 }],
+    ])("asks every start and records nothing when the registry answers %s", (_what, answer) => {
+      const cli = fakeOpenclaw(answer);
+      const first = runBash(LOCATE, JETSON());
+      expect(first.status).toBe(0);
+      expect(first.out).toContain(TODAY());
+      proveLastStart();
+      expect(runBash(LOCATE, JETSON()).out).toContain(TODAY());
+      expect(asked(cli)).toBe(2);
+      expect(recorded()).toBeUndefined();
+    });
+
+    it("loads a Codex the registry lists at its own root, and records no \"no Codex\"", () => {
+      const global = path.join(dir, "global", "@openclaw", "codex");
+      writeJson(path.join(global, "package.json"), { name: "@openclaw/codex", version: "2026.10.7" });
+      fakeOpenclaw({
+        registry: JSON.stringify({ plugins: [{ id: "codex", rootDir: global, dependencyStatus: { requiredInstalled: true } }] }),
+      });
+      const res = runBash(LOCATE, JETSON());
+      expect(res.status).toBe(0);
+      expect(res.out).toContain(`dir=${global} layout=registry deps=1`);
+      expect(recorded()).toBeUndefined();
+    });
+
+    it.each<[string, () => Record<string, string>, string]>([
+      ["the core recorded a new install", () => {
+        writeIndex(JSON.stringify(indexValue({ records: { codex: { source: "npm", spec: "@openclaw/codex" } } })));
+        return {};
+      }, "something it reads changed since the last full check"],
+      ["the operator asks for a full run", () => ({ CLAWBOX_PRESTART_FULL: "1" }),
+        "a full check was asked for (CLAWBOX_PRESTART_FULL)"],
+      ["systemd is restarting the gateway after a failure", () => {
+        proveLastStart({ restarts: 1 });
+        return {};
+      }, "systemd is restarting the gateway after a failure"],
+    ])("asks the registry again when %s", (_what, setUp, why) => {
+      const cli = fakeOpenclaw({ registry: NO_CODEX });
+      expect(runBash(LOCATE, JETSON()).status).toBe(0);
+      expect(recorded()).toEqual(expect.objectContaining({ value: "absent" }));
+      proveLastStart();
+      const env = setUp();
+
+      const second = runBash(LOCATE, { ...JETSON(), ...env });
+      expect(second.status).toBe(0);
+      expect(second.out).toContain(`Codex plugin: asking the core's registry (${why})`);
+      expect(second.out).toContain(TODAY());
+      expect(asked(cli)).toBe(2);
+    });
+
+    it("records nothing from the updater's run outside the unit; the unit's own start asks and records", () => {
+      const cli = fakeOpenclaw({ registry: NO_CODEX });
+      expect(runBash(LOCATE, { ...JETSON(), CLAWBOX_PRESTART_OUTSIDE_UNIT: "1" }).status).toBe(0);
+      expect(recorded()).toBeUndefined();
+
+      proveLastStart();
+      expect(runBash(LOCATE, JETSON()).status).toBe(0);
+      expect(asked(cli)).toBe(2);
+      expect(recorded()).toEqual(expect.objectContaining({ value: "absent" }));
+    });
+
+    // The x64 desktop and the DGX Spark run this same script: there it stays
+    // exactly what it was. Passes before and after the change.
+    it("off a Jetson, asks the registry on every start and records nothing, as before", () => {
+      const cli = fakeOpenclaw({ registry: NO_CODEX });
+      const outs = [runBash(LOCATE), (proveLastStart(), runBash(LOCATE))];
+      for (const res of outs) {
+        expect(res.status).toBe(0);
+        expect(res.out).toContain(TODAY());
+        expect(res.out).not.toContain("Codex plugin:");
+        expect(res.out).toContain("reused instead of re-checked: nothing");
+      }
+      expect(asked(cli)).toBe(2);
+      expect(recorded()).toBeUndefined();
+    });
   });
 });
 

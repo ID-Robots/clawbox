@@ -223,9 +223,10 @@ export CLAWBOX_OPENCLAW_V2
 # variable on purpose: the test suites run single sections of this file on
 # their own, and in such a slice the call is `:` and does nothing.
 #
-# STAMPS. The three checks that cost a CLI cold start on every boot whatever
-# their answer — the Codex plugin's registry dependencies, the core's
-# plugin-consent report and the Claude Code version report — ask
+# STAMPS. The four checks that cost a CLI cold start on every boot whatever
+# their answer — the Codex plugin's registry dependencies, the registry's "no
+# Codex" on a Jetson with no Codex payload, the core's plugin-consent report and
+# the Claude Code version report — ask
 # scripts/gateway-pre-start-stamps.py whether the answer the last full check
 # recorded still holds, and skip the CLI when it does. That helper says yes
 # only when nothing the check reads has changed, the record is under a day
@@ -289,6 +290,14 @@ clawbox_stamp_remember() {
     echo "  WARN: could not record the $1 check in $CLAWBOX_STAMPS_FILE; the next start runs it in full" >&2
   fi
   return 0
+}
+
+# A Jetson: the marker install.sh keys on and install-x64.sh refuses on. The x64
+# desktop and the DGX Spark run this same script, and a check only a Jetson may
+# take on trust (the registry's "no Codex") asks this first, so every other host
+# runs it in full as before. CLAWBOX_TEGRA_RELEASE moves the marker for tests.
+clawbox_jetson_appliance() {
+  [ -f "${CLAWBOX_TEGRA_RELEASE:-/etc/nv_tegra_release}" ]
 }
 
 # Milliseconds on the box's MONOTONIC clock, into CLAWBOX_NOW_MS: /proc/uptime
@@ -6599,6 +6608,37 @@ fi
 # pinned CLI for the root it will actually load, time-bounded because this is
 # ExecStartPre, and accept it only when it contains the expected package file.
 #
+# On a Jetson that answer may be the last full check's. A box with no Codex
+# anywhere paid this cold start (2.4-2.8 s on an 8 GB Jetson) on every start to
+# hear "no Codex" again, so a well-formed "no Codex" is recorded (`codex-absent`)
+# and taken on trust while nothing `plugins list` answers from has changed: the
+# stamps' `plugins` key and, with --plugin-index, the core's own persisted plugin
+# index read only (its install records and its cached plugin view), every agent
+# workspace's `.openclaw/extensions` and every `plugins.load.paths` entry.
+# Workspace-origin plugins stay disabled unless `plugins.entries` or
+# `plugins.allow` names them (OpenClaw 2026.10.9 docs/tools/plugin.md), and both
+# are keyed. That key and the record's 24 h age are what bound a stale "no
+# Codex". What one would skip is the Codex install-and-consent step below, for a
+# Codex the registry would have found outside the managed layouts, which is
+# exactly the outcome of this CLI failing or timing out today: nothing after this
+# block reads CODEX_PLUGIN_DIR_FOUND or CODEX_PLUGIN_LAYOUT, and every later
+# reader tests "$CODEX_PLUGIN_DIR/package.json". Every other host asks on every
+# start, as before.
+_codex_absent_key=""
+_codex_absent_reused=0
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] \
+  && [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && clawbox_jetson_appliance; then
+  if clawbox_stamp_check codex-absent plugins --config "$OPENCLAW_CONFIG" --openclaw-home "$OPENCLAW_HOME_DIR" \
+      --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules" \
+      --plugin-index "$OPENCLAW_HOME_DIR/state/openclaw.sqlite" \
+    && [ "$CLAWBOX_STAMP_VALUE" = "absent" ]; then
+    _codex_absent_reused=1
+    echo "  Codex plugin: the core's registry listed no Codex at the last full check and nothing it reads has changed; not asked again"
+  else
+    _codex_absent_key="${CLAWBOX_STAMP_KEY:-}"
+    [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Codex plugin: asking the core's registry (${CLAWBOX_STAMP_WHY})"
+  fi
+fi
 # `-k 5` is what makes "time-bounded" true. Plain `timeout` sends SIGTERM and
 # then goes on WAITING for the child, and an `openclaw` that ignores it — or any
 # surviving grandchild — keeps this command substitution's pipe open through the
@@ -6607,7 +6647,7 @@ fi
 # against a 2 s ceiling. This is an ExecStartPre with no leading `-`, so that
 # stall is the gateway's start time and then the unit's failure — with no agent
 # on the box — over the codex plugin-repair probe.
-if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] && [ "$_codex_absent_reused" = "0" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(
     timeout -k 5 20 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, os, sys
@@ -6615,7 +6655,9 @@ try:
     data = json.load(sys.stdin)
 except (json.JSONDecodeError, OSError):
     raise SystemExit(0)
-plugins = data.get("plugins", []) if isinstance(data, dict) else []
+plugins = data.get("plugins") if isinstance(data, dict) else None
+if not isinstance(plugins, list):
+    raise SystemExit(0)
 for plugin in plugins:
     if not isinstance(plugin, dict) or plugin.get("id") != "codex":
         continue
@@ -6626,8 +6668,27 @@ for plugin in plugins:
         root = os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
     if isinstance(root, str):
         print(root)
-    break'
+    break
+else:
+    # "-": the CLI answered in its own shape and listed no Codex, the one answer
+    # a later start may take on trust: every entry an object that names its
+    # plugin id, as the stamps helper asks of the core index. An entry without
+    # one could be a Codex this reader cannot see, and an empty list is no
+    # answer at all (the pinned core always lists the plugins it bundles), so
+    # any other shape prints nothing.
+    if plugins and all(isinstance(plugin, dict) and isinstance(plugin.get("id"), str) and plugin["id"]
+                       for plugin in plugins):
+        print("-")'
   )" || CODEX_PLUGIN_DIR_FOUND=""
+  # Recorded only from a CLI that exited 0 (pipefail sends any other exit to
+  # the empty branch above), and never by the updater's run outside the unit
+  # (clawbox_stamp_remember refuses that).
+  if [ "$CODEX_PLUGIN_DIR_FOUND" = "-" ]; then
+    CODEX_PLUGIN_DIR_FOUND=""
+    if [ -n "$_codex_absent_key" ]; then
+      clawbox_stamp_remember codex-absent "$_codex_absent_key" absent
+    fi
+  fi
   if [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && [ -f "$CODEX_PLUGIN_DIR_FOUND/package.json" ]; then
     CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
     CODEX_PLUGIN_LAYOUT="registry"
@@ -6646,9 +6707,9 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ] \
     --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules" \
   && [ "$CLAWBOX_STAMP_VALUE" = "1" ]; then
   # A CLI cold start on every boot for an answer that cannot have changed:
-  # only a POSITIVE verdict is ever recorded, and only reused while nothing it
-  # reads has changed and the last start came up (see "the checks a start may
-  # take on trust" near the top).
+  # only a POSITIVE dependency verdict is ever recorded here, and only reused
+  # while nothing it reads has changed and the last start came up (see "the
+  # checks a start may take on trust" near the top).
   CODEX_REGISTRY_DEPS_OK=1
   echo "  Codex plugin dependencies: nothing they depend on changed since the last full check, which the core's registry passed; not asked again"
 elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
