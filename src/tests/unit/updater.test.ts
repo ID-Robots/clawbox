@@ -2715,6 +2715,10 @@ describe("updater", () => {
 
       const NOT_COMPLETED: [string, string | Error, string][] = [
         ["doctor failed", new Error("Command failed: openclaw doctor --fix"), "did not complete"],
+        ["a signal the updater did not send ended doctor",
+          Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+            code: null, killed: false, signal: "SIGKILL", stdout: "Checking agent main…\n", stderr: "",
+          }), "did not complete"],
         ["doctor says its migration did not finish", "Legacy session store requires migration; run doctor again\n",
           "exited 0 but its migration did not finish"],
       ];
@@ -6212,8 +6216,8 @@ describe("updater", () => {
 
     let doctorTimeouts: number[];
 
-    /** Every answer as before, and a doctor that takes `bytes`' worth of time. */
-    function doctorTakesTimeFor(bytes: number) {
+    /** Every answer as before, and a doctor that takes `bytes`' worth of time, or ends with `failure`. */
+    function doctorTakesTimeFor(bytes: number, failure?: Error) {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         ping: { stdout: "", stderr: "" },
@@ -6230,7 +6234,9 @@ describe("updater", () => {
         const needsMs = Math.ceil(bytes / GiB) * DOCTOR_MS_PER_GIB;
         // The gateway comes back once doctor has had its turn, however it ended.
         mockGatewayUp.mockResolvedValue(true);
-        if (timeout > 0 && needsMs > timeout) {
+        if (failure) {
+          cb?.(failure, { stdout: "", stderr: "" });
+        } else if (timeout > 0 && needsMs > timeout) {
           cb?.(Object.assign(new Error("Command failed: openclaw doctor --fix --yes --non-interactive"), {
             killed: true, signal: "SIGTERM", stdout: "Checking agent databases...\n", stderr: "",
           }), { stdout: "", stderr: "" });
@@ -6241,14 +6247,14 @@ describe("updater", () => {
       }) as unknown as typeof childProcess.execFile);
     }
 
-    async function verifyOnBoxWith(bytes: number) {
+    async function verifyOnBoxWith(bytes: number, failure?: Error) {
       vi.resetModules();
       mockOpenclawDatabaseBytes.mockResolvedValue(bytes);
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockRebuiltBox();
-      doctorTakesTimeFor(bytes);
+      doctorTakesTimeFor(bytes, failure);
       // Down until doctor has run: the verify's recovery is what runs it.
       mockGatewayUp.mockResolvedValue(false);
       updater = await import("@/lib/updater");
@@ -6305,6 +6311,35 @@ describe("updater", () => {
       expect(killedWarning()?.message).toContain("it was still running after 1200s and was stopped");
       // A doctor that could not finish is a warning, not a failed update: the
       // restart and the port probe after it are the verdict.
+      expect(updater.getUpdateState().phase).toBe("completed");
+    });
+
+    /** node's execFile rejection: the output rides on the error, its message names the command. */
+    type DoctorEnd = { code?: number | null; killed?: boolean; signal?: string | null };
+    const doctorEnded = (end: DoctorEnd, stdout = "", stderr = "") =>
+      Object.assign(new Error(`Command failed: openclaw doctor --fix --yes --non-interactive\n${stderr}`), {
+        code: null, killed: false, signal: null, ...end, stdout, stderr,
+      });
+
+    it.each([
+      // node sets `killed` only for a kill it sent; a signal without it came
+      // from elsewhere (the kernel's OOM killer while doctor reads every agent
+      // database, a stray kill), and doctor's last line is progress, not a cause.
+      ["a SIGKILL the updater did not send", doctorEnded({ signal: "SIGKILL" }, "Checking agent main…\n"),
+        "it was killed by SIGKILL from outside the updater"],
+      // Its own crash has the same shape, and reads the same.
+      ["a crash", doctorEnded({ signal: "SIGSEGV" }, "Checking agent main…\n"),
+        "it was killed by SIGSEGV from outside the updater"],
+      ["the updater's own bound", doctorEnded({ killed: true, signal: "SIGTERM" }, "Checking agent main…\n"),
+        "it was still running after 90s and was stopped"],
+      ["a refusal",
+        doctorEnded({ code: 1 }, "Checking agent main…\n", "Config invalid: gateway.port must be a number\n"),
+        "Config invalid: gateway.port must be a number"],
+      ["an exit with nothing said", doctorEnded({ code: 1 }), "it gave no reason"],
+    ])("says why doctor did not complete after %s", async (_what, failure, reason) => {
+      await verifyOnBoxWith(0, failure);
+      expect(killedWarning()?.message).toBe("`openclaw doctor --fix` did not complete. "
+        + `Config and session migrations it performs may still be pending: ${reason}`);
       expect(updater.getUpdateState().phase).toBe("completed");
     });
   });
