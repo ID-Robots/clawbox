@@ -289,6 +289,10 @@ const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/llamacpp",
   "/setup-api/local-ai/ollama",
   "/setup-api/local-ai/embed",
+  // Claude Code's Messages API on the box's engine, for `local` coding runs
+  // (TASK-2501 PR-E): the run holds no cookie, and the route checks the local
+  // coding token itself (src/lib/local-anthropic-route.ts) — none, 401.
+  "/setup-api/local-ai/anthropic",
   // The staff MCP relay (TASK-2377): the gateway calls it for a member of
   // staff's agent with that member's relay token, which the route checks
   // itself (src/lib/staff-mcp-relay.ts) — no cookie, no token, 401.

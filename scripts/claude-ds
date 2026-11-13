@@ -36,6 +36,18 @@
 # before anything else — never through argv or the parent's environment.
 # Neither branch can see the other's credential.
 #
+# `local` (TASK-2501 PR-E) is the box's OWN engine — the owner's External
+# engine, or Local AI's llama.cpp / Ollama — and the provider of a box under
+# the local-only AI lock. Claude Code talks to the box's Messages-API route
+# (/setup-api/local-ai/anthropic, src/lib/local-anthropic-route.ts), which
+# translates to the engine's Chat Completions and adds the engine's key on the
+# server: this script never reads that key. It reads only the box's Local AI
+# token, derives from it the token that opens the route and nothing else, and
+# asks the route which model the engine serves and how large its window is.
+# Every model slot is that model; no proxy variable, no portal token, no
+# Anthropic credential reaches the session; and WebSearch / WebFetch are
+# denied in the harness's own settings.
+#
 # Usage:  claude-ds [any claude argument]     e.g.  claude-ds -p "explain this repo"
 #
 # Overrides (all optional):
@@ -47,8 +59,14 @@
 #   CLAUDE_DS_CONFIG_DIR    where this harness keeps its own state (ClawBox AI
 #                           runs only; an Anthropic run uses Claude Code's own
 #                           default state, which is where the owner's login is)
-#   CLAUDE_DS_PROVIDER      which account pays: clawbox-ai (default) or
+#   CLAUDE_DS_PROVIDER      which account pays: clawbox-ai (default),
 #                           anthropic (one of the owner's Anthropic accounts)
+#                           or local (the box's own engine)
+#   CLAUDE_DS_LOCAL_BASE_URL  local only: the box's Messages-API route
+#                           (default http://127.0.0.1/setup-api/local-ai/anthropic;
+#                           loopback only)
+#   CLAUDE_DS_LOCAL_CONFIG_DIR  local only: the harness's state (default
+#                           ~/.claude-ds-local)
 #   CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE
 #                           anthropic only: the one-shot 0600 file holding the
 #                           account the runner chose (read, then deleted)
@@ -74,8 +92,8 @@ die() { printf 'claude-ds: %s\n' "$*" >&2; exit 1; }
 # box's plan when the caller asked for the owner's own.
 PROVIDER="${CLAUDE_DS_PROVIDER:-clawbox-ai}"
 case "$PROVIDER" in
-  clawbox-ai|anthropic) ;;
-  *) die "unknown CLAUDE_DS_PROVIDER: $PROVIDER (use clawbox-ai or anthropic)" ;;
+  clawbox-ai|anthropic|local) ;;
+  *) die "unknown CLAUDE_DS_PROVIDER: $PROVIDER (use clawbox-ai, anthropic or local)" ;;
 esac
 
 # An owner can pin the box to one account: a provider named in this file is the
@@ -110,6 +128,16 @@ require_private_url() {
     *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $1=$2" ;;
   esac
 }
+# The box's own route, and nothing else, for `local`: the token it is handed
+# opens that route only, and a base anywhere but this box would be a run's
+# code sent to whoever answers there.
+LOCAL_BASE_URL="${CLAUDE_DS_LOCAL_BASE_URL:-http://127.0.0.1/setup-api/local-ai/anthropic}"
+if [ "$PROVIDER" = "local" ]; then
+  case "$LOCAL_BASE_URL" in
+    http://127.0.0.1[:/]*|http://localhost[:/]*) ;;
+    *) die "refusing a local coding route that is not on this box: CLAUDE_DS_LOCAL_BASE_URL=$LOCAL_BASE_URL" ;;
+  esac
+fi
 if [ "$PROVIDER" = "clawbox-ai" ]; then
   require_private_url CLAWBOX_AI_PROXY_URL "$PROXY_URL"
   if [ -n "${CLAUDE_DS_API_BASE_URL:-}" ]; then
@@ -139,14 +167,14 @@ fi
 # those need different answers from the owner.
 command -v python3 >/dev/null 2>&1 || die "python3 is missing; cannot read $CONFIG_JSON"
 
-CREDS="$(python3 - "$CONFIG_JSON" "$PROVIDER" <<'PYEOF'
+CREDS="$(python3 - "$CONFIG_JSON" "$PROVIDER" "$LOCAL_BASE_URL" <<'PYEOF'
 import json, os, sys
 
-cfg_path, provider = sys.argv[1], sys.argv[2]
+cfg_path, provider, local_base = sys.argv[1], sys.argv[2], sys.argv[3]
 
 
-def answer(status, secret, tier, effort, login):
-    for line in (status, secret, tier, effort, login):
+def answer(status, secret, tier, effort, login, engine=""):
+    for line in (status, secret, tier, effort, login, engine):
         print(line)
     raise SystemExit(0)
 
@@ -180,6 +208,46 @@ def has_claude_login():
     except Exception:
         return False
 
+
+if provider == "local":
+    # THE BOX'S OWN ENGINE. The Local AI token (the file the web server keeps,
+    # or the variable it was started with — the same order the server reads
+    # them in) is the key of an HMAC; the result opens the box's Messages-API
+    # route and nothing else. The engine's own key stays on the server.
+    import hashlib, hmac, urllib.error, urllib.request
+    token = os.environ.get("LOCAL_AI_TOKEN", "")
+    if len(token) < 16:
+        try:
+            with open(os.path.join(os.path.dirname(cfg_path), ".local-ai-token")) as fh:
+                token = fh.read().strip()
+        except Exception:
+            token = ""
+    if len(token) < 16:
+        answer("ERR", "This ClawBox has no Local AI token yet, so a local coding run cannot reach its engine. Open Settings -> Local AI once, then try again.", "", "", "")
+    route_token = "clawbox-local-" + hmac.new(token.encode(), b"clawbox local coding route v1", hashlib.sha256).hexdigest()
+    # Which model the engine serves, its window and its longest answer: asked
+    # of the route, so the wrapper and the server read the same engine record.
+    # No proxy: the route is on this box.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(local_base.rstrip("/") + "/v1/models", headers={"authorization": "Bearer " + route_token})
+    try:
+        with opener.open(req, timeout=20) as res:
+            listing = json.load(res)
+    except urllib.error.HTTPError as exc:
+        try:
+            words = json.load(exc).get("error", {}).get("message", "")
+        except Exception:
+            words = ""
+        answer("ERR", words or f"the box's local coding route refused (HTTP {exc.code})", "", "", "")
+    except Exception as exc:
+        answer("ERR", f"cannot reach the box's local coding route at {local_base}: {exc}", "", "", "")
+    try:
+        model = listing["data"][0]
+        info = model.get("clawbox", {})
+        engine = "\t".join([str(model["id"]), str(int(info["context_tokens"])), str(int(info["max_output_tokens"]))])
+    except Exception:
+        answer("ERR", "the box's local coding route answered no engine model", "", "", "")
+    answer("OK", route_token, "", effort, "", engine)
 
 if provider == "anthropic":
     # THE ACCOUNT THE RUNNER CHOSE. With more than one Anthropic account on the
@@ -245,6 +313,8 @@ SECRET="$(printf '%s' "$CREDS" | sed -n 2p)"
 # do, instead of at a default the wrapper made up.
 OWNER_EFFORT="$(printf '%s' "$CREDS" | sed -n 4p)"
 HAS_LOGIN="$(printf '%s' "$CREDS" | sed -n 5p)"
+# local only: the engine's model, window and longest answer, tab-separated.
+LOCAL_ENGINE="$(printf '%s' "$CREDS" | sed -n 6p)"
 
 # Every plan runs the same model (TASK-2261): the plan (line 3 of the answer
 # above) no longer chooses one.
@@ -336,6 +406,84 @@ if [ "$PROVIDER" = "anthropic" ]; then
   PROVIDER_LABEL="Anthropic"
   mkdir -p "$HARNESS_STATE_DIR"
   chmod 700 "$HARNESS_STATE_DIR" 2>/dev/null || true
+elif [ "$PROVIDER" = "local" ]; then
+  # THE BOX'S OWN ENGINE. Claude Code talks to the box's route, which answers
+  # from the engine; both of Claude Code's bases point there, so neither the
+  # messages nor its account calls can fall back to Anthropic.
+  IFS=$'\t' read -r LOCAL_MODEL LOCAL_CONTEXT LOCAL_MAX_OUTPUT <<< "$LOCAL_ENGINE"
+  case "$LOCAL_CONTEXT" in ""|*[!0-9]*) die "the box's local coding route answered no window for its engine" ;; esac
+  case "$LOCAL_MAX_OUTPUT" in ""|*[!0-9]*) die "the box's local coding route answered no longest answer for its engine" ;; esac
+  [ -n "$LOCAL_MODEL" ] || die "the box's local coding route answered no engine model"
+  unset CLAWBOX_AI_PROXY_URL CLAUDE_CODE_SUBAGENT_MODEL
+
+  MODEL="$LOCAL_MODEL"
+  # Claude Code believes a 200k window for a model it does not know, and a 1M
+  # one for a `[1m]` name: an engine with a million-token window is named so,
+  # or the session would compact at a fifth of what it has. The route answers
+  # on the engine's model whatever a request names.
+  MODEL_SLOT="$LOCAL_MODEL"
+  if [ "$LOCAL_CONTEXT" -ge 1000000 ]; then MODEL_SLOT="${LOCAL_MODEL}[1m]"; fi
+
+  export CLAUDE_CONFIG_DIR="${CLAUDE_DS_LOCAL_CONFIG_DIR:-$HOME/.claude-ds-local}"
+  export ANTHROPIC_BASE_URL="${LOCAL_BASE_URL%/}"
+  export CLAUDE_CODE_API_BASE_URL="${LOCAL_BASE_URL%/}"
+  export ANTHROPIC_AUTH_TOKEN="$SECRET"
+  export ANTHROPIC_MODEL="$MODEL_SLOT"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL_SLOT"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL_SLOT"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL_SLOT"
+  # Nothing but the engine: no telemetry, no error reports, no update checks
+  # (a delegated run already has this from the runner; a terminal gets it here).
+  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+  # The engine's longest answer is the most Claude Code may ask for. A lower
+  # value the runner set (a session carried past its window) stays.
+  if [ -z "${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-}" ] || [ "${CLAUDE_CODE_MAX_OUTPUT_TOKENS}" -gt "$LOCAL_MAX_OUTPUT" ] 2>/dev/null; then
+    export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$LOCAL_MAX_OUTPUT"
+  fi
+  # The auto-compact window from the engine's own: 84% of it, the margin the
+  # ClawBox AI branch keeps below a 1M window, so a whole turn of tool results
+  # still fits after the last check. CLAUDE_DS_AUTOCOMPACT_WINDOW overrides it.
+  case "${CLAUDE_DS_AUTOCOMPACT_WINDOW:-}" in
+    "") export CLAUDE_CODE_AUTO_COMPACT_WINDOW=$(( LOCAL_CONTEXT * 84 / 100 )) ;;
+    off) unset CLAUDE_CODE_AUTO_COMPACT_WINDOW ;;
+    0*|*[!0-9]*) die "CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off', not: $CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
+    *) export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
+  esac
+
+  HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
+  HARNESS_STATE_DIR="$CLAUDE_CONFIG_DIR"
+  SEED_ONBOARDING=1
+  PROVIDER_LABEL="the box's own engine"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
+  # WebSearch is a tool Anthropic's servers run, which the engine cannot;
+  # WebFetch would read the web through a model's summary. Denied in the
+  # harness's own user settings — which every session here loads
+  # (--setting-sources user) — beside any rule already there.
+  python3 - "$CLAUDE_CONFIG_DIR/settings.json" <<'PYEOF' || die "could not write the local harness's settings in $CLAUDE_CONFIG_DIR"
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    cfg = {}
+perms = cfg.setdefault("permissions", {})
+if not isinstance(perms, dict):
+    perms = cfg["permissions"] = {}
+deny = perms.get("deny") if isinstance(perms.get("deny"), list) else []
+want = ["WebSearch", "WebFetch"]
+if all(t in deny for t in want):
+    raise SystemExit(0)
+perms["deny"] = deny + [t for t in want if t not in deny]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+with os.fdopen(fd, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PYEOF
 else
   # THE CLAWBOX AI BRANCH — the box's own plan, and what every run got
   # before the selector existed.
