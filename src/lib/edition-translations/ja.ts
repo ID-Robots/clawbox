@@ -1890,6 +1890,7 @@ export const ja: Record<string, string> = {
   "users.staffMcp.allow": "スタッフは {name} を使用できます",
   "users.staffMcp.notUsable": "スタッフに提供できません: {reason}",
   "users.staffMcp.reason.transport": "スタッフに中継できるのは Streamable HTTP サーバーだけです（openclaw.json で \"transport\": \"streamable-http\" を指定してください）",
+  "users.staffMcp.reason.transportHermes": "スタッフに中継できるのは HTTP サーバーだけです（このサーバーはローカルコマンドを実行するか SSE を使っています。config.yaml で command なしの url を指定してください）",
   "users.staffMcp.reason.urlCredential": "アドレスに認証情報が含まれています",
   "users.staffMcp.reason.unusable": "設定を中継できません",
   "users.staffMcp.reason.missing": "もう設定されていません",

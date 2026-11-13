@@ -57,18 +57,30 @@ function write(file: string, body = "PK\u0003\u0004 docx"): string {
   return file;
 }
 
-/** The claim exactly as production-server.js's relay makes it for an OpenClaw member. */
-function relayClaim(username: string, paths: string[], since: number | null = Date.now() - 60_000) {
+/**
+ * PROVENANCE: the staff MCP relay read a result of `username`'s own tool call
+ * naming these files (src/lib/staff-mcp-relay.ts → recordToolOutputFiles).
+ */
+async function toolClaim(username: string, paths: string[], since: number = Date.now() - 60_000) {
+  const { recordToolOutputFiles } = await import("@/lib/chat-reply-media");
+  return recordToolOutputFiles({
+    username,
+    strings: [`Saved. Put this line in your reply:\n${paths.map((p) => `MEDIA:${p}`).join("\n")}`],
+    mediaRoot: mediaRoot(),
+    ownFolder: path.join(openclawHome(), "staff", username),
+    since,
+  });
+}
+
+/** A REPLY's MEDIA: lines, exactly as production-server.js's user-chat relay judges them: the member's own folder only. */
+function replyClaim(username: string, paths: string[], since: number | null = Date.now() - 60_000) {
   const owners = ownersCjs.createMediaOwners(path.join(tmpHome, "data", "chat-media-owners.json"));
   return claims.claimReplyMedia({
     username,
     paths,
     since,
     until: Date.now(),
-    roots: [
-      { dir: mediaRoot(), skip: claims.MEDIA_TREE_OWN_FOLDERS },
-      { dir: path.join(openclawHome(), "staff", username) },
-    ],
+    roots: [{ dir: path.join(openclawHome(), "staff", username) }],
     record: owners.recordMediaOwner,
   });
 }
@@ -104,11 +116,11 @@ afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
-describe("a document a member's reply names (OpenClaw relay)", () => {
+describe("a document a member's own tool call produced (the staff MCP relay's provenance)", () => {
   it("is downloadable by that member, a 404 for another member, and served to the owner as before", async () => {
     const doc = write(path.join(mediaRoot(), "word-docs", "report-1.docx"));
     expect(await read(ALICE, doc)).toBe(404); // nobody's yet
-    const { recorded } = relayClaim("alice", [doc]);
+    const { recorded } = await toolClaim("alice", [doc]);
     expect(recorded).toEqual([fs.realpathSync(doc)]);
     expect(await read(ALICE, doc)).toBe(200);
     expect(await read(BOB, doc)).toBe(404);
@@ -118,25 +130,34 @@ describe("a document a member's reply names (OpenClaw relay)", () => {
   it("member A cannot download member B's file, and B's reply naming A's file does not make it B's", async () => {
     const aDoc = write(path.join(mediaRoot(), "word-docs", "a.docx"));
     const bDoc = write(path.join(mediaRoot(), "word-docs", "b.docx"));
-    relayClaim("alice", [aDoc]);
-    relayClaim("bob", [bDoc]);
+    await toolClaim("alice", [aDoc]);
+    await toolClaim("bob", [bDoc]);
     expect(await read(ALICE, bDoc)).toBe(404);
     expect(await read(BOB, aDoc)).toBe(404);
     // Bob talks his assistant into naming Alice's document: never reassigned.
-    const { recorded, refused } = relayClaim("bob", [aDoc]);
+    const { recorded, refused } = await toolClaim("bob", [aDoc]);
     expect(recorded).toEqual([]);
     expect(refused.map((r) => r.reason)).toEqual(["someone_elses"]);
     expect(await read(BOB, aDoc)).toBe(404);
     expect(await read(ALICE, aDoc)).toBe(200);
   });
 
-  it("serves a file in the member's own assistant folder to them, never to another member, never a dotfile", async () => {
+  it("never makes a shared-media file a member's because their REPLY names it — not even one written during their turn", async () => {
+    // The owner's document, written while Alice's turn runs, never recorded.
+    const ownersDoc = write(path.join(mediaRoot(), "word-docs", "payroll.docx"));
+    const { recorded, refused } = replyClaim("alice", [ownersDoc]);
+    expect(recorded).toEqual([]);
+    expect(refused.map((r) => r.reason)).toEqual(["outside"]);
+    expect(await read(ALICE, ownersDoc)).toBe(404);
+  });
+
+  it("serves a file in the member's own assistant folder (named by their reply) to them, never to another member, never a dotfile", async () => {
     const own = write(path.join(openclawHome(), "staff", "alice", "out", "letter.docx"));
-    relayClaim("alice", [own]);
+    replyClaim("alice", [own]);
     expect(await read(ALICE, own)).toBe(200);
     expect(await read(BOB, own)).toBe(404);
     const hidden = write(path.join(openclawHome(), "staff", "alice", ".secrets", "x.docx"));
-    expect(relayClaim("alice", [hidden]).recorded).toEqual([]);
+    expect(replyClaim("alice", [hidden]).recorded).toEqual([]);
     expect(await read(ALICE, hidden)).toBe(404);
   });
 
@@ -144,7 +165,7 @@ describe("a document a member's reply names (OpenClaw relay)", () => {
     const outside = write(path.join(tmpHome, "Documents", "payroll.docx"));
     const ownerWorkspace = write(path.join(openclawHome(), "workspace", "notes.docx"));
     const otherStaff = write(path.join(openclawHome(), "staff", "bob", "plan.docx"));
-    const { recorded, refused } = relayClaim("alice", [outside, ownerWorkspace, otherStaff, "/etc/passwd"]);
+    const { recorded, refused } = await toolClaim("alice", [outside, ownerWorkspace, otherStaff, "/etc/passwd"]);
     expect(recorded).toEqual([]);
     expect(refused.map((r) => r.reason)).toEqual(["outside", "outside", "outside", "outside"]);
     for (const file of [outside, ownerWorkspace, otherStaff]) expect(await read(ALICE, file)).toBe(404);
@@ -164,7 +185,7 @@ describe("a document a member's reply names (OpenClaw relay)", () => {
     fs.utimesSync(stale, hourAgo, hourAgo);
 
     const traversal = `${mediaRoot()}/word-docs/../../../owner-secret.docx`;
-    const { recorded, refused } = relayClaim("alice", [
+    const { recorded, refused } = await toolClaim("alice", [
       traversal,
       linkFile,
       path.join(mediaRoot(), "escape", "owner-secret.docx"),
@@ -179,7 +200,7 @@ describe("a document a member's reply names (OpenClaw relay)", () => {
 });
 
 describe("a document a member's reply names (Hermes route)", () => {
-  it("records MEDIA: lines of the reply text for the member, and their profile folder is theirs alone", async () => {
+  it("records MEDIA: lines of the reply naming their own profile folder only, and that folder is theirs alone", async () => {
     h.harness = "hermes";
     const hermesMedia = path.join(tmpHome, "data", "chat-media");
     const doc = write(path.join(hermesMedia, "word-docs", "quote.docx"));
@@ -191,12 +212,16 @@ describe("a document a member's reply names (Hermes route)", () => {
     const result = recordMemberReplyMedia({
       username: "alice",
       text: `Here it is.\nMEDIA:${doc}\nMEDIA:\`${own}\`\n\`\`\`\nMEDIA:${outside}\n\`\`\`\nMEDIA:${outside}`,
-      mediaRoot: hermesMedia,
       ownFolder: folder,
       since: Date.now() - 60_000,
     });
-    expect(result.recorded.sort()).toEqual([fs.realpathSync(doc), fs.realpathSync(own)].sort());
-    expect(result.refused.map((r) => r.reason)).toEqual(["outside"]);
+    expect(result.recorded).toEqual([fs.realpathSync(own)]);
+    // The shared media tree is not the reply's to give; the outside file neither.
+    expect(result.refused.map((r) => r.reason)).toEqual(["outside", "outside"]);
+    expect(await read(ALICE, doc)).toBe(404);
+    // …the tool call that wrote it, through the relay, is.
+    const { recordToolOutputFiles } = await import("@/lib/chat-reply-media");
+    expect(recordToolOutputFiles({ username: "alice", strings: [`MEDIA:${doc}`], mediaRoot: hermesMedia, ownFolder: folder, since: Date.now() - 60_000 }).recorded).toEqual([fs.realpathSync(doc)]);
     expect(await read(ALICE, doc)).toBe(200);
     expect(await read(ALICE, own)).toBe(200);
     expect(await read(BOB, doc)).toBe(404);

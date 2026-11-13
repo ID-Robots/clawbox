@@ -52,7 +52,7 @@ describe("the store", () => {
       credentials: { ivan: { docs: "line\nbreak", ok: "fine-token" }, "Bad User": { docs: "x" } },
       relayTokens: { ivan: "short", maria: "b".repeat(64) },
     });
-    expect(parsed.servers).toEqual({ docs: { header: "X-Api-Key", needsCredential: true, writeTools: false, members: null } });
+    expect(parsed.servers).toEqual({ docs: { header: "X-Api-Key", needsCredential: true, writeTools: false, members: null, harness: "openclaw" } });
     expect(parsed.credentials).toEqual({ ivan: { ok: "fine-token" } });
     expect(parsed.relayTokens).toEqual({ maria: "b".repeat(64) });
   });

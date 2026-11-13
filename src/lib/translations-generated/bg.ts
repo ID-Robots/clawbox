@@ -4902,6 +4902,7 @@ const table: Record<string, string> = {
   "users.staffMcp.reason.insecure": "адресът му е обикновен HTTP към друга машина, така че данните за достъп биха пътували некриптирани",
   "users.staffMcp.reason.missing": "вече не е настроен",
   "users.staffMcp.reason.transport": "само Streamable HTTP сървъри могат да се препредават към служителите (в openclaw.json задайте \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "само HTTP сървъри могат да се препредават към служителите (този стартира локална команда или ползва SSE: задайте му url без command в config.yaml)",
   "users.staffMcp.reason.unusable": "настройките му не могат да бъдат препредадени",
   "users.staffMcp.reason.urlCredential": "адресът му съдържа данни за достъп",
   "users.staffMcp.retry": "Опитай отново",

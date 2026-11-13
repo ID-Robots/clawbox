@@ -44,6 +44,8 @@ function grantOf(server: ServerRow): Grant {
 
 interface StaffMcpView {
   orgMode: boolean;
+  /** The runtime the servers are listed for: a transport refusal is told in its terms. */
+  harness?: string;
   staffMcpSupported: boolean;
   servers: ServerRow[];
   users: Array<{ username: string; credentials: Record<string, string> }>;
@@ -63,7 +65,7 @@ function parseView(data: unknown): StaffMcpView | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Partial<StaffMcpView>;
   if (!Array.isArray(d.servers) || !Array.isArray(d.users)) return null;
-  return { orgMode: d.orgMode === true, staffMcpSupported: d.staffMcpSupported !== false, servers: d.servers, users: d.users, applied: d.applied };
+  return { orgMode: d.orgMode === true, harness: typeof d.harness === "string" ? d.harness : undefined, staffMcpSupported: d.staffMcpSupported !== false, servers: d.servers, users: d.users, applied: d.applied };
 }
 
 /** The granted list as the server holds it. */
@@ -221,7 +223,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
                 </label>
                 {!server.usable && server.reason && (
                   <p className="text-[11px] text-white/45 mt-1 ml-6">
-                    {t("users.staffMcp.notUsable", { reason: t(REASON_KEYS[server.reason] ?? "users.staffMcp.reason.unusable") })}
+                    {t("users.staffMcp.notUsable", { reason: t(server.reason === "transport" && view.harness === "hermes" ? "users.staffMcp.reason.transportHermes" : REASON_KEYS[server.reason] ?? "users.staffMcp.reason.unusable") })}
                   </p>
                 )}
                 {on && (

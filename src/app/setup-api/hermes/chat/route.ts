@@ -349,19 +349,6 @@ function parseSessionId(stderr: string): string {
 }
 
 /** The reply this route hands back, whichever transport produced it. */
-/**
- * When each transcript's current turn began (the user's message was written):
- * a file a member's reply names is theirs only if it was written since
- * (TASK-2516, scripts/chat-reply-media.js). Process-local and bounded; a turn
- * whose start was lost to a restart is judged by the default window.
- */
-const turnStartedAt = new Map<string, number>();
-function noteTurnStart(sessionKey: string): void {
-  if (turnStartedAt.size >= 256) turnStartedAt.delete(turnStartedAt.keys().next().value as string);
-  turnStartedAt.delete(sessionKey);
-  turnStartedAt.set(sessionKey, Date.now());
-}
-
 interface TurnPayload {
   text: string;
   harness: "hermes";
@@ -422,6 +409,8 @@ async function settleTurn(
   consoleText: string,
   streamedReasoning: string,
   served: { model?: string; provider?: string } = {},
+  /** When this turn began (`LiveTurn.startedAt`): the files its reply names are a member's only if written since. */
+  turnStartedAt: number | null = null,
 ): Promise<TurnPayload> {
   // Which person's conversation this Hermes session now carries, so only
   // they may resume it (src/lib/chat-scope-server.ts).
@@ -534,12 +523,14 @@ async function settleTurn(
   // (TASK-2516): only a fresh regular file in the media tree or their own
   // profile folder, never through a link, never one already someone else's.
   if (memberTurn && chatUser) {
+    // Their own profile folder only: a file in the shared media tree is made
+    // theirs by the relay that ran their tool call, never by a reply naming
+    // it (scripts/chat-reply-media.js). Synchronous and never throws.
     const { recorded, refused } = recordMemberReplyMedia({
       username: chatUser,
       text: caption,
-      mediaRoot: await chatMediaRoot(),
       ownFolder: staffHermesProfilePaths(chatUser)?.folder ?? null,
-      since: turnStartedAt.get(sessionKey) ?? null,
+      since: turnStartedAt,
     });
     if (recorded.length > 0 || refused.length > 0) {
       console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
@@ -980,6 +971,7 @@ async function runStreamedTurn(
           final.text,
           final.reasoning,
           await servedPair(final, turn, threaded, usageBefore),
+          live.startedAt,
         ),
       );
     }
@@ -1041,6 +1033,7 @@ async function runStreamedTurn(
             recovered.text,
             "",
             await servedPair(null, turn, threaded, usageBefore),
+            live.startedAt,
           ),
         );
         return;
@@ -1557,7 +1550,6 @@ export async function POST(request: Request) {
   const shownText = typeof body.displayText === "string" && body.displayText.trim()
     ? body.displayText.trim()
     : message;
-  noteTurnStart(sessionKey);
   await appendTranscript({
     role: "user",
     // A document is shown as the composer labels it (`📎 name`), the way the
@@ -1863,7 +1855,7 @@ export async function POST(request: Request) {
       // config.yaml's pairing, which is the same read the validation above makes
       // when it has a reason to: recorded too, because a blank under a reply the
       // box knows the model of is a false unknown, not modesty.
-      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed));
+      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed, live.startedAt));
       live.emit("done", answered);
       // The one-shot answer is held to the same rule as the stream: a session
       // that ran out while the CLI was answering is signed out rather than

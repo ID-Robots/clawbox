@@ -4902,6 +4902,7 @@ const table: Record<string, string> = {
   "users.staffMcp.reason.insecure": "its address is plain HTTP to another machine, so a credential would travel unencrypted",
   "users.staffMcp.reason.missing": "it is no longer configured",
   "users.staffMcp.reason.transport": "only Streamable HTTP servers can be relayed to staff (in openclaw.json, set \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "only HTTP servers can be relayed to staff (this one runs a local command or uses SSE: give it a url, without a command, in config.yaml)",
   "users.staffMcp.reason.unusable": "its settings cannot be relayed",
   "users.staffMcp.reason.urlCredential": "its address carries a credential",
   "users.staffMcp.retry": "Try again",

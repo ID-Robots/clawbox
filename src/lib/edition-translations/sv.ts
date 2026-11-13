@@ -1886,6 +1886,7 @@ export const sv: Record<string, string> = {
   "users.staffMcp.allow": "Personalen får använda {name}",
   "users.staffMcp.notUsable": "Kan inte erbjudas personalen: {reason}",
   "users.staffMcp.reason.transport": "bara Streamable HTTP-servrar kan vidarebefordras till personalen (ange \"transport\": \"streamable-http\" i openclaw.json)",
+  "users.staffMcp.reason.transportHermes": "bara HTTP-servrar kan vidarebefordras till personalen (den här kör ett lokalt kommando eller använder SSE: ge den en url utan command i config.yaml)",
   "users.staffMcp.reason.urlCredential": "dess adress innehåller en inloggningsuppgift",
   "users.staffMcp.reason.unusable": "dess inställningar kan inte vidarebefordras",
   "users.staffMcp.reason.missing": "den är inte längre konfigurerad",

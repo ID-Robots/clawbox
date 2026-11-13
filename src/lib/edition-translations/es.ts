@@ -1885,6 +1885,7 @@ export const es: Record<string, string> = {
   "users.staffMcp.allow": "El personal puede usar {name}",
   "users.staffMcp.notUsable": "No se puede ofrecer al personal: {reason}",
   "users.staffMcp.reason.transport": "solo los servidores Streamable HTTP pueden ofrecerse al personal (en openclaw.json, pon \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "solo los servidores HTTP pueden ofrecerse al personal (este ejecuta un comando local o usa SSE: dale una url, sin command, en config.yaml)",
   "users.staffMcp.reason.urlCredential": "su dirección contiene una credencial",
   "users.staffMcp.reason.unusable": "su configuración no se puede retransmitir",
   "users.staffMcp.reason.missing": "ya no está configurado",

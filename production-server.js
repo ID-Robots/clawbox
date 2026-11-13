@@ -27,7 +27,7 @@ const {
   recheckMsFromEnv,
 } = require("./scripts/upgrade-session-watch.js");
 const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat, staffReadyReader } = require("./scripts/gateway-user-relay.js");
-const { claimReplyMedia, MEDIA_TREE_OWN_FOLDERS } = require("./scripts/chat-reply-media.js");
+const { claimReplyMedia } = require("./scripts/chat-reply-media.js");
 const { createMediaOwners } = require("./scripts/chat-media-owners.js");
 const { staffAgentId } = require("./scripts/org-staff-policy.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
@@ -319,13 +319,12 @@ function recordStaffReplyMedia(username, claim) {
     paths: claim.paths,
     since: claim.since,
     until: claim.until,
-    roots: [
-      // The chat media tree (src/lib/harness/media-root.ts), minus the
-      // folders ClawBox records its own writes in.
-      { dir: path.join(OPENCLAW_STATE_DIR, "media"), skip: MEDIA_TREE_OWN_FOLDERS },
-      // Their own folder: the staff agent's workspace (src/lib/org-staff-agents.ts staffWorkspaceDir).
-      { dir: path.join(OPENCLAW_STATE_DIR, "staff", username) },
-    ],
+    // Their own folder only — the staff agent's workspace
+    // (src/lib/org-staff-agents.ts staffWorkspaceDir), which nobody else's
+    // assistant writes into. A file in the shared media tree is made theirs
+    // by the staff MCP relay that ran their tool call (provenance), never by
+    // a reply naming it.
+    roots: [{ dir: path.join(OPENCLAW_STATE_DIR, "staff", username) }],
     record: chatMediaOwners.recordMediaOwner,
   });
   if (recorded.length > 0 || refused.length > 0) {

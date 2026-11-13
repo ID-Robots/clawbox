@@ -1890,6 +1890,7 @@ export const fr: Record<string, string> = {
   "users.staffMcp.allow": "Le personnel peut utiliser {name}",
   "users.staffMcp.notUsable": "Ne peut pas être proposé au personnel : {reason}",
   "users.staffMcp.reason.transport": "seuls les serveurs Streamable HTTP peuvent être relayés au personnel (dans openclaw.json, indiquez \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "seuls les serveurs HTTP peuvent être relayés au personnel (celui-ci lance une commande locale ou utilise SSE : donnez-lui une url, sans command, dans config.yaml)",
   "users.staffMcp.reason.urlCredential": "son adresse contient un identifiant",
   "users.staffMcp.reason.unusable": "sa configuration ne peut pas être relayée",
   "users.staffMcp.reason.missing": "il n’est plus configuré",

@@ -30,6 +30,9 @@ vi.mock("@/lib/clawbox-users", () => ({
   listUsers: vi.fn(async () => state.users.map((username) => ({ username, createdAt: "2026-11-12T00:00:00Z", sv: "x" }))),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
+  get OPENCLAW_HOME() {
+    return path.join(ROOT, ".openclaw");
+  },
   isPlainObject: (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v),
   readConfigStrict: vi.fn(async () => ({ mcp: { servers: state.servers } })),
 }));
@@ -84,6 +87,13 @@ beforeAll(async () => {
       let result: unknown = {};
       if (msg.method === "tools/list") result = { tools: TOOLS };
       if (msg.method === "tools/call") result = { content: [{ type: "text", text: `caller=${req.headers.authorization ?? req.headers["x-api-key"]}` }] };
+      if (msg.method === "tools/call" && msg.params?.name === "create_word_document") {
+        // Writes a fresh document and names it — and names an OLD file of the owner's too.
+        const fresh = path.join(ROOT, ".openclaw", "media", "word-docs", `${msg.params.arguments?.title ?? "doc"}.docx`);
+        fs.mkdirSync(path.dirname(fresh), { recursive: true });
+        fs.writeFileSync(fresh, "PK");
+        result = { content: [{ type: "text", text: `Saved.\nMEDIA:${fresh}\nAlso see ${path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx")}` }] };
+      }
       const reply = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
       if (sse) {
         res.writeHead(200, { "Content-Type": "text/event-stream", "Mcp-Session-Id": "s-1" });
@@ -188,6 +198,26 @@ describe("a tool on the box that takes no credential (TASK-2516)", () => {
     expect((await res.json()).code).toBe("not_granted");
     expect(seen).toHaveLength(0);
     expect((await call("worddoc", TOKENS.maria, whoami)).status).toBe(200);
+  });
+
+  it("records the files a member's own tool call wrote as theirs (provenance), never an older file it merely names", async () => {
+    await grant({ needsCredential: false, writeTools: true });
+    const old = path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx");
+    fs.mkdirSync(path.dirname(old), { recursive: true });
+    fs.writeFileSync(old, "PK");
+    const hourAgo = (Date.now() - 3_600_000) / 1000;
+    fs.utimesSync(old, hourAgo, hourAgo);
+    for (const as of [sse, !sse]) {
+      sse = as;
+      const res = await call("worddoc", TOKENS.olga, { ...createDoc, params: { name: "create_word_document", arguments: { title: `olga-${as ? "sse" : "json"}` } } });
+      expect(res.status).toBe(200);
+      await res.text(); // the body read to its end, as the gateway does
+    }
+    const owners = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "chat-media-owners.json"), "utf-8")) as Record<string, string>;
+    const docs = path.join(fs.realpathSync(ROOT), ".openclaw", "media", "word-docs");
+    expect(owners[path.join(docs, "olga-sse.docx")]).toBe("olga");
+    expect(owners[path.join(docs, "olga-json.docx")]).toBe("olga");
+    expect(owners[path.join(docs, "owners-old.docx")]).toBeUndefined();
   });
 
   it("is not served to staff at all while it is not granted", async () => {

@@ -4902,6 +4902,7 @@ const table: Record<string, string> = {
   "users.staffMcp.reason.insecure": "su dirección es HTTP sin cifrar hacia otra máquina, así que una credencial viajaría sin cifrar",
   "users.staffMcp.reason.missing": "ya no está configurado",
   "users.staffMcp.reason.transport": "solo los servidores Streamable HTTP pueden ofrecerse al personal (en openclaw.json, pon \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "solo los servidores HTTP pueden ofrecerse al personal (este ejecuta un comando local o usa SSE: dale una url, sin command, en config.yaml)",
   "users.staffMcp.reason.unusable": "su configuración no se puede retransmitir",
   "users.staffMcp.reason.urlCredential": "su dirección contiene una credencial",
   "users.staffMcp.retry": "Reintentar",

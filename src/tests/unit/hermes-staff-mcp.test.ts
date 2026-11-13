@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 const grant = (worddoc: Record<string, unknown> | null) =>
-  mcp.updateStaffMcpStore((store) => ({ ...store, servers: worddoc ? { worddoc: { header: "Authorization", ...worddoc } } : ({} as Record<string, never>) }));
+  mcp.updateStaffMcpStore((store) => ({ ...store, servers: worddoc ? { worddoc: { header: "Authorization", harness: "hermes" as const, ...worddoc } } : ({} as Record<string, never>) }));
 const profileConfig = (username: string) =>
   yaml.load(fs.readFileSync(path.join(profile.staffHermesProfilePaths(username, root)!.home, "config.yaml"), "utf-8")) as Record<string, unknown>;
 const grantsFile = () => JSON.parse(fs.readFileSync(path.join(root, "plugins", "clawbox_staff_guard", "staff-mcp-grants.json"), "utf-8"));
@@ -104,6 +104,14 @@ describe("a member's Hermes profile", () => {
   it("grants nothing when the store cannot be read (fail closed)", async () => {
     await grant({ needsCredential: false });
     fs.writeFileSync(mcp.STAFF_MCP_STORE_PATH, "{ not json");
+    expect((await profile.ensureStaffHermesProfile("maria", root))?.mcpApplied).toBe(false);
+    expect(profileConfig("maria").mcp_servers).toBeUndefined();
+    // …and the owner is told the grants did not apply.
+    expect(await profile.syncHermesStaffMcp(["maria"], root)).toBe(false);
+  });
+
+  it("never plans an OpenClaw grant into a Hermes profile (a dual box switched)", async () => {
+    await mcp.updateStaffMcpStore((store) => ({ ...store, servers: { worddoc: { header: "Authorization", needsCredential: false } } }));
     await profile.ensureStaffHermesProfile("maria", root);
     expect(profileConfig("maria").mcp_servers).toBeUndefined();
   });

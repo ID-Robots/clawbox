@@ -4902,6 +4902,7 @@ const table: Record<string, string> = {
   "users.staffMcp.reason.insecure": "其地址是指向另一台机器的未加密 HTTP，凭据将以明文传输",
   "users.staffMcp.reason.missing": "它已不再配置",
   "users.staffMcp.reason.transport": "只有 Streamable HTTP 服务器可以转给员工使用（在 openclaw.json 中设置 \"transport\": \"streamable-http\"）",
+  "users.staffMcp.reason.transportHermes": "只有 HTTP 服务器可以转给员工使用（此服务器运行本地命令或使用 SSE：请在 config.yaml 中为其设置 url，且不要设置 command）",
   "users.staffMcp.reason.unusable": "其设置无法转发",
   "users.staffMcp.reason.urlCredential": "其地址中包含凭据",
   "users.staffMcp.retry": "重试",

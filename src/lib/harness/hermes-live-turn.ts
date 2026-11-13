@@ -59,6 +59,8 @@ interface LiveTurnState {
 /** The handle the route runs a turn through. */
 export interface LiveTurn {
   readonly id: string;
+  /** When the turn began (epoch ms): a file its reply names is the member's only if written since (TASK-2516). */
+  readonly startedAt: number;
   /** Fires on the owner's Stop and on nothing else. */
   readonly signal: AbortSignal;
   /** Forward a frame to everyone attached, and keep it for whoever attaches later. */
@@ -216,6 +218,7 @@ export function beginLiveTurn(sessionKey: string, opts: { turnId?: string; now?:
   }
   return {
     id: state.id,
+    startedAt: state.startedAt,
     signal: state.controller.signal,
     emit(event, data) {
       if (state.ended) return;

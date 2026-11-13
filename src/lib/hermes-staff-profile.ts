@@ -57,6 +57,8 @@ export interface StaffHermesProfile {
   home: string;
   /** Their own folder: the session's working directory. */
   folder: string;
+  /** False when the member's staff MCP grants could not be applied (they then get none: fail closed). */
+  mcpApplied?: boolean;
 }
 
 type Json = Record<string, unknown>;
@@ -210,9 +212,9 @@ async function writeHermesStaffGrants(root: string, change: { agentId?: string; 
  * token. The guard's grants file is written FIRST; a store or a grants file
  * that cannot be read or written grants nothing (fail closed).
  */
-async function staffHermesMcpServers(username: string, root: string, owner: unknown): Promise<Record<string, unknown>> {
+async function staffHermesMcpServers(username: string, root: string, owner: unknown): Promise<{ servers: Record<string, unknown>; ok: boolean }> {
   const agentId = staffAgentId(username);
-  if (!agentId) return {};
+  if (!agentId) return { servers: {}, ok: true };
   try {
     const [{ ensureRelayTokens, planStaffMcpEntries, hermesStaffMcpServers }, { hermesServerEntries }, { getLocalAiProxyRootUrl }] = await Promise.all([
       import("@/lib/staff-mcp"),
@@ -221,13 +223,13 @@ async function staffHermesMcpServers(username: string, root: string, owner: unkn
     ]);
     const store = await ensureRelayTokens([username]);
     const servers = hermesServerEntries(isRecord(owner) ? owner.mcp_servers : undefined);
-    const entries = planStaffMcpEntries({ staff: [username], store, servers, relayBase: getLocalAiProxyRootUrl() }).get(username) ?? [];
+    const entries = planStaffMcpEntries({ staff: [username], store, servers, relayBase: getLocalAiProxyRootUrl(), harness: "hermes" }).get(username) ?? [];
     await writeHermesStaffGrants(root, { agentId, entries: entries.map((e) => e.name) });
-    return hermesStaffMcpServers(entries);
+    return { servers: hermesStaffMcpServers(entries), ok: true };
   } catch (err) {
     console.error(`[org-staff] the staff MCP grants for ${username} could not be applied; none are given:`, err instanceof Error ? err.message : err);
     await writeHermesStaffGrants(root, { agentId }).catch(() => undefined);
-    return {};
+    return { servers: {}, ok: false };
   }
 }
 
@@ -251,7 +253,8 @@ export async function syncHermesStaffMcp(staff: readonly string[], root: string 
   for (const username of staff) {
     const paths = staffHermesProfilePaths(username, root);
     if (!paths || !fs.existsSync(paths.home)) continue;
-    if (!(await ensureStaffHermesProfile(username, root))) ok = false;
+    const made = await ensureStaffHermesProfile(username, root);
+    if (!made || made.mcpApplied === false) ok = false;
   }
   return ok;
 }
@@ -309,8 +312,8 @@ async function prepareStaffHermesProfile(username: string, root: string): Promis
     // the dashboard could serve: a link, so register-mcp.sh's reinstall of the
     // owner's copy is the member's too.
     await linkTo(path.join(paths.home, "plugins", STAFF_GUARD_HERMES_PLUGIN), path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN));
-    const mcpServers = await staffHermesMcpServers(username, root, owner);
-    const config = staffHermesConfig(owner, paths.folder, mcpServers);
+    const mcp = await staffHermesMcpServers(username, root, owner);
+    const config = staffHermesConfig(owner, paths.folder, mcp.servers);
     const configPath = path.join(paths.home, "config.yaml");
     const mcpBefore = await readMcpServersOf(configPath);
     await writeIfChanged(
@@ -322,7 +325,11 @@ async function prepareStaffHermesProfile(username: string, root: string): Promis
       // changed grant reaches a session already open at its next turn only
       // once the dashboard reloads (src/lib/hermes-mcp-reload.ts).
       const { reloadMcpServers } = await import("@/lib/hermes-mcp-reload");
-      void reloadMcpServers().catch(() => undefined);
+      void reloadMcpServers()
+        .then((reloaded) => {
+          if (!reloaded) console.error(`[org-staff] Hermes did not reload its MCP servers after ${username}'s staff grants changed; an open session keeps its old tools until the dashboard reloads`);
+        })
+        .catch(() => undefined);
     }
     await linkTo(path.join(paths.home, ".env"), path.join(root, ".env"));
     await linkTo(path.join(paths.home, "auth.json"), path.join(root, "auth.json"));
@@ -331,7 +338,7 @@ async function prepareStaffHermesProfile(username: string, root: string): Promis
     } catch {
       // No persona on the owner's side yet: Hermes uses its own default.
     }
-    return paths;
+    return { ...paths, mcpApplied: mcp.ok };
   } catch (err) {
     console.error(`[org-staff] could not prepare ${username}'s Hermes profile:`, err instanceof Error ? err.message : err);
     return null;

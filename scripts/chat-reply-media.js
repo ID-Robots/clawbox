@@ -1,12 +1,10 @@
 "use strict";
 
 /**
- * The files an agent's reply in a MEMBER OF STAFF'S chat names, recorded as
- * that member's (TASK-2516). SERVER ONLY. The one implementation: the OpenClaw
- * user-chat relay (scripts/gateway-user-relay.js, in production-server.js)
- * runs it on a reply before the member's browser sees it, and the Hermes chat
- * route (src/app/setup-api/hermes/chat/route.ts, through
- * src/lib/chat-reply-media.ts) on the turn's final text.
+ * Which files a member of staff may download from their chat, recorded as
+ * theirs in chat-media-owners (TASK-2516). SERVER ONLY. The one
+ * implementation, required by production-server.js's user-chat relay and, for
+ * TypeScript, re-exported by src/lib/chat-reply-media.ts.
  *
  * WHY. An owner-granted MCP tool (a document writer) writes a file, and the
  * agent's reply names it on a `MEDIA:<absolute path>` line, which the chat
@@ -14,23 +12,30 @@
  * what chat-media-owners records as theirs, so without a record the card was
  * a 404 for them.
  *
- * WHAT A REPLY CAN MAKE A MEMBER'S — the reply's text is model output, and a
- * member can ask their assistant to write any line, so a path is recorded only
- * when ALL of these hold:
+ * TWO WAYS A FILE BECOMES A MEMBER'S, each with its own proof:
+ *   - IN THE SHARED CHAT MEDIA TREE: only by PROVENANCE — the result of a
+ *     tool call the member's own assistant made through the staff MCP relay
+ *     with THEIR relay token named the file, and the file was written during
+ *     that call (src/lib/staff-mcp-relay.ts, `recordToolOutputFiles`). The
+ *     owner and every other member write into the same tree, so a timestamp
+ *     alone proves nothing about whose a file there is; a reply naming a path
+ *     in the tree never records it.
+ *   - IN THE MEMBER'S OWN ASSISTANT FOLDER (their OpenClaw staff workspace /
+ *     Hermes profile `workspace/`, which nobody else's assistant writes into):
+ *     by their reply's `MEDIA:` lines, written during their turn — the
+ *     OpenClaw relay (scripts/gateway-user-relay.js) and the Hermes chat turn.
+ *
+ * Either way a path is recorded only when ALL of these hold:
  *   - it is absolute (or `file://`), with no `.`/`..` segment, no NUL, within
  *     4096 characters;
- *   - it lies in one of the member's roots: the chat media tree — minus the
- *     folders ClawBox records its own writes in (`skip`: staged uploads,
- *     generated pictures, spoken replies, a channel's inbound media) — or the
- *     member's own folder (their staff workspace / Hermes profile workspace);
- *     no dot segment below the root;
+ *   - it lies in one of the roots the caller names; in the media tree not in
+ *     the folders ClawBox records its own writes in (`skip`); no dot segment
+ *     below the root;
  *   - every component below the root is a real directory and the file a
  *     regular file with one link: a symlink anywhere refuses it (CWE-59), and
  *     so does a hard link;
- *   - it was written DURING the member's turn: modified no earlier than the
- *     turn began (or, unknown, `DEFAULT_TURN_MS` before the reply) and no
- *     later than the reply, give or take `SLACK_MS`. The owner's older media
- *     and another member's earlier file cannot be claimed by naming them;
+ *   - it was modified between `since` (the call's or turn's start; unknown:
+ *     `DEFAULT_TURN_MS` before) and `until`, give or take `SLACK_MS`;
  *   - nobody else's record covers it (chat-media-owners never reassigns one).
  */
 
@@ -126,6 +131,41 @@ function replyMediaPaths(message) {
     if (local && !out.includes(local)) out.push(local);
     if (out.length >= MAX_PATHS_PER_MESSAGE) break;
   }
+  return out;
+}
+
+/** The absolute paths one string of a tool's result names. */
+const PATH_IN_TEXT_RE = /(?:^|[\s"'`(=:,\[])(\/[^\s"'`<>|*?]+)/g;
+
+/**
+ * Every absolute path the strings of a tool result name: a `MEDIA:` line's
+ * payload, a whole line that is a path, and any `/…` token. Trailing
+ * punctuation is dropped. Capped, like a reply's.
+ * @param {ReadonlyArray<unknown>} strings
+ * @returns {string[]}
+ */
+function pathsInText(strings) {
+  const out = [];
+  const add = (p) => {
+    const value = String(p).trim().replace(/[.,;:)\]]+$/, "");
+    const local = localPathOf(value);
+    if (local && !out.includes(local) && out.length < MAX_PATHS_PER_MESSAGE) out.push(local);
+  };
+  for (const text of strings) {
+    if (typeof text !== "string" || !text.includes("/")) continue;
+    for (const payload of mediaDirectives(text)) add(payload);
+    for (const line of text.split("\n")) if (line.trim().startsWith("/")) add(line);
+    for (const match of text.matchAll(PATH_IN_TEXT_RE)) add(match[1]);
+  }
+  return out;
+}
+
+/** Every string inside a JSON value (a tool result's content, structured content, …), bounded. */
+function stringsIn(value, out = [], depth = 0) {
+  if (out.length >= 256 || depth > 12) return out;
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) stringsIn(item, out, depth + 1);
+  else if (isRecord(value)) for (const item of Object.values(value)) stringsIn(item, out, depth + 1);
   return out;
 }
 
@@ -279,4 +319,6 @@ module.exports = {
   claimable,
   claimReplyMedia,
   historyClaims,
+  pathsInText,
+  stringsIn,
 };

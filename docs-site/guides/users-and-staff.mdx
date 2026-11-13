@@ -63,10 +63,15 @@ When a member's assistant uses a granted tool to write a file, the reply shows i
 download card. Only that member can open it. Another member who asks for it by its exact path
 gets "not found". As the owner, you can still open every file in the chat media folder, as before.
 
-A file counts as the member's when it:
+A file counts as the member's when:
 
-- was written during their own conversation turn, and
-- is in the assistant's chat media folder or in that member's own assistant folder.
+- a tool their own assistant called wrote it into the assistant's chat media folder, during that
+  call, and the tool's answer named it; or
+- their assistant wrote it into their own assistant folder during their conversation turn.
 
-A path anywhere else on the box, a link that points elsewhere, or a file that already belongs
-to another member is never handed out this way.
+A file in the shared chat media folder never becomes a member's just because their assistant's
+reply mentions it. A path anywhere else on the box, a link that points elsewhere, or a file that
+already belongs to another member is never handed out this way.
+
+Grants are kept per assistant. If your ClawBox can switch between OpenClaw and Hermes, a grant
+you made on one does not carry over to a server with the same name on the other.

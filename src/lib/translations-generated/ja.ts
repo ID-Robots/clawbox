@@ -4902,6 +4902,7 @@ const table: Record<string, string> = {
   "users.staffMcp.reason.insecure": "アドレスが別のマシンへの暗号化されていない HTTP のため、認証情報が平文で送られてしまいます",
   "users.staffMcp.reason.missing": "もう設定されていません",
   "users.staffMcp.reason.transport": "スタッフに中継できるのは Streamable HTTP サーバーだけです（openclaw.json で \"transport\": \"streamable-http\" を指定してください）",
+  "users.staffMcp.reason.transportHermes": "スタッフに中継できるのは HTTP サーバーだけです（このサーバーはローカルコマンドを実行するか SSE を使っています。config.yaml で command なしの url を指定してください）",
   "users.staffMcp.reason.unusable": "設定を中継できません",
   "users.staffMcp.reason.urlCredential": "アドレスに認証情報が含まれています",
   "users.staffMcp.retry": "再試行",

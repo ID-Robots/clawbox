@@ -1890,6 +1890,7 @@ export const nl: Record<string, string> = {
   "users.staffMcp.allow": "Medewerkers mogen {name} gebruiken",
   "users.staffMcp.notUsable": "Kan niet aan medewerkers worden aangeboden: {reason}",
   "users.staffMcp.reason.transport": "alleen Streamable HTTP-servers kunnen aan medewerkers worden doorgegeven (zet in openclaw.json \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "alleen HTTP-servers kunnen aan medewerkers worden doorgegeven (deze start een lokale opdracht of gebruikt SSE: geef hem in config.yaml een url zonder command)",
   "users.staffMcp.reason.urlCredential": "het adres bevat inloggegevens",
   "users.staffMcp.reason.unusable": "de instellingen kunnen niet worden doorgegeven",
   "users.staffMcp.reason.missing": "hij is niet meer ingesteld",

@@ -4902,6 +4902,7 @@ const table: Record<string, string> = {
   "users.staffMcp.reason.insecure": "het adres is onversleutelde HTTP naar een andere machine, dus inloggegevens zouden onversleuteld reizen",
   "users.staffMcp.reason.missing": "hij is niet meer ingesteld",
   "users.staffMcp.reason.transport": "alleen Streamable HTTP-servers kunnen aan medewerkers worden doorgegeven (zet in openclaw.json \"transport\": \"streamable-http\")",
+  "users.staffMcp.reason.transportHermes": "alleen HTTP-servers kunnen aan medewerkers worden doorgegeven (deze start een lokale opdracht of gebruikt SSE: geef hem in config.yaml een url zonder command)",
   "users.staffMcp.reason.unusable": "de instellingen kunnen niet worden doorgegeven",
   "users.staffMcp.reason.urlCredential": "het adres bevat inloggegevens",
   "users.staffMcp.retry": "Opnieuw proberen",
