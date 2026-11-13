@@ -1124,7 +1124,7 @@ export const fr: Record<string, string> = {
   "codingAgent.prBodyIncludesTaskFailed": "Impossible de changer la part de la tâche que montre la pull request.",
   "codingAgent.genMediaLabel": "Autoriser les images et la parole",
   "codingAgent.genMediaHint": "Une exécution peut faire dessiner des images par ce boîtier et enregistrer des phrases dans des fichiers audio pour son projet — au plus vingt images et quarante clips par exécution. Les images sont prises sur votre quota ClawBox AI ; la parole utilise la voix de ce boîtier, locale ou celle d'un fournisseur cloud facturé à part.",
-  "codingAgent.genMediaLocked": "Désactivé : le verrou « IA locale uniquement » est actif, et les images et la parole des exécutions de code sont produites par le cloud de ClawBox AI.",
+  "codingAgent.genMediaLocked": "Désactivé : le verrou « IA locale uniquement » est actif, donc les exécutions de code ne produisent ni images ni parole.",
   "codingAgent.genMediaFailed": "Impossible de modifier le réglage des médias.",
   "codingAgent.realBrowserLabel": "Vérifier dans le navigateur de cette box",
   "codingAgent.realBrowserHint": "Une exécution vérifie son travail dans le Chromium affiché sur l'écran de cette box, que vous pouvez regarder dans l'application Navigateur de l'agent ; désactivé, elle passe par un navigateur invisible.",

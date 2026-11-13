@@ -57,8 +57,9 @@ export type MediaErrorCode =
   | "bad_request"
   | "no_run"
   | "switched_off"
-  // The local-only AI lock (TASK-2501): pictures and clips are drawn by
-  // ClawBox AI's cloud, so a locked box makes none, whatever a run was given.
+  // The local-only AI lock (TASK-2501): pictures are drawn by ClawBox AI's
+  // cloud and a clip may be spoken by a cloud voice, so a locked box makes
+  // none, whatever a run was given.
   | "cloud_ai_locked"
   | "cap"
   | "outside"
@@ -156,7 +157,7 @@ export async function resolveMediaTarget(request: MediaRequest): Promise<
     return {
       ok: false,
       response: mediaError(
-        "The local-only AI lock is on: pictures and speech are made by ClawBox AI's cloud, so coding runs on this box make none.",
+        "The local-only AI lock is on, so coding runs on this box make no pictures or speech.",
         "cloud_ai_locked",
         409,
       ),

@@ -350,6 +350,8 @@ TIER_MODEL="deepseek-v4-flash"
 # Claude Code's own default. An inherited CLAUDE_CODE_AUTO_COMPACT_WINDOW never
 # decides it on this branch.
 CLAUDE_DS_1M_WINDOW=1048576
+# The smallest CLAUDE_CODE_AUTO_COMPACT_WINDOW Claude Code takes as given.
+CLAUDE_COMPACT_WINDOW_MIN=100000
 autocompact_window_for() {
   case "${CLAUDE_DS_AUTOCOMPACT_WINDOW:-}" in
     off) return 0 ;;
@@ -415,6 +417,13 @@ elif [ "$PROVIDER" = "local" ]; then
   case "$LOCAL_MAX_OUTPUT" in ""|*[!0-9]*) die "the box's local coding route answered no longest answer for its engine" ;; esac
   [ -n "$LOCAL_MODEL" ] || die "the box's local coding route answered no engine model"
   unset CLAWBOX_AI_PROXY_URL CLAUDE_CODE_SUBAGENT_MODEL
+  # The route is on this box, and the session's token goes there alone: an
+  # inherited HTTP(S)_PROXY must not carry it through a proxy. Loopback goes
+  # first in NO_PROXY — both spellings, which Claude Code reads — rather than
+  # the proxy being unset, so the run's own tools (a package install behind
+  # the owner's proxy) still reach it.
+  export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
+  export no_proxy="127.0.0.1,localhost,::1${no_proxy:+,$no_proxy}"
 
   MODEL="$LOCAL_MODEL"
   # Claude Code believes a 200k window for a model it does not know, and a 1M
@@ -443,12 +452,33 @@ elif [ "$PROVIDER" = "local" ]; then
   # The auto-compact window from the engine's own: 84% of it, the margin the
   # ClawBox AI branch keeps below a 1M window, so a whole turn of tool results
   # still fits after the last check. CLAUDE_DS_AUTOCOMPACT_WINDOW overrides it.
+  #
+  # Claude Code reads CLAUDE_CODE_AUTO_COMPACT_WINDOW no lower than 100k (a
+  # smaller value is taken as 100k — on 2.1.283 and 2.1.321 alike), and for a
+  # model it does not know it believes 200k: an engine whose 84% is under that
+  # would grow past its own window before Claude Code compacted. There the
+  # window is given AT the minimum and the point inside it is moved instead:
+  # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, the share of the window it compacts at
+  # (min(window x pct, window - 13k) in both versions), rounded down so it
+  # compacts no later than 84% of the engine's own.
+  LOCAL_COMPACT_AT=""
+  unset CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
   case "${CLAUDE_DS_AUTOCOMPACT_WINDOW:-}" in
-    "") export CLAUDE_CODE_AUTO_COMPACT_WINDOW=$(( LOCAL_CONTEXT * 84 / 100 )) ;;
+    "") LOCAL_COMPACT_AT=$(( LOCAL_CONTEXT * 84 / 100 )) ;;
     off) unset CLAUDE_CODE_AUTO_COMPACT_WINDOW ;;
     0*|*[!0-9]*) die "CLAUDE_DS_AUTOCOMPACT_WINDOW must be a number of tokens or 'off', not: $CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
-    *) export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
+    *) LOCAL_COMPACT_AT="$CLAUDE_DS_AUTOCOMPACT_WINDOW" ;;
   esac
+  if [ -n "$LOCAL_COMPACT_AT" ]; then
+    if [ "$LOCAL_COMPACT_AT" -lt "$CLAUDE_COMPACT_WINDOW_MIN" ]; then
+      export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$CLAUDE_COMPACT_WINDOW_MIN"
+      LOCAL_COMPACT_PCT=$(( LOCAL_COMPACT_AT * 100 / CLAUDE_COMPACT_WINDOW_MIN ))
+      [ "$LOCAL_COMPACT_PCT" -ge 1 ] || LOCAL_COMPACT_PCT=1
+      export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="$LOCAL_COMPACT_PCT"
+    else
+      export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$LOCAL_COMPACT_AT"
+    fi
+  fi
 
   HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
   HARNESS_STATE_DIR="$CLAUDE_CONFIG_DIR"
@@ -706,6 +736,6 @@ seed_harness_config "$PWD"
 # plan picks the model, not the wrapper, and on Anthropic the credential in use
 # is not the one the rest of the box runs on.
 printf 'claude-ds: %s (%s) — state in %s%s\n' "$PROVIDER_LABEL" "$MODEL" "$HARNESS_STATE_DIR" \
-  "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:+ — auto-compact window $CLAUDE_CODE_AUTO_COMPACT_WINDOW tokens}" >&2
+  "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:+ — auto-compact window $CLAUDE_CODE_AUTO_COMPACT_WINDOW tokens}${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:+, compacting at $CLAUDE_AUTOCOMPACT_PCT_OVERRIDE% of it}" >&2
 
 exec claude "${EFFORT_ARGS[@]}" "${SOURCES_ARGS[@]}" "$@"

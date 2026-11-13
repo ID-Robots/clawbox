@@ -1072,7 +1072,9 @@ describe("coding_agent_run and the role settings under the local-only AI lock (T
     expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", provider: "local" });
   });
 
-  it("refuses a model named for the box's engine, which serves one", async () => {
+  // With no lock, where `model` is a parameter at all: under the lock the
+  // schema has none to name (see "offers the box's engine alone" above).
+  it("refuses a model named for the box's engine on a box with no lock, since the engine serves one", async () => {
     const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "local", model: "claude-opus-5-5" });
     expect(out.isError).toBe(true);
     expect(apiPost).not.toHaveBeenCalled();

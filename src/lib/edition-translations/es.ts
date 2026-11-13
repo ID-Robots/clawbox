@@ -1119,7 +1119,7 @@ export const es: Record<string, string> = {
   "codingAgent.prBodyIncludesTaskFailed": "No se pudo cambiar cuánto de la tarea muestra la pull request.",
   "codingAgent.genMediaLabel": "Permitir imágenes y voz a las ejecuciones",
   "codingAgent.genMediaHint": "Una ejecución puede hacer que este equipo dibuje imágenes y grabe frases en archivos de sonido para su proyecto: como máximo veinte imágenes y cuarenta clips por ejecución. Las imágenes salen de tu cuota de ClawBox AI; el habla usa la voz de este equipo, local o de un proveedor en la nube que la cobra por separado.",
-  "codingAgent.genMediaLocked": "Desactivado: el bloqueo «solo IA local» está activado, y las imágenes y el habla de las ejecuciones de código las hace la nube de ClawBox AI.",
+  "codingAgent.genMediaLocked": "Desactivado: el bloqueo «solo IA local» está activado, así que las ejecuciones de código no generan imágenes ni habla.",
   "codingAgent.genMediaFailed": "No se pudo cambiar el ajuste de medios.",
   "codingAgent.realBrowserLabel": "Verificar en el navegador de esta caja",
   "codingAgent.realBrowserHint": "Una ejecución comprueba su trabajo en el Chromium de la pantalla de esta caja, que puedes mirar en la app Navegador del agente; desactivado, usa un navegador invisible.",

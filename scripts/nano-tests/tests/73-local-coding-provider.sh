@@ -39,17 +39,32 @@ RUN=${NANO_RUN_ID:-$$}
 DIR="/tmp/nano-localcode-$RUN"
 note "agent runtime: $RUNTIME"
 
+# The saved keys are the only copy of what the box had: the folder holding them
+# goes only once keys.cjs says KEYS_RESTORED. Anything else (a store it could
+# not read, a copy it could not parse) keeps the folder and fails the test,
+# saying where the copy is.
+#
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
 # shellcheck disable=SC2016,SC2317
 cleanup() {
-  board '
+  local out
+  out=$(board '
     [ -f "$1/sampler.stop" ] || touch "$1/sampler.stop" 2>/dev/null
     [ -f "$1/mock.pid" ] && kill "$(cat "$1/mock.pid")" 2>/dev/null
     if [ -f "$1/saved.json" ]; then
-      cd "$REPO" && node "$1/keys.cjs" off data/config.json "$1/saved.json" "$1/saved-key"
+      restored=$(cd "$REPO" && node "$1/keys.cjs" off data/config.json "$1/saved.json" "$1/saved-key" 2>&1)
+      printf "%s\n" "$restored"
+      case "$restored" in
+        *KEYS_RESTORED*) ;;
+        *) echo "KEYS_KEPT $1"; exit 0 ;;
+      esac
     fi
     rm -rf "$1"
-  ' "$DIR" | sed 's/^/# cleanup: /'
+  ' "$DIR")
+  printf '%s\n' "$out" | sed 's/^/# cleanup: /'
+  if printf '%s\n' "$out" | grep -q '^KEYS_KEPT '; then
+    not_ok "the box's keys were not put back; the saved copy is kept on the board in $DIR"
+  fi
   remove_project_dir
 }
 trap cleanup EXIT
@@ -217,8 +232,14 @@ else
 fi
 SAMPLES=$(printf '%s' "$EGRESS" | jq -r '.samples // 0' 2>/dev/null)
 EXTERNAL=$(printf '%s' "$EGRESS" | jq -r '.external | length' 2>/dev/null)
-if [ "${SAMPLES:-0}" -gt 0 ] && [ "$EXTERNAL" = 0 ]; then
+# At least one connection the sampler pinned on a run process — to the box's
+# own route counts — or "zero off the box" would hold for a sampler that never
+# saw the run at all.
+SEEN=$(printf '%s' "$EGRESS" | jq -r '.endpoints // {} | length' 2>/dev/null)
+if [ "${SAMPLES:-0}" -gt 0 ] && [ "$EXTERNAL" = 0 ] && [ "${SEEN:-0}" -gt 0 ] 2>/dev/null; then
   ok "zero connections off the box from the run's processes ($SAMPLES samples; endpoints: $(printf '%s' "$EGRESS" | jq -c '.endpoints'))"
+elif [ "$EXTERNAL" = 0 ]; then
+  not_ok "the sampler saw no connection from the run's processes at all, so it proves nothing ($SAMPLES samples)"
 else
   not_ok "the run's processes connected off the box: $(printf '%s' "$EGRESS" | jq -c '.external') ($SAMPLES samples)"
 fi
