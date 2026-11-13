@@ -361,12 +361,12 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   const headers = downstreamHeaders(upstream);
   if (listIds.size === 0 || !upstream.ok) {
     const sse = (upstream.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
-    let body = upstream.body;
+    let body: ReadableStream<Uint8Array> | null = upstream.body as ReadableStream<Uint8Array> | null;
     // A streamed answer is still read event by event: any tool list in it
     // (whatever asked for it) reaches the member filtered.
     if (body && sse) body = filteredSse(body, admission.filter, cache);
     if (body && upstream.ok && recordOutputs) body = recordingToolResults(body, sse, callIds, recordOutputs);
-    return new Response(body, { status: upstream.status, headers });
+    return new Response(body as BodyInit | null, { status: upstream.status, headers });
   }
   const body = await readBounded(upstream.body, MAX_LIST_RESPONSE_BYTES);
   if (body === null) return refuse(502, "upstream_too_large", "The MCP server's tool list is too large to check.");
