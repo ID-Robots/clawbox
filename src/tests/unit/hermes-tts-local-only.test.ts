@@ -19,6 +19,11 @@ vi.mock("@/lib/hermes-config-cache", () => ({
 const dashboardFetch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-dashboard-auth", () => ({ dashboardFetch: (...a: unknown[]) => dashboardFetch(...a) }));
 vi.mock("@/lib/harness/credentials", () => ({ CLAWBOX_AI_PROXY_URL: "https://clawbox.com/api/ai" }));
+const markers = vi.hoisted(() => ({ standdown: vi.fn(async () => {}), lock: vi.fn(async () => {}) }));
+vi.mock("@/lib/hermes-voice-standdown", () => ({
+  rememberHermesVoiceStanddown: (...a: unknown[]) => markers.standdown(...(a as [])),
+  rememberHermesVoiceLock: (...a: unknown[]) => markers.lock(...(a as [])),
+}));
 
 const LOCAL = {
   "tts.providers.clawbox-local.type": "command",
@@ -37,6 +42,8 @@ beforeEach(async () => {
     new Response(JSON.stringify({ ok: true, data_url: `data:audio/wav;base64,${WAV}`, mime_type: "audio/wav" }), { status: 200 }),
   );
   vi.spyOn(console, "warn").mockImplementation(() => {});
+  markers.standdown.mockClear();
+  markers.lock.mockClear();
   lib = await import("@/lib/hermes-tts");
 });
 
@@ -98,5 +105,37 @@ describe("speakWithHermes under the lock", () => {
     locked.value = false;
     expect((await lib.speakWithHermes("hello")).ok).toBe(true);
     expect(cliMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("what the move remembers, so lifting the lock gives it back", () => {
+  it("remembers ClawBox AI's own cloud voice through the plan's stand-down", async () => {
+    hermesConfig.values = {
+      ...LOCAL,
+      "tts.provider": "openai",
+      "tts.openai.base_url": "https://clawbox.com/api/ai",
+      "tts.openai.api_key": "claw_token",
+      "tts.openai.voice": "nova",
+    };
+    await lib.speakWithHermes("hello");
+    expect(markers.standdown).toHaveBeenCalledWith("nova");
+    expect(markers.lock).not.toHaveBeenCalled();
+    expect(markers.standdown.mock.invocationCallOrder[0]).toBeLessThan(cliMock.mock.invocationCallOrder[0]);
+  });
+
+  it("remembers an owner's own pick by name, and nothing for the factory edge", async () => {
+    hermesConfig.values = { ...LOCAL, "tts.provider": "elevenlabs" };
+    await lib.speakWithHermes("hello");
+    expect(markers.lock).toHaveBeenCalledWith("elevenlabs");
+    markers.lock.mockClear();
+    hermesConfig.values = { ...LOCAL, "tts.provider": "openai", "tts.openai.base_url": "http://192.168.7.9:8880/v1", "tts.openai.api_key": "sk-own" };
+    await lib.speakWithHermes("hello");
+    expect(markers.lock).toHaveBeenCalledWith("openai");
+    expect(markers.standdown).not.toHaveBeenCalled();
+    markers.lock.mockClear();
+    hermesConfig.values = { ...LOCAL, "tts.provider": "edge" };
+    await lib.speakWithHermes("hello");
+    expect(markers.lock).not.toHaveBeenCalled();
+    expect(markers.standdown).not.toHaveBeenCalled();
   });
 });

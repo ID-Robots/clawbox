@@ -1630,7 +1630,10 @@ if LOCKED:
     ours_slot = not slot_is_empty and (key_is_ours or base_url.rstrip("/") in OUR_PROXIES)
     if provider == LOCAL_PROVIDER:
         if ours_slot:
-            say("withdraw keep")
+            # Our slot goes, but a stand-down the app wrote when it moved the
+            # box (`speakWithHermes`) is KEPT: it is what restores the cloud
+            # voice once the lock is lifted.
+            say("withdraw keep-marker")
         say("hold local-only AI is on and this box already speaks for itself")
     if not local_resolvable():
         # Nowhere safe to move it: a name the harness cannot resolve is Edge.
@@ -1959,6 +1962,9 @@ TOKENPY
     CLAWBOX_VOICE_STOOD_DOWN=true
     case "$CLAWBOX_VOICE_TARGET" in
       keep) hermes_voice_stamp clear || log "could not clear the old voice restoration marker" ;;
+      # The local-only AI lock (TASK-2501): the box already speaks for itself;
+      # only our slot goes, and the restoration marker stays for the unlock.
+      keep-marker) ;;
       "$CLAWBOX_VOICE_LOCAL")
         if ! hermes_voice_stamp remember; then
           log "could not remember the cloud voice — leaving its selection and definition unchanged for retry"
@@ -1995,12 +2001,14 @@ TOKENPY
       # marker remembers the previous voice for a later entitled restoration.
       # An explicit owner selection clears that marker from the Voice panel.
       if hermes_voice_write config unset tts.openai; then
-        if [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
+        if [ "$CLAWBOX_VOICE_TARGET" = keep-marker ]; then
+          log "removed the ClawBox AI cloud voice: local-only AI is on, and this box already speaks with its own voice"
+        elif [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
           log "removed the ClawBox AI cloud voice: this box's plan no longer includes it, and its speech selection was already elsewhere"
         else
           log "removed the ClawBox AI cloud voice: this box's plan no longer includes it, and it speaks from the box again"
         fi
-      elif [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
+      elif [ "$CLAWBOX_VOICE_TARGET" = keep ] || [ "$CLAWBOX_VOICE_TARGET" = keep-marker ]; then
         log "could not remove the ClawBox AI cloud voice definition (exit $CLAWBOX_VOICE_RC) — this box's speech selection is elsewhere, so nothing points at it and no request is made; the next start will try again"
       else
         log "moved this box off the ClawBox AI cloud voice but could not remove its definition (exit $CLAWBOX_VOICE_RC) — nothing points at it, so no request is made; the next start will try again"

@@ -16,7 +16,11 @@
  * link-local or a cloud metadata service, the External engine's own rule
  * (`refusedEngineHost`). A name that does not resolve is no engine at all.
  * Redirects are not followed: a 3xx could carry the recording and the key to a
- * host nobody checked.
+ * host nobody checked. And THE ADDRESS CHECKED IS THE ADDRESS DIALLED: the
+ * request runs on Node's own http(s) client with a lookup that answers only
+ * addresses that pass the rule ({@link lanFetch}), so a name whose DNS answer
+ * changes between a check and the connect (rebinding) cannot carry a recording
+ * off the network.
  *
  * The record lives in the device store under {@link STT_ENDPOINT_STORE_KEY}
  * (no secret in it); the optional key has its own 0600 file beside the
@@ -32,6 +36,8 @@
 
 import crypto from "crypto";
 import fs from "fs";
+import http from "http";
+import https from "https";
 import net from "net";
 import { lookup as dnsLookup } from "dns/promises";
 import path from "@/lib/runtime-path";
@@ -264,6 +270,89 @@ export async function endpointHostRefusal(baseUrl: string, lookupImpl: LookupFn 
   return addresses.every(({ address }) => isLanAddress(address)) ? null : "a name that resolves outside the local network";
 }
 
+/**
+ * The address a connection to `hostname` may dial, resolved ONCE and checked:
+ * every answer must be on the owner's network, and the first is the one used.
+ */
+async function checkedAddress(hostname: string, lookupImpl: LookupFn): Promise<{ address: string; family: 4 | 6 }> {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (net.isIP(host)) {
+    if (!isLanAddress(host)) throw new Error("address outside the local network");
+    return { address: host, family: net.isIPv6(host) ? 6 : 4 };
+  }
+  const answers = await lookupImpl(host);
+  if (answers.length === 0 || !answers.every(({ address }) => isLanAddress(address))) {
+    throw new Error("name resolves outside the local network");
+  }
+  const address = answers[0].address;
+  return { address, family: net.isIPv6(address) ? 6 : 4 };
+}
+
+type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | { address: string; family: number }[], family?: number) => void;
+
+/**
+ * `fetch` for the owner's speech server, on Node's http(s) client: the
+ * connection resolves its host through {@link checkedAddress}, so what was
+ * checked is what is dialled. No redirect is followed (http.request never
+ * does), no proxy is used, and at most {@link MAX_ANSWER_BYTES} of an answer
+ * is read.
+ */
+export function lanFetch(lookupImpl: LookupFn = defaultLookup): typeof fetch {
+  return (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
+    const headers: Record<string, string> = {};
+    new Headers(init.headers).forEach((value, key) => { headers[key] = value; });
+    let payload: Buffer | null = null;
+    if (init.body !== undefined && init.body !== null) {
+      const encoded = new Response(init.body as BodyInit);
+      payload = Buffer.from(await encoded.arrayBuffer());
+      const type = encoded.headers.get("content-type");
+      if (type && !headers["content-type"]) headers["content-type"] = type;
+      headers["content-length"] = String(payload.length);
+    }
+    const client = url.protocol === "https:" ? https : http;
+    return await new Promise<Response>((resolve, reject) => {
+      const req = client.request(url, {
+        method: init.method ?? "GET",
+        headers,
+        signal: init.signal ?? undefined,
+        agent: false,
+        lookup: ((hostname: string, options: { all?: boolean }, callback: LookupCallback) => {
+          checkedAddress(hostname, lookupImpl).then(
+            ({ address, family }) => (options?.all ? callback(null, [{ address, family }]) : callback(null, address, family)),
+            (err: Error) => callback(Object.assign(err, { code: "ECLAWBOXREFUSED" }), "", 4),
+          );
+        }) as unknown as net.LookupFunction,
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on("data", (chunk: Buffer) => {
+          total += chunk.length;
+          if (total > MAX_ANSWER_BYTES + 1) {
+            res.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          const status = res.statusCode ?? 502;
+          const out = new Headers();
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (value !== undefined) out.set(key, Array.isArray(value) ? value.join(", ") : value);
+          }
+          const empty = status === 204 || status === 205 || status === 304;
+          resolve(new Response(empty ? null : Buffer.concat(chunks), { status, headers: out }));
+        });
+        res.on("error", reject);
+        res.on("close", () => { if (!res.complete) reject(new Error("the answer was cut off")); });
+      });
+      req.on("error", reject);
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }) as typeof fetch;
+}
+
 // ── Talking to the server ────────────────────────────────────────────────────
 
 function networkCode(err: unknown): string {
@@ -335,7 +424,7 @@ export async function transcribeAtEndpoint(
     : AbortSignal.timeout(timeoutMs);
   let res: Response;
   try {
-    res = await (options.fetchImpl ?? fetch)(`${record.baseUrl}/audio/transcriptions`, {
+    res = await (options.fetchImpl ?? lanFetch(options.lookupImpl))(`${record.baseUrl}/audio/transcriptions`, {
       method: "POST",
       headers: { Accept: "application/json", ...authHeader(apiKey) },
       body: form,
@@ -408,7 +497,7 @@ export async function probeSttEndpoint(
   const started = Date.now();
   let res: Response;
   try {
-    res = await (options.fetchImpl ?? fetch)(`${record.baseUrl}/models`, {
+    res = await (options.fetchImpl ?? lanFetch(options.lookupImpl))(`${record.baseUrl}/models`, {
       method: "GET",
       headers: { Accept: "application/json", ...authHeader(apiKey) },
       redirect: "manual",

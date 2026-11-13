@@ -1223,3 +1223,31 @@ d("register-mcp.sh — the voice under the local-only AI lock", () => {
     expect(r.stdout).toContain("already speaks for itself");
   });
 });
+
+d("register-mcp.sh — a box the app already moved under the lock", () => {
+  it("takes our slot back but keeps the stand-down, so the cloud voice returns once the lock is lifted", () => {
+    writeStore({ ai_cloud_lock: true, clawai_token: TOKEN, clawai_plan_tier: ENTITLED_TIER });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: clawbox-local\n  openai:\n    base_url: ${PROXY}\n    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n`);
+    // What `speakWithHermes` writes before it moves the box (hermes-voice-standdown.ts).
+    fs.writeFileSync(`${configPath}.clawbox-voice-standdown.json`, JSON.stringify({ version: 1, provider: "clawbox-local" }));
+
+    const r = run();
+    expect(at("tts.openai")).toBeUndefined();
+    expect(fs.existsSync(`${configPath}.clawbox-voice-standdown.json`)).toBe(true);
+    expect(r.stdout).toContain("local-only AI is on, and this box already speaks with its own voice");
+
+    writeStore({ ai_cloud_lock: false, clawai_token: TOKEN, clawai_plan_tier: ENTITLED_TIER });
+    run();
+    expect(at("tts.provider")).toBe("openai");
+    expect(at("tts.openai.base_url")).toBe(PROXY);
+  });
+
+  it("gives back an owner's pick the app remembered", () => {
+    writeStore({ ai_cloud_lock: false });
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: clawbox-local\n`);
+    fs.writeFileSync(lockMarker(), JSON.stringify({ version: 1, provider: "elevenlabs" }));
+    run();
+    expect(at("tts.provider")).toBe("elevenlabs");
+    expect(fs.existsSync(lockMarker())).toBe(false);
+  });
+});
