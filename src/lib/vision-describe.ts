@@ -24,6 +24,7 @@
  */
 import { get as configGet } from "@/lib/config-store";
 import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
+import { CLOUD_AI_LOCKED_CODE } from "@/lib/ai-cloud-lock";
 import { clawboxAiVisionModelFor, probeClawboxAiVision, readClawboxAiVision } from "@/lib/clawbox-ai-vision";
 import { resolveFeatureEngine } from "@/lib/feature-engine";
 import { localEngineSeesPictures, postLocalChat, type LocalEngine } from "@/lib/local-engine";
@@ -138,6 +139,8 @@ export interface VisionDescription {
   vision?: { attempts: VisionAttempt[] };
   text: string | null;
   error: string | null;
+  /** `cloud_ai_locked` when the local-only AI lock refused the cloud model (TASK-2501). */
+  code?: string;
 }
 
 /** One attempt's answer, plus whether asking again could change it. */
@@ -291,7 +294,9 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
     const attempts: VisionAttempt[] = [];
     return await withOneRetry((ms) => askLocal(engine.engine, prompt, imageBase64, mime, ms, attempts), attempts, deadline);
   }
-  if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return { text: null, error: LOCKED_NO_ENGINE_ERROR };
+  // The local-only AI lock (TASK-2501) with no model of its own: the picture
+  // never leaves the box, and the route answers the lock's 409 with its code.
+  if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return { text: null, error: LOCKED_NO_ENGINE_ERROR, code: CLOUD_AI_LOCKED_CODE };
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || !token.trim()) {
     return { text: null, error: "ClawBox AI is not connected on this device" };

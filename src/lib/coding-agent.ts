@@ -65,6 +65,7 @@ import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-wo
  */
 
 import { execFile, spawn, type ChildProcess } from "child_process";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked, isCloudAiLockedSync } from "@/lib/ai-cloud-lock";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
@@ -2712,6 +2713,21 @@ export class CodingAgentError extends Error {
   }
 }
 
+/** Why no coding run starts under the local-only AI lock (TASK-2501). */
+const CODING_AGENT_CLOUD_LOCKED =
+  "Local-only AI is on: the coding agent runs on a cloud model (Anthropic, OpenAI or ClawBox AI), so it is off while the lock is on.";
+
+/**
+ * Refuse a coding run under the local-only AI lock: every provider the coding
+ * agent has is a cloud model. A `not_ready` CodingAgentError, like any other
+ * missing piece, carrying the lock's `code` for the routes to pass on.
+ */
+async function assertCodingAgentUnlocked(): Promise<void> {
+  if (await isCloudAiLocked()) {
+    throw Object.assign(new CodingAgentError("not_ready", CODING_AGENT_CLOUD_LOCKED), { code: CLOUD_AI_LOCKED_CODE });
+  }
+}
+
 /**
  * Refused ONLY because the box is already running every run the owner allows
  * (`coding_agent_max_parallel_runs`): the one refusal the run queue turns into
@@ -4121,7 +4137,7 @@ const CODEX_MISSING =
  * provider's, because that is the run a caller who names nothing gets.
  */
 async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope] = await Promise.all([
+  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope, cloudLocked] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
@@ -4130,6 +4146,7 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     // Cached for a minute inside the module, so a status poll pays for the bus
     // round trip at most once a minute.
     probeSystemdRun(),
+    isCloudAiLocked(),
   ]);
   const claudeInstalled = claudePath !== null;
   const capabilityDropAvailable = setprivPath !== null;
@@ -4169,6 +4186,9 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   const harnessHealthy = fault === null;
   const faultProblem = fault ? harnessFaultProblem(fault) : null;
   if (faultProblem) shared.push(faultProblem);
+  // The local-only AI lock (TASK-2501): every provider the coding agent has —
+  // Anthropic, OpenAI and ClawBox AI — is a cloud model, so none of them runs.
+  if (cloudLocked) shared.unshift(CODING_AGENT_CLOUD_LOCKED);
   const credentialProblem = (id: CodingProvider): string[] => {
     if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
     if (id === "openai") {
@@ -4334,6 +4354,7 @@ function normalizeRequestedModel(provider: unknown, raw: unknown): string | null
  * "Claude Code is not installed": a sentence for the owner, not a retry.
  */
 async function assertProviderReady(provider: CodingProvider): Promise<void> {
+  await assertCodingAgentUnlocked();
   if (provider === "anthropic") {
     const anthropic = await getAnthropicConnection();
     if (!anthropic.connected) throw new CodingAgentError("not_ready", ANTHROPIC_MISSING);
@@ -11914,6 +11935,15 @@ async function continueOnAnotherAccount(
   }
   if (run.status !== "running" || live.has(run.id)) return;
 
+  // The local-only AI lock (TASK-2501) went on while this run waited for an
+  // account: no new process is started on a cloud model. The run ends failed,
+  // in the lock's words, through finishRun's ordinary tail.
+  if (await isCloudAiLocked()) {
+    state.forcedAccountFailure = CODING_AGENT_CLOUD_LOCKED;
+    finishRun(run, state, exitCode);
+    return;
+  }
+
   if (!prepared) {
     // Nobody else can answer after all (the next account's credential turned
     // out dead, or could not be renewed just now). Wait for the first reset,
@@ -11993,6 +12023,13 @@ async function continueOnAnotherAccount(
       ? `, restarted with its credential read again from the store (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`
       : `, failed over in the owner's order (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`;
   console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}${how}`);
+  // Asked once more with no await between the answer and the spawn
+  // (TASK-2501): the lock may have gone on while the secrets above were read.
+  if (isCloudAiLockedSync()) {
+    state.forcedAccountFailure = CODING_AGENT_CLOUD_LOCKED;
+    finishRun(run, state, exitCode);
+    return;
+  }
   try {
     // The SAME record and session: `continuingRecord`, so the counters add up,
     // and the session's own transcript is where the work is — the task is not
@@ -12457,7 +12494,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // reply cut to what fits beside the context (runContextReply). Claude Code
   // compacts before its first request — the wrapper's auto-compact window is
   // far below what the session holds — and goes on from the summary.
-  if (contextCarryOn && run.status === "failed" && run.sessionId) {
+  // Not under the local-only AI lock (TASK-2501), which may have gone on while
+  // this run worked: the carry-on would be a new process on a cloud model.
+  if (contextCarryOn && run.status === "failed" && run.sessionId && !isCloudAiLockedSync()) {
     const { overflow, maxReplyTokens, attempt } = contextCarryOn;
     run.contextRecoveries = attempt;
     run.status = "running";
@@ -12537,6 +12576,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
+    // Nor under the local-only AI lock (TASK-2501): the retry is a new process
+    // on a cloud model. Asked last, so an ordinary exit reads no file for it.
+    && !isCloudAiLockedSync()
   ) {
     {
       run.retries = 1;
@@ -13947,6 +13989,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const givenExperience = requireExperience(input.experience);
   const givenEffort = requireEffort(input.effort);
   const givenBase = requireBaseBranch(input.baseBranch);
+  // The local-only AI lock (TASK-2501), before anything of a run is touched:
+  // a resume would otherwise put its worktree back on disk first. The same
+  // check in `assertProviderReady` stays as the backstop for other callers.
+  await assertCodingAgentUnlocked();
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -15586,6 +15632,9 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
+  // Before the readiness verdict, which also names the lock but as a plain
+  // sentence: a resume or a draft's start keeps the lock's code (TASK-2501).
+  await assertCodingAgentUnlocked();
   const readiness = await checkReadiness();
   // The provider THIS run will use, when the caller knows it — not the owner's
   // default. `readiness.ready` is the default provider's verdict, and

@@ -19,6 +19,7 @@
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLockedError } from "@/lib/ai-cloud-lock";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, getRun, httpStatusForCodingError } from "@/lib/coding-agent";
 
@@ -89,7 +90,9 @@ export function runLifecycleRoute({ verb, noun = "run", idFrom = "body", act }: 
       return await act(id, body, request);
     } catch (err) {
       if (err instanceof CodingAgentError) {
-        return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+        // The local-only AI lock's refusal (TASK-2501) keeps its code.
+        const code = isCloudAiLockedError(err) ? { code: CLOUD_AI_LOCKED_CODE } : {};
+        return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
       }
       return NextResponse.json(
         { error: err instanceof Error ? err.message : `Could not ${verb} the coding run` },

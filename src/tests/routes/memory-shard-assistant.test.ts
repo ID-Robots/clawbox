@@ -33,6 +33,12 @@ const h = vi.hoisted(() => ({
   fourB: "absent" as "absent" | "downloaded" | "unavailable",
   resolvedMode: "incremental" as "incremental" | "full",
   stopped: true,
+  /** The local-only AI lock (TASK-2501). */
+  locked: false,
+}));
+vi.mock("@/lib/ai-cloud-lock", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai-cloud-lock")>()),
+  isCloudAiLocked: async () => h.locked,
 }));
 
 vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => h.person) }));
@@ -148,7 +154,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  Object.assign(h, { person: false, enabled: true, extraPaths: [], placement: "local", cloudAvailable: true, localInstalled: true, fourB: "absent", resolvedMode: "incremental", stopped: true });
+  Object.assign(h, { person: false, enabled: true, extraPaths: [], placement: "local", cloudAvailable: true, localInstalled: true, fourB: "absent", resolvedMode: "incremental", stopped: true, locked: false });
   for (const fn of [...Object.values(lib), ...Object.values(shard), refreshScheduler]) fn.mockClear();
 });
 
@@ -203,6 +209,18 @@ describe("who may write", () => {
     const saved = await r.schedule.PUT(req("PUT", "/schedule", { enabled: true, frequency: "weekly", timeOfDay: "02:30", weekday: 3 }) as never);
     expect(saved.status).toBe(200);
     expect(lib.writeMemorySchedule).toHaveBeenCalledWith({ enabled: true, frequency: "weekly", timeOfDay: "02:30", weekday: 3 });
+  });
+});
+
+describe("the assistant asking for the cloud embedder under the local-only AI lock (TASK-2501)", () => {
+  it("is told about the lock, not that the cloud is unavailable, and nothing is written", async () => {
+    h.locked = true;
+    h.cloudAvailable = false;
+    const r = await routes();
+    const res = await r.provider.POST(req("POST", "/provider", { source: "cloud", confirm: true }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "cloud_ai_locked", kind: "cloud_ai_locked" });
+    expect(shard.switchToCloudEmbeddings).not.toHaveBeenCalled();
   });
 });
 

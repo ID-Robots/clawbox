@@ -759,6 +759,92 @@ describe("/setup-api/chat/model", () => {
     });
   });
 
+  describe("the local-only AI lock (TASK-2501)", () => {
+    const COMPACTION = "agents.defaults.compaction.model";
+    const send = (body: unknown) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    /** The lock on, beside whatever else the device store holds. */
+    const lock = (more: Record<string, unknown> = {}) => {
+      vi.mocked(configGet).mockImplementation(async (key: string) => (key === "ai_cloud_lock" ? true : more[key]));
+      // The lock itself is read through the store's tri-state reader.
+      vi.mocked(getKnown).mockImplementation(async (key: string) => ({ value: key === "ai_cloud_lock" ? true : undefined, known: true }));
+    };
+    const wrotePrimary = () => vi.mocked(runOpenclawConfigSetBatch).mock.calls
+      .some(([ops]) => (ops as string[][]).some((op) => op[0] === "agents.defaults.model.primary"));
+
+    beforeEach(() => {
+      coreAtLeastMock.mockReset().mockResolvedValue(true);
+      vi.mocked(runOpenclawConfigUnset).mockReset().mockResolvedValue(undefined);
+      vi.mocked(configGet).mockReset().mockResolvedValue(undefined);
+      vi.mocked(configSet).mockReset().mockResolvedValue(undefined);
+      vi.mocked(getKnown).mockReset().mockResolvedValue({ value: undefined, known: true });
+    });
+
+    it("refuses a cloud model before anything is written", async () => {
+      lock();
+      const res = await send({ model: "deepseek/deepseek-v4-flash" });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("judges the model, not the source it was sent with", async () => {
+      lock();
+      const res = await send({ source: "local", model: "anthropic/claude-sonnet-4-5" });
+      expect(res.status).toBe(409);
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    });
+
+    it("refuses the way back to a cloud primary", async () => {
+      lock();
+      const res = await send({ source: "primary" });
+      expect(res.status).toBe(409);
+      expect(wrotePrimary()).toBe(false);
+    });
+
+    it("moves the chat onto the box, with no cloud compaction model behind it", async () => {
+      lock();
+      const res = await send({ model: "llamacpp/gemma4-e2b-it-q4_0" });
+      expect(res.status).toBe(200);
+      const ops = vi.mocked(runOpenclawConfigSetBatch).mock.calls.flatMap(([batch]) => batch as string[][]);
+      expect(ops).toContainEqual(["agents.defaults.model.primary", "llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(ops.some((op) => op[0] === COMPACTION)).toBe(false);
+      expect(configSet).not.toHaveBeenCalledWith("local_compaction_model", expect.anything());
+    });
+
+    it("arms that compaction model for the same pick once the lock is off — the case above is the lock's doing", async () => {
+      const res = await send({ model: "llamacpp/gemma4-e2b-it-q4_0" });
+      expect(res.status).toBe(200);
+      const ops = vi.mocked(runOpenclawConfigSetBatch).mock.calls.flatMap(([batch]) => batch as string[][]);
+      expect(ops).toContainEqual([COMPACTION, "deepseek/deepseek-v4-flash"]);
+    });
+
+    it("takes ClawBox's own cloud compaction model out on a write under the lock", async () => {
+      lock({ local_compaction_model: "deepseek/deepseek-v4-flash" });
+      vi.mocked(readConfigStrict).mockResolvedValue({ agents: { defaults: { compaction: { model: "deepseek/deepseek-v4-flash" } } } } as never);
+      const res = await send({ model: "llamacpp/gemma4-e2b-it-q4_0" });
+      expect(res.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(COMPACTION);
+    });
+
+    it("still takes the box's own Local AI by source", async () => {
+      lock();
+      const res = await send({ source: "local" });
+      expect(res.status).toBe(200);
+      expect(wrotePrimary()).toBe(true);
+    });
+
+    it("writes the same cloud pick once the lock is off", async () => {
+      const res = await send({ model: "deepseek/deepseek-v4-flash" });
+      expect(res.status).toBe(200);
+      expect(wrotePrimary()).toBe(true);
+    });
+  });
+
   it("switches back to Flash from a legacy stored primary provider model", async () => {
     vi.mocked(getAll).mockResolvedValue({
       ai_model_provider: "clawai",

@@ -381,6 +381,8 @@ export async function writeHermesCloudTarget(token: string): Promise<void> {
  */
 export async function selectHermesEngine(engine: "local" | "cloud", token: string | null): Promise<void> {
   if (engine === "cloud") {
+    const { isCloudAiLocked } = await import("@/lib/ai-cloud-lock");
+    if (await isCloudAiLocked()) throw new HermesTtsWriteError("Local-only AI is on: replies are spoken by this box's own voice only.");
     if (!token) throw new HermesTtsWriteError("This box has no ClawBox AI credential to speak with.");
     await writeHermesCloudTarget(token);
   }
@@ -494,6 +496,22 @@ export async function speakWithHermes(
   text: string,
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<HermesSpeech> {
+  // The local-only AI lock (TASK-2501): Hermes speaks with whatever
+  // `tts.provider` names, so anything but the box's own voice is refused here,
+  // before the text leaves for it. Only `clawbox-local` with its command
+  // registered (its type AND its command) counts: a name that merely looks
+  // local, or one with nothing behind it, lets Hermes fall back to a provider of its own (Edge, in the
+  // cloud). The reply is then spoken by the box's script instead (voice-speak).
+  const { isCloudAiLocked, CLOUD_AI_LOCKED_CODE } = await import("@/lib/ai-cloud-lock");
+  if (await isCloudAiLocked()) {
+    const { provider, localRegistered, localCommand } = await readHermesVoice();
+    // Both halves of the definition, read: Hermes refuses a `command` provider
+    // with no command and falls back to a provider of its own.
+    const local = (provider ?? "").trim().toLowerCase() === HERMES_LOCAL_TTS_PROVIDER && localRegistered && Boolean(localCommand);
+    if (!local) {
+      return { ok: false, code: CLOUD_AI_LOCKED_CODE, status: 409, reason: "Local-only AI is on: replies are spoken by this box's own voice only." };
+    }
+  }
   const { dashboardFetch } = await import("@/lib/hermes-dashboard-auth");
   let res: Response;
   try {

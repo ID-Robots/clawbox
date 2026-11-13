@@ -39,7 +39,7 @@ import { CONFIG_ROOT, DATA_DIR, get } from "@/lib/config-store";
 import type { EditionSource } from "@/lib/edition-source";
 import { waitForGatewayStartBeforeStop } from "@/lib/gateway-start-guard";
 import { HARNESSES, type Harness } from "@/lib/harness";
-import { hasClawaiToken } from "@/lib/harness/credentials";
+import { hasClawaiEntitlementToken } from "@/lib/harness/credentials";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
 import { memAvailableMb } from "@/lib/mem-available";
@@ -202,13 +202,15 @@ export function swapAllowed(plan: SwapPlan): boolean {
  * not-connected alike) and a brand-new box was told to "upgrade" an account it
  * does not have.
  *
- * `hasClawaiToken` is the one reader of where each edition keeps that
- * credential; a read that throws is "no account on record", which only ever
- * offers a path that also works for someone who has one.
+ * `hasClawaiEntitlementToken` is the one reader of where each edition keeps
+ * that credential, and the local-only AI lock does not change its answer; a
+ * read that throws is "no account on record", which only ever offers a path
+ * that also works for someone who has one.
  */
 export async function swapSubscribed(): Promise<boolean> {
   try {
-    return await hasClawaiToken();
+    // Subscribed is about the account: the local-only AI lock does not change it.
+    return await hasClawaiEntitlementToken();
   } catch {
     return false;
   }

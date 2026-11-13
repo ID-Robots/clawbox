@@ -1,5 +1,6 @@
 import fsp from "fs/promises";
 import path from "@/lib/runtime-path";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { randomUUID } from "crypto";
 import { CLAWBOX_AI_IMAGE_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { mediaUrl } from "@/lib/chat-media";
@@ -305,6 +306,14 @@ export async function generateClawaiImageBytes(
   options: { signal?: AbortSignal; fetchImpl?: FetchLike } = {},
 ): Promise<{ bytes: Buffer; extension: string }> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  // The local-only AI lock (TASK-2501): no prompt leaves the box. 409, the
+  // status every lock refusal answers with, and the lock's code on the error.
+  if (await isCloudAiLocked()) {
+    throw Object.assign(
+      new ClawaiImageError(409, "Local-only AI is on: picture generation uses ClawBox AI's cloud model, so it is off while the lock is on."),
+      { code: CLOUD_AI_LOCKED_CODE },
+    );
+  }
   const token = await resolveClawaiToken();
   if (!token) {
     // Actionable, and the same sentence shape voice input uses for the same
