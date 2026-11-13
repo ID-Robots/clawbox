@@ -23,9 +23,12 @@ import {
  * gateway up these go to its RPCs, and only a gateway that is not there gets
  * the CLI, offline.
  */
-function harness(opts: { up?: boolean; held?: string[] | null; refuse?: string } = {}) {
+function harness(opts: { up?: boolean; held?: string[] | null; refuse?: string; unitUp?: boolean; comesUp?: boolean } = {}) {
+  let calls = 0;
   const rpc = vi.fn(async (method: string, params: Record<string, unknown>) => {
-    if (opts.up === false) throw new GatewayWsUnavailableError("connect ECONNREFUSED");
+    calls += 1;
+    // `comesUp`: the first ask finds a gateway still starting, the next one answers.
+    if (opts.up === false && !(opts.comesUp && calls > 1)) throw new GatewayWsUnavailableError("connect ECONNREFUSED");
     if (opts.refuse) throw new GatewayRpcError(opts.refuse, "UNAVAILABLE");
     if (method === "models.authSetApiKey") return { provider: params.provider, profileId: `${String(params.provider)}:default` };
     return { ok: true };
@@ -33,8 +36,18 @@ function harness(opts: { up?: boolean; held?: string[] | null; refuse?: string }
   const cli = vi.fn(async () => "");
   const stopGateway = vi.fn(async () => {});
   const startGateway = vi.fn(async () => {});
-  _setAuthOpsDepsForTests({ gatewayAuthRpc: rpc, offlineAuthCli: cli, stopGateway, startGateway, storeProfiles: () => (opts.held === undefined ? [] : opts.held) });
-  return { rpc, cli, stopGateway, startGateway };
+  const waitForGateway = vi.fn(async () => opts.comesUp === true);
+  _setAuthOpsDepsForTests({
+    gatewayAuthRpc: rpc,
+    offlineAuthCli: cli,
+    stopGateway,
+    startGateway,
+    storeProfiles: () => (opts.held === undefined ? [] : opts.held),
+    // By default a socket that does not answer belongs to a unit that is down.
+    gatewayUnitUp: async () => opts.unitUp === true,
+    waitForGateway,
+  });
+  return { rpc, cli, stopGateway, startGateway, waitForGateway };
 }
 
 afterEach(() => _setAuthOpsDepsForTests(null));
@@ -56,6 +69,23 @@ describe("saveOpenclawApiKey", () => {
       { stdinData: "claw_test\n", timeoutMs: 60_000 },
     );
     expect(saved.via).toBe("cli");
+  });
+
+  it("waits for a gateway that is starting — it already owns the state — and asks it, never the CLI", async () => {
+    // Seen in CI: the wizard restarted the gateway, and the key save that came
+    // while it started went to the CLI with --profile-id, which it refused.
+    const h = harness({ up: false, unitUp: true, comesUp: true });
+    const saved = await saveOpenclawApiKey("deepseek", "deepseek:default", "claw_test");
+    expect(h.waitForGateway).toHaveBeenCalledTimes(1);
+    expect(h.rpc).toHaveBeenCalledTimes(2);
+    expect(h.cli).not.toHaveBeenCalled();
+    expect(saved.via).toBe("gateway");
+  });
+
+  it("says the assistant is starting when a gateway that owns the state never answers, and writes nothing around it", async () => {
+    const h = harness({ up: false, unitUp: true, comesUp: false });
+    await expect(saveOpenclawApiKey("deepseek", "deepseek:default", "claw_test")).rejects.toThrow(/starting/);
+    expect(h.cli).not.toHaveBeenCalled();
   });
 
   it("passes the gateway's refusal on and does not retry it through the CLI", async () => {

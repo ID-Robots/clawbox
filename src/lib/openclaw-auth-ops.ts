@@ -28,10 +28,10 @@
  * run offline, the gateway started again.
  */
 
-import { spawnOpenclawCli, restartGateway, gatewayIsAbsent } from "@/lib/openclaw-config";
-import { gatewayWsCall, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
+import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs } from "@/lib/openclaw-config";
+import { gatewayWsCall, GatewayWsUnavailableError, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
-import { runUnitJob } from "@/lib/gateway-unit-job";
+import { readUnitState, runUnitJob } from "@/lib/gateway-unit-job";
 
 
 /** One CLI start-up on a Jetson is 10-12 s; the gateway's own write is quicker. */
@@ -44,6 +44,13 @@ export interface AuthOpsDeps {
   storeProfiles: (provider: string) => string[] | null;
   stopGateway: () => Promise<void>;
   startGateway: () => Promise<void>;
+  /**
+   * Is a gateway up or coming up, i.e. does one own (or is about to own) the
+   * state? Only a unit that is down lets the CLI work offline.
+   */
+  gatewayUnitUp: () => Promise<boolean>;
+  /** Wait for a gateway that is coming up to answer; false when it did not in time. */
+  waitForGateway: () => Promise<boolean>;
 }
 
 const defaultDeps: AuthOpsDeps = {
@@ -64,6 +71,14 @@ const defaultDeps: AuthOpsDeps = {
     if (stop.kind === "in-flight") throw new Error("the gateway is still stopping");
   },
   startGateway: () => restartGateway(),
+  gatewayUnitUp: async () => {
+    const state = await readUnitState("clawbox-gateway.service");
+    // A unit that cannot be asked is treated as up: the gateway's refusal is
+    // honest, a CLI write around a live owner is not.
+    if (!state) return true;
+    return ["active", "activating", "reloading", "deactivating"].includes(state.activeState);
+  },
+  waitForGateway: () => waitForGatewayRpcReady(gatewayReadyWaitMs()),
 };
 
 let deps: AuthOpsDeps = defaultDeps;
@@ -85,13 +100,35 @@ function agentArgs(agentId: string | undefined): string[] {
 
 type Online<T> = { answered: true; result: T } | { answered: false };
 
-/** The gateway's answer, or `answered: false` when no gateway is there to give one. */
+/** Thrown when a gateway owns the state but did not come up to take the request in time. */
+export class OpenclawGatewayNotReadyError extends Error {
+  constructor(method: string) {
+    super(`The assistant is starting and did not answer ${method} in time. Try again in a minute.`);
+    this.name = "OpenclawGatewayNotReadyError";
+  }
+}
+
+/**
+ * The gateway's answer, or `answered: false` when NO gateway owns the state
+ * (its unit is down), which is when the offline CLI may run. A socket that
+ * does not answer is not proof of that: a gateway that is starting already
+ * owns the state (2026.11.3 refuses the CLI then too), so it is waited for and
+ * asked again.
+ */
 async function askGatewayForAuth<T>(method: string, params: Record<string, unknown>): Promise<Online<T>> {
   if (gatewayIsAbsent()) return { answered: false };
+  const ask = async (): Promise<Online<T>> => ({ answered: true, result: (await deps.gatewayAuthRpc(method, params, AUTH_TIMEOUT_MS)) as T });
   try {
-    return { answered: true, result: (await deps.gatewayAuthRpc(method, params, AUTH_TIMEOUT_MS)) as T };
+    return await ask();
   } catch (err) {
-    if (err instanceof GatewayWsUnavailableError) return { answered: false };
+    if (!(err instanceof GatewayWsUnavailableError)) throw err;
+  }
+  if (!(await deps.gatewayUnitUp())) return { answered: false };
+  if (!(await deps.waitForGateway())) throw new OpenclawGatewayNotReadyError(method);
+  try {
+    return await ask();
+  } catch (err) {
+    if (err instanceof GatewayWsUnavailableError) throw new OpenclawGatewayNotReadyError(method);
     throw err;
   }
 }
