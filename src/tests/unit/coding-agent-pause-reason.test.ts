@@ -456,3 +456,24 @@ describe("the local-only AI lock going on under a cloud run (TASK-2501)", () => 
     expect(run.progress.join("\n")).toContain(lib.PAUSED_BY_CLOUD_AI_LOCK);
   });
 });
+
+describe("the local-only AI lock reaching a cloud run through its own minute check (TASK-2501)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is paused by the run's own check, without anyone asking", async () => {
+    // Only setInterval is faked: the run's minute check is created with it,
+    // while the spawn, its pipes and the waits below keep real time.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const id = await liveRun("ticked");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lib.getRun(id)?.status).toBe("running");
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    vi.useRealTimers();
+    const run = await settled(id);
+    expect(run.status).toBe("paused");
+    expect(run.progress.join("\n")).toContain(lib.PAUSED_BY_CLOUD_AI_LOCK);
+  });
+});
