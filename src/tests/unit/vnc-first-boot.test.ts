@@ -124,6 +124,100 @@ describe("clawbox-vnc.service: x11vnc's exit 2 on SIGTERM is a clean stop", () =
 });
 
 /**
+ * step_vnc_refresh's autocutsel install, run rather than read: whether
+ * autocutsel is there is dpkg's answer (install.sh's own dpkg_installed), never
+ * apt-get's exit code, and the clawbox-vnc.service refresh after it runs either
+ * way. The unit directory moves into the sandbox; apt-get, dpkg-query,
+ * systemctl, wait_for_apt and install_root_libexec are stubs.
+ */
+describe("step_vnc_refresh reads autocutsel back from dpkg", () => {
+  const AUTOCUTSEL_WARNING = "  Warning: autocutsel not installed (non-fatal; continuing with unit refresh)";
+
+  function runRefresh(opts: { aptRc: number; installed: boolean }) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-vnc-refresh-"));
+    try {
+      const units = path.join(tmp, "systemd");
+      const calls = path.join(tmp, "calls");
+      fs.mkdirSync(units);
+      fs.writeFileSync(calls, "");
+      const sh = read(INSTALL_SH);
+      const step = shellFunctionIfPresent(sh, "step_vnc_refresh");
+      expect(step, "step_vnc_refresh writes its unit under /etc/systemd/system").toContain("/etc/systemd/system/clawbox-vnc.service");
+      const script = [
+        "set -euo pipefail",
+        `PROJECT_DIR=${JSON.stringify(path.join(tmp, "clawbox"))}`,
+        `ROOT_LIBEXEC_DIR=${JSON.stringify(path.join(tmp, "libexec"))}`,
+        "CLAWBOX_USER=clawbox",
+        `CALLS=${JSON.stringify(calls)}`,
+        "wait_for_apt() { :; }",
+        `install_root_libexec() { printf 'install_root_libexec\\n' >> "$CALLS"; }`,
+        `systemctl() { printf 'systemctl %s\\n' "$*" >> "$CALLS"; }`,
+        "apt-get() {",
+        `  printf 'apt-get %s\\n' "$*" >> "$CALLS"`,
+        `  [ ${opts.aptRc} = 0 ] || echo "E: Sub-process /usr/bin/dpkg returned an error code (1)" >&2`,
+        `  return ${opts.aptRc}`,
+        "}",
+        "dpkg-query() {",
+        `  printf 'dpkg-query %s\\n' "$*" >> "$CALLS"`,
+        opts.installed
+          ? "  printf 'install ok installed'"
+          : '  echo "dpkg-query: no packages found matching ${@: -1}" >&2; return 1',
+        "}",
+        shellFunctionIfPresent(sh, "dpkg_installed"),
+        step.replaceAll("/etc/systemd/system", units),
+        // As step_post_update's optional_step runs it: errexit off inside.
+        'rc=0; step_vnc_refresh || rc=$?; echo "RC=$rc"',
+      ].join("\n");
+      const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+      return {
+        rc: /RC=(\d+)/.exec(r.stdout)?.[1],
+        output: `${r.stdout}${r.stderr}`,
+        calls: read(calls).split("\n").filter(Boolean),
+        unitWritten: fs.existsSync(path.join(units, "clawbox-vnc.service")),
+      };
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  /** The step's autocutsel warnings. Not bare "autocutsel": the refresh line names it too. */
+  const warnings = (output: string) => output.split("\n").filter((l) => l.includes("Warning: autocutsel"));
+
+  /** The clawbox-vnc.service refresh that follows the install, in every case. */
+  function expectUnitRefreshed(r: ReturnType<typeof runRefresh>) {
+    expect(r.unitWritten).toBe(true);
+    expect(r.calls).toContain("systemctl daemon-reload");
+    expect(r.calls).toContain("systemctl restart clawbox-vnc.service clawbox-websockify.service");
+    expect(r.output).toContain("  VNC service refreshed");
+    expect(r.rc, r.output).toBe("0");
+  }
+
+  it("claims nothing missing when apt-get exits 100 but dpkg has autocutsel", () => {
+    const r = runRefresh({ aptRc: 100, installed: true });
+
+    expect(r.calls).toContain("apt-get install -y -qq autocutsel");
+    expect(warnings(r.output)).toEqual([]);
+    // apt-get's own error stays visible.
+    expect(r.output).toContain("E: Sub-process /usr/bin/dpkg returned an error code (1)");
+    expectUnitRefreshed(r);
+  });
+
+  it("says autocutsel is not installed when apt-get exits 0 and dpkg does not have it", () => {
+    const r = runRefresh({ aptRc: 0, installed: false });
+
+    expect(warnings(r.output)).toEqual([AUTOCUTSEL_WARNING]);
+    expectUnitRefreshed(r);
+  });
+
+  it("prints no autocutsel warning when apt-get exits 0 and dpkg has it", () => {
+    const r = runRefresh({ aptRc: 0, installed: true });
+
+    expect(warnings(r.output)).toEqual([]);
+    expectUnitRefreshed(r);
+  });
+});
+
+/**
  * step_vnc_install runs on every in-app update. The scripts it makes
  * executable are the service account's files in its checkout, so their mode is
  * set by that account, after the hand-over; root neither chmods nor chowns

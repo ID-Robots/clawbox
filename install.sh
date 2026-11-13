@@ -4125,6 +4125,15 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# dpkg_installed PACKAGE — true when dpkg has PACKAGE installed, whatever apt was
+# asked to want (install, hold or deinstall); never an apt-get exit code.
+dpkg_installed() {
+  case "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" in
+    *' ok installed') return 0 ;;
+  esac
+  return 1
+}
+
 # Ubuntu's logrotate and its daily timer, for step_apt_update. Jetson images can
 # ship without the package, and then rsyslog's /var/log/syslog, kern.log,
 # auth.log and ufw.log are never rotated (one board's syslog held 61 days in
@@ -4140,9 +4149,9 @@ ensure_pipx() {
 # was disabled or stopped since; a masked timer stays masked. The closing line
 # is read back from systemd, never taken from an exit code above it.
 ensure_logrotate() {
-  if [ "$(dpkg-query -W -f='${Status}' logrotate 2>/dev/null || true)" != 'install ok installed' ]; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate \
-      || [ "$(dpkg-query -W -f='${Status}' logrotate 2>/dev/null || true)" != 'install ok installed' ]; then
+  if ! dpkg_installed logrotate; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate || true
+    if ! dpkg_installed logrotate; then
       echo "  Warning: logrotate not installed - /var/log text logs keep growing until an update installs it" >&2
       return 0
     fi
@@ -4240,9 +4249,14 @@ step_apt_update() {
   # everyday chat request, and without these the agent spent the first minutes
   # of each one pip-installing them. Distro packages, so they need no network
   # index and update with the OS. Separate and non-fatal: a mirror that lacks
-  # one of them must not fail the base install above.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-docx python3-openpyxl python3-reportlab \
-    || echo "  Warning: document libraries (python3-docx/openpyxl/reportlab) not installed" >&2
+  # one of them must not fail the base install above. Which ones are missing is
+  # read back from dpkg, never from apt-get's exit code.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-docx python3-openpyxl python3-reportlab || true
+  local doc_lib="" doc_missing=""
+  for doc_lib in python3-docx python3-openpyxl python3-reportlab; do
+    dpkg_installed "$doc_lib" || doc_missing="$doc_missing $doc_lib"
+  done
+  [ -z "$doc_missing" ] || echo "  Warning: document libraries not installed:$doc_missing" >&2
   # Node.js for production server and OpenClaw. The floor is the pinned core's
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
@@ -8143,11 +8157,11 @@ step_clawkeep_install() {
     && IFS= read -r kept < "$record" \
     && tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" \
     && [ -n "$tree" ] && [ "$tree" = "$kept" ] \
-    && dirty="$("${tree_git[@]}" status --porcelain -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain --untracked-files=all -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
     && [ -x "$CLAWBOX_HOME/.local/bin/clawkeepd" ] \
     && as_clawbox_login 'clawkeep --help' >/dev/null 2>&1; then
     rm -f "$record" 2>/dev/null || true
-    echo "  ClawKeep CLI: the same code (clawkeep tree ${tree:0:12}) was installed and verified earlier in this update; not reinstalled"
+    echo "  ClawKeep CLI: the same code (clawkeep tree ${tree:0:12}) was installed earlier in this boot and still answers; not reinstalled"
     return 0
   fi
   # Every forced run drops the record first: a failed, partial, pip --user or
@@ -8196,14 +8210,14 @@ step_clawkeep_install() {
   # /run/clawbox through a fresh mktemp file renamed into place, so it never
   # writes through a link. A tree with local changes is never recorded.
   if tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" && [ -n "$tree" ] \
-    && dirty="$("${tree_git[@]}" status --porcelain -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain --untracked-files=all -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
     && mkdir -p "$(dirname "$record")" \
     && tmp="$(mktemp "$(dirname "$record")/.clawkeep-installed.XXXXXX" 2>/dev/null)" \
     && printf '%s\n' "$tree" > "$tmp" && mv -f "$tmp" "$record"; then
     return 0
   fi
   [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
-  echo "  ClawKeep CLI install not recorded (local changes under clawkeep/, or git or /run/clawbox could not answer); post_update will reinstall it"
+  echo "  ClawKeep CLI install not recorded (local changes under clawkeep/, or git or /run/clawbox could not answer); a later post_update reinstalls it"
   return 0
 }
 
@@ -10041,7 +10055,8 @@ step_uefi_boot_order() {
   fi
   if ! command -v efibootmgr >/dev/null 2>&1; then
     wait_for_apt
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq efibootmgr \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq efibootmgr || true
+    command -v efibootmgr >/dev/null 2>&1 \
       || { echo "  Warning: could not install efibootmgr; UEFI boot order guard not installed" >&2; return 1; }
   fi
   install -D -m 0755 "$dir/clawbox-nvme-boot-order.sh" /usr/local/sbin/clawbox-nvme-boot-order
@@ -10236,7 +10251,7 @@ step_bluetooth_no_debug() {
     return 1
   fi
   if ! printf '%s\n' \
-    "$mark, derived from $vendor by install.sh; delete this file to restore the vendor's debug output" \
+    "$mark, derived from $vendor by install.sh; to restore the vendor's debug output, delete this file and run systemctl daemon-reload (it applies from the next start of bluetooth.service); to keep it restored, add a drop-in of your own (systemctl edit bluetooth), and every later update leaves the unit as you configured it" \
     "[Service]" "ExecStart=" "ExecStart=$derived" > "$tmp"; then
     rm -f -- "$tmp"
     echo "  Warning: could not write the bluetooth drop-in to $tmp" >&2
@@ -14486,10 +14501,12 @@ step_vnc_refresh() {
   #
   # apt-get may collide with unattended-upgrades or a user-triggered install,
   # so wait for the dpkg lock first. Make the install non-fatal — a transient
-  # apt failure here shouldn't block the more important unit refresh below.
+  # apt failure here shouldn't block the more important unit refresh below —
+  # and ask dpkg, not apt-get's exit code, whether autocutsel is there.
   wait_for_apt
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel; then
-    echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel || true
+  if ! dpkg_installed autocutsel; then
+    echo "  Warning: autocutsel not installed (non-fatal; continuing with unit refresh)"
   fi
 
   # A box installed before security scan #21 has a clawbox-firstboot-vnc.service
