@@ -76,12 +76,16 @@ export function offeredCodingProviders(ctx: Pick<McpContext, "codingProviders">)
   return narrowed.length > 0 ? narrowed : CODING_PROVIDERS;
 }
 
-/** The `provider` parameter's description, for the providers this box offers. */
+/**
+ * The `provider` parameter's description, for the providers this box offers.
+ * Both answers stay within MAX_PARAM_DESCRIPTION_CHARS (mcp/lib/register.ts):
+ * mcp/check-tools.ts fails the install on a longer one.
+ */
 export function runProviderDescription(providers: readonly string[]): string {
   if (providers.length === 1 && providers[0] === "local") {
     return `"local": the box's own engine — the local-only AI lock is on, so runs use nothing else. Omit: the same.`;
   }
-  return `Who pays: "clawbox-ai" (the box's plan), "anthropic" or "openai" (the owner's own, once connected), "local" (the box's own engine). Omit: default.`;
+  return `"clawbox-ai" (box's plan), "anthropic"/"openai" (owner's, if connected), "local" (the box's own engine). Omit: default.`;
 }
 // Pure too: the store's own bounds, so the output cap below is derived from
 // what the device can actually hold rather than from a round number.
@@ -1199,7 +1203,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         ? {
           model: zEnumOf(
             RUN_MODELS,
-            `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Naming a model with "clawbox-ai" or "local" is refused.`,
+            `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Refused with "clawbox-ai" or "local".`,
           ).optional(),
         }
         : {}),

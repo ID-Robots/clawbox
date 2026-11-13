@@ -38,7 +38,7 @@ vi.mock("../../../mcp/lib/api", async () => {
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { offeredCodingProviders, registerCodingAgentTools, runProviderDescription } from "../../../mcp/tools/coding-agent";
 import { ApiError } from "../../../mcp/lib/errors";
-import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
+import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS, paramDescriptionViolations } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
 import { MAX_SECRETS } from "../../../src/lib/project-secrets-shape";
 import { OPENAI_MODELS } from "../../../src/lib/coding-provider";
@@ -1033,11 +1033,6 @@ describe("a run whose pull request's CI failed", () => {
   });
 });
 
-/**
- * `effort` (2026-10-30): the per-request level, offered as the app's own list,
- * sent only when named, and the route's refusal of one turned into advice on
- * that argument rather than on the folder.
- */
 describe("coding_agent_run and the role settings under the local-only AI lock (TASK-2501 PR-E)", () => {
   type Shape = Record<string, { safeParse: (v: unknown) => { success: boolean } }>;
   function locked() {
@@ -1088,7 +1083,22 @@ describe("coding_agent_run and the role settings under the local-only AI lock (T
     for (const id of ["clawbox-ai", "anthropic", "openai", "local"]) expect(shape.provider.safeParse(id).success, id).toBe(true);
     expect(shape.model).toBeDefined();
   });
+
+  // The schema a model is shown, locked or not: mcp/check-tools.ts fails the
+  // install on a parameter description over the ceiling, and the two variants
+  // of `provider` (and `model`, offered only without the lock) differ in length.
+  it("keeps every parameter description within the ceiling, locked or not", () => {
+    for (const [label, h] of [["locked", locked()], ["no lock", harness()]] as const) {
+      for (const tool of h.reg.list()) expect(paramDescriptionViolations(tool), `${label}: ${tool.name}`).toEqual([]);
+    }
+  });
 });
+
+/**
+ * `effort` (2026-10-30): the per-request level, offered as the app's own list,
+ * sent only when named, and the route's refusal of one turned into advice on
+ * that argument rather than on the folder.
+ */
 
 describe("coding_agent_run effort", () => {
   it("offers exactly the levels the app offers, and sends only a named one", async () => {
