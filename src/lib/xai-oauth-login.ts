@@ -54,9 +54,11 @@
 // No credential passes through here. The CLI prints a URL and a short code the
 // owner types on another device; the token it receives stays in the CLI.
 
+import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
+import { logoutOpenclawAuthProfiles } from "@/lib/openclaw-auth-ops";
 import { spawn, type ChildProcess } from "child_process";
 import { readdirSync, readFileSync } from "fs";
-import { findOpenclawBin, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { findOpenclawBin } from "@/lib/openclaw-config";
 import {
   MAINTENANCE_RETRY_PAUSE_MS,
   MAINTENANCE_RETRY_WINDOW_MS,
@@ -338,16 +340,16 @@ export const xaiLoginSpawn = {
 };
 
 /** The exact argv `openclaw` gets, exported so the tests and the report name one command. */
-export function xaiLoginArgs(replaceExisting: boolean): string[] {
+export function xaiLoginArgs(): string[] {
+  // OpenClaw 2026.11.3 hands this login to the running gateway, whose login
+  // API refuses `--profile-id`, `--force` and `--set-default` "before starting
+  // sign-in" (docs/cli/models.md): the gateway names the profile itself, and
+  // what `--force` did — drop the existing xAI profiles first, which switching
+  // from an API key needs — is `startXaiLogin`'s logout before the spawn.
   return [
     "models", "auth", "login",
     "--provider", "xai",
     "--method", "oauth",
-    "--profile-id", XAI_PROFILE_ID,
-    // Only when the store already holds an xAI profile: `--force` drops the
-    // existing xai profiles before signing in, which is what switching from an
-    // API key needs and what a first sign-in does not.
-    ...(replaceExisting ? ["--force"] : []),
   ];
 }
 
@@ -476,8 +478,18 @@ export async function startXaiLogin(opts: {
     return { status: "failed", detail: "The sign-in was cancelled, or replaced by another one, before it started." };
   }
   cancelXaiLogin();
+  if (opts.replaceExisting) {
+    // Only when the store already holds an xAI profile (or could not say):
+    // the old profiles out first, through the gateway's models.authLogout.
+    try {
+      const held = await readXaiStoredProfiles();
+      await logoutOpenclawAuthProfiles("xai", (held ?? []).map((row) => row.id));
+    } catch (err) {
+      console.warn("[xai-login] could not take the stored xAI profiles out before the sign-in:", err instanceof Error ? err.message : err);
+    }
+  }
   // One launch, used again when the core refused the start for maintenance.
-  const launch = (): ChildProcess => xaiLoginSpawn.spawn(findOpenclawBin(), xaiLoginArgs(opts.replaceExisting));
+  const launch = (): ChildProcess => xaiLoginSpawn.spawn(findOpenclawBin(), xaiLoginArgs());
   let child: ChildProcess;
   try {
     child = launch();
@@ -606,7 +618,9 @@ function checkStoreInBackground(login: PendingLogin): void {
   login.lastStoreCheckAt = Date.now();
   login.storeCheck = readXaiStoredProfiles()
     .then((rows) => {
-      if (rows?.some((row) => row.id === XAI_PROFILE_ID && row.type === "oauth") && !login.result) {
+      // Any xAI sign-in row: on OpenClaw 2026.11.3 the gateway names the
+      // profile its login writes (`--profile-id` is refused online).
+      if (rows?.some((row) => row.type === "oauth") && !login.result) {
         settle(login, { status: "complete" });
         kill(login.child);
       }
@@ -659,28 +673,11 @@ export interface XaiStoredProfile {
  * recognise: unknown, never "no profiles".
  */
 export async function readXaiStoredProfiles(): Promise<XaiStoredProfile[] | null> {
-  let raw: string;
-  try {
-    raw = await spawnOpenclawCli(["models", "auth", "list", "--json"], { captureStdout: true, timeoutMs: 60_000 });
-  } catch {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  const profiles = parsed && typeof parsed === "object" ? (parsed as { profiles?: unknown }).profiles : undefined;
-  if (!Array.isArray(profiles)) return null;
-  const out: XaiStoredProfile[] = [];
-  for (const row of profiles) {
-    if (!row || typeof row !== "object") continue;
-    const entry = row as { id?: unknown; provider?: unknown; type?: unknown };
-    if (typeof entry.id !== "string") continue;
-    const provider = typeof entry.provider === "string" ? entry.provider : entry.id.split(":")[0];
-    if (provider.trim().toLowerCase() !== "xai") continue;
-    out.push({ id: entry.id, type: String(entry.type ?? "").trim().toLowerCase() });
-  }
-  return out;
+  // The store itself, read-only: OpenClaw 2026.11.3's `models auth list`
+  // needs the gateway stopped, and this runs beside a running gateway.
+  const read = readGatewayProviderAuth("xai");
+  if (read.kind === "no-store") return [];
+  if (read.kind !== "present") return null;
+  return read.profiles.map((row) => ({ id: row.profileId, type: String(row.type ?? "").trim().toLowerCase() }));
 }
+

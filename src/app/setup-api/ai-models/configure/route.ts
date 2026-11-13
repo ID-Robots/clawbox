@@ -3562,7 +3562,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // passes, as it does for that guard, because refusing a sign-in nobody
       // can disprove would lock its owner out.
       const stored = await readXaiStoredProfiles();
-      if (stored && !stored.some((row) => row.id === config.profileKey && row.type === "oauth")) {
+      // Any xAI sign-in row: on OpenClaw 2026.11.3 the login runs through the
+      // gateway, which names the profile itself (`--profile-id` is refused
+      // online); the core's default for it is the id this route writes.
+      const signIn = stored?.find((row) => row.type === "oauth");
+      if (signIn && signIn.id !== config.profileKey) {
+        console.warn(`[configure] the xAI sign-in is stored at ${signIn.id}, not ${config.profileKey}`);
+      }
+      if (stored && !signIn) {
         return NextResponse.json(
           {
             error: "The xAI sign-in did not reach this box's credential store. Sign in again.",
