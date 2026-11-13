@@ -266,7 +266,7 @@ export default function SttEndpointCard({ onChanged }: { onChanged?: () => void 
           <div>
             <label className={LABEL} htmlFor="stt-endpoint-base-url">{t(`${P}baseUrl`)}</label>
             <input id="stt-endpoint-base-url" className={INPUT} data-testid="local-ai-stt-endpoint-base-url" type="url" inputMode="url"
-              autoComplete="off" spellCheck={false} placeholder="http://192.168.1.20:8000/v1"
+              autoComplete="off" spellCheck={false} placeholder="http://192.168.1.20:8000/v1" // public-hygiene: allow an example LAN address shown to the user, not a real host
               value={form.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} />
             <p className="text-[11px] text-[var(--text-muted)] mt-1">{t(`${P}baseUrlHint`)}</p>
           </div>

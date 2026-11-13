@@ -196,7 +196,7 @@ export type SttEndpointInput =
 export function validateSttEndpointInput(body: Record<string, unknown> | null): SttEndpointInput {
   const rawUrl = body?.baseUrl;
   if (typeof rawUrl !== "string" || !rawUrl.trim()) {
-    return { ok: false, code: "invalid_base_url", error: "Enter the server's address, for example http://192.168.1.20:8000/v1." };
+    return { ok: false, code: "invalid_base_url", error: "Enter the server's address, for example http://192.168.1.20:8000/v1." }; // public-hygiene: allow an example LAN address shown to the user, not a real host
   }
   const baseUrl = normalizeSttEndpointUrl(rawUrl);
   if (!baseUrl) {

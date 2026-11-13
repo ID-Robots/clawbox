@@ -2122,7 +2122,7 @@ export const de: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "Kein Sprachserver gespeichert.",
   "localModels.sttEndpoint.setUp": "Server hinzufügen",
   "localModels.sttEndpoint.baseUrl": "Serveradresse",
-  "localModels.sttEndpoint.baseUrlHint": "Die /v1-Wurzel des Servers, auf dieser Box oder in Ihrem lokalen Netzwerk, zum Beispiel http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "Die /v1-Wurzel des Servers, auf dieser Box oder in Ihrem lokalen Netzwerk, zum Beispiel http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Modell",
   "localModels.sttEndpoint.modelHint": "Leer lassen für whisper-1.",
   "localModels.sttEndpoint.apiKey": "API-Schlüssel (optional)",
@@ -2149,7 +2149,7 @@ export const de: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "Der Server ist nicht erreichbar. Prüfen Sie die Adresse und ob er läuft.",
   "localModels.sttEndpoint.error.unauthorized": "Der Server hat den API-Schlüssel abgelehnt.",
   "localModels.sttEndpoint.error.addressRefused": "Der Sprachserver muss auf dieser Box oder in Ihrem lokalen Netzwerk laufen, nicht im Internet.",
-  "localModels.sttEndpoint.error.baseUrl": "Geben Sie eine http://- oder https://-Adresse ein, zum Beispiel http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Geben Sie eine http://- oder https://-Adresse ein, zum Beispiel http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "Der Modellname muss eine Zeile mit höchstens 200 Zeichen sein.",
   "localModels.sttEndpoint.error.apiKey": "Der API-Schlüssel muss eine Zeile ohne Leerzeichen sein.",
   "localModels.sttEndpoint.error.badResponse": "Die Antwort des Servers ist nicht die eines Sprache-zu-Text-Servers.",

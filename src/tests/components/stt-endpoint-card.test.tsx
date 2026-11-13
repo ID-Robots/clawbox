@@ -12,7 +12,7 @@ import SttEndpointCard from "@/components/local-ai/SttEndpointCard";
 
 vi.setConfig({ testTimeout: 30_000 });
 
-const BASE = "http://192.168.1.20:8000/v1";
+const BASE = "http://192.168.1.20:8000/v1"; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
 type Call = { url: string; method: string; body: Record<string, unknown> | null };
 let calls: Call[] = [];
 const json = (body: unknown, status = 200) =>

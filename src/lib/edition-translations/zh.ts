@@ -2131,7 +2131,7 @@ export const zh: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "尚未保存语音服务器。",
   "localModels.sttEndpoint.setUp": "添加服务器",
   "localModels.sttEndpoint.baseUrl": "服务器地址",
-  "localModels.sttEndpoint.baseUrlHint": "服务器的 /v1 根地址,位于本设备或本地网络中,例如 http://192.168.1.20:8000/v1。",
+  "localModels.sttEndpoint.baseUrlHint": "服务器的 /v1 根地址,位于本设备或本地网络中,例如 http://192.168.1.20:8000/v1。", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "模型",
   "localModels.sttEndpoint.modelHint": "留空则使用 whisper-1。",
   "localModels.sttEndpoint.apiKey": "API 密钥(可选)",
@@ -2158,7 +2158,7 @@ export const zh: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "无法连接服务器。请检查地址以及服务器是否在运行。",
   "localModels.sttEndpoint.error.unauthorized": "服务器拒绝了 API 密钥。",
   "localModels.sttEndpoint.error.addressRefused": "语音服务器必须位于本设备或本地网络中,不能在互联网上。",
-  "localModels.sttEndpoint.error.baseUrl": "请输入 http:// 或 https:// 地址,例如 http://192.168.1.20:8000/v1。",
+  "localModels.sttEndpoint.error.baseUrl": "请输入 http:// 或 https:// 地址,例如 http://192.168.1.20:8000/v1。", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "模型名称必须是一行,最多 200 个字符。",
   "localModels.sttEndpoint.error.apiKey": "API 密钥必须是一行且不含空格。",
   "localModels.sttEndpoint.error.badResponse": "服务器的响应不像语音转文字服务器的响应。",

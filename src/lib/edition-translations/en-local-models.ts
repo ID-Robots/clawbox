@@ -231,7 +231,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "No speech server saved.",
   "localModels.sttEndpoint.setUp": "Add a server",
   "localModels.sttEndpoint.baseUrl": "Server address",
-  "localModels.sttEndpoint.baseUrlHint": "The /v1 root of the server, on this box or your local network, for example http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "The /v1 root of the server, on this box or your local network, for example http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Model",
   "localModels.sttEndpoint.modelHint": "Leave empty for whisper-1.",
   "localModels.sttEndpoint.apiKey": "API key (optional)",
@@ -258,7 +258,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "Could not reach the server. Check the address and that it is running.",
   "localModels.sttEndpoint.error.unauthorized": "The server refused the API key.",
   "localModels.sttEndpoint.error.addressRefused": "The speech server must be on this box or on your local network, not on the internet.",
-  "localModels.sttEndpoint.error.baseUrl": "Enter an http:// or https:// address, for example http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Enter an http:// or https:// address, for example http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "The model name must be one line of up to 200 characters.",
   "localModels.sttEndpoint.error.apiKey": "The API key must be one line with no spaces.",
   "localModels.sttEndpoint.error.badResponse": "The server's answer was not what a speech-to-text server sends.",

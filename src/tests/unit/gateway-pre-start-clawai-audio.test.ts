@@ -786,7 +786,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the loca
       else process.env.CLAWBOX_DEVICE_STORE = saved;
     }
   }
-  const ENDPOINT_STORE = { stt_primary: "endpoint", stt_endpoint: { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" } };
+  const ENDPOINT_STORE = { stt_primary: "endpoint", stt_endpoint: { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" } }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
 
   it("seeds no cloud row and no endpoint on a locked box", () => {
     withStore({ ai_cloud_lock: true }, () => {
@@ -836,8 +836,8 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the loca
       expect(audio(cfg)).toEqual({ enabled: false });
     });
     withStore({ ai_cloud_lock: true }, () => {
-      const own = { tools: { media: { audio: { baseUrl: "http://192.168.7.9:9000/v1" } } } };
-      expect(audio(migrate(own, false).cfg)).toEqual({ baseUrl: "http://192.168.7.9:9000/v1" });
+      const own = { tools: { media: { audio: { baseUrl: "http://192.168.7.9:9000/v1" } } } }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+      expect(audio(migrate(own, false).cfg)).toEqual({ baseUrl: "http://192.168.7.9:9000/v1" }); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
     });
   });
 

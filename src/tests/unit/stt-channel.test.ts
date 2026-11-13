@@ -415,7 +415,7 @@ const endpointRow = () => ({
   timeoutSeconds: 120,
   capabilities: ["audio"],
 });
-const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" };
+const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
 
 describe("the local-only AI lock on channel voice notes", () => {
   it("reads no cloud backing under the lock, whatever the credential", async () => {

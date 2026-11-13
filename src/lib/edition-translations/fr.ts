@@ -2123,7 +2123,7 @@ export const fr: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "Aucun serveur vocal enregistré.",
   "localModels.sttEndpoint.setUp": "Ajouter un serveur",
   "localModels.sttEndpoint.baseUrl": "Adresse du serveur",
-  "localModels.sttEndpoint.baseUrlHint": "La racine /v1 du serveur, sur ce boîtier ou sur votre réseau local, par exemple http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "La racine /v1 du serveur, sur ce boîtier ou sur votre réseau local, par exemple http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Modèle",
   "localModels.sttEndpoint.modelHint": "Laissez vide pour whisper-1.",
   "localModels.sttEndpoint.apiKey": "Clé API (facultative)",
@@ -2150,7 +2150,7 @@ export const fr: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "Impossible de joindre le serveur. Vérifiez l'adresse et qu'il fonctionne.",
   "localModels.sttEndpoint.error.unauthorized": "Le serveur a refusé la clé API.",
   "localModels.sttEndpoint.error.addressRefused": "Le serveur vocal doit être sur ce boîtier ou sur votre réseau local, pas sur internet.",
-  "localModels.sttEndpoint.error.baseUrl": "Saisissez une adresse http:// ou https://, par exemple http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Saisissez une adresse http:// ou https://, par exemple http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "Le nom du modèle doit tenir sur une ligne de 200 caractères au plus.",
   "localModels.sttEndpoint.error.apiKey": "La clé API doit tenir sur une ligne, sans espaces.",
   "localModels.sttEndpoint.error.badResponse": "La réponse du serveur n'est pas celle d'un serveur de reconnaissance vocale.",

@@ -2123,7 +2123,7 @@ export const nl: Record<string, string> = {
   "localModels.sttEndpoint.notConfigured": "Geen spraakserver opgeslagen.",
   "localModels.sttEndpoint.setUp": "Server toevoegen",
   "localModels.sttEndpoint.baseUrl": "Serveradres",
-  "localModels.sttEndpoint.baseUrlHint": "De /v1-root van de server, op deze box of in uw lokale netwerk, bijvoorbeeld http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.baseUrlHint": "De /v1-root van de server, op deze box of in uw lokale netwerk, bijvoorbeeld http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.model": "Spraakmodel",
   "localModels.sttEndpoint.modelHint": "Laat leeg voor whisper-1.",
   "localModels.sttEndpoint.apiKey": "API-sleutel (optioneel)",
@@ -2150,7 +2150,7 @@ export const nl: Record<string, string> = {
   "localModels.sttEndpoint.error.unreachable": "De server is niet bereikbaar. Controleer het adres en of hij draait.",
   "localModels.sttEndpoint.error.unauthorized": "De server weigerde de API-sleutel.",
   "localModels.sttEndpoint.error.addressRefused": "De spraakserver moet op deze box of in uw lokale netwerk staan, niet op internet.",
-  "localModels.sttEndpoint.error.baseUrl": "Voer een http://- of https://-adres in, bijvoorbeeld http://192.168.1.20:8000/v1.",
+  "localModels.sttEndpoint.error.baseUrl": "Voer een http://- of https://-adres in, bijvoorbeeld http://192.168.1.20:8000/v1.", // public-hygiene: allow an example LAN address shown to the user, not a real host
   "localModels.sttEndpoint.error.model": "De modelnaam moet één regel van maximaal 200 tekens zijn.",
   "localModels.sttEndpoint.error.apiKey": "De API-sleutel moet één regel zonder spaties zijn.",
   "localModels.sttEndpoint.error.badResponse": "Het antwoord van de server is niet dat van een spraak-naar-tekstserver.",

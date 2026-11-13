@@ -304,7 +304,8 @@ fi
 r() {
   local key=${1#.}
   key=${key%%[.| ]*}
-  printf '%s\n' "$RAW" | sed -n 's/^R //p' | jq -rs --arg k "$key" "map(select(type == \"object\" and has(\$k))) | last | $1 // empty" 2>/dev/null
+  # `select(. != null)`, not `// empty`: a false is an answer, and `// empty` drops it.
+  printf '%s\n' "$RAW" | sed -n 's/^R //p' | jq -rs --arg k "$key" "map(select(type == \"object\" and has(\$k))) | last | ($1) | select(. != null)" 2>/dev/null
 }
 
 # 1. Mic dictation through the owner's server.
