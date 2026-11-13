@@ -652,7 +652,9 @@ export default function CodingAgentSettingsPanel() {
   // the ones that cannot run now. The box's own missing pieces are in
   // `readiness.problems` beside the default account's, and in no account's
   // own list — so they are what the top list has that none of those has.
-  const roleProviders: CodingProviderId[] = status?.providers?.length ? [...status.providers] : [...CODING_PROVIDERS];
+  // A server from before the list: the cloud accounts it knew. The box's own
+  // engine (`local`) is offered only by a server that says so.
+  const roleProviders: CodingProviderId[] = status?.providers?.length ? [...status.providers] : CODING_PROVIDERS.filter((id) => id !== "local");
   // The accounts a role may be pinned to: the ones the owner connected. A
   // server from before the list answers without it — its default provider is
   // then the one connected, which is exactly what it ran on.
