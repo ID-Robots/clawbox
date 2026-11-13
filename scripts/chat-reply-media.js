@@ -46,7 +46,8 @@ const MAX_PATHS_PER_MESSAGE = 16;
 const MAX_PATH_CHARS = 4096;
 
 /** The media-tree folders ClawBox records its own writes in at write time: never claimable by a reply. */
-const MEDIA_TREE_OWN_FOLDERS = Object.freeze(["chat-attachments", "chat-generated", "chat-spoken", "inbound"]);
+// `tool-image-generation`: the owner's assistant's pictures (a member's assistant has no image tool).
+const MEDIA_TREE_OWN_FOLDERS = Object.freeze(["chat-attachments", "chat-generated", "chat-spoken", "inbound", "tool-image-generation"]);
 
 const MEDIA_LINE_RE = /^media:\s*(.*)$/i;
 const FENCE_RE = /^(?:```|~~~)/;

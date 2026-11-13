@@ -110,16 +110,16 @@ describe("a member's Hermes profile", () => {
 });
 
 (hasPython3 ? describe : describe.skip)("clawbox_staff_guard and relay entries", () => {
-  function judge(tool: string, hermesHome: string, grants: Record<string, string[]>) {
+  function judge(tool: string, hermesHome: string, grants: Record<string, string[]>, args: Record<string, unknown> = {}) {
     const program = [
       "import json, sys",
       "sys.path.insert(0, sys.argv[1])",
       "from clawbox_staff_guard.staff_guard import judge",
       "a = json.loads(sys.stdin.read())",
-      "print(json.dumps(judge(a['tool'], {}, a['home'], '/home/clawbox', {'staffMcpGrants': {'agents': a['grants']}})))",
+      "print(json.dumps(judge(a['tool'], a['args'], a['home'], '/home/clawbox', {'staffMcpGrants': {'agents': a['grants']}})))",
     ].join("\n");
     return JSON.parse(execFileSync("python3", ["-I", "-c", program, PLUGINS_ROOT], {
-      input: JSON.stringify({ tool, home: hermesHome, grants }),
+      input: JSON.stringify({ tool, home: hermesHome, grants, args }),
       encoding: "utf-8",
     })) as { action: string; message?: string } | null;
   }
@@ -140,9 +140,22 @@ describe("a member's Hermes profile", () => {
     expect(judge(`mcp__${sanitized}__create_word_document`, maria, {})).toMatchObject({ action: "block" });
   });
 
+  it("does not read a LONGER entry's tools as a granted entry's (`doc` granted, `doc-` not)", () => {
+    const maria = path.join(root, "profiles", "clawbox-staff-maria");
+    const granted = mcp.staffEntryName("maria", "doc").replace(/[^A-Za-z0-9_]/g, "_");
+    const grants = { "clawbox-staff-maria": [mcp.staffEntryName("maria", "doc")] };
+    expect(judge(`mcp__${granted}__search`, maria, grants)).toBeNull();
+    expect(judge(`mcp__${granted}___search`, maria, grants)).toMatchObject({ action: "block" });
+    expect(judge(`mcp_${granted}__search`, maria, grants)).toMatchObject({ action: "block" });
+  });
+
   it("refuses the owner's profile a member's relay entry, and leaves the owner's own tools alone", () => {
     const entry = mcp.staffEntryName("maria", "worddoc").replace(/[^A-Za-z0-9_]/g, "_");
     expect(judge(`mcp__${entry}__create_word_document`, root, { "clawbox-staff-maria": [entry] })).toMatchObject({ action: "block" });
     expect(judge("mcp__worddoc__create_word_document", root, {})).toBeNull();
+    // …nor through Tool Search's tool_call.
+    expect(judge("tool_call", root, {}, { name: `mcp__${entry}__create_word_document`, arguments: {} })).toMatchObject({ action: "block" });
+    expect(judge("tool_call", root, {}, { calls: [{ name: "mcp__worddoc__x" }, { name: `mcp__${entry}__y` }] })).toMatchObject({ action: "block" });
+    expect(judge("tool_call", root, {}, { name: "mcp__worddoc__x" })).toBeNull();
   });
 });

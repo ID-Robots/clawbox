@@ -73,6 +73,11 @@ function grantsOf(view: StaffMcpView): Record<string, Grant> {
   return map;
 }
 
+/** A granted list as one string, independent of the order servers were ticked in. */
+function canon(grants: Record<string, Grant>): string {
+  return JSON.stringify(Object.keys(grants).sort().map((name) => [name, grants[name].header, grants[name].needsCredential, grants[name].writeTools, grants[name].members]));
+}
+
 /** The body that saves a granted list. */
 function grantsBody(grants: Record<string, Grant>) {
   return { servers: Object.fromEntries(Object.entries(grants).map(([name, grant]) => [name, { ...grant }])) };
@@ -99,7 +104,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
     const prev = viewRef.current;
     viewRef.current = next;
     setView(next);
-    setGranted((draft) => (replaceDraft || !prev || JSON.stringify(draft) === JSON.stringify(grantsOf(prev)) ? grantsOf(next) : draft));
+    setGranted((draft) => (replaceDraft || !prev || canon(draft) === canon(grantsOf(prev)) ? grantsOf(next) : draft));
   }, []);
 
   const load = useCallback(async () => {
@@ -169,7 +174,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
 
   const grantedServers = view.servers.filter((s) => s.granted);
   const inputClass = "h-8 px-2 bg-white/[0.06] border border-white/10 rounded-lg text-xs text-white outline-none focus:border-[var(--coral-bright)] transition-colors";
-  const dirty = JSON.stringify(granted) !== JSON.stringify(grantsOf(view));
+  const dirty = canon(granted) !== canon(grantsOf(view));
   const edit = (name: string, change: Partial<Grant>) => setGranted({ ...granted, [name]: { ...granted[name], ...change } });
   // The members a saved grant reaches, for the credentials list below.
   const reaches = (server: ServerRow, username: string) => !Array.isArray(server.members) || server.members.includes(username);

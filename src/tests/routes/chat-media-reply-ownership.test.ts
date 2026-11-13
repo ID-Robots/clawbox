@@ -27,7 +27,7 @@ vi.mock("@/lib/org-mode-server", () => {
     const who = await h.who(req);
     return who && !who.isOwner ? { username: who.username } : null;
   };
-  return { orgMemberOf, isOrgMemberRequest: async (req: Request) => (await orgMemberOf(req)) !== null };
+  return { orgMemberOf, orgMemberStrictOf: orgMemberOf, isOrgMemberRequest: async (req: Request) => (await orgMemberOf(req)) !== null };
 });
 vi.mock("@/lib/harness", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/harness")>()),

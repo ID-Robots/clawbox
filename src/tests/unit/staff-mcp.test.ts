@@ -313,3 +313,27 @@ describe("a tool on the box that takes no credential, granted to all staff or by
     expect(mcp.staffToolAllowed("create_document", { include: ["search"], exclude: [], writeTools: true })).toBe(false);
   });
 });
+
+describe("tool names the review found (TASK-2516)", () => {
+  const strict = { include: null, exclude: [] };
+  const writes = { include: null, exclude: [], writeTools: true };
+  it("refuses who-may-do-what tools even with create/edit ticked", () => {
+    for (const name of ["set_permissions", "add_member", "update_acl", "updateRole", "add_user"]) expect(mcp.staffToolAllowed(name, writes), name).toBe(false);
+  });
+  it("reads a verb at the end of a run-together word too", () => {
+    for (const name of ["mailsend", "filedelete", "docpublish"]) {
+      expect(mcp.staffToolAllowed(name, strict), name).toBe(false);
+      expect(mcp.staffToolAllowed(name, writes), name).toBe(false);
+    }
+    for (const name of ["search", "get_settings", "lookup_address", "list_running_jobs"]) expect(mcp.staffToolAllowed(name, strict), name).toBe(true);
+  });
+  it("plans no entry from a credential named like an object property", () => {
+    const entries = mcp.planStaffMcpEntries({
+      staff: ["olga"],
+      store: mcp.parseStore({ servers: { constructor: {} }, relayTokens: { olga: "c".repeat(64) } }),
+      servers: [httpServer("constructor")],
+      relayBase: "http://127.0.0.1",
+    });
+    expect(entries.size).toBe(0);
+  });
+});
