@@ -65,6 +65,36 @@ describe("useClawboxLogin", () => {
     expect(result.current.plan).toBe("pro");
   });
 
+  it("a link the portal refused is logged out, so a gate offers to link again (TASK-2501)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "llamacpp",
+      clawaiConfigured: false,
+      subscriptionLinked: true,
+      subscriptionLinkRejected: true,
+      clawaiPlan: null,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(false);
+  });
+
+  it("a refused link beside a ClawBox AI sign-in leaves the box logged in on that", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      connected: true,
+      provider: "clawai",
+      clawaiConfigured: true,
+      clawaiAccountTier: "pro",
+      subscriptionLinked: true,
+      subscriptionLinkRejected: true,
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.loggedIn).toBe(true);
+  });
+
   it("a linked Free account is logged in without a paid tier", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
       connected: true,

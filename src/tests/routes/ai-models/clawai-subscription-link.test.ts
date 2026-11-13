@@ -10,16 +10,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-vi.mock("@/lib/clawai-connect", () => ({
-  createClawAiUserCode: vi.fn(() => "ABCD-1234"),
-  createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
-  CLAWAI_USER_CODE_LENGTH: 8,
-  CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
-  writeClawAiSession: vi.fn(),
-  readClawAiSession: vi.fn(),
-  clearClawAiSession: vi.fn(),
-  isClawAiSessionExpired: vi.fn(() => false),
-}));
+vi.mock("@/lib/clawai-connect", () => {
+  const writeClawAiSession = vi.fn();
+  const readClawAiSession = vi.fn();
+  return {
+    createClawAiUserCode: vi.fn(() => "ABCD-1234"),
+    createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
+    CLAWAI_USER_CODE_LENGTH: 8,
+    CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
+    writeClawAiSession,
+    readClawAiSession,
+    // The real one's contract over the two mocks: write only while the stored
+    // session is still the owner's.
+    writeClawAiSessionIfCurrent: vi.fn(async (owner: { device_id: string; createdAt: number }, next: unknown) => {
+      const current = (await readClawAiSession()) as { device_id: string; createdAt: number } | null | undefined;
+      if (!current || current.device_id !== owner.device_id || current.createdAt !== owner.createdAt) return false;
+      await writeClawAiSession(next);
+      return true;
+    }),
+    clearClawAiSession: vi.fn(),
+    isClawAiSessionExpired: vi.fn(() => false),
+  };
+});
 vi.mock("@/app/setup-api/ai-models/configure/route", () => ({
   POST: vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 })),
 }));
@@ -199,6 +211,39 @@ describe("/clawai/poll finishing an entitlement link", () => {
     expect(await (await POST()).json()).toEqual({ status: "complete" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mockLink).not.toHaveBeenCalled();
+  });
+
+  it("never writes its ending over a newer sign-in started while the portal answered the link", async () => {
+    const mine = pendingSession("entitlement");
+    const newer: ClawAiConnectSession = { ...pendingSession("primary"), device_id: "a-newer-device-code", createdAt: mine.createdAt + 1 };
+    let stored: ClawAiConnectSession = mine;
+    mockReadSession.mockImplementation(async () => stored);
+    mockWriteSession.mockImplementation(async (s: ClawAiConnectSession) => { stored = s; });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
+    mockLink.mockImplementation(async () => {
+      stored = newer; // a /clawai/start lands while the portal answers
+      return { ok: true, plan: "pro" };
+    });
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    expect(await (await POST()).json()).toEqual({ status: "complete" });
+    expect(stored).toBe(newer);
+    expect(mockLink).toHaveBeenCalledWith(TOKEN);
+  });
+
+  it("nor its error", async () => {
+    const mine = pendingSession("entitlement");
+    const newer: ClawAiConnectSession = { ...pendingSession("primary"), device_id: "a-newer-device-code", createdAt: mine.createdAt + 1 };
+    let stored: ClawAiConnectSession = mine;
+    mockReadSession.mockImplementation(async () => stored);
+    mockWriteSession.mockImplementation(async (s: ClawAiConnectSession) => { stored = s; });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
+    mockLink.mockImplementation(async () => {
+      stored = newer;
+      return { ok: false, code: "token_rejected", message: "refused" };
+    });
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    expect((await POST()).status).toBe(409);
+    expect(stored).toBe(newer);
   });
 
   it("links nothing when the session was cancelled while the portal answered", async () => {

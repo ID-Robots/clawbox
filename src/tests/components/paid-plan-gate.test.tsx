@@ -271,6 +271,21 @@ describe("the device handoff inside the gate", () => {
     await waitFor(() => expect(screen.queryByTestId("paid-gate")).toBeNull(), { timeout: 8_000 });
   }, 15_000);
 
+  it("offers to link again, not an upgrade card, when the portal refused the linked token (TASK-2501)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/ai-models/status") {
+        return json({ clawaiConfigured: false, subscriptionLinked: true, subscriptionLinkRejected: true, clawaiPlan: null });
+      }
+      return json({ installed: true, connected: false, login: null, paths: [] });
+    }));
+
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "connect"));
+    expect(screen.getByTestId("paid-gate-connect-start")).toHaveTextContent(t("paidGate.signInButton"));
+  });
+
   it("says it is checking rather than dropping back to the Connect button", async () => {
     // The poll runs every PAID_GATE_POLL_MS and the pairing finishes in
     // between; the card must not read as a failure in that gap.

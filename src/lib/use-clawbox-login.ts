@@ -91,6 +91,9 @@ interface AiStatusResponse {
   // A subscription linked to the box for its plan alone, with no ClawBox AI
   // chat model (TASK-2501). Absent on an older server, which had no such link.
   subscriptionLinked?: boolean;
+  // The portal refused the linked token (TASK-2501): the link vouches for no
+  // plan until the owner links again.
+  subscriptionLinkRejected?: boolean;
   // Set on the one answer whose poll recorded a CHANGED plan on the box.
   clawaiPlanChanged?: boolean;
 }
@@ -232,8 +235,12 @@ function readAnswer(data: AiStatusResponse): Answer {
     // currently active for chat, or a subscription linked for its plan
     // alone (TASK-2501) — the plan surfaces gate on the account, never on
     // the chat model. Older responses without `clawaiConfigured` fall back
-    // to the pre-rollout `provider === "clawai"` heuristic.
-    loggedIn: (data.clawaiConfigured ?? (data.provider === "clawai")) || data.subscriptionLinked === true,
+    // to the pre-rollout `provider === "clawai"` heuristic. A link the portal
+    // REFUSED is no account on the box: logged out, so a paid gate shows its
+    // connect face — the "Link my subscription" button — instead of an
+    // upgrade card that has no way to link again.
+    loggedIn: (data.clawaiConfigured ?? (data.provider === "clawai"))
+      || (data.subscriptionLinked === true && data.subscriptionLinkRejected !== true),
     // One normaliser, shared with the server that produced the field, so
     // the two cannot disagree about what an empty list means.
     allowedModels: normalizeAllowedModelIds(data.clawaiAllowedModels),

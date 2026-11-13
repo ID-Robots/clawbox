@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
+import { processStore } from "@/lib/process-store";
 
 // `configuring` is the intermediate state held while the device-side
 // configure pipeline is restarting the gateway after upstream issued a
@@ -103,11 +104,47 @@ export function createClawAiDeviceId(): string {
   return crypto.randomBytes(24).toString("base64url");
 }
 
-export async function writeClawAiSession(session: ClawAiConnectSession) {
+/**
+ * Every write of the session goes through one queue, shared by every copy of
+ * this module in the process, so a conditional write
+ * ({@link writeClawAiSessionIfCurrent}) reads and writes with no other write
+ * in between.
+ */
+const sessionWrites = processStore("clawai-connect:session-writes", () => ({ queue: Promise.resolve() as Promise<unknown> }));
+
+function serializedSessionWrite<T>(work: () => Promise<T>): Promise<T> {
+  const next = sessionWrites.queue.then(work, work);
+  sessionWrites.queue = next.catch(() => undefined);
+  return next;
+}
+
+async function writeSessionNow(session: ClawAiConnectSession) {
   await fs.mkdir(DATA_DIR, { recursive: true });
   const tmpPath = untraced(`${STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`);
   await fs.writeFile(tmpPath, JSON.stringify(session), { mode: 0o600 });
   await fs.rename(tmpPath, STATE_PATH);
+}
+
+export async function writeClawAiSession(session: ClawAiConnectSession) {
+  await serializedSessionWrite(() => writeSessionNow(session));
+}
+
+/**
+ * Write `next` only while the stored session is still `owner`'s — the same
+ * device code, started at the same moment. A finish that waited on the portal
+ * must not replace a newer sign-in someone started meanwhile with its own
+ * ending. Answers whether it wrote.
+ */
+export async function writeClawAiSessionIfCurrent(
+  owner: Pick<ClawAiConnectSession, "device_id" | "createdAt">,
+  next: ClawAiConnectSession,
+): Promise<boolean> {
+  return serializedSessionWrite(async () => {
+    const current = await readClawAiSession();
+    if (!current || current.device_id !== owner.device_id || current.createdAt !== owner.createdAt) return false;
+    await writeSessionNow(next);
+    return true;
+  });
 }
 
 export async function readClawAiSession() {
