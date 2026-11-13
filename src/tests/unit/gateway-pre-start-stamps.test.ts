@@ -753,6 +753,8 @@ describe.skipIf(!hasPython3)("the Codex registry-dependency check, on the boot p
       ["a list with an entry that is not an object", { registry: JSON.stringify({ plugins: ["deepseek"] }) }],
       ["an entry without a plugin id", { registry: JSON.stringify({ plugins: [{ rootDir: "/opt/codex" }] }) }],
       ["an entry whose plugin id is empty", { registry: JSON.stringify({ plugins: [{ id: "", rootDir: "/opt/codex" }] }) }],
+      // The pinned core always lists the plugins it bundles: an empty list is no answer.
+      ["an empty plugin list", { registry: JSON.stringify({ plugins: [] }) }],
       ["no Codex, then a failed exit", { registry: NO_CODEX, registryExit: 1 }],
     ])("asks every start and records nothing when the registry answers %s", (_what, answer) => {
       const cli = fakeOpenclaw(answer);
