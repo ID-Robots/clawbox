@@ -260,11 +260,9 @@ export async function setOpenclawAuthOrder(provider: string, order: string[] | n
  */
 export async function stopOpenclawGatewayForOffline(): Promise<void> {
   if (gatewayIsAbsent()) return;
-  try {
-    fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
-  } catch (err) {
-    console.warn("[openclaw-auth] could not record the offline hold:", err instanceof Error ? err.message : err);
-  }
+  // No record, no stop: a gateway held stopped with nothing on disk to say so
+  // would stay stopped if this server exited before starting it again.
+  fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
   await deps.stopGateway();
 }
 
@@ -314,10 +312,20 @@ export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>): Pro
   // must be started again on every way out. A start issued while that stop is
   // pending cancels it; `work` then meets a gateway that owns the state, and
   // says so, rather than leaving the assistant stopped.
+  let failure: { error: unknown } | null = null;
   try {
     await deps.stopGateway();
     return await work();
+  } catch (err) {
+    failure = { error: err };
+    throw err;
   } finally {
-    await deps.startGateway();
+    try {
+      await deps.startGateway();
+    } catch (startErr) {
+      // The first failure is the one to report; the start's is logged.
+      if (!failure) throw startErr;
+      console.error("[openclaw-auth] the gateway did not start again:", startErr instanceof Error ? startErr.message : startErr);
+    }
   }
 }

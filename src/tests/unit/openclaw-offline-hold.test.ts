@@ -56,6 +56,17 @@ describe("the offline hold", () => {
     expect(fs.existsSync(HOLD)).toBe(false);
   });
 
+  it("stops nothing when the hold cannot be written", async () => {
+    const d = deps();
+    const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => { throw new Error("EROFS: read-only file system"); });
+    try {
+      await expect(stopOpenclawGatewayForOffline()).rejects.toThrow(/EROFS/);
+      expect(d.stopGateway).not.toHaveBeenCalled();
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it("starts the gateway again at boot when the server that held it has exited", async () => {
     const d = deps();
     fs.writeFileSync(HOLD, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));

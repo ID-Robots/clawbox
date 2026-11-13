@@ -383,6 +383,29 @@ describe("a limited account and the sessions core pinned to it", () => {
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
   });
 
+  it("on OpenClaw 2026.11.3 takes the owner's sign-in leading a COMPLETED order, the limited accounts at its tail, as landed", async () => {
+    // The gateway takes only an order naming every profile it holds, so the
+    // limited accounts stay in it after the owner's sign-in (out of the lead,
+    // not out of the store); the pass must not call that a failed write.
+    const core = fakeCore();
+    core.orderKeepsOthers = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    const synced = await gw.syncGatewayNow();
+    expect(synced.status).toBe("ok");
+    expect(core.order?.[0]).toBe("anthropic:default");
+    expect(new Set(core.order?.slice(1))).toEqual(new Set([p(work.id), p(personal.id)]));
+    expect(core.logouts).toEqual([]);
+    // A second pass finds the order leading with what it wants and writes nothing.
+    const orders = core.orders.length;
+    expect(await gw.keepGatewayMirror()).not.toBe("failed");
+    expect(core.orders.length).toBe(orders);
+  });
+
   it("keeps every limited account in, by its reset and ahead of it, when the owner's other Anthropic credential is an API key or of a kind the store does not say", async () => {
     for (const type of ["api_key", ""]) {
       const core = fakeCore();

@@ -2351,8 +2351,14 @@ export async function startMemoryIndex(
     // The stop can take a minute (the gateway drains first), longer than a
     // run may sit with no child before the reconcile calls it interrupted and
     // frees the lock — so the claim is re-stamped while it waits.
+    // Every stamp this call writes is remembered: the run on record is this
+    // call's only while it carries one of them (another run's record carries
+    // its own start time).
+    const ourStamps = new Set<number>([state.startedAtMs]);
     const keepClaim = setInterval(() => {
-      state = { ...state, startedAtMs: Date.now() };
+      const stamp = Math.max(Date.now(), state.startedAtMs + 1);
+      ourStamps.add(stamp);
+      state = { ...state, startedAtMs: stamp };
       void writeRunState(state).catch(() => { /* the next stamp tries again */ });
     }, 10_000);
     try {
@@ -2360,7 +2366,9 @@ export async function startMemoryIndex(
     } catch (err) {
       clearInterval(keepClaim);
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
-      await markInterrupted({ ...state, startedAtMs: Date.now() }).catch(() => undefined);
+      // The record as it stands, so markInterrupted recognises it as this run's.
+      const onRecord = await readPersistedRunState();
+      if (onRecord.status === "running" && ourStamps.has(onRecord.startedAtMs)) await markInterrupted(onRecord).catch(() => undefined);
       throw err;
     } finally {
       clearInterval(keepClaim);
@@ -2368,7 +2376,7 @@ export async function startMemoryIndex(
     // Still this run's? Nothing may have taken the lock over in the meantime;
     // if something did, the gateway goes back and this call steps aside.
     const now = await readPersistedRunState();
-    if (now.status !== "running" || now.mode !== mode || now.trigger !== trigger) {
+    if (now.status !== "running" || !ourStamps.has(now.startedAtMs)) {
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
       return { accepted: false, declined: "running", run: await readMemoryRunState() };
     }

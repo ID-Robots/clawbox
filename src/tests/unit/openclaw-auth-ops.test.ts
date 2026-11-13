@@ -184,6 +184,14 @@ describe("setOpenclawAuthOrder", () => {
 });
 
 describe("withOpenclawGatewayStopped", () => {
+  it("reports the stop's own failure when the start after it fails too", async () => {
+    const h = harness();
+    h.stopGateway.mockRejectedValueOnce(new Error("the gateway is still stopping"));
+    h.startGateway.mockRejectedValueOnce(new Error("restart refused"));
+    await expect(withOpenclawGatewayStopped(async () => "done")).rejects.toThrow(/still stopping/);
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("starts the gateway again when the stop itself throws", async () => {
     const h = harness();
     h.stopGateway.mockRejectedValueOnce(new Error("the gateway is still stopping"));
