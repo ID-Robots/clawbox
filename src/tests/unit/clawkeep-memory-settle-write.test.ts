@@ -24,6 +24,16 @@ vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
   return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
 });
 vi.mock("@/lib/openclaw-auth-ops", () => ({
+  // The gateway request through the (mocked) socket: no gateway = not answered.
+  askOpenclawGateway: async (method: string, params: Record<string, unknown>, timeoutMs: number) => {
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    try {
+      return { answered: true, result: await ws.gatewayWsCall(method, params, { timeoutMs }) };
+    } catch (err) {
+      if (err instanceof ws.GatewayWsUnavailableError) return { answered: false };
+      throw err;
+    }
+  },
   stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
   startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
 }));

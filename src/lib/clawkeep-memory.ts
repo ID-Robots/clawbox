@@ -32,8 +32,7 @@ import { readPlanGate } from "@/lib/paid-plan-gate-server";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
-import { gatewayWsCall, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
-import { startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
+import { askOpenclawGateway, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
@@ -691,11 +690,14 @@ async function collectMemoryStatusJson(agentId: string): Promise<unknown> {
  * index in). Null when no gateway is there to answer.
  */
 async function memoryStatusFromGateway(agentId: string): Promise<unknown | null> {
+  // A gateway that is starting (after an index pass, a restart) already owns
+  // the state: it is waited for, and only a stopped one leaves this to the CLI.
   let answer: unknown;
   try {
-    answer = await gatewayWsCall("memory.status", { agentId }, { timeoutMs: STATUS_TIMEOUT_MS });
+    const online = await askOpenclawGateway("memory.status", { agentId }, STATUS_TIMEOUT_MS);
+    if (!online.answered) return null;
+    answer = online.result;
   } catch (err) {
-    if (err instanceof GatewayWsUnavailableError) return null;
     throw new Error(`memory status unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
   const health = asRecord(answer);

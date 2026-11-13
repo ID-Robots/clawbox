@@ -318,6 +318,12 @@ else
 fi
 
 # ---- the turn ------------------------------------------------------------------
+# The processes the turn must leave alone, read once the box has settled: on
+# OpenClaw 2026.11.3 the Install above saves the first `llamacpp:default` key
+# offline (its gateway refuses `--profile-id`), so the gateway is started
+# again during the Install, not during the turn.
+wait_gateway_settled 180 || note "the gateway had not settled before the turn: ${SETTLE_STATE:-unknown}"
+read -r _ GW_PID ST_PID _ <<<"$(box_snapshot)"
 
 # One turn on the board: the CLI's JSON is kept in a file while the lowest
 # MemAvailable is sampled every second, then come a TURN line, one PAGE line

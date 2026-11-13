@@ -98,7 +98,7 @@ function agentArgs(agentId: string | undefined): string[] {
   return agentId ? ["--agent", agentId] : [];
 }
 
-type Online<T> = { answered: true; result: T } | { answered: false };
+export type Online<T> = { answered: true; result: T } | { answered: false };
 
 /** Thrown when a gateway owns the state but did not come up to take the request in time. */
 export class OpenclawGatewayNotReadyError extends Error {
@@ -116,8 +116,17 @@ export class OpenclawGatewayNotReadyError extends Error {
  * asked again.
  */
 async function askGatewayForAuth<T>(method: string, params: Record<string, unknown>): Promise<Online<T>> {
+  return askOpenclawGateway<T>(method, params, AUTH_TIMEOUT_MS);
+}
+
+/**
+ * Any gateway request with the same rule: answered by the gateway, or
+ * `answered: false` only when no gateway owns the state (its unit is down);
+ * a gateway that is starting is waited for and asked again.
+ */
+export async function askOpenclawGateway<T>(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<Online<T>> {
   if (gatewayIsAbsent()) return { answered: false };
-  const ask = async (): Promise<Online<T>> => ({ answered: true, result: (await deps.gatewayAuthRpc(method, params, AUTH_TIMEOUT_MS)) as T });
+  const ask = async (): Promise<Online<T>> => ({ answered: true, result: (await deps.gatewayAuthRpc(method, params, timeoutMs)) as T });
   try {
     return await ask();
   } catch (err) {
