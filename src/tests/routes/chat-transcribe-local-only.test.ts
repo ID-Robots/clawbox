@@ -60,6 +60,11 @@ function audioRequest(): NextRequest {
   } as unknown as ConstructorParameters<typeof NextRequest>[1]);
 }
 
+/** The key file as the app writes it: bound to the address it was saved for. */
+function boundKey(baseUrl: string, key: string): string {
+  return JSON.stringify({ v: 1, for: baseUrl, key });
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -118,7 +123,7 @@ afterEach(async () => {
 describe("the owner's own speech server", () => {
   it("transcribes with it when it is the chosen engine, sending the model and the key", async () => {
     writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "asr-small" } });
-    fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), "lan-key-1", { mode: 0o600 });
+    fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), boundKey(ENDPOINT, "lan-key-1"), { mode: 0o600 });
 
     const res = await POST(audioRequest());
 
@@ -166,12 +171,12 @@ describe("the owner's own speech server", () => {
     try {
       const B = `http://127.0.0.1:${(other.address() as AddressInfo).port}/v1`;
       writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "asr-a" } });
-      fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), "key-A", { mode: 0o600 });
+      fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), boundKey(ENDPOINT, "key-A"), { mode: 0o600 });
       remux.audioForCloud.mockImplementation(async (audio: { file: Blob; name: string }) => {
         // The save's own order: key off, record, new key.
         fs.rmSync(path.join(tmpHome, "data", ".stt-endpoint-key"), { force: true });
         writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: B, model: "asr-b" } });
-        fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), "key-B", { mode: 0o600 });
+        fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), boundKey(B, "key-B"), { mode: 0o600 });
         return { ...audio, prepared: "as-is" };
       });
       const res = await POST(audioRequest());
@@ -182,6 +187,24 @@ describe("the owner's own speech server", () => {
     } finally {
       await new Promise<void>((resolve) => other.close(() => resolve()));
     }
+  });
+
+  it("never pairs B's key with A's address when saves go A → B → A while it reads (TASK-2501)", async () => {
+    writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "asr-a" } });
+    fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), boundKey(ENDPOINT, "key-A"), { mode: 0o600 });
+    const B = "http://127.0.0.1:9/v1";
+    remux.audioForCloud.mockImplementation(async (audio: { file: Blob; name: string }) => {
+      // A save to B, then a save back to A that kept no key: what is left on
+      // disk is A's record beside B's key.
+      writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: B, model: "asr-b" } });
+      fs.writeFileSync(path.join(tmpHome, "data", ".stt-endpoint-key"), boundKey(B, "key-B"), { mode: 0o600 });
+      writeStore({ stt_primary: "endpoint", stt_endpoint: { baseUrl: ENDPOINT, model: "asr-a" } });
+      return { ...audio, prepared: "as-is" };
+    });
+    const res = await POST(audioRequest());
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].auth).toBeUndefined();
   });
 
   it("uploads nothing to the cloud when the lock goes on while the owner's server was asked", async () => {

@@ -46,9 +46,11 @@ afterEach(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function store(record: unknown, key?: string): void {
+function store(record: unknown, key?: string, keyFor?: string): void {
   fs.writeFileSync(path.join(dir, "data", "config.json"), JSON.stringify({ stt_endpoint: record }));
-  if (key) fs.writeFileSync(path.join(dir, "data", ".stt-endpoint-key"), key);
+  // As the app writes it (stt-endpoint.ts): bound to the address it was saved for.
+  const base = (record as { baseUrl?: string } | null)?.baseUrl;
+  if (key) fs.writeFileSync(path.join(dir, "data", ".stt-endpoint-key"), JSON.stringify({ v: 1, for: keyFor ?? base, key }));
 }
 
 /** Async, so the mock server in this same process can answer while it runs. */
@@ -67,6 +69,15 @@ function run(): Promise<{ status: number; stdout: string; stderr: string }> {
 }
 
 describe.skipIf(!hasPython3)("stt-endpoint-client.py", () => {
+  it("never sends a key stored for another address, nor one in any other shape (TASK-2501)", async () => {
+    store({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "asr-small" }, "key-of-b", "http://127.0.0.2:8000/v1");
+    expect((await run()).status).toBe(0);
+    expect(seen[0].auth).toBeUndefined();
+    fs.writeFileSync(path.join(dir, "data", ".stt-endpoint-key"), "a-bare-key");
+    expect((await run()).status).toBe(0);
+    expect(seen[1].auth).toBeUndefined();
+  });
+
   it("posts the voice note with the model and key to the saved server and prints the transcript", async () => {
     store({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "asr-small" }, "lan-key\n");
     const r = await run();
