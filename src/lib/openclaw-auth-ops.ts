@@ -59,6 +59,12 @@ export interface AuthOpsDeps {
    * state? Only a unit that is down lets the CLI work offline.
    */
   gatewayUnitUp: () => Promise<boolean>;
+  /**
+   * Is the gateway unit running or starting (active, activating, reloading)?
+   * Boot recovery's question, the other way round from `gatewayUnitUp`: a unit
+   * that is stopping, down or cannot be read may stay stopped, so it is started.
+   */
+  gatewayUnitRunning: () => Promise<boolean>;
   /** Wait for a gateway that is coming up to answer; false when it did not in time. */
   waitForGateway: () => Promise<boolean>;
 }
@@ -84,21 +90,20 @@ const defaultDeps: AuthOpsDeps = {
     try {
       await restartGateway();
     } catch (err) {
-      // The unit was started and is still coming up (a Jetson after heavy work
-      // can take longer than the ready wait): not a failure of the offline
-      // work, and every gateway request after this waits for a starting
-      // gateway anyway (askOpenclawGateway). A refused start still throws.
+      // The unit was started and may still be coming up (a Jetson after heavy
+      // work can take longer than the ready wait): not yet a failure of the
+      // offline work. A refused start throws at once.
       // By name, not `instanceof`: every module this one reaches is imported by
       // suites that mock openclaw-config, and a name needs no class there.
       if (err instanceof Error && err.name === "GatewayNotReadyError") {
         // Waited for once more, so the work's caller (a memory pass reporting
         // "done", a key save answering) does not hand the owner an assistant
-        // that cannot answer yet; past that it is still not a failure.
+        // that cannot answer yet. Nothing answering past that is a start that
+        // failed (a gateway that crashed while starting looks the same), and
+        // the caller is told so.
         console.warn("[openclaw-auth] the gateway was started again and is still coming up; waiting for it");
-        if (!(await waitForGatewayRpcReady(gatewayReadyWaitMs() * 3))) {
-          console.warn("[openclaw-auth] the gateway is still coming up after the extra wait");
-        }
-        return;
+        if (await waitForGatewayRpcReady(gatewayReadyWaitMs() * 3)) return;
+        console.warn("[openclaw-auth] the gateway did not answer after the extra wait either");
       }
       throw err;
     }
@@ -109,6 +114,10 @@ const defaultDeps: AuthOpsDeps = {
     // honest, a CLI write around a live owner is not.
     if (!state) return true;
     return ["active", "activating", "reloading", "deactivating"].includes(state.activeState);
+  },
+  gatewayUnitRunning: async () => {
+    const state = await readUnitState("clawbox-gateway.service");
+    return !!state && ["active", "activating", "reloading"].includes(state.activeState);
   },
   waitForGateway: () => waitForGatewayRpcReady(gatewayReadyWaitMs()),
 };
@@ -319,8 +328,9 @@ export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
   }
   // A server that exited after writing the hold but before (or without)
   // stopping the gateway leaves a running gateway: that one is left alone and
-  // only the hold goes.
-  if (await deps.gatewayUnitUp()) {
+  // only the hold goes. One still stopping (the server died while the stop
+  // drained) or whose state cannot be read is started.
+  if (await deps.gatewayUnitRunning()) {
     fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
     return false;
   }

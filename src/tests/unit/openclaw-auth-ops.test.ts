@@ -207,6 +207,15 @@ describe("withOpenclawGatewayStopped", () => {
     await expect(withOpenclawGatewayStopped(async () => "done")).rejects.toThrow(/failed/);
   });
 
+  it("fails a start that still answers nothing after the extra wait", async () => {
+    const { restartGateway, GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    vi.mocked(restartGateway).mockRejectedValueOnce(new GatewayNotReadyError("gateway did not come back"));
+    vi.mocked(waitForGatewayRpcReady).mockResolvedValueOnce(false);
+    _setAuthOpsDepsForTests({ stopGateway: async () => undefined });
+    await expect(withOpenclawGatewayStopped(async () => "done")).rejects.toThrow(/did not come back/);
+  });
+
   it("reports the stop's own failure when the start after it fails too", async () => {
     const h = harness();
     h.stopGateway.mockRejectedValueOnce(new Error("the gateway is still stopping"));

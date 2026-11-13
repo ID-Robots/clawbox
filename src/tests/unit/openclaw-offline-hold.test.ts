@@ -39,7 +39,12 @@ function deps() {
   const stopGateway = vi.fn(async () => undefined);
   const startGateway = vi.fn(async () => undefined);
   const unitUp = { value: false };
-  _setAuthOpsDepsForTests({ stopGateway, startGateway, gatewayUnitUp: async () => unitUp.value });
+  _setAuthOpsDepsForTests({
+    stopGateway,
+    startGateway,
+    gatewayUnitUp: async () => unitUp.value,
+    gatewayUnitRunning: async () => unitUp.value,
+  });
   return { stopGateway, startGateway, unitUp };
 }
 
@@ -83,6 +88,34 @@ describe("the offline hold", () => {
     expect(await restoreOpenclawGatewayAfterCrash()).toBe(false);
     expect(d.startGateway).not.toHaveBeenCalled();
     expect(fs.existsSync(HOLD)).toBe(false);
+  });
+
+  it("starts a gateway that was still stopping, or whose unit cannot be read, when the hold is orphaned", async () => {
+    const { readUnitState } = await import("@/lib/gateway-unit-job");
+    const { restartGateway } = await import("@/lib/openclaw-config");
+    for (const state of [{ activeState: "deactivating" }, null]) {
+      _setAuthOpsDepsForTests(null);
+      vi.mocked(restartGateway).mockClear();
+      vi.mocked(readUnitState).mockResolvedValueOnce(state as Awaited<ReturnType<typeof readUnitState>>);
+      fs.writeFileSync(HOLD, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));
+      expect(await restoreOpenclawGatewayAfterCrash()).toBe(true);
+      expect(vi.mocked(restartGateway)).toHaveBeenCalledTimes(1);
+      expect(fs.existsSync(HOLD)).toBe(false);
+    }
+  });
+
+  it("leaves a running or starting unit alone through the default check", async () => {
+    const { readUnitState } = await import("@/lib/gateway-unit-job");
+    const { restartGateway } = await import("@/lib/openclaw-config");
+    for (const activeState of ["active", "activating"]) {
+      _setAuthOpsDepsForTests(null);
+      vi.mocked(restartGateway).mockClear();
+      vi.mocked(readUnitState).mockResolvedValueOnce({ activeState } as Awaited<ReturnType<typeof readUnitState>>);
+      fs.writeFileSync(HOLD, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));
+      expect(await restoreOpenclawGatewayAfterCrash()).toBe(false);
+      expect(vi.mocked(restartGateway)).not.toHaveBeenCalled();
+      expect(fs.existsSync(HOLD)).toBe(false);
+    }
   });
 
   it("leaves a hold of a live server alone, and does nothing without one", async () => {
