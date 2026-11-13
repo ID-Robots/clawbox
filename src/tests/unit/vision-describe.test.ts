@@ -37,6 +37,7 @@ import {
   DESCRIBE_TIMEOUT_MS,
   EXTERNAL_NO_VISION_ERROR,
   LOCAL_NO_VISION_ERROR,
+  LOCKED_CLOUD_ERROR,
   LOCKED_NO_ENGINE_ERROR,
   MIN_RETRY_MS,
   NO_VISION_MODEL_ERROR,
@@ -241,9 +242,27 @@ describe("on the box's own engine (TASK-2501 PR-C)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("sends no picture when the lock goes on after ClawBox AI was chosen (TASK-2501)", async () => {
+    mocks.configGet.mockImplementation(async (key?: unknown) => (key === "ai_cloud_lock" ? true : "tok-1234567890"));
+    expect(await describeNow()).toEqual({ text: null, error: LOCKED_CLOUD_ERROR, code: "cloud_ai_locked", vision: { attempts: [] } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not retry into the cloud once the lock goes on during the pause (TASK-2501)", async () => {
+    let locked = false;
+    mocks.configGet.mockImplementation(async (key?: unknown) => (key === "ai_cloud_lock" ? locked : "tok-1234567890"));
+    fetchMock.mockImplementationOnce(async () => {
+      locked = true;
+      return status(503);
+    });
+    const result = await describeNow();
+    expect(result).toMatchObject({ text: null, error: LOCKED_CLOUD_ERROR, code: "cloud_ai_locked" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("never falls back to the cloud under the lock with no model on the box", async () => {
     feature.resolveFeatureEngine.mockResolvedValue({ kind: "none", reason: "cloud_ai_locked" });
-    expect(await describeNow()).toEqual({ text: null, error: LOCKED_NO_ENGINE_ERROR });
+    expect(await describeNow()).toEqual({ text: null, error: LOCKED_NO_ENGINE_ERROR, code: "cloud_ai_locked" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mocks.configGet).not.toHaveBeenCalled();
   });

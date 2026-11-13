@@ -18,9 +18,13 @@ const entitlement = vi.fn(async () => "pro" as string | null);
 vi.mock("@/lib/clawai-plan-tier", () => ({ readClawaiEntitlementTier: () => entitlement() }));
 
 const token = vi.fn(async () => "claw_test" as string | null);
+/** The account's credential, which the local-only AI lock never withholds (TASK-2501). */
+const account = vi.fn(async (): Promise<string | null> => token());
 vi.mock("@/lib/harness/credentials", () => ({
   CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
   resolveClawaiToken: () => token(),
+  // "Linked" reads the account's credential; with the lock off it is the same token.
+  resolveClawaiEntitlementToken: () => account(),
 }));
 
 const routeReady = vi.fn(async () => true);
@@ -96,7 +100,7 @@ vi.mock("@/lib/voice-box", () => ({
 const voiceState = vi.fn(async () => ({ choice: "auto" as string }));
 vi.mock("@/lib/voice-output-store", () => ({ readVoiceState: () => voiceState() }));
 
-import { applyClawaiCloudDefaults, readCloudDefaultsStatus } from "@/lib/clawai-cloud-defaults";
+import { applyClawaiCloudDefaults, readCloudDefaultsFacts, readCloudDefaultsStatus } from "@/lib/clawai-cloud-defaults";
 import { CHOICE_SOURCE_KEYS } from "@/lib/clawai-cloud-defaults-state";
 
 beforeEach(() => {
@@ -493,5 +497,18 @@ describe("readCloudDefaultsStatus", () => {
     expect(applied.moved).not.toContain("embeddings");
     expect(switchToCloud).not.toHaveBeenCalled();
     expect(startIndex).not.toHaveBeenCalled();
+  });
+});
+
+describe("readCloudDefaultsFacts under the local-only AI lock (TASK-2501)", () => {
+  it("keeps the box linked, offers no cloud embedder and asks the proxy nothing", async () => {
+    // The lock withholds the credential from AI use only.
+    token.mockResolvedValue(null);
+    account.mockResolvedValueOnce("claw_test");
+    routeReady.mockClear();
+    const facts = await readCloudDefaultsFacts();
+    expect(facts.linked).toBe(true);
+    expect(facts.embeddingsRouteReady).toBe(false);
+    expect(routeReady).not.toHaveBeenCalled();
   });
 });

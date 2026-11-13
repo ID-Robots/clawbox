@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
+import { cloudAiLockedBody, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { Readable } from "stream";
 import { boundedBody } from "@/lib/bounded-body";
 import {
@@ -465,7 +466,11 @@ export async function POST(req: NextRequest) {
   }
 
   let firstFailure: Failure | null = null;
-  for (const engine of sttEngineOrder(await getSttPrimary())) {
+  // The local-only AI lock (TASK-2501) drops the cloud leg: the recording is
+  // transcribed on the box or not at all — never "on the box, else the cloud".
+  const locked = await isCloudAiLocked();
+  const engines: SttEngine[] = locked ? ["local"] : sttEngineOrder(await getSttPrimary());
+  for (const engine of engines) {
     // The caller left. The cloud call above honours `req.signal` and comes
     // back as a failure like any other — which, unchecked, would send the
     // recording on to the box's own engine and hold a two-minute whisper run
@@ -495,6 +500,13 @@ export async function POST(req: NextRequest) {
   // The cloud engine always answers, so the all-unavailable case is unreachable today;
   // it is spelled out rather than asserted away so a chain of two optional
   // engines would still fail with a status instead of a crash.
+  if (locked && !firstFailure) {
+    // Fail closed with the reason, not a quiet fallback to the cloud.
+    return NextResponse.json(
+      cloudAiLockedBody("Local-only AI is on and this box has no on-box transcription engine. Install voice input (Whisper) in Settings → Voice."),
+      { status: 409 },
+    );
+  }
   const failure = firstFailure ?? { status: 503, error: "No transcription engine is available on this ClawBox." };
   return NextResponse.json({ error: failure.error }, { status: failure.status });
 }

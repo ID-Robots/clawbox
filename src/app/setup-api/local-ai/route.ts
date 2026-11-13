@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { externalEngineSelected } from "@/lib/external-engine";
@@ -29,6 +30,9 @@ function isLocalModelRef(ref: unknown): boolean {
  * so turning it off puts it back rather than leave the box with no backup.
  */
 async function clawboxAiFallback(config: Awaited<ReturnType<typeof readOpenClawConfig>>): Promise<string | null> {
+  // Never under the local-only AI lock (TASK-2501): no cloud model is put
+  // behind the chat while it is on.
+  if (await isCloudAiLocked()) return null;
   const apiKey = config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
   if (typeof apiKey !== "string" || !apiKey.startsWith("claw_")) return null;
   if (parseDisabledProviders(await get(DISABLED_PROVIDERS_KEY)).has("clawai")) return null;

@@ -280,7 +280,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
+import { get as getConfigKey, getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   setPrimaryModelWithoutCatalogValidation,
@@ -1106,6 +1106,79 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
     expect(tokenCommand).toMatch(/^config set gateway\.auth\.token [0-9a-f]{64}$/);
     expect(commands).not.toContain("config set gateway.auth.token clawbox");
+  });
+
+  describe("the local-only AI lock (TASK-2501)", () => {
+    // The lock is read through the store's tri-state reader; every other key answers as the file's beforeEach set it.
+    const lock = () => {
+      vi.mocked(getConfigKey).mockImplementation(async (key: string) => (key === "ai_cloud_lock" ? true : undefined));
+      vi.mocked(getKnown).mockImplementation(async (key: string) => ({ value: key === "ai_cloud_lock" ? true : undefined, known: true }));
+    };
+    const writes = () => configSetCalls(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    // `clearAllMocks` keeps implementations: the lock must not outlive these cases.
+    afterEach(() => {
+      vi.mocked(getConfigKey).mockImplementation(async () => undefined);
+      vi.mocked(getKnown).mockImplementation(async () => ({ value: undefined, known: true }));
+    });
+
+    it("connects no cloud provider, ClawBox AI included, and writes nothing", async () => {
+      lock();
+      for (const body of [{ provider: "anthropic", apiKey: "sk-ant-api03-test" }, { provider: "clawai", apiKey: "claw_token_abc" }]) {
+        const res = await configurePost(jsonRequest(body));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      }
+      expect(writes()).toEqual([]);
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    });
+
+    it("refuses Settings' background sign-in before any task starts", async () => {
+      lock();
+      const { listBackgroundTasks } = await import("@/lib/background-tasks");
+      const before = listBackgroundTasks({ kind: "provider-sign-in" }).length;
+      const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-0123456789", background: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(listBackgroundTasks({ kind: "provider-sign-in" })).toHaveLength(before);
+    });
+
+    it("judges an OAuth handoff on the provider its tokens were minted for, not the body's", async () => {
+      lock();
+      mockFs.readFile.mockImplementation(async (file) =>
+        String(file).endsWith("oauth-device-tokens.json")
+          ? JSON.stringify({ provider: "openai", access_token: "access.token.jwt", refresh_token: "refresh-token", expires_in: 3600, createdAt: Date.now() })
+          : JSON.stringify({ version: 1, profiles: {} }),
+      );
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", authMode: "subscription", oauthHandoff: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(writes()).toEqual([]);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      // Left in place: a refusal is not a reason to throw away a sign-in.
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(expect.stringContaining("oauth-device-tokens.json"));
+    });
+
+    it("still turns the on-device model on, with no ClawBox AI model behind it", async () => {
+      lock();
+      // A linked box: without the lock, the on-device primary gets ClawBox AI as its fallback.
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_token_abc" });
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(res.status).toBe(200);
+      const calls = writes();
+      expect(calls.find((c) => c.path === "agents.defaults.model.primary")?.value).toBe("llamacpp/gemma4-e2b-it-q4_0");
+      expect(calls.some((c) => c.path === "models.providers.deepseek")).toBe(false);
+      const fallbacks = calls.filter((c) => c.path === "agents.defaults.model.fallbacks").map((c) => String(c.value));
+      expect(fallbacks.every((value) => !value.includes("deepseek"))).toBe(true);
+    });
+
+    it("puts ClawBox AI behind the same on-device model once the lock is off", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_token_abc" });
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(res.status).toBe(200);
+      const fallbacks = writes().filter((c) => c.path === "agents.defaults.model.fallbacks").map((c) => String(c.value));
+      expect(fallbacks.some((value) => value.includes("deepseek"))).toBe(true);
+    });
   });
 
   it("preserves an externally managed gateway token when settings are saved", async () => {

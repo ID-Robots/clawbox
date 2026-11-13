@@ -319,3 +319,31 @@ describe("followClawaiPlanOnRecord", () => {
     expect(h.order).toEqual([]);
   });
 });
+
+describe("followClawaiPlanChange — under the local-only AI lock (TASK-2501)", () => {
+  beforeEach(() => {
+    h.store.ai_cloud_lock = true;
+  });
+
+  it("an upgrade arms no cloud voice and applies no cloud defaults", async () => {
+    await follow.followClawaiPlanChange({ previous: "free", next: "pro" });
+    expect(h.order).toEqual([]);
+    expect(h.apply).not.toHaveBeenCalled();
+  });
+
+  it("a plan change that would promote the cloud defaults applies none", async () => {
+    h.voiceConfig.mockResolvedValue(ARMED);
+    h.rawConfig.mockResolvedValue(ARMED);
+    await follow.followClawaiPlanChange({ previous: "pro", next: "flash" });
+    // The withdrawal still runs — it only takes a cloud path away.
+    expect(h.order).toEqual(["restart"]);
+    expect(h.apply).not.toHaveBeenCalled();
+  });
+
+  it("a downgrade still withdraws the cloud voice the plan no longer covers", async () => {
+    h.voiceConfig.mockResolvedValue(ARMED);
+    h.rawConfig.mockResolvedValue(ARMED);
+    await follow.followClawaiPlanChange({ previous: "pro", next: "free" });
+    expect(h.order).toEqual(["restart"]);
+  });
+});

@@ -24,6 +24,7 @@
  */
 import { get as configGet } from "@/lib/config-store";
 import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { clawboxAiVisionModelFor, probeClawboxAiVision, readClawboxAiVision } from "@/lib/clawbox-ai-vision";
 import { resolveFeatureEngine } from "@/lib/feature-engine";
 import { localEngineSeesPictures, postLocalChat, type LocalEngine } from "@/lib/local-engine";
@@ -91,6 +92,8 @@ export const NO_VISION_MODEL_ERROR = "ClawBox AI cannot look at pictures right n
 export const LOCAL_NO_VISION_ERROR = "The model on this box cannot look at pictures";
 /** The same for an External engine the owner saved without image input. */
 export const EXTERNAL_NO_VISION_ERROR = "The External engine is not set to take pictures (Settings → Local AI)";
+/** The cloud model is not asked: the local-only AI lock went on while a ClawBox AI description was under way. */
+export const LOCKED_CLOUD_ERROR = "Local-only AI is on: pictures are not sent to ClawBox AI's cloud model";
 /** What it says when the local-only AI lock is on and the box has no model of its own. */
 export const LOCKED_NO_ENGINE_ERROR = "Local-only AI is on, and no model on this box can look at pictures";
 /**
@@ -138,6 +141,8 @@ export interface VisionDescription {
   vision?: { attempts: VisionAttempt[] };
   text: string | null;
   error: string | null;
+  /** `cloud_ai_locked` when the local-only AI lock refused the cloud model (TASK-2501). */
+  code?: string;
 }
 
 /** One attempt's answer, plus whether asking again could change it. */
@@ -154,6 +159,9 @@ async function ask(
   timeoutMs: number,
   attempts: VisionAttempt[],
 ): Promise<Attempt> {
+  // Asked again right before the picture leaves: the lock (TASK-2501) can go on
+  // while the engine was chosen, the model resolved or a retry waited.
+  if (await isCloudAiLocked()) return { text: null, error: LOCKED_CLOUD_ERROR, code: CLOUD_AI_LOCKED_CODE, transient: false };
   const startedAt = Date.now();
   const metric: VisionAttempt = { requestedModel: model, responseModel: null, durationMs: 0, status: null, usage: null };
   attempts.push(metric);
@@ -271,13 +279,13 @@ async function askLocal(
 async function withOneRetry(attempt: (timeoutMs: number) => Promise<Attempt>, attempts: VisionAttempt[], deadline: number): Promise<VisionDescription> {
   const first = await attempt(Math.max(1, deadline - Date.now()));
   if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {
-    return { text: first.text, error: first.error, vision: { attempts } };
+    return { text: first.text, error: first.error, ...(first.code ? { code: first.code } : {}), vision: { attempts } };
   }
   await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
   // The retry lives inside the SAME budget, so a caller sized against
   // DESCRIBE_TIMEOUT_MS never sees the two attempts as one long hang.
   const second = await attempt(deadline - Date.now());
-  return { text: second.text, error: second.error, vision: { attempts } };
+  return { text: second.text, error: second.error, ...(second.code ? { code: second.code } : {}), vision: { attempts } };
 }
 
 /** Describe a picture through the box's AI: ClawBox AI's model, or the box's own engine (see the module docblock). */
@@ -291,7 +299,9 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
     const attempts: VisionAttempt[] = [];
     return await withOneRetry((ms) => askLocal(engine.engine, prompt, imageBase64, mime, ms, attempts), attempts, deadline);
   }
-  if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return { text: null, error: LOCKED_NO_ENGINE_ERROR };
+  // The local-only AI lock (TASK-2501) with no model of its own: the picture
+  // never leaves the box, and the route answers the lock's 409 with its code.
+  if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return { text: null, error: LOCKED_NO_ENGINE_ERROR, code: CLOUD_AI_LOCKED_CODE };
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || !token.trim()) {
     return { text: null, error: "ClawBox AI is not connected on this device" };

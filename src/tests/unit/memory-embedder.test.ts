@@ -13,6 +13,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
+  // Only for the index module the lock case below imports; nothing is written there.
+  DATA_DIR: "/tmp/memory-embedder-test-data",
   get: async (key: string) => store.get(key),
   // The local-only AI lock is read with the tri-state reader (feature-engine.ts).
   getKnown: async (key: string) => ({ value: store.get(key), known: true }),
@@ -187,6 +189,29 @@ describe("the box's own engine, where the cloud cannot answer (TASK-2501 PR-C)",
   });
 });
 
+describe("the local-only AI lock (TASK-2501)", () => {
+  it("embeds on the box whatever was pinned, asked for or defaulted to", async () => {
+    store.set("ai_cloud_lock", true);
+    // The default of a linked, paid box is the cloud: not under the lock.
+    expect((await resolveMemoryEmbedder()).source).toBe("local");
+    expect((await resolveMemoryEmbedder("cloud")).source).toBe("local");
+    await writeEmbedderPin("cloud");
+    const embedder = await resolveMemoryEmbedder();
+    expect(embedder.source).toBe("local");
+    expect(embedder.requestUrl).toBe(`${PROXY}/embeddings`);
+    expect(JSON.stringify(embedder)).not.toContain("clawbox.test");
+  });
+
+  it("rewrites no pin, so unlocking puts the box back where the owner left it", async () => {
+    await writeEmbedderPin("cloud");
+    store.set("ai_cloud_lock", "pinned");
+    await resolveMemoryEmbedder();
+    expect(await readEmbedderPin()).toBe("cloud");
+    store.delete("ai_cloud_lock");
+    expect((await resolveMemoryEmbedder()).requestUrl).toBe(CLOUD_ENDPOINT);
+  });
+});
+
 describe("the width each embedder answers with", () => {
   it("is carried, because the index's memory budget is a function of it", async () => {
     // The chunk ceiling and the vector cache are derived from this
@@ -217,5 +242,26 @@ describe("the fence", () => {
       .toThrow(/ClawBox AI account/i);
     expect(() => assertEmbedEndpointAllowed("local", "https://someone-elses-server.example/v1"))
       .toThrow(/not on this device/i);
+  });
+});
+
+describe("a cloud pass the local-only AI lock interrupts (TASK-2501)", () => {
+  it("sends no further document once the lock is on, and does not retry", async () => {
+    await writeEmbedderPin("cloud");
+    // Resolved while unlocked: the pass holds the cloud endpoint and token.
+    const embedder = await resolveMemoryEmbedder();
+    expect(embedder.source).toBe("cloud");
+    store.set("ai_cloud_lock", true);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      const { embedMemoryTexts, EmbeddingUnavailableError } = await import("@/lib/memory-index-local");
+      const refused = await embedMemoryTexts(["the owner's document"], "document", undefined, embedder).then(() => null, (err: unknown) => err);
+      expect(refused).toBeInstanceOf(EmbeddingUnavailableError);
+      expect((refused as { retryable: boolean }).retryable).toBe(false);
+      expect(String((refused as Error).message)).toMatch(/local-only AI is on/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

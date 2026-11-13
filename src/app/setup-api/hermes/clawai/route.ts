@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cloudAiLockedResponse, isCloudAiLocked, isCloudAiLockedError } from "@/lib/ai-cloud-lock";
 import {
   EXPLICIT_MODEL_PICKS_KEY,
   clawboxAiModelIdOf,
@@ -98,6 +99,8 @@ export async function GET() {
 export async function POST(request: Request): Promise<Response> {
   const blocked = await requireHermes();
   if (blocked) return blocked;
+  // The local-only AI lock (TASK-2501): ClawBox AI is not Hermes' provider while it is on.
+  if (await isCloudAiLocked()) return cloudAiLockedResponse();
 
   // Settings' ask (TASK-2148): the link as a background task of the box
   // (src/lib/provider-auth-tasks.ts), answered 202 at once and followed by the
@@ -255,6 +258,9 @@ export async function POST(request: Request): Promise<Response> {
       });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
+    // The local-only AI lock went on after the check above (TASK-2501): the
+    // refusal is the box's policy, not a failed write, and keeps its code.
+    if (isCloudAiLockedError(err)) return cloudAiLockedResponse(err.message);
     // Only OUR own error text is safe to echo — a raw spawn error can carry the
     // hermes binary path.
     return NextResponse.json(

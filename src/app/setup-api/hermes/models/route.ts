@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { withProviderChangeLock } from "@/lib/provider-change-lock";
+import { cloudAiLockedResponse, isCloudAiLocked, LOCAL_AI_PROVIDER_IDS } from "@/lib/ai-cloud-lock";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
@@ -26,6 +27,9 @@ import {
 } from "@/lib/hermes-model-options";
 import { readProviderVerified } from "@/lib/provider-verified";
 import { readCloudProvidersHidden } from "@/lib/cloud-providers-server";
+
+/** Why a cloud provider is refused under the local-only AI lock (TASK-2501). */
+const HERMES_MODELS_LOCKED_MESSAGE = "Local-only AI is on: Hermes can only use a model on this box or your External engine.";
 
 // Hermes' provider/model configuration.
 //
@@ -242,6 +246,11 @@ async function saveInBackground(
 ): Promise<Response> {
   const provider = typeof body.provider === "string" ? body.provider.trim() : "";
   if (!provider) return NextResponse.json({ error: "provider is required" }, { status: 400 });
+  // Refused before a sign-in task is started for a save that cannot land
+  // (TASK-2501); `postHermesModels` says the same for the direct path.
+  if (!LOCAL_AI_PROVIDER_IDS.includes(provider) && (await isCloudAiLocked())) {
+    return cloudAiLockedResponse(HERMES_MODELS_LOCKED_MESSAGE);
+  }
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
   const model = typeof body.model === "string" ? body.model.trim() : "";
   const { canonicalProviderId, providerRowLabel } = await import("@/lib/provider-status");
@@ -317,6 +326,11 @@ async function postHermesModels(request: Request) {
   const targetProvider = provider || previousProvider;
   if (!targetProvider) {
     return NextResponse.json({ error: "No provider configured" }, { status: 409 });
+  }
+  // The local-only AI lock (TASK-2501): Hermes chats on the on-device model or
+  // the owner's External engine only.
+  if (!LOCAL_AI_PROVIDER_IDS.includes(targetProvider) && (await isCloudAiLocked())) {
+    return cloudAiLockedResponse(HERMES_MODELS_LOCKED_MESSAGE);
   }
 
   // Resolve the model we will actually write. A provider switch NEVER carries

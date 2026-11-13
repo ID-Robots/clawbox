@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cloudAiLockedResponse, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
@@ -204,6 +205,10 @@ const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https:
 /** Portal-token prefix — the entitlement marker both writers gate on. */
 const CLAWBOX_AI_TOKEN_PREFIX = "claw_";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+
+/** Why a cloud provider save is refused under the local-only AI lock (TASK-2501). */
+const CONFIGURE_LOCKED_MESSAGE =
+  "Local-only AI is on: cloud AI providers cannot be connected. Turn the lock off in Settings → Local AI first.";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 /**
@@ -2262,8 +2267,11 @@ async function ensureFallbackModel(
         console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err),
     },
     async () => {
-      // ClawBox AI is the last resort, and the owner's switch reaches it too.
-      const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai");
+      // ClawBox AI is the last resort, and the owner's switch reaches it too —
+      // as does the local-only AI lock (TASK-2501): an on-device model saved
+      // under it gets no cloud model behind it. `configureClawboxAi` reads the
+      // stored token itself, so the lock is asked here rather than through it.
+      const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai") || (await isCloudAiLocked());
       const fallbackConfigured = !clawaiSwitchedOff
         && await configureClawboxAi(true, preferredClawboxAiToken);
       if (fallbackConfigured) {
@@ -2536,6 +2544,9 @@ export async function POST(request: Request) {
   if (isLocalProviderRow(row) || isLocalProviderRow(normalizeProviderId(asked) ?? asked)) {
     return configureNow(own());
   }
+  // Refused here, before a sign-in task is started for a save that cannot
+  // land (TASK-2501); `configureNow` says the same for the direct path.
+  if (await isCloudAiLocked()) return cloudAiLockedResponse(CONFIGURE_LOCKED_MESSAGE);
   return tasks.providerAuthStartResponse(tasks.startProviderSignInTask({
     provider: row,
     label: providerRowLabel(harness, row),
@@ -2551,16 +2562,25 @@ export async function POST(request: Request) {
  * selected" check and its writes cannot interleave with them.
  */
 async function configureNow(request: Request): Promise<Response> {
-  if (await isOnDeviceConfigure(request)) {
+  const onDevice = await isOnDeviceConfigure(request);
+  // The local-only AI lock (TASK-2501): no cloud provider is connected while
+  // it is on — ClawBox AI included. The on-device engines still are.
+  if (!onDevice && (await isCloudAiLocked())) return cloudAiLockedResponse(CONFIGURE_LOCKED_MESSAGE);
+  if (onDevice) {
     return withLocalAiTransitionLock(() => configureNowUnlocked(request));
   }
   return configureNowUnlocked(request);
 }
 
+/** The two engines this route turns on that run on the box itself. */
+function isOnDeviceProviderId(provider: unknown): boolean {
+  return provider === "llamacpp" || provider === "ollama";
+}
+
 async function isOnDeviceConfigure(request: Request): Promise<boolean> {
   try {
     const body = await request.clone().json() as { provider?: unknown } | null;
-    return body?.provider === "llamacpp" || body?.provider === "ollama";
+    return isOnDeviceProviderId(body?.provider);
   } catch {
     return false;
   }
@@ -2756,6 +2776,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    // The local-only AI lock (TASK-2501), asked again on the provider that will
+    // actually be written: an OAuth handoff replaces `body.provider` above with
+    // the one its tokens were minted for, after `configureNow` judged the body
+    // as it arrived. Before any write; the handoff file is left for a retry.
+    if (!isOnDeviceProviderId(provider) && (await isCloudAiLocked())) {
+      return cloudAiLockedResponse(CONFIGURE_LOCKED_MESSAGE);
+    }
     // The storage mode is the documented client contract (api-key vs OAuth
     // bundle) — but only these four spellings exist ("local" is what the
     // Ollama hook and the llama.cpp installer send; the route treats it as

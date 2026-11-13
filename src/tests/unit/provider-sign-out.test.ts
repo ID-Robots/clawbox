@@ -178,7 +178,13 @@ const credentials = vi.hoisted(() => ({
   resolveClawaiToken: vi.fn(),
   hasClawaiToken: vi.fn(async () => false),
 }));
-vi.mock("@/lib/harness/credentials", () => credentials);
+// Signing out reads the credential the way "is this box linked" does — lock or
+// not (TASK-2501) — so the entitlement readers answer what these two do.
+vi.mock("@/lib/harness/credentials", () => ({
+  ...credentials,
+  resolveClawaiEntitlementToken: (...a: unknown[]) => (credentials.resolveClawaiToken as (...b: unknown[]) => unknown)(...a),
+  hasClawaiEntitlementToken: () => credentials.hasClawaiToken(),
+}));
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(async () => box.harness),
   getActiveHarnessSource: vi.fn(async () => ({ active: box.harness, defaulted: false, edition: box.edition, locked: box.edition !== "dual" })),

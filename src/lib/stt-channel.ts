@@ -13,6 +13,7 @@
  */
 
 import { isDeepStrictEqual } from "util";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import { hasChatgptOauthProfile } from "@/lib/chatgpt-subscription";
 import { isClawboxAiToken } from "@/lib/clawai-token";
@@ -57,7 +58,9 @@ export type CloudSttUnavailable =
   /** It holds a key that is not this box's ClawBox AI token. */
   | "profile_stale"
   /** The `openai` credential is a ChatGPT sign-in, which the core will not send to the proxy. */
-  | "openai_oauth";
+  | "openai_oauth"
+  /** The local-only AI lock is on: no recording is sent to a cloud engine (TASK-2501). */
+  | "cloud_ai_locked";
 
 export interface CloudSttBacking {
   usable: boolean;
@@ -85,6 +88,7 @@ const UNAVAILABLE_SENTENCE: Record<CloudSttUnavailable, string> = {
   profile_not_api_key: `the ${TRANSCRIBE_AUTH_PROFILE} auth profile is not an API key the gateway can send to the ClawBox AI endpoint`,
   profile_stale: `the ${TRANSCRIBE_AUTH_PROFILE} auth profile holds a different key from this box's ClawBox AI credential`,
   openai_oauth: "the openai credential is a ChatGPT sign-in, and OpenClaw refuses a custom endpoint for an OAuth credential",
+  cloud_ai_locked: "local-only AI is on, so no recording is sent to a cloud transcription engine",
 };
 
 /**
@@ -162,8 +166,14 @@ async function clawaiTokenFrom(config: OpenClawConfig): Promise<string | null> {
   return await resolveClawaiToken();
 }
 
-/** {@link decideCloudSttBacking} over what this box holds now. */
+/**
+ * {@link decideCloudSttBacking} over what this box holds now. The local-only
+ * AI lock (TASK-2501) answers first: the token is read from openclaw.json here,
+ * not through `resolveClawaiToken`, so without this a channel list written
+ * under the lock would still carry the cloud row.
+ */
 export async function readCloudSttBacking(config?: OpenClawConfig): Promise<CloudSttBacking> {
+  if (await isCloudAiLocked()) return unusable("cloud_ai_locked");
   const cfg = config ?? (await readConfig());
   const token = await clawaiTokenFrom(cfg);
   // No token, no question for the store: both readers below open sqlite.
@@ -342,7 +352,8 @@ export async function reconcileChannelAudio(options: ReconcileChannelAudioOption
     readConfigStrict(),
     localSttInstalled(),
   ]);
-  const token = await clawaiTokenFrom(config);
+  // Under the local-only AI lock the box has no cloud engine to order first.
+  const token = (await isCloudAiLocked()) ? null : await clawaiTokenFrom(config);
   const order = sttEngineOrder(resolveSttPrimary(stored, token !== null, local.installed));
   const wrote = await syncChannelAudio(order, local.installed, { onlyOurRoute: true });
   if (wrote) {

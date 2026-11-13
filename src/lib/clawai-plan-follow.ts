@@ -40,6 +40,7 @@
  */
 
 import type { ClawaiPlanChange, ClawaiPlanTier } from "@/lib/clawai-plan-tier";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { CLOUD_TTS_ENTITLED_TIER } from "@/lib/clawai-cloud-defaults-state";
 import { CLAWBOX_AI_PLAN_UNPAID } from "@/lib/clawbox-ai-models";
 import { createSerialLock } from "@/lib/serial-lock";
@@ -89,6 +90,8 @@ export function followClawaiPlanChange(change: ClawaiPlanChange): Promise<void> 
  */
 export function followClawaiPlanOnRecord(): Promise<void> {
   return withFollow(async () => {
+    // Asked under the local-only AI lock too: withdrawing a cloud voice only
+    // takes a cloud path away.
     const { readClawaiPlanOnRecord, clawaiSpeechWithdrawable } = await import("@/lib/clawai-plan-tier");
     const plan = await readClawaiPlanOnRecord();
     if (plan === null || !clawaiSpeechWithdrawable(plan, CLOUD_TTS_ENTITLED_TIER) || withdrawTriedFor === plan) return;
@@ -102,19 +105,28 @@ export function followClawaiPlanOnRecord(): Promise<void> {
 async function followOnce(change: ClawaiPlanChange): Promise<void> {
   // An unknown plan is not a downgrade, and covers nothing to promote to.
   if (change.next === null) return;
+  // The local-only AI lock (TASK-2501): a plan change promotes nothing while it
+  // is on — no cloud voice armed, no cloud defaults applied. A withdrawal only
+  // takes a cloud path away, so a downgrade is still followed.
+  const locked = await isCloudAiLocked();
+  const arming = change.next === CLOUD_TTS_ENTITLED_TIER;
+  if (locked && arming) {
+    console.log(`[clawai-plan-follow] the ClawBox AI plan is now ${change.next}; local-only AI is on, nothing to arm`);
+    return;
+  }
   console.log(`[clawai-plan-follow] the ClawBox AI plan is now ${change.next} (was ${change.previous ?? "not known"})`);
   withdrawTriedFor = null;
   // The defaults below are worth applying whatever happened here.
-  const voice = change.next === CLOUD_TTS_ENTITLED_TIER ? armOpenclawCloudVoice() : withdrawOpenclawCloudVoice();
+  const voice = arming ? armOpenclawCloudVoice() : withdrawOpenclawCloudVoice();
   const restarted = await voice.catch((err: unknown) => {
     console.warn("[clawai-plan-follow] could not follow the cloud voice:", err instanceof Error ? err.message : err);
     return false;
   });
   // A withdrawal this follow restarted for is not a read's to repeat; one whose
   // restart was refused is, once.
-  if (restarted && change.next !== CLOUD_TTS_ENTITLED_TIER) withdrawTriedFor = change.next;
-  // An unpaid plan covers nothing to promote to.
-  if (change.next === CLAWBOX_AI_PLAN_UNPAID) return;
+  if (restarted && !arming) withdrawTriedFor = change.next;
+  // An unpaid plan covers nothing to promote to, and the lock promotes nothing.
+  if (change.next === CLAWBOX_AI_PLAN_UNPAID || locked) return;
   const { applyClawaiCloudDefaults } = await import("@/lib/clawai-cloud-defaults");
   await applyClawaiCloudDefaults({ trigger: "plan" });
 }

@@ -394,3 +394,36 @@ describe("reconcileChannelAudio — boot, a Whisper install, a provider save", (
     expect(config.batch).not.toHaveBeenCalled();
   });
 });
+
+describe("channel voice notes under the local-only AI lock (TASK-2501)", () => {
+  /**
+   * The case the lock has to answer itself: openclaw.json holds the ClawBox
+   * AI key, and this module reads it from there before it ever asks
+   * `resolveClawaiToken` — so "no token under the lock" alone would not keep
+   * the cloud row out.
+   */
+  const heldInFile = (cfg: Record<string, unknown> = {}) =>
+    linked({ ...cfg, models: { providers: { deepseek: { apiKey: "claw_token" } } } });
+
+  it("reads the cloud row as unusable, with the lock as the reason", async () => {
+    store.set("ai_cloud_lock", true);
+    config.read.mockResolvedValue(heldInFile());
+    expect(await lib.readCloudSttBacking()).toEqual({ usable: false, reason: "cloud_ai_locked" });
+  });
+
+  it("takes the cloud row and our endpoint out at boot, whatever order the owner stored", async () => {
+    store.set("ai_cloud_lock", true);
+    store.set("stt_primary", "cloud");
+    config.read.mockResolvedValue(heldInFile({ tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } }));
+    expect(await lib.reconcileChannelAudio({ trigger: "boot" })).toBe(true);
+    expect(writtenModels().every(isLocal)).toBe(true);
+    expect(written()).toEqual(["tools.media.models", "-tools.media.audio.baseUrl"]);
+  });
+
+  it("writes the cloud row back once the lock is off", async () => {
+    store.set("stt_primary", "cloud");
+    config.read.mockResolvedValue(heldInFile());
+    await lib.reconcileChannelAudio({ trigger: "boot" });
+    expect(writtenModels()[0]).toEqual(CLOUD);
+  });
+});

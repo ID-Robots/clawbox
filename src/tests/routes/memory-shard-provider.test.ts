@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   routeReady: true,
   factsThrow: false,
   token: "claw_test_token" as string | null,
+  /** The local-only AI lock (TASK-2501). */
+  locked: false,
   installed: false,
   /** The model the box is set to, as data/config.json holds it (TASK-2411). */
   active: { id: "qwen3-embedding-0.6b", quant: "Q8_0" } as { id: string; quant: string },
@@ -38,6 +40,10 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => h.owner }));
+vi.mock("@/lib/ai-cloud-lock", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai-cloud-lock")>()),
+  isCloudAiLocked: async () => h.locked,
+}));
 vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
   openclawIsAbsent: () => h.absent,
@@ -99,6 +105,7 @@ beforeEach(() => {
   h.routeReady = true;
   h.factsThrow = false;
   h.token = "claw_test_token";
+  h.locked = false;
   h.installed = false;
   h.active = { id: "qwen3-embedding-0.6b", quant: "Q8_0" };
   h.gate4b = { available: true, quant: "Q8_0", reason: null, detail: null };
@@ -343,5 +350,25 @@ describe("POST — the ClawBox AI cloud", () => {
     const res = await (await route()).POST(post({ source: "cloud" }));
     expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({ kind: "failed", error: "openclaw config set timed out" });
+  });
+});
+
+describe("POST — the local-only AI lock (TASK-2501)", () => {
+  it("refuses the cloud embedder before any pin or config is written", async () => {
+    h.locked = true;
+    const res = await (await route()).POST(post({ source: "cloud" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "cloud_ai_locked", kind: "cloud_ai_locked" });
+    expect(h.switchCloud).not.toHaveBeenCalled();
+    expect(h.note).not.toHaveBeenCalled();
+    expect(h.invalidate).not.toHaveBeenCalled();
+  });
+
+  it("still switches to the model on this box", async () => {
+    h.locked = true;
+    h.installed = true;
+    const res = await (await route()).POST(post({ source: "local" }));
+    expect(res.status).toBe(200);
+    expect(h.switchLocal).toHaveBeenCalledTimes(1);
   });
 });
