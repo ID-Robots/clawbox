@@ -233,6 +233,19 @@ describe("lanFetch — the address checked is the address dialled", () => {
     expect(hits[0].body).toContain('name="model"\r\n\r\nm1');
   });
 
+  it("falls back to the next checked address when the first does not answer (TASK-2501)", async () => {
+    // ::1 first, and the server listens on IPv4 only (127.0.0.1 above).
+    const lookup = vi.fn(async () => [{ address: "::1" }, { address: "127.0.0.1" }]);
+    const out = await transcribeAtEndpoint(
+      { baseUrl: `http://asr.lan:${port}/v1`, model: "m1" },
+      null,
+      AUDIO,
+      { lookupImpl: lookup },
+    );
+    expect(out).toEqual({ ok: true, text: "heard" });
+    expect(hits).toHaveLength(1);
+  });
+
   it("never connects when the name answers outside the network at connect time", async () => {
     // Rebinding: whatever the check saw, the connection's own lookup is the one that counts.
     const fetchImpl = (await import("@/lib/stt-endpoint")).lanFetch(async () => [{ address: "93.184.216.34" }]);

@@ -65,7 +65,11 @@ function messageOf(payload: unknown): Message {
   return { key: `${P}error.generic` };
 }
 
-export default function SttEndpointCard({ onChanged }: { onChanged?: () => void }) {
+export default function SttEndpointCard({ onChanged, refreshSignal }: {
+  onChanged?: () => void;
+  /** Changes when the parent read the transcription status again — another card may have changed the engine. */
+  refreshSignal?: number;
+}) {
   const { t } = useT();
   const [stt, setStt] = useState<SttView | null>(null);
   const [readFailed, setReadFailed] = useState(false);
@@ -97,7 +101,7 @@ export default function SttEndpointCard({ onChanged }: { onChanged?: () => void 
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, refreshSignal]);
 
   const endpoint = stt?.engines?.endpoint ?? null;
   const configured = endpoint?.configured === true;
