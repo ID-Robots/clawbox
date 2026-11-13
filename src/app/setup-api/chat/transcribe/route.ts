@@ -12,10 +12,10 @@ import {
 } from "@/lib/harness/credentials";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
+import { readSttEndpoint, readSttEndpointKey, transcribeAtEndpoint } from "@/lib/stt-endpoint";
 import {
   cloudTranscribeProblem,
-  getSttPrimary,
-  sttEngineOrder,
+  getSttRoute,
   TRANSCRIBE_MODEL,
   type SttEngine,
 } from "@/lib/stt-preference";
@@ -29,14 +29,22 @@ export const dynamic = "force-dynamic";
 // records with `MediaRecorder`, POSTs the blob here, and sends the returned
 // text through the ordinary chat-turn path.
 //
-// Two engines can do it: ClawBox AI (the cloud) and faster-whisper on the box
-// itself. The owner picks which goes first (src/lib/stt-preference.ts) and the
-// other is the fallback, so a box with no uplink still takes dictation and a
-// box whose whisper is cold still answers quickly. ANY failure of the first
-// engine sends the recording to the second: a 4xx the proxy chose, a 5xx, a
-// network error, a timeout, or something under the engine throwing. When both
-// fail the caller hears about the PRIMARY's failure — that is the engine they
-// chose, and its message is the one that names their next step.
+// Three engines can do it: ClawBox AI (the cloud), faster-whisper on the box
+// itself, and the owner's own OpenAI-compatible speech server on this box or
+// the LAN (src/lib/stt-endpoint.ts, TASK-2501 PR-D). The owner picks which
+// goes first (src/lib/stt-preference.ts) and the others are the fallback, so a
+// box with no uplink still takes dictation and a box whose whisper is cold
+// still answers quickly. ANY failure of the first engine sends the recording
+// to the next: a 4xx the proxy chose, a 5xx, a network error, a timeout, or
+// something under the engine throwing. When all fail the caller hears about
+// the PRIMARY's failure — that is the engine they chose, and its message is
+// the one that names their next step.
+//
+// UNDER THE LOCAL-ONLY AI LOCK (TASK-2501) THIS FAILS CLOSED. The chain is the
+// chosen local engine alone — the box's Whisper or the owner's server, never
+// the cloud — and its failure is the answer, with the reason the recording
+// went nowhere else (`code: "cloud_ai_locked"`). The ClawBox AI credential is
+// not even read. Without the lock every box walks the chain it always did.
 //
 // Why the device proxies instead of the browser calling out directly: the
 // ClawBox AI token is the device's credential, not the page's. Handing it to
@@ -411,6 +419,24 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
 type Unavailable = { unavailable: string };
 
 /**
+ * The owner's own speech server, or `unavailable` when none is saved. Its
+ * address rule (loopback or private LAN, resolved per request) is
+ * `transcribeAtEndpoint`'s, so a name that has moved outside the network is a
+ * refusal here before a byte is sent.
+ */
+async function transcribeAtOwnEndpoint(req: NextRequest, audio: Audio): Promise<Transcript | Failure | Unavailable> {
+  const record = await readSttEndpoint();
+  if (!record) return { unavailable: "no speech server of the owner's is saved" };
+  // The same duration-carrying WebM the cloud leg sends: ASR servers decode
+  // with ffmpeg or soundfile, and a file that states its length is the one
+  // every one of them reads.
+  const upload = await audioForCloud(audio, req.signal);
+  const result = await transcribeAtEndpoint(record, readSttEndpointKey(), upload, { signal: req.signal });
+  if (!result.ok) return { status: result.status, error: result.error, detail: result.detail };
+  return { text: result.text };
+}
+
+/**
  * The on-box engine, or `unavailable` when it is not installed. That is a fact
  * about the box, not a failure of this recording, so it must not become the
  * error the caller sees.
@@ -436,20 +462,30 @@ async function transcribeOnBox(audio: Audio): Promise<Transcript | Failure | Una
  */
 async function attempt(engine: SttEngine, req: NextRequest, audio: Audio): Promise<Transcript | Failure | Unavailable> {
   try {
+    if (engine === "endpoint") return await transcribeAtOwnEndpoint(req, audio);
     return engine === "cloud" ? await transcribeInCloud(req, audio) : await transcribeOnBox(audio);
   } catch (err) {
     // Only the error's NAME from the cloud leg: its message can quote the
     // credential file it failed to parse, and this line goes to the journal.
     return engine === "cloud"
       ? { status: 502, error: "Transcription failed.", detail: `cloud leg threw ${err instanceof Error ? err.name : typeof err}` }
-      : { status: 500, error: "Transcription failed on this box.", detail: `on-box leg threw: ${String(err)}` };
+      : engine === "endpoint"
+        ? { status: 502, error: "Transcription failed on the speech server.", detail: `endpoint leg threw ${err instanceof Error ? err.name : typeof err}` }
+        : { status: 500, error: "Transcription failed on this box.", detail: `on-box leg threw: ${String(err)}` };
   }
 }
+
+/** Appended to every failure under the lock, so the owner reads why nothing else was tried. */
+const LOCKED_SUFFIX = " Local-only AI is on, so the recording was not sent to the cloud.";
+
+/** The lock's answer when it leaves no engine at all: what to set up instead. */
+const LOCKED_NO_ENGINE =
+  "Local-only AI is on and this box has no transcription engine of its own. Install voice input (Whisper) in Settings → Local AI, or add your own speech server there.";
 
 // POST /setup-api/chat/transcribe
 // Body: multipart/form-data with one `file` part holding the recording.
 // Returns { ok: true, text, engine } -- the transcript for the voice turn to
-// send, and which engine ("cloud" | "local") produced it.
+// send, and which engine ("cloud" | "local" | "endpoint") produced it.
 export async function POST(req: NextRequest) {
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.includes("multipart/form-data")) {
@@ -464,8 +500,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: audio.error }, { status: audio.status });
   }
 
+  // Never throws: an unreadable lock already reads as ON (`cloudAiLockOn`),
+  // and a route that could not be read at all is no permission for the cloud.
+  let route: Awaited<ReturnType<typeof getSttRoute>>;
+  try {
+    route = await getSttRoute();
+  } catch (err) {
+    console.warn("[chat/transcribe] could not read the transcription settings:", err instanceof Error ? err.name : typeof err);
+    return NextResponse.json({ error: "Could not read the transcription settings on this box." }, { status: 500 });
+  }
+  const { order, locked } = route;
   let firstFailure: Failure | null = null;
-  for (const engine of sttEngineOrder(await getSttPrimary())) {
+  for (const engine of order) {
     // The caller left. The cloud call above honours `req.signal` and comes
     // back as a failure like any other — which, unchecked, would send the
     // recording on to the box's own engine and hold a two-minute whisper run
@@ -482,7 +528,7 @@ export async function POST(req: NextRequest) {
     if ("status" in result) {
       console.warn(
         `[chat/transcribe] ${engine} engine failed (${result.status}${result.detail ? `: ${result.detail}` : ""})`
-        + (firstFailure ? "" : "; trying the other engine"),
+        + (locked ? "; local-only AI is on, so no other engine is tried" : firstFailure ? "" : "; trying the other engine"),
       );
       firstFailure ??= result;
       continue;
@@ -492,8 +538,14 @@ export async function POST(req: NextRequest) {
     // is not an error and must not be reported as one.
     return NextResponse.json({ ok: true, text: result.text.trim(), engine });
   }
+  if (locked) {
+    // Fail closed, with the reason — never a quiet fallback to the cloud.
+    return firstFailure
+      ? NextResponse.json({ error: `${firstFailure.error}${LOCKED_SUFFIX}`, code: "cloud_ai_locked" }, { status: firstFailure.status })
+      : NextResponse.json({ error: LOCKED_NO_ENGINE, code: "cloud_ai_locked" }, { status: 409 });
+  }
   // The cloud engine always answers, so the all-unavailable case is unreachable today;
-  // it is spelled out rather than asserted away so a chain of two optional
+  // it is spelled out rather than asserted away so a chain of optional
   // engines would still fail with a status instead of a crash.
   const failure = firstFailure ?? { status: 503, error: "No transcription engine is available on this ClawBox." };
   return NextResponse.json({ error: failure.error }, { status: failure.status });

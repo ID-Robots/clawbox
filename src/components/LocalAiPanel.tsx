@@ -13,6 +13,7 @@ import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/compon
 import { BackgroundTaskInline, queuedLine } from "@/components/BackgroundTaskProgress";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
+import SttEndpointCard from "@/components/local-ai/SttEndpointCard";
 import ExternalEngineCard from "@/components/local-ai/ExternalEngineCard";
 import { EXTERNAL_ENGINE_PROVIDER } from "@/lib/external-engine-shared";
 
@@ -325,7 +326,14 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const localVoice = Array.isArray(tts?.engines) && (tts.engines as { id: string; configured: boolean }[]).some((e) => e.id === "local" && e.configured);
     const ttsRole: Role = !localVoice ? null : tts?.choice === "local" ? "primary" : "fallback";
     const localStt = stt?.engines?.local?.installed === true;
-    const sttRole: Role = !localStt ? null : stt?.primary === "local" ? "primary" : "fallback";
+    // A fallback only while the box's engine is in the chain: under the
+    // local-only AI lock the chain is the chosen engine alone (TASK-2501), so
+    // with the owner's own speech server chosen Whisper is neither.
+    const sttRole: Role = !localStt
+      ? null
+      : stt?.primary === "local"
+        ? "primary"
+        : !Array.isArray(stt?.chain) || (stt.chain as unknown[]).includes("local") ? "fallback" : null;
     // Explicitly `!== false`, so a server that predates the field — or one whose
     // read failed — leaves the action where it has always been rather than
     // hiding it on a box that can use it. And the cloud has to be IN the chain:
@@ -1045,6 +1053,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
               })}
             </ul>
             {card && <div className="mt-3">{card}</div>}
+            {/* The owner's own speech server (TASK-2501 PR-D), whether or not
+                Whisper is on the box: it is the engine a box without one
+                transcribes with under the local-only AI lock. */}
+            {group.kind === "stt" && <div className="mt-3"><SttEndpointCard onChanged={afterInstall} /></div>}
           </section>
         );
       })}

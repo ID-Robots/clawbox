@@ -9,6 +9,8 @@ import { readCloudSttBacking, syncChannelAudio } from "@/lib/stt-channel";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
+import { cloudAiLockOn } from "@/lib/feature-engine";
+import { readSttEndpoint, readSttEndpointKey } from "@/lib/stt-endpoint";
 import {
   cloudTranscribeProblem,
   isSttEngine,
@@ -22,7 +24,13 @@ import {
 /**
  * GET  /setup-api/stt            → which engine hears this box first, and what
  *                                  each engine can do
- * POST /setup-api/stt {primary}  → put ClawBox cloud or the box itself first
+ * POST /setup-api/stt {primary}  → put ClawBox cloud, the box itself or the
+ *                                  owner's own speech server first
+ *
+ * The owner's own server (TASK-2501 PR-D) is saved and removed through
+ * /setup-api/stt/endpoint; here it is one more engine to report and to pick.
+ * Under the local-only AI lock the cloud is reported as locked, is never in
+ * either chain, and cannot be picked.
  *
  * The sibling of /setup-api/tts, for the other direction of speech. The one
  * preference reaches two surfaces: the chat microphone reads it per request
@@ -48,37 +56,48 @@ const EDITION_UNSUPPORTED = {
 } as const;
 
 async function status() {
-  const [stored, local, token] = await Promise.all([
+  const [stored, local, locked, endpoint] = await Promise.all([
     readStoredSttPrimary(),
     localSttInstalled(),
-    resolveClawaiToken(),
+    cloudAiLockOn(),
+    readSttEndpoint(),
   ]);
+  // Under the lock the credential is not read: nothing here may use it.
+  const token = locked ? null : await resolveClawaiToken();
   const cloudConfigured = token !== null;
   // The credential this read already holds, rather than `getSttPrimary()`
   // fetching it a second time. Same verdict either way.
-  const primary = resolveSttPrimary(stored, cloudConfigured, local.installed);
-  const order = sttEngineOrder(primary);
+  const primary = resolveSttPrimary(stored, cloudConfigured, local.installed, endpoint !== null, locked);
+  const order = sttEngineOrder(primary, locked);
   // What the microphone's cloud leg will actually send to the proxy: the rule
   // the transcribe route asks before it uploads anything.
   const micCloud = token !== null
     && cloudTranscribeProblem(token, openclawIsAbsent() ? null : await readConfig()) === null;
+  const usable = (engine: SttEngine): boolean =>
+    engine === "cloud" ? micCloud : engine === "local" ? local.installed : endpoint !== null;
   return {
     primary,
+    // The local-only AI lock (TASK-2501): no cloud leg and no fallback.
+    localOnly: locked,
     engines: {
-      cloud: { configured: cloudConfigured, label: "ClawBox cloud" },
+      cloud: { configured: cloudConfigured, label: "ClawBox cloud", ...(locked ? { locked: true } : {}) },
       local: { installed: local.installed, label: "On this box", detail: local.detail },
+      // The owner's own server. The key is never answered — only whether one is on file.
+      endpoint: endpoint
+        ? { configured: true, label: "Your speech server", baseUrl: endpoint.baseUrl, model: endpoint.model, apiKeySet: readSttEndpointKey() !== null }
+        : { configured: false, label: "Your speech server" },
     },
     // The engines this box can actually use, in the order it tries them. An
     // unlinked cloud or an uninstalled whisper is shown under `engines`, not
     // listed here as a step that will silently do nothing.
-    chain: order.filter((engine) => (engine === "cloud" ? micCloud : local.installed)),
+    chain: order.filter(usable),
     // The ACTIVE harness, not the edition — the same rule /setup-api/tts uses
     // and for the same reason: on a licensed dual box switched to Hermes,
     // `openclawIsAbsent()` is false while the gateway that serves channels is
     // not the one this box is talking through, so it reported channel voice
     // notes as working on a harness that serves none.
     channels: (await getActiveHarness()) === "openclaw" && !openclawIsAbsent()
-      ? await channelStatus(order, local.installed)
+      ? await channelStatus(order, local.installed, endpoint !== null)
       : EDITION_UNSUPPORTED,
   };
 }
@@ -91,11 +110,11 @@ async function status() {
  * proxy itself, while a channel goes through the gateway's credential for the
  * row, which the token alone does not guarantee (see `readCloudSttBacking`).
  */
-async function channelStatus(order: SttEngine[], localInstalled: boolean) {
+async function channelStatus(order: SttEngine[], localInstalled: boolean, endpointConfigured: boolean) {
   const cloud = await readCloudSttBacking();
   return {
     supportedOnEdition: true as const,
-    chain: order.filter((engine) => (engine === "cloud" ? cloud.usable : localInstalled)),
+    chain: order.filter((engine) => (engine === "cloud" ? cloud.usable : engine === "local" ? localInstalled : endpointConfigured)),
     cloudUnavailable: cloud.reason,
   };
 }
@@ -140,16 +159,28 @@ export async function POST(req: Request) {
   }
   const primary = (body as { primary?: unknown } | null)?.primary;
   if (!isSttEngine(primary)) {
-    return NextResponse.json({ error: "Pick ClawBox cloud or this box." }, { status: 400 });
+    return NextResponse.json({ error: "Pick ClawBox cloud, this box or your own speech server." }, { status: 400 });
   }
 
   try {
-    const [local, token] = await Promise.all([localSttInstalled(), resolveClawaiToken()]);
+    const [local, locked, endpoint] = await Promise.all([localSttInstalled(), cloudAiLockOn(), readSttEndpoint()]);
+    // Under the local-only AI lock (TASK-2501) the cloud is no engine to pick,
+    // and handing the capability back to the default would mean nothing else.
+    if (locked && primary === "cloud") {
+      return NextResponse.json(
+        { error: "Local-only AI is on: recordings are transcribed on this box or by your own speech server only.", code: "cloud_ai_locked" },
+        { status: 409 },
+      );
+    }
+    const token = locked ? null : await resolveClawaiToken();
     // Refuse rather than write a primary the box cannot honour: an engine that
     // is not installed must read as not installed, not as a selected option
     // that never hears anything. Same call the tts route makes.
     if (primary === "local" && !local.installed) {
       return NextResponse.json({ error: local.detail }, { status: 409 });
+    }
+    if (primary === "endpoint" && !endpoint) {
+      return NextResponse.json({ error: "Save your speech server's address first.", code: "not_configured" }, { status: 409 });
     }
     // WHO DECIDED, beside WHAT was decided. A person pinning the engine on the
     // box is what stops the ClawBox AI cloud default from moving it back at the
@@ -167,7 +198,9 @@ export async function POST(req: Request) {
     // direction. Releasing the capability back to the default is the opposite
     // case and stays AFTER its write, because a cleared pin over an engine that
     // did not move is the one that loses a decision.
-    if (primary === "local") await noteOwnerChoice("stt");
+    // The owner's own server is as much an on-box pick as the box's engine:
+    // either keeps the ClawBox AI cloud default from moving the box back.
+    if (primary !== "cloud") await noteOwnerChoice("stt");
     // The channel list is written in the order the box will ACTUALLY hear in,
     // which is not always the one that was posted: `{primary:"cloud"}` is the
     // panel's "Use as fallback" handing the capability back to the automatic
@@ -175,12 +208,12 @@ export async function POST(req: Request) {
     // engine on the box. Writing the cloud row first there would make every
     // voice note pay a refused round trip before the engine that can answer,
     // and would disagree with the primary this same response reports.
-    const effective = resolveSttPrimary(primary, token !== null, local.installed);
+    const effective = resolveSttPrimary(primary, token !== null, local.installed, endpoint !== null, locked);
     // Gateway first, preference second, so a failed CLI write leaves the
     // stored preference describing what the box still does.
-    const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(effective), local.installed);
+    const wrote = openclawIsAbsent() ? false : await syncChannelAudio(sttEngineOrder(effective, locked), local.installed);
     await setSttPrimary(primary);
-    if (primary !== "local") await clearOwnerChoice("stt");
+    if (primary === "cloud") await clearOwnerChoice("stt");
     if (wrote) {
       try {
         // Media-understanding config is read at gateway start, so a restart is
