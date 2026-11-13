@@ -14746,6 +14746,9 @@ step_desktop_background_apps() {
   local unit_dir="$config/systemd/user"
   local mask="$unit_dir/tracker-miner-fs-3.service"
   local marker='# ClawBox: hidden by install.sh (step_desktop_background_apps). To bring it back for good, remove this line and the Hidden=true line; a deleted file is written again by the next update'
+  # A copy is ours when its first line starts with this, so rewording the undo
+  # text after it never turns the copies already in the field into the owner's.
+  local marker_prefix='# ClawBox: hidden by install.sh (step_desktop_background_apps)'
   local name src dst state rc=0
 
   hand_over_home_path "$autostart_dir"
@@ -14774,14 +14777,14 @@ step_desktop_background_apps() {
         new=$(cat; echo .); new=${new%.}
         if [ -L "$1" ]; then echo link; exit 0; fi
         if [ -e "$1" ]; then
-          [ "$(head -n 1 -- "$1" 2>/dev/null)" = "$2" ] || { echo own; exit 0; }
+          case "$(head -n 1 -- "$1" 2>/dev/null)" in "$2"*) ;; *) echo own; exit 0 ;; esac
           if printf %s "$new" | cmp -s - "$1"; then echo same; exit 0; fi
         fi
         mkdir -p -m 700 -- "${1%/*}" && t=$(mktemp -- "$1.XXXXXX") || exit 1
         if printf %s "$new" > "$t" && chmod 644 -- "$t" && mv -f -T -- "$t" "$1"; then echo hidden; exit 0; fi
         rm -f -- "$t"
         exit 1
-      ' sh "$dst" "$marker") || state=failed
+      ' sh "$dst" "$marker_prefix") || state=failed
       case "$state" in
         hidden) echo "  $name: hidden from the desktop session, from the next login" ;;
         same) echo "  $name: already hidden" ;;

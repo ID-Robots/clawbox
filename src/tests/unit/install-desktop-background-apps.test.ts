@@ -34,6 +34,9 @@ const STEP = "step_desktop_background_apps";
 const MARKER =
   "# ClawBox: hidden by install.sh (step_desktop_background_apps). To bring it back for good, "
   + "remove this line and the Hidden=true line; a deleted file is written again by the next update";
+// What a first line must start with for the step to treat the file as its own:
+// the undo wording after it may change in a later release.
+const PREFIX = "# ClawBox: hidden by install.sh (step_desktop_background_apps)";
 const ENTRIES = ["gnome-software-service", "update-notifier", "nvpmodel_indicator", "tracker-miner-fs-3"];
 const UNIT = "tracker-miner-fs-3.service";
 const SYSTEM_AUTOSTART = "/etc/xdg/autostart";
@@ -391,6 +394,47 @@ d("step_desktop_background_apps hides Ubuntu's background apps from the desktop 
     expect(r.stdout).toContain("update-notifier: hidden");
   });
 
+  it("knows its own copy by the first line's prefix, and rewrites one with other wording after it", () => {
+    // A copy an earlier release wrote, whose undo sentence read differently.
+    systemFixtures();
+    const older = override(VENDOR["update-notifier"]).replace(MARKER, `${PREFIX}. Older wording of how to undo it`);
+    fs.mkdirSync(autostartDir(), { recursive: true });
+    fs.writeFileSync(entryFile("update-notifier"), older);
+
+    const r = runStep();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expectWrittenAsTheAccount(r);
+    expect(fs.readFileSync(entryFile("update-notifier"), "utf-8")).toBe(override(VENDOR["update-notifier"]));
+    expect(r.stdout).toContain("update-notifier: hidden");
+    expect(r.stdout).not.toContain("owner's own");
+  });
+
+  it("leaves a file whose first line does not start with the prefix byte-for-byte", () => {
+    systemFixtures();
+    // The prefix later in the line, and a first line that stops short of it.
+    const own: Record<string, string> = {
+      "update-notifier": override(VENDOR["update-notifier"]).replace(MARKER, `# my own copy, was: ${PREFIX}`),
+      nvpmodel_indicator: override(VENDOR.nvpmodel_indicator).replace(MARKER, "# ClawBox: hidden by install.sh"),
+    };
+    fs.mkdirSync(autostartDir(), { recursive: true });
+    const past = new Date("2026-01-01T00:00:00Z");
+    for (const [name, text] of Object.entries(own)) {
+      fs.writeFileSync(entryFile(name), text);
+      fs.utimesSync(entryFile(name), past, past);
+    }
+
+    const r = runStep();
+
+    expect(r.status, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expectWrittenAsTheAccount(r);
+    for (const [name, text] of Object.entries(own)) {
+      expect(fs.readFileSync(entryFile(name), "utf-8"), name).toBe(text);
+      expect(fs.statSync(entryFile(name)).mtimeMs, name).toBe(past.getTime());
+      expect(r.stdout).toContain(`${name}: ~/.config/autostart/${name}.desktop is the owner's own, left as it is`);
+    }
+  });
+
   it("writes nothing on a second run, and says each is already done", () => {
     systemFixtures();
     expect(runStep().status).toBe(0);
@@ -426,6 +470,16 @@ d("step_desktop_background_apps hides Ubuntu's background apps from the desktop 
     for (const name of ENTRIES) expect(r.stderr).toContain(`Warning: could not write ${entryFile(name)}`);
     expect(r.stderr).toContain(`Warning: could not write ${maskFile()}`);
     expect(fs.existsSync(path.join(home, ".config"))).toBe(false);
+  });
+});
+
+describe("step_desktop_background_apps's marker", () => {
+  it("starts with the prefix the step knows its own copy by", () => {
+    const fn = extractShellFunction(STEP);
+    const literal = (name: string) => fn.match(new RegExp(`^ {2}local ${name}='([^']*)'$`, "m"))?.[1];
+    expect(literal("marker")).toBe(MARKER);
+    expect(literal("marker_prefix")).toBe(PREFIX);
+    expect(MARKER.startsWith(`${PREFIX}.`)).toBe(true);
   });
 });
 
