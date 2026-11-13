@@ -485,7 +485,7 @@ interface PoolRuntime {
    * `askedAt`: the last ask, answered or not — what the next ask waits on.
    */
   room: Map<string, { reading: AnthropicUsageReading | null; at: number; askedAt?: number }>;
-  /** Per account, the usage ask in flight (readAccountUsage): every caller meanwhile awaits that one. */
+  /** Per account (and `:quiet` for one that does not record), the usage ask in flight (readAccountUsage): every like caller meanwhile awaits that one. */
   usageAsks: Map<string, Promise<AnthropicUsageReading | null>>;
   /** The last readRoom pass: each waits for the one before it. */
   roomRead: Promise<void>;
@@ -1170,9 +1170,10 @@ async function askUsage(account: AnthropicAccount): Promise<AnthropicUsageReadin
  *    markModelLimited would; the account stays `ok`;
  *  - a reset Anthropic did not give, or one already past: nothing is invented
  *    and the record stays as it is;
- *  - room again where only a reading had set a limit: it is lifted. A limit a
- *    refusal recorded is never lifted by a reading, only extended by a later
- *    reset (and the owner's clearLimit stays theirs).
+ *  - room again (a window READ, none spent) where only a reading had set a
+ *    limit: it is lifted. A limit a refusal recorded is never lifted by a
+ *    reading, only extended by a later reset (and the owner's clearLimit
+ *    stays theirs).
  * Null: nothing to change. An account that needs the owner is left alone.
  */
 interface ReadingPlan {
@@ -1196,7 +1197,10 @@ function readingPlan(account: AnthropicAccount, reading: AnthropicUsageReading, 
         || (onlyRead ? account.limitedUntil !== until || account.limitKind !== reading.kind : (account.limitedUntil ?? 0) < until);
       if (changes) limit = { until, kind: reading.kind };
     }
-  } else if (onlyRead) {
+  } else if (onlyRead && (reading.windows ?? []).length > 0) {
+    // Room only when the answer READ a window of the account's: a 200 with
+    // none (`{}`, an error envelope) says nothing, and lifting on it would
+    // hand the account out to be refused and limited again.
     lift = true;
   }
   const weeks: ReadingPlan["weeks"] = [];
@@ -1296,7 +1300,11 @@ export function readAccountUsage(id: string, maxAgeMs = 0, opts: { record?: bool
   const state = runtime();
   const cached = state.room.get(id);
   if (maxAgeMs > 0 && cached && Date.now() - cached.at < maxAgeMs) return Promise.resolve(cached.reading);
-  const inFlight = state.usageAsks.get(id);
+  // Callers share an ask only when they record alike: one that records must
+  // not hand back a reading it never wrote, and a `record: false` one must
+  // not have its run's limit written first under the box's name.
+  const key = opts.record === false ? `${id}:quiet` : id;
+  const inFlight = state.usageAsks.get(key);
   if (inFlight) return inFlight;
   const ask = (async () => {
     try {
@@ -1318,9 +1326,9 @@ export function readAccountUsage(id: string, maxAgeMs = 0, opts: { record?: bool
       return null;
     }
   })().finally(() => {
-    if (state.usageAsks.get(id) === ask) state.usageAsks.delete(id);
+    if (state.usageAsks.get(key) === ask) state.usageAsks.delete(key);
   });
-  state.usageAsks.set(id, ask);
+  state.usageAsks.set(key, ask);
   return ask;
 }
 

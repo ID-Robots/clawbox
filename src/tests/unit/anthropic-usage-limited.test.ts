@@ -271,6 +271,16 @@ describe("a later reading with room", () => {
     expect((await pool.readPoolState()).activeId).toBe(a);
   });
 
+  it("is not an answer that read no window at all: a 200 with nothing in it lifts nothing", async () => {
+    const reset = Date.now() + 30 * H;
+    const { answers } = usage({ "sk-ant-oat01-b": answer({ week: 100, weekReset: reset }) });
+    const { b } = await accounts("A", "B");
+    await pool.readAccountUsage(b);
+    answers["sk-ant-oat01-b"] = {};
+    expect(await pool.readAccountUsage(b)).toMatchObject({ exhausted: false });
+    expect(await viewOf(b)).toMatchObject({ status: "limited", limitedUntil: reset });
+  });
+
   it("brings the box back when every account was limited", async () => {
     const { answers } = usage({ "sk-ant-oat01-a": answer({ week: 100 }) });
     const { a, b } = await accounts("A", "B");
@@ -318,6 +328,21 @@ describe("what does not record a reading", () => {
     const reading = await pool.readAccountUsage(a, 0, { record: false });
     expect(reading?.exhausted).toBe(true);
     expect(await viewOf(a)).toMatchObject({ status: "ok", active: true });
+  });
+
+  it("callers share an ask only when they record alike: one that records never gets a reading it did not write", async () => {
+    const { asked } = usage({ "sk-ant-oat01-a": answer({ week: 100 }) });
+    const { a, b } = await accounts("A", "B");
+    const [quiet, loud] = await Promise.all([pool.readAccountUsage(a, 0, { record: false }), pool.readAccountUsage(a)]);
+    expect(quiet?.exhausted).toBe(true);
+    expect(loud?.exhausted).toBe(true);
+    expect(asked).toEqual(["sk-ant-oat01-a", "sk-ant-oat01-a"]);
+    const state = await pool.readPoolState();
+    expect(state.accounts.find((x) => x.id === a)?.status).toBe("limited");
+    expect(state.activeId).toBe(b);
+    // Two that record alike still ask once.
+    await Promise.all([pool.readAccountUsage(a, 0, { record: false }), pool.readAccountUsage(a, 0, { record: false })]);
+    expect(asked).toHaveLength(3);
   });
 
   it("an account that needs the owner keeps that state, whatever its reading", async () => {
