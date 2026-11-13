@@ -420,7 +420,7 @@ export function planStaffMcpEntries(input: {
       // A server that takes no credential is every member's; any other only
       // theirs who have one. Either way the entry carries THEIR relay token.
       const setting = input.store.servers[server];
-      if (!token || !grantReaches(setting, username) || (setting.needsCredential !== false && !credentials[server])) continue;
+      if (!token || !grantReaches(setting, username) || (setting.needsCredential !== false && !(Object.hasOwn(credentials, server) && credentials[server]))) continue;
       const name = staffEntryName(username, server, taken);
       taken.add(name);
       const config: Record<string, unknown> = {
@@ -511,12 +511,24 @@ const REFUSED_WITH_WRITES = new Set([...WRITE_VERBS].filter((verb) => !CREATE_ED
 const LONG_REFUSED_WITH_WRITES = [...REFUSED_WITH_WRITES].filter((verb) => verb.length >= 4);
 
 function isWriteWord(word: string): boolean {
-  return WRITE_VERBS.has(word) || LONG_WRITE_VERBS.some((verb) => word.startsWith(verb));
+  // A run-together name reads either way round: `sendmail` and `mailsend`.
+  return WRITE_VERBS.has(word) || LONG_WRITE_VERBS.some((verb) => word.startsWith(verb) || word.endsWith(verb));
+}
+
+/**
+ * Who-may-do-what nouns: with the owner's create/edit tick, `set`, `add` and
+ * `update` would otherwise let `set_permissions`, `add_member` or
+ * `update_acl` through. A tool naming one of these stays refused.
+ */
+const PRIVILEGE_NOUNS = ["permission", "acl", "role", "member", "access", "owner", "admin", "sharing", "privilege", "policy", "grant", "group", "user"];
+
+function isPrivilegeWord(word: string): boolean {
+  return PRIVILEGE_NOUNS.some((noun) => word.startsWith(noun));
 }
 
 /** A word that sends, deletes, runs or otherwise does more than create or edit. */
 function isRefusedEvenWithWrites(word: string): boolean {
-  return REFUSED_WITH_WRITES.has(word) || LONG_REFUSED_WITH_WRITES.some((verb) => word.startsWith(verb));
+  return REFUSED_WITH_WRITES.has(word) || isPrivilegeWord(word) || LONG_REFUSED_WITH_WRITES.some((verb) => word.startsWith(verb) || word.endsWith(verb));
 }
 
 /** The words of a tool name: split on `_`, `-`, `.`, `/`, spaces and camelCase. */

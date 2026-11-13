@@ -175,7 +175,9 @@ function filterJsonBody(text: string, listIds: Set<string>, filter: ToolFilter, 
   try {
     parsed = JSON.parse(text);
   } catch {
-    return text;
+    // A tool list that cannot be read is not passed unfiltered.
+    if (listIds.size === 0) return text;
+    return JSON.stringify([...listIds].map((id) => ({ jsonrpc: "2.0", id: JSON.parse(id), error: { code: -32603, message: "The tool list could not be read." } })));
   }
   const one = (m: unknown) => (isObject(m) && listIds.has(JSON.stringify(m.id)) ? filterToolsResult(m as JsonRpcMessage, filter, cache) : m);
   return JSON.stringify(Array.isArray(parsed) ? parsed.map(one) : one(parsed));

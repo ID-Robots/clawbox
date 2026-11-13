@@ -6,7 +6,7 @@ import { Readable } from "stream";
 import { chatMediaRoot } from "@/lib/harness/media-root";
 import { getActiveHarness } from "@/lib/harness";
 import { openclawWorkspaceDir } from "@/lib/language-persona";
-import { orgMemberOf } from "@/lib/org-mode-server";
+import { orgMemberStrictOf } from "@/lib/org-mode-server";
 import { isMediaOwnedBy } from "@/lib/chat-media-owners";
 
 export const dynamic = "force-dynamic";
@@ -241,7 +241,11 @@ async function resolveRequest(req: NextRequest): Promise<Resolved> {
   // chat only: never the workspace, and in the shared media tree only what is
   // recorded as theirs (src/lib/chat-media-owners.ts). The owner, the agent's
   // bearer and every user on a home box are served as before.
-  const member = await orgMemberOf(req);
+  // STRICT: a signed-in user other than the owner on a box whose switch
+  // cannot be read is refused, never served the owner's view of the tree.
+  const memberState = await orgMemberStrictOf(req);
+  if (memberState === "unknown") return fail(503, "Organisation mode could not be read");
+  const member = memberState;
   const { roots, workspace } = await allowedRoots(member?.username ?? null);
 
   // TWO containment tests. The first is purely lexical and runs before any

@@ -141,8 +141,11 @@ def granted_relay_tool(username: str, tool_name: str, paths: Optional[dict] = No
     """Is ``tool_name`` a tool of a relay entry granted to ``username``'s profile?"""
     agent = policy_table()["agentPrefix"] + username
     for entry in staff_mcp_grants(paths).get(agent, []):
-        if any(tool_name.startswith(prefix) for prefix in _mcp_tool_prefixes(entry)):
-            return True
+        for prefix in _mcp_tool_prefixes(entry):
+            # The rest must be a tool name, not more of a LONGER entry's name
+            # (`doc` granted, `doc-` not: both sanitise to a trailing `_`).
+            if tool_name.startswith(prefix) and tool_name[len(prefix):] and not tool_name[len(prefix):].startswith("_"):
+                return True
     return False
 
 
@@ -209,8 +212,16 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
     if username is None:
         # The owner's (or any other) profile never calls a member's relay
         # entry: it carries that member's relay token.
+        refusal = {"action": "block", "message": "Blocked by ClawBox: this MCP server belongs to a member of staff's assistant."}
         if is_staff_relay_tool(tool_name):
-            return {"action": "block", "message": "Blocked by ClawBox: this MCP server belongs to a member of staff's assistant."}
+            return refusal
+        if tool_name == TOOL_SEARCH_CALL:
+            outer = args if isinstance(args, dict) else {}
+            entries = outer["calls"] if isinstance(outer.get("calls"), list) else [outer]
+            for entry in entries:
+                target = (entry.get("name") or entry.get("id") or entry.get("tool")) if isinstance(entry, dict) else None
+                if isinstance(target, str) and is_staff_relay_tool(target.strip().split(":")[-1]):
+                    return refusal
         return None
     if tool_name in TOOL_SEARCH_READS:
         return None
