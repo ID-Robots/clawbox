@@ -59,6 +59,8 @@ const SAME_ENDPOINT = hasPython3 ? slice("def _same_endpoint(_a, _b):", "if _cla
 const POLICY = hasPython3
   ? slice("# Migration: ClawBox AI cloud voice (text to speech).", "if isinstance(ds_models, list):")
   : "";
+/** The local-only AI lock's reader (TASK-2501), which the speech-to-text block defines first. */
+const LOCK_READER = hasPython3 ? slice("def _clawbox_cloud_ai_locked():", "# end of the local-only AI lock reader") : "";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "clawai-speech-")); });
@@ -83,6 +85,8 @@ interface Options {
   storeBody?: string;
   /** Run the block in its OpenClaw 2 mode (top-level tts home). */
   v2?: boolean;
+  /** More device-store keys — the local-only AI lock (TASK-2501). */
+  extraStore?: Record<string, unknown>;
 }
 
 /**
@@ -101,6 +105,7 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     storeExists = true,
     storeBody,
     v2 = false,
+    extraStore = {},
   } = opts;
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
@@ -111,6 +116,7 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
       storeBody ?? JSON.stringify({
         ...(deviceTier === null ? {} : { clawai_tier: deviceTier }),
         ...(planTier === null ? {} : { clawai_plan_tier: planTier }),
+        ...extraStore,
       }),
     );
   }
@@ -126,6 +132,7 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     `deepseek_provider = {"baseUrl": ${JSON.stringify(PROXY)}}`,
     PROXY_HOSTS,
     SAME_ENDPOINT,
+    LOCK_READER,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
@@ -448,14 +455,20 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
         expect(speech(cfg)).toEqual(ours);
       });
 
-      it("does not withdraw a working voice over a device store it cannot read", () => {
+      // A store that cannot be read says nothing about the PLAN, but it may
+      // hold the local-only AI lock (TASK-2501), which is read failing closed:
+      // not known to be unlocked is locked. Withdrawing is recoverable — the
+      // first boot over a readable store arms the voice again (the lock suite
+      // at the end pins that) — while speaking through the cloud on a box that
+      // may be locked is not.
+      it("withdraws the voice over a device store it cannot read, because the lock may be on", () => {
         const { cfg, changed } = migrate(
           { messages: { tts: { providers: { openai: ours } } } },
           { storeBody: "not json at all" },
         );
 
-        expect(changed).toBe(false);
-        expect(speech(cfg)).toEqual(ours);
+        expect(changed).toBe(true);
+        expect(speech(cfg)).toBeUndefined();
       });
 
       it("does not withdraw a working voice over a box with no device store", () => {
@@ -1000,5 +1013,42 @@ describe("both editions gate cloud speech on the same tier", () => {
     // And it takes ONE argument's worth of evidence: there is no device stamp
     // in this signature to fall back to, which is the point.
     expect(clawaiSpeechWithdrawable.length).toBe(2);
+  });
+});
+
+// TASK-2501 PR-D: under the local-only AI lock the box speaks with Kokoro only.
+describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () => {
+  it("never arms an entitled box", () => {
+    const { cfg, changed } = migrate({}, { extraStore: { ai_cloud_lock: true } });
+    expect(changed).toBe(false);
+    expect(speech(cfg)).toBeUndefined();
+  });
+
+  it("withdraws the voice ClawBox stamped, and says why", () => {
+    const armed = migrate({});
+    expect(speech(armed.cfg)).toBeDefined();
+    const { cfg, changed, log } = migrate(armed.cfg, { extraStore: { ai_cloud_lock: "pinned" } });
+    expect(changed).toBe(true);
+    expect(speech(cfg)).toBeUndefined();
+    expect(log).toMatch(/local-only AI is on/);
+  });
+
+  it("reads an unreadable store as locked", () => {
+    const armed = migrate({});
+    const { cfg } = migrate(armed.cfg, { storeBody: "{ torn" });
+    expect(speech(cfg)).toBeUndefined();
+  });
+
+  it("arms the box again once the lock is lifted", () => {
+    const locked = migrate(migrate({}).cfg, { extraStore: { ai_cloud_lock: true } });
+    const { cfg } = migrate(locked.cfg, { extraStore: { ai_cloud_lock: false } });
+    expect(speech(cfg)).toMatchObject({ baseUrl: PROXY, apiKey: TOKEN });
+  });
+
+  it("leaves an owner's own speech entry alone", () => {
+    const own = { messages: { tts: { providers: { openai: { baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" } } } } };
+    const { cfg, changed } = migrate(own, { extraStore: { ai_cloud_lock: true } });
+    expect(changed).toBe(false);
+    expect(speech(cfg)).toEqual({ baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" });
   });
 });
