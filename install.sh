@@ -11236,6 +11236,10 @@ step_post_update() {
   # Without this call the marker would be fresh-install-only, and every box
   # already in the field would keep GNOME's first-run assistant resident.
   optional_step gnome_initial_setup_done step_gnome_initial_setup_done
+  # Without this call the hidden autostart entries would be fresh-install-only,
+  # and every box already in the field would keep Ubuntu's background apps
+  # resident in its desktop session.
+  optional_step desktop_background_apps step_desktop_background_apps
   # Reinstall the unit files from config/ + daemon-reload. Without this, unit
   # changes only ever reached FRESH installs: the in-app update runs
   # bootstrap_updater -> ... -> post_update and never re-copies
@@ -14686,6 +14690,124 @@ step_gnome_initial_setup_done() {
   fi
 }
 
+# Ubuntu's background apps in the clawbox account's GNOME session.
+#
+# The desktop stays on (scripts/clawbox-desktop-mode.sh), and its session kept
+# four of the image's apps resident that ClawBox has no use for: gnome-software's
+# background service, update-notifier (which launches update-manager and runs
+# apt-check; ClawBox has its own updater), NVIDIA's nvpmodel_indicator (the
+# power-mode tray icon, ClawBox sets the power mode itself; on Orin it is also
+# the desktop's only over-current and throttle alert, which nothing replaces)
+# and the tracker file miner (file search on the local desktop is no longer
+# indexed). About 110 MB of PSS and 300 MB of swap between them on an 8 GB board.
+#
+# Each is switched off with the switch the session itself reads, for this
+# account only: a copy of its system autostart entry under the same name in
+# ~/.config/autostart, with Hidden=true. gnome-session 42 reads that directory
+# before /etc/xdg/autostart and keeps the first entry with a given name, so the
+# copy shadows the system one. A full copy, not two lines: a user file
+# GDesktopAppInfo cannot load (one without Type=) is dropped, and the system
+# entry then starts. The miner runs as a user unit in a systemd-managed session,
+# so that unit is masked too, with the link to /dev/null that
+# `systemctl --user mask` writes (no user bus needed). Nothing under /etc, no
+# package removed, no process ended: it takes effect at the account's next
+# login or the box's next reboot.
+#
+# Everything in the home is written AS THE USER, the paths as arguments: root
+# writing there would follow a planted link. A root-owned directory an older
+# install left on the way is handed back first. Left alone, each with one line:
+# an entry or unit this image does not ship, a file there without the ClawBox
+# first line (the owner's own; removing that line is how to bring an app back
+# for good), a link there, and a directory on the way that is a link. Called by
+# the full install and by step_post_update, so a box in the field is fixed by
+# its next update; a copy that is already right is not rewritten.
+step_desktop_background_apps() {
+  local system_entries="/etc/xdg/autostart"
+  local system_units="/usr/lib/systemd/user"
+  local config="$CLAWBOX_HOME/.config"
+  local autostart_dir="$config/autostart"
+  local unit_dir="$config/systemd/user"
+  local mask="$unit_dir/tracker-miner-fs-3.service"
+  local marker='# ClawBox: hidden by install.sh (step_desktop_background_apps). To bring it back for good, remove this line and the Hidden=true line; a deleted file is written again by the next update'
+  local name src dst state rc=0
+
+  hand_over_home_path "$autostart_dir"
+  hand_over_home_path "$unit_dir"
+
+  if [ -L "$config" ] || [ -L "$autostart_dir" ]; then
+    echo "  ~/.config/autostart is reached through a link, left as it is: no background app hidden"
+  else
+    for name in gnome-software-service update-notifier nvpmodel_indicator tracker-miner-fs-3; do
+      src="$system_entries/$name.desktop"
+      dst="$autostart_dir/$name.desktop"
+      if [ ! -f "$src" ] || [ -L "$src" ] || ! grep -qx '\[Desktop Entry\]' "$src"; then
+        echo "  $name: no system autostart entry on this image, nothing to hide"
+        continue
+      fi
+      # Root makes the copy out of the system entry and hands it over on stdin;
+      # the user only writes it. Every Hidden= line goes (GKeyFile keeps the
+      # last of a key), and Hidden=true goes right under the header, never at
+      # the end, where a later group such as [Desktop Action ...] would own it.
+      # The user reads all of stdin first, then answers one word.
+      state=$({ printf '%s\n' "$marker" && awk '
+          /^[ \t]*Hidden[ \t]*=/ { next }
+          { print }
+          !placed && $0 == "[Desktop Entry]" { print "Hidden=true"; placed = 1 }
+        ' "$src"; } | as_clawbox sh -c '
+        new=$(cat; echo .); new=${new%.}
+        if [ -L "$1" ]; then echo link; exit 0; fi
+        if [ -e "$1" ]; then
+          [ "$(head -n 1 -- "$1" 2>/dev/null)" = "$2" ] || { echo own; exit 0; }
+          if printf %s "$new" | cmp -s - "$1"; then echo same; exit 0; fi
+        fi
+        mkdir -p -m 700 -- "${1%/*}" && t=$(mktemp -- "$1.XXXXXX") || exit 1
+        if printf %s "$new" > "$t" && chmod 644 -- "$t" && mv -f -T -- "$t" "$1"; then echo hidden; exit 0; fi
+        rm -f -- "$t"
+        exit 1
+      ' sh "$dst" "$marker") || state=failed
+      case "$state" in
+        hidden) echo "  $name: hidden from the desktop session, from the next login" ;;
+        same) echo "  $name: already hidden" ;;
+        own) echo "  $name: ~/.config/autostart/$name.desktop is the owner's own, left as it is" ;;
+        link) echo "  $name: ~/.config/autostart/$name.desktop is a link, left as it is" ;;
+        *)
+          echo "  Warning: could not write $dst — $name keeps starting with the desktop" >&2
+          rc=1
+          ;;
+      esac
+    done
+  fi
+
+  if [ ! -e "$system_units/tracker-miner-fs-3.service" ]; then
+    echo "  tracker-miner-fs-3.service: no such user unit on this image, nothing to mask"
+  elif [ -L "$config" ] || [ -L "$config/systemd" ] || [ -L "$unit_dir" ]; then
+    echo "  ~/.config/systemd/user is reached through a link, left as it is: the file miner is not masked"
+  else
+    state=$(as_clawbox sh -c '
+      if [ -L "$1" ]; then
+        if [ "$(readlink -- "$1")" = /dev/null ]; then echo same; else echo link; fi
+      elif [ -e "$1" ]; then
+        echo own
+      elif mkdir -p -m 700 -- "${1%/*}" && ln -s /dev/null "$1"; then
+        echo masked
+      else
+        exit 1
+      fi
+    ' sh "$mask") || state=failed
+    case "$state" in
+      masked) echo "  tracker-miner-fs-3.service: masked, the file miner no longer starts from the next login" ;;
+      same) echo "  tracker-miner-fs-3.service: already masked" ;;
+      own) echo "  tracker-miner-fs-3.service: ~/.config/systemd/user/tracker-miner-fs-3.service is the owner's own, left as it is" ;;
+      link) echo "  tracker-miner-fs-3.service: ~/.config/systemd/user/tracker-miner-fs-3.service is a link, left as it is" ;;
+      *)
+        echo "  Warning: could not write $mask — the file miner keeps starting with the desktop" >&2
+        rc=1
+        ;;
+    esac
+  fi
+  return "$rc"
+}
+
 step_ffmpeg_install() {
   wait_for_apt
   apt-get install -y ffmpeg
@@ -15970,10 +16092,12 @@ step_vnc_install
 
 log "Applying ClawBox desktop theme..."
 # Under the same heading, so the step count stays what it is. Non-fatal: GNOME's
-# first-run assistant costs memory, not function. Before step_desktop_theme, as
-# it has always run; both write ~/.config as clawbox now, and each hands a
-# root-owned one left by an older install back to clawbox on its own.
+# first-run assistant costs memory, not function, and so do Ubuntu's background
+# apps. Before step_desktop_theme, as it has always run; all three write
+# ~/.config as clawbox now, and each hands a root-owned one left by an older
+# install back to clawbox on its own.
 step_gnome_initial_setup_done || echo "  Warning: gnome_initial_setup_done step failed (non-fatal)"
+step_desktop_background_apps || echo "  Warning: desktop_background_apps step failed (non-fatal)"
 step_desktop_theme
 
 # Belt-and-suspenders PATH stanza — covers update runs that early-return out
