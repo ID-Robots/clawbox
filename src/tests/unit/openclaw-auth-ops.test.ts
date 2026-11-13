@@ -65,7 +65,7 @@ describe("saveOpenclawApiKey", () => {
     // A provider with a `models.providers` entry: the gateway writes
     // `<provider>:manual` even beside `<provider>:default`.
     const h = harness({ held: ["openrouter:default"] });
-    h.rpc.mockImplementation(async (method: string) => (method === "models.authSetApiKey" ? { provider: "openrouter", profileId: "openrouter:manual" } : {}));
+    h.rpc.mockImplementation((async (method: string) => (method === "models.authSetApiKey" ? { provider: "openrouter", profileId: "openrouter:manual" } : {})) as never);
     const saved = await saveOpenclawApiKey("openrouter", "openrouter:default", "sk-or-test");
     expect(h.rpc).toHaveBeenCalledWith("models.authLogout", { provider: "openrouter", profileIds: ["openrouter:manual"] }, 60_000);
     expect(h.cli).toHaveBeenCalledWith(
@@ -78,7 +78,7 @@ describe("saveOpenclawApiKey", () => {
 
   it("never takes out a profile the store held before, even when the gateway wrote into it", async () => {
     const h = harness({ held: ["openrouter:default", "openrouter:manual"] });
-    h.rpc.mockImplementation(async (method: string) => (method === "models.authSetApiKey" ? { provider: "openrouter", profileId: "openrouter:manual" } : {}));
+    h.rpc.mockImplementation((async (method: string) => (method === "models.authSetApiKey" ? { provider: "openrouter", profileId: "openrouter:manual" } : {})) as never);
     await saveOpenclawApiKey("openrouter", "openrouter:default", "sk-or-test");
     expect(h.rpc).not.toHaveBeenCalledWith("models.authLogout", expect.anything(), expect.anything());
   });

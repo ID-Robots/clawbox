@@ -302,8 +302,8 @@ describe("what the first Index now click actually runs", () => {
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = failing;
     const { getMemoryStatus } = await lib();
     const ws = await import("@/lib/openclaw-gateway-ws");
-    const { dbPath: _dbPath, workspaceDir: _workspaceDir, extraPaths: _extraPaths, ...legacy } = REAL_STATUS[0].status;
-    const vector = { ...legacy.vector };
+    const { dbPath: _dbPath, workspaceDir: _workspaceDir, extraPaths: _extraPaths, ...legacy } = (REAL_STATUS as Array<{ status: Record<string, unknown> }>)[0].status;
+    const vector = { ...(legacy.vector as Record<string, unknown>) };
     delete vector.available;
     delete vector.semanticAvailable;
     vi.mocked(ws.gatewayWsCall).mockResolvedValueOnce({
