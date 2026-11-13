@@ -159,7 +159,7 @@ TEST_DEADLINE=$(( $(date +%s) + ${NANO_TEST_TIMEOUT:-1800} - 60 ))
 # (src/lib/clawkeep-memory.ts), and the next test's first turn must not be
 # sent into that hold. Notes only: the box is being put back, not judged.
 wait_restore_pass() {
-  local run= left
+  local run='' left
   while [ "$(date +%s)" -lt "$TEST_DEADLINE" ]; do
     board_owner_api GET /setup-api/clawkeep/memory
     # A status read that failed says nothing about the pass: asked again.
