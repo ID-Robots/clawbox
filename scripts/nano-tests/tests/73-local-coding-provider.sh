@@ -129,9 +129,9 @@ esac
 for cloud in anthropic clawbox-ai; do
   board_api POST /setup-api/coding-agent/run "$(jq -cn --arg dir "$PROJECT_DIR" --arg p "$cloud" '{task: "Say hello.", directory: $dir, provider: $p}')"
   if { [ "$API_STATUS" = 400 ] || [ "$API_STATUS" = 409 ]; } && api_json '.error' | grep -q 'local-only AI lock is on'; then
-    ok "a $cloud run is refused under the lock (HTTP $API_STATUS)"
+    ok "a run on $cloud is refused under the lock (HTTP $API_STATUS)"
   else
-    not_ok "a $cloud run under the lock: $(api_error)"
+    not_ok "a run on $cloud under the lock: $(api_error)"
   fi
 done
 
@@ -170,7 +170,8 @@ CHECK=$(board '
   for _ in $(seq 1 20); do [ -s "$1/egress.json" ] && break; sleep 0.5; done
   node -e "
     const fs = require(\"fs\");
-    const lines = fs.readFileSync(process.argv[1], \"utf8\").trim().split(\"\n\").filter(Boolean).map((l) => JSON.parse(l));
+    const raw = fs.existsSync(process.argv[1]) ? fs.readFileSync(process.argv[1], \"utf8\") : \"\";
+    const lines = raw.trim().split(\"\n\").filter(Boolean).map((l) => JSON.parse(l));
     const chat = lines.filter((l) => l.path === \"/v1/chat/completions\");
     const loop = chat.filter((l) => l.mainLoop);
     console.log(\"ENGINE \" + JSON.stringify({
