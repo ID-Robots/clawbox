@@ -281,6 +281,30 @@ describe("a later reading with room", () => {
     expect(await viewOf(b)).toMatchObject({ status: "limited", limitedUntil: reset });
   });
 
+  it("lifts only on the window the limit is on: a session with room says nothing about a spent week", async () => {
+    const reset = Date.now() + 30 * H;
+    const { answers } = usage({ "sk-ant-oat01-b": answer({ week: 100, weekReset: reset }) });
+    const { b } = await accounts("A", "B");
+    await pool.readAccountUsage(b);
+    answers["sk-ant-oat01-b"] = { five_hour: { utilization: 10, resets_at: iso(Date.now() + H) } };
+    expect(await pool.readAccountUsage(b)).toMatchObject({ exhausted: false });
+    expect(await viewOf(b)).toMatchObject({ status: "limited", limitedUntil: reset, limitKind: "weekly" });
+  });
+
+  it("wakes what waits on a reset when it lifts — a model week's end is off the timer from then on", async () => {
+    const { answers } = usage({ "sk-ant-oat01-a": answer({ week: 20, fable: 100 }) });
+    const { a } = await accounts("A", "B");
+    const woke = vi.fn();
+    pool.onLimitReset(woke);
+    await pool.readAccountUsage(a);
+    expect((await viewOf(a))?.modelLimits).toHaveLength(1);
+    expect(woke).not.toHaveBeenCalled();
+    answers["sk-ant-oat01-a"] = answer({ week: 20, fable: 4 });
+    await pool.readAccountUsage(a);
+    expect((await viewOf(a))?.modelLimits).toEqual([]);
+    expect(woke).toHaveBeenCalledTimes(1);
+  });
+
   it("brings the box back when every account was limited", async () => {
     const { answers } = usage({ "sk-ant-oat01-a": answer({ week: 100 }) });
     const { a, b } = await accounts("A", "B");

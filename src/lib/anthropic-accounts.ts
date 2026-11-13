@@ -450,6 +450,8 @@ interface ChangeContext {
   fromLabel?: string | null;
   /** What the mutation turned out to be, when that is only known inside it. */
   cause?: SwapCause;
+  /** The work found nothing to change (a usage reading that agrees with the record): no settle, no write. */
+  unchanged?: boolean;
 }
 
 /**
@@ -700,6 +702,7 @@ async function mutate<T>(work: (file: PoolFile, now: number, ctx: ChangeContext)
     const file = await loadLocked();
     const ctx: ChangeContext = {};
     const out = await work(file, Date.now(), ctx);
+    if (ctx.unchanged) return out;
     moved.change = settleActive(file, Date.now(), opts.cause ?? "reset", ctx, opts.reselect === true);
     await writePool(file);
     return out;
@@ -1170,8 +1173,8 @@ async function askUsage(account: AnthropicAccount): Promise<AnthropicUsageReadin
  *    markModelLimited would; the account stays `ok`;
  *  - a reset Anthropic did not give, or one already past: nothing is invented
  *    and the record stays as it is;
- *  - room again (a window READ, none spent) where only a reading had set a
- *    limit: it is lifted. A limit a refusal recorded is never lifted by a
+ *  - room again (the limit's own window READ, none spent) where only a
+ *    reading had set a limit: it is lifted. A limit a refusal recorded is never lifted by a
  *    reading, only extended by a later reset (and the owner's clearLimit
  *    stays theirs).
  * Null: nothing to change. An account that needs the owner is left alone.
@@ -1197,10 +1200,11 @@ function readingPlan(account: AnthropicAccount, reading: AnthropicUsageReading, 
         || (onlyRead ? account.limitedUntil !== until || account.limitKind !== reading.kind : (account.limitedUntil ?? 0) < until);
       if (changes) limit = { until, kind: reading.kind };
     }
-  } else if (onlyRead && (reading.windows ?? []).length > 0) {
-    // Room only when the answer READ a window of the account's: a 200 with
-    // none (`{}`, an error envelope) says nothing, and lifting on it would
-    // hand the account out to be refused and limited again.
+  } else if (onlyRead && (reading.windows ?? []).some((w) => w.kind === account.limitKind)) {
+    // Room only when the answer READ the window the limit is on (none of the
+    // account's is spent here): a 200 with no window (`{}`, an error
+    // envelope), or one without the week a weekly limit is on, says nothing —
+    // lifting on it would hand the account out to be refused and limited again.
     lift = true;
   }
   const weeks: ReadingPlan["weeks"] = [];
@@ -1265,18 +1269,25 @@ function applyReadingPlan(account: AnthropicAccount, plan: ReadingPlan, now: num
 /**
  * Write what a fresh reading says about one account (readingPlan), through the
  * pool's one chain and its one settle — so the status, the health, the pick,
- * `lastSwap` and the gateway's order (which follows the move) all agree. Null
- * when this process's last view of the pool has nothing to change: no write.
- * Synchronous up to its place in the chain, so a pick queued after it sees
- * it. Never awaited under a lock; the promise never rejects.
+ * `lastSwap` and the gateway's order (which follows the move) all agree.
+ * Decided IN the chain, on the pool as the writes queued before it left it (a
+ * spent reading still queued, then one with room: the room wins); nothing to
+ * change is no write. Synchronous up to its place in the chain, so a pick
+ * queued after it sees it. A lift wakes what waits on a reset (wakeNow), once
+ * it has landed. Never awaited under a lock; the promise never rejects.
  */
-function recordUsageReading(id: string, reading: AnthropicUsageReading): Promise<void> | null {
-  const seen = runtime().snapshot?.accounts.find((a) => a.id === id);
-  if (!seen || !readingPlan(seen, reading, Date.now())) return null;
+function recordUsageReading(id: string, reading: AnthropicUsageReading): Promise<void> {
   return mutate((file, now, ctx) => {
     const account = file.accounts.find((a) => a.id === id);
     const plan = account ? readingPlan(account, reading, now) : null;
-    if (account && plan) applyReadingPlan(account, plan, now, ctx);
+    if (!account || !plan) {
+      ctx.unchanged = true;
+      return false;
+    }
+    applyReadingPlan(account, plan, now, ctx);
+    return plan.lift || plan.liftWeeks.length > 0;
+  }).then((lifted) => {
+    if (lifted) wakeNow();
   }).catch((err: unknown) => {
     console.error(`[anthropic-accounts] could not record what account ${id}'s usage reading says:`, err instanceof Error ? err.message : err);
   });
@@ -1895,18 +1906,28 @@ function armWake(file: PoolFile): void {
   state.wakeTimer = setTimeout(() => {
     state.wakeTimer = null;
     state.wakeAt = null;
-    for (const listener of state.wakeListeners) {
-      try {
-        listener();
-      } catch (err) {
-        console.error("[anthropic-accounts] a limit-reset listener failed:", err instanceof Error ? err.message : err);
-      }
-    }
+    wakeNow();
     // Re-read: it settles the active account against the reset (and emits the
     // move), and the next limit in line (if any) arms the next wake.
     void readAccounts().catch(() => {});
   }, delay);
   state.wakeTimer.unref?.();
+}
+
+/**
+ * Tell the reset listeners a limit is over: the runs waiting for one
+ * (src/lib/coding-agent.ts) and the gateway's order. The wake timer's call, and
+ * a usage reading's that lifted a limit (TASK-2515) — which also takes that
+ * limit's end off the timer, so nothing else would. Outside the chain.
+ */
+function wakeNow(): void {
+  for (const listener of [...runtime().wakeListeners]) {
+    try {
+      listener();
+    } catch (err) {
+      console.error("[anthropic-accounts] a limit-reset listener failed:", err instanceof Error ? err.message : err);
+    }
+  }
 }
 
 /** At boot: read the pool (which migrates and arms the wake) and clear stale handoffs. */
