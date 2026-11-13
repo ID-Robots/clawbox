@@ -133,7 +133,7 @@ describe("POST /v1/messages", () => {
   });
 
   it("asks the box's engine, with the box's key and the engine's model, and answers a whole message", async () => {
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({
+    const fetchImpl = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify({
       id: "x1",
       choices: [{ message: { content: "Done." }, finish_reason: "stop" }],
       usage: { prompt_tokens: 40, completion_tokens: 3 },
@@ -155,7 +155,7 @@ describe("POST /v1/messages", () => {
 
   it("asks the box's own runtimes for no thinking", async () => {
     resolveLocalEngine.mockResolvedValue({ ...ENGINE, kind: "llamacpp", chatUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1/chat/completions", authorization: "Bearer local-ai-token", contextTokens: 131_072 });
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }), { status: 200 }));
+    const fetchImpl = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }), { status: 200 }));
     await handleLocalMessages(post("/messages", { messages: [{ role: "user", content: "x" }] }), { fetchImpl });
     expect(JSON.parse(String(fetchImpl.mock.calls[0][1]!.body)).reasoning_effort).toBe("none");
   });
