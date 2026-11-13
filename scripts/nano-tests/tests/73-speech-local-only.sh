@@ -89,6 +89,13 @@ mic() {
     | curl -sS -o "$out" -w "%{http_code}" -X POST --max-time 200 -F "file=@$WORK/voice.wav;type=audio/wav" -K - "$DASHBOARD/setup-api/chat/transcribe" 2>/dev/null)
   printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
 }
+# The board has no jq: nj EXPR reads JSON on stdin and prints EXPR of it (v)
+# as JSON; njs prints stdin as one JSON string.
+nj() { node -e "let s=\"\";process.stdin.on(\"data\",(d)=>s+=d).on(\"end\",()=>{let v=null;try{v=JSON.parse(s)}catch{}let r=null;try{r=(new Function(\"v\",\"return (\"+process.argv[1]+\")\"))(v)}catch{}process.stdout.write(JSON.stringify(r===undefined?null:r))})" "$1"; }
+# njc EXPR: EXPR of the JSON on stdin, printed with its keys sorted, so two
+# reads of one config compare equal whatever order a writer left them in.
+njc() { node -e "let s=\"\";process.stdin.on(\"data\",(d)=>s+=d).on(\"end\",()=>{let v=null;try{v=JSON.parse(s)}catch{}let r=null;try{r=(new Function(\"v\",\"return (\"+process.argv[1]+\")\"))(v)}catch{}const c=(x)=>Array.isArray(x)?x.map(c):(x&&typeof x===\"object\")?Object.fromEntries(Object.keys(x).sort().map((k)=>[k,c(x[k])])):x;process.stdout.write(JSON.stringify(c(r===undefined?null:r)))})" "$1"; }
+njs() { node -e "let s=\"\";process.stdin.on(\"data\",(d)=>s+=d).on(\"end\",()=>process.stdout.write(JSON.stringify(s)))"; }
 mock_count() { [ -f "$WORK/mock.log" ] && wc -l < "$WORK/mock.log" | tr -d " " || echo 0; }
 
 # The keys this test may change, saved strictly and put back exactly.
@@ -98,14 +105,15 @@ keys() {
     const [cfgPath, savedPath, mode] = process.argv.slice(1);
     const read = () => { const c = JSON.parse(fs.readFileSync(cfgPath, \"utf8\")); if (!c || typeof c !== \"object\" || Array.isArray(c)) throw new Error(\"not an object\"); return c; };
     const write = (c) => { const t = cfgPath + \".nano-tmp\"; fs.writeFileSync(t, JSON.stringify(c, null, 2), { mode: 0o600 }); fs.renameSync(t, cfgPath); };
-    const KEYS = [\"ai_cloud_lock\", \"stt_primary\", \"stt_endpoint\", \"stt_choice_source\", \"stt_channel_audio_lock_off\"];
+    const KEYS = [\"ai_cloud_lock\", \"stt_primary\", \"stt_endpoint\", \"stt_choice_source\", \"voice_auto_reply\"];
     let c;
     try { c = read(); } catch (err) { console.log(\"CONFIG_UNREADABLE \" + (err && err.message)); process.exit(0); }
     if (mode === \"save\") {
       fs.writeFileSync(savedPath, JSON.stringify(Object.fromEntries(KEYS.map((k) => [k, Object.prototype.hasOwnProperty.call(c, k) ? c[k] : null]))));
       console.log(\"KEYS_SAVED\");
     } else if (mode === \"lock\") {
-      c.ai_cloud_lock = true; write(c);
+      // The lock, and spoken replies on so the reply leg has a reply to speak.
+      c.ai_cloud_lock = true; c.voice_auto_reply = true; write(c);
       if (read().ai_cloud_lock === true) console.log(\"LOCK_SET\");
     } else if (mode === \"check\") {
       const before = JSON.parse(fs.readFileSync(savedPath, \"utf8\"));
@@ -152,6 +160,10 @@ restart_gateway() {
 
 KEY_EXISTED=0
 [ -f data/.stt-endpoint-key ] && { KEY_EXISTED=1; cp -p data/.stt-endpoint-key "$WORK/key"; }
+# Hermes'"'"' voice markers: whatever was there before is put back, and only that.
+MARKERS="$HOME/.hermes/config.yaml.clawbox-voice-lock.json $HOME/.hermes/config.yaml.clawbox-voice-standdown.json"
+mkdir -p "$WORK/markers"
+for m in $MARKERS; do [ -f "$m" ] && cp -p "$m" "$WORK/markers/"; done
 cleanup() {
   [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null
   keys restore
@@ -159,27 +171,41 @@ cleanup() {
   if [ "$RUNTIME" = openclaw ]; then
     local now media
     now=$(oc_speech)
-    media=$(printf "%s" "$BEFORE_OC" | jq -c ".media")
-    if [ "$(printf "%s" "$now" | jq -c ".media")" != "$media" ]; then
+    media=$(printf "%s" "$BEFORE_OC" | nj "v && v.media")
+    if [ "$(printf "%s" "$now" | nj "v && v.media")" != "$media" ]; then
       if [ "$media" = null ]; then openclaw config unset tools.media >/dev/null 2>&1; else openclaw config set tools.media "$media" --json >/dev/null 2>&1; fi
       say "{\"restored\":\"tools.media\"}"
     fi
     # The cloud voice entry the lock withdrew comes back at the next gateway
     # start, now that the lock is off again.
-    if [ "$(oc_speech | jq -c "{tts,legacyTts}")" != "$(printf "%s" "$BEFORE_OC" | jq -c "{tts,legacyTts}")" ]; then
-      say "{\"restartForTts\":$(restart_gateway | jq -R .)}"
+    if [ "$(oc_speech | nj "v && [v.tts, v.legacyTts]")" != "$(printf "%s" "$BEFORE_OC" | nj "v && [v.tts, v.legacyTts]")" ]; then
+      say "{\"restartForTts\":$(restart_gateway | njs)}"
     fi
-    say "{\"restoredSame\":$([ "$(oc_speech | jq -c .)" = "$(printf "%s" "$BEFORE_OC" | jq -c .)" ] && echo true || echo false)}"
+    local after differs="" part
+    after=$(oc_speech)
+    for part in media tts legacyTts; do
+      [ "$(printf "%s" "$after" | njc "v && v.$part")" = "$(printf "%s" "$BEFORE_OC" | njc "v && v.$part")" ] || differs="$differs $part"
+    done
+    say "{\"restoredSame\":$([ -z "$differs" ] && echo true || echo false),\"differs\":$(printf "%s" "$differs" | njs),\"heldLeft\":$([ -e data/.tts-local-only-held.json ] && echo true || echo false),\"audioMarkLeft\":$([ -e data/.channel-audio-lock-off ] && echo true || echo false)}"
   else
     [ "$(hermes_provider)" != "$BEFORE_PROVIDER" ] && hermes_set_provider "$BEFORE_PROVIDER" >/dev/null
-    rm -f "$HOME/.hermes/config.yaml.clawbox-voice-lock.json"
+    for m in $MARKERS; do
+      if [ -f "$WORK/markers/$(basename "$m")" ]; then cp -p "$WORK/markers/$(basename "$m")" "$m"; else rm -f "$m"; fi
+    done
     say "{\"restoredProvider\":$([ "$(hermes_provider)" = "$BEFORE_PROVIDER" ] && echo true || echo false)}"
   fi
   say "{\"keys\":\"$(keys check)\"}"
   rm -rf "$WORK"
 }
 keys save | grep -q KEYS_SAVED || { echo "CONFIG_UNREADABLE"; exit 0; }
-if [ "$RUNTIME" = openclaw ]; then BEFORE_OC=$(oc_speech); else BEFORE_PROVIDER=$(hermes_provider); fi
+# What is put back has to have been read: nothing is changed over a read that failed.
+if [ "$RUNTIME" = openclaw ]; then
+  BEFORE_OC=$(oc_speech)
+  [ "$(printf "%s" "$BEFORE_OC" | nj "v !== null && typeof v === \"object\"")" = true ] || { echo "CONFIG_UNREADABLE openclaw.json"; exit 0; }
+else
+  BEFORE_PROVIDER=$(hermes_provider)
+  [ -n "$BEFORE_PROVIDER" ] || { echo "CONFIG_UNREADABLE hermes voice"; exit 0; }
+fi
 trap cleanup EXIT
 
 # The owner'"'"'s speech server, mocked: 127.0.0.1 only, one fixed sentence.
@@ -214,20 +240,20 @@ sleep 1
 keys lock
 # 1. Save the server as the owner, then dictate.
 SAVE=$(owner_api POST /setup-api/stt/endpoint "{\"baseUrl\":\"http://127.0.0.1:$PORT/v1\",\"model\":\"mock-asr\"}")
-say "{\"save\":{\"status\":$(printf "%s" "$SAVE" | head -n1),\"body\":$(printf "%s" "$SAVE" | tail -n +2 | jq -c "{ok,configured,baseUrl,model,apiKeySet,warning,code,error}" 2>/dev/null || echo null)}}"
+say "{\"save\":{\"status\":\"$(printf "%s" "$SAVE" | head -n1)\",\"body\":$(printf "%s" "$SAVE" | tail -n +2 | nj "v && {ok: v.ok, configured: v.configured, baseUrl: v.baseUrl, model: v.model, apiKeySet: v.apiKeySet, warning: v.warning, code: v.code, error: v.error}")}}"
 STT=$(owner_api GET /setup-api/stt)
-say "{\"stt\":$(printf "%s" "$STT" | tail -n +2 | jq -c "{primary,localOnly,chain,cloud:.engines.cloud,channels:.channels.chain}" 2>/dev/null || echo null)}"
+say "{\"stt\":$(printf "%s" "$STT" | tail -n +2 | nj "v && {primary: v.primary, localOnly: v.localOnly, chain: v.chain, cloud: v.engines && v.engines.cloud, channels: v.channels && v.channels.chain}")}"
 [ "$RUNTIME" = openclaw ] && sleep 20
 N0=$(mock_count)
 MIC=$(mic)
-say "{\"mic\":{\"status\":$(printf "%s" "$MIC" | head -n1),\"body\":$(printf "%s" "$MIC" | tail -n +2 | jq -c . 2>/dev/null || echo null),\"mockRequests\":$(( $(mock_count) - N0 )),\"mockModel\":$(tail -n 1 "$WORK/mock.log" 2>/dev/null | jq -c .model || echo null)}}"
+say "{\"mic\":{\"status\":\"$(printf "%s" "$MIC" | head -n1)\",\"body\":$(printf "%s" "$MIC" | tail -n +2 | nj v),\"mockRequests\":$(( $(mock_count) - N0 )),\"mockModel\":$(tail -n 1 "$WORK/mock.log" 2>/dev/null | nj "v && v.model")}}"
 
 # 2. Channel voice notes (OpenClaw): the list, and the media-understanding path.
 if [ "$RUNTIME" = openclaw ]; then
-  say "{\"channelConfig\":$(oc_speech | jq -c "{audio:.media.audio,models:[.media.models[]? | select((.capabilities // []) | index(\"audio\")) | {type,args,provider}]}")}"
+  say "{\"channelConfig\":$(oc_speech | nj "v && {audio: v.media && v.media.audio, models: ((v.media && v.media.models) || []).filter((m) => (m.capabilities || []).includes(String.fromCharCode(97,117,100,105,111))).map((m) => ({type: m.type, args: m.args, provider: m.provider}))}")}"
   N0=$(mock_count)
   INFER=$(timeout 180 openclaw infer audio transcribe --file "$WORK/voice.wav" --json 2>&1 | tail -n 40)
-  say "{\"channel\":{\"mockRequests\":$(( $(mock_count) - N0 )),\"heard\":$(printf "%s" "$INFER" | grep -c "harbour lantern"),\"tail\":$(printf "%s" "$INFER" | tail -n 3 | head -c 400 | jq -Rs .)}}"
+  say "{\"channel\":{\"mockRequests\":$(( $(mock_count) - N0 )),\"heard\":$(printf "%s" "$INFER" | grep -c "harbour lantern"),\"tail\":$(printf "%s" "$INFER" | tail -n 3 | head -c 400 | njs)}}"
 fi
 
 # 3. A spoken reply from the box'"'"'s own voice.
@@ -240,22 +266,24 @@ SPK=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http:/
   | curl -sS -D "$HDR" -o "$WORK/reply.bin" -w "%{http_code}" -X POST --max-time 200 --data-binary "{\"text\":\"Spoken by this box alone.\"}" -K - "$DASHBOARD/setup-api/tts/speak" 2>/dev/null)
 ENGINE=$(grep -i "^x-clawbox-voice-engine:" "$HDR" | tr -d "\r" | awk "{print \$2}")
 CTYPE=$(grep -i "^content-type:" "$HDR" | tr -d "\r" | awk "{print \$2}")
-say "{\"speak\":{\"status\":${SPK:-0},\"engine\":$(printf "%s" "$ENGINE" | jq -R .),\"type\":$(printf "%s" "$CTYPE" | jq -R .),\"bytes\":$(stat -c %s "$WORK/reply.bin" 2>/dev/null || echo 0),\"error\":$(head -c 300 "$WORK/reply.bin" | tr -cd "[:print:]" | jq -Rs .)}}"
+say "{\"speak\":{\"status\":\"${SPK:-000}\",\"engine\":$(printf "%s" "$ENGINE" | njs),\"type\":$(printf "%s" "$CTYPE" | njs),\"bytes\":$(stat -c %s "$WORK/reply.bin" 2>/dev/null || echo 0),\"error\":$(head -c 300 "$WORK/reply.bin" | tr -cd "[:print:]" | njs)}}"
 rm -f "$HDR"
 if [ "$RUNTIME" = hermes ]; then
   say "{\"hermesAfter\":$(hermes_provider)}"
 else
-  say "{\"ttsCloudEntry\":$(oc_speech | jq -c "[.tts.providers.openai?, .legacyTts.providers.openai?] | map(select(. != null) | {baseUrl, managed: .clawboxManaged})")}"
+  say "{\"ttsCloudEntry\":$(oc_speech | nj "v && [v.tts && v.tts.providers && v.tts.providers.openai, v.legacyTts && v.legacyTts.providers && v.legacyTts.providers.openai].filter(Boolean).map((e) => ({baseUrl: e.baseUrl, managed: e.clawboxManaged}))")}"
 fi
 
 # 4. The server stopped: refused, with the reason, and no cloud leg.
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null; MOCK_PID=
 MIC=$(mic)
-say "{\"stopped\":{\"status\":$(printf "%s" "$MIC" | head -n1),\"body\":$(printf "%s" "$MIC" | tail -n +2 | jq -c . 2>/dev/null || echo null)}}"
+say "{\"stopped\":{\"status\":\"$(printf "%s" "$MIC" | head -n1)\",\"body\":$(printf "%s" "$MIC" | tail -n +2 | nj v)}}"
 timeout 200 bun -e "$INPROC_JS" "$WORK/voice.wav" 2>&1 | sed -n "s/^INPROC /R {\"inproc\":/p" | sed "s/\$/}/" | tail -n 1
 if [ "$RUNTIME" = openclaw ]; then
-  INFER=$(timeout 180 openclaw infer audio transcribe --file "$WORK/voice.wav" --json 2>&1 | tail -n 40)
-  say "{\"channelStopped\":{\"heard\":$(printf "%s" "$INFER" | grep -c "harbour lantern"),\"tail\":$(printf "%s" "$INFER" | tail -n 3 | head -c 300 | jq -Rs .)}}"
+  INFER=$(timeout 180 openclaw infer audio transcribe --file "$WORK/voice.wav" --json 2>&1); RC=$?
+  # Any transcript at all — not only the mock'"'"'s sentence — would be another
+  # engine answering: the stopped server'"'"'s row is the only one listed.
+  say "{\"channelStopped\":{\"rc\":$RC,\"heard\":$(printf "%s" "$INFER" | grep -c "harbour lantern"),\"anyText\":$(printf "%s" "$INFER" | grep -cE "\"(text|transcript)\"[[:space:]]*:[[:space:]]*\"[^\"]"),\"tail\":$(printf "%s" "$INFER" | tail -n 3 | head -c 300 | njs)}}"
 fi
 # Control: the same stopped server with the lock lifted — the chain the box
 # always had, so a box holding a ClawBox AI credential shows its cloud leg here.
@@ -265,7 +293,7 @@ timeout 200 bun -e "$INPROC_JS" "$WORK/voice.wav" 2>&1 | sed -n "s/^INPROC /R {\
 
 note "raw: $(printf '%s' "$RAW" | tail -n 30 | head -c 6000)"
 if printf '%s\n' "$RAW" | grep -q 'CONFIG_UNREADABLE'; then
-  not_ok "data/config.json could not be read on the board; nothing was changed"
+  not_ok "the board's settings could not be read ($(printf '%s\n' "$RAW" | grep -m1 'CONFIG_UNREADABLE')); nothing was changed"
   finish
 fi
 if ! printf '%s\n' "$RAW" | grep -qx 'LOCK_SET'; then
@@ -349,8 +377,8 @@ else
   not_ok "in-process under the lock: $(r '.inproc | tojson')"
 fi
 if [ "$RUNTIME" = openclaw ]; then
-  if [ "$(r '.channelStopped.heard')" = 0 ]; then
-    ok "OpenClaw's media understanding hears nothing with the server stopped (no other engine is listed to fall back to)"
+  if [ "$(r '.channelStopped.heard')" = 0 ] && [ "$(r '.channelStopped.anyText')" = 0 ]; then
+    ok "OpenClaw's media understanding hears nothing with the server stopped — no transcript from any engine (exit $(r '.channelStopped.rc'))"
   else
     not_ok "OpenClaw's media understanding still transcribed with the server stopped: $(r '.channelStopped | tojson')"
   fi
@@ -361,7 +389,11 @@ note "control, lock lifted, server stopped: HTTP $(r '.control.status'), $CONTRO
 # Restored.
 if [ "$(r '.keys')" = KEYS_SAME ]; then ok "every data/config.json key the test changed is back as it was"; else not_ok "data/config.json keys after the test: $(r '.keys')"; fi
 if [ "$RUNTIME" = openclaw ]; then
-  if [ "$(r '.restoredSame')" = true ]; then ok "openclaw.json's speech blocks are back as they were"; else not_ok "openclaw.json's speech blocks differ after the test"; fi
+  if [ "$(r '.restoredSame')" = true ] && [ "$(r '.heldLeft')" = false ] && [ "$(r '.audioMarkLeft')" = false ]; then
+    ok "openclaw.json's speech blocks are back as they were, and no lock-time file is left behind"
+  else
+    not_ok "openclaw.json after the test: differs in [$(r '.differs')], held voices left $(r '.heldLeft'), audio mark left $(r '.audioMarkLeft')"
+  fi
 elif [ "$(r '.restoredProvider')" = true ]; then
   ok "Hermes' voice selection is back as it was"
 else
