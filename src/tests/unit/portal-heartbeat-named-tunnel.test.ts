@@ -258,6 +258,31 @@ describe("the named tunnel follows the account off the box", () => {
     expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
   });
 
+  it("does not write the tunnel a heartbeat answered after the link was removed", async () => {
+    await configStore.set("clawai_token", undefined);
+    await configStore.set("subscription_link_token", LINK_TOKEN);
+    fetchMock.mockImplementation(async () => {
+      // The unlink lands while the portal answers.
+      await configStore.set("subscription_link_token", undefined);
+      return ok({ success: true, boxTunnel: { hostname: HOST, token: TOKEN } });
+    });
+    await beat();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(fs.stat(CRED)).rejects.toThrow();
+    expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+  });
+
+  it("does not hand one account's answer to another that took its place meanwhile", async () => {
+    await configStore.set("clawai_token", undefined);
+    await configStore.set("subscription_link_token", LINK_TOKEN);
+    fetchMock.mockImplementation(async () => {
+      await configStore.set("subscription_link_token", "claw_99999999999999999999999999999999");
+      return ok({ success: true, boxTunnel: { hostname: HOST, token: TOKEN } });
+    });
+    await beat();
+    await expect(fs.stat(CRED)).rejects.toThrow();
+  });
+
   it("keeps the tunnel while a ClawBox AI token is still on the box", async () => {
     await storeCredential();
     await configStore.set("subscription_link_token", undefined);

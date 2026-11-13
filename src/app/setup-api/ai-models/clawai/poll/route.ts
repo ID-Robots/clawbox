@@ -12,6 +12,7 @@ import {
   isClawAiSessionExpired,
   readClawAiSession,
   writeClawAiSession,
+  writeClawAiSessionIfCurrent,
 } from "@/lib/clawai-connect";
 import { getBackgroundTask } from "@/lib/background-tasks";
 import {
@@ -212,19 +213,29 @@ async function recordClawaiEnd(session: ClawAiConnectSession, end: ProviderSignI
  * lands meanwhile answers "configuring" instead of linking a second time.
  */
 async function finishSubscriptionLink(session: ClawAiConnectSession, accessToken: string): Promise<NextResponse> {
+  // Every session write here is conditional: the link starts no provider task,
+  // so nothing stops a new /clawai/start while the portal answers, and this
+  // attempt's ending must never replace that newer session.
   const linking: ClawAiConnectSession = { ...session, status: "configuring", error: null, configuringStartedAt: Date.now() };
-  await writeClawAiSession(linking);
+  if (!(await writeClawAiSessionIfCurrent(session, linking))) {
+    return NextResponse.json(
+      { status: "error", error: "This ClawBox sign-in was replaced by a newer one. Use the newer code." },
+      { status: 410 },
+    );
+  }
   const { linkSubscription } = await import("@/lib/subscription-link");
   const outcome = await linkSubscription(accessToken);
   if (!outcome.ok) {
     console.error("[clawai/poll] Subscription link failed:", outcome.code);
-    await writeClawAiSession({ ...linking, status: "error", error: outcome.message });
+    await writeClawAiSessionIfCurrent(session, { ...linking, status: "error", error: outcome.message });
     return NextResponse.json(
       { status: "error", error: outcome.message },
       { status: outcome.code === "store_failed" ? 500 : 409 },
     );
   }
-  await writeClawAiSession({ ...linking, status: "complete", error: null, warning: null, completedAt: Date.now() });
+  // The link itself is the owner's and stays; only the session's ending is
+  // skipped when a newer sign-in holds the session now.
+  await writeClawAiSessionIfCurrent(session, { ...linking, status: "complete", error: null, warning: null, completedAt: Date.now() });
   return NextResponse.json({ status: "complete" });
 }
 

@@ -198,7 +198,16 @@ async function pushNow(tunnelUrl: string): Promise<void> {
     if (res.ok) {
       lastPushedUrl = tunnelUrl;
       const answer: unknown = await res.json().catch(() => null);
+      // The account may have left the box (an unlink, a sign-out) or changed
+      // while the request was out: the answer was for the account that asked.
+      if ((await readClawAiToken()) !== token) {
+        await revokeNamedTunnelWithoutAccount("the account left while the heartbeat was answered");
+        return;
+      }
       await applyBoxTunnel(answer, stored);
+      // And should it leave while the credential was written, the unlink's own
+      // revoke may have run before the file landed: ask once more, after it.
+      await revokeNamedTunnelWithoutAccount("the account left while the named tunnel was written");
     } else if (res.status === 401 || res.status === 403) {
       // Token revoked or unpaired — stop trying until a config change clears
       // the in-memory state via process restart.
