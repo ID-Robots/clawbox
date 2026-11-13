@@ -400,7 +400,16 @@ export function syncStaffAgents(): Promise<boolean> {
 async function syncStaffAgentsNow(): Promise<boolean> {
   try {
     const { getActiveHarness } = await import("@/lib/harness");
-    if ((await getActiveHarness()) !== "openclaw") return true;
+    const harness = await getActiveHarness();
+    if (harness === "hermes") {
+      // Hermes: each member's own profile carries their relay entries
+      // (TASK-2516, src/lib/hermes-staff-profile.ts); a profile made later
+      // gets its own on the member's first turn.
+      const { syncHermesStaffMcp } = await import("@/lib/hermes-staff-profile");
+      const staff = (await readOrgMode()) ? (await listUsers()).map((user) => user.username) : [];
+      return await syncHermesStaffMcp(staff);
+    }
+    if (harness !== "openclaw") return true;
     const { OPENCLAW_HOME, openclawIsAbsent, readConfigStrict, runOpenclawConfigSetBatch, runOpenclawConfigUnset } = await import("@/lib/openclaw-config");
     if (openclawIsAbsent()) return true;
     const { openclawWorkspaceDir } = await import("@/lib/language-persona");

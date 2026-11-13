@@ -27,6 +27,8 @@ const {
   recheckMsFromEnv,
 } = require("./scripts/upgrade-session-watch.js");
 const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat, staffReadyReader } = require("./scripts/gateway-user-relay.js");
+const { claimReplyMedia, MEDIA_TREE_OWN_FOLDERS } = require("./scripts/chat-reply-media.js");
+const { createMediaOwners } = require("./scripts/chat-media-owners.js");
 const { staffAgentId } = require("./scripts/org-staff-policy.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
 const { ORG_MODE_KEY, orgModeFrom, orgModeRefusesUpgrade } = require("./scripts/org-mode.js");
@@ -304,6 +306,33 @@ const OPENCLAW_CONFIG_PATH = `${
   || `${process.env.HOME || "/home/clawbox"}/.openclaw`
 }/openclaw.json`;
 const RELAY_IDENTITY_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", ".gateway-user-relay-device.json");
+// Whose chat a media file is (src/lib/chat-media-owners.ts): the relay records
+// the files a member of staff's reply names as theirs (TASK-2516), so the
+// download card in their chat opens for them and for nobody else.
+const chatMediaOwners = createMediaOwners(path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "chat-media-owners.json"));
+const OPENCLAW_STATE_DIR = path.dirname(OPENCLAW_CONFIG_PATH);
+
+/** A member of staff's reply named files: record the ones that may be theirs (scripts/chat-reply-media.js). */
+function recordStaffReplyMedia(username, claim) {
+  const { recorded, refused } = claimReplyMedia({
+    username,
+    paths: claim.paths,
+    since: claim.since,
+    until: claim.until,
+    roots: [
+      // The chat media tree (src/lib/harness/media-root.ts), minus the
+      // folders ClawBox records its own writes in.
+      { dir: path.join(OPENCLAW_STATE_DIR, "media"), skip: MEDIA_TREE_OWN_FOLDERS },
+      // Their own folder: the staff agent's workspace (src/lib/org-staff-agents.ts staffWorkspaceDir).
+      { dir: path.join(OPENCLAW_STATE_DIR, "staff", username) },
+    ],
+    record: chatMediaOwners.recordMediaOwner,
+  });
+  if (recorded.length > 0 || refused.length > 0) {
+    // Counts and reasons only: a path can name a person's document.
+    console.log(`[user-chat-relay] a reply's files: ${recorded.length} recorded as the member's, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+  }
+}
 let relayIdentity = null;
 const userChatWss = new WebSocket.Server({ noServer: true });
 
@@ -349,6 +378,7 @@ function relayUserChatUpgrade(req, socket, head, url, identity) {
       staffAgent,
       staffReady: staffAgent ? staffReadyReader(OPENCLAW_CONFIG_PATH, staffAgent) : undefined,
       stillCurrent: () => readSessionConfig().orgMode === orgMode,
+      onReplyMedia: staffAgent ? (claim) => recordStaffReplyMedia(identity.username, claim) : null,
       connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
         // Port-less to satisfy the gateway's strict origin allowlist, as the
         // owner's pipe and the WSS proxy below send it.

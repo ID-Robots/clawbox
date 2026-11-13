@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# timeout: 3300
+# timeout: 4500
 # tier: long
-# covers: config/org-staff-policy.json scripts/org-staff-policy.js scripts/gateway-user-relay.js src/lib/org-staff-*.ts src/lib/hermes-staff-profile.ts scripts/openclaw-plugins/clawbox-staff-guard/* scripts/hermes-plugins/clawbox_staff_guard/* src/app/setup-api/hermes/chat/route.ts scripts/nano-tests/board/org-mode-staff.mjs src/lib/staff-mcp*.ts src/app/setup-api/staff-mcp/* src/app/setup-api/settings/staff-mcp/* scripts/nano-tests/board/org-mode-staff-mcp.mjs src/lib/files-scope*.ts src/app/setup-api/files/*
+# covers: config/org-staff-policy.json scripts/org-staff-policy.js scripts/gateway-user-relay.js src/lib/org-staff-*.ts src/lib/hermes-staff-profile.ts scripts/openclaw-plugins/clawbox-staff-guard/* scripts/hermes-plugins/clawbox_staff_guard/* src/app/setup-api/hermes/chat/route.ts scripts/nano-tests/board/org-mode-staff.mjs src/lib/staff-mcp*.ts src/app/setup-api/staff-mcp/* src/app/setup-api/settings/staff-mcp/* scripts/nano-tests/board/org-mode-staff-mcp.mjs src/lib/files-scope*.ts src/app/setup-api/files/* scripts/chat-reply-media.js scripts/chat-media-owners.js src/lib/chat-reply-media.ts src/lib/chat-media-owners.ts src/app/setup-api/chat/media/* scripts/nano-tests/board/org-mode-staff-mcp-files.mjs
 #
 # An organisation box's limited assistant and private memory (TASK-2444,
 # TASK-2445), for real, on whichever agent runtime the board runs:
@@ -25,7 +25,12 @@
 #      a stub MCP server that echoes the credential; on OpenClaw the owner
 #      grants it, A's call carries A's credential, B without one gets none,
 #      then B's carries B's, and the owner's assistant uses its own entry; on
-#      Hermes the grant is refused and A's ask reaches nothing.
+#      Hermes (TASK-2516) the same grant through each member's own profile.
+#   6b. A granted tool that writes a file (TASK-2516,
+#      scripts/nano-tests/board/org-mode-staff-mcp-files.mjs): no credential,
+#      create/edit tools on, to A only then to everyone; each member downloads
+#      their own document from their chat, the other gets 404, a path outside
+#      the media folders is nobody's, and naming another's file changes nothing.
 #   7. The owner turns the switch off and removes both users: the staff agents
 #      leave the roster and their folders go with them.
 #
@@ -168,6 +173,16 @@ MCP_RC=$?
 grep -E "^(RESULT|NOTE) " "$MCP_OUT" || say "not ok - [$RUNTIME] the staff MCP driver printed nothing"
 [ "$MCP_RC" = 0 ] || say "not ok - [$RUNTIME] the staff MCP driver ended with status $MCP_RC (124: it ran out of time)"
 rm -f "$MCP_OUT"
+
+# 6b. A granted tool that writes a file, and the file downloaded from the
+# member own chat only (TASK-2516).
+MCPF_OUT=$(mktemp)
+cd "$REPO" && A_NAME="$A_NAME" A_COOKIE="$A_COOKIE" B_NAME="$B_NAME" B_COOKIE="$B_COOKIE" OWNER_COOKIE="$OWNER" MARK="$MARK" RUNTIME="$RUNTIME" REPO="$REPO" \
+  timeout 1100 node "$REPO/scripts/nano-tests/board/org-mode-staff-mcp-files.mjs" >"$MCPF_OUT" 2>&1
+MCPF_RC=$?
+grep -E "^(RESULT|NOTE) " "$MCPF_OUT" || say "not ok - [$RUNTIME] the staff MCP files driver printed nothing"
+[ "$MCPF_RC" = 0 ] || say "not ok - [$RUNTIME] the staff MCP files driver ended with status $MCPF_RC (124: it ran out of time)"
+rm -f "$MCPF_OUT"
 
 # 7. Off, and the users gone — both of them, by what the box answered and by
 # what it now lists.
