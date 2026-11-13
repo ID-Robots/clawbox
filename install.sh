@@ -14585,7 +14585,7 @@ VNCSVC
     install -m 644 "$unit_tmp" "$unit_path"
     systemctl daemon-reload
     systemctl restart clawbox-vnc.service clawbox-websockify.service || true
-    echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual, autocutsel installed)"
+    echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual)"
   else
     echo "  VNC service already up-to-date, skipping restart"
   fi

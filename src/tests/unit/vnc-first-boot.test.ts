@@ -180,7 +180,7 @@ describe("step_vnc_refresh reads autocutsel back from dpkg", () => {
     }
   }
 
-  /** The step's autocutsel warnings. Not bare "autocutsel": the refresh line names it too. */
+  /** The step's autocutsel warnings, matched on the warning's own text. */
   const warnings = (output: string) => output.split("\n").filter((l) => l.includes("Warning: autocutsel"));
 
   /** The clawbox-vnc.service refresh that follows the install, in every case. */
@@ -188,7 +188,8 @@ describe("step_vnc_refresh reads autocutsel back from dpkg", () => {
     expect(r.unitWritten).toBe(true);
     expect(r.calls).toContain("systemctl daemon-reload");
     expect(r.calls).toContain("systemctl restart clawbox-vnc.service clawbox-websockify.service");
-    expect(r.output).toContain("  VNC service refreshed");
+    // The whole line: it states only what the step did, nothing about autocutsel.
+    expect(r.output).toContain("  VNC service refreshed (CLAWBOX_VNC_MODE=virtual)\n");
     expect(r.rc, r.output).toBe("0");
   }
 
@@ -206,6 +207,8 @@ describe("step_vnc_refresh reads autocutsel back from dpkg", () => {
     const r = runRefresh({ aptRc: 0, installed: false });
 
     expect(warnings(r.output)).toEqual([AUTOCUTSEL_WARNING]);
+    // Nothing later in the run contradicts the warning.
+    expect(r.output).not.toContain("autocutsel installed");
     expectUnitRefreshed(r);
   });
 
