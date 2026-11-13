@@ -146,6 +146,15 @@ describe("clawai-connect — a conditional write (TASK-2501)", () => {
     expect(await connect.writeClawAiSessionIfCurrent(base, { ...base, status: "complete" })).toBe(false);
   });
 
+  it("never recreates a session cleared while a conditional write was queued", async () => {
+    await connect.writeClawAiSession(base);
+    const cleared = connect.clearClawAiSession();
+    const conditional = connect.writeClawAiSessionIfCurrent(base, { ...base, status: "complete" });
+    await cleared;
+    expect(await conditional).toBe(false);
+    expect(await connect.readClawAiSession()).toBeNull();
+  });
+
   it("writes nothing when there is no session", async () => {
     expect(await connect.writeClawAiSessionIfCurrent(base, base)).toBe(false);
     expect(await connect.readClawAiSession()).toBeNull();
