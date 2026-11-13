@@ -60,6 +60,7 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 - [Local AI](https://docs.clawbox.com/guides/local-ai): Settings → Local AI as a per-model inventory (Gemma 4 ships, Kokoro/Whisper/embeddings install on request); local-only mode (OpenClaw/dual only); nothing heavy is installed by an update
 - [Messaging Channels](https://docs.clawbox.com/guides/messaging-channels): Telegram, Discord (token-only connect, invite link built on the box), WhatsApp and email all guided in Settings → Channels; receiving mail is Hermes-only; spoken replies on channels are OpenClaw-only; other OpenClaw channels remain advanced configuration
 - [Desktop & Appearance](https://docs.clawbox.com/guides/appearance): wallpapers per edition (Lobster Orbital is the OpenClaw default), the mascot, and the Mascot Pet picker on every edition — the built-in ClawBox crab plus Petdex pets that download on pick
+- [Users & Staff](https://docs.clawbox.com/guides/users-and-staff): adding users, organisation mode for a team, choosing which MCP servers members of staff may use (every member or named ones, their own credential or none for a local tool, read-only or also create/edit tools), and files a member's assistant makes being downloadable by that member only
 - [Subscriptions](https://docs.clawbox.com/guides/subscriptions): ClawBox AI plans — Free €0, Pro €9/month or €89/year, Max €49/month or €479/year — and what each unlocks on the device. Internal tier names are off by one: `flash` = Pro, `pro` = Max
 
 ## External

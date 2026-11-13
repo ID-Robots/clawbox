@@ -58,7 +58,8 @@ import { chatKeyUser } from "@/lib/chat-scope";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
 import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
 import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
-import { ensureStaffHermesProfile, staffGuardLoaded, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { ensureStaffHermesProfile, staffGuardLoaded, staffHermesProfilePaths, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { recordMemberReplyMedia } from "@/lib/chat-reply-media";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
@@ -408,6 +409,8 @@ async function settleTurn(
   consoleText: string,
   streamedReasoning: string,
   served: { model?: string; provider?: string } = {},
+  /** When this turn began (`LiveTurn.startedAt`): the files its reply names are a member's only if written since. */
+  turnStartedAt: number | null = null,
 ): Promise<TurnPayload> {
   // Which person's conversation this Hermes session now carries, so only
   // they may resume it (src/lib/chat-scope-server.ts).
@@ -515,6 +518,24 @@ async function settleTurn(
   // owner is theirs: served back to them on an organisation box, and to no
   // other member (src/lib/chat-media-owners.ts).
   if (chatUser) recordMediaOwner(chatUser, [...drawn, spokenClip]);
+  // A file the member's own turn produced — a document an owner-granted MCP
+  // tool wrote — named on a `MEDIA:` line of the reply is theirs too
+  // (TASK-2516): only a fresh regular file in the media tree or their own
+  // profile folder, never through a link, never one already someone else's.
+  if (memberTurn && chatUser) {
+    // Their own profile folder only: a file in the shared media tree is made
+    // theirs by the relay that ran their tool call, never by a reply naming
+    // it (scripts/chat-reply-media.js). Synchronous and never throws.
+    const { recorded, refused } = recordMemberReplyMedia({
+      username: chatUser,
+      text: caption,
+      ownFolder: staffHermesProfilePaths(chatUser)?.folder ?? null,
+      since: turnStartedAt,
+    });
+    if (recorded.length > 0 || refused.length > 0) {
+      console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+    }
+  }
   const answer = [
     caption,
     ...drawn.map((file) => `MEDIA:${file}`),
@@ -950,6 +971,7 @@ async function runStreamedTurn(
           final.text,
           final.reasoning,
           await servedPair(final, turn, threaded, usageBefore),
+          live.startedAt,
         ),
       );
     }
@@ -1011,6 +1033,7 @@ async function runStreamedTurn(
             recovered.text,
             "",
             await servedPair(null, turn, threaded, usageBefore),
+            live.startedAt,
           ),
         );
         return;
@@ -1832,7 +1855,7 @@ export async function POST(request: Request) {
       // config.yaml's pairing, which is the same read the validation above makes
       // when it has a reason to: recorded too, because a blank under a reply the
       // box knows the model of is a false unknown, not modesty.
-      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed));
+      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed, live.startedAt));
       live.emit("done", answered);
       // The one-shot answer is held to the same rule as the stream: a session
       // that ran out while the CLI was answering is signed out rather than

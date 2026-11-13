@@ -101,7 +101,33 @@ describe("the staff tools card", () => {
     fireEvent.click(screen.getByTestId("staff-mcp-save-grants"));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, i]) => i?.method === "POST")).toBe(true));
     const post = fetchMock.mock.calls.find(([, i]) => i?.method === "POST")!;
-    expect(JSON.parse(String(post[1].body))).toEqual({ servers: { docs: { header: "X-Api-Key" } } });
+    expect(JSON.parse(String(post[1].body))).toEqual({ servers: { docs: { header: "X-Api-Key", needsCredential: true, writeTools: false, members: null } } });
+  });
+
+  it("grants a tool that takes no credential to named members, with its create/edit tools (TASK-2516)", async () => {
+    render(<StaffMcpCard users={["ivan", "maria"]} orgMode />);
+    fireEvent.click(await screen.findByTestId("staff-mcp-needs-credential-docs"));
+    // No credential: no header to name.
+    expect(screen.queryByTestId("staff-mcp-header-docs")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("staff-mcp-write-tools-docs"));
+    fireEvent.click(screen.getByTestId("staff-mcp-some-docs"));
+    fireEvent.click(screen.getByTestId("staff-mcp-member-docs-maria"));
+    fireEvent.click(screen.getByTestId("staff-mcp-save-grants"));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, i]) => i?.method === "POST")).toBe(true));
+    const post = fetchMock.mock.calls.find(([, i]) => i?.method === "POST")!;
+    expect(JSON.parse(String(post[1].body))).toEqual({ servers: { docs: { header: "Authorization", needsCredential: false, writeTools: true, members: ["maria"] } } });
+  });
+
+  it("asks for credentials only for a server that needs them, and only of the members it reaches", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => (url === "/setup-api/settings/staff-mcp" && (init?.method ?? "GET") === "GET"
+      ? json(200, { ...VIEW, servers: [{ ...VIEW.servers[0], members: ["maria"] }, { name: "worddoc", transport: "http", usable: true, granted: true, header: "Authorization", needsCredential: false, writeTools: true, members: null }] })
+      : json(404, {})));
+    render(<StaffMcpCard users={["ivan", "maria"]} orgMode />);
+    expect(await screen.findByTestId("staff-mcp-cred-maria-docs")).toBeInTheDocument();
+    expect(screen.queryByTestId("staff-mcp-cred-ivan-docs")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("staff-mcp-cred-maria-worddoc")).not.toBeInTheDocument();
+    expect((screen.getByTestId("staff-mcp-write-tools-worddoc") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByTestId("staff-mcp-member-docs-maria") as HTMLInputElement).checked).toBe(true);
   });
 
   it("keeps an unsaved grant edit when a credential is saved", async () => {
@@ -142,7 +168,7 @@ describe("the staff tools card", () => {
     fireEvent.change(screen.getByTestId("staff-mcp-header-docs"), { target: { value: "X-Other" } });
     fireEvent.click(screen.getByTestId("staff-mcp-apply-retry"));
     await waitFor(() => expect(posts()).toHaveLength(2));
-    expect(JSON.parse(String(posts()[1][1].body))).toEqual({ servers: { docs: { header: "X-Api-Key" } } });
+    expect(JSON.parse(String(posts()[1][1].body))).toEqual({ servers: { docs: { header: "X-Api-Key", needsCredential: true, writeTools: false, members: null } } });
     // …and the edit made since is still in the form after the answer.
     await waitFor(() => expect(screen.queryByTestId("staff-mcp-apply-retry")).not.toBeDisabled());
     expect((screen.getByTestId("staff-mcp-header-docs") as HTMLInputElement).value).toBe("X-Other");

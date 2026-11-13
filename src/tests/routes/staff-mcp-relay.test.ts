@@ -30,6 +30,9 @@ vi.mock("@/lib/clawbox-users", () => ({
   listUsers: vi.fn(async () => state.users.map((username) => ({ username, createdAt: "2026-11-12T00:00:00Z", sv: "x" }))),
 }));
 vi.mock("@/lib/openclaw-config", () => ({
+  get OPENCLAW_HOME() {
+    return path.join(ROOT, ".openclaw");
+  },
   isPlainObject: (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v),
   readConfigStrict: vi.fn(async () => ({ mcp: { servers: state.servers } })),
 }));
@@ -49,6 +52,7 @@ const TOOLS = [
   { name: "send_mail", description: "send an email", inputSchema: { type: "object" } },
   { name: "purge_index", description: "x", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
   { name: "lookup_ledger", description: "harmless name, destructive by the server's word", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
+  { name: "create_word_document", description: "write a .docx", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } },
 ];
 
 let relay: typeof import("@/app/setup-api/staff-mcp/[server]/route");
@@ -83,6 +87,13 @@ beforeAll(async () => {
       let result: unknown = {};
       if (msg.method === "tools/list") result = { tools: TOOLS };
       if (msg.method === "tools/call") result = { content: [{ type: "text", text: `caller=${req.headers.authorization ?? req.headers["x-api-key"]}` }] };
+      if (msg.method === "tools/call" && msg.params?.name === "create_word_document") {
+        // Writes a fresh document and names it — and names an OLD file of the owner's too.
+        const fresh = path.join(ROOT, ".openclaw", "media", "word-docs", `${msg.params.arguments?.title ?? "doc"}.docx`);
+        fs.mkdirSync(path.dirname(fresh), { recursive: true });
+        fs.writeFileSync(fresh, "PK");
+        result = { content: [{ type: "text", text: `Saved.\nMEDIA:${fresh}\nAlso see ${path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx")}` }] };
+      }
       const reply = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
       if (sse) {
         res.writeHead(200, { "Content-Type": "text/event-stream", "Mcp-Session-Id": "s-1" });
@@ -100,6 +111,8 @@ beforeAll(async () => {
     m365: { url: upstreamUrl, transport: "streamable-http" },
     filtered: { url: upstreamUrl, transport: "streamable-http", toolFilter: { include: ["whoami"] } },
     leaky: { url: `${upstreamUrl}?key=owner`, transport: "streamable-http" },
+    // A tool on the box that takes no credential (TASK-2516); the owner's own entry carries a header of theirs.
+    worddoc: { url: upstreamUrl, transport: "streamable-http", headers: { "X-Owner": "owner-secret" } },
   };
   process.env.CLAWBOX_ROOT = ROOT;
   vi.resetModules();
@@ -145,6 +158,77 @@ function call(server: string, token: string | null, message: unknown) {
 }
 
 const whoami = { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "whoami", arguments: {} } };
+
+describe("a tool on the box that takes no credential (TASK-2516)", () => {
+  const createDoc = { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "create_word_document", arguments: { title: "Q4" } } };
+  const listTools = { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} };
+  const grant = (worddoc: Record<string, unknown>) => mcp.updateStaffMcpStore((store) => ({ ...store, servers: { ...store.servers, worddoc: { header: "Authorization", ...worddoc } } }));
+
+  it("serves every member through their own token, sending no credential and nothing of the owner's", async () => {
+    await grant({ needsCredential: false });
+    const res = await call("worddoc", TOKENS.olga, whoami);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toContain("caller=undefined");
+    expect(callsOnly()[0]).toMatchObject({ auth: null, apiKey: null, ownerHeader: null });
+  });
+
+  it("offers and passes the create/edit tool only where the owner ticked it — the sender stays refused", async () => {
+    await grant({ needsCredential: false });
+    const strict = await (await call("worddoc", TOKENS.olga, listTools)).json();
+    expect(strict.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "whoami"]);
+    expect((await (await call("worddoc", TOKENS.olga, createDoc)).json()).error?.code).toBe(-32601);
+
+    await grant({ needsCredential: false, writeTools: true });
+    resetRelayCaches();
+    const open = await (await call("worddoc", TOKENS.olga, listTools)).json();
+    expect(open.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "whoami", "create_word_document"]);
+    seen.length = 0;
+    const made = await (await call("worddoc", TOKENS.olga, createDoc)).json();
+    expect(made.result).toBeTruthy();
+    expect(callsOnly()).toHaveLength(1);
+    const send = { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "send_mail", arguments: {} } };
+    expect((await (await call("worddoc", TOKENS.olga, send)).json()).error?.code).toBe(-32601);
+    expect(callsOnly()).toHaveLength(1);
+  });
+
+  it("refuses a member the owner did not name, before the server is reached", async () => {
+    await grant({ needsCredential: false, members: ["maria"] });
+    const res = await call("worddoc", TOKENS.olga, whoami);
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("not_granted");
+    expect(seen).toHaveLength(0);
+    expect((await call("worddoc", TOKENS.maria, whoami)).status).toBe(200);
+  });
+
+  it("records the files a member's own tool call CREATED as theirs (provenance), never a recent owner's file it merely names", async () => {
+    await grant({ needsCredential: false, writeTools: true });
+    // The owner's document: written just before the call and touched again
+    // DURING it (a recent mtime), but not created by it.
+    const old = path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx");
+    fs.mkdirSync(path.dirname(old), { recursive: true });
+    fs.writeFileSync(old, "PK");
+    await new Promise((r) => setTimeout(r, 60));
+    fs.writeFileSync(old, "PK again");
+    for (const as of [sse, !sse]) {
+      sse = as;
+      const res = await call("worddoc", TOKENS.olga, { ...createDoc, params: { name: "create_word_document", arguments: { title: `olga-${as ? "sse" : "json"}` } } });
+      expect(res.status).toBe(200);
+      await res.text(); // the body read to its end, as the gateway does
+    }
+    const owners = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "chat-media-owners.json"), "utf-8")) as Record<string, string>;
+    const docs = path.join(fs.realpathSync(ROOT), ".openclaw", "media", "word-docs");
+    expect(owners[path.join(docs, "olga-sse.docx")]).toBe("olga");
+    expect(owners[path.join(docs, "olga-json.docx")]).toBe("olga");
+    expect(owners[path.join(docs, "owners-old.docx")]).toBeUndefined();
+  });
+
+  it("is not served to staff at all while it is not granted", async () => {
+    const res = await call("worddoc", TOKENS.olga, whoami);
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("not_granted");
+    expect(seen).toHaveLength(0);
+  });
+});
 
 describe("whose credential travels", () => {
   it("sends each member's own credential, in the owner's chosen header, and nothing of the owner's", async () => {

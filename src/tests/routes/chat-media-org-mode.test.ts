@@ -14,9 +14,9 @@ import path from "path";
  */
 
 const h = vi.hoisted(() => ({
-  member: vi.fn(async (): Promise<{ username: string } | null> => ({ username: "alice" })),
+  member: vi.fn(async (): Promise<{ username: string } | null | "unknown"> => ({ username: "alice" })),
 }));
-vi.mock("@/lib/org-mode-server", () => ({ orgMemberOf: h.member }));
+vi.mock("@/lib/org-mode-server", () => ({ orgMemberOf: h.member, orgMemberStrictOf: h.member }));
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -37,7 +37,7 @@ const request = (p: string) => {
 };
 const get = (p: string) => GET(request(p));
 const media = (...parts: string[]) => path.join(tmpHome, ".openclaw", "media", ...parts);
-const as = (who: { username: string } | null) => h.member.mockResolvedValue(who);
+const as = (who: { username: string } | null | "unknown") => h.member.mockResolvedValue(who);
 
 beforeEach(async () => {
   saved = { HOME: process.env.HOME, OPENCLAW_HOME: process.env.OPENCLAW_HOME };
@@ -66,6 +66,12 @@ afterEach(() => {
 });
 
 describe("a member of staff on an organisation box", () => {
+  it("is refused (503), never served the owner's view, when the switch cannot be read (TASK-2516 review)", async () => {
+    as("unknown");
+    expect((await get(path.join(tmpHome, ".openclaw", "workspace", "MEMORY.md"))).status).toBe(503);
+    expect((await get(path.join(tmpHome, ".openclaw", "media", "tool-image-generation", "cat.png"))).status).toBe(503);
+  });
+
   it("is never served the agent's workspace, by absolute or relative path", async () => {
     expect((await get(path.join(tmpHome, ".openclaw", "workspace", "MEMORY.md"))).status).toBe(404);
     expect((await get("MEMORY.md")).status).toBe(400);
