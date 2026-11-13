@@ -186,11 +186,15 @@ async function openclawTurn(sock, key, text) {
         // `tool_call` before it): `id`, then `toolId`, then `name`, as the core reads it.
         const a = d.args && typeof d.args === "object" ? d.args : {};
         const target = [a.id, a.toolId, a.name].find((v) => typeof v === "string" && v) || "";
-        tools.push({ name: d.name, target, result: "" });
+        tools.push({ name: d.name, target, result: "", full: "" });
       }
       else {
         const t = [...tools].reverse().find((x) => x.name === d.name);
-        if (t) t.result = JSON.stringify(d.result ?? d.partialResult ?? d.error ?? "").slice(0, 300);
+        // `result` is what the log shows; `full` is what a check reads.
+        if (t) {
+          t.full = JSON.stringify(d.result ?? d.partialResult ?? d.error ?? "");
+          t.result = t.full.slice(0, 300);
+        }
       }
     }
     if (f.event === "chat" && p.state === "final") {
@@ -344,7 +348,24 @@ async function openclawRun() {
   note(`[${RUNTIME}] owner asked for the code: ${ownerAsk.text}`);
   // How it answered: which tools (and, through a dispatcher, which target) the owner's turn used.
   note(`[${RUNTIME}] owner's tools for it: ${ownerAsk.tools.map((t) => (t.target ? `${t.name}(${t.target})` : t.name)).join(", ") || "none"}`);
-  check(!ownerAsk.text.includes(secret), "the owner's assistant does not have A's fact either");
+  // Neither the owner's memory nor any session view may hand the owner's
+  // assistant A's fact. The owner's own shell and read tools are another
+  // matter: they reach every file on the box, a member's folder included (the
+  // owner administers it), and OpenClaw 2026.11.3's assistant goes there when
+  // its memory comes back empty. A fact read off the disk that way is noted;
+  // returned by any other tool (memory_search, sessions_search, …), or known
+  // without a tool, it is a failure.
+  const toolId = (t) => (["tool_call", "dispatch_action"].includes(t.name) ? String(t.target || "") : t.name);
+  const label = (t) => (t.target ? `${t.name}(${t.target})` : t.name);
+  const gave = ownerAsk.tools.filter((t) => (t.full || "").includes(secret));
+  const offDisk = gave.filter((t) => /(^|:)(exec|process|bash|read)$/.test(toolId(t)));
+  const leaked = gave.filter((t) => !offDisk.includes(t));
+  check(leaked.length === 0, "no memory or session tool of the owner's returns A's fact", leaked.map(label).join(", "));
+  if (ownerAsk.text.includes(secret) && offDisk.length > 0) {
+    note(`[${RUNTIME}] the owner's assistant read A's fact off the disk with ${offDisk.map(label).join(", ")}, the owner's own tools; its memory does not hold it`);
+  } else {
+    check(!ownerAsk.text.includes(secret), "the owner's assistant does not have A's fact either");
+  }
   // A gets it back in a new conversation (their memory, kept across chats).
   const aTab = `agent:${aAgent}:clawbox-utab-${createHash("sha1").update(MARK).digest("hex").slice(0, 12)}-${A_NAME}`;
   const recall = await openclawTurn(a, aTab, "What is my locker code? Search your memory.");
