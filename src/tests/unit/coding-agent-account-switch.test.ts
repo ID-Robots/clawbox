@@ -89,7 +89,7 @@ function calls(): { n: number; cred: string; args: string }[] {
  * (works until something ends it). It reads — and deletes — the credential
  * handoff exactly as the real wrapper does, and logs what it was handed.
  */
-function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disabled")[]): void {
+function installWrapper(plan: readonly ("limit" | "limitlock" | "ok" | "hang" | "auth" | "disabled")[]): void {
   fs.writeFileSync(path.join(base, "plan"), `${plan.join("\n")}\n`);
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
@@ -105,6 +105,8 @@ function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disa
       `mode=$(sed -n "\${n}p" ${sq(path.join(base, "plan"))})`,
       'case "$mode" in',
       `  limit) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_LIMIT)} ${sq(LIMIT_RESULT)}; exit 1 ;;`,
+      // The owner turns the local-only AI lock on while this attempt runs (TASK-2501).
+      `  limitlock) sed -i '1s/^{/{"ai_cloud_lock":true,/' ${sq(path.join(root, "data", "config.json"))}; printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_LIMIT)} ${sq(LIMIT_RESULT)}; exit 1 ;;`,
       `  auth) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
       `  disabled) printf '%s\\n' ${sq(INIT)} ${sq(DISABLED_RESULT)}; exit 1 ;;`,
       `  hang) printf '%s\\n' ${sq(INIT)}; sleep 30; exit 0 ;;`,
@@ -181,6 +183,20 @@ async function twoAccounts() {
 }
 
 describe("an account at its limit mid-run", () => {
+  it("does not carry the run on to another account once the local-only AI lock has gone on (TASK-2501)", async () => {
+    installWrapper(["limitlock", "ok"]);
+    makeProject("site");
+    await twoAccounts();
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    const run = await settled(started.id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/Local-only AI is on/);
+    // One process, the one that ran before the lock: no second spawn.
+    expect(calls()).toHaveLength(1);
+  });
+
   it("carries the SAME run on, in the same session, on the next account", async () => {
     installWrapper(["limit", "ok"]);
     makeProject("site");

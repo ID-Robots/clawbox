@@ -20,15 +20,16 @@
  */
 
 import { getKnown } from "@/lib/config-store";
+import { AI_CLOUD_LOCK_KEY } from "@/lib/ai-cloud-lock-shared";
 import type { LocalEngine } from "@/lib/local-engine";
 
 /**
- * The device-store key of TASK-2501's local-only AI lock (PR-A): `true`, or
- * `"pinned"`, is on. Read here by its stored value until the lock's own
- * contract (`isCloudAiLocked()` in `ai-cloud-lock.ts`) is on beta; then this
- * reader becomes that call, with the same answer.
+ * The device-store key of TASK-2501's local-only AI lock: `true`, or
+ * `"pinned"`, is on — the key and rule of `isCloudAiLocked()` in
+ * `ai-cloud-lock.ts`. Read here by its stored value so a reader that rejects
+ * reads as locked (see below), where that contract falls back to a plain read.
  */
-export const CLOUD_AI_LOCK_KEY = "ai_cloud_lock";
+export const CLOUD_AI_LOCK_KEY = AI_CLOUD_LOCK_KEY;
 
 /**
  * Is the local-only AI lock on? FAILING CLOSED: an absent store (no

@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cloudAiLockedResponse, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
@@ -50,6 +51,8 @@ export async function POST(request: Request) {
   if (!API_KEY_PROVIDERS.has(provider)) {
     return NextResponse.json({ error: "Provider does not accept an API key here" }, { status: 400 });
   }
+  // The local-only AI lock (TASK-2501): no cloud provider key is added while it is on.
+  if (await isCloudAiLocked()) return cloudAiLockedResponse();
   if (!apiKey || !API_KEY_RE.test(apiKey) || apiKey.startsWith("-")) {
     return NextResponse.json({ error: "Invalid API key" }, { status: 400 });
   }

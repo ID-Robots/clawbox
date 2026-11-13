@@ -18,7 +18,9 @@ const creds = vi.hoisted(() => ({
   noteClawaiCredentialRefused: vi.fn(async () => undefined),
   proxyRefusedClawaiCredential: vi.fn(async () => false),
 }));
-vi.mock("@/lib/harness/credentials", () => creds);
+// The allowance meter reads the account's credential, the writer the AI one
+// (TASK-2501); with the lock off both are the same token.
+vi.mock("@/lib/harness/credentials", () => ({ ...creds, resolveClawaiEntitlementToken: () => creds.resolveClawaiToken() }));
 const auth = vi.hoisted(() => ({ requireSession: vi.fn(async () => null) }));
 vi.mock("@/lib/route-auth", () => auth);
 const portal = vi.hoisted(() => ({ fetchClawaiUsage: vi.fn() }));

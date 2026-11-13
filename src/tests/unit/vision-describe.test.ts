@@ -243,7 +243,7 @@ describe("on the box's own engine (TASK-2501 PR-C)", () => {
 
   it("never falls back to the cloud under the lock with no model on the box", async () => {
     feature.resolveFeatureEngine.mockResolvedValue({ kind: "none", reason: "cloud_ai_locked" });
-    expect(await describeNow()).toEqual({ text: null, error: LOCKED_NO_ENGINE_ERROR });
+    expect(await describeNow()).toEqual({ text: null, error: LOCKED_NO_ENGINE_ERROR, code: "cloud_ai_locked" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mocks.configGet).not.toHaveBeenCalled();
   });

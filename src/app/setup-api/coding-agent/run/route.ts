@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLockedError } from "@/lib/ai-cloud-lock";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, ProviderChoiceError, httpStatusForCodingError, newRunId, startOrQueueRun } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
@@ -203,9 +204,11 @@ export async function POST(request: Request) {
       // caller can tell "that pair is not on this box" from "that folder is not
       // allowed" — both are `kind: "invalid"`, and the MCP tool advises on the
       // wrong argument without it. Anything else answers exactly as before.
+      // So is the local-only AI lock's refusal (TASK-2501): a `not_ready` like
+      // a missing sign-in, which only its code tells apart.
       const code = err instanceof ProviderChoiceError || err instanceof ExperienceChoiceError
         ? { code: err.code }
-        : {};
+        : isCloudAiLockedError(err) ? { code: CLOUD_AI_LOCKED_CODE } : {};
       return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
     }
     console.error("[coding-agent/run] failed to start:", err instanceof Error ? err.message : err);

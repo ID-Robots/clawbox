@@ -28,11 +28,12 @@ import crypto from "crypto";
 import { runChild } from "./child-run";
 import { createSerialLock } from "./serial-lock";
 import { sanitizeErrorMessage } from "./safe-error-text";
+import { CLOUD_AI_LOCKED_CODE } from "./ai-cloud-lock-shared";
 import { getActiveHarness } from "./harness";
 import { speakWithHermes } from "./hermes-tts";
 import { buildTtsInventory, KOKORO_STAMP } from "./local-models";
 import { readVoiceConfig } from "./voice-box";
-import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "./voice-output";
+import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, LOCAL_TTS_PROVIDER_ID, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "./voice-output";
 import { readLocalVoice, readVoiceState } from "./voice-output-store";
 import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "./voice-catalog";
 import { compressSpeech } from "./tts-compress";
@@ -103,6 +104,20 @@ function localRefusal(stderr: string): Response {
   }
   const reason = reasons.map(sanitizeErrorMessage).find((r): r is string => r !== null) ?? null;
   return refuse(reason ? `${base} (${reason})` : base, "local_failed", 502, reason ? { reason } : {});
+}
+
+/**
+ * The box's own voice as `speakLocally` runs it, from Hermes' view of it.
+ * Hermes registers the same script as a command TEMPLATE
+ * (`clawbox-tts.sh --text-file={input_path} -- {output_path}`), while
+ * `speakLocally` calls the script with arguments of its own — so only the
+ * script's path is kept. No absolute path, no voice: `speakLocally` then
+ * answers `no_local_voice`.
+ */
+export function boxVoiceFromHermes(config: VoiceConfigView): VoiceConfigView {
+  const script = localCommandPath(config)?.split(/\s+/)[0] ?? null;
+  if (!script || !script.startsWith("/")) return {};
+  return { tts: { provider: LOCAL_TTS_PROVIDER_ID, providers: { [LOCAL_TTS_PROVIDER_ID]: { command: script } } } };
 }
 
 export async function speakLocally(config: VoiceConfigView, requestedVoice: unknown, text: string): Promise<Response> {
@@ -434,6 +449,13 @@ export async function speakReply(
     // replies would have, and not necessarily a WAV.
     if ((await getActiveHarness()) === "hermes") {
       const spoken = await speakWithHermes(text);
+      if (!spoken.ok && spoken.code === CLOUD_AI_LOCKED_CODE) {
+        // The local-only AI lock (TASK-2501) refused the cloud voice Hermes is
+        // still set to: the box's own voice speaks instead, as Auto does on
+        // OpenClaw. Hermes' setting is the owner's and is left as it is.
+        const local = await (speakers?.local ?? speakLocally)(boxVoiceFromHermes(await readVoiceConfig("hermes")), undefined, text);
+        return format ? await inReplyFormat(local, format) : local;
+      }
       if (!spoken.ok) return refuse("Could not speak that on this box.", spoken.code, spoken.status, spoken.reason ? { reason: spoken.reason } : {});
       const answer = new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
       return format ? await inReplyFormat(answer, format) : answer;

@@ -14,6 +14,7 @@
  */
 
 import { promises as fs } from "fs";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { getActiveHarness } from "@/lib/harness";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import { CLOUD_TTS_ENTITLED_TIER } from "@/lib/clawai-cloud-defaults-state";
@@ -30,6 +31,7 @@ import { readConfig, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import {
   localCommandPath,
   withoutClawboxCloudVoice,
+  withoutCloudVoices,
   type LocalVoiceProbe,
   type VoiceConfigView,
   type VoiceEngine,
@@ -78,6 +80,14 @@ async function exists(p: string): Promise<boolean> {
  * it as a `type: command` provider), so this half needed no edition of its own.
  */
 export async function readVoiceConfig(harness: ActiveHarness): Promise<VoiceConfigView> {
+  // The local-only AI lock (TASK-2501): no cloud voice is usable, so none is
+  // read — the selector, Auto, the Play button and the chat's spoken replies
+  // all see only the box's own voice.
+  if (await isCloudAiLocked()) return withoutCloudVoices(await readVoiceConfigUnlocked(harness));
+  return await readVoiceConfigUnlocked(harness);
+}
+
+async function readVoiceConfigUnlocked(harness: ActiveHarness): Promise<VoiceConfigView> {
   if (harness !== "hermes") return await openclawVoiceConfigForPlan(await readConfig());
   const [probe, token, entitled] = await Promise.all([
     readHermesVoice(),
