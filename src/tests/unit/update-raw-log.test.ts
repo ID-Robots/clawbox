@@ -249,6 +249,41 @@ describe("capture", () => {
     expect(text).toContain("(exit 1)");
   });
 
+  it("names the signal of a command killed from outside the updater, not node's 'Command failed'", async () => {
+    // How node rejects a child the kernel's OOM killer or a stray kill ended:
+    // no exit code, and `killed` false, since node did not send that signal.
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    const failure = Object.assign(new Error("Command failed: bun run build\nboom"), {
+      code: null, killed: false, signal: "SIGKILL", stdout: "", stderr: "",
+    });
+    await expect(logUpdateCommand(["bun", "run", "build"], async () => { throw failure; })).rejects.toBe(failure);
+    await settle();
+    const text = logText(id!);
+    expect(text).toContain("(killed by SIGKILL from outside the updater)");
+    expect(text).not.toContain("(Command failed");
+  });
+
+  // Every other way a command ends closes the same bytes as before: the
+  // updater's own kill, an exit code, a spawn failure, a maxBuffer overflow, a
+  // plain error and none at all. The x64 desktop's update logs through this too.
+  it.each<[string, unknown, string]>([
+    ["an exit code", Object.assign(new Error("Command failed: bun run build\nboom"), { code: 1, killed: false, signal: null }), "exit 1"],
+    ["the updater's own timeout", Object.assign(new Error("Command failed: bun run build"), { code: null, killed: true, signal: "SIGTERM" }), "killed by SIGTERM"],
+    ["a kill with no signal named", Object.assign(new Error("Command failed: bun run build"), { killed: true }), "killed"],
+    ["a spawn failure", Object.assign(new Error("spawn bun ENOENT"), { code: "ENOENT", errno: -2, syscall: "spawn bun", path: "bun" }), "spawn bun ENOENT"],
+    ["a maxBuffer overflow", Object.assign(new RangeError("stdout maxBuffer length exceeded"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }), "stdout maxBuffer length exceeded"],
+    ["a plain error", new Error("boom\nmore"), "boom"],
+    ["no error object", null, "failed"],
+    // The child's own crash carries the same shape as an outside kill.
+    ["a signal node did not send", Object.assign(new Error("Command failed: bun run build"), { code: null, killed: false, signal: "SIGSEGV" }), "killed by SIGSEGV from outside the updater"],
+  ])("closes a command that ended with %s on exactly its one line", async (_what, failure, closing) => {
+    const id = await openUpdateLog({ fresh: true, flow: "update", title: "ClawBox update" });
+    await expect(logUpdateCommand(["bun", "run", "build"], async () => { throw failure; })).rejects.toBe(failure);
+    await settle();
+    const text = logText(id!);
+    expect(text.slice(text.lastIndexOf("$ bun run build"))).toBe(`$ bun run build\x1b[0m\n\x1b[1;31m(${closing})\x1b[0m\n`);
+  });
+
   it("is a no-op — and never a throw — while no run is open", async () => {
     expect(currentUpdateLogId()).toBeNull();
     await writeUpdateLog("nothing\n");
@@ -509,6 +544,7 @@ describe("commands the web server runs itself", () => {
     const text = logText(id!);
     expect(text).toContain("error: lockfile had changes\n");
     expect(text).toContain("(exit 2)");
+    expect(text.endsWith("error: lockfile had changes\n\x1b[1;31m(exit 2)\x1b[0m\n")).toBe(true);
     expect(text).not.toContain("ignored");
   });
 });

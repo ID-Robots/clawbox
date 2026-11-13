@@ -558,6 +558,8 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
   });
 
   describe("doctor's own record, which the marker alone does not prove current", () => {
+    // install.sh's fast path never reads doctor.at: the updater's doctor-due
+    // nulls it and relies on this path staying open (the doctor.at cases below).
     const recordFile = (box: Box) => path.join(box.dir, "checkout/data/openclaw-migration-status.json");
 
     it("a database is behind the core's schema although the marker names the target", () => {
@@ -608,6 +610,55 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
 
     it("the record is not an object", () => {
       expectFullPath(run(makeBox({ record: "[]" })), "the record of doctor's migration could not be read");
+    });
+
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const doctorRunAt = (at: unknown) => makeBox({ record: doctorRecord(TARGET, { doctor: { core: TARGET, verdict: "complete", at } }) });
+    const DOCTOR_TIMES: [string, unknown][] = [
+      // What doctor-due writes; the same input as a record with no time, which
+      // the cases above already take the fast path on. Listed to say so.
+      ["null", null],
+      ["31 days old", new Date(Date.now() - 31 * DAY_MS).toISOString()],
+      ["a day in the future", new Date(Date.now() + DAY_MS).toISOString()],
+      ["not a date", "not a date"],
+      ["not a string", 0],
+    ];
+
+    it.each(DOCTOR_TIMES)("keeps the fast path whatever doctor.at holds: %s", (_what, at) => {
+      expectFastPath(run(doctorRunAt(at)));
+    });
+
+    // The cases above bite: the shipped check with the updater's own gate on
+    // doctor.at put in (doctorRecordRefusal: a UTC time, not later than now, at
+    // most 30 days old) sends every one of them to the full path, and a fresh
+    // time still to the fast one. Double quotes only: the program is a
+    // single-quoted bash string.
+    const AT_GATE_WHY = "doctor recorded run has no time in the last 30 days";
+    const AT_GATE = [
+      "import datetime",
+      "try:",
+      '    ran = datetime.datetime.fromisoformat(run.get("at").replace("Z", "+00:00"))',
+      "except Exception:",
+      "    ran = None",
+      "now = datetime.datetime.now(datetime.timezone.utc)",
+      "if ran is None or ran.tzinfo is None or ran > now or now - ran > datetime.timedelta(days=30):",
+      `    doubt("${AT_GATE_WHY}")`,
+      "",
+    ].join("\n");
+    const INJECTION_POINT = '\nif run.get("core") != target:\n';
+    function checkReadingDoctorAt(): string {
+      const shipped = shellFunction("openclaw_refresh_fast_path_check");
+      expect(shipped.split(INJECTION_POINT)).toHaveLength(2);
+      expect(AT_GATE).not.toContain("'");
+      return shipped.replace(INJECTION_POINT, `\n${AT_GATE}${INJECTION_POINT.slice(1)}`);
+    }
+
+    it.each(DOCTOR_TIMES)("takes the full path for doctor.at %s once the check reads it as the updater's gate does", (_what, at) => {
+      expectFullPath(run(doctorRunAt(at), `${checkReadingDoctorAt()}\nstep_openclaw_install`), AT_GATE_WHY);
+    });
+
+    it("keeps the fast path for a doctor.at one day old under that same gate", () => {
+      expectFastPath(run(doctorRunAt(new Date(Date.now() - DAY_MS).toISOString()), `${checkReadingDoctorAt()}\nstep_openclaw_install`));
     });
 
     it("is read as the clawbox account, before the plugin list", () => {
