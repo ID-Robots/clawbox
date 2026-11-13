@@ -51,6 +51,16 @@ tried last, after the accounts on this list.
     with it. Nothing restarts.
   - a message you sent in the **desktop chat**, a scheduled task or a check-in that
     still failed on the limit is **sent again once** on the new account.
+- **A limit counts as soon as Anthropic reports it, not only when something fails.**
+  When the box reads a Claude account's usage from Anthropic (the card asks when you
+  open it, and so does the assistant's `anthropic_accounts` tool) and the session or the
+  account's week is used up, the account is marked **Limited until** the reset Anthropic
+  gives. If it was the account in use, everything moves to the next one, as for any limit.
+  The next switch never lands on an account that is already used up. If Anthropic gives no
+  reset time, the account's state stays as it was. A model's own weekly limit is only that
+  model's. If a later reading shows the account has room again, for example after you
+  upgraded its plan, the box takes it back. A limit that came from a real refusal stays
+  until its reset.
 - **A model's own weekly limit moves only that model's work.** When an account has spent the
   week of one model but not its own week, coding runs on that model are passed to the next
   account, while the chat and runs on other models stay on it, and the active account does
@@ -147,7 +157,7 @@ or **All limited · back at 22:50**.
 |---|---|
 | **In use** | The active account: new coding runs start on it, and the chat tries it first once it runs on these accounts. |
 | **Ready** | Can answer; waiting its turn. |
-| **Limited until 22:50** | At its usage limit. The time is in your clock, with the weekday when it is not today. |
+| **Limited until 22:50** | At its usage limit: a run or the chat hit it, or Anthropic's usage reading shows its session or week used up. The time is in your clock, with the weekday when it is not today. |
 | **Sign-in expired** | The box could not renew the sign-in. Re-authenticate it, or for the Claude Code sign-in, run `claude` in the Terminal app again. |
 | **Needs re-authentication** | Anthropic refused the credential, for example after a revoked key or a password change. |
 
