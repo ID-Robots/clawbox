@@ -5,7 +5,12 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
   gatewayIsAbsent: () => false,
   gatewayReadyWaitMs: () => 1000,
-  GatewayNotReadyError: class GatewayNotReadyError extends Error {},
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
 }));
 vi.mock("@/lib/openclaw-auth-store", () => ({ readGatewayProviderAuth: vi.fn() }));
 vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn() }));
