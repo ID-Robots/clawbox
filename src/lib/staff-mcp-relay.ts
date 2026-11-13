@@ -9,14 +9,19 @@
  *   1. names the member by that token (constant-time) — no token, no member,
  *      401; the owner's agent and every other caller have none;
  *   2. serves only while organisation mode is on, the member is still a
- *      registered user, the owner still grants the server, the server is still
- *      a Streamable HTTP server in openclaw.json, and the member has a
- *      credential for it — otherwise 403/404, and their agent gets no tools;
+ *      registered user, the owner still grants the server (to every member,
+ *      or to this one by name), the server is still a Streamable HTTP server
+ *      in the assistant's config (openclaw.json, or Hermes' config.yaml), and
+ *      the member has a credential for it unless the owner marked it as one
+ *      that takes none (TASK-2516) — otherwise 403/404, and their agent gets
+ *      no tools;
  *   3. sends the request on to the owner's configured URL with exactly the
- *      member's credential in the owner's chosen header. Nothing of the
- *      owner's entry's headers, and nothing of the relay token, travels;
+ *      member's credential in the owner's chosen header (or no credential at
+ *      all for a server that takes none). Nothing of the owner's entry's
+ *      headers, and nothing of the relay token, travels;
  *   4. holds the tools to the owner's tool filter minus anything that sends or
- *      writes (`staffToolAllowed`): `tools/list` answers are filtered (JSON or
+ *      writes — where the owner ticked it, minus anything that does more than
+ *      create or edit (`staffToolAllowed`): `tools/list` answers are filtered (JSON or
  *      an SSE stream), and a `tools/call` of anything else is answered with a
  *      JSON-RPC error without reaching the server.
  *
@@ -26,6 +31,7 @@
 import { readOrgModeStrict } from "@/lib/org-mode-server";
 import {
   credentialHeaderValue,
+  grantReaches,
   readStaffMcpStoreOrEmpty,
   staffServerVerdict,
   staffToolAllowed,
@@ -70,7 +76,7 @@ function bearerOf(req: Request): string | null {
 
 /** The relayed request's caller and target, or the refusal. */
 type Admission =
-  | { ok: true; username: string; url: string; header: string; credential: string; filter: ToolFilter; cacheKey: string }
+  | { ok: true; username: string; url: string; header: string; credential: string | null; filter: ToolFilter; cacheKey: string }
   | { ok: false; response: Response };
 
 /**
@@ -91,20 +97,24 @@ export async function admitRelayRequest(req: Request, server: string): Promise<A
   }
   const setting = Object.hasOwn(store.servers, server) ? store.servers[server] : undefined;
   if (!setting) return { ok: false, response: refuse(404, "not_granted", "The owner has not granted this server to members of staff.") };
+  if (!grantReaches(setting, username)) return { ok: false, response: refuse(403, "not_granted", "The owner has not granted this server to this member of staff.") };
   const mine = Object.hasOwn(store.credentials, username) ? store.credentials[username] : undefined;
-  const credential = mine && Object.hasOwn(mine, server) ? mine[server] : undefined;
-  if (!credential) return { ok: false, response: refuse(403, "no_credential", "No credential is set for this member of staff on this server.") };
+  // A server that takes no credential (a tool on this box, TASK-2516) is
+  // called with none: never the owner's headers in its place.
+  const credential = setting.needsCredential !== false && mine && Object.hasOwn(mine, server) ? mine[server] : undefined;
+  if (setting.needsCredential !== false && !credential) {
+    return { ok: false, response: refuse(403, "no_credential", "No credential is set for this member of staff on this server.") };
+  }
 
-  const { readConfigStrict, isPlainObject } = await import("@/lib/openclaw-config");
-  const { openclawServerEntries } = await import("@/lib/project-mcp-servers");
-  let config: Record<string, unknown>;
+  // The server as the box's assistant defines it now: openclaw.json's
+  // `mcp.servers` on OpenClaw, config.yaml's `mcp_servers` on Hermes.
+  const [{ readServersOf }, { getActiveHarness }] = await Promise.all([import("@/lib/project-mcp-servers"), import("@/lib/harness")]);
+  let read;
   try {
-    config = await readConfigStrict();
+    read = (await readServersOf((await getActiveHarness()) === "hermes" ? "hermes" : "openclaw")).find((entry) => entry.name === server);
   } catch {
     return { ok: false, response: refuse(503, "config_unreadable", "The assistant's configuration could not be read.") };
   }
-  const mcp = isPlainObject(config.mcp) ? config.mcp : {};
-  const read = openclawServerEntries(mcp.servers).find((entry) => entry.name === server);
   if (!read || staffServerVerdict(read) !== null || !read.config || !("url" in read.config)) {
     return { ok: false, response: refuse(404, "server_unavailable", "This server is not one members of staff can use.") };
   }
@@ -113,8 +123,8 @@ export async function admitRelayRequest(req: Request, server: string): Promise<A
     username,
     url: read.config.url,
     header: setting.header,
-    credential,
-    filter: { include: read.include ?? null, exclude: read.exclude ?? [] },
+    credential: credential ?? null,
+    filter: { include: read.include ?? null, exclude: read.exclude ?? [], writeTools: setting.writeTools === true },
     cacheKey: `${username}\0${server}`,
   };
 }
@@ -125,7 +135,7 @@ function upstreamHeaders(req: Request, admission: Extract<Admission, { ok: true 
     const value = req.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
-  headers.set(admission.header, credentialHeaderValue(admission.header, admission.credential));
+  if (admission.credential !== null) headers.set(admission.header, credentialHeaderValue(admission.header, admission.credential));
   return headers;
 }
 

@@ -9,9 +9,11 @@ import {
   credentialHeaderName,
   isServerName,
   isStaffUsername,
+  MAX_GRANT_MEMBERS,
   maskCredential,
   normalizeCredential,
   readStaffMcpStore,
+  serverSetting,
   staffServerVerdict,
   updateStaffMcpStore,
   type StaffMcpStore,
@@ -27,9 +29,12 @@ import {
  * page. A credential is never answered — not to the owner either, who sees it
  * masked.
  *
- * GET  `{ orgMode, harness, servers: [{name, transport, usable, reason?, granted, header}],
+ * GET  `{ orgMode, harness, servers: [{name, transport, usable, reason?, granted, header, needsCredential, writeTools}],
  *         users: [{username, credentials: {[server]: "••••abcd"}}] }`
- * POST `{ servers: {[name]: {header?}} }`          — the granted list, whole;
+ * POST `{ servers: {[name]: {header?, needsCredential?, writeTools?, members?}} }` — the granted list, whole
+ *      (`needsCredential: false` — a server that takes no credential;
+ *      `writeTools: true` — its create/edit tools too; `members` — only these
+ *      members of staff, `null`/absent — all of them; TASK-2516);
  *      `{ username, server, credential: string|null }` — one member's credential.
  *
  * 403 `owner_only` for anyone else; 400 for a bad or unknown name.
@@ -53,13 +58,14 @@ async function ownerOnly(req: Request, write: boolean): Promise<NextResponse | n
   return null;
 }
 
-/** The OpenClaw servers this box defines, as the staff page lists them. */
-async function configuredServers() {
-  const { readConfigStrict, isPlainObject } = await import("@/lib/openclaw-config");
-  const { openclawServerEntries } = await import("@/lib/project-mcp-servers");
-  const config = await readConfigStrict();
-  const mcp = isPlainObject(config.mcp) ? config.mcp : {};
-  return openclawServerEntries(mcp.servers);
+/**
+ * The MCP servers the box's assistant defines, as the staff page lists them:
+ * openclaw.json's `mcp.servers` on OpenClaw, config.yaml's `mcp_servers` on
+ * Hermes (TASK-2516 — each member's Hermes profile gets its own relay entries).
+ */
+async function configuredServers(harness: string) {
+  const { readServersOf } = await import("@/lib/project-mcp-servers");
+  return readServersOf(harness === "hermes" ? "hermes" : "openclaw");
 }
 
 async function view(store: StaffMcpStore) {
@@ -71,28 +77,36 @@ async function view(store: StaffMcpStore) {
   const harness = await getActiveHarness();
   let servers: Awaited<ReturnType<typeof configuredServers>> = [];
   let unreadable = false;
-  if (harness === "openclaw") {
-    try {
-      servers = await configuredServers();
-    } catch {
-      unreadable = true;
-    }
+  try {
+    servers = await configuredServers(harness);
+  } catch {
+    unreadable = true;
   }
-  const listed: Array<{ name: string; transport: string | null; usable: boolean; reason?: string; granted: boolean; header: string }> = servers.map((server) => {
+  type Listed = { name: string; transport: string | null; usable: boolean; reason?: string; granted: boolean; header: string; needsCredential: boolean; writeTools: boolean; members: string[] | null };
+  const settingOf = (name: string) => {
+    const setting = Object.hasOwn(store.servers, name) ? store.servers[name] : undefined;
+    return {
+      granted: Boolean(setting),
+      header: setting?.header ?? "Authorization",
+      needsCredential: setting?.needsCredential ?? true,
+      writeTools: setting?.writeTools ?? false,
+      members: setting?.members ?? null,
+    };
+  };
+  const listed: Listed[] = servers.map((server) => {
     const reason = staffServerVerdict(server);
     return {
       name: server.name,
       transport: server.transport,
       usable: reason === null,
       ...(reason ? { reason } : {}),
-      granted: Boolean(store.servers[server.name]),
-      header: store.servers[server.name]?.header ?? "Authorization",
+      ...settingOf(server.name),
     };
   });
-  // A grant whose server is gone from openclaw.json is still shown, so the owner can take it away.
+  // A grant whose server is gone from the assistant's config is still shown, so the owner can take it away.
   for (const name of Object.keys(store.servers)) {
     if (!listed.some((s) => s.name === name)) {
-      listed.push({ name, transport: null, usable: false, reason: "missing", granted: true, header: store.servers[name].header });
+      listed.push({ name, transport: null, usable: false, reason: "missing", ...settingOf(name) });
     }
   }
   const users = (await listUsers()).map((user) => {
@@ -103,8 +117,9 @@ async function view(store: StaffMcpStore) {
   return {
     orgMode: await readOrgMode(),
     harness,
-    // Hermes: a member of staff's profile gets no MCP server (multi-user.md).
-    staffMcpSupported: harness === "openclaw",
+    // Both runtimes since TASK-2516: OpenClaw through per-member gateway
+    // entries, Hermes through each member's own profile (multi-user.md).
+    staffMcpSupported: harness === "openclaw" || harness === "hermes",
     configUnreadable: unreadable,
     servers: listed.sort((a, b) => a.name.localeCompare(b.name)),
     users,
@@ -137,14 +152,15 @@ export async function POST(req: Request) {
   const body = read.body as Record<string, unknown>;
 
   const { getActiveHarness } = await import("@/lib/harness");
-  if ((await getActiveHarness()) !== "openclaw") {
-    return refuse(409, "unsupported_harness", "Members of staff get MCP tools on the OpenClaw assistant only.");
+  const harness = await getActiveHarness();
+  if (harness !== "openclaw" && harness !== "hermes") {
+    return refuse(409, "unsupported_harness", "Members of staff get MCP tools on the OpenClaw and Hermes assistants only.");
   }
 
   let change: (store: StaffMcpStore) => StaffMcpStore | Promise<StaffMcpStore>;
   if (body.servers !== undefined) {
-    // The granted list, whole. Every name must be a server openclaw.json
-    // defines that members of staff can use — or one already granted, so a
+    // The granted list, whole. Every name must be a server the assistant's
+    // config defines that members of staff can use — or one already granted, so a
     // grant whose server went away can still be kept or taken away.
     if (body.servers === null || typeof body.servers !== "object" || Array.isArray(body.servers)) {
       return refuse(400, "bad_servers", "servers must be an object of server names.");
@@ -153,12 +169,14 @@ export async function POST(req: Request) {
     if (requested.length > MAX_GRANTED) return refuse(400, "too_many", `At most ${MAX_GRANTED} servers can be granted.`);
     let known;
     try {
-      known = await configuredServers();
+      known = await configuredServers(harness);
     } catch {
       return refuse(503, "config_unreadable", "The assistant's configuration could not be read. Nothing was changed.");
     }
     const current = await readStoreOr500();
     if (current instanceof NextResponse) return current;
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const staffNames = new Set((await listUsers()).map((user) => user.username));
     const next: StaffMcpStore["servers"] = {};
     for (const [name, setting] of requested) {
       if (!isServerName(name)) return refuse(400, "bad_server", `"${String(name).slice(0, 64)}" is not a server name.`);
@@ -167,9 +185,20 @@ export async function POST(req: Request) {
       if (server && staffServerVerdict(server) !== null && !current.servers[name]) {
         return refuse(400, "server_not_usable", `"${name}" cannot be offered to members of staff (only Streamable HTTP servers without a credential in the URL can).`);
       }
-      const header = credentialHeaderName(setting && typeof setting === "object" ? (setting as { header?: unknown }).header : undefined);
+      const fields = setting && typeof setting === "object" && !Array.isArray(setting) ? (setting as Record<string, unknown>) : {};
+      const header = credentialHeaderName(fields.header);
       if (!header) return refuse(400, "bad_header", `The credential header for "${name}" is not a header that can be used.`);
-      next[name] = { header };
+      for (const flag of ["needsCredential", "writeTools"] as const) {
+        if (fields[flag] !== undefined && typeof fields[flag] !== "boolean") return refuse(400, "bad_setting", `${flag} for "${name}" must be true or false.`);
+      }
+      // Every member named must be a member of staff on this box now: a name
+      // that is not cannot be granted ahead of an account that does not exist.
+      if (fields.members !== undefined && fields.members !== null) {
+        if (!Array.isArray(fields.members) || fields.members.length > MAX_GRANT_MEMBERS || !fields.members.every((m) => isStaffUsername(m) && staffNames.has(m))) {
+          return refuse(400, "bad_members", `The members of staff named for "${name}" are not all users of this box.`);
+        }
+      }
+      next[name] = serverSetting(header, fields);
     }
     change = (store) => ({ ...store, servers: next });
   } else if (body.username !== undefined || body.server !== undefined) {

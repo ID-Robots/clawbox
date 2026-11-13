@@ -49,6 +49,7 @@ const TOOLS = [
   { name: "send_mail", description: "send an email", inputSchema: { type: "object" } },
   { name: "purge_index", description: "x", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
   { name: "lookup_ledger", description: "harmless name, destructive by the server's word", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
+  { name: "create_word_document", description: "write a .docx", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } },
 ];
 
 let relay: typeof import("@/app/setup-api/staff-mcp/[server]/route");
@@ -100,6 +101,8 @@ beforeAll(async () => {
     m365: { url: upstreamUrl, transport: "streamable-http" },
     filtered: { url: upstreamUrl, transport: "streamable-http", toolFilter: { include: ["whoami"] } },
     leaky: { url: `${upstreamUrl}?key=owner`, transport: "streamable-http" },
+    // A tool on the box that takes no credential (TASK-2516); the owner's own entry carries a header of theirs.
+    worddoc: { url: upstreamUrl, transport: "streamable-http", headers: { "X-Owner": "owner-secret" } },
   };
   process.env.CLAWBOX_ROOT = ROOT;
   vi.resetModules();
@@ -145,6 +148,55 @@ function call(server: string, token: string | null, message: unknown) {
 }
 
 const whoami = { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "whoami", arguments: {} } };
+
+describe("a tool on the box that takes no credential (TASK-2516)", () => {
+  const createDoc = { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "create_word_document", arguments: { title: "Q4" } } };
+  const listTools = { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} };
+  const grant = (worddoc: Record<string, unknown>) => mcp.updateStaffMcpStore((store) => ({ ...store, servers: { ...store.servers, worddoc: { header: "Authorization", ...worddoc } } }));
+
+  it("serves every member through their own token, sending no credential and nothing of the owner's", async () => {
+    await grant({ needsCredential: false });
+    const res = await call("worddoc", TOKENS.olga, whoami);
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toContain("caller=undefined");
+    expect(callsOnly()[0]).toMatchObject({ auth: null, apiKey: null, ownerHeader: null });
+  });
+
+  it("offers and passes the create/edit tool only where the owner ticked it — the sender stays refused", async () => {
+    await grant({ needsCredential: false });
+    const strict = await (await call("worddoc", TOKENS.olga, listTools)).json();
+    expect(strict.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "whoami"]);
+    expect((await (await call("worddoc", TOKENS.olga, createDoc)).json()).error?.code).toBe(-32601);
+
+    await grant({ needsCredential: false, writeTools: true });
+    resetRelayCaches();
+    const open = await (await call("worddoc", TOKENS.olga, listTools)).json();
+    expect(open.result.tools.map((t: { name: string }) => t.name)).toEqual(["search", "whoami", "create_word_document"]);
+    seen.length = 0;
+    const made = await (await call("worddoc", TOKENS.olga, createDoc)).json();
+    expect(made.result).toBeTruthy();
+    expect(callsOnly()).toHaveLength(1);
+    const send = { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "send_mail", arguments: {} } };
+    expect((await (await call("worddoc", TOKENS.olga, send)).json()).error?.code).toBe(-32601);
+    expect(callsOnly()).toHaveLength(1);
+  });
+
+  it("refuses a member the owner did not name, before the server is reached", async () => {
+    await grant({ needsCredential: false, members: ["maria"] });
+    const res = await call("worddoc", TOKENS.olga, whoami);
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("not_granted");
+    expect(seen).toHaveLength(0);
+    expect((await call("worddoc", TOKENS.maria, whoami)).status).toBe(200);
+  });
+
+  it("is not served to staff at all while it is not granted", async () => {
+    const res = await call("worddoc", TOKENS.olga, whoami);
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("not_granted");
+    expect(seen).toHaveLength(0);
+  });
+});
 
 describe("whose credential travels", () => {
   it("sends each member's own credential, in the owner's chosen header, and nothing of the owner's", async () => {

@@ -70,6 +70,41 @@ export const MAX_CREDENTIAL_CHARS = 4096;
 export interface StaffMcpServerSetting {
   /** The header the member's credential is sent in. */
   header: string;
+  /**
+   * Does each member need a credential of their own (TASK-2377's model, the
+   * default)? `false` is a server that takes none — a tool on this box such as
+   * a document writer (TASK-2516): every member of staff gets it, and the
+   * relay sends it no credential at all (never the owner's headers either).
+   */
+  needsCredential?: boolean;
+  /**
+   * May members use this server's tools that CREATE or EDIT something — write
+   * a document, add a row (TASK-2516)? Off by default. Never a tool that
+   * sends, publishes, pays, deletes or runs something (`staffToolAllowed`).
+   */
+  writeTools?: boolean;
+  /**
+   * Which members of staff get the server: `null` — every one of them; a list
+   * — only these (TASK-2516). Narrows, never widens: a server that needs a
+   * credential still reaches only members who have one.
+   */
+  members?: string[] | null;
+}
+
+/** At most this many names in one grant's member list. */
+export const MAX_GRANT_MEMBERS = 256;
+
+/** A grant's member list from what was stored or posted: `null` for "everyone"; a bad list is null only when absent, else an empty list (nobody). */
+export function grantMembers(raw: unknown): string[] | null {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter(isStaffUsername))].sort().slice(0, MAX_GRANT_MEMBERS);
+}
+
+/** Does `setting` reach `username` at all (before any credential)? */
+export function grantReaches(setting: StaffMcpServerSetting, username: string): boolean {
+  // A setting built by hand (not through parseStore) may lack the list: everyone.
+  return !Array.isArray(setting.members) || setting.members.includes(username);
 }
 
 export interface StaffMcpStore {
@@ -122,7 +157,15 @@ export function maskCredential(value: string): string {
   return value.length >= 16 ? `••••${value.slice(-4)}` : "••••";
 }
 
-/** Parse the stored document, dropping anything that is not in its shape. */
+/**
+ * A grant's setting from what was stored or posted: only a literal `false`
+ * drops the per-member credential and only a literal `true` lets write tools
+ * through, so a missing or odd value is always the stricter reading.
+ */
+export function serverSetting(header: string, raw: { needsCredential?: unknown; writeTools?: unknown; members?: unknown }): StaffMcpServerSetting {
+  return { header, needsCredential: raw.needsCredential !== false, writeTools: raw.writeTools === true, members: grantMembers(raw.members) };
+}
+
 /**
  * A map with no prototype: `constructor` and `__proto__` are legal usernames
  * and server names, and on a plain object `map["constructor"]` would answer
@@ -133,6 +176,7 @@ function bare<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;
 }
 
+/** Parse the stored document, dropping anything that is not in its shape. */
 export function parseStore(raw: unknown): StaffMcpStore {
   const store: StaffMcpStore = { servers: bare(), credentials: bare(), relayTokens: bare() };
   if (!isRecord(raw)) return store;
@@ -140,7 +184,7 @@ export function parseStore(raw: unknown): StaffMcpStore {
     for (const [name, setting] of Object.entries(raw.servers)) {
       if (!isServerName(name)) continue;
       const header = credentialHeaderName(isRecord(setting) ? setting.header : undefined);
-      if (header) store.servers[name] = { header };
+      if (header) store.servers[name] = serverSetting(header, isRecord(setting) ? setting : {});
     }
   }
   if (isRecord(raw.credentials)) {
@@ -241,7 +285,17 @@ export async function forgetStaffMcpUserStrict(username: string, file: string = 
   // Rebuilt without the name rather than `delete map[name]`: no property is
   // written or removed by a name a request supplied.
   const without = <T>(map: Record<string, T>) => Object.fromEntries(Object.entries(map).filter(([key]) => key !== username));
-  await updateStaffMcpStore((store) => ({ ...store, credentials: without(store.credentials), relayTokens: without(store.relayTokens) }), file);
+  // Their name leaves every grant's member list too: an account created
+  // later under the name is a new person, granted nothing by the old one.
+  await updateStaffMcpStore((store) => ({
+    ...store,
+    servers: Object.fromEntries(Object.entries(store.servers).map(([name, setting]) => [
+      name,
+      Array.isArray(setting.members) ? { ...setting, members: setting.members.filter((member) => member !== username) } : setting,
+    ])),
+    credentials: without(store.credentials),
+    relayTokens: without(store.relayTokens),
+  }), file);
 }
 
 /**
@@ -363,7 +417,10 @@ export function planStaffMcpEntries(input: {
     for (const server of Object.keys(input.store.servers).sort()) {
       const read = byName.get(server);
       if (!read || staffServerVerdict(read) !== null) continue;
-      if (!credentials[server] || !token) continue;
+      // A server that takes no credential is every member's; any other only
+      // theirs who have one. Either way the entry carries THEIR relay token.
+      const setting = input.store.servers[server];
+      if (!token || !grantReaches(setting, username) || (setting.needsCredential !== false && !credentials[server])) continue;
       const name = staffEntryName(username, server, taken);
       taken.add(name);
       const config: Record<string, unknown> = {
@@ -392,10 +449,15 @@ export function grantsDocument(entries: ReadonlyMap<string, readonly StaffMcpEnt
   return { agents };
 }
 
-/** Mint a relay token for every member of staff that has a credential and none yet. */
+/**
+ * Mint a relay token for every member of staff that will get an entry and has
+ * none yet: one with a credential, or everyone while a server that takes no
+ * credential is granted.
+ */
 export async function ensureRelayTokens(staff: readonly string[], file: string = STAFF_MCP_STORE_PATH): Promise<StaffMcpStore> {
   const current = await readStaffMcpStore(file);
-  const missing = staff.filter((user) => isStaffUsername(user) && current.credentials[user] && !current.relayTokens[user]);
+  const openTo = (user: string) => Object.values(current.servers).some((setting) => setting.needsCredential === false && grantReaches(setting, user));
+  const missing = staff.filter((user) => isStaffUsername(user) && (openTo(user) || current.credentials[user]) && !current.relayTokens[user]);
   if (missing.length === 0) return current;
   return updateStaffMcpStore((store) => {
     const relayTokens = { ...store.relayTokens };
@@ -432,8 +494,29 @@ const WRITE_VERBS = new Set([
  */
 const LONG_WRITE_VERBS = [...WRITE_VERBS].filter((verb) => verb.length >= 4);
 
+/**
+ * The verbs of a tool that only CREATES or EDITS something — a document
+ * writer's `create_document`, `append_rows`, `save_file` (TASK-2516). Offered
+ * to members of staff only where the owner ticked "tools that create or edit"
+ * for the server (`writeTools`). Everything else in WRITE_VERBS — sending,
+ * publishing, paying, deleting, moving, running, changing who may do what —
+ * stays refused whatever the owner ticks.
+ */
+export const CREATE_EDIT_VERBS: ReadonlySet<string> = new Set([
+  "create", "write", "update", "edit", "insert", "modify", "set", "add", "append", "save", "copy", "replace",
+  "put", "patch", "compose",
+]);
+
+const REFUSED_WITH_WRITES = new Set([...WRITE_VERBS].filter((verb) => !CREATE_EDIT_VERBS.has(verb)));
+const LONG_REFUSED_WITH_WRITES = [...REFUSED_WITH_WRITES].filter((verb) => verb.length >= 4);
+
 function isWriteWord(word: string): boolean {
   return WRITE_VERBS.has(word) || LONG_WRITE_VERBS.some((verb) => word.startsWith(verb));
+}
+
+/** A word that sends, deletes, runs or otherwise does more than create or edit. */
+function isRefusedEvenWithWrites(word: string): boolean {
+  return REFUSED_WITH_WRITES.has(word) || LONG_REFUSED_WITH_WRITES.some((verb) => word.startsWith(verb));
 }
 
 /** The words of a tool name: split on `_`, `-`, `.`, `/`, spaces and camelCase. */
@@ -448,6 +531,8 @@ export function toolNameWords(name: string): string[] {
 export interface ToolFilter {
   include: readonly string[] | null;
   exclude: readonly string[];
+  /** The owner let this server's create/edit tools through (`StaffMcpServerSetting.writeTools`). */
+  writeTools?: boolean;
 }
 
 /** The MCP `annotations` a server declared for a tool, when it did. */
@@ -462,12 +547,47 @@ export interface ToolAnnotations {
  * (an include list is the whole selection, an exclude takes away), then no
  * word that sends or writes, then the server's own annotations: a tool it
  * calls destructive, or explicitly not read-only, is not offered either.
+ *
+ * Where the owner let the server's create/edit tools through
+ * (`filter.writeTools`), a word of CREATE_EDIT_VERBS and `readOnlyHint: false`
+ * no longer refuse — every other write verb and `destructiveHint: true` still
+ * do.
  */
 export function staffToolAllowed(name: unknown, filter: ToolFilter, annotations?: ToolAnnotations | null): boolean {
   if (typeof name !== "string" || !name || name.length > 128) return false;
   if (filter.include && !filter.include.includes(name)) return false;
   if (filter.exclude.includes(name)) return false;
-  if (toolNameWords(name).some(isWriteWord)) return false;
-  if (annotations && (annotations.destructiveHint === true || annotations.readOnlyHint === false)) return false;
+  const writes = filter.writeTools === true;
+  if (toolNameWords(name).some(writes ? isRefusedEvenWithWrites : isWriteWord)) return false;
+  if (annotations && annotations.destructiveHint === true) return false;
+  if (annotations && !writes && annotations.readOnlyHint === false) return false;
   return true;
+}
+
+// ── Hermes: each member's own profile carries their entries (TASK-2516) ────
+
+/**
+ * A member's planned entries as Hermes' `mcp_servers` in THEIR profile's
+ * config.yaml (src/lib/hermes-staff-profile.ts): the same relay URL and relay
+ * token, the owner's tool filter as Hermes spells it (`tools.include` /
+ * `tools.exclude`). Hermes keys a profile's MCP connections by that profile
+ * when one process serves several, so another profile never holds them; the
+ * staff guard refuses a call to an entry that is not granted to the calling
+ * profile all the same (`staff-mcp-grants.json` beside the installed plugin).
+ */
+export function hermesStaffMcpServers(entries: readonly StaffMcpEntry[]): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const entry of entries) {
+    const config = entry.config;
+    const server: Record<string, unknown> = { url: config.url, headers: { ...(config.headers as Record<string, string>) } };
+    const filter = isRecord(config.toolFilter) ? config.toolFilter : null;
+    if (filter) {
+      const tools: Record<string, unknown> = {};
+      if (Array.isArray(filter.include)) tools.include = [...filter.include];
+      if (Array.isArray(filter.exclude)) tools.exclude = [...filter.exclude];
+      server.tools = tools;
+    }
+    out[entry.name] = server;
+  }
+  return out;
 }

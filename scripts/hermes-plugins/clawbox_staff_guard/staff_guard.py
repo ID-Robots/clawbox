@@ -15,9 +15,15 @@ is the second lock, and the part toolsets cannot say:
   attachment path still cannot open it — and nothing on the web;
 * a relative path is made absolute INSIDE the folder (a ``modify``), so the
   file the tool opens is the one that was checked, whatever its working
-  directory.
+  directory;
+* an MCP tool runs only when it belongs to a relay entry the owner granted
+  THIS member (TASK-2516): ClawBox writes each member's entries
+  (``cbstaff-<8 hex>-<server>``, src/lib/staff-mcp.ts) into their profile's
+  ``mcp_servers`` and lists them per profile in ``staff-mcp-grants.json``
+  beside this plugin; missing or unreadable grants nothing.
 
-Every other profile — the owner's — gets no opinion.
+Every other profile — the owner's — gets no opinion, except that it never
+calls a member's relay entry (it carries that member's relay token).
 """
 
 from __future__ import annotations
@@ -95,6 +101,51 @@ def staged_file_owned_by(username: str, real: Path, root_real: Path, owners_file
     return False
 
 
+def staff_mcp_grants(paths: Optional[dict] = None) -> dict:
+    """``{agent id: [entry names]}`` from ``staff-mcp-grants.json`` beside the
+    plugin (``paths["staffMcpGrants"]`` stands in for it in tests). ``{}`` when it
+    cannot be read: then no relay entry is anyone's (fail closed)."""
+    if paths is not None and "staffMcpGrants" in paths:
+        raw = paths.get("staffMcpGrants")
+    else:
+        try:
+            raw = json.loads((_HERE / "staff-mcp-grants.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    agents = raw.get("agents") if isinstance(raw, dict) else None
+    if not isinstance(agents, dict):
+        return {}
+    return {k: [n for n in v if isinstance(n, str)] for k, v in agents.items() if isinstance(k, str) and isinstance(v, list)}
+
+
+def _mcp_name_component(value: str) -> str:
+    """An MCP server name as Hermes puts it into a tool's registry name."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", value)
+
+
+def _mcp_tool_prefixes(entry: str) -> tuple:
+    """The registry-name prefixes of a server's tools: ``mcp__<server>__`` (current
+    Hermes) and ``mcp_<server>_`` (earlier releases)."""
+    s = _mcp_name_component(entry)
+    return (f"mcp__{s}__", f"mcp_{s}_")
+
+
+def is_staff_relay_tool(tool_name: str) -> bool:
+    """Does this tool belong to a member's relay entry (``cbstaff-…``)?"""
+    prefix = _mcp_name_component(policy_table().get("mcpEntryPrefix", "cbstaff-")).lower()
+    name = tool_name.lower()
+    return name.startswith(f"mcp__{prefix}") or name.startswith(f"mcp_{prefix}")
+
+
+def granted_relay_tool(username: str, tool_name: str, paths: Optional[dict] = None) -> bool:
+    """Is ``tool_name`` a tool of a relay entry granted to ``username``'s profile?"""
+    agent = policy_table()["agentPrefix"] + username
+    for entry in staff_mcp_grants(paths).get(agent, []):
+        if any(tool_name.startswith(prefix) for prefix in _mcp_tool_prefixes(entry)):
+            return True
+    return False
+
+
 def staff_member_of(hermes_home: Any) -> Optional[str]:
     """The member of staff whose profile this home is, or None for every other profile."""
     if not hermes_home:
@@ -156,6 +207,10 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
     ``paths`` stands in for clawbox-paths.json (tests)."""
     username = staff_member_of(hermes_home)
     if username is None:
+        # The owner's (or any other) profile never calls a member's relay
+        # entry: it carries that member's relay token.
+        if is_staff_relay_tool(tool_name):
+            return {"action": "block", "message": "Blocked by ClawBox: this MCP server belongs to a member of staff's assistant."}
         return None
     if tool_name in TOOL_SEARCH_READS:
         return None
@@ -163,6 +218,10 @@ def judge(tool_name: str, args: Any, hermes_home: Any, user_home: Optional[str] 
         return _judge_tool_call(args, hermes_home, user_home, paths)
     policy = policy_table()["hermes"]
     if tool_name not in policy["allowTools"]:
+        # A tool of an MCP server the owner granted this member (TASK-2516):
+        # the relay behind it holds its tools to the owner's grant.
+        if is_staff_relay_tool(tool_name) and granted_relay_tool(username, tool_name, paths):
+            return None
         return block(f"`{tool_name}` is not available to members of staff")
     writing = tool_name in policy["writeTools"]
     reading = tool_name in policy["readTools"]

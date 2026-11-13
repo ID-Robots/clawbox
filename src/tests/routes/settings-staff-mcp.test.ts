@@ -193,9 +193,36 @@ describe("the grants", () => {
     expect((await (await post({ servers: { docs: {} } })).json()).applied).toBe(true);
   });
 
-  it("is refused on a Hermes box, where staff get no MCP tools", async () => {
+  it("stores a server that takes no credential, its create/edit tools and a member list (TASK-2516), and lists them back", async () => {
+    const res = await post({ servers: { docs: { needsCredential: false, writeTools: true, members: ["maria", "ivan", "maria"] } } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.servers.find((s: { name: string }) => s.name === "docs")).toMatchObject({ granted: true, needsCredential: false, writeTools: true, members: ["ivan", "maria"] });
+    // Ungranted: listed for the owner, granted to nobody.
+    expect(body.servers.find((s: { name: string }) => s.name === "local")).toMatchObject({ granted: false });
+    const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    expect(stored.servers).toEqual({ docs: { header: "Authorization", needsCredential: false, writeTools: true, members: ["ivan", "maria"] } });
+    // Every member of staff (no list), and back to the strict defaults.
+    expect((await (await post({ servers: { docs: {} } })).json()).servers.find((s: { name: string }) => s.name === "docs")).toMatchObject({ needsCredential: true, writeTools: false, members: null });
+  });
+
+  it("refuses a member list naming someone who is not a user here, and a flag that is not true or false", async () => {
+    for (const [servers, code] of [
+      [{ docs: { members: ["ghost"] } }, "bad_members"],
+      [{ docs: { members: ["owner"] } }, "bad_members"],
+      [{ docs: { members: "ivan" } }, "bad_members"],
+      [{ docs: { needsCredential: "no" } }, "bad_setting"],
+      [{ docs: { writeTools: 1 } }, "bad_setting"],
+    ] as const) {
+      const res = await post({ servers });
+      expect(res.status, JSON.stringify(servers)).toBe(400);
+      expect((await res.json()).code).toBe(code);
+    }
+    expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("is offered on a Hermes box too since TASK-2516 (each member's own profile carries the relay entries)", async () => {
     h.harness = "hermes";
-    expect((await post({ servers: { docs: {} } })).status).toBe(409);
-    expect((await (await get()).json()).staffMcpSupported).toBe(false);
+    expect((await (await get()).json()).staffMcpSupported).toBe(true);
   });
 });

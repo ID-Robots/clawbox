@@ -72,6 +72,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { agentIdOfKey, openclawUserMainKey, userMayUseKey } = require("./chat-scope.js");
+const { historyClaims, replyMediaPaths } = require("./chat-reply-media.js");
 const {
   STAFF_GUARD_PLUGIN_ID,
   isStaffCatalogueCommand,
@@ -150,6 +151,9 @@ function createRelayState(username, options = {}) {
     challenge: null,
     pending: new Map(),
     questions: new Set(),
+    // sessionKey → when this socket last sent a turn on it (TASK-2516: the
+    // files a reply names are a member's only if written during their turn).
+    turnStarts: new Map(),
   };
 }
 
@@ -266,7 +270,40 @@ function filterClientFrame(state, frame) {
     return { toClient: refusalFrame(id, `"${method}" is not available to this ClawBox user's chat.`) };
   }
   state.pending.set(id, method);
+  if (method === "chat.send" && typeof params.sessionKey === "string") {
+    // Bounded: a socket that sends on many sessions keeps the latest few.
+    if (state.turnStarts.size >= 64) state.turnStarts.delete(state.turnStarts.keys().next().value);
+    state.turnStarts.set(params.sessionKey, Date.now());
+  }
   return { toGateway: forwarded };
+}
+
+/**
+ * The files the gateway frame's assistant replies name, for a member of staff
+ * only (TASK-2516; scripts/chat-reply-media.js decides what may be recorded):
+ * `[{ paths, since, until }]`. A `chat` event's final message (the turn this
+ * socket started, or "recent" when it opened mid-turn), a `session.message`
+ * of the assistant's, and every assistant message of a `chat.history` answer
+ * (each turn's own times — a reply that finished while the member's browser
+ * was closed is recorded when their chat loads it). Called BEFORE the frame
+ * is filtered, so the request a response answers is still known; only frames
+ * about the member's own keys count.
+ */
+function replyMediaClaims(state, frame) {
+  if (!state.staffAgent || !isRecord(frame)) return [];
+  if (frame.type === "res" && typeof frame.id === "string") {
+    if (!frame.ok || state.pending.get(frame.id) !== "chat.history" || !isRecord(frame.payload)) return [];
+    const key = frame.payload.sessionKey;
+    if (key !== undefined && !mayUseKey(state, key)) return [];
+    return historyClaims(frame.payload.messages);
+  }
+  if (frame.type !== "event" || (frame.event !== "chat" && frame.event !== "session.message")) return [];
+  const payload = isRecord(frame.payload) ? frame.payload : {};
+  if (!mayUseKey(state, payload.sessionKey)) return [];
+  if (frame.event === "chat" && payload.state !== "final") return [];
+  const paths = replyMediaPaths(payload.message);
+  if (paths.length === 0) return [];
+  return [{ paths, since: state.turnStarts.get(payload.sessionKey) ?? null, until: Date.now() }];
 }
 
 /** A `commands.list` answer cut to what a member of staff may send: /new and /reasoning. */
@@ -515,7 +552,7 @@ const MAX_QUEUED_FRAMES = 64;
  * Relay one user's chat socket. `clientWs` is the browser's socket (already
  * upgraded), `connectUpstream()` opens the gateway's.
  */
-function relayUserChat({ clientWs, username, connectUpstream, token, identity, staffAgent = null, staffReady, stillCurrent = () => true, log = () => {} }) {
+function relayUserChat({ clientWs, username, connectUpstream, token, identity, staffAgent = null, staffReady, stillCurrent = () => true, onReplyMedia = null, log = () => {} }) {
   const WebSocket = require("ws");
   const state = createRelayState(username, { staffAgent, staffReady });
   const queued = [];
@@ -605,6 +642,17 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, s
     if (isRecord(frame) && frame.type === "event" && frame.event === "connect.challenge") {
       state.challenge = isRecord(frame.payload) ? frame.payload : null;
     }
+    // Recorded before the browser sees the reply, so the download card the
+    // reply draws is already the member's when it asks for the file.
+    if (typeof onReplyMedia === "function") {
+      for (const claim of replyMediaClaims(state, frame)) {
+        try {
+          onReplyMedia(claim);
+        } catch (err) {
+          log(`could not record a reply's files: ${err && err.message ? err.message : err}`);
+        }
+      }
+    }
     const out = filterGatewayFrame(state, frame);
     if (out.toClient) sendClient(out.toClient);
   });
@@ -664,6 +712,7 @@ module.exports = {
   createRelayState,
   filterClientFrame,
   filterGatewayFrame,
+  replyMediaClaims,
   userHello,
   buildRelayConnect,
   relayDeviceParams,

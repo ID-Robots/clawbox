@@ -111,20 +111,40 @@ interface Root {
  * `~`, the whole home — so every dot-segment below it is refused, which keeps
  * `~/.openclaw`, `.ssh`, `.env` and `.git` out of reach.
  */
-async function allowedRoots(withWorkspace = true): Promise<{ roots: Root[]; workspace: string | null }> {
+async function allowedRoots(member: string | null): Promise<{ roots: Root[]; workspace: string | null }> {
   const roots: Root[] = [];
   const mediaLogical = await chatMediaRoot();
   const mediaReal = await resolvedRoot(mediaLogical);
   if (mediaReal) roots.push({ logical: mediaLogical, real: mediaReal, hideDotfiles: false });
   let workspace: string | null = null;
-  // The agent's workspace is the owner's notes and memory: on an organisation
-  // box (src/lib/org-mode.ts) a member of staff is served the media tree only.
-  if (withWorkspace && (await getActiveHarness()) !== "hermes") {
+  const harness = await getActiveHarness();
+  if (member !== null) {
+    // The agent's workspace is the owner's notes and memory: on an
+    // organisation box (src/lib/org-mode.ts) a member of staff is served the
+    // media tree and their OWN assistant's folder (a document their granted
+    // tool wrote there, TASK-2516) — and in both only what is recorded as
+    // theirs, never a dotfile.
+    const own = await memberFolder(harness, member);
+    const ownReal = own ? await resolvedRoot(own) : null;
+    if (own && ownReal) roots.push({ logical: own, real: ownReal, hideDotfiles: true });
+    return { roots, workspace: null };
+  }
+  if (harness !== "hermes") {
     workspace = openclawWorkspaceDir();
     const wsReal = await resolvedRoot(workspace);
     if (wsReal) roots.push({ logical: workspace, real: wsReal, hideDotfiles: true });
   }
   return { roots, workspace };
+}
+
+/** A member of staff's own assistant folder: their OpenClaw staff workspace, or their Hermes profile's `workspace/`. */
+async function memberFolder(harness: string, username: string): Promise<string | null> {
+  if (harness === "hermes") {
+    const { staffHermesProfilePaths } = await import("@/lib/hermes-staff-profile");
+    return staffHermesProfilePaths(username)?.folder ?? null;
+  }
+  const [{ staffWorkspaceDir }, { OPENCLAW_HOME }] = await Promise.all([import("@/lib/org-staff-agents"), import("@/lib/openclaw-config")]);
+  return staffWorkspaceDir(OPENCLAW_HOME, username);
 }
 
 /** A path relative to `base` that stays inside it, or null. */
@@ -222,7 +242,7 @@ async function resolveRequest(req: NextRequest): Promise<Resolved> {
   // recorded as theirs (src/lib/chat-media-owners.ts). The owner, the agent's
   // bearer and every user on a home box are served as before.
   const member = await orgMemberOf(req);
-  const { roots, workspace } = await allowedRoots(member === null);
+  const { roots, workspace } = await allowedRoots(member?.username ?? null);
 
   // TWO containment tests. The first is purely lexical and runs before any
   // filesystem call touches the query string: the request is reduced to a

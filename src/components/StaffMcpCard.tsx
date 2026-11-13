@@ -2,7 +2,9 @@
 
 // Settings → System → Users: the MCP servers members of staff may use on an
 // organisation box, each with that person's own credential (TASK-2377,
-// src/lib/staff-mcp.ts). Owner only — the route refuses anyone else, and the
+// src/lib/staff-mcp.ts) — or, for a tool on this box that takes none (a
+// document writer), with none; to every member of staff or to those named,
+// optionally with the tools that create or edit (TASK-2516). Owner only — the route refuses anyone else, and the
 // Users tab is drawn for the owner alone. A credential is write-only here:
 // the route answers it masked (`••••abcd`), never in clear.
 
@@ -17,6 +19,27 @@ interface ServerRow {
   reason?: string;
   granted: boolean;
   header: string;
+  needsCredential?: boolean;
+  writeTools?: boolean;
+  members?: string[] | null;
+}
+
+/** One grant as the owner edits it, and as it is posted. */
+interface Grant {
+  header: string;
+  needsCredential: boolean;
+  writeTools: boolean;
+  /** `null`: every member of staff. */
+  members: string[] | null;
+}
+
+function grantOf(server: ServerRow): Grant {
+  return {
+    header: server.header || "Authorization",
+    needsCredential: server.needsCredential !== false,
+    writeTools: server.writeTools === true,
+    members: Array.isArray(server.members) ? [...server.members].sort() : null,
+  };
 }
 
 interface StaffMcpView {
@@ -43,17 +66,22 @@ function parseView(data: unknown): StaffMcpView | null {
   return { orgMode: d.orgMode === true, staffMcpSupported: d.staffMcpSupported !== false, servers: d.servers, users: d.users, applied: d.applied };
 }
 
-/** The granted list as the server holds it: `{ name: header }`. */
-function grantsOf(view: StaffMcpView): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const server of view.servers) if (server.granted) map[server.name] = server.header || "Authorization";
+/** The granted list as the server holds it. */
+function grantsOf(view: StaffMcpView): Record<string, Grant> {
+  const map: Record<string, Grant> = {};
+  for (const server of view.servers) if (server.granted) map[server.name] = grantOf(server);
   return map;
+}
+
+/** The body that saves a granted list. */
+function grantsBody(grants: Record<string, Grant>) {
+  return { servers: Object.fromEntries(Object.entries(grants).map(([name, grant]) => [name, { ...grant }])) };
 }
 
 export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgMode: boolean }) {
   const { t } = useT();
   const [view, setView] = useState<StaffMcpView | null>(null);
-  const [granted, setGranted] = useState<Record<string, string>>({});
+  const [granted, setGranted] = useState<Record<string, Grant>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -141,7 +169,11 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
 
   const grantedServers = view.servers.filter((s) => s.granted);
   const inputClass = "h-8 px-2 bg-white/[0.06] border border-white/10 rounded-lg text-xs text-white outline-none focus:border-[var(--coral-bright)] transition-colors";
-  const dirty = JSON.stringify(granted) !== JSON.stringify(Object.fromEntries(grantedServers.map((s) => [s.name, s.header])));
+  const dirty = JSON.stringify(granted) !== JSON.stringify(grantsOf(view));
+  const edit = (name: string, change: Partial<Grant>) => setGranted({ ...granted, [name]: { ...granted[name], ...change } });
+  // The members a saved grant reaches, for the credentials list below.
+  const reaches = (server: ServerRow, username: string) => !Array.isArray(server.members) || server.members.includes(username);
+  const credentialServers = grantedServers.filter((s) => s.needsCredential !== false);
 
   return (
     <div className="bg-white/5 rounded-xl p-5 space-y-3" data-testid="staff-mcp-card">
@@ -174,7 +206,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
                     disabled={!offerable || busy !== null}
                     onChange={(e) => {
                       const next = { ...granted };
-                      if (e.target.checked) next[server.name] = server.header || "Authorization";
+                      if (e.target.checked) next[server.name] = grantOf(server);
                       else delete next[server.name];
                       setGranted(next);
                     }}
@@ -188,18 +220,91 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
                   </p>
                 )}
                 {on && (
-                  <label className="flex items-center gap-2 mt-2 ml-6 text-[11px] text-white/60">
-                    {t("users.staffMcp.header")}
-                    <input
-                      type="text"
-                      value={granted[server.name]}
-                      maxLength={64}
-                      spellCheck={false}
-                      onChange={(e) => setGranted({ ...granted, [server.name]: e.target.value.trim() })}
-                      className={`${inputClass} w-40`}
-                      data-testid={`staff-mcp-header-${server.name}`}
-                    />
-                  </label>
+                  <div className="mt-2 ml-6 space-y-2 text-[11px] text-white/60">
+                    <fieldset className="space-y-1" data-testid={`staff-mcp-who-${server.name}`}>
+                      <legend className="sr-only">{t("users.staffMcp.who")}</legend>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name={`staff-mcp-who-${server.name}`}
+                          checked={granted[server.name].members === null}
+                          disabled={busy !== null}
+                          onChange={() => edit(server.name, { members: null })}
+                          data-testid={`staff-mcp-all-${server.name}`}
+                        />
+                        {t("users.staffMcp.allStaff")}
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name={`staff-mcp-who-${server.name}`}
+                          checked={granted[server.name].members !== null}
+                          disabled={busy !== null}
+                          onChange={() => edit(server.name, { members: granted[server.name].members ?? [] })}
+                          data-testid={`staff-mcp-some-${server.name}`}
+                        />
+                        {t("users.staffMcp.someStaff")}
+                      </label>
+                      {granted[server.name].members !== null && (
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 ml-5">
+                          {view.users.length === 0 && <span className="text-white/40">{t("users.staffMcp.noUsers")}</span>}
+                          {view.users.map((user) => {
+                            const members = granted[server.name].members ?? [];
+                            return (
+                              <label key={user.username} className="flex items-center gap-1.5 cursor-pointer text-white/80">
+                                <input
+                                  type="checkbox"
+                                  checked={members.includes(user.username)}
+                                  disabled={busy !== null}
+                                  onChange={(e) => edit(server.name, {
+                                    members: (e.target.checked ? [...members, user.username] : members.filter((m) => m !== user.username)).sort(),
+                                  })}
+                                  data-testid={`staff-mcp-member-${server.name}-${user.username}`}
+                                />
+                                {user.username}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </fieldset>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={granted[server.name].needsCredential}
+                        disabled={busy !== null}
+                        onChange={(e) => edit(server.name, { needsCredential: e.target.checked })}
+                        data-testid={`staff-mcp-needs-credential-${server.name}`}
+                      />
+                      <span>{t("users.staffMcp.needsCredential")}</span>
+                    </label>
+                    {granted[server.name].needsCredential && (
+                      <label className="flex items-center gap-2 ml-5">
+                        {t("users.staffMcp.header")}
+                        <input
+                          type="text"
+                          value={granted[server.name].header}
+                          maxLength={64}
+                          spellCheck={false}
+                          onChange={(e) => edit(server.name, { header: e.target.value.trim() })}
+                          className={`${inputClass} w-40`}
+                          data-testid={`staff-mcp-header-${server.name}`}
+                        />
+                      </label>
+                    )}
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={granted[server.name].writeTools}
+                        disabled={busy !== null}
+                        onChange={(e) => edit(server.name, { writeTools: e.target.checked })}
+                        data-testid={`staff-mcp-write-tools-${server.name}`}
+                      />
+                      <span>{t("users.staffMcp.writeTools")}</span>
+                    </label>
+                  </div>
                 )}
               </li>
             );
@@ -211,7 +316,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
         <button
           type="button"
           disabled={!dirty || busy !== null}
-          onClick={() => void post("grants", { servers: Object.fromEntries(Object.entries(granted).map(([name, header]) => [name, { header }])) })}
+          onClick={() => void post("grants", grantsBody(granted))}
           className="px-3 h-8 rounded-lg text-xs font-medium text-white btn-gradient cursor-pointer disabled:opacity-50"
           data-testid="staff-mcp-save-grants"
         >
@@ -219,12 +324,12 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
         </button>
       )}
 
-      {view.staffMcpSupported && grantedServers.length > 0 && (
+      {view.staffMcpSupported && credentialServers.length > 0 && (
         <div className="space-y-2" data-testid="staff-mcp-credentials">
           <h5 className="text-xs font-semibold uppercase tracking-wider text-white/50">{t("users.staffMcp.credentials")}</h5>
           {view.users.length === 0 && <p className="text-xs text-white/50">{t("users.staffMcp.noUsers")}</p>}
           {view.users.flatMap((user) =>
-            grantedServers.map((server) => {
+            credentialServers.filter((server) => reaches(server, user.username)).map((server) => {
               const key = `${user.username}\n${server.name}`;
               const masked = user.credentials[server.name];
               return (
@@ -280,7 +385,7 @@ export default function StaffMcpCard({ users, orgMode }: { users: string[]; orgM
             disabled={busy !== null}
             // The grants as SAVED — never an unsaved edit made since.
             // Its own key: the answer does not replace a draft being edited.
-            onClick={() => void post("apply-retry", { servers: Object.fromEntries(Object.entries(grantsOf(view)).map(([name, header]) => [name, { header }])) })}
+            onClick={() => void post("apply-retry", grantsBody(grantsOf(view)))}
             className="px-3 h-8 rounded-lg text-xs text-white bg-white/10 hover:bg-white/15 cursor-pointer disabled:opacity-50"
             data-testid="staff-mcp-apply-retry"
           >

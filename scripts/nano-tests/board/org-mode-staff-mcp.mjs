@@ -20,8 +20,9 @@
 //      the tool list filtered; the credentials stored 0600, never in
 //      openclaw.json, answered to the owner masked and to A refused.
 //
-// On Hermes members of staff get no MCP tools: the owner's grant is refused,
-// A's profile has no MCP server, and A's ask reaches nothing.
+// On Hermes (TASK-2516) the same grant reaches each member through their own
+// profile: the owner's server in config.yaml, A's call with A's credential, B
+// without one gets no entry and no tool.
 //
 // Prints `RESULT ok - …`, `RESULT not ok - …` and `NOTE …` lines. Nothing it
 // prints names a host, an address or a credential.
@@ -318,27 +319,56 @@ async function openclawRun(port) {
   check(peek.status === 403 && !peek.text.includes(CRED_A), "a member of staff cannot read the grants or any credential");
 }
 
-async function hermesRun() {
-  const grant = await api("POST", "/setup-api/settings/staff-mcp", OWNER_COOKIE, { servers: { [SERVER]: {} } });
-  check(grant.status === 409, "on Hermes the owner's grant is refused: members of staff get no MCP tools", `${grant.status} ${grant.json.code || ""}`);
-  const view = await api("GET", "/setup-api/settings/staff-mcp", OWNER_COOKIE);
-  check(view.status === 200 && view.json.staffMcpSupported === false, "Settings says members of staff get no MCP tools on Hermes");
-  const since = calls.length;
+/** One Hermes turn of a member's (the chat route, as the desktop posts it). */
+async function hermesTurn(cookie, text) {
   const r = await fetch(`${DASHBOARD}/setup-api/hermes/chat`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json", cookie: `clawbox_session=${A_COOKIE}`, origin: DASHBOARD },
-    body: JSON.stringify({ message: ASK }),
+    headers: { "content-type": "application/json", accept: "application/json", cookie: `clawbox_session=${cookie}`, origin: DASHBOARD },
+    body: JSON.stringify({ message: text }),
     signal: AbortSignal.timeout(TURN_MS + 60_000),
   });
   let json = {};
   try { json = await r.json(); } catch { /* none */ }
-  note(`[${RUNTIME}] staff A assistant: ${String(json.text || json.error || `HTTP ${r.status}`).slice(0, 400)}`);
-  // A chat that did not run proves nothing about what it could reach.
-  check(r.status === 200 && typeof json.text === "string" && json.text.length > 0, "A's Hermes turn completed", `HTTP ${r.status} ${json.code || ""}`);
-  const aHome = path.join(HERMES_HOME, "profiles", policy.staffAgentId(A_NAME));
-  const cfg = fs.existsSync(path.join(aHome, "config.yaml")) ? fs.readFileSync(path.join(aHome, "config.yaml"), "utf-8") : "";
-  check(!/^mcp_servers:/m.test(cfg), "A's Hermes profile has no MCP server");
-  check(calls.length === since, "A's ask reached no MCP server");
+  return { status: r.status, text: typeof json.text === "string" ? json.text : "", code: json.code || "" };
+}
+
+/** A member's Hermes profile's mcp_servers (TASK-2516: only their granted relay entries). */
+function hermesEntries(username) {
+  const file = path.join(HERMES_HOME, "profiles", policy.staffAgentId(username), "config.yaml");
+  if (!fs.existsSync(file)) return {};
+  const yaml = require("js-yaml");
+  return (yaml.load(fs.readFileSync(file, "utf-8")) || {}).mcp_servers || {};
+}
+
+// Since TASK-2516 Hermes carries the same grant through each member's own
+// profile: the owner's server in config.yaml (with the owner's header), A's
+// credential travels for A, B without one gets nothing.
+let hermesConfigBefore = null;
+async function hermesRun(port) {
+  const yaml = require("js-yaml");
+  const configFile = path.join(HERMES_HOME, "config.yaml");
+  hermesConfigBefore = fs.readFileSync(configFile, "utf-8");
+  const doc = yaml.load(hermesConfigBefore) || {};
+  doc.mcp_servers = { ...(doc.mcp_servers || {}), [SERVER]: { url: `http://127.0.0.1:${port}/mcp`, headers: { Authorization: `Bearer ${OWNER_TOKEN}` } } };
+  fs.writeFileSync(configFile, yaml.dump(doc, { noRefs: true, lineWidth: -1 }));
+  const grant = await api("POST", "/setup-api/settings/staff-mcp", OWNER_COOKIE, { servers: { [SERVER]: {} } });
+  check(grant.status === 200, "on Hermes the owner grants the MCP server to members of staff", `${grant.status} ${grant.json.code || ""}`);
+  const setA = await api("POST", "/setup-api/settings/staff-mcp", OWNER_COOKIE, { username: A_NAME, server: SERVER, credential: CRED_A });
+  check(setA.status === 200 && !setA.text.includes(CRED_A), "the owner sets A's credential and is answered it masked only", `${setA.status}`);
+  let since = calls.length;
+  const ta = await hermesTurn(A_COOKIE, ASK);
+  note(`[${RUNTIME}] staff A assistant: ${ta.text.replace(new RegExp(`${CRED_A}|${CRED_B}|${OWNER_TOKEN}`, "g"), "<credential>").slice(0, 400) || `HTTP ${ta.status} ${ta.code}`}`);
+  const aCalls = whoamiCalls(since);
+  note(`[${RUNTIME}] the server saw for A's turn: ${aCalls.map((c) => whose(c.auth)).join(", ") || "(nothing)"}`);
+  const aEntries = Object.keys(hermesEntries(A_NAME));
+  check(aEntries.length === 1 && aEntries[0].startsWith("cbstaff-") && !JSON.stringify(hermesEntries(A_NAME)).includes(CRED_A),
+    "A's Hermes profile carries one relay entry of its own (and never A's credential)", aEntries.join(","));
+  check(ta.status === 200 && aCalls.length > 0 && aCalls.every((c) => c.auth === `Bearer ${CRED_A}`), "A's assistant calls the server with A's own credential (and the turn completed)");
+  since = calls.length;
+  const tb = await hermesTurn(B_COOKIE, ASK);
+  note(`[${RUNTIME}] staff B assistant: ${tb.text.slice(0, 300) || `HTTP ${tb.status} ${tb.code}`}`);
+  check(tb.status === 200 && whoamiCalls(since).length === 0 && Object.keys(hermesEntries(B_NAME)).length === 0,
+    "B, without a credential, gets no entry and no tool from the server");
 }
 
 async function main() {
@@ -346,12 +376,13 @@ async function main() {
   const port = stub.address().port;
   try {
     if (RUNTIME === "openclaw") await openclawRun(port);
-    else await hermesRun();
+    else await hermesRun(port);
   } catch (err) {
     fail(`the staff MCP driver stopped: ${String(err?.message || err).split("\n")[0].slice(0, 300)}`);
   } finally {
     // The grant and the owner's test server go again.
     await api("POST", "/setup-api/settings/staff-mcp", OWNER_COOKIE, { servers: {} }).catch(() => undefined);
+    if (RUNTIME === "hermes" && hermesConfigBefore !== null) fs.writeFileSync(path.join(HERMES_HOME, "config.yaml"), hermesConfigBefore);
     if (RUNTIME === "openclaw") {
       try { openclaw("config", "unset", `mcp.servers.${SERVER}`); } catch { note(`[${RUNTIME}] could not remove the test server entry`); }
       const left = Object.keys(openclawConfig().mcp?.servers || {}).filter((n) => n.startsWith("cbstaff-") || n === SERVER);

@@ -58,7 +58,8 @@ import { chatKeyUser } from "@/lib/chat-scope";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
 import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
 import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
-import { ensureStaffHermesProfile, staffGuardLoaded, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { ensureStaffHermesProfile, staffGuardLoaded, staffHermesProfilePaths, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { recordMemberReplyMedia } from "@/lib/chat-reply-media";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
@@ -348,6 +349,19 @@ function parseSessionId(stderr: string): string {
 }
 
 /** The reply this route hands back, whichever transport produced it. */
+/**
+ * When each transcript's current turn began (the user's message was written):
+ * a file a member's reply names is theirs only if it was written since
+ * (TASK-2516, scripts/chat-reply-media.js). Process-local and bounded; a turn
+ * whose start was lost to a restart is judged by the default window.
+ */
+const turnStartedAt = new Map<string, number>();
+function noteTurnStart(sessionKey: string): void {
+  if (turnStartedAt.size >= 256) turnStartedAt.delete(turnStartedAt.keys().next().value as string);
+  turnStartedAt.delete(sessionKey);
+  turnStartedAt.set(sessionKey, Date.now());
+}
+
 interface TurnPayload {
   text: string;
   harness: "hermes";
@@ -515,6 +529,22 @@ async function settleTurn(
   // owner is theirs: served back to them on an organisation box, and to no
   // other member (src/lib/chat-media-owners.ts).
   if (chatUser) recordMediaOwner(chatUser, [...drawn, spokenClip]);
+  // A file the member's own turn produced — a document an owner-granted MCP
+  // tool wrote — named on a `MEDIA:` line of the reply is theirs too
+  // (TASK-2516): only a fresh regular file in the media tree or their own
+  // profile folder, never through a link, never one already someone else's.
+  if (memberTurn && chatUser) {
+    const { recorded, refused } = recordMemberReplyMedia({
+      username: chatUser,
+      text: caption,
+      mediaRoot: await chatMediaRoot(),
+      ownFolder: staffHermesProfilePaths(chatUser)?.folder ?? null,
+      since: turnStartedAt.get(sessionKey) ?? null,
+    });
+    if (recorded.length > 0 || refused.length > 0) {
+      console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+    }
+  }
   const answer = [
     caption,
     ...drawn.map((file) => `MEDIA:${file}`),
@@ -1527,6 +1557,7 @@ export async function POST(request: Request) {
   const shownText = typeof body.displayText === "string" && body.displayText.trim()
     ? body.displayText.trim()
     : message;
+  noteTurnStart(sessionKey);
   await appendTranscript({
     role: "user",
     // A document is shown as the composer labels it (`📎 name`), the way the
