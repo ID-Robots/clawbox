@@ -115,6 +115,28 @@ describe("fileDenyRules with no owner rules", () => {
     }
   });
 
+  it("denies a harness state folder its override moved out of the home, and never a root or the home", async () => {
+    const { fileDenyRules } = await import("@/lib/coding-agent");
+    const restore = saveEnv("CLAUDE_DS_CONFIG_DIR", "CLAUDE_DS_LOCAL_CONFIG_DIR");
+    try {
+      process.env.CLAUDE_DS_CONFIG_DIR = "/srv/claude-state/clawbox-ai";
+      process.env.CLAUDE_DS_LOCAL_CONFIG_DIR = "/srv/claude-state/local";
+      const rules = fileDenyRules();
+      for (const moved of ["/srv/claude-state/clawbox-ai", "/srv/claude-state/local"]) {
+        expect(rules, moved).toContain(`Read(/${moved}/**)`);
+        expect(denied(rules, pathMod.join(moved, "projects", "other", "x.jsonl")), moved).toBe(true);
+      }
+      // Too broad to be a state folder: no rule that would shut the run out of everything.
+      process.env.CLAUDE_DS_CONFIG_DIR = "/";
+      process.env.CLAUDE_DS_LOCAL_CONFIG_DIR = home;
+      const broad = fileDenyRules();
+      expect(broad).not.toContain("Read(///**)");
+      expect(broad).not.toContain(`Read(/${home}/**)`);
+    } finally {
+      restore();
+    }
+  });
+
   it("denies the credential stores whatever else happens", async () => {
     const { fileDenyRules } = await import("@/lib/coding-agent");
     expect(denied(fileDenyRules(), pathMod.join(home, ".ssh", "id_ed25519"))).toBe(true);
