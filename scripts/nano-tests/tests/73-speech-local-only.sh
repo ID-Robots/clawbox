@@ -268,6 +268,10 @@ ENGINE=$(grep -i "^x-clawbox-voice-engine:" "$HDR" | tr -d "\r" | awk "{print \$
 CTYPE=$(grep -i "^content-type:" "$HDR" | tr -d "\r" | awk "{print \$2}")
 say "{\"speak\":{\"status\":\"${SPK:-000}\",\"engine\":$(printf "%s" "$ENGINE" | njs),\"type\":$(printf "%s" "$CTYPE" | njs),\"bytes\":$(stat -c %s "$WORK/reply.bin" 2>/dev/null || echo 0),\"error\":$(head -c 300 "$WORK/reply.bin" | tr -cd "[:print:]" | njs)}}"
 rm -f "$HDR"
+# Whether the box has its own voice installed at all: no_voice under the lock means "none",
+# and only then is the spoken-reply leg skipped.
+LOCALV=$(printf "header = \"Cookie: clawbox_session=%s\"\n" "$(cookie)" | curl -sS --max-time 30 -K - "$DASHBOARD/setup-api/tts" 2>/dev/null | nj "v && Array.isArray(v.engines) ? v.engines.filter((e) => e.id === \"local\").map((e) => e.configured === true)[0] : null")
+say "{\"localVoice\":${LOCALV:-null}}"
 if [ "$RUNTIME" = hermes ]; then
   say "{\"hermesAfter\":$(hermes_provider)}"
 else
@@ -343,7 +347,7 @@ else
 fi
 
 # 3. The voice reply.
-if printf '%s' "$(r '.speak.error')" | grep -q 'no_local_voice'; then
+if printf '%s' "$(r '.speak.error')" | grep -q 'no_local_voice' || { printf '%s' "$(r '.speak.error')" | grep -q 'no_voice' && [ "$(r '.localVoice')" = false ]; }; then
   skip "no voice is installed on this board (Kokoro): the spoken reply leg needs it"
 elif [ "$(r '.speak.status')" = 200 ] && [ "$(r '.speak.bytes')" -gt 1024 ] 2>/dev/null && { [ "$RUNTIME" = hermes ] || [ "$(r '.speak.engine')" = local ]; }; then
   ok "a voice reply was spoken by the box's own voice under the lock ($(r '.speak.bytes') bytes of $(r '.speak.type')$([ -n "$(r '.speak.engine')" ] && printf ', engine %s' "$(r '.speak.engine')"))"
