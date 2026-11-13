@@ -113,13 +113,17 @@ export function cliJsonFromModelsList(payload: Record<string, unknown>): CliMode
     models,
     ...(outcomes.length
       ? {
-        providerOutcomes: outcomes.map(({ provider, profileId, status, unlistedConfiguredModelIds }) => {
-          const unlisted = unlistedConfiguredModelIds as unknown[] | null | undefined;
+        providerOutcomes: outcomes.map((outcome) => {
+          const { provider, profileId, status } = outcome;
+          // Checked as the stderr side checks it: the same command maps this
+          // field for its catalog warnings, so a ready outcome whose field is
+          // not a list crashes the CLI rather than printing it.
+          const unlisted = status === "ready" ? unlistedIdsOf(outcome) : [];
           return {
             provider,
             ...(profileId ? { profileId } : {}),
             status,
-            ...(status === "ready" && unlisted?.length ? { unlistedConfiguredModelIds: unlisted } : {}),
+            ...(unlisted.length ? { unlistedConfiguredModelIds: unlisted } : {}),
           };
         }),
       }

@@ -148,9 +148,19 @@ describe("cliDiagnosticFromModelsList", () => {
   });
 
   it("throws where the CLI would crash on an unlisted-ids field that is not a list", () => {
-    expect(() => cliDiagnosticFromModelsList({
+    const payload = {
       models: [],
       providerOutcomes: [{ provider: "ollama", status: "ready", unlistedConfiguredModelIds: "qwen3:8b" }],
-    })).toThrow(/unlistedConfiguredModelIds that is not a list/);
+    };
+    expect(() => cliDiagnosticFromModelsList(payload)).toThrow(/unlistedConfiguredModelIds that is not a list/);
+    expect(() => cliJsonFromModelsList(payload)).toThrow(/unlistedConfiguredModelIds that is not a list/);
+  });
+
+  it("does not read the unlisted ids of an outcome that is not ready", () => {
+    const payload = {
+      models: [],
+      providerOutcomes: [{ provider: "xai", status: "unavailable", unlistedConfiguredModelIds: "grok-5" }],
+    };
+    expect(cliJsonFromModelsList(payload).providerOutcomes).toEqual([{ provider: "xai", status: "unavailable" }]);
   });
 });
