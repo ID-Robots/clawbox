@@ -234,9 +234,10 @@ disable_unused_rpcbind() {
   # from under it. Capture first, then test the captured text — from a
   # here-string: `printf | grep -q` is a pipeline too, and printf still writing
   # the later lines when grep exits at a match is SIGPIPE, the same false again.
+  # A held package counts as installed: its line reads "hold ok installed".
   local rpc_status
   rpc_status=$(dpkg-query -W -f='${Status}\n' nfs-common nfs-kernel-server autofs ypbind 2>/dev/null || true)
-  if grep -q "^install ok installed" <<<"$rpc_status"; then
+  if grep -q " ok installed$" <<<"$rpc_status"; then
     log "rpcbind left alone — an NFS/NIS package is installed"
     return 0
   fi
