@@ -48,7 +48,9 @@ function shellFunction(name: string): string {
 const TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const OTHER_TREE = "0123456789abcdef0123456789abcdef01234567";
 const REUSE_LINE =
-  /ClawKeep CLI: the same code \(clawkeep tree 4b825dc642cb\) was installed and verified earlier in this update; not reinstalled/;
+  /ClawKeep CLI: the same code \(clawkeep tree 4b825dc642cb\) was installed earlier in this boot and still answers; not reinstalled/;
+const NOT_RECORDED_LINE =
+  "  ClawKeep CLI install not recorded (local changes under clawkeep/, or git or /run/clawbox could not answer); a later post_update reinstalls it\n";
 
 let dir: string;
 let project: string;
@@ -119,7 +121,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function runStep(args: string[], opts: { pipx?: boolean } = {}) {
+function runStep(args: string[], opts: { pipx?: boolean; env?: Record<string, string> } = {}) {
   const log = JSON.stringify(path.join(dir, "calls"));
   const program = [
     "set -euo pipefail",
@@ -140,6 +142,7 @@ function runStep(args: string[], opts: { pipx?: boolean } = {}) {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       HOME: dir,
       CLAWBOX_CLAWKEEP_INSTALLED_RECORD: record,
+      ...opts.env,
     }),
   });
 }
@@ -160,6 +163,16 @@ describe("step_clawkeep_install: one forced install per update", () => {
     const gitCalls = calls().filter((c) => c.startsWith("git ")).length;
     expect(gitCalls).toBeGreaterThan(0);
     expect(calls().filter((c) => c === "as_clawbox git").length).toBe(gitCalls);
+  });
+
+  it("keys the record on HEAD's clawkeep tree and asks git for untracked files whatever its config says", () => {
+    const r = runStep([]);
+    expect(r.status, r.stderr).toBe(0);
+    const git = `git -c safe.directory=${project} -C ${project}`;
+    expect(calls()).toContain(`${git} rev-parse -q --verify HEAD:clawkeep`);
+    expect(calls()).toContain(`${git} status --porcelain --untracked-files=all -- clawkeep`);
+    // No status call without the mode: each one decides whether the tree is clean.
+    expect(calls().filter((c) => c.startsWith("git ") && c.includes(" status ") && !c.includes("--untracked-files=all"))).toEqual([]);
   });
 
   it("post_update reuses a verified install of the same tree: no pipx, one line, record spent", () => {
@@ -218,6 +231,8 @@ describe("step_clawkeep_install: one forced install per update", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(pipxRuns()).toBe(1);
     expect(existsSync(record)).toBe(false);
+    // The full install's own call is followed by no post_update: "a later" one.
+    expect(r.stdout).toContain(NOT_RECORDED_LINE);
   });
 
   it("never records when git cannot name the tree", () => {
@@ -280,6 +295,104 @@ describe("step_clawkeep_install: one forced install per update", () => {
     const r = runStep([]);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain("ClawKeep source missing; skipping");
+    expect(existsSync(record)).toBe(false);
+  });
+});
+
+const HAS_GIT = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+
+/**
+ * The same step against a real git repository, so what decides "clean" is
+ * git's own answer, not a fake's: the fake git above prints whatever a case
+ * says, whatever the arguments. Only the account's own git configuration is
+ * in play (HOME and GIT_CONFIG_GLOBAL in the sandbox, no system file), and
+ * `status.showUntrackedFiles=no` there hides an untracked file from a plain
+ * `git status --porcelain`.
+ */
+describe.skipIf(!HAS_GIT)("step_clawkeep_install against a real git repository", () => {
+  let gitEnv: Record<string, string>;
+
+  function git(...args: string[]): string {
+    const r = spawnSync("git", ["-C", project, ...args], { encoding: "utf-8", env: testEnv({ ...gitEnv, PATH: process.env.PATH ?? "" }) });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  }
+
+  const headTree = () => git("rev-parse", "HEAD:clawkeep");
+  const run = (args: string[]) => runStep(args, { env: gitEnv });
+
+  beforeEach(() => {
+    // PATH keeps the fake pipx and clawkeep; git is the real one.
+    rmSync(path.join(bin, "git"));
+    gitEnv = {
+      HOME: dir,
+      GIT_CONFIG_GLOBAL: path.join(dir, "gitconfig"),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_AUTHOR_NAME: "fixture",
+      GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+      GIT_COMMITTER_NAME: "fixture",
+      GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    };
+    writeFileSync(gitEnv.GIT_CONFIG_GLOBAL, "");
+    mkdirSync(path.join(project, "clawkeep", "clawkeep"), { recursive: true });
+    writeFileSync(path.join(project, "clawkeep", "clawkeep", "cli.py"), "print('clawkeep')\n");
+    writeFileSync(path.join(project, "README.md"), "fixture\n");
+    git("init", "-q");
+    git("add", "-A");
+    git("commit", "-q", "-m", "fixture");
+  });
+
+  it("never records a tree with an untracked file that status.showUntrackedFiles=no hides", () => {
+    git("config", "status.showUntrackedFiles", "no");
+    writeFileSync(path.join(project, "clawkeep", "clawkeep", "new.py"), "print('local')\n");
+    // The premise: git's plain porcelain status prints nothing here.
+    expect(git("status", "--porcelain", "--", "clawkeep")).toBe("");
+
+    const r = run([]);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(pipxRuns()).toBe(1);
+    expect(existsSync(record)).toBe(false);
+    expect(r.stdout).toContain(NOT_RECORDED_LINE);
+  });
+
+  it("forces under --reuse-this-update over that untracked file, though the record names HEAD's tree", () => {
+    git("config", "status.showUntrackedFiles", "no");
+    writeFileSync(path.join(project, "clawkeep", "clawkeep", "new.py"), "print('local')\n");
+    keepRecord(`${headTree()}\n`);
+
+    const r = run(["--reuse-this-update"]);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).not.toContain("not reinstalled");
+    expect(pipxRuns()).toBe(1);
+  });
+
+  it("records the tree id of HEAD:clawkeep for a clean tree", () => {
+    const r = run([]);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(record, "utf-8")).toBe(`${headTree()}\n`);
+  });
+
+  it("still reuses after a commit that leaves clawkeep/ alone: the key is the tree, not HEAD", () => {
+    expect(run([]).status).toBe(0);
+    writeFileSync(path.join(project, "README.md"), "fixture, edited\n");
+    git("commit", "-q", "-am", "readme");
+
+    const r = run(["--reuse-this-update"]);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("was installed earlier in this boot and still answers; not reinstalled");
+    expect(pipxRuns()).toBe(1);
+  });
+
+  it("never records a tree with a tracked edit under clawkeep/", () => {
+    writeFileSync(path.join(project, "clawkeep", "clawkeep", "cli.py"), "print('edited')\n");
+
+    const r = run([]);
+
+    expect(r.status, r.stderr).toBe(0);
     expect(existsSync(record)).toBe(false);
   });
 });

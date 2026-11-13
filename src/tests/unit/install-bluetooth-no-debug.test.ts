@@ -68,7 +68,25 @@ function writeVendor(execStart: string) {
   fs.writeFileSync(vendor, `[Service]\nExecStart=\nExecStart=${execStart}\n`);
 }
 
+/**
+ * The drop-in's first line tells an operator both halves: deleting the file
+ * undoes it until the next update writes it again, and a drop-in of their own
+ * is what keeps it undone (the step then removes ClawBox's file).
+ */
 function expectedDropIn(): string {
+  return [
+    `${MARKER}, derived from ${vendor} by install.sh; to restore the vendor's debug output, delete this file and run`
+      + " systemctl daemon-reload (it applies from the next start of bluetooth.service); to keep it restored, add a"
+      + " drop-in of your own (systemctl edit bluetooth), and every later update leaves the unit as you configured it",
+    "[Service]",
+    "ExecStart=",
+    `ExecStart=${DERIVED_EXEC}`,
+    "",
+  ].join("\n");
+}
+
+/** The drop-in as earlier releases wrote it: the same marker and ExecStart, the old first line. */
+function earlierReleaseDropIn(): string {
   return [
     `${MARKER}, derived from ${vendor} by install.sh; delete this file to restore the vendor's debug output`,
     "[Service]",
@@ -232,6 +250,46 @@ d("step_bluetooth_no_debug starts bluetoothd without NVIDIA's -d", () => {
     expect(second.stdout).toContain("already in place");
     expectIndented(second);
     expectNoLeftovers();
+  });
+
+  it("rewrites an earlier release's drop-in once, with one reload and no restart, then leaves it", () => {
+    writeVendor(VENDOR_EXEC);
+    fs.mkdirSync(destDir, { recursive: true });
+    fs.writeFileSync(dest, earlierReleaseDropIn());
+
+    const first = runStep();
+
+    expect(first.status, `${first.stdout}\n${first.stderr}`).toBe(0);
+    expect(fs.readFileSync(dest, "utf-8")).toBe(expectedDropIn());
+    // Still read as ClawBox's own, and the ExecStart is unchanged.
+    expect(fs.readFileSync(dest, "utf-8").startsWith(MARKER)).toBe(true);
+    expect(fs.readFileSync(dest, "utf-8")).toContain(`\nExecStart=${DERIVED_EXEC}\n`);
+    expect(installCalls()).toHaveLength(1);
+    expect(reloads()).toHaveLength(1);
+    expect(systemctlCalls().filter((line) => line !== "systemctl daemon-reload")).toEqual([
+      "systemctl show bluetooth.service -p DropInPaths --value",
+    ]);
+    expectNoLeftovers();
+
+    fs.rmSync(calls);
+    const second = runStep();
+
+    expect(second.status, `${second.stdout}\n${second.stderr}`).toBe(0);
+    expect(second.stdout).toContain("already in place");
+    expect(installCalls()).toEqual([]);
+    expect(reloads()).toEqual([]);
+  });
+
+  it("writes its first line as one line, starting with the marker", () => {
+    writeVendor(VENDOR_EXEC);
+
+    expect(runStep().status).toBe(0);
+
+    const first = fs.readFileSync(dest, "utf-8").split("\n")[0];
+    expect(first.startsWith(`${MARKER}, `)).toBe(true);
+    expect(first).toContain("delete this file and run systemctl daemon-reload");
+    expect(first).toContain("add a drop-in of your own (systemctl edit bluetooth)");
+    expect(fs.readFileSync(dest, "utf-8").split("\n")[1]).toBe("[Service]");
   });
 
   it("re-derives the drop-in when the vendor's arguments change", () => {

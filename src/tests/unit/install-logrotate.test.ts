@@ -24,9 +24,15 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * logrotate would otherwise stop the base install, the document libraries and
  * the Node check on every update.
  *
- * The shipped step_apt_update and ensure_logrotate are lifted out of install.sh
- * and run under bash with apt-get, dpkg-query, systemctl and curl stubbed;
- * nothing reads the real /etc or the runner's package database.
+ * Whether a package is there is dpkg's answer (`dpkg_installed`), never
+ * apt-get's exit code: apt-get exits 100 when ANOTHER package's trigger or
+ * postinst fails after the one asked for was configured, and a held package is
+ * installed although `${Status}` does not start with "install". The same
+ * read-back decides the document libraries' warning.
+ *
+ * The shipped step_apt_update, ensure_logrotate and dpkg_installed are lifted
+ * out of install.sh and run under bash with apt-get, dpkg-query, systemctl and
+ * curl stubbed; nothing reads the real /etc or the runner's package database.
  */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
@@ -48,22 +54,33 @@ type Box = {
   calls: () => string[];
 };
 
+/** The document libraries step_apt_update installs on their own apt line. */
+const DOC_LIBS = ["python3-docx", "python3-openpyxl", "python3-reportlab"];
+
 /**
  * A box as apt and systemd see it. `installed`: whether dpkg knows logrotate.
+ * `held`: it is installed and on hold (`${Status}` is "hold ok installed").
  * `timer`/`active`: logrotate.timer's unit state. `aptFailsLogrotate`: a mirror
  * that cannot serve the package. `aptInstallsNothing`: apt-get answers 0 and
- * dpkg still does not know the package. `enableRefused`: `systemctl enable
- * --now` fails and changes nothing. `startFails`: it enables the unit, then
- * fails to start it.
+ * dpkg still does not know the package. `aptFailsAfterInstall`: apt-get
+ * configures logrotate, then exits 100 over another package's postinst.
+ * `enableRefused`: `systemctl enable --now` fails and changes nothing.
+ * `startFails`: it enables the unit, then fails to start it. `docsAptFails`:
+ * the document-libraries line exits 100 after configuring what it could;
+ * `docsMissing`: the libraries that line leaves uninstalled.
  */
 function makeBox(opts: {
   installed: boolean;
+  held?: boolean;
   timer?: Timer;
   active?: boolean;
   aptFailsLogrotate?: boolean;
   aptInstallsNothing?: boolean;
+  aptFailsAfterInstall?: boolean;
   enableRefused?: boolean;
   startFails?: boolean;
+  docsAptFails?: boolean;
+  docsMissing?: string[];
 }): Box {
   const dir = mkdtempSync(path.join(tmpdir(), "clawbox-logrotate-"));
   const state = path.join(dir, "state");
@@ -71,13 +88,17 @@ function makeBox(opts: {
   mkdirSync(state, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(path.join(state, "calls"), "");
-  if (opts.installed) writeFileSync(path.join(state, "installed"), "");
+  if (opts.installed || opts.held) writeFileSync(path.join(state, "installed"), "");
+  if (opts.held) writeFileSync(path.join(state, "held"), "");
   writeFileSync(path.join(state, "timer"), opts.timer ?? "disabled");
   writeFileSync(path.join(state, "active"), opts.active ? "active" : "inactive");
   if (opts.aptFailsLogrotate) writeFileSync(path.join(state, "apt-fails-logrotate"), "");
   if (opts.aptInstallsNothing) writeFileSync(path.join(state, "apt-installs-nothing"), "");
+  if (opts.aptFailsAfterInstall) writeFileSync(path.join(state, "apt-fails-after-install"), "");
   if (opts.enableRefused) writeFileSync(path.join(state, "enable-refused"), "");
   if (opts.startFails) writeFileSync(path.join(state, "start-fails"), "");
+  if (opts.docsAptFails) writeFileSync(path.join(state, "docs-apt-fails"), "");
+  for (const pkg of opts.docsMissing ?? []) writeFileSync(path.join(state, `docs-missing-${pkg}`), "");
 
   const write = (name: string, body: string) => {
     const p = path.join(bin, name);
@@ -88,6 +109,8 @@ function makeBox(opts: {
   // apt-get as a box sees it: a mirror without logrotate answers 100 with
   // apt's own sentence; a served one runs the package's postinst, which on
   // jammy and later enables and starts logrotate.timer on a first install.
+  // An exit of 100 AFTER the package was configured is another package's
+  // failing postinst in the same dpkg run.
   write("apt-get", `
 printf 'apt-get %s\\n' "$*" >> "$ST/calls"
 case " $* " in
@@ -100,17 +123,41 @@ case " $* " in
       : > "$ST/installed"
       [ "$(cat "$ST/timer")" = masked ] || { echo enabled > "$ST/timer"; echo active > "$ST/active"; }
     fi
+    if [ -e "$ST/apt-fails-after-install" ]; then
+      echo "dpkg: error processing package fixture-other (--configure):" >&2
+      echo "E: Sub-process /usr/bin/dpkg returned an error code (1)" >&2
+      exit 100
+    fi
+    ;;
+  *" python3-docx "*)
+    for p in ${DOC_LIBS.join(" ")}; do
+      [ -e "$ST/docs-missing-$p" ] || : > "$ST/pkg-$p"
+    done
+    if [ -e "$ST/docs-apt-fails" ]; then
+      echo "E: Sub-process /usr/bin/dpkg returned an error code (1)" >&2
+      exit 100
+    fi
     ;;
 esac
 exit 0
 `);
 
   // dpkg-query exits 1 for a package it has never seen, which is what a bare
-  // assignment under errexit would die on.
+  // assignment under errexit would die on. It answers per package, from the
+  // last argument, as the real one does for one name.
   write("dpkg-query", `
 printf 'dpkg-query %s\\n' "$*" >> "$ST/calls"
-if [ -e "$ST/installed" ]; then printf 'install ok installed'; exit 0; fi
-echo "dpkg-query: no packages found matching logrotate" >&2
+pkg="\${@: -1}"
+case "$pkg" in
+  logrotate)
+    if [ -e "$ST/held" ]; then printf 'hold ok installed'; exit 0; fi
+    if [ -e "$ST/installed" ]; then printf 'install ok installed'; exit 0; fi
+    ;;
+  *)
+    if [ -e "$ST/pkg-$pkg" ]; then printf 'install ok installed'; exit 0; fi
+    ;;
+esac
+echo "dpkg-query: no packages found matching $pkg" >&2
 exit 1
 `);
 
@@ -163,15 +210,23 @@ const AMBIENT = [
   "node() { printf 'v24.22.1\\n'; }",
 ];
 
-/** step_apt_update as install.sh runs it: errexit, nounset, pipefail. */
-function run(box: Box, ensureLogrotate = shellFunction("ensure_logrotate")): SpawnSyncReturns<string> {
-  const step = shellFunction("step_apt_update");
+/**
+ * step_apt_update as install.sh runs it: errexit, nounset, pipefail. A case may
+ * hand in its own copy of ensure_logrotate or step_apt_update.
+ */
+function run(
+  box: Box,
+  over: { ensureLogrotate?: string | null; step?: string } = {},
+): SpawnSyncReturns<string> {
+  const step = over.step ?? shellFunction("step_apt_update");
   if (!step) throw new Error("step_apt_update not found in install.sh");
+  const ensureLogrotate = "ensureLogrotate" in over ? over.ensureLogrotate : shellFunction("ensure_logrotate");
   const program = [
     "set -euo pipefail",
     `ST=${JSON.stringify(box.state)}`,
     'OPENCLAW_NODE_ENGINE=">=24.22.1 <25 || >=26.12.1"',
     ...AMBIENT,
+    shellFunction("dpkg_installed") ?? "",
     ensureLogrotate ?? "",
     step,
     "step_apt_update",
@@ -233,18 +288,61 @@ describe("step_apt_update installs Ubuntu's logrotate on the Jetson", () => {
   it("fails the step under errexit once the guard on that install is removed (the case above is real)", () => {
     const shipped = shellFunction("ensure_logrotate");
     expect(shipped, "ensure_logrotate in install.sh").not.toBeNull();
-    const guarded = /if ! (DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate)\b[\s\S]*?\n\s*fi\n/;
+    const guarded = /(DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate) \|\| true\n/;
     expect(shipped).toMatch(guarded);
     const unguarded = shipped!.replace(guarded, "$1\n");
     const box = makeBox({ installed: false, aptFailsLogrotate: true });
 
-    const r = run(box, unguarded);
+    const r = run(box, { ensureLogrotate: unguarded });
     const calls = box.calls();
 
     expect(r.status).not.toBe(0);
     expect(at(calls, LOGROTATE_INSTALL)).toBeGreaterThanOrEqual(0);
     expect(at(calls, "python3-docx")).toBe(-1);
     expect(at(calls, "node-check")).toBe(-1);
+  });
+
+  it("takes a logrotate dpkg configured as installed although apt-get then exited 100", () => {
+    // Another package's postinst failing in the same dpkg run is apt-get's 100
+    // too; logrotate is configured and its postinst started the timer.
+    const box = makeBox({ installed: false, aptFailsAfterInstall: true });
+
+    const r = run(box);
+    const calls = box.calls();
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(at(calls, LOGROTATE_INSTALL)).toBeGreaterThanOrEqual(0);
+    expect(r.stderr).not.toMatch(/logrotate not installed/);
+    // apt-get's own error stays visible.
+    expect(r.stderr).toContain("E: Sub-process /usr/bin/dpkg returned an error code (1)");
+    expect(r.stdout).toContain(SUMMARY);
+    expect(at(calls, "node-check")).toBeGreaterThan(at(calls, LOGROTATE_INSTALL));
+  });
+
+  it("never asks apt-get for a held logrotate, and claims nothing missing", () => {
+    const box = makeBox({ installed: true, held: true, timer: "enabled", active: true });
+
+    const r = run(box);
+    const calls = box.calls();
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(at(calls, LOGROTATE_INSTALL)).toBe(-1);
+    expect(r.stderr).not.toMatch(/logrotate not installed/);
+    expect(at(calls, ENABLE)).toBe(-1);
+    expect(r.stdout).toContain(SUMMARY);
+  });
+
+  it("still enables the timer of a held logrotate", () => {
+    const box = makeBox({ installed: true, held: true, timer: "disabled" });
+
+    const r = run(box);
+    const calls = box.calls();
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(at(calls, LOGROTATE_INSTALL)).toBe(-1);
+    expect(at(calls, ENABLE), `the timer was left disabled:\n${calls.join("\n")}`).toBeGreaterThanOrEqual(0);
+    expect(r.stderr).not.toMatch(/logrotate not installed/);
+    expect(r.stdout).toContain(SUMMARY);
   });
 
   it("believes dpkg, not apt-get's exit code, about whether the package is there", () => {
@@ -318,5 +416,106 @@ describe("step_apt_update installs Ubuntu's logrotate on the Jetson", () => {
     expect(base).toHaveLength(1);
     expect(base[0]).toMatch(/apt-get install -y -qq /);
     expect(base[0]).not.toContain("logrotate");
+  });
+});
+
+/** The document-libraries lines of step_apt_update, as the box logs them. */
+const docWarnings = (r: SpawnSyncReturns<string>) =>
+  `${r.stdout}\n${r.stderr}`.split("\n").filter((l) => l.includes("document libraries"));
+
+describe("step_apt_update reads the document libraries back from dpkg", () => {
+  it("claims nothing missing when apt-get exits 100 but dpkg has all three", () => {
+    const box = makeBox({ installed: true, timer: "enabled", active: true, docsAptFails: true });
+
+    const r = run(box);
+    const calls = box.calls();
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(docWarnings(r)).toEqual([]);
+    // apt-get's own error stays visible, and the step goes on to the Node check.
+    expect(r.stderr).toContain("E: Sub-process /usr/bin/dpkg returned an error code (1)");
+    expect(at(calls, "node-check")).toBeGreaterThan(at(calls, "python3-docx"));
+  });
+
+  it("names the one library dpkg does not have, though apt-get exited 0", () => {
+    const box = makeBox({ installed: true, timer: "enabled", active: true, docsMissing: ["python3-reportlab"] });
+
+    const r = run(box);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(docWarnings(r)).toEqual(["  Warning: document libraries not installed: python3-reportlab"]);
+    expect(r.stderr).toContain("  Warning: document libraries not installed: python3-reportlab\n");
+    expect(at(box.calls(), "node-check")).toBeGreaterThan(at(box.calls(), "python3-docx"));
+  });
+
+  it("names every missing library on one line", () => {
+    const box = makeBox({ installed: true, timer: "enabled", active: true, docsAptFails: true, docsMissing: DOC_LIBS });
+
+    const r = run(box);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(docWarnings(r)).toEqual([`  Warning: document libraries not installed: ${DOC_LIBS.join(" ")}`]);
+  });
+
+  it("prints nothing about them when apt-get exits 0 and dpkg has all three", () => {
+    const box = makeBox({ installed: true, timer: "enabled", active: true });
+
+    const r = run(box);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(docWarnings(r)).toEqual([]);
+    for (const pkg of DOC_LIBS) expect(box.calls()).toContain(`dpkg-query -W -f=\${Status} ${pkg}`);
+  });
+
+  it("fails the step under errexit once the guard on that apt line is removed (the guard is real)", () => {
+    const shipped = shellFunction("step_apt_update");
+    expect(shipped, "step_apt_update in install.sh").not.toBeNull();
+    const guarded =
+      /(DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-docx python3-openpyxl python3-reportlab) \|\| true\n/;
+    expect(shipped).toMatch(guarded);
+    const box = makeBox({ installed: true, timer: "enabled", active: true, docsAptFails: true });
+
+    const r = run(box, { step: shipped!.replace(guarded, "$1\n") });
+
+    expect(r.status).not.toBe(0);
+    expect(at(box.calls(), "python3-docx")).toBeGreaterThanOrEqual(0);
+    expect(at(box.calls(), "node-check")).toBe(-1);
+  });
+});
+
+/**
+ * dpkg_installed, the one read-back the installer's apt lines use: true when
+ * dpkg has the package installed whatever apt was asked to want, false for
+ * every other status and when dpkg-query cannot answer.
+ */
+describe("dpkg_installed", () => {
+  it.each([
+    ["install ok installed", 0, true],
+    ["hold ok installed", 0, true],
+    ["deinstall ok installed", 0, true],
+    ["deinstall ok config-files", 0, false],
+    ["install ok half-configured", 0, false],
+    ["install reinstreq installed", 0, false],
+    ["unknown ok not-installed", 0, false],
+    ["", 0, false],
+    ["", 1, false],
+  ])("reads %j (dpkg-query exit %i) as installed: %s", (status, rc, installed) => {
+    const helper = shellFunction("dpkg_installed");
+    expect(helper, "dpkg_installed in install.sh, as a multi-line function").not.toBeNull();
+    const dir = mkdtempSync(path.join(tmpdir(), "clawbox-dpkg-installed-"));
+    const args = path.join(dir, "args");
+    const program = [
+      "set -euo pipefail",
+      `dpkg-query() { printf '%s\\n' "$*" > ${JSON.stringify(args)}; printf '%s' ${JSON.stringify(status)}; return ${rc}; }`,
+      helper!,
+      "if dpkg_installed fixture-pkg; then echo yes; else echo no; fi",
+    ].join("\n");
+
+    const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 20_000 });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe(installed ? "yes" : "no");
+    // The `${Status}` field (want, error flag, status), for the one package.
+    expect(readFileSync(args, "utf-8")).toBe("-W -f=${Status} fixture-pkg\n");
   });
 });

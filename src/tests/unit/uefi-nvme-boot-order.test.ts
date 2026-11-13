@@ -1,8 +1,9 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync, spawnSync } from "child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+import { testEnv } from "@/tests/helpers/env";
 
 // Runs the real guard script under bash: both ceilings, see test-timeout-hygiene.
 vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
@@ -266,5 +267,142 @@ describe("install.sh wiring", () => {
   it("stays off non-Jetson hosts", () => {
     const step = SH.slice(SH.indexOf("step_uefi_boot_order() {"));
     expect(step.slice(0, step.indexOf("\n}\n"))).toContain("/etc/nv_tegra_release");
+  });
+});
+
+/**
+ * step_uefi_boot_order's efibootmgr install, RUN rather than read: whether
+ * efibootmgr is there is asked again after apt-get, never taken from apt-get's
+ * exit code (it exits 100 when another package's postinst fails after
+ * efibootmgr was configured, and 0 having installed nothing).
+ *
+ * The step's hardware gates are bypassed ON PURPOSE, in the sliced text only:
+ * is_test_mode answers no; /etc/nv_tegra_release, /sys/firmware/efi/efivars,
+ * the installed guard /usr/local/sbin/clawbox-nvme-boot-order and the unit
+ * directory /etc/systemd/system are rewritten into the sandbox; and SRC_DIR is
+ * a sandbox tree whose guard is a stub that answers --check with 0. PATH is the
+ * sandbox alone, with the few tools the step runs linked in, so an efibootmgr
+ * on the runner can never stand in for the one apt-get is asked for.
+ */
+describe("step_uefi_boot_order asks again whether efibootmgr is there after apt-get", () => {
+  const SH = readFileSync(path.join(REPO, "install.sh"), "utf8");
+  const HOST_PATHS = [
+    "/etc/nv_tegra_release",
+    "/sys/firmware/efi/efivars",
+    "/usr/local/sbin/clawbox-nvme-boot-order",
+    "/etc/systemd/system",
+  ];
+  const TOOLS = ["bash", "sed", "install", "chmod"];
+  const EFIBOOTMGR_WARNING = "  Warning: could not install efibootmgr; UEFI boot order guard not installed";
+
+  function runStep(opts: { efibootmgr: boolean; apt?: "configures-then-100" | "0-installs-nothing" }) {
+    const root = path.join(dir, "step");
+    const bin = path.join(root, "bin");
+    const src = path.join(root, "src");
+    const guardSrc = path.join(src, "scripts", "uefi-boot-order");
+    const calls = path.join(root, "calls");
+    const at = {
+      tegra: path.join(root, "tegra-release"),
+      efivars: path.join(root, "efivars"),
+      guard: path.join(root, "sbin", "clawbox-nvme-boot-order"),
+      units: path.join(root, "systemd"),
+    };
+    for (const d of [bin, guardSrc, at.efivars]) mkdirSync(d, { recursive: true });
+    writeFileSync(at.tegra, "# R36 (release), REVISION: 4.3\n");
+    writeFileSync(calls, "");
+    writeFileSync(
+      path.join(guardSrc, "clawbox-nvme-boot-order.sh"),
+      '#!/bin/sh\n[ "${1:-}" = --check ] && { echo "NVMe first"; exit 0; }\necho "order already right"\n',
+    );
+    writeFileSync(path.join(guardSrc, "clawbox-nvme-boot-order.service"), "[Unit]\nDescription=fixture\n");
+    for (const t of TOOLS) {
+      const found = spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf-8" }).stdout.trim();
+      expect(found, `${t} on the runner`).not.toBe("");
+      symlinkSync(found, path.join(bin, t));
+    }
+    if (opts.efibootmgr) {
+      writeFileSync(path.join(bin, "efibootmgr"), "#!/bin/sh\nexit 0\n");
+      chmodSync(path.join(bin, "efibootmgr"), 0o755);
+    }
+
+    const start = SH.indexOf("\nstep_uefi_boot_order() {\n");
+    expect(start).toBeGreaterThan(-1);
+    let fn = SH.slice(start + 1, SH.indexOf("\n}\n", start) + 2);
+    // The seam: every host path the step names is there to be moved.
+    for (const p of HOST_PATHS) expect(fn, `step_uefi_boot_order names ${p}`).toContain(p);
+    fn = fn
+      .replaceAll("/etc/nv_tegra_release", at.tegra)
+      .replaceAll("/sys/firmware/efi/efivars", at.efivars)
+      .replaceAll("/usr/local/sbin/clawbox-nvme-boot-order", at.guard)
+      .replaceAll("/etc/systemd/system", at.units);
+    for (const p of HOST_PATHS) expect(fn).not.toContain(p);
+
+    const program = [
+      "set -euo pipefail",
+      `CALLS=${JSON.stringify(calls)}`,
+      `BIN=${JSON.stringify(bin)}`,
+      `SRC_DIR=${JSON.stringify(src)}`,
+      `APT=${JSON.stringify(opts.apt ?? "")}`,
+      "is_test_mode() { return 1; }",
+      "wait_for_apt() { :; }",
+      `systemctl() { printf 'systemctl %s\\n' "$*" >> "$CALLS"; }`,
+      `install() { printf 'install %s\\n' "$*" >> "$CALLS"; command install "$@"; }`,
+      "apt-get() {",
+      `  printf 'apt-get %s\\n' "$*" >> "$CALLS"`,
+      '  case "$APT" in',
+      "    configures-then-100)",
+      `      printf '#!/bin/sh\\nexit 0\\n' > "$BIN/efibootmgr"; chmod 0755 "$BIN/efibootmgr"`,
+      '      echo "E: Sub-process /usr/bin/dpkg returned an error code (1)" >&2',
+      "      return 100 ;;",
+      "  esac",
+      "}",
+      fn,
+      // As the full install calls it (`|| echo`), which is also optional_step's errexit-off call.
+      'rc=0; step_uefi_boot_order || rc=$?; echo "RC=$rc"',
+    ].join("\n");
+    const bash = path.join(bin, "bash");
+    const r = spawnSync(bash, ["-c", program], { encoding: "utf8", env: testEnv({ PATH: bin, HOME: root }) });
+    const out = `${r.stdout}${r.stderr}`;
+    // Never one of the step's other exits: the gates above are what this case bypasses.
+    expect(out).not.toContain("skipping UEFI boot order guard");
+    expect(out).not.toContain("not NVMe-first after the guard ran");
+    return {
+      rc: /RC=(\d+)/.exec(r.stdout)?.[1],
+      stderr: r.stderr,
+      calls: readFileSync(calls, "utf8").split("\n").filter(Boolean),
+      guardInstalled: existsSync(at.guard),
+      unitInstalled: existsSync(path.join(at.units, "clawbox-nvme-boot-order.service")),
+    };
+  }
+
+  it("installs the guard when apt-get configured efibootmgr and then exited 100", () => {
+    const r = runStep({ efibootmgr: false, apt: "configures-then-100" });
+
+    expect(r.calls).toContain("apt-get install -y -qq efibootmgr");
+    expect(r.stderr).not.toContain(EFIBOOTMGR_WARNING);
+    // apt-get's own error stays visible.
+    expect(r.stderr).toContain("E: Sub-process /usr/bin/dpkg returned an error code (1)");
+    expect(r.guardInstalled).toBe(true);
+    expect(r.unitInstalled).toBe(true);
+    expect(r.rc, r.stderr).toBe("0");
+  });
+
+  it("installs no guard, and warns, when apt-get exited 0 without installing efibootmgr", () => {
+    const r = runStep({ efibootmgr: false, apt: "0-installs-nothing" });
+
+    expect(r.calls).toContain("apt-get install -y -qq efibootmgr");
+    expect(r.stderr.split("\n").filter((l) => l.includes("efibootmgr"))).toEqual([EFIBOOTMGR_WARNING]);
+    expect(r.guardInstalled).toBe(false);
+    expect(r.unitInstalled).toBe(false);
+    expect(r.calls.filter((c) => c.startsWith("install ") || c.startsWith("systemctl "))).toEqual([]);
+    expect(r.rc).toBe("1");
+  });
+
+  it("asks apt-get for nothing when efibootmgr is already there", () => {
+    const r = runStep({ efibootmgr: true });
+
+    expect(r.calls.filter((c) => c.startsWith("apt-get "))).toEqual([]);
+    expect(r.guardInstalled).toBe(true);
+    expect(r.rc, r.stderr).toBe("0");
   });
 });
