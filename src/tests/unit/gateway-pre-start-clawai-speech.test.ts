@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -97,7 +97,7 @@ interface Options {
  * decided the `openai` slot is ours, and the token it took from the ClawBox AI
  * provider entry. `CLAWBOX_DEVICE_STORE` is the env var the shell exports.
  */
-function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boolean; log: string; heldToRemove: string | null } {
+function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boolean; log: string; heldToRemove: string | null; lockApplied: boolean } {
   const {
     routeIsOurs = true,
     deviceTier = MAX_DEVICE_TIER,
@@ -135,7 +135,7 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     LOCK_READER,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
-    "print(json.dumps({'cfg': cfg, 'changed': changed, 'heldToRemove': globals().get('_clawbox_tts_held_to_remove')}))",
+    "print(json.dumps({'cfg': cfg, 'changed': changed, 'heldToRemove': globals().get('_clawbox_tts_held_to_remove'), 'lockApplied': globals().get('_clawbox_tts_lock_applied', False)}))",
   ].join("\n");
   const lines = execFileSync("python3", ["-c", program, file], {
     encoding: "utf-8",
@@ -1086,6 +1086,52 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
     expect(script.slice(write, unlink)).not.toMatch(/except/);
     // The pass itself no longer removes it.
     expect(POLICY).not.toMatch(/os\.unlink\(_held_path\)/);
+  });
+
+  it("does not start the gateway on the old config when the locked rewrite cannot be written either", () => {
+    // The real write block, run against a config file in a directory that
+    // cannot take the temp file (a full disk, a read-only home): both writes
+    // failed. After a locked hold it must stop the start; otherwise it carries
+    // on as it always has.
+    const block = slice("if changed:\n    # Atomic write", "    # It changes nothing in the config, so it needs no write to land first.");
+    const ro = path.join(dir, "ro");
+    mkdirSync(ro);
+    const cfgPath = path.join(ro, "openclaw.json");
+    writeFileSync(cfgPath, "{}");
+    chmodSync(ro, 0o500);
+    try {
+      const run = (applied: boolean) => spawnSync("python3", ["-c", [
+        "import json, os, sys, tempfile",
+        "cfg = {'messages': {}}",
+        "changed = True",
+        `cfg_path = ${JSON.stringify(cfgPath)}`,
+        "_clawbox_tts_held_to_remove = None",
+        `_clawbox_tts_lock_applied = ${applied ? "True" : "False"}`,
+        "def _record_memory_rebuild(_x): pass",
+        "def _record_keyword_only_rebuild(): pass",
+        "_memory_index_changes = None",
+        block,
+        "print('STARTS')",
+      ].join("\n")], { encoding: "utf-8" });
+      const locked = run(true);
+      expect(locked.status).toBe(1);
+      expect(locked.stdout).not.toContain("STARTS");
+      expect(locked.stderr).toMatch(/not started on the old config/);
+      const unlocked = run(false);
+      expect(unlocked.status).toBe(0);
+      expect(unlocked.stdout).toContain("STARTS");
+      expect(unlocked.stderr).toMatch(/starts on the config already on disk/);
+    } finally {
+      chmodSync(ro, 0o700);
+    }
+  });
+
+  it("marks the start as needing its write when the lock held voices aside, and not otherwise", () => {
+    const own = { messages: { tts: { provider: "openai", providers: { "tts-local-cli": { command: "/x" }, openai: { apiKey: "sk-own" } } } } };
+    expect(POLICY).toContain("_clawbox_tts_lock_applied = True");
+    const locked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    expect(locked.lockApplied).toBe(true);
+    expect(migrate(locked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } }).lockApplied).toBe(false);
   });
 
   it("fails closed when the held file cannot be written: the cloud voices are held in place, nothing lost", () => {

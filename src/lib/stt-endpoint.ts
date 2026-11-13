@@ -89,22 +89,31 @@ function keyPath(): string {
   return path.join(resolveConfigRoot(), "data", ".stt-endpoint-key");
 }
 
-/** The stored key, or null when none is on file. Never logged, never answered. */
-export function readSttEndpointKey(): string | null {
+/**
+ * The stored key FOR `baseUrl`, or null when none is on file for it. Never
+ * logged, never answered. The key is stored BOUND to the server it was saved
+ * for (`{"v":1,"for":<baseUrl>,"key":…}`), so whatever a reader saw of the
+ * record, a key is only ever handed out for the address it belongs to — no
+ * interleaving of saves (A → B → A) can pair one server's key with another's
+ * address. A file in any other shape is no key.
+ */
+export function readSttEndpointKey(baseUrl: string): string | null {
   try {
-    const key = fs.readFileSync(keyPath(), "utf-8").trim();
+    const stored = JSON.parse(fs.readFileSync(keyPath(), "utf-8")) as { v?: unknown; for?: unknown; key?: unknown } | null;
+    if (!stored || stored.v !== 1 || stored.for !== baseUrl || typeof stored.key !== "string") return null;
+    const key = stored.key.trim();
     return key ? key : null;
   } catch {
     return null;
   }
 }
 
-/** Written 0600 and atomically (temp + rename), so a crash never leaves half a key. */
-export function writeSttEndpointKey(key: string): void {
+/** Written 0600 and atomically (temp + rename), so a crash never leaves half a key; bound to `baseUrl`. */
+export function writeSttEndpointKey(key: string, baseUrl: string): void {
   const target = keyPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(tmp, key, { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify({ v: 1, for: baseUrl, key }), { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, target);
 }
@@ -149,7 +158,7 @@ export async function readSttEndpointSnapshot(): Promise<{ record: SttEndpointRe
   for (let attempt = 0; attempt < 3; attempt++) {
     const first = await readSttEndpoint();
     if (!first) return null;
-    const key = readSttEndpointKey();
+    const key = readSttEndpointKey(first.baseUrl);
     const again = await readSttEndpoint();
     if (again && again.baseUrl === first.baseUrl && again.model === first.model) return { record: first, key };
   }

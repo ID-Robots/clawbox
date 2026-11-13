@@ -84,7 +84,7 @@ async function status() {
       local: { installed: local.installed, label: "On this box", detail: local.detail },
       // The owner's own server. The key is never answered — only whether one is on file.
       endpoint: endpoint
-        ? { configured: true, label: "Your speech server", baseUrl: endpoint.baseUrl, model: endpoint.model, apiKeySet: readSttEndpointKey() !== null }
+        ? { configured: true, label: "Your speech server", baseUrl: endpoint.baseUrl, model: endpoint.model, apiKeySet: readSttEndpointKey(endpoint.baseUrl) !== null }
         : { configured: false, label: "Your speech server" },
     },
     // The engines this box can actually use, in the order it tries them. An

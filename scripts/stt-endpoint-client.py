@@ -10,7 +10,8 @@ chat microphone asks the same server from src/lib/stt-endpoint.ts.
 It reads the same two things that module does, from the app's own data
 directory (this script lives in <app>/scripts/):
   - the record `stt_endpoint` = {baseUrl, model} in data/config.json;
-  - the optional key in data/.stt-endpoint-key (0600). Never printed.
+  - the optional key in data/.stt-endpoint-key (0600), bound to the address it
+    was saved for. Never printed.
 
 THE ADDRESS RULE IS THE SAME, and it is applied before a byte is sent: the
 host is resolved and every address must be loopback or on the private LAN
@@ -121,12 +122,19 @@ def read_record():
     return base, model
 
 
-def read_key():
+def read_key(base):
+    """The key stored FOR `base` (src/lib/stt-endpoint.ts binds it to the
+    address it was saved for), or None: a key bound to any other address, or a
+    file in any other shape, is never sent."""
     try:
         with open(KEY_FILE, encoding="utf-8") as fh:
-            return fh.read().strip() or None
-    except OSError:
+            stored = json.load(fh)
+    except (OSError, ValueError):
         return None
+    if not isinstance(stored, dict) or stored.get("v") != 1 or stored.get("for") != base:
+        return None
+    key = stored.get("key")
+    return key.strip() or None if isinstance(key, str) else None
 
 
 def main():
@@ -139,17 +147,13 @@ def main():
         fail("the saved speech server address is not http(s)")
     if not pin_host(parsed.hostname or ""):
         fail("the speech server is not on this box or the local network; nothing was sent")
-    # The key and the record as ONE pair, read after the address was pinned: the
-    # record, the key, the record again (the save writes key-off, record, new
-    # key), so a save that lands meanwhile never sends one server's key to
-    # another's address. A record that keeps changing sends nothing.
-    key = None
-    for _ in range(3):
-        key = read_key()
-        if read_record() == (base, model):
-            break
-    else:
-        fail("the saved speech server kept changing; nothing was sent")
+    # The key is bound to the address it was saved for, so it is read FOR the
+    # pinned address: whatever saves land meanwhile, only that address's own
+    # key can be sent to it. The record read again after it: a server that was
+    # replaced while this ran is not asked at all.
+    key = read_key(base)
+    if read_record() != (base, model):
+        fail("the saved speech server changed while the voice note was sent; nothing was sent")
 
     try:
         with open(audio_path, "rb") as fh:
