@@ -591,6 +591,12 @@ fi
 # pinned, `claude-ds --effort ultracode` against a stored fixed level would
 # silently stay at that level. So `claude-ds --effort low` still means low.
 EFFORT="${CLAUDE_DS_EFFORT:-${OWNER_EFFORT:-xhigh}}"
+# The box's own engine never runs on ultracode (src/lib/coding-agent.ts
+# effortOnProvider): it answers one request at a time with thinking off, so
+# the Workflow fan-out would only queue on it. The same xhigh, whoever asked —
+# an older run record, or the owner's stored choice in a terminal. A caller's
+# own --effort still wins below.
+if [ "$PROVIDER" = "local" ] && [ "$EFFORT" = "ultracode" ]; then EFFORT=xhigh; fi
 EFFORT_ARGS=()
 wants_own_effort=0
 wants_own_sources=0

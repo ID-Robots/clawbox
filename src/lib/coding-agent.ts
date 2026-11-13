@@ -6894,6 +6894,18 @@ export function fileDenyRules(allowRules: readonly string[] = []): string[] {
     // deny, and the allow rule is what would open it once it appears.
     for (const { dir } of open) denyEntries(dir, [], (entry) => unlocked.includes(path.join(dir, entry)));
   }
+  // A harness state folder its override moved (harnessStateDir) is not where
+  // the list above looks: denied whole wherever it is, unless it is one of the
+  // listed folders after all. Never a filesystem root or the home itself — an
+  // override that broad is a mistake, and its rule would shut the run out of
+  // its own folder.
+  for (const moved of [process.env.CLAUDE_DS_CONFIG_DIR, process.env.CLAUDE_DS_LOCAL_CONFIG_DIR]) {
+    if (typeof moved !== "string" || !path.isAbsolute(moved)) continue;
+    const dir = path.resolve(moved);
+    if (dir === path.parse(dir).root || dir === home) continue;
+    if (HARNESS_STATE_SUBTREES.some((sub) => path.join(home, sub) === dir)) continue;
+    denyTree(dir);
+  }
   denyEntries(DATA_DIR, DATA_SECRET_FILES, (entry) => DATA_DIR_PUBLIC_SUBTREES.has(entry));
   denyEntries(CONFIG_ROOT, [".env"], (entry) => path.join(CONFIG_ROOT, entry) === DATA_DIR);
   return rules;
@@ -7820,7 +7832,10 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   }
   // The owner's setting wins over anything inherited: this is the knob the
   // Coding Agent app writes, and a stale shell variable must not override it.
-  if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
+  // As the provider runs it (effortOnProvider): the wrapper turns an
+  // ultracode here into `--effort ultracode`, so a `local` run's — a draft's,
+  // an older record's — is clamped on this side as well as in the argv.
+  if (opts.effort) env.CLAUDE_DS_EFFORT = opts.provider ? effortOnProvider(opts.provider, opts.effort) : opts.effort;
   // Which account pays. Always written, never left to whatever the web
   // server's own environment happens to carry: an inherited CLAUDE_DS_PROVIDER
   // would decide who is billed for a run nobody asked to move.
