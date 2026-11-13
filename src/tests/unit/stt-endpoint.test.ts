@@ -180,14 +180,23 @@ describe("the key file", () => {
   });
 
   it("is written 0600, read back trimmed, and removed", () => {
-    expect(readSttEndpointKey()).toBeNull();
-    writeSttEndpointKey("k-123");
+    expect(readSttEndpointKey(RECORD.baseUrl)).toBeNull();
+    writeSttEndpointKey("k-123", RECORD.baseUrl);
     const file = path.join(root, "data", ".stt-endpoint-key");
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
-    expect(readSttEndpointKey()).toBe("k-123");
+    expect(readSttEndpointKey(RECORD.baseUrl)).toBe("k-123");
     deleteSttEndpointKey();
     deleteSttEndpointKey();
-    expect(readSttEndpointKey()).toBeNull();
+    expect(readSttEndpointKey(RECORD.baseUrl)).toBeNull();
+  });
+
+  it("hands a key out only for the address it was saved for (TASK-2501)", () => {
+    writeSttEndpointKey("key-of-b", "http://127.0.0.2:8000/v1");
+    expect(readSttEndpointKey(RECORD.baseUrl)).toBeNull();
+    expect(readSttEndpointKey("http://127.0.0.2:8000/v1")).toBe("key-of-b");
+    // A bare key (no binding) is no key.
+    fs.writeFileSync(path.join(root, "data", ".stt-endpoint-key"), "bare");
+    expect(readSttEndpointKey(RECORD.baseUrl)).toBeNull();
   });
 });
 

@@ -710,7 +710,7 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     expect(store.get("stt_primary")).toBe("endpoint");
     expect(store.get("stt_choice_source")).toBe("owner");
     const fs = await import("fs");
-    expect(fs.readFileSync(keyFile(), "utf-8")).toBe("lan-key");
+    expect(JSON.parse(fs.readFileSync(keyFile(), "utf-8"))).toEqual({ v: 1, for: ENDPOINT, key: "lan-key" });
     const models = JSON.parse(batchMock.mock.calls.at(-1)![0].find((op: string[]) => op[0] === "tools.media.models")[1]);
     expect(models[0].args[0]).toMatch(/scripts\/stt-endpoint-client\.py$/);
     expect(restartMock).toHaveBeenCalled();
@@ -744,7 +744,7 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     await POST(endpointPost({ baseUrl: ENDPOINT, apiKey: "k1" }));
     await POST(endpointPost({ baseUrl: `${ENDPOINT}`, model: "other" }));
     const fs = await import("fs");
-    expect(fs.readFileSync(keyFile(), "utf-8")).toBe("k1");
+    expect(JSON.parse(fs.readFileSync(keyFile(), "utf-8"))).toEqual({ v: 1, for: ENDPOINT, key: "k1" });
     await POST(endpointPost({ baseUrl: OTHER }));
     expect(fs.existsSync(keyFile())).toBe(false);
   });

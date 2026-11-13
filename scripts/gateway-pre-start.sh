@@ -5005,6 +5005,9 @@ CLAWBOX_TTS_LOCAL_PROVIDER_ID = "tts-local-cli"
 CLAWBOX_TTS_HELD_PREFIX = "clawbox-held--"
 # The held file, removed only once the config it was restored into is written.
 _clawbox_tts_held_to_remove = None
+# Set when this start held cloud voices aside under the lock: the config on
+# disk still lets them speak, so it must not be started on if the write fails.
+_clawbox_tts_lock_applied = False
 
 
 def _clawbox_tts_is_local(_id):
@@ -5101,6 +5104,8 @@ def _clawbox_tts_lock_pass():
                     _target["providers"].setdefault(CLAWBOX_TTS_HELD_PREFIX + "provider", {"provider": _target.get("provider"), "selected": _key})
                 _target["provider"] = _key
         changed = True
+        global _clawbox_tts_lock_applied
+        _clawbox_tts_lock_applied = True
         if _in_file:
             print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
         else:
@@ -5577,6 +5582,17 @@ if changed:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+        if _clawbox_tts_lock_applied:
+            # The one exception to "carry on" above: under the local-only AI
+            # lock (TASK-2501) the config on disk still lets cloud voices
+            # speak, so starting on it would break the lock. Failing closed
+            # costs the gateway this start; the next one tries the write again.
+            print(
+                "  ERROR: local-only AI is on and the gateway config that holds the cloud voices aside could not be written (%s: %s); the gateway is not started on the old config"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(
             "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
             % (type(exc).__name__, exc),

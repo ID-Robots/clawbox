@@ -51,7 +51,7 @@ function noStore<T>(body: T, init?: ResponseInit) {
 async function view() {
   const record = await readSttEndpoint();
   return record
-    ? { configured: true, baseUrl: record.baseUrl, model: record.model, apiKeySet: readSttEndpointKey() !== null }
+    ? { configured: true, baseUrl: record.baseUrl, model: record.model, apiKeySet: readSttEndpointKey(record.baseUrl) !== null }
     : { configured: false };
 }
 
@@ -127,7 +127,7 @@ export async function POST(req: Request) {
       // that origin only, so re-aiming the endpoint never mails the old
       // server's key to a new host.
       const keptKey = !input.clearApiKey && saved && originOf(saved.baseUrl) === originOf(input.value.baseUrl)
-        ? readSttEndpointKey()
+        ? readSttEndpointKey(saved.baseUrl)
         : null;
       const apiKey = input.apiKey ?? keptKey;
       const probe = await probeSttEndpoint(input.value, apiKey);
@@ -145,7 +145,7 @@ export async function POST(req: Request) {
       // file — never one server's key to another.
       deleteSttEndpointKey();
       await writeSttEndpoint(input.value);
-      if (apiKey) writeSttEndpointKey(apiKey);
+      if (apiKey) writeSttEndpointKey(apiKey, input.value.baseUrl);
       await setSttPrimary("endpoint");
       const warning = await alignChannels();
       return noStore({ ...(await view()), ok: true, latencyMs: probe.latencyMs, ...(warning ? { warning } : {}) });
