@@ -142,6 +142,17 @@ describe("a document a member's own tool call produced (the staff MCP relay's pr
     expect(await read(ALICE, aDoc)).toBe(200);
   });
 
+  it("never makes a recent owner's file a member's because their tool result NAMES it: it must be created during the call", async () => {
+    const ownersDoc = write(path.join(mediaRoot(), "word-docs", "board-minutes.docx"));
+    await new Promise((r) => setTimeout(r, 60));
+    const callStart = Date.now();
+    fs.writeFileSync(ownersDoc, "PK touched during the call");
+    const { recorded, refused } = await toolClaim("alice", [ownersDoc], callStart);
+    expect(recorded).toEqual([]);
+    expect(refused.map((r) => r.reason)).toEqual(["not_this_call"]);
+    expect(await read(ALICE, ownersDoc)).toBe(404);
+  });
+
   it("never makes a shared-media file a member's because their REPLY names it — not even one written during their turn", async () => {
     // The owner's document, written while Alice's turn runs, never recorded.
     const ownersDoc = write(path.join(mediaRoot(), "word-docs", "payroll.docx"));

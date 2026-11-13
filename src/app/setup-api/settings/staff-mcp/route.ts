@@ -44,6 +44,8 @@ const NO_STORE = { "Cache-Control": "no-store" };
 
 /** The member a credential was for went away while the change waited for the store. */
 class UserGoneError extends Error {}
+/** The grant a credential was for was withdrawn, or moved to the other runtime, while the change waited for the store. */
+class GrantGoneError extends Error {}
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_GRANTED = 32;
 
@@ -267,6 +269,10 @@ export async function POST(req: Request) {
       // was removed (or replaced by a new one of the same name) meanwhile.
       const { listUsers: usersNow } = await import("@/lib/clawbox-users");
       if (!(await usersNow()).some((u) => u.username === username && u.createdAt === account.createdAt && u.sv === account.sv)) throw new UserGoneError();
+      // The grant too, and its runtime: a grant save queued ahead of this one
+      // may have withdrawn it or re-made it on the other runtime, and a
+      // credential must never land on a grant it was not set for.
+      if (!Object.hasOwn(store.servers, server) || (store.servers[server].harness ?? "openclaw") !== runtime) throw new GrantGoneError();
       const mine = { ...(store.credentials[username] ?? {}) };
       if (credential) mine[server] = credential;
       else delete mine[server];
@@ -284,6 +290,7 @@ export async function POST(req: Request) {
     store = await updateStaffMcpStore(change);
   } catch (err) {
     if (err instanceof UserGoneError) return refuse(400, "unknown_user", "That user is not a member of staff on this box any more.");
+    if (err instanceof GrantGoneError) return refuse(400, "unknown_server", `"${String(body.server).slice(0, 64)}" is not granted to members of staff on this assistant any more.`);
     return refuse(500, "store_write_failed", "The staff tools settings could not be saved. Nothing was changed.");
   }
   console.log("[staff-mcp] the owner changed the staff MCP grants");
