@@ -190,3 +190,60 @@ describe("the key file", () => {
     expect(readSttEndpointKey()).toBeNull();
   });
 });
+
+describe("lanFetch — the address checked is the address dialled", () => {
+  let server: import("http").Server;
+  let port = 0;
+  let hits: { url?: string; host?: string; body: string }[];
+
+  beforeEach(async () => {
+    const http = await import("http");
+    hits = [];
+    server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        hits.push({ url: req.url, host: req.headers.host, body: Buffer.concat(chunks).toString("latin1") });
+        if (req.url === "/redirect") {
+          res.writeHead(302, { location: "http://93.184.216.34/" });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ text: "heard" }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    port = (server.address() as import("net").AddressInfo).port;
+  });
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("dials the checked address of a name, sending the form and keeping the Host", async () => {
+    const lookup = vi.fn(async () => [{ address: "127.0.0.1" }]);
+    const out = await transcribeAtEndpoint(
+      { baseUrl: `http://asr.lan:${port}/v1`, model: "m1" },
+      "k",
+      AUDIO,
+      { lookupImpl: lookup },
+    );
+    expect(out).toEqual({ ok: true, text: "heard" });
+    expect(hits[0].host).toBe(`asr.lan:${port}`);
+    expect(hits[0].body).toContain('name="model"\r\n\r\nm1');
+  });
+
+  it("never connects when the name answers outside the network at connect time", async () => {
+    // Rebinding: whatever the check saw, the connection's own lookup is the one that counts.
+    const fetchImpl = (await import("@/lib/stt-endpoint")).lanFetch(async () => [{ address: "93.184.216.34" }]);
+    await expect(fetchImpl(`http://asr.lan:${port}/v1/models`)).rejects.toThrow();
+    expect(hits).toHaveLength(0);
+  });
+
+  it("answers a redirect as it is and never follows it", async () => {
+    const fetchImpl = (await import("@/lib/stt-endpoint")).lanFetch(async () => [{ address: "127.0.0.1" }]);
+    const res = await fetchImpl(`http://127.0.0.1:${port}/redirect`);
+    expect(res.status).toBe(302);
+    expect(hits).toHaveLength(1);
+  });
+});

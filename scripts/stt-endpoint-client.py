@@ -64,23 +64,35 @@ def is_lan(addr):
     return any(ip in net for net in _LAN if net.version == ip.version)
 
 
-def host_allowed(host):
-    host = host.strip("[]").lower().rstrip(".")
-    if not host:
+_real_getaddrinfo = socket.getaddrinfo
+
+
+def pin_host(host):
+    """Resolve `host` ONCE, check every answer, and pin the connection to it.
+
+    THE ADDRESS CHECKED IS THE ADDRESS DIALLED: after this, every lookup of
+    the name in this process answers the checked addresses only, so a DNS
+    answer that changes between the check and the connect (rebinding) cannot
+    carry a voice note off the network. Answers False when the host is not on
+    this box or the local network, or does not resolve.
+    """
+    bare = host.strip("[]").lower().rstrip(".")
+    if not bare:
         return False
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
     try:
-        ipaddress.ip_address(host.split("%")[0])
-        return is_lan(host)
-    except ValueError:
-        pass
-    try:
-        infos = socket.getaddrinfo(host, None)
+        infos = _real_getaddrinfo(bare, None)
     except (socket.gaierror, UnicodeError, OSError):
         return False
-    addrs = {info[4][0] for info in infos}
-    return bool(addrs) and all(is_lan(a) for a in addrs)
+    if not infos or not all(is_lan(info[4][0]) for info in infos):
+        return False
+
+    def pinned(name, port, *args, **kwargs):
+        if isinstance(name, str) and name.strip("[]").lower().rstrip(".") == bare:
+            return [(f, t, p, c, (sa[0], port) + tuple(sa[2:])) for (f, t, p, c, sa) in _real_getaddrinfo(infos[0][4][0], port, *args, **kwargs)]
+        raise OSError("stt-endpoint-client connects to the checked speech server only")
+
+    socket.getaddrinfo = pinned
+    return True
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -107,7 +119,7 @@ def main():
     parsed = urllib.parse.urlsplit(base)
     if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
         fail("the saved speech server address is not http(s)")
-    if not host_allowed(parsed.hostname or ""):
+    if not pin_host(parsed.hostname or ""):
         fail("the speech server is not on this box or the local network; nothing was sent")
     key = None
     try:

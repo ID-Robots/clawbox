@@ -528,8 +528,22 @@ export async function speakWithHermes(
     if (!voice.localRegistered || !voice.localCommand) {
       return { ok: false, code: "cloud_ai_locked", status: 409, reason: `${HERMES_VOICE_LOCKED} No on-box voice is installed.` };
     }
-    if ((voice.provider ?? "").trim().toLowerCase() !== HERMES_LOCAL_TTS_PROVIDER) {
+    const current = (voice.provider ?? "").trim().toLowerCase();
+    if (current !== HERMES_LOCAL_TTS_PROVIDER) {
       try {
+        // Remembered FIRST, the way the boot plan does it, so lifting the lock
+        // gives the box back what it had: ClawBox AI's own cloud voice through
+        // the plan's stand-down (restored on an entitled box), an owner's own
+        // pick through the lock marker. Hermes' factory `edge` and an unset
+        // selection are nobody's choice and are not remembered.
+        const markers = await import("@/lib/hermes-voice-standdown");
+        if (current === HERMES_CLOUD_TTS_PROVIDER && !voice.unread.cloudRoute && !voice.unread.cloudKey) {
+          const { CLAWBOX_AI_PROXY_URL } = await import("@/lib/harness/credentials");
+          if (hermesCloudRouteIsOurs(voice, CLAWBOX_AI_PROXY_URL)) await markers.rememberHermesVoiceStanddown(voice.cloudVoice);
+          else await markers.rememberHermesVoiceLock(voice.provider ?? "");
+        } else if (current && current !== HERMES_FACTORY_TTS_PROVIDER) {
+          await markers.rememberHermesVoiceLock(voice.provider ?? "");
+        }
         await set(KEYS.provider, HERMES_LOCAL_TTS_PROVIDER);
       } catch {
         return { ok: false, code: "cloud_ai_locked", status: 503, reason: "Could not move this box onto its own voice." };

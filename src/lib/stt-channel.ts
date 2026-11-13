@@ -32,7 +32,9 @@ import {
   runOpenclawConfigUnset,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
-import { get as storeGet, set as storeSet } from "@/lib/config-store";
+import { promises as fsp } from "fs";
+import path from "@/lib/runtime-path";
+import { resolveConfigRoot } from "@/lib/config-store";
 import { cloudAiLockOn } from "@/lib/feature-engine";
 import { createSerialLock } from "@/lib/serial-lock";
 import { readSttEndpoint, STT_ENDPOINT_CLIENT_SCRIPT } from "@/lib/stt-endpoint";
@@ -222,11 +224,24 @@ function isClawboxAudioRow(row: unknown): boolean {
 }
 
 /**
- * The device-store mark that ClawBox itself switched channel transcription
- * off for the local-only AI lock, so only ClawBox's own switch is ever turned
- * back on (TASK-2501).
+ * The mark that ClawBox itself switched channel transcription off for the
+ * local-only AI lock, so only ClawBox's own switch is ever turned back on
+ * (TASK-2501). A file beside the device store rather than a store key, because
+ * gateway-pre-start.sh sets and clears the same switch at every gateway start
+ * and must not write the Next app's store: `data/.channel-audio-lock-off`.
  */
-export const CHANNEL_AUDIO_LOCK_OFF_KEY = "stt_channel_audio_lock_off";
+export function channelAudioLockOffPath(): string {
+  return path.join(resolveConfigRoot(), "data", ".channel-audio-lock-off");
+}
+
+async function lockOffMarked(): Promise<boolean> {
+  try {
+    await fsp.access(channelAudioLockOffPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 type AudioSwitch = "off" | "restore" | null;
 
@@ -241,19 +256,22 @@ type AudioSwitch = "off" | "restore" | null;
  * (`restore`). An `enabled: false` the owner set is theirs and never touched.
  */
 async function audioSwitchFor(off: boolean, current: unknown): Promise<AudioSwitch> {
-  const ours = (await storeGet(CHANNEL_AUDIO_LOCK_OFF_KEY).catch(() => null)) === true;
+  const ours = await lockOffMarked();
   if (off) return current === false ? null : "off";
   return ours ? "restore" : null;
 }
 
 async function applyAudioSwitch(change: AudioSwitch, current: unknown): Promise<void> {
   if (change === "off") {
+    // The mark first: a switch ClawBox turned off without one would never be
+    // turned back on.
+    await fsp.mkdir(path.dirname(channelAudioLockOffPath()), { recursive: true });
+    await fsp.writeFile(channelAudioLockOffPath(), "", { mode: 0o600 });
     await runOpenclawConfigSetBatch([["tools.media.audio.enabled", "false", "--json"]]);
-    await storeSet(CHANNEL_AUDIO_LOCK_OFF_KEY, true);
     console.warn("[stt-channel] channel voice notes are not transcribed: local-only AI is on and this box has no engine of its own");
   } else if (change === "restore") {
     if (current === false) await runOpenclawConfigUnset("tools.media.audio.enabled");
-    await storeSet(CHANNEL_AUDIO_LOCK_OFF_KEY, undefined);
+    await fsp.rm(channelAudioLockOffPath(), { force: true });
   }
 }
 

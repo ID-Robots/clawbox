@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1045,10 +1045,40 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
     expect(speech(cfg)).toMatchObject({ baseUrl: PROXY, apiKey: TOKEN });
   });
 
-  it("leaves an owner's own speech entry alone", () => {
-    const own = { messages: { tts: { providers: { openai: { baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" } } } } };
-    const { cfg, changed } = migrate(own, { extraStore: { ai_cloud_lock: true } });
-    expect(changed).toBe(false);
-    expect(speech(cfg)).toEqual({ baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" });
+  it("holds an owner's own cloud voices aside, points the gateway at the box's voice, and gives everything back unlocked", () => {
+    const local = { command: "/home/clawbox/clawbox/scripts/openclaw/clawbox-tts.sh", outputFormat: "wav" };
+    const own = {
+      messages: {
+        tts: {
+          provider: "elevenlabs",
+          providers: {
+            "tts-local-cli": local,
+            openai: { baseUrl: "http://192.168.1.9:8880/v1", apiKey: "sk-own" },
+            elevenlabs: { apiKey: "el-own" },
+            microsoft: { enabled: true },
+          },
+        },
+      },
+    };
+    const locked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    expect(locked.changed).toBe(true);
+    const tts = (locked.cfg.messages as { tts: Record<string, unknown> }).tts;
+    expect(tts.provider).toBe("tts-local-cli");
+    expect(tts.providers).toEqual({ "tts-local-cli": local, microsoft: { enabled: false } });
+    const heldFile = path.join(dir, ".tts-local-only-held.json");
+    expect(statSync(heldFile).mode & 0o777).toBe(0o600);
+    expect(locked.log).toMatch(/own voice only/);
+
+    const unlocked = migrate(locked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: false } });
+    expect(unlocked.cfg).toEqual(own);
+    expect(existsSync(heldFile)).toBe(false);
+  });
+
+  it("leaves the voices in place when they cannot be held aside", () => {
+    const own = { messages: { tts: { provider: "elevenlabs", providers: { "tts-local-cli": { command: "/x" }, elevenlabs: { apiKey: "el-own" } } } } };
+    mkdirSync(path.join(dir, ".tts-local-only-held.json.tmp"));
+    const { cfg, log } = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    expect(cfg).toEqual(own);
+    expect(log).toMatch(/could not be held aside/);
   });
 });

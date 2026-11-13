@@ -617,19 +617,41 @@ describe("POST /setup-api/stt — the write", () => {
 
 // TASK-2501 PR-D: the owner's own speech server, and the local-only AI lock.
 describe("the owner's own speech server and the local-only AI lock", () => {
-  const ENDPOINT = "http://192.168.1.20:8000/v1";
+  // Real servers on loopback: the probe dials them on Node's own http client
+  // (stt-endpoint.ts `lanFetch`), so `fetch` must never be asked.
+  let ENDPOINT = "";
+  let OTHER = "";
+  let probes: string[];
+  let servers: import("http").Server[];
   let fetchMock: ReturnType<typeof vi.fn>;
+
+  async function serve(): Promise<string> {
+    const http = await import("http");
+    const server = http.createServer((req, res) => {
+      probes.push(`${req.headers.host}${req.url}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    return `http://127.0.0.1:${(server.address() as import("net").AddressInfo).port}/v1`;
+  }
 
   beforeEach(async () => {
     const fs = await import("fs");
     const os = await import("os");
     const path = await import("path");
     configRoot.dir = fs.mkdtempSync(path.join(os.tmpdir(), "stt-endpoint-route-"));
-    fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    probes = [];
+    servers = [];
+    ENDPOINT = await serve();
+    OTHER = await serve();
+    fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
   });
   afterEach(async () => {
     vi.unstubAllGlobals();
+    await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     (await import("fs")).rmSync(configRoot.dir, { recursive: true, force: true });
   });
 
@@ -682,7 +704,8 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     const body = await res.json();
     expect(body).toMatchObject({ ok: true, configured: true, baseUrl: ENDPOINT, model: "asr", apiKeySet: true });
     expect(JSON.stringify(body)).not.toContain("lan-key");
-    expect(fetchMock.mock.calls[0][0]).toBe(`${ENDPOINT}/models`);
+    expect(probes).toEqual([`${new URL(ENDPOINT).host}/v1/models`]);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(store.get("stt_endpoint")).toEqual({ baseUrl: ENDPOINT, model: "asr" });
     expect(store.get("stt_primary")).toBe("endpoint");
     expect(store.get("stt_choice_source")).toBe("owner");
@@ -707,11 +730,12 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     const refused = await POST(endpointPost({ baseUrl: "http://8.8.8.8/v1" }));
     expect(refused.status).toBe(400);
     expect((await refused.json()).code).toBe("address_refused");
-    fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
-    const down = await POST(endpointPost({ baseUrl: ENDPOINT }));
+    const dead = ENDPOINT;
+    await new Promise<void>((resolve) => servers.shift()!.close(() => resolve()));
+    const down = await POST(endpointPost({ baseUrl: dead }));
     expect(down.status).toBe(502);
     expect((await down.json()).code).toBe("unreachable");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(probes).toEqual([]);
     expect(store.get("stt_endpoint")).toBeUndefined();
   });
 
@@ -721,7 +745,7 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     await POST(endpointPost({ baseUrl: `${ENDPOINT}`, model: "other" }));
     const fs = await import("fs");
     expect(fs.readFileSync(keyFile(), "utf-8")).toBe("k1");
-    await POST(endpointPost({ baseUrl: "http://192.168.1.21:8000/v1" }));
+    await POST(endpointPost({ baseUrl: OTHER }));
     expect(fs.existsSync(keyFile())).toBe(false);
   });
 
@@ -730,7 +754,7 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     const { POST, DELETE } = await endpointRoute();
     expect((await POST(endpointPost({ baseUrl: ENDPOINT }))).status).toBe(403);
     expect((await DELETE(new Request("http://box/setup-api/stt/endpoint", { method: "DELETE" }))).status).toBe(403);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(probes).toEqual([]);
   });
 
   it("removing the chosen server goes back to the box's engine under the lock, to the default without it", async () => {
