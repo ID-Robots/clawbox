@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
+import { processStore } from "@/lib/process-store";
 
 // `configuring` is the intermediate state held while the device-side
 // configure pipeline is restarting the gateway after upstream issued a
@@ -11,6 +12,17 @@ import { DATA_DIR } from "@/lib/config-store";
 // page even though the server already finished.
 export type ClawAiConnectStatus = "pending" | "configuring" | "complete" | "error";
 export type ClawAiTier = "free" | "flash" | "pro";
+
+/**
+ * What the token the portal issues is FOR.
+ *
+ * - `primary` / `local` — ClawBox AI becomes a chat model of this box, in that
+ *   slot; the poll hands the token to the configure route (or to Hermes).
+ * - `entitlement` — the subscription is linked for its PLAN alone
+ *   (`@/lib/subscription-link`, TASK-2501): plan-gated features unlock, and no
+ *   provider, model or gateway setting is touched.
+ */
+export type ClawAiConnectScope = "primary" | "local" | "entitlement";
 
 // Device-authorization session: a code the user types on the portal,
 // plus the device_id we use to poll the upstream service for token
@@ -24,7 +36,7 @@ export interface ClawAiConnectSession {
   createdAt: number;
   status: ClawAiConnectStatus;
   provider: "clawai";
-  scope: "primary" | "local";
+  scope: ClawAiConnectScope;
   tier?: ClawAiTier;
   deviceName?: string;
   verificationUrl?: string;
@@ -92,11 +104,47 @@ export function createClawAiDeviceId(): string {
   return crypto.randomBytes(24).toString("base64url");
 }
 
-export async function writeClawAiSession(session: ClawAiConnectSession) {
+/**
+ * Every write of the session goes through one queue, shared by every copy of
+ * this module in the process, so a conditional write
+ * ({@link writeClawAiSessionIfCurrent}) reads and writes with no other write
+ * in between.
+ */
+const sessionWrites = processStore("clawai-connect:session-writes", () => ({ queue: Promise.resolve() as Promise<unknown> }));
+
+function serializedSessionWrite<T>(work: () => Promise<T>): Promise<T> {
+  const next = sessionWrites.queue.then(work, work);
+  sessionWrites.queue = next.catch(() => undefined);
+  return next;
+}
+
+async function writeSessionNow(session: ClawAiConnectSession) {
   await fs.mkdir(DATA_DIR, { recursive: true });
   const tmpPath = untraced(`${STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`);
   await fs.writeFile(tmpPath, JSON.stringify(session), { mode: 0o600 });
   await fs.rename(tmpPath, STATE_PATH);
+}
+
+export async function writeClawAiSession(session: ClawAiConnectSession) {
+  await serializedSessionWrite(() => writeSessionNow(session));
+}
+
+/**
+ * Write `next` only while the stored session is still `owner`'s — the same
+ * device code, started at the same moment. A finish that waited on the portal
+ * must not replace a newer sign-in someone started meanwhile with its own
+ * ending. Answers whether it wrote.
+ */
+export async function writeClawAiSessionIfCurrent(
+  owner: Pick<ClawAiConnectSession, "device_id" | "createdAt">,
+  next: ClawAiConnectSession,
+): Promise<boolean> {
+  return serializedSessionWrite(async () => {
+    const current = await readClawAiSession();
+    if (!current || current.device_id !== owner.device_id || current.createdAt !== owner.createdAt) return false;
+    await writeSessionNow(next);
+    return true;
+  });
 }
 
 export async function readClawAiSession() {
@@ -108,8 +156,9 @@ export async function readClawAiSession() {
   }
 }
 
+/** Through the same queue as every write: a conditional write never recreates a session cleared meanwhile. */
 export async function clearClawAiSession() {
-  await fs.unlink(STATE_PATH).catch(() => {});
+  await serializedSessionWrite(() => fs.unlink(STATE_PATH).catch(() => {}));
 }
 
 export function isClawAiSessionExpired(session: ClawAiConnectSession) {

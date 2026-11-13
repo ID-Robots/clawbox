@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClawaiTier } from "@/lib/clawbox-ai-tiers";
+import type { ClawAiConnectScope } from "@/lib/clawai-connect";
 import { humanizeApiError } from "@/lib/api-error-message";
 
 // ClawBox AI device-authorisation state machine (RFC 8628 style), lifted out of
@@ -68,7 +69,12 @@ function settleWithin<T>(work: Promise<T>, controller: AbortController, ms: numb
 }
 
 export interface ClawaiDeviceLoginOptions {
-  scope?: "primary" | "local";
+  /**
+   * What the token is for (`ClawAiConnectScope`): a chat model slot, or
+   * `entitlement` — link the subscription for its plan alone, leaving the
+   * box's chat model as it is (TASK-2501).
+   */
+  scope?: ClawAiConnectScope;
   /** Read at start() time so a tier change between renders is picked up. */
   getTier: () => ClawaiTier;
   /** A new attempt is beginning — hosts clear any previous status here. */

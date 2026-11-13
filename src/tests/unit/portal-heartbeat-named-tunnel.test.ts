@@ -225,3 +225,93 @@ describe("revocation", () => {
     expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * TASK-2501: a subscription linked for its plan alone is an account credential
+ * the heartbeat names the box with, so a link-only box can be handed a named
+ * tunnel. When the last account credential leaves the box — an unlink, or a
+ * ClawBox AI sign-out — that hostname is not the box's to serve any more.
+ */
+describe("the named tunnel follows the account off the box", () => {
+  const LINK_TOKEN = "claw_fedcba9876543210fedcba9876543210";
+  const CLAWAI_TOKEN = "claw_0123456789abcdef0123456789abcdef";
+
+  afterEach(async () => {
+    await configStore.set("subscription_link_token", undefined);
+    await configStore.set("clawai_token", CLAWAI_TOKEN);
+  });
+
+  it("a link-only box is provisioned, and unlinking revokes the tunnel and restarts it on the quick one", async () => {
+    await configStore.set("clawai_token", undefined);
+    await configStore.set("subscription_link_token", LINK_TOKEN);
+    fetchMock.mockResolvedValue(ok({ success: true, boxTunnel: { hostname: HOST, token: TOKEN } }));
+    await beat();
+    expect((fetchMock.mock.calls.at(-1) as [string, RequestInit])[1].headers).toMatchObject({ Authorization: `Bearer ${LINK_TOKEN}` });
+    expect(await fs.readFile(CRED, "utf-8")).toContain(`hostname=${HOST}`);
+    cloudflaredState.startTunnelService.mockClear();
+
+    // The unlink route removes the link, then asks this.
+    await configStore.set("subscription_link_token", undefined);
+    expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(true);
+
+    await expect(fs.stat(CRED)).rejects.toThrow();
+    expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not write the tunnel a heartbeat answered after the link was removed", async () => {
+    await configStore.set("clawai_token", undefined);
+    await configStore.set("subscription_link_token", LINK_TOKEN);
+    fetchMock.mockImplementation(async () => {
+      // The unlink lands while the portal answers.
+      await configStore.set("subscription_link_token", undefined);
+      return ok({ success: true, boxTunnel: { hostname: HOST, token: TOKEN } });
+    });
+    await beat();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(fs.stat(CRED)).rejects.toThrow();
+    expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+  });
+
+  it("does not hand one account's answer to another that took its place meanwhile", async () => {
+    await configStore.set("clawai_token", undefined);
+    await configStore.set("subscription_link_token", LINK_TOKEN);
+    fetchMock.mockImplementation(async () => {
+      await configStore.set("subscription_link_token", "claw_99999999999999999999999999999999");
+      return ok({ success: true, boxTunnel: { hostname: HOST, token: TOKEN } });
+    });
+    await beat();
+    await expect(fs.stat(CRED)).rejects.toThrow();
+  });
+
+  it("keeps the tunnel while a ClawBox AI token is still on the box", async () => {
+    await storeCredential();
+    await configStore.set("subscription_link_token", undefined);
+    expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+    expect(await fs.readFile(CRED, "utf-8")).toContain(`hostname=${HOST}`);
+    expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+  });
+
+  it("a heartbeat on a box left with no account token revokes the tunnel — a ClawBox AI sign-out included", async () => {
+    await storeCredential();
+    await configStore.set("clawai_token", undefined);
+    await beat("https://after-sign-out.trycloudflare.com");
+    // Nothing to name the account with, so nothing is sent — and the
+    // hostname the departed account was given is dropped.
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(fs.stat(CRED)).rejects.toThrow();
+    expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not revoke on a store it cannot read — that is not an unpaired box", async () => {
+    await storeCredential();
+    const configPath = path.join(TEST_ROOT, "data", "config.json");
+    const saved = await fs.readFile(configPath, "utf-8");
+    await fs.writeFile(configPath, "{ half-written");
+    try {
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+      expect(await fs.readFile(CRED, "utf-8")).toContain(`hostname=${HOST}`);
+    } finally {
+      await fs.writeFile(configPath, saved);
+    }
+  });
+});

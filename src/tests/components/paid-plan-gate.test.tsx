@@ -232,6 +232,60 @@ describe("the settings-page notice", () => {
 });
 
 describe("the device handoff inside the gate", () => {
+  it("links the subscription for its plan alone, and says the chat model stays (TASK-2501)", async () => {
+    // Pairing here used to make ClawBox AI the box's PRIMARY model as a side
+    // effect of unlocking a feature. The gate now asks for the entitlement
+    // scope, and no model tier: a Free account links and meets the upgrade
+    // card instead of the portal's 402.
+    const startBodies: unknown[] = [];
+    let linked = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url === "/setup-api/ai-models/status") {
+        return json(linked
+          ? { clawaiConfigured: false, subscriptionLinked: true, clawaiPlan: "flash" }
+          : { clawaiConfigured: false, subscriptionLinked: false, clawaiPlan: "free" });
+      }
+      if (url === "/setup-api/ai-models/clawai/start") {
+        startBodies.push(JSON.parse(String(init?.body)));
+        return json({ user_code: "WDJB-MJHT", verification_url: "https://clawbox.com/portal/device", interval: 1 });
+      }
+      if (url === "/setup-api/ai-models/clawai/poll") {
+        linked = true;
+        return json({ status: "complete" });
+      }
+      return json({ installed: true, connected: false, login: null, paths: [] });
+    }));
+
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "connect"));
+    expect(screen.getByTestId("paid-gate-keeps-model")).toHaveTextContent(t("paidGate.signInKeepsModel"));
+    expect(screen.getByTestId("paid-gate-connect-start")).toHaveTextContent(t("paidGate.signInButton"));
+
+    fireEvent.click(screen.getByTestId("paid-gate-connect-start"));
+    await screen.findByTestId("paid-gate-device");
+    expect(startBodies).toEqual([{ scope: "entitlement", tier: "free" }]);
+
+    // The link-only answer satisfies the gate: the card goes.
+    await waitFor(() => expect(screen.queryByTestId("paid-gate")).toBeNull(), { timeout: 8_000 });
+  }, 15_000);
+
+  it("offers to link again, not an upgrade card, when the portal refused the linked token (TASK-2501)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/ai-models/status") {
+        return json({ clawaiConfigured: false, subscriptionLinked: true, subscriptionLinkRejected: true, clawaiPlan: null });
+      }
+      return json({ installed: true, connected: false, login: null, paths: [] });
+    }));
+
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("paid-gate")).toHaveAttribute("data-face", "connect"));
+    expect(screen.getByTestId("paid-gate-connect-start")).toHaveTextContent(t("paidGate.signInButton"));
+  });
+
   it("says it is checking rather than dropping back to the Connect button", async () => {
     // The poll runs every PAID_GATE_POLL_MS and the pairing finishes in
     // between; the card must not read as a failure in that gap.

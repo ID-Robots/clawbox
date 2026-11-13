@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "./runtime-path";
 import { CLOUDFLARED_DIR, getTunnelServiceState, startTunnelService } from "./cloudflared";
-import { get as getConfigValue } from "./config-store";
+import { get as getConfigValue, getKnownMany } from "./config-store";
 import { migrateLegacyPortalUrl } from "./portal-legacy-domain";
 import {
   type NamedTunnelCredential,
@@ -20,6 +20,10 @@ const PORTAL_HEARTBEAT_URL = migrateLegacyPortalUrl(
   "https://clawbox.com/api/portal/devices/heartbeat",
 );
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+// Spelled here rather than imported from `./subscription-link`, which would pull
+// the portal-tier lookup into the heartbeat's graph for one string; the
+// subscription-link suite pins the two spellings together.
+const SUBSCRIPTION_LINK_TOKEN_KEY = "subscription_link_token";
 const MACHINE_ID_FILE = "/etc/machine-id";
 
 // In-memory cache of the last URL we successfully pushed. Survives the lifetime
@@ -92,14 +96,62 @@ function deriveDeviceName(deviceId: string): string {
   return `ClawBox-${suffix}`;
 }
 
-async function readClawAiToken(): Promise<string | null> {
+async function readPortalToken(key: string): Promise<string | null> {
   try {
-    const raw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY);
+    const raw = await getConfigValue(key);
     if (typeof raw !== "string") return null;
     const trimmed = raw.trim();
     return trimmed.startsWith("claw_") ? trimmed : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The credential the heartbeat names the owner's account with: the ClawBox AI
+ * token, or — on a box whose subscription is linked for its plan alone
+ * (TASK-2501) — the link's. The heartbeat registers the DEVICE with the
+ * account (Remote Control's tunnel hangs off it); it spends no AI, so the
+ * link's token is as good an account credential here as the chat one.
+ */
+async function readClawAiToken(): Promise<string | null> {
+  return (await readPortalToken(CLAWBOX_AI_TOKEN_CONFIG_KEY))
+    ?? (await readPortalToken(SUBSCRIPTION_LINK_TOKEN_KEY));
+}
+
+/**
+ * Does the store POSITIVELY hold no account credential — neither the ClawBox AI
+ * token nor a linked subscription's? False when it cannot be read: a store that
+ * failed to open is not an unpaired box, and revoking on it would take the
+ * owner's named hostname away over a read error.
+ */
+async function storeHoldsNoAccountToken(): Promise<boolean> {
+  const { values, known } = await getKnownMany([CLAWBOX_AI_TOKEN_CONFIG_KEY, SUBSCRIPTION_LINK_TOKEN_KEY]);
+  if (!known) return false;
+  const isToken = (raw: unknown) => typeof raw === "string" && raw.trim().startsWith("claw_");
+  return !isToken(values[CLAWBOX_AI_TOKEN_CONFIG_KEY]) && !isToken(values[SUBSCRIPTION_LINK_TOKEN_KEY]);
+}
+
+/**
+ * The account left the box — a subscription unlinked, a ClawBox AI sign-out —
+ * and no other account credential remains: the named tunnel the heartbeat
+ * provisioned for that account must not go on serving its hostname. Revokes it
+ * and drops the tunnel back to the quick one (only restarting a tunnel that is
+ * running). A box still holding either token keeps its tunnel: the hostname is
+ * the device's under that account. Never throws.
+ *
+ * Called by the unlink at once (`/setup-api/ai-models/subscription-link`), and
+ * by every heartbeat that finds no account token, which covers a sign-out.
+ */
+export async function revokeNamedTunnelWithoutAccount(reason: string): Promise<boolean> {
+  try {
+    if (!(await storeHoldsNoAccountToken())) return false;
+    if (!(await readNamedTunnelCredential())) return false;
+    await revokeNamedTunnel(reason);
+    return true;
+  } catch (err) {
+    console.warn("[portal-heartbeat] could not revoke the named tunnel:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
@@ -112,7 +164,12 @@ async function readClawAiToken(): Promise<string | null> {
 async function pushNow(tunnelUrl: string): Promise<void> {
   try {
     const token = await readClawAiToken();
-    if (!token) return;
+    if (!token) {
+      // No account on the box any more: whatever named tunnel an earlier
+      // account was given is not this box's to serve.
+      await revokeNamedTunnelWithoutAccount("no ClawBox account is linked to this box");
+      return;
+    }
 
     const deviceId = await getOrCreateDeviceId();
     const name = deriveDeviceName(deviceId);
@@ -141,7 +198,16 @@ async function pushNow(tunnelUrl: string): Promise<void> {
     if (res.ok) {
       lastPushedUrl = tunnelUrl;
       const answer: unknown = await res.json().catch(() => null);
+      // The account may have left the box (an unlink, a sign-out) or changed
+      // while the request was out: the answer was for the account that asked.
+      if ((await readClawAiToken()) !== token) {
+        await revokeNamedTunnelWithoutAccount("the account left while the heartbeat was answered");
+        return;
+      }
       await applyBoxTunnel(answer, stored);
+      // And should it leave while the credential was written, the unlink's own
+      // revoke may have run before the file landed: ask once more, after it.
+      await revokeNamedTunnelWithoutAccount("the account left while the named tunnel was written");
     } else if (res.status === 401 || res.status === 403) {
       // Token revoked or unpaired — stop trying until a config change clears
       // the in-memory state via process restart.

@@ -23,11 +23,13 @@ export const paidGateEn: Record<string, string> = {
   "paidGate.memoryShardDescription":
     "Memory Shard indexes the folders you choose so the assistant can search your own documents. Available on the Pro and Max plans.",
 
-  // No ClawBox AI account on the box at all: the device-code handoff, the same
-  // one the setup wizard and the Providers page run.
+  // No ClawBox account on the box at all: the device-code handoff the setup
+  // wizard and the Providers page run, in its link-only form (TASK-2501) — it
+  // links the subscription for its plan and leaves the chat model alone.
   "paidGate.signInTitle": "Connect your ClawBox account",
   "paidGate.signInBody": "{feature} needs a ClawBox Pro or Max plan. Connect this box to your ClawBox account, then switch the feature on.",
-  "paidGate.signInButton": "Connect ClawBox AI",
+  "paidGate.signInKeepsModel": "This links your subscription only. The box keeps the AI model it uses now — nothing is switched to ClawBox AI.",
+  "paidGate.signInButton": "Link my subscription",
   "paidGate.signInCancel": "Cancel",
   "paidGate.signInStarting": "Requesting a code…",
 
