@@ -2438,7 +2438,7 @@ async function runOpenclawDoctorFix(): Promise<void> {
       env: doctorChildEnv(),
     }), { timeoutMs, label: "openclaw doctor --fix" });
   } catch (err) {
-    await markOpenclawDoctorDue();
+    logDoctorMarkedDue("did not complete", await markOpenclawDoctorDue());
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
     // its own closing sentence is advice for the command that is blocked —
@@ -2477,8 +2477,24 @@ async function runOpenclawDoctorFix(): Promise<void> {
     return;
   }
   const output = [ran?.stdout, ran?.stderr].map((part) => (typeof part === "string" ? part : "")).join("\n");
-  if (doctorRunCompleted(output)) await recordOpenclawDoctorComplete();
-  else await markOpenclawDoctorDue();
+  if (!doctorRunCompleted(output)) {
+    logDoctorMarkedDue("exited 0 but its migration did not finish", await markOpenclawDoctorDue());
+  } else if (await recordOpenclawDoctorComplete()) {
+    console.log("[Updater] openclaw doctor --fix: completed; its run is recorded complete");
+  } else {
+    console.log("[Updater] openclaw doctor --fix: completed, but its run could not be recorded; the record stays as it was");
+  }
+}
+
+/**
+ * What the update's log says after a doctor run that did not complete, by the
+ * helper's own answer. "Due" holds as well when there was nothing to write (no
+ * record, or one already due), which the helper also answers true.
+ */
+function logDoctorMarkedDue(how: string, markedDue: boolean): void {
+  console.log(`[Updater] openclaw doctor --fix: ${how}; ${markedDue
+    ? "its recorded run is due, so the next update runs doctor again"
+    : "its recorded run could not be marked due, so the record stays as it was"}`);
 }
 
 /**
