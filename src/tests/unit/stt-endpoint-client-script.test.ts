@@ -55,7 +55,8 @@ function store(record: unknown, key?: string): void {
 function run(): Promise<{ status: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn("python3", ["-I", SCRIPT, path.join(dir, "voice.ogg")], {
-      env: { PATH: process.env.PATH ?? "", CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"), HTTP_PROXY: "http://192.0.2.1:9", http_proxy: "http://192.0.2.1:9" },
+      env: { PATH: process.env.PATH ?? "", CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"), HTTP_PROXY: "http://192.0.2.1:9", http_proxy: "http://192.0.2.1:9", NODE_ENV: "test" },
+      stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";

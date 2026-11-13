@@ -88,7 +88,12 @@ def pin_host(host):
 
     def pinned(name, port, *args, **kwargs):
         if isinstance(name, str) and name.strip("[]").lower().rstrip(".") == bare:
-            return [(f, t, p, c, (sa[0], port) + tuple(sa[2:])) for (f, t, p, c, sa) in _real_getaddrinfo(infos[0][4][0], port, *args, **kwargs)]
+            # Every checked address, in the resolver's order, so a name with both
+            # ::1 and 127.0.0.1 falls back the way any client would.
+            out = []
+            for addr in dict.fromkeys(info[4][0] for info in infos):
+                out.extend(_real_getaddrinfo(addr, port, *args, **kwargs))
+            return out
         raise OSError("stt-endpoint-client connects to the checked speech server only")
 
     socket.getaddrinfo = pinned
