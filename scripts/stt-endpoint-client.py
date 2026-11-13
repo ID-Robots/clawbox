@@ -105,10 +105,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def main():
-    if len(sys.argv) != 2:
-        fail("usage: stt-endpoint-client.py <audio file>")
-    audio_path = sys.argv[1]
+def read_record():
     try:
         with open(STORE, encoding="utf-8") as fh:
             store = json.load(fh)
@@ -121,17 +118,38 @@ def main():
     model = record.get("model")
     if not isinstance(base, str) or not isinstance(model, str) or not base or not model:
         fail("the saved speech server is incomplete")
+    return base, model
+
+
+def read_key():
+    try:
+        with open(KEY_FILE, encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("usage: stt-endpoint-client.py <audio file>")
+    audio_path = sys.argv[1]
+    base, model = read_record()
     parsed = urllib.parse.urlsplit(base)
     if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
         fail("the saved speech server address is not http(s)")
     if not pin_host(parsed.hostname or ""):
         fail("the speech server is not on this box or the local network; nothing was sent")
+    # The key and the record as ONE pair, read after the address was pinned: the
+    # record, the key, the record again (the save writes key-off, record, new
+    # key), so a save that lands meanwhile never sends one server's key to
+    # another's address. A record that keeps changing sends nothing.
     key = None
-    try:
-        with open(KEY_FILE, encoding="utf-8") as fh:
-            key = fh.read().strip() or None
-    except OSError:
-        key = None
+    for _ in range(3):
+        key = read_key()
+        if read_record() == (base, model):
+            break
+    else:
+        fail("the saved speech server kept changing; nothing was sent")
 
     try:
         with open(audio_path, "rb") as fh:

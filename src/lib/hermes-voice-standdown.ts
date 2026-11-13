@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { hermesHome } from "@/lib/hermes-env";
@@ -47,8 +48,18 @@ export async function rememberHermesVoiceLock(provider: string): Promise<void> {
   await writeAtomically(lockMarkerPath(), { version: 1, provider });
 }
 
+/**
+ * Temp file and rename, the temp file this call's OWN: two spoken replies
+ * remembering at once must not rename each other's file away. A failed write
+ * or rename removes its own temp file.
+ */
 async function writeAtomically(target: string, value: unknown): Promise<void> {
-  const tmp = `${target}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 });
-  await fs.rename(tmp, target);
+  const tmp = untraced(`${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  try {
+    await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 });
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {});
+    throw err;
+  }
 }

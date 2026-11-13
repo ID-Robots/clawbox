@@ -248,6 +248,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
    * nothing until there is a cloud to fall back to.
    */
   const [sttCloudReady, setSttCloudReady] = useState(true);
+  // Bumped on every read of the transcription status, so the speech-server
+  // card reads it again when a sibling (Whisper's Use) changed the engine.
+  const [sttVersion, setSttVersion] = useState(0);
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Not an error: a change that WENT THROUGH, which the box then qualified.
@@ -344,6 +347,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const sttChain: unknown[] | null = Array.isArray(stt?.chain) ? stt.chain : null;
     setSttCloudReady(stt?.engines?.cloud?.configured !== false && (sttChain === null || sttChain.includes("cloud")));
     setRoles({ llm, tts: ttsRole, stt: sttRole });
+    setSttVersion((v) => v + 1);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -1056,7 +1060,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
             {/* The owner's own speech server (TASK-2501 PR-D), whether or not
                 Whisper is on the box: it is the engine a box without one
                 transcribes with under the local-only AI lock. */}
-            {group.kind === "stt" && <div className="mt-3"><SttEndpointCard onChanged={afterInstall} /></div>}
+            {group.kind === "stt" && <div className="mt-3"><SttEndpointCard onChanged={afterInstall} refreshSignal={sttVersion} /></div>}
           </section>
         );
       })}

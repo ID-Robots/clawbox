@@ -1184,6 +1184,23 @@ d("register-mcp.sh — the voice under the local-only AI lock", () => {
     expect(at("tts.openai.base_url")).toBe(PROXY);
   });
 
+  it("keeps an owner's own endpoint that carries a claw_ key: only the selection moves", () => {
+    writeStore({ ai_cloud_lock: true });
+    const own = "http://speech.owner.example:8880/v1";
+    writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: openai\n  openai:\n    base_url: ${own}\n    api_key: ${TOKEN}\n    model: my-own-voice\n`);
+
+    run();
+    expect(at("tts.provider")).toBe("clawbox-local");
+    // Not ours by address: the slot is the owner's, endpoint and model kept.
+    expect(at("tts.openai")).toEqual({ base_url: own, api_key: TOKEN, model: "my-own-voice" });
+    expect(JSON.parse(fs.readFileSync(lockMarker(), "utf-8"))).toEqual({ version: 1, provider: "openai" });
+
+    writeStore({ ai_cloud_lock: false });
+    run();
+    expect(at("tts.provider")).toBe("openai");
+    expect(at("tts.openai")).toEqual({ base_url: own, api_key: TOKEN, model: "my-own-voice" });
+  });
+
   it("moves an owner's own cloud pick off, and gives it back when the lock is lifted", () => {
     writeStore({ ai_cloud_lock: true });
     writeYaml(`${BASE_CONFIG}${LOCAL_DEF}  provider: elevenlabs\n`);

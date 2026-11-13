@@ -97,7 +97,7 @@ interface Options {
  * decided the `openai` slot is ours, and the token it took from the ClawBox AI
  * provider entry. `CLAWBOX_DEVICE_STORE` is the env var the shell exports.
  */
-function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boolean; log: string } {
+function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boolean; log: string; heldToRemove: string | null } {
   const {
     routeIsOurs = true,
     deviceTier = MAX_DEVICE_TIER,
@@ -135,7 +135,7 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     LOCK_READER,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
-    "print(json.dumps({'cfg': cfg, 'changed': changed}))",
+    "print(json.dumps({'cfg': cfg, 'changed': changed, 'heldToRemove': globals().get('_clawbox_tts_held_to_remove')}))",
   ].join("\n");
   const lines = execFileSync("python3", ["-c", program, file], {
     encoding: "utf-8",
@@ -1071,14 +1071,79 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
 
     const unlocked = migrate(locked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: false } });
     expect(unlocked.cfg).toEqual(own);
-    expect(existsSync(heldFile)).toBe(false);
+    // Removed only once the config they went back into is written (the
+    // gateway config write, after this pass), never before.
+    expect(existsSync(heldFile)).toBe(true);
+    expect(unlocked.heldToRemove).toBe(heldFile);
   });
 
-  it("leaves the voices in place when they cannot be held aside", () => {
-    const own = { messages: { tts: { provider: "elevenlabs", providers: { "tts-local-cli": { command: "/x" }, elevenlabs: { apiKey: "el-own" } } } } };
+  it("removes the held file only after the gateway config write has landed", () => {
+    const script = readFileSync(SCRIPT, "utf-8");
+    const write = script.indexOf('os.replace(tmp_path, cfg_path)\n        print("  Updated gateway config")');
+    const unlink = script.indexOf("os.unlink(_clawbox_tts_held_to_remove)");
+    expect(write).toBeGreaterThan(0);
+    expect(unlink).toBeGreaterThan(write);
+    expect(script.slice(write, unlink)).not.toMatch(/except/);
+    // The pass itself no longer removes it.
+    expect(POLICY).not.toMatch(/os\.unlink\(_held_path\)/);
+  });
+
+  it("fails closed when the held file cannot be written: the cloud voices are held in place, nothing lost", () => {
+    const own = {
+      messages: {
+        tts: {
+          provider: "elevenlabs",
+          providers: { "tts-local-cli": { command: "/x" }, elevenlabs: { apiKey: "el-own" }, microsoft: { enabled: true } },
+        },
+      },
+    };
     mkdirSync(path.join(dir, ".tts-local-only-held.json.tmp"));
-    const { cfg, log } = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
-    expect(cfg).toEqual(own);
-    expect(log).toMatch(/could not be held aside/);
+    const locked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    const tts = (locked.cfg.messages as { tts: { provider: string; providers: Record<string, unknown> } }).tts;
+    expect(tts.provider).toBe("tts-local-cli");
+    // Out of the chain: no speech plugin is registered under a held key.
+    expect(tts.providers.elevenlabs).toBeUndefined();
+    expect(tts.providers["clawbox-held--elevenlabs"]).toEqual({ apiKey: "el-own" });
+    expect(tts.providers.microsoft).toEqual({ enabled: false });
+    expect(locked.log).toMatch(/held in place/);
+    // Asked again under the lock, nothing moves twice.
+    const again = migrate(locked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    expect(again.cfg).toEqual(locked.cfg);
+
+    const unlocked = migrate(locked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: false } });
+    expect(unlocked.cfg).toEqual(own);
+  });
+
+  it("fails closed on a held file it cannot read, and never writes over it", () => {
+    const heldFile = path.join(dir, ".tts-local-only-held.json");
+    writeFileSync(heldFile, "{ torn");
+    const own = { messages: { tts: { provider: "openai", providers: { "tts-local-cli": { command: "/x" }, openai: { apiKey: "sk-own" } } } } };
+    const locked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    const tts = (locked.cfg.messages as { tts: { provider: string; providers: Record<string, unknown> } }).tts;
+    expect(tts.provider).toBe("tts-local-cli");
+    expect(tts.providers.openai).toBeUndefined();
+    expect(tts.providers["clawbox-held--openai"]).toEqual({ apiKey: "sk-own" });
+    expect(readFileSync(heldFile, "utf-8")).toBe("{ torn");
+    expect(locked.log).toMatch(/could not be read/);
+  });
+
+  it("gives the owner's selection back only over the voice the lock chose", () => {
+    const own = {
+      messages: {
+        tts: { provider: "openai", providers: { "tts-local-cli": { command: "/x" }, "piper-local": { command: "/p" }, openai: { apiKey: "sk-own" } } },
+      },
+    };
+    const locked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    // While locked, the owner picks the other voice on the box.
+    const picked = JSON.parse(JSON.stringify(locked.cfg)) as { messages: { tts: { provider: string } } };
+    picked.messages.tts.provider = "piper-local";
+    const unlocked = migrate(picked, { routeIsOurs: false, extraStore: { ai_cloud_lock: false } });
+    const tts = (unlocked.cfg.messages as { tts: { provider: string; providers: Record<string, unknown> } }).tts;
+    expect(tts.provider).toBe("piper-local");
+    expect(tts.providers.openai).toEqual({ apiKey: "sk-own" });
+    // Left on the voice the lock chose, the owner's own selection comes back.
+    rmSync(path.join(dir, ".tts-local-only-held.json"), { force: true });
+    const relocked = migrate(own, { routeIsOurs: false, extraStore: { ai_cloud_lock: true } });
+    expect((migrate(relocked.cfg, { routeIsOurs: false, extraStore: { ai_cloud_lock: false } }).cfg.messages as { tts: { provider: string } }).tts.provider).toBe("openai");
   });
 });
