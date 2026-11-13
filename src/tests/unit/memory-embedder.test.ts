@@ -14,6 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
+  // The local-only AI lock is read with the tri-state reader (feature-engine.ts).
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
   set: async (key: string, value: unknown) => { store.set(key, value); },
 }));
 
@@ -148,6 +150,39 @@ describe("the field switch", () => {
       store.set(CLAWAI_CLOUD_EMBEDDINGS_KEY, value);
       const expected = String(value).trim().toLowerCase() === "off" ? "local" : "cloud";
       expect((await resolveMemoryEmbedder()).source, String(value)).toBe(expected);
+    }
+  });
+});
+
+describe("the box's own engine, where the cloud cannot answer (TASK-2501 PR-C)", () => {
+  it("embeds a cloud-pinned box on the box when it holds no ClawBox AI credential, the pin kept", async () => {
+    await writeEmbedderPin("cloud");
+    token.mockResolvedValue(null);
+    const embedder = await resolveMemoryEmbedder();
+    expect(embedder.source).toBe("local");
+    expect(embedder.requestUrl).toBe(`${PROXY}/embeddings`);
+    expect(await readEmbedderPin()).toBe("cloud");
+    // Signed in again: the cloud the owner chose comes back.
+    token.mockResolvedValue("claw_test");
+    expect((await resolveMemoryEmbedder()).source).toBe("cloud");
+  });
+
+  it("embeds on the box under the local-only AI lock, signed in or not, the pin kept", async () => {
+    await writeEmbedderPin("cloud");
+    for (const lock of [true, "pinned"]) {
+      store.set("ai_cloud_lock", lock);
+      expect((await resolveMemoryEmbedder()).source, String(lock)).toBe("local");
+    }
+    expect(await readEmbedderPin()).toBe("cloud");
+    store.delete("ai_cloud_lock");
+    expect((await resolveMemoryEmbedder()).source).toBe("cloud");
+  });
+
+  it("never hands out a cloud embedder without the bearer it needs", async () => {
+    token.mockResolvedValue(null);
+    for (const fallback of ["cloud", undefined] as const) {
+      const embedder = await resolveMemoryEmbedder(fallback);
+      expect(embedder.source === "local" || embedder.token !== null).toBe(true);
     }
   });
 });

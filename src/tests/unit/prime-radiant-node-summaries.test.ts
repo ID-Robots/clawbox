@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
 import { slugify } from "@/lib/prime-radiant/claims";
 import { domainMismatches, findDuplicateEntities, nameSkeleton, rolePhrase, suggestDomain } from "@/lib/prime-radiant/entity-hygiene";
-import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
+import { FlashCallError, fitsWindow, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
 import { createStubFlashClient } from "@/lib/prime-radiant/flash-stub";
 import { serializePage } from "@/lib/prime-radiant/frontmatter";
 import { readCosts } from "@/lib/prime-radiant/ingest-store";
@@ -420,6 +420,57 @@ describe("the plan", () => {
 });
 
 describe("the pass", () => {
+  it("asks the box's own model as many nodes a call as its window holds, every call fitting it", async () => {
+    const state = tmpState();
+    try {
+      const snap = { current: vault() };
+      const calls: FlashRequest[] = [];
+      const { run } = fakeRun(snap);
+      const inventing = inventingClient(calls);
+      const budget = { contextTokens: 1_500, maxOutputTokens: 1_024, parallel: 1 };
+      const local: FlashClient = { ...inventing, model: "llamacpp/gemma4-e2b-it-q4_0", engine: "local", budget, complete: (r) => inventing.complete(r) };
+      const r = await runSummaries(snap.current, run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: local, online: true, runId: "run-1", now: () => NOW });
+      expect(r.byModel).toBe(r.planned);
+      expect(r.model.calls).toBeGreaterThan(Math.ceil(r.planned / SUMMARY_BATCH));
+      for (const call of calls) {
+        if ((readSummaryItems(call.user) ?? []).length > 1) expect(fitsWindow(budget, call)).toBe(true);
+      }
+    } finally {
+      dropState(state);
+    }
+  });
+
+  it("asks a batch too long for the box's own model again a node at a time, and goes on past a node too long alone", async () => {
+    const state = tmpState();
+    try {
+      const snap = { current: vault() };
+      const calls: FlashRequest[] = [];
+      const { run } = fakeRun(snap);
+      const inventing = inventingClient(calls);
+      let singles = 0;
+      const local: FlashClient = {
+        ...inventing,
+        model: "llamacpp/gemma4-e2b-it-q4_0",
+        engine: "local",
+        budget: { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 },
+        complete: async (r) => {
+          const n = (readSummaryItems(r.user) ?? []).length;
+          if (n > 1) throw new FlashCallError("too_long", "too long");
+          // The first node alone is too long as well.
+          if (++singles === 1) throw new FlashCallError("too_long", "too long");
+          return inventing.complete(r);
+        },
+      };
+      const r = await runSummaries(snap.current, run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: local, online: true, runId: "run-1", now: () => NOW });
+      expect(r.planned).toBeGreaterThan(2);
+      expect(r.model.skipped ?? null).toBeNull();
+      expect(r.byModel).toBe(r.planned - 1);
+      expect(r.written).toBe(r.planned);
+    } finally {
+      dropState(state);
+    }
+  });
+
   it("writes model summaries that passed the check (the invented sentence rejected), records the cost, and is idempotent", async () => {
     const state = tmpState();
     try {

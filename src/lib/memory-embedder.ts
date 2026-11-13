@@ -40,6 +40,7 @@ import { getEmbedProxyBaseUrl, readActiveLocalEmbeddingModel } from "@/lib/embed
 import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID, localEmbeddingModelSpec } from "@/lib/embed-runtime-ids";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 import { resolveClawaiCloudDefaults } from "@/lib/clawai-cloud-defaults-state";
 import {
   LOCAL_EMBEDDING_DIMENSIONS,
@@ -80,9 +81,11 @@ export interface ResolvedEmbedder {
    */
   dimensions: number;
   /**
-   * The bearer. Null only on the cloud arm of a box that holds no ClawBox AI
-   * credential — a state {@link embedderUsable} answers for, rather than one
-   * that throws inside a status read.
+   * The bearer. Null on the local arm, whose proxy token is read at request
+   * time. {@link resolveMemoryEmbedder} sends a box with no ClawBox AI
+   * credential to the local arm, so a cloud arm without one is only ever
+   * built by hand — a state {@link embedderUsable} still answers for, rather
+   * than one that throws inside a status read.
    */
   token: string | null;
   /**
@@ -202,6 +205,22 @@ async function cloudEmbedder(): Promise<ResolvedEmbedder> {
  * full reindex", exactly as any other embedder change does, and clearing the key
  * puts the box back where the owner left it.
  *
+ * AND THE BOX'S OWN ENGINE IS WHERE A CLOUD THAT CANNOT ANSWER LANDS (TASK-2501
+ * PR-C: Memory Shard on the local engine). Two more facts send a `cloud` box to
+ * the model on this box, the pin again left as it is:
+ *
+ *  - the local-only AI lock is on (`feature-engine.ts`): nothing the owner
+ *    indexed goes to the cloud while it is, and unlocking puts the box back
+ *    where the owner left it;
+ *  - the box holds no ClawBox AI credential: a box that runs its local engine
+ *    only — signed out of ClawBox AI, or linked for its plan alone — has no
+ *    account the cloud embedder could bill, and an index embedded slowly on
+ *    the box beats one that cannot be embedded at all. Signing in again
+ *    brings the cloud back.
+ *
+ * Either way the index reads `mismatched` against what it was built with and
+ * the card offers its full reindex, as for the field switch.
+ *
  * @param fallback what an unpinned box uses, when the caller has already worked
  *   the cloud-defaults verdict out and would otherwise pay for it twice.
  */
@@ -209,7 +228,10 @@ export async function resolveMemoryEmbedder(fallback?: EmbeddingSource): Promise
   const pinned = await readEmbedderPin();
   const source = pinned ?? fallback ?? (await defaultEmbedderSource());
   if (source !== "cloud") return await localEmbedder();
-  return (await cloudEmbeddingsSwitchedOff()) ? await localEmbedder() : await cloudEmbedder();
+  if (await cloudAiLockOn()) return await localEmbedder();
+  if (await cloudEmbeddingsSwitchedOff()) return await localEmbedder();
+  const cloud = await cloudEmbedder();
+  return cloud.token === null ? await localEmbedder() : cloud;
 }
 
 /** Trailing slashes are not part of an address. */

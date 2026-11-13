@@ -9,13 +9,16 @@
  * `{ job }`, progress on `GET ingest/<new id>/events`; what fails again is
  * the new job's dead letters.
  *
- * 404 `not_found`, 409 `busy` (`runningId`), 412 `no_credential`. The owner
+ * 404 `not_found`, 409 `busy` (`runningId`), 412 `no_credential`, 409
+ * `cloud_ai_locked` (route-helpers `noEngineRefusal`), 409 `window_too_small`
+ * (`IngestWindowError`). The owner
  * (cookie AND same origin) or the assistant through the MCP bearer, like
  * every start.
  */
-import { flashAvailable } from "@/lib/prime-radiant/flash-client";
+import { flashUnavailableReason } from "@/lib/prime-radiant/flash-client";
 import {
   IngestBusyError,
+  IngestWindowError,
   NothingToRetryError,
   UnknownJobError,
   getIngestJob,
@@ -23,7 +26,7 @@ import {
   safeJobId,
   startIngest,
 } from "@/lib/prime-radiant/ingest";
-import { fail, json, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, noEngineRefusal, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -34,15 +37,16 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!id || !getIngestJob(id)) return fail("not_found", "No such ingest job.", 404);
   const running = runningJobId();
   if (running) return json({ error: "An ingest is already running.", code: "busy", runningId: running }, 409);
-  if (!(await flashAvailable())) {
-    return fail("no_credential", "Sign this box in to ClawBox AI first; Prime Radiant writes its pages with it.", 412);
-  }
+  const unavailable = await flashUnavailableReason();
+  if (unavailable) return noEngineRefusal(unavailable);
   try {
     return json({ job: await startIngest({ kind: "retry", retryOf: id }, { author: gate.writer.author }) }, 202);
   } catch (err) {
     if (err instanceof IngestBusyError) {
       return json({ error: "An ingest is already running.", code: "busy", runningId: err.runningId }, 409);
     }
+    // The box's own model cannot hold one document's page: no job, no dead letter.
+    if (err instanceof IngestWindowError) return fail("window_too_small", err.message, 409);
     if (err instanceof UnknownJobError) return fail("not_found", "No such ingest job.", 404);
     if (err instanceof NothingToRetryError) return fail("nothing_to_retry", "That ingest has no documents left to retry.", 409);
     return vaultFailure("ingest retry", err);

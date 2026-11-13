@@ -203,6 +203,9 @@ let pageOverride: unknown;
 let ingestJobs: unknown[];
 /** The account half of `GET costs?allowance=1`. */
 let allowanceAccount: unknown;
+/** Which engine writes, and the window's calls to the box's own engine (TASK-2501 PR-C). */
+let allowanceEngine: "clawbox-ai" | "local" | null;
+let allowanceLocal: { calls: number; tokensIn: number; tokensOut: number; usdEstimate: number };
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
 let previewAnswer: Record<string, unknown> | null;
@@ -280,6 +283,8 @@ function installFetch() {
               allowance: {
                 countedAgainst: "clawbox-ai", windowDays: 7, since: "2026-01-01T12:00:00.000Z",
                 primeRadiant: { calls: 6, tokensIn: 5200, tokensOut: 900, usdEstimate: 0.01 },
+                local: allowanceLocal,
+                engine: allowanceEngine,
                 account: allowanceAccount,
               },
             }
@@ -385,6 +390,8 @@ async function pickFolder() {
 }
 
 beforeEach(() => {
+  allowanceEngine = "clawbox-ai";
+  allowanceLocal = { calls: 0, tokensIn: 0, tokensOut: 0, usdEstimate: 0 };
   status = { ...STATUS };
   calls = [];
   searchStatus = 200;
@@ -981,6 +988,32 @@ describe("PrimeRadiantApp", () => {
     await openTab("settings");
     expect(await screen.findByTestId("prime-radiant-usage-allowance-unread")).toHaveTextContent(/could not be read just now/);
     expect(screen.queryByTestId("prime-radiant-usage-allowance-weekly")).toBeNull();
+  });
+
+  it("says the box's own engine writes, shows its calls apart, and warns of no spent allowance it does not use (TASK-2501 PR-C)", async () => {
+    allowanceEngine = "local";
+    allowanceLocal = { calls: 4, tokensIn: 9000, tokensOut: 1200, usdEstimate: 0 };
+    allowanceAccount = {
+      available: true, plan: "max", timeZone: "UTC",
+      weekly: { used: 10_000_000, limit: 10_000_000, percentUsed: 100, isOverLimit: true, resetAt: "2026-01-09T14:05:00.000Z" },
+      burst: null,
+    };
+    const local = await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-engine-local")).toHaveTextContent("This box's own engine (Local AI or its External engine) writes the pages, not ClawBox AI.");
+    expect(screen.getByTestId("prime-radiant-usage-local")).toHaveTextContent(
+      "Last 7 days: about 10.2K tokens in 4 calls to this box's own engine (Local AI or its External engine), counted against no ClawBox AI allowance.",
+    );
+    expect(screen.queryByTestId("prime-radiant-usage-allowance-spent")).toBeNull();
+    local.unmount();
+
+    // Back on ClawBox AI: the week's local calls still show, the engine line does not.
+    allowanceEngine = "clawbox-ai";
+    await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-local")).toHaveTextContent(/4 calls to this box's own engine/);
+    expect(screen.queryByTestId("prime-radiant-usage-engine-local")).toBeNull();
+    expect(screen.getByTestId("prime-radiant-usage-allowance-spent")).toBeInTheDocument();
   });
 
   it("merges a held night from the nightly card", async () => {

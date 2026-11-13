@@ -9,22 +9,25 @@
  * Files follow the same rule (`file_not_found` / `file_refused`, with
  * `index`) and are staged as one upload batch through the drop's own staging
  * (its names, caps and disk reserve), then ingested like a drop. 412
- * `no_credential` when the box has no ClawBox AI sign-in, before anything is
- * read.
+ * `no_credential` when the box has neither a ClawBox AI sign-in nor a model
+ * of its own (Local AI, or the owner's External engine), 409
+ * `cloud_ai_locked` when the local-only AI lock is on and the box has no
+ * model of its own — before anything is read; 409 `window_too_small` when
+ * the box's own model cannot hold one document's page (`IngestWindowError`).
  *
  * GET — the recent jobs, newest first, and the running one's id.
  *
- * The POST reads the owner's files, spends their ClawBox AI allowance and
- * writes the vault: the owner (cookie AND same origin), or the assistant
+ * The POST reads the owner's files, spends their ClawBox AI allowance (or
+ * the time of the model on this box) and writes the vault: the owner (cookie AND same origin), or the assistant
  * through the MCP bearer when the owner asks it to — never a cross-site page.
  * The GET admits whoever `requireSession` admits.
  */
 import fs from "fs/promises";
 import { requireSession } from "@/lib/route-auth";
-import { flashAvailable } from "@/lib/prime-radiant/flash-client";
-import { IngestBusyError, listIngestJobs, runningJobId, startIngest } from "@/lib/prime-radiant/ingest";
+import { flashUnavailableReason } from "@/lib/prime-radiant/flash-client";
+import { IngestBusyError, IngestWindowError, listIngestJobs, runningJobId, startIngest } from "@/lib/prime-radiant/ingest";
 import { safeBatchId, stageFiles, stagedBatch } from "@/lib/prime-radiant/ingest-upload";
-import { fail, json, resolveIngestFiles, resolveIngestFolders, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, noEngineRefusal, resolveIngestFiles, resolveIngestFolders, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -66,9 +69,8 @@ export async function POST(req: Request) {
 
   const running = runningJobId();
   if (running) return json({ error: "An ingest is already running.", code: "busy", runningId: running }, 409);
-  if (!(await flashAvailable())) {
-    return fail("no_credential", "Sign this box in to ClawBox AI first; Prime Radiant writes its pages with it.", 412);
-  }
+  const unavailable = await flashUnavailableReason();
+  if (unavailable) return noEngineRefusal(unavailable);
 
   let input: Parameters<typeof startIngest>[0];
   // The batch staged here from named files: no job owns it until startIngest
@@ -101,6 +103,8 @@ export async function POST(req: Request) {
     if (err instanceof IngestBusyError) {
       return json({ error: "An ingest is already running.", code: "busy", runningId: err.runningId }, 409);
     }
+    // The box's own model cannot hold one document's page: no job, no dead letter.
+    if (err instanceof IngestWindowError) return fail("window_too_small", err.message, 409);
     return vaultFailure("ingest", err);
   }
 }

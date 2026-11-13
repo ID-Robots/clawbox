@@ -54,6 +54,7 @@ import {
   allowanceSpentText,
   allowanceStopOf,
   completeWithRetry,
+  itemsThatFit,
   FlashCallError,
   flashClient,
   stubEnabled,
@@ -723,10 +724,19 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
   }
 
   // The judge, a small batch a call, a few calls in flight.
-  const client = options.client ?? flashClient();
+  const client = options.client ?? (await flashClient());
   const rates = options.rates;
   const batches: number[][] = [];
-  for (let at = 0; at < ask.length; at += JUDGE_BATCH_PAIRS) batches.push(ask.slice(at, at + JUDGE_BATCH_PAIRS));
+  const pairsOf = (batch: readonly number[]) => batch.map((n) => ({ a: claims[pairs[n].a].text, b: claims[pairs[n].b].text }));
+  // As many pairs a call as the box's own model's window holds (ClawBox AI: JUDGE_BATCH_PAIRS).
+  for (let at = 0; at < ask.length; ) {
+    const size = itemsThatFit(client.budget, Math.min(JUDGE_BATCH_PAIRS, ask.length - at), (k) => ({
+      ...buildJudgePrompt(pairsOf(ask.slice(at, at + k))),
+      maxTokens: judgeMaxTokens(k),
+    }));
+    batches.push(ask.slice(at, at + size));
+    at += size;
+  }
   const learned: Array<{ hash: string; verdict: JudgeVerdict; why: string }> = [];
   const failures = new Map<string, number>();
   let stop: string | null = null;
@@ -748,7 +758,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       ({ response } = await completeWithRetry(client, { system, user, maxTokens: judgeMaxTokens(batch.length), signal: options.signal }, retry));
     } catch (err) {
       const e = err instanceof FlashCallError ? err : null;
-      if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "allowance" || e.kind === "aborted")) throw e;
+      if (e && (e.kind === "no_credential" || e.kind === "no_engine" || e.kind === "auth" || e.kind === "refused" || e.kind === "allowance" || e.kind === "aborted")) throw e;
       return { ok: false, kind: e?.kind ?? "error" };
     }
     const usd = estimateUsd(response.model, response.usage, rates);
@@ -794,17 +804,22 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       if (stop || options.signal?.aborted) return;
       try {
         const first = await judgeOnce(batch);
-        // An unreadable (or empty, or capped) answer, and the pairs a readable
-        // one left out, are asked once more in small calls; a call that failed
-        // for another reason waits for the next pass.
-        if (!first.ok && first.kind !== "bad_response") {
+        // An unreadable (or empty, or capped) answer, a call too long for the
+        // box's own model (its window, or its time), and the pairs a readable
+        // answer left out, are asked once more in small calls; a call that
+        // failed for another reason waits for the next pass.
+        // Too long for the box's own model: asked again one pair a call, never
+        // as it was; a single pair still too long waits for the next pass.
+        const tooLong = !first.ok && first.kind === "too_long";
+        if (!first.ok && (tooLong ? batch.length === 1 : first.kind !== "bad_response")) {
           batchFailed(first.kind);
           return;
         }
         const again = first.ok ? first.missing : batch;
-        for (let at = 0; at < again.length; at += JUDGE_RETRY_PAIRS) {
+        const step = tooLong ? 1 : JUDGE_RETRY_PAIRS;
+        for (let at = 0; at < again.length; at += step) {
           if (stop || options.signal?.aborted) return;
-          const small = await judgeOnce(again.slice(at, at + JUDGE_RETRY_PAIRS));
+          const small = await judgeOnce(again.slice(at, at + step));
           if (!small.ok) batchFailed(small.kind);
         }
       } catch (err) {
@@ -814,7 +829,8 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
         if (!stop) stop = err instanceof FlashCallError ? err.kind : "error";
       }
     }),
-    Math.max(1, options.parallel ?? JUDGE_PARALLEL),
+    // The box's own engine takes one call at a time (its budget), whatever the ingest's parallel says.
+    Math.max(1, Math.min(options.parallel ?? JUDGE_PARALLEL, client.budget?.parallel ?? Number.POSITIVE_INFINITY)),
   );
   for (const [kind, count] of failures) {
     result.notes.push(
