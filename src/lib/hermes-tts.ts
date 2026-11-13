@@ -336,6 +336,19 @@ export function hermesTtsProviderIsFactory(provider: string | null): boolean {
 
 export class HermesTtsWriteError extends Error {}
 
+/** What the local-only AI lock answers a cloud voice with (TASK-2501). */
+export const HERMES_VOICE_LOCKED = "Local-only AI is on: replies are spoken by this box's own voice only.";
+
+/**
+ * Is the local-only AI lock on? Read lazily, failing closed (`cloudAiLockOn`):
+ * the voice routes import this module and should not pull the store reader
+ * into a chat turn that never speaks.
+ */
+async function voiceLocked(): Promise<boolean> {
+  const { cloudAiLockOn } = await import("@/lib/feature-engine");
+  return await cloudAiLockOn();
+}
+
 async function set(key: string, value: string): Promise<void> {
   const r = await runHermesCli(["config", "set", key, value], { timeoutMs: 15_000 });
   if (r.code !== 0) {
@@ -358,6 +371,11 @@ async function set(key: string, value: string): Promise<void> {
  * can never be left pointing at a provider that has nowhere to send a request.
  */
 export async function writeHermesCloudTarget(token: string): Promise<void> {
+  // THE ONE WRITER of the cloud voice on this edition — the Voice tab, every
+  // ClawBox AI link and the restore after a renewed plan all come through
+  // here — so the local-only AI lock (TASK-2501) refuses it here, before the
+  // proxy or the token reach Hermes' config. Callers already handle a refusal.
+  if (await voiceLocked()) throw new HermesTtsWriteError(HERMES_VOICE_LOCKED);
   // IMPORTED HERE, not at the top of the file, for the reason hermes-clawai.ts
   // gives for the same move: `harness/credentials` reaches `openclaw-config`,
   // which spawns the openclaw CLI, and a static import would put that whole
@@ -405,6 +423,7 @@ export async function selectHermesEngine(engine: "local" | "cloud", token: strin
  * caller's to keep — this writes nothing else, and never a credential.
  */
 export async function selectHermesProvider(engine: "local" | "cloud"): Promise<void> {
+  if (engine === "cloud" && (await voiceLocked())) throw new HermesTtsWriteError(HERMES_VOICE_LOCKED);
   await set(KEYS.provider, hermesProviderFor(engine));
 }
 
@@ -496,20 +515,28 @@ export async function speakWithHermes(
   text: string,
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<HermesSpeech> {
-  // The local-only AI lock (TASK-2501): Hermes speaks with whatever
-  // `tts.provider` names, so anything but the box's own voice is refused here,
-  // before the text leaves for it. Only `clawbox-local` with its command
-  // registered (its type AND its command) counts: a name that merely looks
-  // local, or one with nothing behind it, lets Hermes fall back to a provider of its own (Edge, in the
-  // cloud). The reply is then spoken by the box's script instead (voice-speak).
-  const { isCloudAiLocked, CLOUD_AI_LOCKED_CODE } = await import("@/lib/ai-cloud-lock");
-  if (await isCloudAiLocked()) {
-    const { provider, localRegistered, localCommand } = await readHermesVoice();
-    // Both halves of the definition, read: Hermes refuses a `command` provider
-    // with no command and falls back to a provider of its own.
-    const local = (provider ?? "").trim().toLowerCase() === HERMES_LOCAL_TTS_PROVIDER && localRegistered && Boolean(localCommand);
-    if (!local) {
-      return { ok: false, code: CLOUD_AI_LOCKED_CODE, status: 409, reason: "Local-only AI is on: replies are spoken by this box's own voice only." };
+  // THE LOCAL-ONLY AI LOCK (TASK-2501): Hermes speaks with whatever
+  // `tts.provider` names, and the factory `edge` is Microsoft's cloud. So under
+  // the lock anything but the box's own voice is REPLACED by it first — the
+  // Kokoro definition install.sh registers — and only then is Hermes asked.
+  // The boot pass (register-mcp.sh) makes the same move for Hermes' own
+  // channel replies. With no on-box voice registered nothing is spoken: the
+  // text never leaves for a cloud voice.
+  if (await voiceLocked()) {
+    const voice = await readHermesVoice();
+    if (voice.unread.provider || voice.unread.localProvider) {
+      return { ok: false, code: "cloud_ai_locked", status: 503, reason: "Could not read which voice this box speaks with." };
+    }
+    if (!voice.localRegistered || !voice.localCommand) {
+      return { ok: false, code: "cloud_ai_locked", status: 409, reason: `${HERMES_VOICE_LOCKED} No on-box voice is installed.` };
+    }
+    if ((voice.provider ?? "").trim().toLowerCase() !== HERMES_LOCAL_TTS_PROVIDER) {
+      try {
+        await set(KEYS.provider, HERMES_LOCAL_TTS_PROVIDER);
+      } catch {
+        return { ok: false, code: "cloud_ai_locked", status: 503, reason: "Could not move this box onto its own voice." };
+      }
+      console.warn("[hermes/tts] local-only AI is on: moved Hermes' voice onto the box's own (Kokoro)");
     }
   }
   const { dashboardFetch } = await import("@/lib/hermes-dashboard-auth");
