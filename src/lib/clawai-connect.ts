@@ -156,8 +156,9 @@ export async function readClawAiSession() {
   }
 }
 
+/** Through the same queue as every write: a conditional write never recreates a session cleared meanwhile. */
 export async function clearClawAiSession() {
-  await fs.unlink(STATE_PATH).catch(() => {});
+  await serializedSessionWrite(() => fs.unlink(STATE_PATH).catch(() => {}));
 }
 
 export function isClawAiSessionExpired(session: ClawAiConnectSession) {
