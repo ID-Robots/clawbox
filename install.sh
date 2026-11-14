@@ -3892,7 +3892,9 @@ record_rebuild_kept_build() {
   # (readBuildId): beside the real standalone entry, through its link if any.
   entry="$(readlink -f "$PROJECT_DIR/.next/standalone/server.js" 2>/dev/null)" || entry=""
   [ -n "$entry" ] || return 1
-  id="$(head -n 1 "$(dirname "$entry")/.next/BUILD_ID" 2>/dev/null | tr -d '[:space:]')" || id=""
+  # Read as the tree's owner: the entry is a link the tree may point anywhere,
+  # and root reads nothing through it that the account could not read itself.
+  id="$(as_clawbox head -n 1 -- "$(dirname "$entry")/.next/BUILD_ID" 2>/dev/null | tr -d '[:space:]')" || id=""
   case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
   up="$(awk '{print $1}' /proc/uptime 2>/dev/null)" || up=""
   case "$up" in ''|*[!0-9.]*) return 1 ;; esac

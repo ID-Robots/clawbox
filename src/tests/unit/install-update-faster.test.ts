@@ -485,6 +485,7 @@ d("record_rebuild_kept_build: the serving build's id, on the boot's own count", 
     const script = [
       "set -euo pipefail",
       `PROJECT_DIR=${JSON.stringify(project)}`,
+      'as_clawbox() { "$@"; }',
       INSTALL_SH.slice(start + 1, end),
       fn("forget_rebuild_kept_build"),
       fn("record_rebuild_kept_build"),
