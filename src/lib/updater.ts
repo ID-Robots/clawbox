@@ -91,11 +91,11 @@ import {
  */
 const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
 /**
- * When this run dispatched its rebuild step, in seconds since the boot
- * (/proc/uptime), beside `update_needs_continuation` — what a note from that
- * step must be newer than to count (rebuildKeptBuild, TASK-2517).
+ * When this run dispatched its rebuild step — `{ boot, uptime }`: the boot's id
+ * and the seconds since that boot — beside `update_needs_continuation`: what a
+ * note from that step must match to count (rebuildKeptBuild, TASK-2517).
  */
-const UPDATE_REBUILD_DISPATCHED_KEY = "update_rebuild_dispatched_uptime";
+const UPDATE_REBUILD_DISPATCHED_KEY = "update_rebuild_dispatched";
 /**
  * Beside the stamp: how the run was cut short and which step it was on, from
  * the lock holder's record (`{ cause, step? }`). Written before the stamp and
@@ -946,19 +946,30 @@ async function readBuildId(): Promise<string> {
 /**
  * Where install.sh's rebuild step notes that it KEPT the build it found,
  * because that build already was this checkout's (`record_rebuild_kept_build`,
- * TASK-2517): "<BUILD_ID> <seconds since boot>", root's, on /run — so it
- * outlives the web server's restart inside the update and is gone after a boot.
+ * TASK-2517): "<BUILD_ID> <boot id> <seconds since boot>", root's, on disk —
+ * the reboot arm ends that step with a reboot, and this half then resumes in
+ * the next boot.
  */
 function rebuildKeptNote(): string {
-  return process.env.CLAWBOX_REBUILD_KEPT_BUILD || "/run/clawbox/rebuild-kept-build";
+  return process.env.CLAWBOX_REBUILD_KEPT_BUILD || "/var/lib/clawbox/rebuild-kept-build";
 }
 
-/** Seconds since this boot (/proc/uptime), or null where it cannot be read. */
-async function secondsSinceBoot(): Promise<number | null> {
+/** Where this boot's id is read. */
+function bootIdFile(): string {
+  return process.env.CLAWBOX_BOOT_ID_FILE || "/proc/sys/kernel/random/boot_id";
+}
+
+/**
+ * This boot and the seconds since it began, or null where either cannot be
+ * read: the clock the rebuild step's note is written on. Monotonic within the
+ * boot, so a clock step during an update can neither fake nor hide an order.
+ */
+async function bootMoment(): Promise<{ boot: string; uptime: number } | null> {
   try {
-    const first = (await readFile("/proc/uptime", "utf-8")).trim().split(/\s+/)[0];
-    const seconds = Number(first);
-    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+    const boot = (await readFile(/* turbopackIgnore: true */ bootIdFile(), "utf-8")).trim();
+    const uptime = Number((await readFile("/proc/uptime", "utf-8")).trim().split(/\s+/)[0]);
+    if (!/^[0-9a-f-]{8,64}$/.test(boot) || !Number.isFinite(uptime) || uptime <= 0) return null;
+    return { boot, uptime };
   } catch {
     return null;
   }
@@ -969,24 +980,27 @@ async function secondsSinceBoot(): Promise<number | null> {
  * to produce one? The continuation demands a changed BUILD_ID as evidence of a
  * rebuild; a step that found the build already current (an update with nothing
  * new) leaves the same one, and says so in its note instead. Only positive
- * evidence counts: the note names exactly the serving build and was written
- * after this run dispatched the step — both readings of the boot's own
- * monotonic count, so a clock step during the update can neither fake nor hide
- * the order — and it lives on /run, so the power cycle the BUILD_ID check is
- * there for erases it too. Anything unreadable is a no.
+ * evidence counts: the note names exactly the serving build, and was written in
+ * the boot this run dispatched the step in and after that moment. The note's
+ * boot is compared with the DISPATCH's, never with the boot reading it, so a
+ * kept build that ended in the reboot arm's reboot still counts, while a note an
+ * older run left can never stand for this one (install.sh also clears it at the
+ * top of every rebuild step). Anything unreadable is a no.
  */
-async function rebuildKeptBuild(buildId: string, dispatchedAt: unknown): Promise<boolean> {
-  if (!buildId) return false;
-  const since = typeof dispatchedAt === "number" ? dispatchedAt : Number.NaN;
-  if (!Number.isFinite(since) || since <= 0) return false;
+async function rebuildKeptBuild(buildId: string, dispatched: unknown): Promise<boolean> {
+  if (!buildId || !dispatched || typeof dispatched !== "object") return false;
+  const { boot, uptime } = dispatched as { boot?: unknown; uptime?: unknown };
+  if (typeof boot !== "string" || !boot || typeof uptime !== "number" || !Number.isFinite(uptime) || uptime <= 0) {
+    return false;
+  }
   let note: string;
   try {
     note = (await readFile(/* turbopackIgnore: true */ rebuildKeptNote(), "utf-8")).trim();
   } catch {
     return false;
   }
-  const match = /^([A-Za-z0-9_-]+) ([0-9]+(?:\.[0-9]+)?)$/.exec(note);
-  return !!match && match[1] === buildId && Number(match[2]) >= since;
+  const match = /^([A-Za-z0-9_-]+) ([0-9a-f-]+) ([0-9]+(?:\.[0-9]+)?)$/.exec(note);
+  return !!match && match[1] === buildId && match[2] === boot && Number(match[3]) >= uptime;
 }
 
 /**
@@ -1959,7 +1973,7 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // continuation can tell this run's "kept the build" note from an older one.
   await setMany({
     update_needs_continuation: (await readBuildId()) || "no-previous-build",
-    [UPDATE_REBUILD_DISPATCHED_KEY]: (await secondsSinceBoot()) ?? undefined,
+    [UPDATE_REBUILD_DISPATCHED_KEY]: (await bootMoment()) ?? undefined,
   });
   // Captured before the dispatch, so the failure read below cannot miss a line
   // the unit wrote in its first moments — nor pick up the previous attempt's.
