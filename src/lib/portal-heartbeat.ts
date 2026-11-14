@@ -386,7 +386,24 @@ export function pushHeartbeatIfChanged(tunnelUrl: string | null): void {
  * request on top.
  */
 export function pushHeartbeatTick(tunnelUrl: string | null): void {
-  if (!tunnelUrl) return;
   if (inFlight) return;
+  if (!tunnelUrl) {
+    // Nothing to push yet, but a named tunnel left running without its
+    // credential is retried all the same: it may be the very process that
+    // has not published its URL.
+    inFlight = retryStaleNamedTunnelOnTick();
+    return;
+  }
   inFlight = pushNow(tunnelUrl);
+}
+
+/** The tick's stale-tunnel retry when there is no URL to push. Never throws. */
+async function retryStaleNamedTunnelOnTick(): Promise<void> {
+  try {
+    await retryStaleNamedTunnel("an earlier revoke could not restart the tunnel");
+  } catch (err) {
+    console.warn("[portal-heartbeat] stale tunnel retry failed:", err instanceof Error ? err.message : err);
+  } finally {
+    inFlight = null;
+  }
 }

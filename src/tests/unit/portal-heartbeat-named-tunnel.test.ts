@@ -362,8 +362,22 @@ describe("the named tunnel follows the account off the box", () => {
       expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
 
       // The ClawBox AI token is still there; the next beat retries the restart all the same.
+      cloudflaredState.startTunnelService.mockRejectedValueOnce(new Error("sudo: a password is required"));
       await beat("https://next-beat.trycloudflare.com");
       expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(2);
+
+      // A tick with no tunnel URL yet pushes nothing, but retries too.
+      fetchMock.mockClear();
+      heartbeat.pushHeartbeatTick(null);
+      await flush();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(3);
+
+      // Once it went through and the unit runs the quick tunnel, a tick restarts nothing.
+      await fs.writeFile(MODE, "quick\n");
+      heartbeat.pushHeartbeatTick(null);
+      await flush();
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(3);
     } finally {
       await fs.rm(MODE, { force: true });
     }
