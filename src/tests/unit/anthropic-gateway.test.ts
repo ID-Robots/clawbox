@@ -115,6 +115,10 @@ function fakeCore() {
     beforeCall: null as ((method: string, params: Record<string, unknown>) => void) | null,
     /** Other providers' profiles core holds (`deepseek:default`, …): what a job given back can be bound to. */
     otherProfiles: new Map<string, { provider: string; type: string; secret: string }>(),
+    /** Runs as the gateway answers again after an offline window: a turn or a run in its first moments. */
+    afterWindow: null as (() => void) | null,
+    /** Claude CLI chat sessions (chatTurn): the session's automatic pick, and the profile and credential its CLI session is bound to. */
+    sessions: new Map<string, ChatSession>(),
   };
   offlineWindows = 0;
   gw._setGatewayDepsForTests({
@@ -155,6 +159,8 @@ function fakeCore() {
       try {
         const done = await work();
         if (core.offlineFails) throw new Error("the gateway did not start again");
+        core.windowOpen = false;
+        core.afterWindow?.();
         return done;
       } finally {
         core.windowOpen = false;
@@ -210,8 +216,14 @@ interface FakeCron {
   agentId?: string;
   sessionTarget: string;
   enabled: boolean;
+  name?: string;
   payload: { kind: string; message: string; model?: string };
-  binding: { profileId: string; lifetime: string } | null;
+  /**
+   * `source` as core records it: `user` for an explicit `model@profile`, `auto`
+   * for what core picked itself (a job made in a chat). Core refuses both alike
+   * once the profile's authorization was replaced (`acquireCronInferenceAuthorization`).
+   */
+  binding: { profileId: string; lifetime: string; source?: "user" | "auto" } | null;
   revision: number;
   state: { lastStatus?: string; lastError?: string; lastRunAtMs?: number };
 }
@@ -262,6 +274,41 @@ function runCron(core: ReturnType<typeof fakeCore>, id: string, now = Date.now()
   if (core.lifetimes.get(job.binding.profileId) !== job.binding.lifetime) return fail("Automation inference account was replaced. Explicitly select an authorized account again.");
   job.state = { lastStatus: "ok", lastRunAtMs: now };
   return job.binding.profileId;
+}
+
+/** One Claude CLI chat session as core 2026.11.3 keeps it. */
+interface ChatSession {
+  /** The session's automatic pick (`authProfileOverride`, source `auto`). */
+  override: string | null;
+  /** The CLI session's binding: the profile, and the credential it was made with (core's auth epoch for it). */
+  cli: { profileId: string; fingerprint: string } | null;
+}
+
+/**
+ * One Claude CLI turn as core 2026.11.3 starts it (`selectCliExecutionAuthProfile`,
+ * `resolveCliAuthEpoch`, `prependAuthProfilePin`, read in the 2026.11.3 package):
+ * the CLI session keeps its profile while the store holds it with the same
+ * credential. A paste that renews that profile changes the credential —
+ * `reuse=invalidated:auth-epoch` — and the fresh pick puts the session's own
+ * automatic pick first when the store still holds that profile, else the
+ * order's first: the stored order, else openclaw.json's, else the store's.
+ * Answers the profile the turn ran on.
+ */
+function chatTurn(core: ReturnType<typeof fakeCore>, key: string): { profileId: string | null; reuse: string } {
+  const session = core.sessions.get(key) as ChatSession;
+  let reuse = "fresh";
+  if (session.cli) {
+    const held = core.profiles.get(session.cli.profileId);
+    if (held && fp(held.secret) === session.cli.fingerprint) return { profileId: session.cli.profileId, reuse: "reused" };
+    reuse = held ? "invalidated:auth-epoch" : "removed";
+  }
+  const order = (core.order ?? core.configOrder ?? [...core.profiles.keys()]).filter((id) => core.profiles.has(id));
+  const picked = session.override && order.includes(session.override) ? session.override : order[0] ?? null;
+  if (picked) {
+    session.cli = { profileId: picked, fingerprint: fp((core.profiles.get(picked) as { secret: string }).secret) };
+    session.override = picked;
+  }
+  return { profileId: picked, reuse };
 }
 
 function addCron(core: ReturnType<typeof fakeCore>, job: Partial<FakeCron> & { id: string }): FakeCron {
@@ -2499,5 +2546,235 @@ describe("TASK-2533 second review pass", () => {
     expect(core.profiles.has(p(personal.id))).toBe(false);
     expect(core.profiles.has(p(work.id))).toBe(true);
     expect(core.order?.[0]).toBe(p(work.id));
+  });
+});
+
+describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () => {
+  // One renewal there stopped the gateway once and pasted four accounts.
+  // Afterwards openclaw.json's order led with the last paste, spent accounts
+  // first. A chat whose CLI binding the paste had invalidated picked a spent
+  // account. Automations refused before any model call ("account was
+  // replaced", "no recorded inference account"). Placeholder accounts here:
+  // Alpha (active), Bravo, Charlie; Delta and Echo at their weekly limit.
+  const NAMES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"];
+  const SONNET = "anthropic/claude-sonnet-5-5";
+  const email = (i: number) => `${NAMES[i].toLowerCase()}@example.com`;
+
+  /** Five pool accounts, with the owner's own sign-in and a manual token of the owner's beside them. */
+  const ownersBox = async (core: ReturnType<typeof fakeCore>): Promise<string[]> => {
+    core.tellsConfigOrder = true;
+    // 2026.11.3 keeps every profile the store holds after the order asked for:
+    // on the box the stored order ended with the two spent accounts, still held.
+    core.orderKeepsOthers = true;
+    core.profiles.set("anthropic:manual", { type: "token", secret: "sk-ant-oat01-the-owners-manual-token", expires: null });
+    const ids: string[] = [];
+    for (const [i, name] of NAMES.entries()) {
+      ids.push((await pool.addOAuthAccount({ label: `${name} Max`, email: email(i), tokens: oauth(`sk-ant-oat01-${name.toLowerCase()}`) })).id);
+    }
+    await gw.keepGatewayMirror();
+    return ids;
+  };
+
+  /** Delta and Echo reach their weekly limit as the pool records it (a usage reading, a coding run): the active account stays. */
+  const twoSpent = async (ids: string[]) => {
+    await pool.markLimited(ids[3], Date.now() + 72 * H, "weekly", { source: "chat" });
+    await pool.markLimited(ids[4], Date.now() + 96 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+  };
+
+  /**
+   * Alpha, Bravo and Charlie come due together and Anthropic renews each one:
+   * the keeper's next pass renews and pastes them all in ONE window ("renewed
+   * N more account(s) with the gateway stopped").
+   */
+  const renewalDue = async (ids: string[], tag: string) => {
+    for (const i of [0, 1, 2]) {
+      const held = await pool.gatewayCredentialFor(ids[i], { renew: false });
+      await pool.replaceCredential(ids[i], { kind: "oauth", tokens: oauth(held?.access as string, 2 * H), email: email(i) });
+    }
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 503 });
+      n += 1;
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-${tag}-renewed-${n}`, refresh_token: `${tag}-r-${n}`, expires_in: 28_800 }), { status: 200 });
+    }));
+  };
+
+  /** The pool's word on the account a profile holds; a profile that is not the pool's answers its own id. */
+  const statusOf = async (profileId: string | null) => {
+    const account = (await pool.readPoolState()).accounts.find((a) => p(a.id) === profileId);
+    return account ? account.status : profileId;
+  };
+
+  const lifetime = (core: ReturnType<typeof fakeCore>, profileId: string) => core.lifetimes.get(profileId) as string;
+
+  it("R1 — a renewal of several accounts in one gateway stop re-binds, in that same pass, every job bound to them (user and auto, and one made between two renewals): no run sees \"account was replaced\"", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    await twoSpent(ids);
+    // As on the box: one made in a chat on Alpha (auto), one the owner pinned to Bravo (user).
+    addCron(core, { id: "standup", name: "Daily standup auto-report", binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "auto" } });
+    addCron(core, { id: "winback", name: "Win-back onboarding replies", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[1])}` }, binding: { profileId: p(ids[1]), lifetime: lifetime(core, p(ids[1])), source: "user" } });
+    await gw.bindGatewayCrons();
+    for (const id of ["standup", "winback"]) expect(await statusOf(runCron(core, id))).toBe("ok");
+
+    // The renewal: Alpha, Bravo and Charlie with the gateway stopped once.
+    await renewalDue(ids, "first");
+    const windows = offlineWindows;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(offlineWindows).toBe(windows + 1);
+    for (const i of [0, 1, 2]) expect(core.profiles.get(p(ids[i]))?.secret).toMatch(/^sk-ant-oat01-first-renewed-/);
+    // No watcher minute in between: the keeper's own pass re-bound them.
+    for (const id of ["standup", "winback"]) expect(await statusOf(runCron(core, id))).toBe("ok");
+
+    // Between two renewals: a job a chat makes on Bravo (auto), one the owner pins to Charlie (user).
+    addCron(core, { id: "final-report", name: "08:00 final report", binding: { profileId: p(ids[1]), lifetime: lifetime(core, p(ids[1])), source: "auto" } });
+    addCron(core, { id: "coding-check", name: "Hourly coding-run check", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[2])}` }, binding: { profileId: p(ids[2]), lifetime: lifetime(core, p(ids[2])), source: "user" } });
+    await renewalDue(ids, "second");
+    await gw.keepGatewayMirror();
+    for (const id of ["standup", "winback", "final-report", "coding-check"]) {
+      const ran = runCron(core, id);
+      expect(ran).not.toMatch(/replaced|no recorded/);
+      expect(await statusOf(ran)).toBe("ok");
+    }
+  });
+
+  it("R1b — a renewal made by the owner's \"use these accounts for the chat\" re-binds the jobs before it answers", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    addCron(core, { id: "standup" });
+    await gw.bindGatewayCrons();
+    expect(runCron(core, "standup")).toBe(p(ids[0]));
+
+    await renewalDue(ids, "first");
+    const result = await gw.putChatOnPool(async () => ({ ok: true }));
+
+    expect(result.ok).toBe(true);
+    expect(core.profiles.get(p(ids[0]))?.secret).toMatch(/^sk-ant-oat01-first-renewed-/);
+    expect(runCron(core, "standup")).toBe(p(ids[0]));
+  });
+
+  it("R1c — a job core refused twice is asked again in the renewal's own pass: its back-off was for the authorization the renewal replaced", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    addCron(core, { id: "soak", name: "soak watch", payload: { kind: "agentTurn", message: "m", model: SONNET }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "auto" } });
+    const asked = () => core.calls.filter((c) => c.method === "cron.update" && c.params.id === "soak").length;
+    // The scheduler refuses the adoption twice in a row: backed off.
+    core.refuseCronUpdate.add(`${SONNET}@${p(ids[0])}`);
+    await gw.bindGatewayCrons();
+    await gw.bindGatewayCrons();
+    expect(asked()).toBe(2);
+    await gw.bindGatewayCrons();
+    expect(asked()).toBe(2);
+    core.refuseCronUpdate.clear();
+
+    // Alpha is renewed inside the back-off: the job's own binding is now the replaced one.
+    await renewalDue(ids, "first");
+    await gw.keepGatewayMirror();
+
+    expect(asked()).toBe(3);
+    expect(runCron(core, "soak")).toBe(p(ids[0]));
+  });
+
+  it("R2 — a job with no recorded inference account gets one before its next run; one pinned to the owner's own account is never moved, and is reported by name once a run is lost to it", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    // Made by paths that captured no account (on the box: night-batch-start, night-batch-report).
+    addCron(core, { id: "night-start", name: "night-batch-start" });
+    addCron(core, { id: "night-report", name: "night-batch-report", payload: { kind: "agentTurn", message: "m", model: SONNET } });
+    // Pinned to the owner's own sign-in, and never bound (made before 2026.11.3).
+    addCron(core, { id: "owners-own", name: "Owner's digest", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-opus-5-5@anthropic:default" } });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await gw.bindGatewayCrons();
+      expect(runCron(core, "night-start")).toBe(p(ids[0]));
+      expect(runCron(core, "night-report")).toBe(p(ids[0]));
+
+      // The owner's choice stays the owner's: a model@profile onto it would be the box's consent, not theirs.
+      expect(core.calls.some((c) => c.method === "cron.update" && c.params.id === "owners-own")).toBe(false);
+      expect(runCron(core, "owners-own")).toMatch(/no recorded inference account/);
+      await gw.bindGatewayCrons();
+      expect(core.calls.some((c) => c.method === "cron.update" && c.params.id === "owners-own")).toBe(false);
+      // ...but the box says which job lost its run, on which account, and what it needs.
+      const said = () => errors.mock.calls.map((c) => c.map(String).join(" ")).filter((line) => line.includes("owners-own"));
+      expect(said()).toHaveLength(1);
+      expect(said()[0]).toContain("Owner's digest");
+      expect(said()[0]).toContain("anthropic:default");
+      expect(said()[0]).toMatch(/model@profile/);
+      // Once a lost run, not every minute.
+      await gw.bindGatewayCrons();
+      expect(said()).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("R3 — after a renewal of several accounts in one gateway stop, openclaw.json's auth.order.anthropic equals the stored order, not the last paste first", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    await twoSpent(ids);
+    // The watcher's minutes since the limits: Delta and Echo are out.
+    await gw.noteGatewayCooldowns();
+    const order = [p(ids[0]), p(ids[1]), p(ids[2]), "anthropic:default", "anthropic:manual"];
+    expect(core.order).toEqual(order);
+    expect(core.configOrder).toEqual(order);
+
+    await renewalDue(ids, "first");
+    let atRestart: string[] | null = null;
+    core.afterWindow = () => {
+      atRestart ??= core.configOrder ? [...core.configOrder] : null;
+    };
+    await gw.keepGatewayMirror();
+
+    // Each paste puts its profile first (the precondition the box met):
+    // the gateway came back with the last account pasted at the head.
+    expect(atRestart?.[0]).toBe(core.pastes.at(-1)?.profileId);
+    expect(core.order).toEqual(order);
+    expect(core.configOrder).toEqual(core.order);
+  });
+
+  it("R4 — a chat whose CLI binding the renewal invalidated picks an account the pool marks ok, never the limited one it had picked itself before", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    // The owner's direct chat: its own automatic pick is Delta (made before Delta's limit), its CLI session is on Alpha.
+    core.sessions.set("direct", { override: p(ids[3]), cli: { profileId: p(ids[0]), fingerprint: fp(core.profiles.get(p(ids[0]))?.secret as string) } });
+    expect(chatTurn(core, "direct")).toEqual({ profileId: p(ids[0]), reuse: "reused" });
+    await twoSpent(ids);
+    // Hours of the watcher's minutes before the renewal.
+    await gw.noteGatewayCooldowns();
+    expect(chatTurn(core, "direct")).toEqual({ profileId: p(ids[0]), reuse: "reused" });
+
+    await renewalDue(ids, "first");
+    await gw.keepGatewayMirror();
+
+    const turn = chatTurn(core, "direct");
+    expect(turn.reuse).toBe("invalidated:auth-epoch");
+    expect(await statusOf(turn.profileId)).toBe("ok");
+  });
+
+  it("R4b — with the limit recorded just before the renewal's window, the limited account is out before the gateway stops: no turn after the restart lands on it", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    core.sessions.set("direct", { override: p(ids[3]), cli: { profileId: p(ids[0]), fingerprint: fp(core.profiles.get(p(ids[0]))?.secret as string) } });
+    // The limits land and the keeper's pass with a renewal comes next — no watcher minute in between.
+    await twoSpent(ids);
+    await renewalDue(ids, "first");
+    let atRestart: { profileId: string | null; reuse: string } | null = null;
+    let heldAtRestart: string[] = [];
+    core.afterWindow = () => {
+      if (atRestart) return;
+      atRestart = chatTurn(core, "direct");
+      heldAtRestart = [...core.profiles.keys()];
+    };
+    await gw.keepGatewayMirror();
+
+    expect(atRestart).not.toBeNull();
+    const turn = atRestart as unknown as { profileId: string | null; reuse: string };
+    expect(turn.reuse).toBe("invalidated:auth-epoch");
+    expect(await statusOf(turn.profileId)).toBe("ok");
+    expect(heldAtRestart).not.toContain(p(ids[3]));
+    expect(heldAtRestart).not.toContain(p(ids[4]));
+    // ...and the order still leads with the account that answers.
+    expect(core.order?.[0]).toBe(p(ids[0]));
   });
 });
