@@ -818,6 +818,16 @@ describe("background.js: switching linked ClawBoxes", () => {
     await n.call({ type: "switchBox", slot: 2 }, 1);
     expect(n.chrome.tabs.create).not.toHaveBeenCalled();
 
+    // Asked of the desktop, an answer with no session end, or one that comes
+    // back after it, opens and activates nothing either.
+    for (const answer of [{ selfName: "laptop", boxes: list.boxes }, { ...list, validUntil: Date.now() - 1 }]) {
+      const a = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { desktopList: answer });
+      await a.call({ type: "switchBox", slot: 2 }, 1);
+      expect(a.chrome.tabs.create).not.toHaveBeenCalled();
+      expect(a.chrome.tabs.update).not.toHaveBeenCalled();
+      expect(a.session.linkedBoxes).toBeUndefined();
+    }
+
     // Still inside the session: used as it is, without asking the desktop.
     const ok = loadWorker([DESK], { stored: list });
     await ok.call({ type: "switchBox", slot: 2 });
