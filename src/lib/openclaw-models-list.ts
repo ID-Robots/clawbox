@@ -23,7 +23,7 @@
  */
 
 /** The OpenClaw version every copy in this module was checked against. */
-export const MODELS_LIST_CHECKED_AT = "2026.10.9";
+export const MODELS_LIST_CHECKED_AT = "2026.11.3";
 
 /**
  * What `openclaw models list --provider <p> --all --json [--refresh]` sends a
@@ -58,7 +58,7 @@ export interface CliModelRow {
 export interface CliModelsListJson {
   count: number;
   models: CliModelRow[];
-  providerOutcomes?: Array<{ provider: unknown; profileId?: unknown; status: unknown }>;
+  providerOutcomes?: Array<{ provider: unknown; profileId?: unknown; status: unknown; unlistedConfiguredModelIds?: unknown[] }>;
 }
 
 /** The core's `modelKey`: trimmed parts, an id that already names its provider kept as it is. */
@@ -113,14 +113,35 @@ export function cliJsonFromModelsList(payload: Record<string, unknown>): CliMode
     models,
     ...(outcomes.length
       ? {
-        providerOutcomes: outcomes.map(({ provider, profileId, status }) => ({
-          provider,
-          ...(profileId ? { profileId } : {}),
-          status,
-        })),
+        providerOutcomes: outcomes.map((outcome) => {
+          const { provider, profileId, status } = outcome;
+          // Checked as the stderr side checks it: the same command maps this
+          // field for its catalog warnings, so a ready outcome whose field is
+          // not a list crashes the CLI rather than printing it.
+          const unlisted = status === "ready" ? unlistedIdsOf(outcome) : [];
+          return {
+            provider,
+            ...(profileId ? { profileId } : {}),
+            status,
+            ...(unlisted.length ? { unlistedConfiguredModelIds: unlisted } : {}),
+          };
+        }),
       }
       : {}),
   };
+}
+
+/**
+ * The ids a ready provider's outcome names as configured but missing from its
+ * last successful listing (2026.11.3, `getModelCatalogWarnings`). The core
+ * reads the field as `?? []` and maps it, so anything else that is not a list
+ * would crash the CLI: it throws here too.
+ */
+function unlistedIdsOf(outcome: Record<string, unknown>): unknown[] {
+  const ids = outcome.unlistedConfiguredModelIds;
+  if (ids == null) return [];
+  if (!Array.isArray(ids)) throw new Error("models.list answered unlistedConfiguredModelIds that is not a list");
+  return ids;
 }
 
 /**
@@ -133,12 +154,21 @@ function terminalSafe(value: unknown): string {
 }
 
 /**
- * What the CLI writes to stderr for the same answer: the refresh warning and
- * one sentence per provider whose discovery is not ready. "" when there is
- * none. Only the catalogue's log line reads it, as it read the CLI's stderr.
+ * What the CLI writes to stderr for the same answer: one advisory per
+ * configured model a ready provider did not list (from 2026.11.3), the
+ * refresh warning and one sentence per provider whose discovery is not ready.
+ * "" when there is none. Only the catalogue's log line reads it, as it read
+ * the CLI's stderr.
  */
 export function cliDiagnosticFromModelsList(payload: Record<string, unknown>): string {
   const lines: string[] = [];
+  for (const outcome of outcomesOf(payload)) {
+    if (outcome.status !== "ready") continue;
+    for (const modelId of unlistedIdsOf(outcome)) {
+      lines.push(`Configured model "${terminalSafe(`${String(outcome.provider)}/${String(modelId)}`)}" is not present in the provider's last successful server catalog${outcome.profileId ? ` (profile ${terminalSafe(outcome.profileId)})` : ""}.`
+        + " Pull or download it on that server, or fix the configured model name; then run openclaw models list --refresh. The model remains selectable.");
+    }
+  }
   if (payload.refreshFailed) {
     lines.push("Model discovery could not refresh all providers. Showing the available published model list.");
   }

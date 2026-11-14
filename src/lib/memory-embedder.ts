@@ -225,10 +225,13 @@ async function cloudEmbedder(): Promise<ResolvedEmbedder> {
  *   the cloud-defaults verdict out and would otherwise pay for it twice.
  */
 export async function resolveMemoryEmbedder(fallback?: EmbeddingSource): Promise<ResolvedEmbedder> {
+  // The lock first: working the default out asks the cloud embeddings route
+  // (`defaultEmbedderSource` probes it on an unpinned box), and nothing may go
+  // to the cloud while the local-only lock is on — not even that question.
+  if (await cloudAiLockOn()) return await localEmbedder();
   const pinned = await readEmbedderPin();
   const source = pinned ?? fallback ?? (await defaultEmbedderSource());
   if (source !== "cloud") return await localEmbedder();
-  if (await cloudAiLockOn()) return await localEmbedder();
   if (await cloudEmbeddingsSwitchedOff()) return await localEmbedder();
   const cloud = await cloudEmbedder();
   return cloud.token === null ? await localEmbedder() : cloud;

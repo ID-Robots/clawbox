@@ -24,6 +24,20 @@ function leaks(text: string): boolean {
 }
 
 describe("describeChatFailure", () => {
+  it("does not answer a requested model's failure with the reload note a fallback attempt carried", () => {
+    const shown = describeChatFailure("All models failed (2): anthropic/claude-opus-5-5: No API key found for provider \"anthropic\" (auth) | deepseek/deepseek-v4-flash: Error: Skills discovery was retired before publication");
+    expect(shown).not.toMatch(/reloading its settings/);
+  });
+
+  it("tells a turn OpenClaw 2026.11.3 lost to a settings reload to send it again, and leaks nothing", () => {
+    const raw = "Error: Skills discovery was retired before publication";
+    const shown = describeChatFailure(raw);
+    expect(shown).toMatch(/reloading its settings/);
+    expect(shown).toMatch(/Send it again/);
+    expect(leaks(shown)).toBe(false);
+    expect(shown).not.toContain("Skills discovery");
+  });
+
   it("never renders the session-takeover error a customer actually saw", () => {
     for (const raw of [TAKEOVER_RAW, FOLLOWUP_RAW]) {
       const shown = describeChatFailure(raw);

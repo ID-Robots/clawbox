@@ -16,6 +16,28 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const { failures } = vi.hoisted(() => ({ failures: { settled: 0 } }));
 
+// OpenClaw 2026.11.3: the status probe asks the gateway's memory.status first
+// (no gateway in these tests: the CLI answers, as before), and an OpenClaw
+// index pass runs with the gateway stopped and started again (recorded here).
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>();
+  return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
+});
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  // The gateway request through the (mocked) socket: no gateway = not answered.
+  askOpenclawGateway: async (method: string, params: Record<string, unknown>, timeoutMs: number) => {
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    try {
+      return { answered: true, result: await ws.gatewayWsCall(method, params, { timeoutMs }) };
+    } catch (err) {
+      if (err instanceof ws.GatewayWsUnavailableError) return { answered: false };
+      throw err;
+    }
+  },
+  stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
+  startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
+}));
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const writeFile = (async (...args: Parameters<typeof actual.promises.writeFile>) => {

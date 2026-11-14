@@ -6,8 +6,11 @@
 #
 # A project's MCP servers reaching a real delegated run (src/lib/project-mcp-servers.ts):
 #
-#   1. A stand-in board server is registered with the board's OWN harness, the
-#      native way (`openclaw mcp set`), carrying a token in its env.
+#   1. A stand-in board server is registered with the board's OWN harness,
+#      carrying a token in its env: on OpenClaw through the running gateway
+#      (`openclaw config set mcp.servers.<name> … --json`, which 2026.11.3
+#      routes to the gateway; its `openclaw mcp set` refuses while a gateway
+#      owns the state).
 #   2. The owner's checklist (GET /setup-api/coding-agent/mcp-servers) lists it,
 #      unticked, and never the token; the MCP bearer may not tick it; the owner
 #      ticks it and "ClawBox read-only tools" for a fresh code project.
@@ -82,7 +85,7 @@ py() { python3 -c "import json,sys; j=json.load(sys.stdin); a=sys.argv[2:]; prin
 
 cleanup() {
   [ -n "${OWNER:-}" ] && call POST /setup-api/coding-agent/mcp-servers "$OWNER" "{\"project\":\"$PID\",\"servers\":[]}" >/dev/null 2>&1
-  openclaw mcp unset "$NAME" >/dev/null 2>&1
+  openclaw config unset "mcp.servers.$NAME" >/dev/null 2>&1
   api POST /setup-api/code "{\"action\":\"delete-project\",\"projectId\":\"$PID\"}" >/dev/null 2>&1
   rm -rf -- "$STUB_DIR"
 }
@@ -162,7 +165,7 @@ EOF
 EXE=$(find "$HOME/.cache/ms-playwright" -maxdepth 4 -type f \( -name headless_shell -o -name chrome \) -perm -u+x 2>/dev/null | sort -V | tail -n 1)
 
 ENTRY=$(python3 -c "import json,sys; print(json.dumps({\"command\": sys.argv[1], \"args\": [sys.argv[2], sys.argv[3], sys.argv[4]], \"env\": {\"BOARD_TOKEN\": sys.argv[5]}}))" "$NODE" "$STUB_DIR/board.mjs" "$MARKER" "$SDK" "$TOKEN")
-if openclaw mcp set "$NAME" "$ENTRY" >/dev/null 2>&1; then say "ok - registered a stand-in board server with the harness (openclaw mcp set)"; else say "not ok - openclaw mcp set refused the stand-in server"; exit 0; fi
+if openclaw config set "mcp.servers.$NAME" "$ENTRY" --json >/dev/null 2>&1; then say "ok - registered a stand-in board server with the harness (mcp.servers, through the gateway)"; else say "not ok - the harness refused the stand-in server (config set mcp.servers.$NAME)"; exit 0; fi
 
 r=$(api POST /setup-api/code "{\"action\":\"init\",\"projectId\":\"$PID\",\"name\":\"$PID\"}")
 if [ "$(status_of "$r")" != 200 ]; then say "not ok - the code project could not be made: HTTP $(status_of "$r")"; exit 0; fi

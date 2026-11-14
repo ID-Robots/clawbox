@@ -14,8 +14,13 @@ vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: () => "openclaw",
   spawnOpenclawCli: vi.fn(),
 }));
+// OpenClaw 2026.11.3: the store is read directly (its `models auth list` needs
+// the gateway stopped), and old xAI profiles leave through the gateway.
+vi.mock("@/lib/openclaw-auth-store", () => ({ readGatewayProviderAuth: vi.fn(() => ({ kind: "no-store" })) }));
+vi.mock("@/lib/openclaw-auth-ops", () => ({ logoutOpenclawAuthProfiles: vi.fn(async (_provider: string, ids: string[]) => ids) }));
 
-import { spawnOpenclawCli } from "@/lib/openclaw-config";
+import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
+import { logoutOpenclawAuthProfiles } from "@/lib/openclaw-auth-ops";
 import {
   cancelXaiLogin,
   claimXaiLoginAttempt,
@@ -149,28 +154,21 @@ describe("cleanTuiOutput / outputTail", () => {
 });
 
 describe("the command", () => {
-  it("is the oauth login at the shared profile id — never with --device-code", () => {
+  it("is the oauth login the gateway takes — never with --device-code, --profile-id or --force", () => {
     // Measured: `--device-code cannot be combined with --method unless method
-    // is device-code.` (exit 1).
-    expect(xaiLoginArgs(false).join(" ")).toBe(
-      "models auth login --provider xai --method oauth --profile-id xai:default",
-    );
-    expect(xaiLoginArgs(true)).not.toContain("--device-code");
-  });
-
-  it("adds --force only when there is a profile to replace", () => {
-    expect(xaiLoginArgs(true)).toContain("--force");
-    expect(xaiLoginArgs(false)).not.toContain("--force");
+    // is device-code.` (exit 1). OpenClaw 2026.11.3 hands the login to the
+    // running gateway, whose login API refuses --profile-id and --force.
+    expect(xaiLoginArgs().join(" ")).toBe("models auth login --provider xai --method oauth");
+    for (const flag of ["--device-code", "--profile-id", "--force", "--set-default"]) expect(xaiLoginArgs()).not.toContain(flag);
   });
 
   it("runs under a pseudo-terminal, because the login refuses without one", () => {
     // Measured: `models auth login requires an interactive TTY` (exit 1).
-    expect(ptyCommand("/opt/openclaw/bin/openclaw", xaiLoginArgs(false))).toEqual({
+    expect(ptyCommand("/opt/openclaw/bin/openclaw", xaiLoginArgs())).toEqual({
       file: "script",
       args: [
         "-qfec",
-        "'/opt/openclaw/bin/openclaw' 'models' 'auth' 'login' '--provider' 'xai' '--method' 'oauth'"
-          + " '--profile-id' 'xai:default'",
+        "'/opt/openclaw/bin/openclaw' 'models' 'auth' 'login' '--provider' 'xai' '--method' 'oauth'",
         "/dev/null",
       ],
     });
@@ -227,6 +225,8 @@ describe("the login in flight", () => {
   /** Start, let the CLI "print" something, and collect start's answer. */
   async function startWith(print: () => void, opts = { replaceExisting: false }) {
     const started = startXaiLogin(opts);
+    // The login spawns after the old profiles are out (replaceExisting).
+    await vi.advanceTimersByTimeAsync(0);
     print();
     await vi.advanceTimersByTimeAsync(250);
     return started;
@@ -314,7 +314,7 @@ describe("the login in flight", () => {
       // The CLI stated no lifetime here, so the measured default.
       expiresInMinutes: 30,
     });
-    expect(spawnArgs).toEqual(xaiLoginArgs(false));
+    expect(spawnArgs).toEqual(xaiLoginArgs());
     expect(pollXaiLogin()).toMatchObject({ status: "pending", userCode: "ABCD-1234" });
   });
 
@@ -325,11 +325,12 @@ describe("the login in flight", () => {
     expect(answer.status).toBe("pending");
   });
 
-  it("passes --force through when a profile is being replaced", async () => {
+  it("replaces a stored profile without --force, which the gateway's login refuses", async () => {
     await startWith(() => {
       child.stdout.emit("data", Buffer.from("https://example.test/device ABCD-1234\n"));
     }, { replaceExisting: true });
-    expect(spawnArgs).toContain("--force");
+    expect(spawnArgs).not.toContain("--force");
+    expect(vi.mocked(logoutOpenclawAuthProfiles)).toHaveBeenCalled();
   });
 
   it("reports complete once the CLI exits 0, then forgets the login", async () => {
@@ -400,9 +401,7 @@ describe("the login in flight", () => {
 
   it("completes from the store when the sign-in lands and the CLI lingers", async () => {
     // What the CLI prints after approval is unmeasured; the store is not.
-    vi.mocked(spawnOpenclawCli).mockResolvedValue(
-      JSON.stringify({ profiles: [{ id: "xai:default", provider: "xai", type: "oauth" }] }),
-    );
+    vi.mocked(readGatewayProviderAuth).mockReturnValue({ kind: "present", profiles: [{ profileId: "xai:default", type: "oauth", fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null }], order: null, failures: {} });
     await startWith(() => {
       child.stdout.emit("data", Buffer.from(MEASURED_RAW_CHUNKS.join("")));
     });
@@ -411,26 +410,27 @@ describe("the login in flight", () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(pollXaiLogin()).toEqual({ status: "complete" });
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-    vi.mocked(spawnOpenclawCli).mockReset();
+    vi.mocked(readGatewayProviderAuth).mockReturnValue({ kind: "no-store" });
   });
 
   it("does not count a sign-in that was already stored before this login began", async () => {
-    vi.mocked(spawnOpenclawCli).mockResolvedValue(
-      JSON.stringify({ profiles: [{ id: "xai:default", provider: "xai", type: "oauth" }] }),
-    );
+    vi.mocked(readGatewayProviderAuth).mockReturnValue({ kind: "present", profiles: [{ profileId: "xai:default", type: "oauth", fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null }], order: null, failures: {} });
     const started = startXaiLogin({ replaceExisting: true, signInAlreadyStored: true });
+    await vi.advanceTimersByTimeAsync(0);
     child.stdout.emit("data", Buffer.from(MEASURED_RAW_CHUNKS.join("")));
     await vi.advanceTimersByTimeAsync(250);
     await started;
+    // The one read before the spawn found what to take out; the poll asks nothing.
+    vi.mocked(readGatewayProviderAuth).mockClear();
 
     pollXaiLogin();
     await vi.advanceTimersByTimeAsync(25_000);
     expect(pollXaiLogin().status).toBe("pending");
-    expect(spawnOpenclawCli).not.toHaveBeenCalled();
+    expect(readGatewayProviderAuth).not.toHaveBeenCalled();
     // Only the CLI's own exit can finish it.
     child.emit("close", 0);
     expect(pollXaiLogin()).toEqual({ status: "complete" });
-    vi.mocked(spawnOpenclawCli).mockReset();
+    vi.mocked(readGatewayProviderAuth).mockReturnValue({ kind: "no-store" });
   });
 
   it("stops the CLI on cancel", async () => {
@@ -557,37 +557,49 @@ describe("the login in flight", () => {
 });
 
 describe("readXaiStoredProfiles", () => {
-  const mockCli = vi.mocked(spawnOpenclawCli);
+  const read = vi.mocked(readGatewayProviderAuth);
+  const row = (profileId: string, type: string) => ({ profileId, type, fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null });
 
-  it("returns the xai rows of the store and nobody else's", async () => {
-    mockCli.mockResolvedValueOnce(JSON.stringify({
-      profiles: [
-        { id: "xai:default", provider: "xai", type: "oauth" },
-        { id: "anthropic:default", provider: "anthropic", type: "api_key" },
-        { id: "xai:manual", type: "API_KEY" },
-      ],
-    }));
-
+  it("returns the xai rows of the store, read directly", async () => {
+    read.mockReturnValueOnce({ kind: "present", profiles: [row("xai:default", "oauth"), row("xai:manual", "API_KEY")], order: null, failures: {} });
     expect(await readXaiStoredProfiles()).toEqual([
       { id: "xai:default", type: "oauth" },
       { id: "xai:manual", type: "api_key" },
     ]);
-    expect(mockCli).toHaveBeenCalledWith(["models", "auth", "list", "--json"], expect.anything());
+    expect(read).toHaveBeenCalledWith("xai");
   });
 
-  it("answers an empty list for a store with no xai profile", async () => {
-    mockCli.mockResolvedValueOnce(JSON.stringify({ profiles: [] }));
+  it("answers an empty list for a box with no store", async () => {
+    read.mockReturnValueOnce({ kind: "no-store" });
     expect(await readXaiStoredProfiles()).toEqual([]);
   });
 
-  it("answers null — unknown — when the store cannot be read or parsed", async () => {
-    mockCli.mockRejectedValueOnce(new Error("timeout"));
+  it("answers null — unknown — when the store cannot be read", async () => {
+    read.mockReturnValueOnce({ kind: "unreadable" });
     expect(await readXaiStoredProfiles()).toBeNull();
-    mockCli.mockResolvedValueOnce("not json");
-    expect(await readXaiStoredProfiles()).toBeNull();
-    mockCli.mockResolvedValueOnce("null");
-    expect(await readXaiStoredProfiles()).toBeNull();
-    mockCli.mockResolvedValueOnce(JSON.stringify({ profiles: {} }));
-    expect(await readXaiStoredProfiles()).toBeNull();
+  });
+});
+
+describe("replacing a stored xAI sign-in", () => {
+  it("spawns nothing when the sign-in is cancelled while the old profiles are taken out", async () => {
+    vi.mocked(readGatewayProviderAuth).mockReturnValueOnce({ kind: "present", profiles: [{ profileId: "xai:default", type: "api_key", fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null }], order: null, failures: {} });
+    vi.mocked(logoutOpenclawAuthProfiles).mockImplementationOnce(async (_p: string, ids: string[]) => {
+      cancelXaiLogin();
+      return ids;
+    });
+    const spawn = vi.spyOn(xaiLoginSpawn, "spawn");
+    expect(await startXaiLogin({ replaceExisting: true })).toMatchObject({ status: "failed", detail: expect.stringMatching(/cancelled/) });
+    expect(spawn).not.toHaveBeenCalled();
+    spawn.mockRestore();
+  });
+
+  it("takes the stored xAI profiles out through the gateway before the login starts", async () => {
+    vi.mocked(readGatewayProviderAuth).mockReturnValueOnce({ kind: "present", profiles: [{ profileId: "xai:default", type: "api_key", fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null }], order: null, failures: {} });
+    const spawn = vi.spyOn(xaiLoginSpawn, "spawn").mockImplementation(() => { throw new Error("no CLI here"); });
+    await startXaiLogin({ replaceExisting: true });
+    expect(vi.mocked(logoutOpenclawAuthProfiles)).toHaveBeenCalledWith("xai", ["xai:default"]);
+    expect(vi.mocked(logoutOpenclawAuthProfiles).mock.invocationCallOrder[0]).toBeLessThan(spawn.mock.invocationCallOrder[0]);
+    spawn.mockRestore();
+    cancelXaiLogin();
   });
 });

@@ -178,6 +178,20 @@ describe("the box's own engine, where the cloud cannot answer (TASK-2501 PR-C)",
     expect((await resolveMemoryEmbedder()).source).toBe("cloud");
   });
 
+  it("asks nothing of the cloud on an unpinned box under the lock — not even what the default would be", async () => {
+    // The default is worked out from the cloud-defaults facts, whose route
+    // probe is a request to the cloud embedder (TASK-2499, the board's test 72).
+    store.delete("memory_shard_embedder");
+    facts.mockClear();
+    store.set("ai_cloud_lock", true);
+    try {
+      expect((await resolveMemoryEmbedder()).source).toBe("local");
+      expect(facts).not.toHaveBeenCalled();
+    } finally {
+      store.delete("ai_cloud_lock");
+    }
+  });
+
   it("never hands out a cloud embedder without the bearer it needs", async () => {
     token.mockResolvedValue(null);
     for (const fallback of ["cloud", undefined] as const) {

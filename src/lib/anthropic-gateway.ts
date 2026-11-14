@@ -98,6 +98,7 @@
  * chat stays on the pool's Claude accounts (`not_transferable`).
  */
 
+import { logoutOpenclawAuthProfiles, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
@@ -144,6 +145,12 @@ export interface GatewayDeps {
   read: () => GatewayProviderAuthRead;
   /** Core's writer: one `token` profile, the access token on stdin. `agent`: the `--agent` arguments (ChatConfig). */
   paste: (profileId: string, token: { access: string; expires: number | null }, agent: readonly string[]) => Promise<void>;
+  /**
+   * Run the pass's token pastes (`paste-token`, which OpenClaw 2026.11.3 takes
+   * only offline: it has no gateway RPC) with the gateway stopped through its
+   * service owner, and started again after. Absent: the pastes run as they are.
+   */
+  offline?: <T>(work: () => Promise<T>) => Promise<T>;
   /** Core's removal of one profile, its order and config entries. */
   logout: (profileId: string, agent: readonly string[]) => Promise<void>;
   /** Core's stored order for Anthropic; an empty list clears it. */
@@ -192,6 +199,12 @@ function agentArgsOf(agents: unknown): string[] | null {
   return ids.length > 1 ? ["--agent", "main"] : [];
 }
 
+/** The agent `agentArgsOf` named (`--agent main`), for the gateway request. */
+function agentIdOf(agent: readonly string[]): string | undefined {
+  const i = agent.indexOf("--agent");
+  return i >= 0 && typeof agent[i + 1] === "string" ? agent[i + 1] : undefined;
+}
+
 async function modelsAuth(args: string[], agent: readonly string[], stdinData?: string): Promise<void> {
   await spawnOpenclawCli(["models", "auth", ...args, ...agent], {
     timeoutMs: CLI_TIMEOUT_MS,
@@ -223,8 +236,14 @@ const defaultDeps: GatewayDeps = {
     if (token.expires !== null) args.push("--expires-in", `${Math.max(60, Math.floor((token.expires - Date.now()) / 1000))}s`);
     await modelsAuth(args, agent, `${token.access}\n`);
   },
-  logout: (profileId, agent) => modelsAuth(["logout", profileId, "--yes"], agent),
-  order: (profileIds, agent) => modelsAuth(profileIds.length > 0 ? ["order", "set", "--provider", PROVIDER, ...profileIds] : ["order", "clear", "--provider", PROVIDER], agent),
+  // OpenClaw 2026.11.3 refuses the CLI's `logout` and `order` while the
+  // gateway owns the state: the gateway's own models.authLogout /
+  // models.authOrderSet then, the CLI only when no gateway answers.
+  offline: (work) => withOpenclawGatewayStopped(work),
+  logout: async (profileId, agent) => {
+    await logoutOpenclawAuthProfiles(PROVIDER, [profileId], agentIdOf(agent));
+  },
+  order: (profileIds, agent) => setOpenclawAuthOrder(PROVIDER, profileIds.length > 0 ? [...profileIds] : null, agentIdOf(agent)),
   unsetConfigOrder: () => runOpenclawConfigUnset(`auth.order.${PROVIDER}`),
   usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
@@ -357,7 +376,15 @@ function otherProfiles(store: Extract<GatewayProviderAuthRead, { kind: "present"
   return [...ordered, ...profiles.filter((p) => !ordered.includes(p))];
 }
 
-const sameList = (a: readonly string[] | null, b: readonly string[]) => a !== null && a.length === b.length && a.every((id, i) => id === b[i]);
+/**
+ * Does the stored order lead with `wanted`? OpenClaw 2026.11.3 takes an order
+ * only when it names every profile the store holds for the provider, so the
+ * gateway keeps the pool's order first and the provider's other profiles
+ * after it (src/lib/openclaw-auth-ops.ts); an empty `wanted` is a cleared one.
+ */
+const leadsWith = (stored: readonly string[] | null, wanted: readonly string[]) => wanted.length === 0
+  ? stored === null || stored.length === 0
+  : stored !== null && stored.length >= wanted.length && wanted.every((id, i) => id === stored[i]);
 
 interface OrderMarker {
   /** The pool wrote core's stored order. */
@@ -433,8 +460,12 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     return takeOut(d, ours, pool, why, agent, attempt, () => changed);
   }
 
-  // Every account's current access token, in where it is not already.
+  // Every account's current access token, in where it is not already. The
+  // tokens are fetched first (a renewal may need the network), and every paste
+  // the pass owes runs in ONE offline window (`d.offline`).
   const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
+  const toPaste: { id: string; account: string; token: { access: string; expires: number | null } }[] = [];
+  let offlineFailed = false;
   let pasted = 0;
   for (const account of wanted) {
     const id = poolProfileId(account.id);
@@ -445,7 +476,22 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const fingerprint = tokenFingerprint(token.access);
     tokens.set(id, { fingerprint, expires: token.expires });
     if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) continue;
-    if (await attempt(`account ${account.id}'s token`, () => d.paste(id, token, agent))) pasted += 1;
+    toPaste.push({ id, account: account.id, token });
+  }
+  if (toPaste.length > 0) {
+    const pasteAll = async () => {
+      for (const { id, account, token } of toPaste) {
+        if (await attempt(`account ${account}'s token`, () => d.paste(id, token, agent))) pasted += 1;
+      }
+    };
+    try {
+      await (d.offline ? d.offline(pasteAll) : pasteAll());
+    } catch (err) {
+      // Stored credentials do not prove the gateway is answering again: the
+      // pass fails below, whatever the read-back shows.
+      offlineFailed = true;
+      console.error("[anthropic-gateway] the gateway could not be stopped and started again around the token pastes:", err instanceof Error ? err.message : err);
+    }
   }
   // What the pool wrote, recorded the moment it is seen, so taking the pool
   // out later undoes exactly that: a CONFIG order core's paste created beside
@@ -480,13 +526,13 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // Core said it wrote the order: whatever the read-back shows, taking the
   // pool out later clears it (an order that is not there clears without fuss).
   let orderWritten = false;
-  if (!sameList(after.order, order)) {
+  if (!leadsWith(after.order, order)) {
     if (await attempt("the account order", () => d.order(order, agent))) orderWritten = true;
     const reread = d.read();
     if (reread.kind !== "present") return outcome("failed", "write_lost", changed);
     final = reread;
   }
-  const orderLanded = sameList(final.order ?? (order.length === 0 ? [] : null), order);
+  const orderLanded = leadsWith(final.order, order);
   if (!orderLanded) owed.push("order");
 
   if ((orderLanded || orderWritten) && !marker.stored) await writeOrderMarker({ ...marker, stored: true });
@@ -535,6 +581,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const first = target ? `${target.id} first` : onSignIn ? `none of them in the order, every one limited: the owner's own sign-in (${order[0]}) first` : "none first";
     console.error(`[anthropic-gateway] the gateway holds ${held.size} Anthropic account(s) of the pool, ${first}${owed.length > 0 ? `; still owed: ${owed.join(", ")}` : ""}`);
   }
+  if (offlineFailed) return outcome("failed", "gateway_restart_failed", held.size);
   if (!leadOk) return outcome("failed", "write_failed", held.size);
   if (active && active.kind !== "oauth") return outcome("skipped", "not_transferable", held.size);
   // `pending` is the keeper's to finish without failing the move it serves.

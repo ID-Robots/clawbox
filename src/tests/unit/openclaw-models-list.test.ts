@@ -5,7 +5,7 @@ import {
   CLI_STDERR_OUTCOMES_REVERSED,
   CLI_STDOUT,
   GATEWAY_ANSWER,
-} from "../fixtures/openclaw-models-list-2026.10.9";
+} from "../fixtures/openclaw-models-list-2026.11.3";
 
 /**
  * The gateway's `models.list` answer, projected to exactly what the pinned
@@ -124,5 +124,43 @@ describe("cliDiagnosticFromModelsList", () => {
       "Model discovery authentication was rejected for anthropic (profile anthropic:work). Open Models in the Control UI to check sign-in and catalog access, then retry with --refresh.",
       "Model discovery is unavailable for xai. Retry with --refresh; if it still fails, check the provider in Models in the Control UI.",
     ].join("\n"));
+  });
+
+  // 2026.11.3's catalog warnings (`getModelCatalogWarnings`): a READY outcome only.
+  it("names a configured model a ready provider did not list, and only for a ready one", () => {
+    const payload = {
+      models: [],
+      providerOutcomes: [
+        { provider: "ollama", status: "ready", unlistedConfiguredModelIds: ["qwen3:8b"] },
+        { provider: "xai", status: "unavailable", unlistedConfiguredModelIds: ["grok-5"] },
+        { provider: "openai", status: "ready", unlistedConfiguredModelIds: [] },
+      ],
+    };
+    expect(cliDiagnosticFromModelsList(payload)).toBe([
+      "Configured model \"ollama/qwen3:8b\" is not present in the provider's last successful server catalog. Pull or download it on that server, or fix the configured model name; then run openclaw models list --refresh. The model remains selectable.",
+      "Model discovery is unavailable for xai. Retry with --refresh; if it still fails, check the provider in Models in the Control UI.",
+    ].join("\n"));
+    expect(cliJsonFromModelsList(payload).providerOutcomes).toEqual([
+      { provider: "ollama", status: "ready", unlistedConfiguredModelIds: ["qwen3:8b"] },
+      { provider: "xai", status: "unavailable" },
+      { provider: "openai", status: "ready" },
+    ]);
+  });
+
+  it("throws where the CLI would crash on an unlisted-ids field that is not a list", () => {
+    const payload = {
+      models: [],
+      providerOutcomes: [{ provider: "ollama", status: "ready", unlistedConfiguredModelIds: "qwen3:8b" }],
+    };
+    expect(() => cliDiagnosticFromModelsList(payload)).toThrow(/unlistedConfiguredModelIds that is not a list/);
+    expect(() => cliJsonFromModelsList(payload)).toThrow(/unlistedConfiguredModelIds that is not a list/);
+  });
+
+  it("does not read the unlisted ids of an outcome that is not ready", () => {
+    const payload = {
+      models: [],
+      providerOutcomes: [{ provider: "xai", status: "unavailable", unlistedConfiguredModelIds: "grok-5" }],
+    };
+    expect(cliJsonFromModelsList(payload).providerOutcomes).toEqual([{ provider: "xai", status: "unavailable" }]);
   });
 });

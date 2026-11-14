@@ -93,6 +93,21 @@ describe("a member of staff's tools", () => {
     expect(staffToolCallDenyReason(call("tool_call", { id: "write", path: "notes.md", content: "x" }), MARIA, opts)).toBeNull();
   });
 
+  // OpenClaw 2026.11.3 renamed the dispatcher `dispatch_action`; it reads its
+  // target as `id`, then `toolId`, then `name`, and the target's arguments as
+  // `args`, else `input`, else flat, with dotted `args.<key>` on top.
+  it("judges 2026.11.3's dispatch_action by the tool it names, read the way the core reads it", () => {
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "openclaw:core:memory_search", args: { query: "locker" } }), MARIA, opts)).toBeNull();
+    expect(staffToolCallDenyReason(call("dispatch_action", { toolId: "openclaw:core:automations" }), MARIA, opts)).toMatch(/`automations` is not available/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { name: "web_fetch", args: { url: "https://example.com" } }), MARIA, opts)).toMatch(/`web_fetch` is not available/);
+    // `id` wins over `name`, as in the core: the guard judges the tool that runs.
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "exec", name: "read", args: {} }), MARIA, opts)).toMatch(/`exec` is not available/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { args: {} }), MARIA, opts)).toMatch(/`dispatch_action` without a tool/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "write", input: { path: path.join(openclawHome, "openclaw.json"), content: "x" } }), MARIA, opts)).toMatch(/outside/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "write", "args.path": path.join(openclawHome, "openclaw.json"), "args.content": "x" }), MARIA, opts)).toMatch(/outside/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "write", args: { path: "notes.md", content: "x" } }), MARIA, opts)).toBeNull();
+  });
+
   it("allows memory search and the clarifying question", () => {
     for (const tool of ["memory_search", "memory_get", "ask_user", "progress_card"]) {
       expect(STAFF_OPENCLAW_TOOLS.allow).toContain(tool);
@@ -232,6 +247,16 @@ describe("staff MCP grants", () => {
     expect(staffToolCallDenyReason(call("cbstaff-aaaaaaaa-docs__search", { q: "x" }), MARIA, g())).toBeNull();
     expect(staffToolCallDenyReason(call("tool_call", { id: "mcp:cbstaff-aaaaaaaa-docs:search", args: {} }), MARIA, g())).toBeNull();
     expect(staffToolCallDenyReason(call("tool_call", { id: "cbstaff-aaaaaaaa-docs__search" }), MARIA, g())).toBeNull();
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "cbstaff-aaaaaaaa-docs__search", args: { q: "x" } }), MARIA, g())).toBeNull();
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "mcp:cbstaff-aaaaaaaa-docs:search" }), MARIA, g())).toBeNull();
+  });
+
+  it("refuses through dispatch_action whatever it refuses directly", () => {
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "cbstaff-aaaaaaaa-docs__search" }), IVAN, g())).toMatch(/not granted/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "mcp:cbstaff-bbbbbbbb-docs:search" }), MARIA, g())).toMatch(/not granted/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "mcp:clawbox:system_info" }), MARIA, g())).toMatch(/not available/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "clawbox__bash" }), MARIA, g())).toMatch(/not available/);
+    expect(staffToolCallDenyReason(call("dispatch_action", { id: "mcp:cbstaff-aaaaaaaa-docs:search" }), OWNER, g())).toMatch(/member of staff/);
   });
 
   it("refuses another member's entry, an ungranted one and every other MCP server", () => {

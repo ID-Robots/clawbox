@@ -32,6 +32,28 @@ let tmpDir = "";
 // written to the config store, whose file is shared with every other test in
 // the worker.
 const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+// OpenClaw 2026.11.3: the status probe asks the gateway's memory.status first
+// (no gateway in these tests: the CLI answers, as before), and an OpenClaw
+// index pass runs with the gateway stopped and started again (recorded here).
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>();
+  return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
+});
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  // The gateway request through the (mocked) socket: no gateway = not answered.
+  askOpenclawGateway: async (method: string, params: Record<string, unknown>, timeoutMs: number) => {
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    try {
+      return { answered: true, result: await ws.gatewayWsCall(method, params, { timeoutMs }) };
+    } catch (err) {
+      if (err instanceof ws.GatewayWsUnavailableError) return { answered: false };
+      throw err;
+    }
+  },
+  stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
+  startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/lib/memory-shard", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/memory-shard")>(),
   getMemoryShardEnabled: async () => shard.enabled,
@@ -270,6 +292,38 @@ describe("what the first Index now click actually runs", () => {
   it("leaves an existing index alone", async () => {
     const { resolveIndexMode } = await withStatusChunks(512);
     expect(await resolveIndexMode("incremental")).toBe("incremental");
+  });
+
+  // OpenClaw 2026.11.3 refuses `memory status` while its gateway runs: the
+  // gateway's own memory.status answers (v2: health + details.legacy).
+  async function fromGateway(health: "ready" | "degraded", message?: string) {
+    const failing = path.join(tmpDir, "openclaw-refuses");
+    await fs.writeFile(failing, "#!/bin/sh\necho 'Cannot admit memory.cli' >&2\nexit 1\n", { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = failing;
+    const { getMemoryStatus } = await lib();
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    const { dbPath: _dbPath, workspaceDir: _workspaceDir, extraPaths: _extraPaths, ...legacy } = (REAL_STATUS as Array<{ status: Record<string, unknown> }>)[0].status;
+    const vector = { ...(legacy.vector as Record<string, unknown>) };
+    delete vector.available;
+    delete vector.semanticAvailable;
+    vi.mocked(ws.gatewayWsCall).mockResolvedValueOnce({
+      version: 2, agentId: "main", providerId: "memory-core", status: health, ...(message ? { message } : {}),
+      details: { legacy: { ...legacy, vector } },
+    });
+    return { status: await getMemoryStatus(), ws };
+  }
+
+  it("reads the status from the running gateway's memory.status, not the CLI", async () => {
+    const { status, ws } = await fromGateway("ready");
+    expect(vi.mocked(ws.gatewayWsCall)).toHaveBeenCalledWith("memory.status", { agentId: expect.any(String) }, expect.anything());
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("healthy");
+  });
+
+  it("takes the gateway's own degraded health for the index's", async () => {
+    const { status } = await fromGateway("degraded", "Memory embeddings are pending. Search results may be incomplete.");
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("degraded");
   });
 
   it("uses the server Node runtime when the CLI lives beside an obsolete Node", async () => {
@@ -1097,14 +1151,66 @@ describe("what a scheduled slot runs against a disowned index (TASK-1197)", () =
     expect(await resolveIndexMode("incremental", "schedule")).toBe("full");
   });
 
-  it("leaves a scheduled pass over a valid index incremental", async () => {
+  it("leaves a scheduled pass over a valid index to the running gateway on OpenClaw", async () => {
+    // OpenClaw 2026.11.3 runs `memory index` only with the gateway stopped,
+    // and the running gateway syncs the index itself: a schedule's
+    // incremental slot stops nothing and runs no CLI pass.
     await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
     const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
-    expect((await startMemoryIndex("incremental", "schedule")).accepted).toBe(true);
-    const run = await settledMemoryRun(tmpDir);
-    expect(run.mode).toBe("incremental");
-    const [index] = await indexCalls();
-    expect(index).not.toContain("--force");
+    const { stopOpenclawGatewayForOffline } = await import("@/lib/openclaw-auth-ops");
+    const started = await startMemoryIndex("incremental", "schedule");
+    expect(started).toMatchObject({ accepted: false, declined: "gateway_indexes" });
+    expect(await indexCalls()).toEqual([]);
+    expect(vi.mocked(stopOpenclawGatewayForOffline)).not.toHaveBeenCalled();
+  });
+
+  it("steps aside, and starts the gateway again, when another run took the record over while the gateway stopped", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const mod = await import("@/lib/clawkeep-memory");
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockClear();
+    const file = path.join(tmpDir, "memory-index-state.json");
+    vi.mocked(ops.stopOpenclawGatewayForOffline).mockImplementationOnce(async () => {
+      // Another run's record lands during the stop (its own start time).
+      const other = JSON.parse(await fs.readFile(file, "utf8"));
+      await fs.writeFile(file, JSON.stringify({ ...other, status: "running", startedAtMs: other.startedAtMs - 123_456 }));
+    });
+    const started = await mod.startMemoryIndex("incremental", "manual");
+    expect(started).toMatchObject({ accepted: false, declined: "running" });
+    expect(vi.mocked(ops.startOpenclawGatewayAfterOffline)).toHaveBeenCalledTimes(1);
+    expect(await indexCalls()).toEqual([]);
+  });
+
+  it("records a pass whose assistant could not be started again as failed, after one more try", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const mod = await import("@/lib/clawkeep-memory");
+    mod._setGatewayRestartRetryPauseForTests(1);
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockClear();
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockRejectedValue(new Error("restart refused"));
+    try {
+      expect((await mod.startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+      const run = await settledMemoryRun(tmpDir);
+      expect(run.status).not.toBe("succeeded");
+      expect(vi.mocked(ops.startOpenclawGatewayAfterOffline)).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.mocked(ops.startOpenclawGatewayAfterOffline).mockResolvedValue(undefined);
+    }
+  });
+
+  it("runs an owner's OpenClaw pass with the gateway stopped, and starts it again when the pass ends", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.stopOpenclawGatewayForOffline).mockClear();
+    vi.mocked(ops.startOpenclawGatewayAfterOffline).mockClear();
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    await settledMemoryRun(tmpDir);
+    await vi.waitFor(() => expect(vi.mocked(ops.startOpenclawGatewayAfterOffline)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(ops.stopOpenclawGatewayForOffline)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ops.stopOpenclawGatewayForOffline).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(ops.startOpenclawGatewayAfterOffline).mock.invocationCallOrder[0]);
+    expect((await indexCalls()).length).toBe(1);
   });
 
   it("asks a FRESH status for the schedule, so a cached empty reading cannot send --force over a built index", async () => {

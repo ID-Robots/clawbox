@@ -54,6 +54,7 @@ import {
   type GatewayAuthProfileRead,
   type GatewayOAuthBundle,
 } from "@/lib/openclaw-auth-store";
+import { logoutOpenclawAuthProfiles, providerOfProfileId, saveOpenclawApiKey, setOpenclawAuthOrder } from "@/lib/openclaw-auth-ops";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -630,34 +631,17 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
 }
 
 async function pasteApiKeyOnce(provider: string, profileId: string, key: string): Promise<void> {
-  await spawnOpenclawCli(
-    [
-      "models", "auth", "paste-api-key",
-      // NO `--agent`. ClawBox used to pin `main` here — and in the sign-in
-      // guard and the order write — on the argument that the CLI resolves a
-      // READ and a WRITE differently, so an unpinned pair could address two
-      // stores. Measured against the installed core (2026.8.1) with a sole
-      // `pro-agent` roster and the flag omitted, that is not what happens:
-      //
-      //   models auth list --json     -> "agentId": "pro-agent"
-      //   paste-api-key …             -> agents/pro-agent/agent/openclaw-agent.sqlite
-      //
-      // The two resolvers only diverge on a roster with SEVERAL agents, and
-      // there `main` was never the right answer either. What the pin actually
-      // did was write this device's ClawBox AI credential into an agent store
-      // the gateway does not read — leaving whatever the real store held,
-      // however stale, to keep serving turns, which is TASK-730 — or, when
-      // `main` is not in the roster at all, fail the whole save outright:
-      //
-      //   $ openclaw models auth paste-api-key --agent main …
-      //   Unknown agent id "main". Use "openclaw agents list" to see configured agents.
-      //
-      // So the target is the harness's to choose, and this asks it to.
-      "--provider", provider,
-      "--profile-id", profileId,
-    ],
-    { stdinData: key + "\n", timeoutMs: 60_000 },
-  );
+  // NO agent is named, here or in the gateway request. ClawBox used to pin
+  // `main` (`--agent main`), which wrote this device's ClawBox AI credential
+  // into an agent store the gateway does not read on a roster without `main`
+  // as its sole agent (TASK-730), or failed the save outright ("Unknown agent
+  // id"). The target is the harness's to choose, and this asks it to.
+  //
+  // OpenClaw 2026.11.3: while the gateway runs the key goes to its own
+  // `models.authSetApiKey` — the CLI refuses `--profile-id` then, and the
+  // gateway itself picks `<provider>:default`, the id ClawBox names — and a
+  // gateway that is not there gets the offline `paste-api-key --profile-id`.
+  await saveOpenclawApiKey(provider, profileId, key);
 }
 
 /**
@@ -721,8 +705,10 @@ async function releaseClawboxAiSlot(profileId: string, holder: "store" | "metada
   console.warn(`[configure] a sign-in holds ${profileId} (${holder}); taking the slot over for the ClawBox AI key`);
   try {
     // Unpinned, like the paste: the core resolves the same agent for both.
-    await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: 60_000 });
-    return;
+    // Through the gateway while it runs (2026.11.3 refuses the CLI's logout
+    // then); a slot the store does not hold is left to the unset below.
+    const removed = await logoutOpenclawAuthProfiles(providerOfProfileId(profileId), [profileId]);
+    if (removed.length > 0) return;
   } catch (err) {
     console.warn(
       `[configure] models auth logout ${profileId} failed:`,
@@ -797,61 +783,20 @@ class SignInWouldBeLostError extends Error {
  * of seconds.
  */
 async function assertNoSignInAt(profileId: string): Promise<void> {
-  // Nothing to lose where there is no OpenClaw auth store: the Hermes SKU
-  // keeps its credentials in the harness's own config and never reaches
-  // `paste-api-key` at all.
   if (openclawIsAbsent()) return;
-  let raw: string;
-  try {
-    // Unpinned, like the paste this guards and the auth order beside it: all
-    // three let the core pick the agent, so all three address one store on
-    // every box where a save can succeed (see `pasteAuthApiKey`). The response
-    // names the agent it answered for (`agentId`, `agentDir`), so a box that
-    // disagrees can still be told apart in a log.
-    //
-    // KNOWN LIMIT, measured: before an agent has a store of its own the core
-    // answers from the shared one (`authStatePath` pointed at `agents/main/`
-    // while `agentId` was `pro-agent`), so this can see an inherited profile
-    // the paste would only have shadowed. It refuses in that case, which is
-    // the safe direction — and strictly better than what it replaces, since
-    // the same box previously failed the whole save with
-    // `Unknown agent id "main"`.
-    raw = await spawnOpenclawCli(
-      ["models", "auth", "list", "--json"],
-      { captureStdout: true, timeoutMs: 60_000 },
-    );
-  } catch (err) {
-    console.warn(
-      "[configure] could not read the auth profiles before pasting a key:",
-      err instanceof Error ? logSafe(err.message) : err,
-    );
+  // The store itself, read-only: OpenClaw 2026.11.3's `models auth list`
+  // needs the gateway stopped ("its loaders can initialize persistent state",
+  // docs/cli/models.md), and this guard runs beside a running gateway. A store
+  // that cannot be read leaves the save unguarded, as a failed list did.
+  const stored = readGatewayAuthProfile(profileId);
+  if (stored?.kind !== "present") {
+    if (stored?.kind === "unreadable") console.warn("[configure] could not read the auth profiles before pasting a key; the key paste is unguarded");
     return;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    console.warn("[configure] `models auth list --json` was not JSON; the key paste is unguarded");
-    return;
-  }
-  // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
-  // handler's own catch would turn into a 500 — the opposite of the fail-open
-  // this guard promises, over a save that is perfectly good.
-  if (!parsed || typeof parsed !== "object") return;
-  const profiles = (parsed as { profiles?: unknown }).profiles;
-  if (!Array.isArray(profiles)) return;
-  // The store's own shape, measured on 2026.8.1:
-  // `{profiles: [{id, provider, type, label, expiresAt}]}`, `type` being
-  // `oauth` or `api_key`. Any OAuth row AT THIS ID counts, whatever provider it
-  // names: the paste replaces the row, so what it would destroy is the
-  // question, not who owns it.
-  const holdsSignIn = profiles.some((row) => {
-    if (!row || typeof row !== "object") return false;
-    const entry = row as { id?: unknown; type?: unknown };
-    return entry.id === profileId && isOauthProfile({ mode: String(entry.type ?? "") });
-  });
-  if (holdsSignIn) throw new SignInWouldBeLostError(profileId);
+  const copies = [stored, stored.sharedCopy].filter((copy): copy is GatewayAuthProfileCopy => !!copy);
+  if (copies.some((copy) => isOauthProfile({ mode: copy.type }))) throw new SignInWouldBeLostError(profileId);
 }
+
 
 /**
  * Record the box's OpenAI auth preference with the core's own per-provider
@@ -908,7 +853,9 @@ async function applyOpenAiAuthOrder(
     ? ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, ...order]
     : ["models", "auth", "order", "clear", "--provider", CHATGPT_PROVIDER];
   try {
-    await spawnOpenclawCli(args, { timeoutMs: 60_000 });
+    // The gateway's `models.authOrderSet` while it runs (OpenClaw 2026.11.3
+    // refuses the CLI's `order` then), the CLI offline otherwise.
+    await setOpenclawAuthOrder(CHATGPT_PROVIDER, shouldSet ? order : null);
     // The marker follows the write that succeeded, so a later save knows
     // whether there is anything of ours to clear.
     await setMany({ [OPENAI_AUTH_ORDER_KEY]: shouldSet ? true : undefined });
@@ -3615,7 +3562,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // passes, as it does for that guard, because refusing a sign-in nobody
       // can disprove would lock its owner out.
       const stored = await readXaiStoredProfiles();
-      if (stored && !stored.some((row) => row.id === config.profileKey && row.type === "oauth")) {
+      // Any xAI sign-in row: on OpenClaw 2026.11.3 the login runs through the
+      // gateway, which names the profile itself (`--profile-id` is refused
+      // online); the core's default for it is the id this route writes.
+      const signIn = stored?.find((row) => row.type === "oauth");
+      if (signIn && signIn.id !== config.profileKey) {
+        console.warn(`[configure] the xAI sign-in is stored at ${signIn.id}, not ${config.profileKey}`);
+      }
+      if (stored && !signIn) {
         return NextResponse.json(
           {
             error: "The xAI sign-in did not reach this box's credential store. Sign in again.",

@@ -19,6 +19,10 @@
 // handler streams the text as it already does for every answer without
 // reasoning, so nothing in the core itself is touched.
 //
+// ClawBox pins 2026.11.3 now, which carries upstream's fix: on it this reports
+// "not needed" and writes nothing (checked against the published package). It
+// stays for a box on 2026.10.9 — one that has not updated yet, or a rollback.
+//
 // Run by install.sh's openclaw_patch step (fresh installs, every update, a
 // harness swap) as the user who owns the core:
 //

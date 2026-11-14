@@ -76,7 +76,12 @@ function fakeCore() {
     agent: [] as string[] | null,
     /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
     pasteExitsAfterWrite: false,
+    /** OpenClaw 2026.11.3 keeps every other profile of the provider after the order asked for. */
+    orderKeepsOthers: false,
+    /** The gateway could not be stopped and started again around the pastes. */
+    offlineFails: false,
   };
+  offlineWindows = 0;
   gw._setGatewayDepsForTests({
     absent: () => false,
     chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null, agent: core.agent }),
@@ -88,6 +93,14 @@ function fakeCore() {
         failures: core.failures,
       }
       : { kind: "unreadable" },
+    // OpenClaw 2026.11.3 takes `paste-token` only offline: the pass's pastes
+    // run in one window with the gateway stopped (counted here).
+    offline: async (work) => {
+      offlineWindows += 1;
+      const done = await work();
+      if (core.offlineFails) throw new Error("the gateway did not start again");
+      return done;
+    },
     paste: async (profileId, token) => {
       if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
       core.pastes.push({ profileId, ...token });
@@ -107,7 +120,7 @@ function fakeCore() {
     order: async (ids) => {
       if (core.refuseOrder) throw new Error("the auth state is busy");
       core.orders.push([...ids]);
-      core.order = ids.length > 0 ? [...ids] : null;
+      core.order = ids.length > 0 ? [...ids, ...(core.orderKeepsOthers ? [...core.profiles.keys()].filter((id) => !ids.includes(id)) : [])] : null;
       if (core.orderReadsBackOtherwise && core.order) core.order = [...core.order].reverse();
     },
     unsetConfigOrder: async () => {
@@ -168,6 +181,9 @@ const rateLimited = (now = Date.now(), until = now + 30_000): Failure => ({
   cooldownUntil: until, cooldownReason: "rate_limit", disabledUntil: null, disabledReason: null, blockedUntil: null, lastFailureAt: now - 1_000,
 });
 
+/** How many offline windows (gateway stopped) the pool asked for. */
+let offlineWindows = 0;
+
 describe("the pool in the gateway", () => {
   it("puts every Claude account in as its own profile — the access token only — the active one first and the chat's own sign-in last", async () => {
     const core = fakeCore();
@@ -178,6 +194,8 @@ describe("the pool in the gateway", () => {
     expect(core.pastes.map((w) => w.profileId).sort()).toEqual([p(work.id), p(personal.id)].sort());
     expect(core.pastes.find((w) => w.profileId === p(work.id))).toMatchObject({ access: "sk-ant-oat01-work", expires: expect.any(Number) });
     expect(JSON.stringify(core.pastes)).not.toContain("refresh-");
+    // Both pastes in ONE offline window: the gateway is stopped once a pass.
+    expect(offlineWindows).toBe(1);
     expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:default"]);
     // The chat's own sign-in is never written or taken out.
     expect(core.profiles.get("anthropic:default")?.secret).toBe(OWN);
@@ -188,6 +206,28 @@ describe("the pool in the gateway", () => {
     const asked = core.pastes.length + core.orders.length;
     expect(await gw.keepGatewayMirror()).toBe("fresh");
     expect(core.pastes.length + core.orders.length).toBe(asked);
+    // ...and stops nothing.
+    expect(offlineWindows).toBe(1);
+  });
+
+  it("takes an order the gateway completed with the provider's other profiles as landed (OpenClaw 2026.11.3)", async () => {
+    const core = fakeCore();
+    core.orderKeepsOthers = true;
+    const { work, personal } = await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.order?.slice(0, 2)).toEqual([p(work.id), p(personal.id)]);
+    // A second pass finds the order leading with the pool's and writes nothing.
+    const orders = core.orders.length;
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(core.orders.length).toBe(orders);
+  });
+
+  it("fails the pass when the gateway did not start again after the token pastes, whatever the store shows", async () => {
+    const core = fakeCore();
+    core.offlineFails = true;
+    await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).not.toBe("synced");
+    expect(core.pastes.length).toBe(2);
   });
 
   it("moves the order when the pool moves — a limit seen elsewhere, the owner's new order — and never restarts anything", async () => {
@@ -341,6 +381,29 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.clearLimit(personal.id);
     await gw.syncGatewayNow();
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+  });
+
+  it("on OpenClaw 2026.11.3 takes the owner's sign-in leading a COMPLETED order, the limited accounts at its tail, as landed", async () => {
+    // The gateway takes only an order naming every profile it holds, so the
+    // limited accounts stay in it after the owner's sign-in (out of the lead,
+    // not out of the store); the pass must not call that a failed write.
+    const core = fakeCore();
+    core.orderKeepsOthers = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    const synced = await gw.syncGatewayNow();
+    expect(synced.status).toBe("ok");
+    expect(core.order?.[0]).toBe("anthropic:default");
+    expect(new Set(core.order?.slice(1))).toEqual(new Set([p(work.id), p(personal.id)]));
+    expect(core.logouts).toEqual([]);
+    // A second pass finds the order leading with what it wants and writes nothing.
+    const orders = core.orders.length;
+    expect(await gw.keepGatewayMirror()).not.toBe("failed");
+    expect(core.orders.length).toBe(orders);
   });
 
   it("keeps every limited account in, by its reset and ahead of it, when the owner's other Anthropic credential is an API key or of a kind the store does not say", async () => {

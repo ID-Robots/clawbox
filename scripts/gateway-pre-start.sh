@@ -8688,7 +8688,7 @@ if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_STAFF_GUARD_NODE" ];
       fs.writeFileSync(grants, JSON.stringify({ agents: { "clawbox-staff-probe": ["cbstaff-00000000-docs"] } }));
       const g = { ...opts, mcpGrants: grants };
       if (staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("a granted staff MCP tool was refused");
-      if (!staffToolCallDenyReason({ toolName: "tool_call", params: { id: "mcp:cbstaff-00000000-other:search" } }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("an ungranted staff MCP tool behind tool_call was not refused");
+      if (!staffToolCallDenyReason({ toolName: "dispatch_action", params: { id: "mcp:cbstaff-00000000-other:search" } }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("an ungranted staff MCP tool behind tool_call was not refused");
       if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-other" }, g)) throw new Error("another member could call a granted MCP tool");
       if (!staffToolCallDenyReason({ toolName: "clawbox__system_info", params: {} }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("a staff clawbox__ call was not refused");
       if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-probe" }, { ...opts, mcpGrants: `${tmp}/missing.json` })) throw new Error("a missing grants file granted a staff MCP tool");
