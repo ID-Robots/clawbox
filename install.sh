@@ -4170,19 +4170,47 @@ ensure_vault_packages() {
 # that reaches post_update by another road — a hand-run force-update.sh, a
 # heal, an update that stopped after the rebuild — where neither of those ran:
 # the unit step_systemd_services has just installed and enabled would otherwise
-# stay down until the next boot. Idempotent; a failure is a warning.
+# stay down until the next boot. On that road nothing restarts a vault that IS
+# running either, so it would keep serving the previous build (from a vault/
+# folder the checkout may have replaced under it) until the next boot: such a
+# vault is restarted. One the updater has already restarted onto this build is
+# left alone. Idempotent; a failure is a warning.
 ensure_vault_service() {
   local rc=0
   ensure_vault_packages || rc=1
-  if [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] \
-    && ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
+  [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] || return "$rc"
+  if ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
     echo "  Starting clawbox-vault.service: enabled and not running"
     systemctl start --no-block clawbox-vault.service || {
       echo "  Warning: could not start clawbox-vault.service" >&2
       rc=1
     }
+  elif vault_runs_previous_build; then
+    echo "  Restarting clawbox-vault.service: it is still running the previous build"
+    systemctl restart --no-block clawbox-vault.service || {
+      echo "  Warning: could not restart clawbox-vault.service" >&2
+      rc=1
+    }
   fi
   return "$rc"
+}
+
+# Whether the running vault started before the build on disk: its working
+# directory is no longer the checkout's vault/ (replaced, so "(deleted)"), or a
+# file it runs from changed after it started. Unknown (no pid, no start time)
+# is "no": a restart nobody can justify is not made.
+vault_runs_previous_build() {
+  local pid cwd started dir="$PROJECT_DIR/vault"
+  pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+  case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+  [ -n "$cwd" ] || return 1
+  [ "$cwd" = "$(readlink -f "$dir" 2>/dev/null || echo "$dir")" ] || return 0
+  started="$(date -d "$(ps -o lstart= -p "$pid" 2>/dev/null)" +%s 2>/dev/null || true)"
+  case "$started" in '' | *[!0-9]*) return 1 ;; esac
+  # ps has whole seconds: a file of the vault's own start second is not "newer".
+  [ -n "$(find "$dir/src" "$dir/extension" "$dir/package.json" "$PROJECT_DIR/scripts/start-vault.sh" \
+    -type f -newermt "@$((started + 1))" -print -quit 2>/dev/null)" ]
 }
 
 dpkg_installed() {

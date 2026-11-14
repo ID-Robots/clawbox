@@ -10,7 +10,7 @@
  * browser's extension flag. The vault's own behaviour is proved in vault/tests
  * (bun) and the tools in mcp-vault-tools.test.ts.
  */
-import { execFileSync } from "child_process";
+import { execFileSync, spawn, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -131,10 +131,59 @@ describe("the service: installed and started on every box, loopback only", () =>
     const ensure = shellFunction(INSTALL_SH, "ensure_vault_service");
     expect(ensure).toContain("ensure_vault_packages || rc=1");
     expect(ensure).toContain("systemctl start --no-block clawbox-vault.service");
+    // …and a running vault left on the previous build by that road is restarted onto this one.
+    expect(ensure).toMatch(/elif vault_runs_previous_build; then\s+echo[^\n]*\n\s+systemctl restart --no-block clawbox-vault\.service/);
     // The one runtime package comes with the app's own install.
     const pkg = JSON.parse(read("package.json")) as { dependencies: Record<string, string> };
     expect(pkg.dependencies.tldts).toBeTruthy();
     expect(fs.existsSync(path.join(ROOT, "vault", "node_modules"))).toBe(false);
+  });
+
+  it("restarts a running vault after an update only when it still runs the previous build", () => {
+    // The real function, a real process standing in for the vault, and a
+    // systemctl that answers its MainPID.
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vault-stale-")));
+    const project = path.join(tmp, "clawbox");
+    const vaultDir = path.join(project, "vault");
+    const files = ["vault/package.json", "vault/src/main.ts", "vault/extension/manifest.json", "scripts/start-vault.sh"];
+    const write = () => {
+      for (const f of files) {
+        fs.mkdirSync(path.dirname(path.join(project, f)), { recursive: true });
+        fs.writeFileSync(path.join(project, f), "x");
+      }
+      const past = new Date(Date.now() - 120_000);
+      for (const f of files) fs.utimesSync(path.join(project, f), past, past);
+    };
+    write();
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "systemctl"), '#!/bin/sh\necho "$FAKE_PID"\n', { mode: 0o755 });
+    const fn = `${shellFunction(INSTALL_SH, "vault_runs_previous_build")}\n}\n`;
+    const ask = (pid: number) =>
+      spawnSync("bash", ["-c", `${fn}PROJECT_DIR="$1"; if vault_runs_previous_build; then echo previous; else echo current; fi`, "_", project], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_PID: String(pid) },
+        encoding: "utf8",
+      }).stdout.trim();
+    const child = spawn("sleep", ["60"], { cwd: vaultDir, stdio: "ignore" });
+    try {
+      expect(child.pid).toBeGreaterThan(0);
+      const pid = child.pid as number;
+      expect(ask(pid)).toBe("current");
+      expect(ask(0)).toBe("current");
+      // A source changed after it started (an update checked out a new commit).
+      const later = new Date(Date.now() + 10_000);
+      fs.utimesSync(path.join(vaultDir, "src", "main.ts"), later, later);
+      expect(ask(pid)).toBe("previous");
+      write();
+      expect(ask(pid)).toBe("current");
+      // The checkout replaced vault/ under it: its cwd now reads "(deleted)".
+      fs.rmSync(vaultDir, { recursive: true, force: true });
+      write();
+      expect(ask(pid)).toBe("previous");
+    } finally {
+      child.kill();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it("is installed by the PC installer too, under that install's own user and checkout", () => {
