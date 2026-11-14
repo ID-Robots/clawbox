@@ -9,8 +9,8 @@
  *     access token only, in an order that follows the pool (the active account
  *     first, the chat's own sign-in last); a limited account out of the order
  *     while another can answer, or the chat's own subscription sign-in, so no
- *     session core pinned to it stays there, and back at its reset; never a
- *     restart.
+ *     session core pinned to it stays there, and back at its reset; the
+ *     gateway stopped only for a token paste, and once for every account's.
  *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
  *     an unreadable config removes nothing; the owner's own profiles are never
  *     written or removed; a write core refused is owed, not claimed.
@@ -306,6 +306,78 @@ describe("the pool in the gateway", () => {
     await gw.keepGatewayMirror();
     expect(core.logouts).toEqual([p(personal.id), p(work.id)]);
     expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+  });
+
+  it("renews every other account in the SAME offline window when one comes due — one gateway stop a token lifetime, not one an account", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect(offlineWindows).toBe(1);
+    // The accounts were signed in at different times: Work's token is inside
+    // the pool's renewal margin, Personal's has two hours more.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work", 2 * H), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 4 * H), email: "me@example.com" });
+    let renewals = 0;
+    const anthropic = vi.fn(async () => {
+      renewals += 1;
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-renewed-${renewals}`, refresh_token: `r-${renewals}`, expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", anthropic);
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    // Work came due; Personal was renewed beside it, and both went in with
+    // the gateway stopped ONCE.
+    expect(anthropic).toHaveBeenCalledTimes(2);
+    expect(offlineWindows).toBe(2);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-renewed-1");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-renewed-2");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: false, fingerprint: fp("sk-ant-oat01-renewed-1") });
+
+    // Their tokens end together now: the next pass has nothing to renew, and
+    // stops nothing.
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(anthropic).toHaveBeenCalledTimes(2);
+    expect(offlineWindows).toBe(2);
+  });
+
+  it("renews nothing ahead of time for an account whose token ends with the one going in", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const anthropic = vi.fn(async () => new Response("{}", { status: 500 }));
+    vi.stubGlobal("fetch", anthropic);
+    // The owner signed Work in again: a fresh token, minutes younger than
+    // Personal's. Renewing Personal for that would refuse the copy a coding
+    // run holds, to move its end by minutes.
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 8 * H - 20 * 60_000), email: "me@example.com" });
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    expect(anthropic).not.toHaveBeenCalled();
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+    expect(offlineWindows).toBe(2);
+  });
+
+  it("leaves an account as it is when its renewal ahead of time could not be made — the window still takes the token that was owed", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 5 * H), email: "me@example.com" });
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    const anthropic = vi.fn().mockRejectedValue(new Error("ENOTFOUND"));
+    vi.stubGlobal("fetch", anthropic);
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    // Personal's token has five hours in it: it stays, and nothing is marked.
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
+    expect(offlineWindows).toBe(2);
   });
 
   it("puts a token the pool renewed in — no restart — and owes a write core refused instead of claiming it", async () => {
