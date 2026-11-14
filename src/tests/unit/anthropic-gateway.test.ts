@@ -1646,6 +1646,18 @@ describe("automations follow the pool across a swap and a renewal (TASK-2533, Op
     expect(runCron(core, "inbox")).toBe(p(work.id));
   });
 
+  it("never binds the automations to a static token past its end, whatever the order says (CodeRabbit on #1526)", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const job = addCron(core, { id: "inbox" });
+    // Work's copy has run out and the order has not been rewritten yet.
+    const held = core.profiles.get(p(work.id));
+    if (held) held.expires = Date.now() - 1_000;
+    await gw.bindGatewayCrons();
+    expect(job.binding?.profileId).toBe(p(personal.id));
+  });
+
   it("adopts a job the chat made since, bound to whatever its session ran on, on the watcher's next look", async () => {
     const core = fakeCore();
     const { personal } = await twoClaudeAccounts();

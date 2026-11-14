@@ -7,6 +7,8 @@
 import { describe, expect, it } from "vitest";
 import {
   BINDING_RETRY_WINDOW_MS,
+  bindCronsToTarget,
+  type CronBindingDeps,
   isAnthropicModel,
   parseCronDefinitions,
   planCronBindings,
@@ -105,5 +107,65 @@ describe("planning the adoptions", () => {
     expect(plan([job({ id: "j", ...failed, enabled: false, lastRunAtMs: NOW - 1000 })], {})[0]).toMatchObject({ retry: false });
     // Any other failure is the model's, not the account's.
     expect(plan([job({ id: "j", lastStatus: "error", lastError: "You've hit your weekly limit", lastRunAtMs: NOW - 1000 })], records)).toEqual([]);
+  });
+});
+
+describe("applying the adoptions (CodeRabbit review on #1526)", () => {
+  /** A cron.list with one job, and a cron.update that answers as the test says. */
+  function fakeDeps(opts: { model?: string | null; records?: CronBindingRecords | Error; writeFails?: boolean; updateFails?: boolean; lastError?: string; lastRunAtMs?: number }) {
+    const calls: { method: string; params: Record<string, unknown> }[] = [];
+    let stored: CronBindingRecords | Error = opts.records ?? {};
+    const jobModel = opts.model ?? null;
+    const deps: CronBindingDeps = {
+      call: async (method, params) => {
+        calls.push({ method, params });
+        if (method === "cron.list") {
+          return { jobs: [{ id: "j", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", ...(jobModel ? { model: jobModel } : {}) }, state: { lastStatus: opts.lastError ? "error" : "ok", lastError: opts.lastError, lastRunAtMs: opts.lastRunAtMs } }] };
+        }
+        if (method === "cron.update" && opts.updateFails) throw new Error("the scheduler is busy");
+        return { ok: true, configRevision: "r2" };
+      },
+      readRecords: async () => {
+        if (stored instanceof Error) throw stored;
+        return stored;
+      },
+      writeRecords: async (r) => {
+        if (opts.writeFails) throw new Error("disk full");
+        stored = structuredClone(r);
+      },
+    };
+    return { deps, calls, stored: () => stored };
+  }
+  const input = { target: { profileId: POOL_A, authorization: "life-2" }, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, now: NOW };
+
+  it("changes nothing when the records cannot be read", async () => {
+    const f = fakeDeps({ records: new Error("locked") });
+    expect(await bindCronsToTarget(f.deps, input)).toMatchObject({ unread: true, bound: 0 });
+    expect(f.calls.filter((c) => c.method === "cron.update")).toEqual([]);
+  });
+
+  it("touches no job before its record is written", async () => {
+    const f = fakeDeps({ writeFails: true });
+    expect(await bindCronsToTarget(f.deps, input)).toMatchObject({ owed: 1, bound: 0 });
+    expect(f.calls.filter((c) => c.method === "cron.update")).toEqual([]);
+  });
+
+  it("does not take a provisional record for a confirmed adoption: a renewal's re-adoption core refused is planned again", async () => {
+    const model = `anthropic/claude-sonnet-5-5@${POOL_A}`;
+    const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: false, model, original: "anthropic/claude-sonnet-5-5", revision: "r1", at: NOW - 60_000 } };
+    const f = fakeDeps({ model, records, updateFails: true });
+    await bindCronsToTarget(f.deps, input);
+    const after = f.stored() as CronBindingRecords;
+    expect(after.j).toMatchObject({ provisional: true, authorization: "life-2", at: NOW - 60_000 });
+    expect(planCronBindings({ ...input, jobs: [job({ id: "j", model, revision: "r1" })], records: after })).toHaveLength(1);
+  });
+
+  it("keeps a lost run lost when the adoption did not land: it is still run again once it does", async () => {
+    const failed = { lastError: "Automation inference account was replaced. Explicitly select an authorized account again.", lastRunAtMs: NOW - 1000 };
+    const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: true, model: null, revision: "r1", at: NOW - 60_000 } };
+    const f = fakeDeps({ ...failed, records, updateFails: true });
+    await bindCronsToTarget(f.deps, input);
+    const after = f.stored() as CronBindingRecords;
+    expect(planCronBindings({ ...input, jobs: [job({ id: "j", lastStatus: "error", ...failed })], records: after })[0]).toMatchObject({ retry: true });
   });
 });

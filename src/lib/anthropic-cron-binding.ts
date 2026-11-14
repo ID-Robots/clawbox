@@ -123,6 +123,12 @@ export interface CronBindingRecord {
   at: number;
   /** When the box last ran a lost run of this job again. */
   retriedAt?: number;
+  /**
+   * Written before an adoption's first update and not yet confirmed by core:
+   * the job is the box's own (its model matches), but its binding is not taken
+   * as current until an update lands.
+   */
+  provisional?: boolean;
 }
 
 export type CronBindingRecords = Record<string, CronBindingRecord>;
@@ -255,7 +261,7 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
     }
     const lastRun = job.lastRunAtMs ?? 0;
     const failed = job.lastStatus === "error" && !!job.lastError && BINDING_FAILURE_RE.test(job.lastError) && lastRun > (record?.at ?? 0);
-    const current = !!record && (ours || pinnedDefault)
+    const current = !!record && (ours || pinnedDefault) && record.provisional !== true
       && record.profileId === target.profileId
       && record.authorization === target.authorization
       && (record.revision === null || job.revision === null || record.revision === job.revision || pinnedDefault);
@@ -344,15 +350,21 @@ export async function bindCronsToTarget(
   try {
     records = { ...(await deps.readRecords()) };
   } catch {
-    records = {};
+    // Unknown is not empty: written over, the records of jobs the box moved
+    // onto the owner's sign-in, their models before and their owed clears
+    // would be gone. Nothing is changed until they can be read.
+    return { ...result, unread: true };
   }
   let dirty = false;
-  const save = async () => {
+  /** Answers whether the records were written. */
+  const save = async (): Promise<boolean> => {
     try {
       await deps.writeRecords(records);
       dirty = false;
+      return true;
     } catch (err) {
       console.error("[anthropic-cron-binding] could not record which accounts the automations were given:", err instanceof Error ? err.message : err);
+      return false;
     }
   };
   // Records of jobs that are gone — only when the whole list was read.
@@ -385,6 +397,8 @@ export async function bindCronsToTarget(
       // Written BEFORE the first update: one core takes but whose answer is
       // lost (a timeout, a restart) is still known as the box's own next time
       // — a model-less job pinned to its default is cleared, not kept pinned.
+      // `at` stays the last CONFIRMED adoption's, so a lost run is still
+      // seen as lost if this one does not land.
       records[job.id] = {
         profileId: input.target.profileId,
         authorization: input.target.authorization,
@@ -392,10 +406,17 @@ export async function bindCronsToTarget(
         model: plan.steps[0],
         original: plan.original,
         revision: null,
-        at: now,
+        at: before?.at ?? 0,
+        provisional: true,
         ...(before?.retriedAt !== undefined ? { retriedAt: before.retriedAt } : {}),
       };
-      await save();
+      if (!(await save())) {
+        // No durable record, no change to the job: the next pass plans it again.
+        if (before) records[job.id] = before;
+        else delete records[job.id];
+        result.owed += 1;
+        continue;
+      }
     }
     let model: string | null = job.model;
     let revision: string | null = job.revision;

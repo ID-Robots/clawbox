@@ -1310,7 +1310,9 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
     const pool = await readPoolState();
     const poolIn = store.profiles.some((p) => isPoolProfile(p.profileId))
       || (chat.onAnthropic && pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "limited"));
-    const usable = (id: string) => store.profiles.find((p) => p.profileId === id && !p.fenced && p.fingerprint !== null);
+    // A static token past its end is no lead (an oauth sign-in core refreshes itself).
+    const usable = (id: string) => store.profiles.find((p) => p.profileId === id && !p.fenced && p.fingerprint !== null
+      && !(p.type === "token" && p.expires !== null && p.expires <= now));
     // The order a turn resolves: the stored one, else openclaw.json's, else the store's own.
     const order = store.order ?? chat.configOrderIds ?? store.profiles.map((p) => p.profileId);
     const leadId = chat.onAnthropic ? order.find((id) => usable(id)) : undefined;
