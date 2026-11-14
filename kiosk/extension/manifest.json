@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ClawBox Kiosk Tabs",
-  "version": "1.5.3",
-  "description": "A slim ClawBox bar on every page the ClawBox desktop opens in the kiosk Chrome — back to ClawBox, switch between open pages, back/forward/reload, a centred address bar, a new tab on a ClawBox start page, close this one, open DevTools on it — with the page laid out below it, and on the desktop itself as its tab strip. The kiosk runs --kiosk and has no tab strip of its own.",
+  "version": "1.6.0",
+  "description": "A slim ClawBox bar on every page the ClawBox desktop opens in the kiosk Chrome — back to ClawBox, switch between open pages, back/forward/reload, a centred address bar, a new tab on a ClawBox start page, close this one, open DevTools on it — with the page laid out below it, and on the desktop itself as its tab strip; and Ctrl+Shift+1 … 9 on any page switches between the owner's linked ClawBoxes, each kept in a tab of its own. The kiosk runs --kiosk and has no tab strip of its own.",
   "permissions": [
     "tabs",
-    "debugger"
+    "debugger",
+    "storage"
   ],
   "host_permissions": [
     "http://127.0.0.1/*"
@@ -55,6 +56,17 @@
         "content.css"
       ],
       "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "workspaces.js"
+      ],
+      "run_at": "document_start",
       "all_frames": false
     }
   ],
