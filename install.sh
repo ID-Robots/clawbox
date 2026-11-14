@@ -3980,6 +3980,8 @@ record_rebuild_kept_build() {
 #     runs, with the same executable-bit rule);
 #   - the build would run on the Node.js that built it (the stamp's `node`
 #     against `node --version` in the build's own login environment);
+#   - node-pty loads, the probe ensure_node_pty starts with: do_rebuild is also
+#     what repairs it;
 #   - no env file Next loads at build time is newer than the build: next.config.ts
 #     bakes GATEWAY_URL and PORTAL_EMBED_ORIGINS into the rewrites and headers
 #     it compiles.
@@ -4017,6 +4019,12 @@ build_is_current_for_checkout() {
     else
       node_now="$(as_clawbox_login "node --version" 2>/dev/null | tail -n 1)" || node_now=""
       node_now="${node_now//[[:space:]]/}"
+      # The one thing do_rebuild repairs besides the build: a node-pty that no
+      # longer loads (ensure_node_pty). A box whose terminal module is broken
+      # takes the full rebuild, which repairs it as every update always did.
+      if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" >/dev/null 2>&1; then
+        failed+=("node-pty does not load (the rebuild repairs it)")
+      fi
       for stamp in "$build_dir/build-info.json" "$build_dir/standalone/.next/build-info.json"; do
         if ! refusal="$(build_stamp_refusal "$stamp" "$node_now")"; then
           failed+=("${stamp#"$PROJECT_DIR"/} could not be read (node did not run)")

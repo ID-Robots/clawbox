@@ -130,7 +130,9 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
       // The privilege drops, without the privilege: the commands run as the
       // test's own user, exactly as given.
       'as_clawbox() { "$@"; }',
-      'as_clawbox_login() { bash -c "$*"; }',
+      // node-pty is not installed in the fixture: its probe answers "loads"
+      // unless a case says otherwise.
+      'as_clawbox_login() { case "$*" in *node-pty*) return 0 ;; esac; bash -c "$*"; }',
       'runuser() { while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift; "$@"; }',
       ...extra,
       fn("first_paths"),
@@ -187,6 +189,12 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
     const r = ask();
     expect(r.status).toBe(1);
     expect(r.reason).toContain(said);
+  });
+
+  it("rebuilds when node-pty does not load, so the rebuild can repair it as before", () => {
+    const r = ask({}, ['as_clawbox_login() { case "$*" in *node-pty*) return 1 ;; esac; bash -c "$*"; }']);
+    expect(r.status).toBe(1);
+    expect(r.reason).toContain("node-pty does not load (the rebuild repairs it)");
   });
 
   it("rebuilds when the build's own Node cannot be asked", () => {
