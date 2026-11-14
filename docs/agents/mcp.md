@@ -100,6 +100,7 @@ of them kept failing.
     `browser_click/type/keypress/scroll`, and the coding family — `bash`,
     `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`,
     `list_directory`, `glob`, `grep`, `notebook_edit`, `web_fetch`, `web_search`
+  - **ClawBox Vault** (both editions, full profile only): `vault_list`, `vault_match`, `vault_fill`, `vault_save`, `vault_generate`, `vault_delete`, `vault_audit` (`mcp/tools/vault.ts` over `vault/src/mcp/tools.ts`). No tool returns a password and none declares `readOnly`, so a delegated run never gets them; the rules are in [vault.md](vault.md).
 - **`clawbox-cli.ts`** — shell-callable CLI wrapper (`clawbox webapp create/update`, `clawbox app open/list`, `clawbox notify`, `clawbox system stats/info`, `clawbox edition`, `clawbox code init/build/files/read/write/edit/search/delete`)
 - **Registration** — the harness spawns this server only if its own config lists
   it. OpenClaw: `scripts/gateway-pre-start.sh` writes `mcp.servers.clawbox` into

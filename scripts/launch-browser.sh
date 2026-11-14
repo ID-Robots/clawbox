@@ -17,6 +17,8 @@ set -euo pipefail
 
 # shellcheck source=scripts/lib/browser-clean-start.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/browser-clean-start.sh"
+# shellcheck source=scripts/lib/vault-extension.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/vault-extension.sh"
 
 CURRENT_USER="$(id -un)"
 HOME="${HOME:-$(getent passwd "$CURRENT_USER" | cut -d: -f6)}"
@@ -349,6 +351,16 @@ if is_chrome_for_testing "$CHROMIUM"; then
   BUILD_FLAGS=(--test-type=gpu)
 fi
 
+# ClawBox Vault's extension, preloaded when the vault service has built it
+# (scripts/lib/vault-extension.sh says where, and why only a complete folder).
+EXTENSION_FLAGS=()
+mapfile -t EXTENSION_FLAGS < <(vault_extension_flags)
+if [ "${#EXTENSION_FLAGS[@]}" -gt 0 ]; then
+  echo "Extension: ClawBox Vault (${EXTENSION_FLAGS[0]#--load-extension=})"
+else
+  echo "Extension: none (ClawBox Vault has not built its extension yet)"
+fi
+
 # A clean start: the new tab page instead of the last session, and a clean
 # last exit, so a crash or a hard stop brings back no tabs and no "Restore
 # pages?" bubble. Only those keys of the profile's preferences change.
@@ -360,6 +372,7 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "${SANDBOX_FLAGS[@]}" \
   "${BUILD_FLAGS[@]}" \
   "${BROWSER_CLEAN_START_FLAGS[@]}" \
+  "${EXTENSION_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
   --remote-allow-origins="http://127.0.0.1:${CDP_PORT}" \
   --user-data-dir="$PROFILE" \

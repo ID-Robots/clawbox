@@ -69,11 +69,21 @@ import { orgMemberVerdict } from "./org-mode";
 
 /**
  * Desktop apps that are the owner's alone: the harnesses' own consoles, which
- * list (and open) every conversation on the box, and System Update (updating
- * the box is the owner's call). Every other app is every signed-in user's —
- * on a home box; an organisation box narrows that (src/lib/org-mode.ts).
+ * list (and open) every conversation on the box, System Update (updating the
+ * box is the owner's call) and ClawBox Vault (the owner's passwords). Every
+ * other app is every signed-in user's — on a home box; an organisation box
+ * narrows that (src/lib/org-mode.ts).
  */
-export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes", "system_update"];
+export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes", "system_update", "vault"];
+
+/**
+ * Where the web server proxies ClawBox Vault's own app (src/lib/vault-proxy.ts,
+ * src/app/apps/clawbox-vault). The owner's on every box, page and API alike:
+ * `/apps` is otherwise every user's, so this tree is named before that rule.
+ * The route refuses anyone but the owner as well; this is the same answer one
+ * step earlier, with the desktop's notice for a person who typed the address.
+ */
+export const VAULT_APP_TREE = "/apps/clawbox-vault";
 
 /** The one owner-only app the owner can share (see the header). */
 export const SHAREABLE_OPENCLAW_APP_ID = "openclaw";
@@ -319,6 +329,9 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   if ((underPrefix(canon, UPDATE_API_TREE) || UPDATE_API_PATHS.has(canon)) && !(isRead && canon === UPDATE_STATUS_API)) {
     return "deny";
   }
+  // The owner's passwords: before the org split and before `/apps` is opened
+  // to every user below. The page sends a person home; anything else is 403.
+  if (underPrefix(canon, VAULT_APP_TREE)) return canon === VAULT_APP_TREE ? ownerPage(req) : "deny";
   if (req.orgMode === true) return orgMember(req, canon, method, isRead);
   // The Control UI page with the token in it: shared with the rest of OpenClaw.
   if (OWNER_SECRET_API.has(canon)) return shared ? "allow" : "deny";

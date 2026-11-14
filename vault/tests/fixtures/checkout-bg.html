@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="bg"><body>
+  <h1>Плащане</h1>
+  <form id="plashtane">
+    <label for="tel">Телефон</label><input id="tel" name="phone" type="tel">
+    <label for="karta">Номер на картата</label><input id="karta" name="karta">
+    <label for="ime">Име на картодържателя</label><input id="ime" name="ime">
+    <label>Валидна до</label>
+    <label for="mesec">Месец</label>
+    <select id="mesec" name="mesec">
+      <option value="">--</option><option value="01">Януари</option><option value="02">Февруари</option><option value="03">Март</option><option value="04">Април</option>
+      <option value="05">Май</option><option value="06">Юни</option><option value="07">Юли</option><option value="08">Август</option>
+      <option value="09">Септември</option><option value="10">Октомври</option><option value="11">Ноември</option><option value="12">Декември</option>
+    </select>
+    <label for="godina">Година</label>
+    <select id="godina" name="godina"><option value="">--</option><option value="26">26</option><option value="30">30</option><option value="34">34</option><option value="38">38</option><option value="40">40</option></select>
+    <label for="kod">CVV код</label><input id="kod" name="kod" maxlength="3">
+    <label for="tip">Тип на картата</label>
+    <select id="tip" name="tip"><option value="">--</option><option value="visa">Visa</option><option value="mc">Mastercard</option></select>
+    <button type="submit">Плати</button>
+  </form>
+</body></html>

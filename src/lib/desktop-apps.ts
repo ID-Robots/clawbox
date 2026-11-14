@@ -15,7 +15,7 @@ export interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "prime_radiant" | "system_update" | "chat" | "screenshot" | "chrome";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "prime_radiant" | "system_update" | "chat" | "screenshot" | "chrome" | "vault";
   url?: string;
   // Webapps only: how the desktop opens it (InstalledMeta.launch).
   launch?: "window";
@@ -61,6 +61,13 @@ export const apps: AppDef[] = [
   // edition. A product name, so it carries no translation key.
   { id: "prime-radiant", name: "Prime Radiant", color: "#0f2a52", type: "prime_radiant", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
+  // ClawBox Vault, the box's password manager (vault/): logins the extension
+  // in the box's own browser fills and the assistant's vault_* tools use,
+  // without the assistant ever seeing a password. The window is the vault
+  // service's own page behind the owner-only route (src/lib/vault-proxy.ts),
+  // so the app is the owner's alone (OWNER_ONLY_APP_IDS) on every edition. A
+  // product name, so it carries no translation key.
+  { id: "vault", name: "ClawBox Vault", color: "#14532d", type: "vault", pinned: true, defaultWidth: 1040, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   // The web itself: a start page with a search box, opened as an EXTERNAL
@@ -105,6 +112,7 @@ export const APP_GLYPHS: Readonly<Record<string, string>> = Object.freeze({
   // legible small.
   "memory-shard": "diamond",
   system_update: "system_update",
+  vault: "key",
   vnc: "desktop_windows",
   // The globe: the open web, as opposed to `browser`'s window with the
   // assistant in it (AgentBrowserIcon).

@@ -1464,6 +1464,9 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-heartbeat.timer
   clawbox-ap-watchdog.timer
   clawbox-codex-auth-sync.timer
+  # ClawBox Vault, the built-in password manager (vault/). Every edition: it is
+  # ClawBox's own service, the same under OpenClaw and Hermes. Loopback only.
+  clawbox-vault.service
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-wifi-failover.service
@@ -4134,6 +4137,54 @@ ensure_pipx() {
 
 # dpkg_installed PACKAGE — true when dpkg has PACKAGE installed, whatever apt was
 # asked to want (install, hold or deinstall); never an apt-get exit code.
+# ClawBox Vault's storage (vault/src/server/pass.ts): `pass` keeps each login as
+# a GnuPG-encrypted file in a git-tracked folder, so the vault needs pass and
+# gnupg (and git, which the base package line carries). Asked by step_apt_update,
+# which every full install and every in-app update runs, and again by
+# ensure_vault_service for a box that reached post_update by another road.
+#
+# Never fatal to its caller: without them the vault still runs and says what is
+# missing in its own window. Which ones are missing is read back from dpkg,
+# never from apt-get's exit code. Returns 1 when one is still missing.
+ensure_vault_packages() {
+  local pkg="" missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -n "$missing" ] || return 0
+  wait_for_apt
+  # shellcheck disable=SC2086  # a list of package names, split on purpose
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing || true
+  missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -z "$missing" ] && return 0
+  echo "  Warning: ClawBox Vault packages not installed:$missing" >&2
+  return 1
+}
+
+# ClawBox Vault after an update. The in-app updater needs nothing from here:
+# its apt_update step installs the packages and its rebuild step starts every
+# enabled clawbox-* unit (restart_services_after_update). This is for the box
+# that reaches post_update by another road — a hand-run force-update.sh, a
+# heal, an update that stopped after the rebuild — where neither of those ran:
+# the unit step_systemd_services has just installed and enabled would otherwise
+# stay down until the next boot. Idempotent; a failure is a warning.
+ensure_vault_service() {
+  local rc=0
+  ensure_vault_packages || rc=1
+  if [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] \
+    && ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
+    echo "  Starting clawbox-vault.service: enabled and not running"
+    systemctl start --no-block clawbox-vault.service || {
+      echo "  Warning: could not start clawbox-vault.service" >&2
+      rc=1
+    }
+  fi
+  return "$rc"
+}
+
 dpkg_installed() {
   case "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" in
     *' ok installed') return 0 ;;
@@ -4264,6 +4315,10 @@ step_apt_update() {
     dpkg_installed "$doc_lib" || doc_missing="$doc_missing $doc_lib"
   done
   [ -z "$doc_missing" ] || echo "  Warning: document libraries not installed:$doc_missing" >&2
+  # ClawBox Vault's storage, pass and gnupg (git is in the base line above).
+  # Separate and non-fatal, like the document libraries: a mirror without one
+  # of them must not fail the base install. See ensure_vault_packages.
+  ensure_vault_packages || true
   # Node.js for production server and OpenClaw. The floor is the pinned core's
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
@@ -11274,6 +11329,9 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  # After the units are in place: ClawBox Vault's packages and its unit, for a
+  # box that got here without the updater's apt and rebuild steps.
+  optional_step vault_service ensure_vault_service
   optional_step hermes_dashboard_proxy_refresh step_hermes_dashboard_proxy_refresh
   optional_step nm_dispatcher step_nm_dispatcher
   # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
@@ -11952,7 +12010,11 @@ step_polkit_rules() {
 
 step_start_services() {
   local svc
-  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance)
+  # clawbox-vault: the built-in password manager, on every edition. An in-app
+  # update needs no line of its own for it: step_rebuild_reboot installs and
+  # enables the unit, and restart_services_after_update then starts or restarts
+  # every enabled clawbox-* unit on the new build.
+  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance clawbox-vault)
   # The OpenClaw gateway only exists on editions that run it. On the Hermes SKU
   # it is never installed (and is masked by step_edition_gateway_state), and
   # `systemctl restart` on a missing unit exits 5 — which, under the

@@ -501,6 +501,58 @@ step_apt_update() {
   # next update once its root-owned installer copy is current. Gated inside,
   # and never fatal: an update must not fail over an optional sandbox profile.
   ensure_bwrap_userns_profile || echo "  Warning: the bubblewrap AppArmor profile was not installed"
+  # ClawBox Vault's storage: `pass` (GnuPG-encrypted files in a git-tracked
+  # folder). Separate and non-fatal, as on the appliance: the vault says what is
+  # missing in its own window, and an update must not fail over it.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pass gnupg \
+    || echo "  Warning: pass/gnupg were not installed; ClawBox Vault will say so until they are"
+  # The same reasoning as the profile above: this is the root step every update
+  # runs here, so it is also where an installed PC gets the vault's unit.
+  install_vault_service || echo "  Warning: the ClawBox Vault service was not installed"
+}
+
+# ClawBox Vault, the built-in password manager (vault/): one loopback-only Bun
+# service under the desktop owner's account. The appliance ships this unit as
+# config/clawbox-vault.service; a PC writes its own because the user, the home
+# and the checkout are this install's. Called by step_systemd_services (a fresh
+# install) and by step_apt_update (every update). Never fatal.
+install_vault_service() {
+  local vault_unit="/etc/systemd/system/clawbox-vault.service"
+  if [ ! -x "$PROJECT_DIR/scripts/start-vault.sh" ]; then
+    echo "  ClawBox Vault is not in this checkout yet; its service arrives with the next update"
+    return 0
+  fi
+  cat > "$vault_unit" <<VAULT_UNIT
+[Unit]
+Description=ClawBox Vault (password manager, loopback only)
+After=network.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+Group=$CLAWBOX_USER
+WorkingDirectory=$PROJECT_DIR/vault
+Environment=HOME=$CLAWBOX_HOME
+ExecStart=$PROJECT_DIR/scripts/start-vault.sh
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143 SIGTERM
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+MemoryAccounting=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
+VAULT_UNIT
+  systemctl daemon-reload
+  systemctl enable clawbox-vault.service >/dev/null 2>&1 || return 1
+  # --no-block: the caller is an install or an update step, and the service
+  # needs the build's packages; it restarts itself until they are there.
+  systemctl restart --no-block clawbox-vault.service || return 1
+  echo "  ClawBox Vault service installed (127.0.0.1:4796)"
 }
 
 step_install_bun() {
@@ -2313,6 +2365,7 @@ EOF
     systemctl enable "$GATEWAY_SERVICE" "$UI_SERVICE" clawbox-vnc.service clawbox-websockify.service
     systemctl restart clawbox-vnc.service clawbox-websockify.service
   fi
+  install_vault_service || echo "  Warning: the ClawBox Vault service was not installed"
   echo "  Persistent x64 services installed"
 }
 

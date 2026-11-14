@@ -119,6 +119,14 @@ export const TOOL_NOTES: readonly ToolNote[] = [
     note: "The typed text is never echoed back: these are the tools that type passwords. `browser_fill` with a CSS selector beats clicking and typing, and Tab-by-Tab navigation — one step per field.",
   },
   {
+    tool: "vault_fill",
+    note: "To log in somewhere: open the login page with `browser_open` first (the box's own browser, where the vault's extension lives, not another browser tool's), then `vault_fill` with that page's URL (`submit: true` presses the button). Never ask the user for a password that is in the vault, and never type one yourself. Statuses: `no_tab` = the page is not open in the box's browser, open it with `browser_open`; `no_form` = the page shows no login form yet; `no_entry` = nothing saved for this site (`vault_match` shows what is); `origin_mismatch` = the form belongs to another site or the page is plain http, do not work around it; `locked` or `extension_offline` = the user must unlock ClawBox Vault or open the box's browser. An answer saying the vault is not set up means the owner has to open ClawBox Vault on the desktop and choose a PIN: tell them, do not retry.",
+  },
+  {
+    tool: "vault_save",
+    note: "For a new account, leave `password` out: the vault makes a strong one, stores it, and `vault_fill` types it into the sign-up form (both password fields). You never see it, and there is nothing to show the user: they read it in the ClawBox Vault app. An existing entry keeps its password unless you pass one or `regenerate: true`.",
+  },
+  {
     tool: "grep",
     note: "Ask for output_mode \"files_with_matches\" first, then \"content\" on one file. Files holding device credentials are never searched or shown — nor listed by `list_directory` or matched by `glob`.",
   },

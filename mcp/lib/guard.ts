@@ -167,7 +167,7 @@ export function isAllowedPath(abs: string, real: string | null = canonicalPath(a
  * the files inside it, whichever folder they turn up in.
  */
 export const SECRET_NAME_RE =
-  /(^|[^\w.-])\.(ssh|hermes|clawkeep|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
+  /(^|[^\w.-])\.(ssh|hermes|clawkeep|clawbox-vault|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
 
 /**
  * Every `.openclaw` mention in a shell string, with whatever path follows it.

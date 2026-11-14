@@ -194,7 +194,7 @@ const HARD_SEGMENTS: readonly string[] = [
   ".ssh", ".gnupg", ".aws", ".kube", ".docker",
   ".config/gcloud", ".config/gh", ".config/rclone",
   // The appliance's own state and tokens.
-  ".openclaw", ".hermes", ".codex", ".clawkeep",
+  ".openclaw", ".hermes", ".codex", ".clawkeep", ".clawbox-vault",
   // The harness's settings and OAuth token live directly in these; only the
   // `projects/` child below is ever unlockable.
   ".claude", ".claude-ds",

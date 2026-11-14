@@ -501,6 +501,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-heartbeat.timer": "enabled:active",
     "clawbox-ap-watchdog.timer": "enabled:active",
     "clawbox-codex-auth-sync.timer": "enabled:active",
+    "clawbox-vault.service": "enabled:active",
     "clawbox-heartbeat.service": "static:inactive",
     "clawbox-browser.service": "disabled:inactive",
     "clawbox-embed.service": "static:inactive",
@@ -556,8 +557,9 @@ d("the validator now says what to run, not just what is wrong", () => {
     // The teardown adds no checks — the healthy line must not move.
     const r = runValidator("openclaw", healthyOpenclaw());
     expect(r.status).toBe(0);
-    // 19 with the supervised WiFi worker among the installed-but-on-demand units,
-    // and clawbox-build-heal.service (TASK-1316), the boot-time oneshot.
-    expect(r.stdout).toMatch(/All 19 checks healthy/);
+    // 20 with the supervised WiFi worker among the installed-but-on-demand units,
+    // clawbox-build-heal.service (TASK-1316), the boot-time oneshot, and
+    // clawbox-vault.service, the built-in password manager, among the active ones.
+    expect(r.stdout).toMatch(/All 20 checks healthy/);
   });
 });
