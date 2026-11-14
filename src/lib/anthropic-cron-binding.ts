@@ -136,6 +136,18 @@ export interface CronBindingRecord {
    * as current until an update lands.
    */
   provisional?: boolean;
+  /**
+   * With `provisional`: the job's model before that update — still the box's
+   * own when the update did not land (a job pinned to the owner's sign-in is
+   * otherwise taken for the owner's choice and never moved again).
+   */
+  previousModel?: string | null;
+  /**
+   * Being given back: the first update's model (`model@profile` onto the
+   * account it runs on now), written before it is sent — a reply lost after
+   * core took it still leaves the job the box's to finish giving back.
+   */
+  releasing?: string;
 }
 
 export type CronBindingRecords = Record<string, CronBindingRecord>;
@@ -238,8 +250,11 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
     if (job.kind !== "agentTurn" || job.sessionTarget === "main") continue;
     if (job.agentId !== null ? job.agentId !== "main" : input.defaultIsMain === false) continue;
     const record: CronBindingRecord | undefined = records[job.id];
-    // The model is the one the box left: what it adopted is still its to move.
-    const ours = !!record && record.model === job.model;
+    // The model is the one the box left: what it adopted is still its to move —
+    // or the one an update it sent, unanswered, may have left.
+    const ours = !!record && (record.model === job.model
+      || (record.provisional === true && record.previousModel !== undefined && record.previousModel === job.model)
+      || (record.releasing !== undefined && record.releasing === job.model));
     if (input.onlyAdopted && !ours) continue;
     const original = ours ? (record.original ?? (record.inherits ? null : record.model)) : job.model;
     const { base: defaultBase } = defaultModel ? splitModelRef(defaultModel) : { base: "" };
@@ -428,12 +443,23 @@ export async function bindCronsToTarget(
         revision: null,
         at: before?.at ?? 0,
         provisional: true,
+        previousModel: job.model,
         ...(before?.retriedAt !== undefined ? { retriedAt: before.retriedAt } : {}),
       };
       if (!(await save())) {
         // No durable record, no change to the job: the next pass plans it again.
         if (before) records[job.id] = before;
         else delete records[job.id];
+        result.owed += 1;
+        continue;
+      }
+    }
+    if (plan.release && before && typeof plan.steps[0] === "string" && plan.steps.length > 1 && before.releasing !== plan.steps[0]) {
+      // Written BEFORE the first update, as an adoption's record is: that pin,
+      // its reply lost, must still read as the box's next time, and be cleared.
+      records[job.id] = { ...before, releasing: plan.steps[0] };
+      if (!(await save())) {
+        records[job.id] = before;
         result.owed += 1;
         continue;
       }

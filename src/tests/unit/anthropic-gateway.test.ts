@@ -2265,6 +2265,125 @@ describe("TASK-2533 second review pass", () => {
     expect(runCron(core, "own-model")).toBe("anthropic:default");
   });
 
+  it("a job moved onto the owner's sign-in while every pool account was limited stays the box's after a refused move back, and moves once core takes it", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    await pool.markLimited(personal.id, Date.now() + H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect(runCron(core, "own-model")).toBe("anthropic:default");
+
+    // Personal is back; core refuses the move back (twice: the job is backed off).
+    core.refuseCronUpdate.add(`anthropic/claude-sonnet-5-5@${p(personal.id)}`);
+    await pool.clearLimit(personal.id);
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect(runCron(core, "own-model")).toBe("anthropic:default");
+
+    core.refuseCronUpdate.clear();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    await gw.bindGatewayCrons();
+    expect(runCron(core, "own-model")).toBe(p(personal.id));
+  });
+
+  it("finishes giving a model-less job back when core took the first update and its answer was lost", async () => {
+    const core = fakeCore();
+    core.otherProfiles.set("deepseek:default", { provider: "deepseek", type: "api_key", secret: "sk-deepseek-key" });
+    await twoClaudeAccounts();
+    addCron(core, { id: "inherits" });
+    await gw.keepGatewayMirror();
+    core.loseReplyOf.add("deepseek/deepseek-v4-flash@deepseek:default");
+    core.chatOnClaude = false;
+    core.chatModel = "deepseek/deepseek-v4-flash";
+    await gw.syncGatewayNow();
+    const job = core.crons.get("inherits") as FakeCron;
+    // Taken by core, its answer lost: pinned to the new default for now.
+    expect(job.payload.model).toBe("deepseek/deepseek-v4-flash@deepseek:default");
+
+    core.loseReplyOf.clear();
+    await gw.bindGatewayCrons();
+
+    expect(job.payload.model).toBeUndefined();
+    expect(runCron(core, "inherits")).toBe("deepseek:default");
+  });
+
+  it("gives a job with a bare Claude model back onto the owner's sign-in, not its removed pool profile", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    addCron(core, { id: "bare", payload: { kind: "agentTurn", message: "m", model: "claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "bare")).toMatch(/^anthropic:clawbox-/);
+    core.chatOnClaude = false;
+    core.chatModel = "deepseek/deepseek-v4-flash";
+    await gw.syncGatewayNow();
+
+    expect((core.crons.get("bare") as FakeCron).payload.model).toBe("claude-sonnet-5-5");
+    expect(runCron(core, "bare")).toBe("anthropic:default");
+  });
+
+  it("asks Anthropic about every held account in turn: accounts whose asks keep failing do not keep another from being asked", async () => {
+    fakeCore();
+    const ids: string[] = [];
+    for (const name of ["alpha", "bravo", "charlie"]) {
+      ids.push((await pool.addOAuthAccount({ label: name, email: `${name}@example.com`, tokens: oauth(`sk-ant-oat01-${name}`) })).id);
+    }
+    await gw.keepGatewayMirror();
+    expect((await pool.readPoolState()).gateway?.accountId).toBe(ids[0]);
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+      const token = ((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      asked.push(token);
+      if (!token.includes("charlie")) return new Response("{\"error\":\"rate_limited\"}", { status: 429 });
+      return new Response(JSON.stringify({ five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    for (let tick = 0; tick < 6; tick += 1) {
+      vi.setSystemTime(t0 + tick * 60_000);
+      await gw.lookAtLeadUsage();
+    }
+
+    expect(asked.some((t) => t.includes("charlie"))).toBe(true);
+  });
+
+  it("a cron limit no account can be named for reads every held account before its retry is sent", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const events: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+      const token = ((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      events.push(`usage:${token}`);
+      const body = token.includes("work")
+        ? { five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * H).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
+        : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    core.beforeCall = (method) => {
+      if (method === "cron.run") events.push("cron.run");
+    };
+    // A job the box never bound (core bound it itself): its limit names no account.
+    core.cronJobs.push({ id: "foreign", state: { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() } });
+
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(work.id)).toBe("limited");
+    const firstAsk = events.findIndex((e) => e.startsWith("usage:"));
+    expect(firstAsk).toBeGreaterThanOrEqual(0);
+    const run = events.indexOf("cron.run");
+    expect(run === -1 || firstAsk < run).toBe(true);
+  });
+
   it("the minute's back-off holds back only what it already tried: an account limited since is out at once", async () => {
     const core = fakeCore();
     core.tellsConfigOrder = true;

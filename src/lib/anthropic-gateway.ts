@@ -1481,8 +1481,9 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
     // is gone, and core changes a job's account only on a `model@profile`.
     const accountFor = (model: string): string | null => {
       const slash = model.indexOf("/");
-      if (slash <= 0) return null;
-      const provider = model.slice(0, slash);
+      // A bare Claude model (`claude-sonnet-5-5`) is Anthropic's, as the planner takes it.
+      const provider = slash > 0 ? model.slice(0, slash) : /^claude/i.test(model.trim()) ? PROVIDER : null;
+      if (!provider) return null;
       const read = provider === PROVIDER ? store : d.readProvider?.(provider);
       if (!read || read.kind !== "present") return null;
       const fit = (id: string) => !isPoolProfile(id) && read.profiles.some((p) => p.profileId === id && !p.fenced && p.fingerprint !== null
@@ -1538,12 +1539,15 @@ export async function lookAtLeadUsage(now: number = Date.now()): Promise<void> {
     if (store.kind !== "present") return;
     const pool = await readPoolState();
     const lead = pool.gateway?.accountId ?? null;
+    const lastAsked = (id: string) => Math.max(state.usageAnsweredAt.get(id) ?? 0, state.usageFailedAt.get(id) ?? 0);
     const held = pool.accounts.filter((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok"
       && store.profiles.some((p) => p.profileId === poolProfileId(a.id) && !p.fenced && p.fingerprint !== null));
     const due = held
       .filter((a) => now - (state.usageAnsweredAt.get(a.id) ?? Number.NEGATIVE_INFINITY) >= LEAD_USAGE_MS
         && now - (state.usageFailedAt.get(a.id) ?? Number.NEGATIVE_INFINITY) >= USAGE_RETRY_MS)
-      .sort((a, b) => (a.id === lead ? -1 : b.id === lead ? 1 : (state.usageAnsweredAt.get(a.id) ?? 0) - (state.usageAnsweredAt.get(b.id) ?? 0)));
+      // The lead first, then the one asked longest ago, whatever it answered:
+      // accounts that keep failing must not keep another from ever being asked.
+      .sort((a, b) => (a.id === lead ? -1 : b.id === lead ? 1 : lastAsked(a.id) - lastAsked(b.id)));
     const account = due[0];
     if (!account) return;
     state.leadUsageAt = now;
@@ -1667,7 +1671,7 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
   // died on its limit names that account, so the pool records the limit at
   // once — 2026.11.3 records no cooldown for a Claude CLI limit.
   const bindings = await (d.cronBindings?.read() ?? Promise.resolve({} as CronBindingRecords)).catch(() => ({} as CronBindingRecords));
-  let unnamed = false;
+  let heldRead = false;
   for (const job of parseCronJobs(payload)) {
     if (job.lastRunAtMs === null || job.lastRunAtMs <= since) continue;
     newest = Math.max(newest, job.lastRunAtMs);
@@ -1679,7 +1683,14 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     const record = bindings[job.id];
     const bound = record && !record.provisional && (record.boundAt ?? record.at) <= job.lastRunAtMs ? record.profileId : null;
     const boundAccount = bound && isPoolProfile(bound) ? pool.accounts.find((a) => poolProfileId(a.id) === bound) ?? null : null;
-    if (!boundAccount) unnamed = true;
+    // A limit no account can be named for: Anthropic's word on every held
+    // account first (once a scan), so a spent active account is the pool's
+    // limit — and the swap under way — before the retry below can be sent.
+    if (!boundAccount && !heldRead) {
+      heldRead = true;
+      await readHeldUsageNow();
+    }
+    const on = heldRead ? (await readPoolState()).activeId : pool.activeId;
     const result = await reportAnthropicFailure({
       text: job.lastError,
       source: "cron",
@@ -1688,7 +1699,7 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
         // Per account the pool is on once core's record is in (the watcher
         // reads it first): a run that fails again on the account it was moved
         // to is a new failure, and earns one retry of its own on the next.
-        key: `cron:${job.id}:${pool.activeId ?? "none"}`,
+        key: `cron:${job.id}:${on ?? "none"}`,
         after: "gateway",
         run: async () => {
           try {
@@ -1703,8 +1714,6 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     if (result.handled) reported += 1;
   }
   state.cronWatermark = newest;
-  // A limit no account can be named for: ask Anthropic about every held one now.
-  if (unnamed) await readHeldUsageNow();
   return reported;
 }
 
