@@ -313,8 +313,17 @@ export class Auth {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    // Checked and tightened through one descriptor, never by path twice.
-    const fd = openSync(this.mcpTokenFile, "r");
+    // Checked and tightened through one descriptor, never by path twice. A
+    // file its owner cannot read (mode 000/200) is made 600 first, as the
+    // service could never use it otherwise.
+    let fd: number;
+    try {
+      fd = openSync(this.mcpTokenFile, "r");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EACCES") throw err;
+      chmodSync(this.mcpTokenFile, 0o600);
+      fd = openSync(this.mcpTokenFile, "r");
+    }
     try {
       if ((fstatSync(fd).mode & 0o077) !== 0) fchmodSync(fd, 0o600);
     } finally {

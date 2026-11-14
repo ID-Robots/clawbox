@@ -31,10 +31,9 @@ export class AuditLog {
       fd = openSync(this.file, "a+", 0o600);
       fchmodSync(fd, 0o600);
       const size = fstatSync(fd).size;
-      if (size > MAX_BYTES) {
-        this.rotate(fd, size);
-        ftruncateSync(fd, 0);
-      }
+      // Truncated only once the whole log is in audit.jsonl.1: a copy cut
+      // short (a full disk) keeps the log as it was, one line longer.
+      if (size > MAX_BYTES && this.rotate(fd, size)) ftruncateSync(fd, 0);
       writeSync(fd, `${JSON.stringify(rec)}\n`);
     } catch (err) {
       console.error(`audit log write failed: ${(err as Error).message}`);
@@ -43,8 +42,8 @@ export class AuditLog {
     }
   }
 
-  /** Copies the open log into `<file>.1` (replacing it), mode 600. */
-  private rotate(fd: number, size: number): void {
+  /** Copies the open log into `<file>.1` (replacing it), mode 600. True when all of it got there. */
+  private rotate(fd: number, size: number): boolean {
     const old = Buffer.alloc(size);
     let got = 0;
     while (got < size) {
@@ -52,10 +51,17 @@ export class AuditLog {
       if (n === 0) break;
       got += n;
     }
+    if (got < size) return false;
     const out = openSync(`${this.file}.1`, "w", 0o600);
     try {
       fchmodSync(out, 0o600);
-      writeSync(out, old, 0, got);
+      let put = 0;
+      while (put < got) {
+        const n = writeSync(out, old, put, got - put);
+        if (n <= 0) return false;
+        put += n;
+      }
+      return true;
     } finally {
       closeSync(out);
     }

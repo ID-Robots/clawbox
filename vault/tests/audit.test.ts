@@ -1,10 +1,11 @@
-// The audit log: one JSON line per action, mode 600, rotated to audit.jsonl.1
-// once it passes 5 MiB, with the card redactor over every field.
+// The audit log (one JSON line per action, mode 600, rotated to audit.jsonl.1
+// past 5 MiB, the card redactor over every field) and the agent token file.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuditLog } from "../src/server/audit";
+import { Auth } from "../src/server/auth";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -31,7 +32,9 @@ describe("AuditLog", () => {
   test("tightens a log someone left readable", () => {
     const dir = tempDir();
     const file = join(dir, "audit.jsonl");
-    writeFileSync(file, "", { mode: 0o644 });
+    writeFileSync(file, "");
+    chmodSync(file, 0o644);
+    expect(statSync(file).mode & 0o777).toBe(0o644);
     new AuditLog(dir).record({ actor: "agent", action: "list" });
     expect(statSync(file).mode & 0o777).toBe(0o600);
   });
@@ -55,9 +58,37 @@ describe("AuditLog", () => {
     expect(log.recent().map((r) => r.action)).toEqual(["new"]);
   });
 
-  test("redacts a card number in any field", () => {
+  test("redacts a card number in every field it keeps", () => {
     const dir = tempDir();
-    new AuditLog(dir).record({ actor: "agent", action: "fill", detail: "card 4111 1111 1111 1111" });
-    expect(readFileSync(join(dir, "audit.jsonl"), "utf8")).not.toContain("4111 1111 1111 1111");
+    const pan = "4111 1111 1111 1111";
+    new AuditLog(dir).record({ actor: "agent", action: `fill ${pan}`, name: `shop/${pan}`, host: `${pan}.example.com`, status: `ok ${pan}`, detail: `card ${pan}` });
+    const line = readFileSync(join(dir, "audit.jsonl"), "utf8");
+    expect(line).not.toContain(pan);
+    expect(line).not.toContain("4111111111111111");
+    expect(Object.keys(JSON.parse(line))).toEqual(["ts", "actor", "action", "name", "host", "status", "detail"]);
   });
+});
+
+describe("Auth's agent token", () => {
+  test("is made mode 600 on first start, and checkMcp accepts it", () => {
+    const dir = tempDir();
+    const auth = new Auth(dir);
+    const file = join(dir, "agent-token");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(auth.checkMcp(readFileSync(file, "utf8").trim())).toBe(true);
+  });
+
+  for (const mode of [0o644, 0o000, 0o200]) {
+    test(`a token file left at mode ${mode.toString(8).padStart(3, "0")} is kept and made 600`, () => {
+      const dir = tempDir();
+      const token = "a".repeat(43);
+      const file = join(dir, "agent-token");
+      writeFileSync(file, `${token}\n`);
+      chmodSync(file, mode);
+      expect(statSync(file).mode & 0o777).toBe(mode);
+      const auth = new Auth(dir);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(auth.checkMcp(token)).toBe(true);
+    });
+  }
 });
