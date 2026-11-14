@@ -519,7 +519,9 @@ async function submitEdit(ev: Event): Promise<void> {
       if (editor && editOriginal === editor) editOriginal = { ...editor, name: movedTo };
       void loadEntries();
     } else if ((err as ApiError).renameUnconfirmed) {
-      if (editSession === session) unconfirmedEditSession = session;
+      // This session, or one opened on the same entry while the answer was on
+      // its way: both hold the name that may be gone.
+      if (editSession === session || (editor && editOriginal?.name === editor.name)) unconfirmedEditSession = editSession;
       // The detail shown (and its Edit button) is the entry as it was: gone,
       // so the entry can only be edited again once picked from the new list.
       selected = null;
@@ -789,7 +791,7 @@ async function submitCard(ev: Event): Promise<void> {
       if (editor && cardOriginal === editor) cardOriginal = { ...editor, name: movedTo };
       void loadCards();
     } else if ((err as ApiError).renameUnconfirmed) {
-      if (cardEditSession === session) unconfirmedCardSession = session;
+      if (cardEditSession === session || (editor && cardOriginal?.name === editor.name)) unconfirmedCardSession = cardEditSession;
       selectedCard = null;
       cardRequest++;
       resetCardDetail();

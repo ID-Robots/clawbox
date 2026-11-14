@@ -8,6 +8,7 @@ import { JSDOM } from "jsdom";
 
 const UI = join(import.meta.dir, "../src/ui");
 const ENTRY = { name: "a.example.com/ops", login: "ops", url: "https://a.example.com/login", updated: "2026-11-14T12:00:00Z" };
+const CARD = { name: "cards/company-visa", label: "Company Visa", brand: "visa", last4: "4242", exp: "12/34", expired: false, cardholder: "", updated: "2026-11-14T12:00:00Z" };
 
 interface Call {
   method: string;
@@ -16,8 +17,11 @@ interface Call {
   body: Record<string, unknown> | null;
 }
 const calls: Call[] = [];
-/** What the next POST ui/entries answers; null is a plain success. */
+/** What the next POST ui/entries (or ui/cards) answers; null is a plain success. */
 let saveAnswer: { status: number; body: unknown } | null = null;
+let cardAnswer: { status: number; body: unknown } | null = null;
+/** Set to hold the next save's answer until release() is called. */
+let held: { release: () => void } | null = null;
 let lockHangs = false;
 let doc: Document;
 // Every global this file adds or replaces, put back afterwards: bun runs the
@@ -29,6 +33,32 @@ let win: Window & typeof globalThis;
 const $ = (id: string) => doc.getElementById(id) as HTMLElement;
 const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
 const posts = () => calls.filter((c) => c.method === "POST" && c.path === "ui/entries");
+const cardPosts = () => calls.filter((c) => c.method === "POST" && c.path === "ui/cards");
+const UNNAMED = { status: 409, body: { error: "where it is now could not be confirmed", code: "renamed_not_updated" } };
+const editButton = (pane: string) => Array.from($(pane).querySelectorAll("button")).find((b) => b.textContent === "Edit");
+
+function answer(a: { status: number; body: unknown } | null, fallback: unknown): Promise<Response> {
+  const send = () => (a ? reply(a.body, a.status) : reply(fallback));
+  if (!held) return send();
+  return new Promise((resolve) => {
+    held = { release: () => resolve(send()) };
+  });
+}
+
+async function openCardEditor(): Promise<void> {
+  ($("view-cards").querySelector(".entry-item") as HTMLElement).click();
+  await settle();
+  const edit = editButton("card-detail");
+  expect(edit).toBeTruthy();
+  edit!.click();
+  await settle();
+}
+
+async function saveCard(label: string): Promise<void> {
+  ($("card-label") as HTMLInputElement).value = label;
+  $("card-form").dispatchEvent(new win.Event("submit", { cancelable: true }));
+  await settle(60);
+}
 
 function reply(body: unknown, status = 200): Promise<Response> {
   return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
@@ -79,15 +109,15 @@ beforeAll(async () => {
     const path = String(url).replace("./api/", "");
     const method = init.method ?? "GET";
     calls.push({ method, path, auth: init.headers?.authorization ?? null, body: init.body ? JSON.parse(init.body) : null });
-    if (path === "ui/status") return reply({ pinSet: true, unlocked: false, cards: false, store: { ready: true } });
+    if (path === "ui/status") return reply({ pinSet: true, unlocked: false, cards: true, store: { ready: true } });
     if (path === "ui/unlock") return reply({ token: "session-under-test", idleMs: 900_000 });
     if (path === "ui/lock") return lockHangs ? new Promise(() => {}) : reply({ ok: true });
     if (path.startsWith("ui/entries") && method === "GET") return reply({ entries: [ENTRY] });
     if (path.startsWith("ui/entry?")) return reply({ ...ENTRY, note: "", has2fa: false, extraLines: 0 });
-    if (path === "ui/entries" && method === "POST") {
-      const a = saveAnswer;
-      return a ? reply(a.body, a.status) : reply({ name: (calls.at(-1)?.body?.name as string) ?? ENTRY.name, created: false });
-    }
+    if (path === "ui/entries" && method === "POST") return answer(saveAnswer, { name: ENTRY.name, created: false });
+    if (path.startsWith("ui/cards") && method === "GET") return reply({ cards: [CARD] });
+    if (path.startsWith("ui/card?")) return reply({ ...CARD, note: "", hasCvv: false, extraLines: 0 });
+    if (path === "ui/cards" && method === "POST") return answer(cardAnswer, { name: CARD.name, created: false, card: CARD });
     return reply({});
   };
   await import("../src/ui/app");
@@ -136,6 +166,67 @@ describe("a renamed save that failed", () => {
     saveAnswer = null;
     await save("c.example.com/ops");
     expect(posts().at(-1)!.body).toMatchObject({ originalName: "c.example.com/ops" });
+  });
+});
+
+describe("an answer that comes after the dialog was reopened", () => {
+  test("login: a 409 for the earlier session also stops the reopened one", async () => {
+    await openEditor();
+    saveAnswer = UNNAMED;
+    held = { release: () => {} };
+    const before = posts().length;
+    ($("edit-name") as HTMLInputElement).value = "d.example.com/ops";
+    $("edit-form").dispatchEvent(new win.Event("submit", { cancelable: true }));
+    await settle();
+    // Reopened from the detail still on screen while the answer is on its way.
+    editButton("detail")!.click();
+    await settle();
+    held.release();
+    held = null;
+    await settle(60);
+    saveAnswer = null;
+    await save("d.example.com/ops");
+    expect(posts()).toHaveLength(before + 1);
+    expect($("edit-error").textContent).toContain("could not be confirmed");
+  });
+});
+
+describe("the card editor", () => {
+  test("an unconfirmed rename: no retry, no stale Edit, a fresh pick saves again", async () => {
+    $("nav-cards").click();
+    await settle(60);
+    await openCardEditor();
+    cardAnswer = UNNAMED;
+    await saveCard("Moved Visa");
+    expect(cardPosts()).toHaveLength(1);
+    expect(cardPosts()[0]!.body).toMatchObject({ originalName: CARD.name });
+    await saveCard("Moved Visa");
+    expect(cardPosts()).toHaveLength(1);
+    expect($("card-error").textContent).toContain("could not be confirmed");
+    expect(editButton("card-detail")).toBeUndefined();
+    cardAnswer = null;
+    await openCardEditor();
+    await saveCard("Moved Visa");
+    expect(cardPosts()).toHaveLength(2);
+  });
+
+  test("a 409 that arrives after the card dialog was reopened stops the reopened one", async () => {
+    await openCardEditor();
+    cardAnswer = UNNAMED;
+    held = { release: () => {} };
+    const before = cardPosts().length;
+    ($("card-label") as HTMLInputElement).value = "Moved again";
+    $("card-form").dispatchEvent(new win.Event("submit", { cancelable: true }));
+    await settle();
+    editButton("card-detail")!.click();
+    await settle();
+    held.release();
+    held = null;
+    await settle(60);
+    cardAnswer = null;
+    await saveCard("Moved again");
+    expect(cardPosts()).toHaveLength(before + 1);
+    expect($("card-error").textContent).toContain("could not be confirmed");
   });
 });
 
