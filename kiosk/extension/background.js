@@ -139,7 +139,13 @@ async function goHome() {
 // And it is used no longer than the session that read it lasts (`validUntil`,
 // the route's `sessionExpiresAt`): a session that runs out with the desktop tab
 // closed reaches neither of those, so past that time the copy is dropped and
-// the desktop is asked again — which, signed out, answers nothing.
+// the desktop is asked again — which, signed out, answers nothing. A list the
+// desktop answers that was asked for before the list was forgotten (or before
+// a newer list came in) is stale: it is neither kept nor used (a refusal is
+// always applied), and a switch under way when the list is forgotten opens and
+// activates no box. The desktop gets
+// ASK_DESKTOP_MS to answer, so a read that hangs cannot hold up the keys after
+// it, and Ctrl+Shift+1 goes home before it reads the list at all.
 const MAX_BOXES = 8;
 const MAX_BOX_NAME = 40;
 const BOXES_KEY = "linkedBoxes";
@@ -147,6 +153,14 @@ const BOX_TABS_KEY = "linkedBoxTabs";
 const PENDING_KEY = "linkedBoxIndicators";
 const PENDING_TTL_MS = 15000;
 const MAX_LABEL = 300;
+const ASK_DESKTOP_MS = 3000;
+
+// Moves on with every change of the kept list (a newer one saved, or the list
+// forgotten): a desktop answer asked for before it is stale.
+let listGeneration = 0;
+// Moves on when the owner's list is forgotten (/login, a refused read): a
+// switch that began before it reaches no box, whatever it had already read.
+let revocations = 0;
 
 function boxName(raw) {
   if (typeof raw !== "string") return null;
@@ -220,24 +234,45 @@ async function saveBoxes(list) {
     // No session end given is no promise at all: a copy good for nothing past now.
     validUntil: list && Number.isFinite(list.validUntil) ? list.validUntil : 0,
   };
+  listGeneration++;
   await chrome.storage.session.set({ [BOXES_KEY]: clean });
   return clean;
 }
 
 function forgetBoxes() {
+  listGeneration++;
   return chrome.storage.session.remove(BOXES_KEY);
 }
 
+/** The owner's list forgotten: no switch under way and no answer still out may use it. */
+function revokeBoxes() {
+  revocations++;
+  return forgetBoxes();
+}
+
+/** `promise`'s answer, or null when it has none within `ms` (a rejection still rejects). */
+function withDeadline(promise, ms) {
+  let timer = 0;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
 async function askDesktopForBoxes() {
+  const asked = listGeneration;
   const all = await normalTabs();
   const desk = all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
   if (!desk) return null;
   try {
-    const list = await chrome.tabs.sendMessage(desk.id, { type: "readBoxes" });
+    const list = await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readBoxes" }), ASK_DESKTOP_MS);
+    // A refusal is applied whatever came in meanwhile: forgetting is always the
+    // safe way round (at worst the desktop is asked once more).
     if (list && list.revoked) {
-      await forgetBoxes();
+      await revokeBoxes();
       return null;
     }
+    // The list changed while the desktop was reading it — forgotten, or a newer
+    // one came in: this answer is stale, and what is kept now stands.
+    if (listGeneration !== asked) return await storedBoxes();
     if (!list) return null;
     const clean = await saveBoxes(list);
     // The same rule as a kept copy: an answer with no session end, or one that
@@ -324,12 +359,16 @@ function queueSwitch(task) {
 
 async function switchBox(slot, sender) {
   if (!Number.isInteger(slot) || slot < 1 || slot > MAX_BOXES + 1) return { ok: false, error: "no such slot" };
+  const revoked = revocations;
+  const stillTheOwners = () => revocations === revoked;
+  // Home first: going home never waits on the list, only its indicator does.
+  const home = slot === 1 ? await goHome() : null;
   const list = (await storedBoxes()) || (await askDesktopForBoxes()) || { selfName: "", boxes: [] };
-  const boxes = cleanBoxes(list.boxes);
+  // Forgotten while this switch read it: none of the owner's boxes.
+  const boxes = stillTheOwners() ? cleanBoxes(list.boxes) : [];
   const selfName = boxName(list.selfName) || "ClawBox";
   const names = [selfName, ...boxes.map((b) => b.name)];
   if (slot === 1) {
-    const home = await goHome();
     await indicate(home && home.id, { type: "boxIndicator", slot, kind: "stay", name: selfName, names });
     return { ok: true };
   }
@@ -340,6 +379,8 @@ async function switchBox(slot, sender) {
     return { ok: true };
   }
   let tab = await tabForBox(box);
+  // Forgotten while the box's tab was looked up: nothing opened or activated.
+  if (!stillTheOwners()) return { ok: false, error: "the list was forgotten" };
   if (tab) await chrome.tabs.update(tab.id, { active: true });
   else tab = await chrome.tabs.create({ url: box.url, active: true });
   await rememberBoxTab(webOrigin(box.url), tab.id);
@@ -385,7 +426,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // The kiosk's own pages only (its /login included): a web page's
         // content script never sends it, and nothing else may clear the list.
         if (!sender.tab || !isDesktop(sender.tab.url)) return { ok: false, error: "not from the desktop" };
-        await forgetBoxes();
+        await revokeBoxes();
         return { ok: true };
       case "pendingIndicator":
         return takePendingIndicator(sender.tab && sender.tab.id);

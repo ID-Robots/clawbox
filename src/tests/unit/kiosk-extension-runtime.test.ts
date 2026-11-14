@@ -470,7 +470,7 @@ describe("workspaces.js", () => {
   // the indicator, and on the kiosk's own desktop the list it hands the worker.
   type Listener = (e: unknown) => void;
 
-  function load(href: string, opts: { pending?: unknown; list?: unknown; listStatus?: number } = {}) {
+  function load(href: string, opts: { pending?: unknown; list?: unknown; listStatus?: number; fetch?: (url: string, init: RequestInit) => Promise<Response> } = {}) {
     const url = new URL(href);
     const keydown: Listener[] = [];
     const winEvents: Record<string, Listener[]> = {};
@@ -487,7 +487,7 @@ describe("workspaces.js", () => {
     const onMessage: Array<(msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown> = [];
     const sendMessage = vi.fn(async (msg: { type: string }) => (msg.type === "pendingIndicator" ? opts.pending ?? null : { ok: true }));
     const chrome = { runtime: { sendMessage, onMessage: { addListener: (fn: (typeof onMessage)[number]) => onMessage.push(fn) } } };
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(opts.list ?? { self: { name: "laptop" }, boxes: [] }), { status: opts.listStatus ?? 200 }));
+    const fetchMock = vi.fn(opts.fetch ?? (async () => new Response(JSON.stringify(opts.list ?? { self: { name: "laptop" }, boxes: [] }), { status: opts.listStatus ?? 200 })));
     const scope: Record<string, unknown> = {};
     new Function("chrome", "window", "location", "fetch", "globalThis", source("workspaces.js"))(
       chrome, win, { origin: url.origin, pathname: url.pathname }, fetchMock, scope,
@@ -617,6 +617,76 @@ describe("workspaces.js", () => {
     expect(sent(down).filter((m) => m.type === "boxes" || m.type === "boxesRevoked")).toEqual([]);
   });
 
+  it("hands the worker only the newest read: an older answer that comes back last is dropped", async () => {
+    const answers: Array<(r: Response) => void> = [];
+    const reply = (boxes: unknown[]) => new Response(JSON.stringify({ self: { name: "laptop" }, boxes, sessionExpiresAt: 1_900_000_000_000 }), { status: 200 });
+    const OLD = { name: "Old", url: "https://old.example.com/" };
+    const NEW = { name: "New", url: "https://new.example.com/" };
+    const pushed = (m: ReturnType<typeof load>) => sent(m).filter((x) => x.type === "boxes" || x.type === "boxesRevoked");
+
+    // The page opened (read 1), then Settings saved (read 2); read 2 answers first.
+    const w = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+    for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    expect(answers).toHaveLength(2);
+    answers[1](reply([NEW]));
+    await flushMicrotasks();
+    answers[0](reply([OLD]));
+    await flushMicrotasks();
+    expect(pushed(w)).toEqual([expect.objectContaining({ type: "boxes", boxes: [NEW] })]);
+
+    // An older list that comes back after a newer refusal does not put the list back…
+    answers.length = 0;
+    const r = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+    for (const fn of r.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    answers[1](new Response("{}", { status: 401 }));
+    await flushMicrotasks();
+    answers[0](reply([OLD]));
+    await flushMicrotasks();
+    expect(pushed(r)).toEqual([{ type: "boxesRevoked" }]);
+
+    // …while a refusal always goes through, however old: after a newer list, or
+    // when the newer read got no answer at all.
+    for (const newer of [() => reply([NEW]), () => new Response("", { status: 502 })]) {
+      answers.length = 0;
+      const o = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+      for (const fn of o.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+      answers[1](newer());
+      await flushMicrotasks();
+      answers[0](new Response("{}", { status: 403 }));
+      await flushMicrotasks();
+      expect(pushed(o).at(-1)).toEqual({ type: "boxesRevoked" });
+    }
+
+    // The worker's own ask is a read too: a push still out from before it stays quiet.
+    answers.length = 0;
+    const a = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+    const ask = a.message({ type: "readBoxes" });
+    answers[1](reply([NEW]));
+    await flushMicrotasks();
+    expect(ask.answer()).toMatchObject({ boxes: [NEW] });
+    answers[0](reply([OLD]));
+    await flushMicrotasks();
+    expect(pushed(a)).toEqual([]);
+  });
+
+  it("gives up a read that hangs before the worker's deadline, so an ask is answered", async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = (_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+      const w = load("http://localhost:3005/", { fetch: hung });
+      const ask = w.message({ type: "readBoxes" });
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(ask.answer()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ask.answer()).toBeNull();
+      expect(sent(w).filter((m) => m.type === "boxes" || m.type === "boxesRevoked")).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("on the kiosk's own sign-in page, has the worker forget the owner's list; never on another site's", async () => {
     const own = load("http://localhost:3005/login?next=%2F");
     await flushMicrotasks();
@@ -630,7 +700,7 @@ describe("workspaces.js", () => {
 describe("background.js: switching linked ClawBoxes", () => {
   type Tab = { id: number; url: string; active?: boolean; pendingUrl?: string };
 
-  function loadWorker(start: Tab[], opts: { listening?: number[]; stored?: unknown; desktopList?: unknown } = {}) {
+  function loadWorker(start: Tab[], opts: { listening?: number[]; stored?: unknown; desktopList?: unknown; ask?: () => Promise<unknown> } = {}) {
     let tabs = start.map((t) => ({ ...t }));
     let nextId = 100;
     const listening = new Set(opts.listening ?? start.map((t) => t.id));
@@ -647,7 +717,7 @@ describe("background.js: switching linked ClawBoxes", () => {
     const delivered: [number, unknown][] = [];
     const sendMessage = vi.fn(async (id: number, msg: { type: string }) => {
       if (!listening.has(id)) throw new Error("Could not establish connection. Receiving end does not exist.");
-      if (msg.type === "readBoxes") return opts.desktopList ?? null;
+      if (msg.type === "readBoxes") return opts.ask ? opts.ask() : opts.desktopList ?? null;
       if (msg.type === "boxIndicator") delivered.push([id, msg]);
       return { ok: true };
     });
@@ -832,6 +902,83 @@ describe("background.js: switching linked ClawBoxes", () => {
     const ok = loadWorker([DESK], { stored: list });
     await ok.call({ type: "switchBox", slot: 2 });
     expect(ok.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
+  });
+
+  it("uses no desktop answer asked for before the list was forgotten, and opens nothing for it", async () => {
+    let answer!: (v: unknown) => void;
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { ask: () => new Promise((resolve) => { answer = resolve; }) });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    // The owner signs out while the desktop is still reading the list.
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    answer(list);
+    expect(await switching).toEqual({ ok: true });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+    expect(w.session.linkedBoxes).toBeUndefined();
+    // Nothing of the owner's list reaches the indicator either.
+    expect(w.indicators()).toEqual([[1, expect.objectContaining({ slot: 2, kind: "empty", names: ["ClawBox"] })]]);
+  });
+
+  it("takes a newer list from the desktop over an older answer it was still waiting for", async () => {
+    let answer!: (v: unknown) => void;
+    const w = loadWorker([DESK], { ask: () => new Promise((resolve) => { answer = resolve; }) });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    const newer = { ...list, boxes: [list.boxes[1]] };
+    await w.call({ type: "boxes", ...newer }, 1);
+    answer(list);
+    await switching;
+    expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "http://nas.example.net:3005/", active: true });
+    expect((w.session.linkedBoxes as { boxes: unknown[] }).boxes).toEqual(newer.boxes);
+
+    // A refusal, though, is applied whatever came in while it was out.
+    let refuse!: (v: unknown) => void;
+    const r = loadWorker([DESK], { ask: () => new Promise((resolve) => { refuse = resolve; }) });
+    const refused = r.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(refuse).toBeTypeOf("function"));
+    await r.call({ type: "boxes", ...list }, 1);
+    refuse({ revoked: true });
+    await refused;
+    expect(r.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(r.session.linkedBoxes).toBeUndefined();
+  });
+
+  it("opens and activates no box when the list is forgotten while the switch is under way", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: list });
+    const query = w.chrome.tabs.query.getMockImplementation()!;
+    let release!: () => void;
+    // Hold the switch at its look for the box's tab.
+    w.chrome.tabs.query.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return query();
+    });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    release();
+    expect(await switching).toEqual({ ok: false, error: "the list was forgotten" });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+    expect(w.active()).toBe(1);
+  });
+
+  it("waits for a desktop that never answers no longer than its deadline; home does not wait for it", async () => {
+    const w = loadWorker([{ ...DESK, active: false }, { id: 2, url: "https://main.example.com/", active: true }], { ask: () => new Promise(() => {}) });
+    const two = w.call({ type: "switchBox", slot: 2 }, 2);
+    const one = w.call({ type: "switchBox", slot: 1 }, 2);
+    await flushMicrotasks();
+    // Ctrl+Shift+1 waits behind Ctrl+Shift+2, whose ask has not answered yet…
+    expect(w.active()).toBe(2);
+    // …until the deadline: then 2 goes on with no list, and 1 goes home at once.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await two).toEqual({ ok: true });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(w.active()).toBe(1));
+    // Its indicator, which needs the list, waits for the deadline in turn.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await one).toEqual({ ok: true });
+    expect(w.indicators().at(-1)).toEqual([1, expect.objectContaining({ slot: 1, kind: "stay" })]);
   });
 
   it("runs quick presses one after the other: one tab per box, the last key wins", async () => {

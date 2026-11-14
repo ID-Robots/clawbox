@@ -134,9 +134,14 @@
   // ─── The list, from the kiosk's own desktop ───
   const isDesktop = DESKTOP_ORIGINS.includes(location.origin + "/") && location.pathname === "/";
 
+  // A read that hangs is given up (an answer of nothing) before the worker's
+  // own deadline for an ask (background.js ASK_DESKTOP_MS) runs out.
+  const READ_MS = 2000;
   async function readBoxes() {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), READ_MS);
     try {
-      const res = await fetch(LINKED_BOXES_PATH, { cache: "no-store", credentials: "same-origin" });
+      const res = await fetch(LINKED_BOXES_PATH, { cache: "no-store", credentials: "same-origin", signal: abort.signal });
       // Refused (signed out, or not the owner) is not "could not ask": the
       // worker must forget the owner's list, not keep the last one.
       if (res.status === 401 || res.status === 403) return { revoked: true };
@@ -150,14 +155,30 @@
       };
     } catch {
       return null;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
+  // Reads overlap (the page opening, Settings saving, the tab shown again, the
+  // worker asking). A list is handed over only when no newer read's answer has
+  // been, so an older list that comes back last cannot put back what a newer
+  // read replaced or refused. A refusal always goes through, however old:
+  // forgetting is the safe way round (the worker asks again when it needs to).
+  let boxesRead = 0;
+  let boxesHanded = 0;
   async function pushBoxes() {
+    const mine = ++boxesRead;
     const list = await readBoxes();
     if (!list) return;
-    if (list.revoked) send({ type: "boxesRevoked" });
-    else send({ type: "boxes", selfName: list.selfName, boxes: list.boxes, emptyText: list.emptyText, validUntil: list.validUntil });
+    if (list.revoked) {
+      boxesHanded = Math.max(boxesHanded, mine);
+      send({ type: "boxesRevoked" });
+      return;
+    }
+    if (mine < boxesHanded) return;
+    boxesHanded = mine;
+    send({ type: "boxes", selfName: list.selfName, boxes: list.boxes, emptyText: list.emptyText, validUntil: list.validUntil });
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -169,7 +190,12 @@
       return undefined;
     }
     if (msg.type === "readBoxes" && isDesktop) {
-      readBoxes().then(sendResponse);
+      // The worker's own ask is a read too: a push still out from before it is older.
+      const mine = ++boxesRead;
+      readBoxes().then((list) => {
+        if (list) boxesHanded = Math.max(boxesHanded, mine);
+        sendResponse(list);
+      });
       return true; // async sendResponse
     }
     return undefined;

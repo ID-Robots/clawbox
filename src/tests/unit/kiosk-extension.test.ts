@@ -96,6 +96,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.3", files: "94d918220f0dc388308170e4a1d903cd6461fb394c17f0b7c9104502940f12f2" },
   // A list asked of the desktop obeys the same session end before it is used.
   { version: "1.6.4", files: "1e64d63326e85115078fccc5bf4e3b605f82e8a3690a425efb38db9f81563589" },
+  // A list read begun before the list was forgotten (or replaced) is never used, a refusal always is; reads have deadlines; newest list wins.
+  { version: "1.6.5", files: "3a3e1b04680c64d3ad5652bfce7e0eaa4490350a13b463a2a5dbb0670c9ccc61" },
 ];
 
 /**
