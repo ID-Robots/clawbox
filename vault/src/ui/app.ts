@@ -485,6 +485,9 @@ async function submitEdit(ev: Event): Promise<void> {
     originalName: editOriginal?.name,
     create: !editOriginal,
   };
+  // The editor this save came from: the dialog may be closed and another
+  // entry opened before the answer arrives.
+  const editor = editOriginal;
   try {
     const out = await api<{ name: string }>("ui/entries", { body });
     $<HTMLInputElement>("edit-password").value = "";
@@ -496,8 +499,8 @@ async function submitEdit(ev: Event): Promise<void> {
     $("edit-error").textContent = (err as Error).message;
     // The entry is under its new name now: a retry must update it there.
     const movedTo = (err as ApiError).movedTo;
-    if (movedTo && editOriginal) {
-      editOriginal = { ...editOriginal, name: movedTo };
+    if (movedTo) {
+      if (editor && editOriginal === editor) editOriginal = { ...editor, name: movedTo };
       void loadEntries();
     }
   }
@@ -729,6 +732,7 @@ function closeCardEdit(): void {
 async function submitCard(ev: Event): Promise<void> {
   ev.preventDefault();
   const number = digitsOf($<HTMLInputElement>("card-number").value);
+  const editor = cardOriginal; // see submitEdit
   const body = {
     originalName: cardOriginal?.name,
     label: $<HTMLInputElement>("card-label").value.trim(),
@@ -748,8 +752,8 @@ async function submitCard(ev: Event): Promise<void> {
   } catch (err) {
     $("card-error").textContent = (err as Error).message;
     const movedTo = (err as ApiError).movedTo;
-    if (movedTo && cardOriginal) {
-      cardOriginal = { ...cardOriginal, name: movedTo };
+    if (movedTo) {
+      if (editor && cardOriginal === editor) cardOriginal = { ...editor, name: movedTo };
       void loadCards();
     }
   }

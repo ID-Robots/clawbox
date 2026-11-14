@@ -88,7 +88,11 @@ async function pollLoop(): Promise<void> {
         backoff = 1_000;
         for (const cmd of r.commands) void handleCommand(cmd);
       } catch (err) {
-        if (err instanceof ApiError && err.status === 401) break;
+        // A 401 dropped the token it was sent with (api()). The loop condition
+        // reads the token again: none left ends the loop; one that a pairing
+        // stored meanwhile keeps it polling at once, as this loop is the one
+        // the pairing's pollLoop() call found already running.
+        if (err instanceof ApiError && err.status === 401) continue;
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 30_000);
       }
