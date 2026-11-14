@@ -5,7 +5,8 @@
 // commit in the store, so history stays. Listing walks the store directory.
 // Plaintext only ever travels over stdin/stdout pipes.
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { chmod, copyFile, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { validateName } from "../shared/entry";
 
@@ -123,31 +124,61 @@ export class PassStore {
    * entry's own folder with the recipients and options `pass insert` would use;
    * only after encryption succeeded is it synced and renamed over the entry,
    * then committed with pass's own message. A reader sees the old ciphertext or
-   * the new one, and a failed save leaves the previous entry and no temp file.
+   * the new one. A failed save, including a failed commit, leaves the previous
+   * entry (or no entry), nothing staged, and no temp file.
    */
   async insert(name: string, content: string): Promise<void> {
     const n = validateName(name);
     const body = content.endsWith("\n") ? content : `${content}\n`;
     const env = this.env();
-    const file = this.fileFor(n);
+    // Absolute: git -C <dir> reads a relative pathspec against <dir>.
+    const file = resolve(this.fileFor(n));
     const dir = dirname(file);
     const mask = umaskOf(env);
     const gpg = gpgCommand(env);
     const recipients = await this.recipients(n, env, gpg.bin);
     await mkdir(dir, { recursive: true, mode: 0o777 & ~mask });
-    const tmp = join(dir, `.${basename(file)}.${randomUUID()}.tmp`);
+    const id = randomUUID();
+    const tmp = join(dir, `.${basename(file)}.${id}.tmp`);
+    const old = join(dir, `.${basename(file)}.${id}.old`);
+    let kept = false;
+    let published = false;
     try {
       const args = [gpg.bin, "-e", ...recipients.flatMap((r) => ["-r", r]), "-o", tmp, ...gpg.opts];
       const r = await this.exec(args, env, body);
       if (r.code !== 0) this.fail("insert", n, r);
       await chmod(tmp, 0o666 & ~mask);
       await syncPath(tmp);
+      try {
+        await copyFile(file, old, fsConstants.COPYFILE_EXCL);
+        kept = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
       await rename(tmp, file);
+      published = true;
       await syncPath(dir).catch(() => undefined);
+      await this.commit(n, file, `Add given password for ${n} to store.`, env);
+    } catch (err) {
+      if (published) {
+        // The store must not show a save its history lacks: put the previous
+        // ciphertext back (or take the new entry away) and unstage it.
+        try {
+          if (kept) await rename(old, file);
+          else await rm(file, { force: true });
+          kept = false;
+          const { git, genv } = gitEnv(env, this.opts.storeDir);
+          await this.exec([git, "-C", dir, "reset", "-q", "--", file], genv);
+        } catch {
+          this.opts.log?.(`pass insert ${n}: the previous entry could not be put back; it is kept beside it as ${basename(old)}`);
+          kept = false;
+        }
+      }
+      throw err;
     } finally {
       await rm(tmp, { force: true });
+      if (kept) await rm(old, { force: true });
     }
-    await this.commit(n, file, `Add given password for ${n} to store.`, env);
   }
 
   /** Recipients the way pass picks them: PASSWORD_STORE_KEY, else the nearest .gpg-id. */
@@ -192,12 +223,7 @@ export class PassStore {
 
   /** pass's git_add_file: stage the entry and commit it when the store is a git work tree. */
   private async commit(name: string, file: string, message: string, env: Record<string, string>): Promise<void> {
-    const genv = { ...env };
-    for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_NAMESPACE", "GIT_INDEX_FILE", "GIT_INDEX_VERSION", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
-      delete genv[k];
-    }
-    genv.GIT_CEILING_DIRECTORIES = resolve(this.opts.storeDir, "..");
-    const git = Bun.which("git", { PATH: genv.PATH ?? "" }) ?? "git";
+    const { git, genv } = gitEnv(env, this.opts.storeDir);
     const dir = dirname(file);
     const inside = await this.exec([git, "-C", dir, "rev-parse", "--is-inside-work-tree"], genv);
     if (inside.code !== 0 || inside.stdout.trim() !== "true") return;
@@ -256,6 +282,18 @@ export class PassStore {
     else await walk(this.opts.storeDir, "");
     return out.sort((a, b) => a.localeCompare(b));
   }
+}
+
+/** git as pass runs it: no inherited repo overrides, never above the store's parent. */
+function gitEnv(env: Record<string, string>, storeDir: string): { git: string; genv: Record<string, string> } {
+  const genv = { ...env };
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_NAMESPACE", "GIT_INDEX_FILE", "GIT_INDEX_VERSION", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
+    delete genv[k];
+  }
+  // pass exports "$PREFIX/.." unresolved, so git follows a symlinked store to
+  // its real parent; only make it absolute (git ignores relative ceilings).
+  genv.GIT_CEILING_DIRECTORIES = `${resolve(storeDir)}/..`;
+  return { git: Bun.which("git", { PATH: genv.PATH ?? "" }) ?? "git", genv };
 }
 
 /** Whitespace-separated words, as pass splits its unquoted env settings. */

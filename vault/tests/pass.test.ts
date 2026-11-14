@@ -1,8 +1,8 @@
 // pass adapter round trip against a TEMPORARY GNUPGHOME and a TEMPORARY store.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { Catalog } from "../src/server/catalog";
 import { PassError, PassStore } from "../src/server/pass";
 import { createTempStore, gitLog, PASS_BIN, passShow, passShowExitCode, type TempStore } from "./helpers/tempstore";
@@ -108,7 +108,7 @@ describe("catalog on the temp store", () => {
 });
 
 describe("atomic saves", () => {
-  const tempFiles = () => allFiles(store.storeDir).filter((f) => f.endsWith(".tmp"));
+  const tempFiles = () => allFiles(store.storeDir).filter((f) => /\.(tmp|old)$/.test(f));
   const fpr = () => readFileSync(join(store.storeDir, ".gpg-id"), "utf8").trim();
 
   test("an overwrite replaces the entry file instead of rewriting it in place", async () => {
@@ -148,6 +148,32 @@ describe("atomic saves", () => {
     expect(tempFiles()).toEqual([]);
     expect(gitLog(store)).toBe(commits);
     expect(logs.join("\n")).not.toContain("lost");
+  });
+
+  test("a failed commit puts the previous entry back and leaves nothing staged", async () => {
+    await pass.insert("atomic.example.com/hooked", "before\n");
+    const commits = gitLog(store);
+    const hook = join(store.storeDir, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    try {
+      await expect(pass.insert("atomic.example.com/hooked", "after\n")).rejects.toMatchObject({ code: "failed" });
+      await expect(pass.insert("atomic.example.com/never", "new\n")).rejects.toMatchObject({ code: "failed" });
+    } finally {
+      rmSync(hook, { force: true });
+    }
+    expect(passShow(store, "atomic.example.com/hooked")).toBe("before\n");
+    expect(await pass.exists("atomic.example.com/never")).toBe(false);
+    expect(gitLog(store)).toBe(commits);
+    const status = Bun.spawnSync(["git", "-C", store.storeDir, "status", "--porcelain"], { env: store.env, stdout: "pipe" });
+    expect(status.stdout.toString().trim()).toBe("");
+    expect(allFiles(store.storeDir).filter((f) => /\.(tmp|old)$/.test(f))).toEqual([]);
+  });
+
+  test("a store given as a relative path saves and commits", async () => {
+    const rel = new PassStore({ bin: PASS_BIN, storeDir: relative(process.cwd(), store.storeDir), env: store.env });
+    await rel.insert("atomic.example.com/relative", "rel\n");
+    expect(passShow(store, "atomic.example.com/relative")).toBe("rel\n");
+    expect(gitLog(store)).toContain("Add given password for atomic.example.com/relative to store.");
   });
 
   test("recipients come from the nearest .gpg-id, comments stripped, like pass", async () => {
