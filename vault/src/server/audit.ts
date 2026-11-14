@@ -4,7 +4,7 @@
 // `record` drops anything else. Cards are recorded by label and last 4 only;
 // as a last guard every field is run through the card-number/CVV redactor.
 import { scrubCardData } from "../shared/card";
-import { appendFileSync, chmodSync, existsSync, readFileSync, renameSync, statSync } from "node:fs";
+import { closeSync, existsSync, fchmodSync, fstatSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditRecord } from "../shared/types";
 
@@ -24,14 +24,23 @@ export class AuditLog {
     if (entry.host) rec.host = clean(entry.host, 255);
     if (entry.status) rec.status = clean(entry.status, 40);
     if (entry.detail) rec.detail = clean(entry.detail, 200);
+    let fd = -1;
     try {
-      if (existsSync(this.file) && statSync(this.file).size > MAX_BYTES) {
+      // The size is read from the open descriptor, so the file that is rotated
+      // or appended to is the one that was measured.
+      fd = openSync(this.file, "a", 0o600);
+      if (fstatSync(fd).size > MAX_BYTES) {
+        closeSync(fd);
+        fd = -1;
         renameSync(this.file, `${this.file}.1`);
+        fd = openSync(this.file, "a", 0o600);
       }
-      appendFileSync(this.file, `${JSON.stringify(rec)}\n`, { mode: 0o600 });
-      chmodSync(this.file, 0o600);
+      fchmodSync(fd, 0o600);
+      writeSync(fd, `${JSON.stringify(rec)}\n`);
     } catch (err) {
       console.error(`audit log write failed: ${(err as Error).message}`);
+    } finally {
+      if (fd >= 0) closeSync(fd);
     }
   }
 

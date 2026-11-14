@@ -28,7 +28,7 @@
 // call, so a rotated token needs no restart here, and it is refused when group
 // or others can read it. It is only ever sent to a loopback address.
 
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -73,10 +73,17 @@ function readToken(): string {
   const file = vaultTokenFile();
   let token: string;
   try {
-    if ((statSync(file).mode & 0o077) !== 0) {
-      throw new ToolError("AUTH_FAILED", "ClawBox Vault's agent token is readable by other users, so it is not used.", "Tell the user; do not retry.");
+    // One descriptor for both the mode check and the read, so the file that is
+    // read is the one that was checked.
+    const fd = openSync(file, "r");
+    try {
+      if ((fstatSync(fd).mode & 0o077) !== 0) {
+        throw new ToolError("AUTH_FAILED", "ClawBox Vault's agent token is readable by other users, so it is not used.", "Tell the user; do not retry.");
+      }
+      token = readFileSync(fd, "utf8").trim();
+    } finally {
+      closeSync(fd);
     }
-    token = readFileSync(file, "utf8").trim();
   } catch (err) {
     if (err instanceof ToolError) throw err;
     // No file: the service has never started on this box.

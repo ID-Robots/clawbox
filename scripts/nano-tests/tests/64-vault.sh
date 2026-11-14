@@ -84,9 +84,13 @@ FILES=$(board '
   v=$HOME/.clawbox-vault
   m() { stat -c %a "$1" 2>/dev/null || echo missing; }
   printf "home=%s gnupg=%s store=%s token=%s pairing=%s\n" "$(m "$v")" "$(m "$v/gnupg")" "$(m "$v/store")" "$(m "$v/agent-token")" "$(m "$v/extension/pairing.json")"
+  # A board has no jq: its own python3 reads the manifest.
+  facts=$(python3 -c "import json, sys
+m = json.load(open(sys.argv[1]))
+print(m.get(\"manifest_version\"), len(m.get(\"web_accessible_resources\") or []))" "$v/extension/manifest.json" 2>/dev/null)
   printf "gpgid=%s git=%s manifest=%s worker=%s\n" "$([ -s "$v/store/.gpg-id" ] && echo yes || echo no)" "$([ -d "$v/store/.git" ] && echo yes || echo no)" \
-    "$(jq -r ".manifest_version" "$v/extension/manifest.json" 2>/dev/null)" "$([ -s "$v/extension/build/background.js" ] && echo yes || echo no)"
-  printf "war=%s\n" "$(jq -r "(.web_accessible_resources // []) | length" "$v/extension/manifest.json" 2>/dev/null)"
+    "${facts%% *}" "$([ -s "$v/extension/build/background.js" ] && echo yes || echo no)"
+  printf "war=%s\n" "${facts##* }"
   printf "userstore=%s\n" "$([ -e "$HOME/.password-store" ] && echo present || echo absent)"
   curl -sS --max-time 20 http://127.0.0.1:4796/api/ui/status 2>/dev/null
   printf "\n"
@@ -99,7 +103,7 @@ FLAGS=$(printf '%s\n' "$FILES" | grep -- '--load-extension=' | head -n1)
 if [ "$(f home)" = 700 ] && [ "$(f gnupg)" = 700 ] && [ "$(f store)" = 700 ] && [ "$(f gpgid)" = yes ] && [ "$(f git)" = yes ]; then
   ok "the vault made its own keyring and store in ~/.clawbox-vault (all mode 700, git-tracked)"
 else
-  not_ok "~/.clawbox-vault is not as the first run leaves it: $(printf '%s' "$FILES" | sed -n 1,2p | tr '\n' ' ')"
+  not_ok "the vault's home (.clawbox-vault) is not as the first run leaves it: $(printf '%s' "$FILES" | sed -n 1,2p | tr '\n' ' ')"
 fi
 if [ "$(printf '%s' "$STATUS" | jq -r '.store.ready' 2>/dev/null)" = true ]; then
   ok "the service reports its password store ready"
@@ -137,9 +141,9 @@ else
 fi
 board_api GET /apps/clawbox-vault/api/ui/status
 if [ "$API_STATUS" = 403 ] && [ "$(api_json '.code')" = owner_only ]; then
-  ok "the assistant's bearer is refused there (403 owner_only)"
+  ok "the assistant, with its own credential, gets 403 owner_only there"
 else
-  not_ok "the assistant's bearer got HTTP $API_STATUS from the vault's app: $(printf '%s' "$API_BODY" | head -c 200)"
+  not_ok "the assistant's own credential got HTTP $API_STATUS from the vault's app: $(printf '%s' "$API_BODY" | head -c 200)"
 fi
 # shellcheck disable=SC2016  # expanded on the board
 ANON=$(board 'curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "$DASHBOARD/apps/clawbox-vault/api/ui/status" 2>/dev/null')
@@ -167,10 +171,13 @@ AGENT=$(board '
   call -X POST -H "Content-Type: application/json" --data-binary "{\"url\":\"https://shop.example.com/checkout\"}" http://127.0.0.1:4796/api/agent/card-fill
   call -H "Origin: https://evil.example.org" http://127.0.0.1:4796/api/agent/entries
   curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 http://127.0.0.1:4796/api/agent/entries 2>/dev/null
-  s=$(jq -r ".secret // empty" "$HOME/.clawbox-vault/extension/pairing.json" 2>/dev/null)
+  s=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get(\"secret\", \"\"))" "$HOME/.clawbox-vault/extension/pairing.json" 2>/dev/null)
+  printf "secret=%s\n" "$([ "${#s}" -ge 40 ] && echo read || echo missing)"
   curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: https://evil.example.org" --data-binary "{\"secret\":\"$s\"}" http://127.0.0.1:4796/api/pair/auto 2>/dev/null
   curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop" --data-binary "{\"secret\":\"not-the-secret-0123456789abcdefghijklmnop\"}" http://127.0.0.1:4796/api/pair/auto 2>/dev/null
 ')
+SECRET_READ=$(printf '%s\n' "$AGENT" | sed -n 's/^secret=//p' | head -n1)
+AGENT=$(printf '%s\n' "$AGENT" | grep -v '^secret=')
 a() { printf '%s\n' "$AGENT" | sed -n "${1}p"; }
 ENTRIES_CODE=$(a 1 | cut -d' ' -f1)
 if [ "$PIN_SET" = true ]; then
@@ -201,7 +208,9 @@ if [ "$(a 5)" = 401 ]; then
 else
   not_ok "the agent API answered HTTP $(a 5) without a token"
 fi
-if [ "$(a 6)" = 403 ]; then
+if [ "$SECRET_READ" != read ]; then
+  not_ok "the pairing secret could not be read on the board, so pairing was not tried with it"
+elif [ "$(a 6)" = 403 ]; then
   ok "a web page's origin cannot pair, even with the secret"
 else
   not_ok "a web origin got HTTP $(a 6) from the pairing route"
@@ -292,14 +301,16 @@ fi
 # shellcheck disable=SC2016  # expanded on the board
 LEAKS=$(board '
   t=$(tr -d "\r\n" < "$HOME/.clawbox-vault/agent-token")
-  s=$(jq -r ".secret // empty" "$HOME/.clawbox-vault/extension/pairing.json" 2>/dev/null)
+  s=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get(\"secret\", \"\"))" "$HOME/.clawbox-vault/extension/pairing.json" 2>/dev/null)
   log=$(journalctl -u clawbox-vault.service --no-pager 2>/dev/null)
   n=0
   [ -n "$t" ] && n=$((n + $(printf "%s" "$log" | grep -cF -- "$t")))
   [ -n "$s" ] && n=$((n + $(printf "%s" "$log" | grep -cF -- "$s")))
-  printf "%s %s\n" "$n" "$(printf "%s\n" "$log" | wc -l)"
+  printf "%s %s %s\n" "$n" "$(printf "%s\n" "$log" | wc -l)" "$([ "${#t}" -ge 40 ] && [ "${#s}" -ge 40 ] && echo both || echo unread)"
 ')
-if [ "$(printf '%s' "$LEAKS" | cut -d' ' -f1)" = 0 ]; then
+if [ "$(printf '%s' "$LEAKS" | cut -d' ' -f3)" != both ]; then
+  not_ok "the agent token or the pairing secret could not be read on the board, so the journal was not searched for it"
+elif [ "$(printf '%s' "$LEAKS" | cut -d' ' -f1)" = 0 ]; then
   ok "neither the agent token nor the pairing secret is in the service's journal ($(printf '%s' "$LEAKS" | cut -d' ' -f2) lines read)"
 else
   not_ok "the service's journal contains a token or the pairing secret"

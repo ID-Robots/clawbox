@@ -10,7 +10,7 @@
 //  - the agent's tools: a random token in a mode-600 file the service creates.
 // Nothing here ever handles a stored password.
 import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fchmodSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/[a-p]{32}$/;
@@ -308,10 +308,18 @@ export class Auth {
   // ---- agent token ---------------------------------------------------------
 
   private ensureMcpToken(): void {
-    if (!existsSync(this.mcpTokenFile)) {
+    try {
       writeFileSync(this.mcpTokenFile, `${randomToken()}\n`, { mode: 0o600, flag: "wx" });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    if ((statSync(this.mcpTokenFile).mode & 0o077) !== 0) chmodSync(this.mcpTokenFile, 0o600);
+    // Checked and tightened through one descriptor, never by path twice.
+    const fd = openSync(this.mcpTokenFile, "r");
+    try {
+      if ((fstatSync(fd).mode & 0o077) !== 0) fchmodSync(fd, 0o600);
+    } finally {
+      closeSync(fd);
+    }
   }
 
   /** Re-reads the file each time, so rotating it (delete + restart) takes effect. */
