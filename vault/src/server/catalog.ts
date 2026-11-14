@@ -49,6 +49,22 @@ export function validateLoginName(name: unknown): string {
   return n;
 }
 
+/**
+ * A renamed save whose update failed and whose rename could not be undone
+ * either: the entry is now under `to`, with its previous content (a failed
+ * insert leaves the entry as it was). Said in so many words, with the new
+ * name, so the caller can retry there instead of under a name that is gone.
+ */
+export class StrandedRenameError extends Error {
+  constructor(
+    readonly from: string,
+    readonly to: string,
+  ) {
+    super(`the update failed and the entry could not be moved back: "${from}" is now "${to}", unchanged`);
+    this.name = "StrandedRenameError";
+  }
+}
+
 export class Catalog {
   private cache = new Map<string, CacheItem>();
   private writeChain: Promise<unknown> = Promise.resolve();
@@ -160,8 +176,12 @@ export class Catalog {
         // A rename and its update are one save: if the update fails, the entry
         // goes back under its old name, where the app will retry it.
         if (movedFrom) {
-          await this.store.move(name, movedFrom).catch(() => undefined);
           this.cache.delete(name);
+          try {
+            await this.store.move(name, movedFrom);
+          } catch {
+            throw new StrandedRenameError(movedFrom, name);
+          }
         }
         throw err;
       }

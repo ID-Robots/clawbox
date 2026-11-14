@@ -73,6 +73,8 @@ class ApiError extends Error {
     readonly status: number,
     message: string,
     readonly retryAfterMs = 0,
+    /** Set when a renamed save failed and the entry stayed under its new name. */
+    readonly movedTo?: string,
   ) {
     super(message);
   }
@@ -92,10 +94,11 @@ async function api<T>(path: string, init: { method?: string; body?: unknown } = 
     // the service no cookie, only this PIN session's bearer.
     credentials: "same-origin",
   });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string; retryAfterMs?: number };
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string; retryAfterMs?: number; code?: string; name?: string };
   if (!res.ok) {
     if (res.status === 401 && session && path.startsWith("ui/") && !path.startsWith("ui/pin")) lockScreen("The vault locked itself after a period of inactivity.");
-    throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`, data.retryAfterMs ?? 0);
+    const movedTo = data.code === "renamed_not_updated" && typeof data.name === "string" ? data.name : undefined;
+    throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`, data.retryAfterMs ?? 0, movedTo);
   }
   return data;
 }
@@ -491,6 +494,12 @@ async function submitEdit(ev: Event): Promise<void> {
     await selectEntry(out.name);
   } catch (err) {
     $("edit-error").textContent = (err as Error).message;
+    // The entry is under its new name now: a retry must update it there.
+    const movedTo = (err as ApiError).movedTo;
+    if (movedTo && editOriginal) {
+      editOriginal = { ...editOriginal, name: movedTo };
+      void loadEntries();
+    }
   }
 }
 
@@ -738,6 +747,11 @@ async function submitCard(ev: Event): Promise<void> {
     await selectCard(out.name);
   } catch (err) {
     $("card-error").textContent = (err as Error).message;
+    const movedTo = (err as ApiError).movedTo;
+    if (movedTo && cardOriginal) {
+      cardOriginal = { ...cardOriginal, name: movedTo };
+      void loadCards();
+    }
   }
 }
 

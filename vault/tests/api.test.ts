@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createTempStore, passShowExitCode, type TempStore } from "./helpers/tempstore";
+import { PassError } from "../src/server/pass";
 import { createTestVault, EXT_ORIGIN, pairExtension, type TestVault } from "./helpers/vault";
 
 const PASSWORD = "Wq3%api-Secret-Test-77";
@@ -260,6 +261,34 @@ describe("entries and secrets", () => {
     expect(await check("whatever-1", "someone@example.com")).toEqual({ kind: "new", suggestedName: "example.com/someone@example.com" });
     const http = await body(await v.request("/api/ext/check", { token: ext, origin: EXT_ORIGIN, body: { url: "http://billing.example.com/login", login: "x", password: "y-123456" } }));
     expect(http).toEqual({ kind: "ignore" });
+  });
+});
+
+describe("a rename that cannot be undone", () => {
+  test("answers 409 renamed_not_updated with the entry's new name, and no secret", async () => {
+    await v.request("/api/agent/save", { token: v.mcpToken, body: { name: "strand.example.com/ops", login: "ops", url: "https://strand.example.com", password: "Strand-Secret-1" } });
+    const store = v.catalog.store as unknown as Record<string, unknown>;
+    let moves = 0;
+    const realMove = v.catalog.store.move.bind(v.catalog.store);
+    store.insert = async () => {
+      throw new PassError("pass insert failed (exit 2)", "failed");
+    };
+    store.move = async (from: string, to: string) => {
+      if (moves++ > 0) throw new PassError("pass mv failed (exit 1)", "failed");
+      return realMove(from, to);
+    };
+    try {
+      const res = await v.request("/api/ui/entries", { token: ui, body: { name: "strand.example.com/ops2", login: "ops2", originalName: "strand.example.com/ops" } });
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text)).toMatchObject({ code: "renamed_not_updated", name: "strand.example.com/ops2" });
+      expect(text).not.toContain("Strand-Secret-1");
+    } finally {
+      delete store.insert;
+      delete store.move;
+    }
+    expect((await v.catalog.read("strand.example.com/ops2")).login).toBe("ops");
+    await v.request("/api/agent/delete", { token: v.mcpToken, body: { name: "strand.example.com/ops2", confirm: true } });
   });
 });
 

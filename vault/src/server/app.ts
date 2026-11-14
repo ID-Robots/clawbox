@@ -46,7 +46,7 @@ import { EXTENSION_STATUSES, type CardSummary, type FillResult, type SaveCheck }
 import type { AuditLog } from "./audit";
 import { Auth, bearer } from "./auth";
 import { validateCardName, type CardCatalog } from "./cards";
-import type { Catalog } from "./catalog";
+import { StrandedRenameError, type Catalog } from "./catalog";
 import type { VaultConfig } from "./config";
 import type { FillQueue } from "./fillqueue";
 import { hostAllowed, HttpError, json, readJson, SECURITY_HEADERS, UI_CSP } from "./http";
@@ -890,6 +890,10 @@ export function createApp(deps: AppDeps) {
     const cors = corsFor(origin);
     if (err instanceof HttpError) return json(err.status, { error: err.message, ...err.extra }, cors);
     if (err instanceof ValidationError) return json(400, { error: err.message }, cors);
+    if (err instanceof StrandedRenameError) {
+      deps.log(`save of ${err.from} failed and its rename to ${err.to} could not be undone`);
+      return json(409, { error: err.message, code: "renamed_not_updated", name: err.to }, cors);
+    }
     if (err instanceof PassError) {
       if (err.code === "not_found") return json(404, { error: "entry not found" }, cors);
       if (err.code === "exists") return json(409, { error: "entry already exists" }, cors);

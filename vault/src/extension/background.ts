@@ -12,6 +12,7 @@ import { defaultEntryName, isFillAllowedUrl, matchUrl, originOf, parseWebUrl } f
 import type { FillCommand, SaveCheck } from "../shared/types";
 import type { CardData, CardFieldKind, GuardedCardOutcome } from "./cardforms";
 import { CARDS_ENABLED } from "./flags";
+import { TokenStore, type TokenStorage } from "./token";
 import { chipAllowed, chooseFillFrame, pickCardTab, pickTab, planCardFill, type CardFrameProbe, type CardPlan, type FrameProbe } from "./frames";
 import type {
   CardFillReply,
@@ -44,9 +45,10 @@ class ApiError extends Error {
 
 // ---- service client -------------------------------------------------------------
 
-async function token(): Promise<string | null> {
-  const { token } = await chrome.storage.local.get("token");
-  return typeof token === "string" ? token : null;
+const tokens = new TokenStore(chrome.storage.local as unknown as TokenStorage);
+
+function token(): Promise<string | null> {
+  return tokens.get();
 }
 
 async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
@@ -62,9 +64,10 @@ async function api<T>(path: string, init: { method?: string; body?: unknown; sig
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) {
-    // Only the token this request used is dropped: a pairing that stored a new
-    // one while it was in flight (a long poll lasts 25 s) must survive its 401.
-    if (res.status === 401 && (await token()) === t) await chrome.storage.local.remove("token");
+    // Only the token this request used is dropped, in the token queue's turn: a
+    // pairing that stores a new one while it is in flight (a long poll lasts
+    // 25 s) or while this check runs must survive its 401.
+    if (res.status === 401) await tokens.dropIfCurrent(t);
     throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`);
   }
   return data;
@@ -785,7 +788,7 @@ async function pair(code: string): Promise<{ ok: boolean; error?: string }> {
   if (!res) return { ok: false, error: "The vault service is not reachable." };
   const data = (await res.json().catch(() => ({}))) as { token?: string; error?: string };
   if (!res.ok || !data.token) return { ok: false, error: data.error ?? "Pairing failed." };
-  await chrome.storage.local.set({ token: data.token });
+  await tokens.set(data.token);
   void pollLoop();
   return { ok: true };
 }
@@ -815,7 +818,7 @@ function autoPair(): Promise<boolean> {
       });
       const data = (await res.json().catch(() => ({}))) as { token?: string };
       if (!res.ok || !data.token) return false;
-      await chrome.storage.local.set({ token: data.token });
+      await tokens.set(data.token);
       return true;
     } catch {
       return false; // no pairing file (a browser paired by code) or the service is down
@@ -843,7 +846,7 @@ async function handlePopup(msg: PopupMessage): Promise<unknown> {
       return pair(String(msg.code ?? ""));
     case "popup:unpair":
       await api("/api/ext/unpair", { body: {} }).catch(() => undefined);
-      await chrome.storage.local.remove("token");
+      await tokens.clear();
       return { ok: true };
     case "popup:lock":
       await api("/api/ext/lock", { body: {} });

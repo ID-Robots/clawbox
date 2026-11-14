@@ -4,7 +4,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { CardCatalog } from "../src/server/cards";
-import { Catalog } from "../src/server/catalog";
+import { Catalog, StrandedRenameError } from "../src/server/catalog";
 import { PassError, PassStore } from "../src/server/pass";
 import { createTempStore, gitLog, PASS_BIN, passShow, passShowExitCode, type TempStore } from "./helpers/tempstore";
 
@@ -128,6 +128,38 @@ describe("catalog on the temp store", () => {
     expect(await pass.exists(saved.name)).toBe(true);
     expect((await pass.list({ under: saved.name.split("/")[0] })).filter((n) => /new/i.test(n))).toEqual([]);
     await cards.remove(saved.name);
+  });
+
+  test("when the move back fails too, the save says where the entry is now, unchanged", async () => {
+    // Every insert is refused, and only the first move (the rename) succeeds.
+    const stuck = Object.create(pass) as PassStore;
+    stuck.insert = async () => {
+      throw new PassError("pass insert failed (exit 2)", "failed");
+    };
+    let moves = 0;
+    stuck.move = async (from: string, to: string) => {
+      if (moves++ > 0) throw new PassError("pass mv failed (exit 1)", "failed");
+      return pass.move(from, to);
+    };
+    await catalog.save({ name: "stuck.example.com/ops", login: "ops", password: "Stuck-Secret-1" });
+    const err = await new Catalog(stuck).save({ name: "stuck.example.com/ops2", login: "ops2" }, { renameFrom: "stuck.example.com/ops" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StrandedRenameError);
+    expect(err).toMatchObject({ from: "stuck.example.com/ops", to: "stuck.example.com/ops2" });
+    expect(String((err as Error).message)).not.toContain("Stuck-Secret-1");
+    // Recoverable: under the new name, with the old content.
+    expect(await pass.exists("stuck.example.com/ops")).toBe(false);
+    expect((await catalog.read("stuck.example.com/ops2")).login).toBe("ops");
+    await catalog.remove("stuck.example.com/ops2");
+
+    moves = 0;
+    const cards = new CardCatalog(pass, catalog);
+    const saved = await cards.save({ number: "4242424242424242", exp: "12/34", label: "Stuck card" });
+    const cardErr = await new CardCatalog(stuck, catalog).save({ label: "Moved card" }, { name: saved.name }).catch((e: unknown) => e);
+    expect(cardErr).toBeInstanceOf(StrandedRenameError);
+    const to = (cardErr as StrandedRenameError).to;
+    expect(await pass.exists(to)).toBe(true);
+    expect(await pass.exists(saved.name)).toBe(false);
+    await cards.remove(to);
   });
 });
 

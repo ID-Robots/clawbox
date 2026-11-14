@@ -103,8 +103,14 @@ print(m.get(\"manifest_version\"), len(m.get(\"web_accessible_resources\") or []
   bin=$(printf "%s" "$args" | cut -d" " -f1)
   printf "browserbin=%s\n" "$(basename "${bin:-none}")"
   printf "browserext=%s\n" "$(printf "%s" "$args" | grep -o -- "--load-extension=[^ ]*" | head -n1 | cut -d= -f2)"
+  # The worker must be the one of the vault extension: the id of an unpacked
+  # extension is the SHA-256 of its absolute folder path, 32 hex digits as a-p.
+  ext_id=$(python3 -c "import hashlib, sys
+print(\"\".join(chr(97 + int(c, 16)) for c in hashlib.sha256(sys.argv[1].encode()).hexdigest()[:32]))" "$v/extension" 2>/dev/null)
+  printf "extid=%s\n" "$ext_id"
   printf "browsersw=%s\n" "$(curl -s --max-time 5 http://127.0.0.1:18800/json/list 2>/dev/null | python3 -c "import json, sys
-print(any(t.get(\"type\") == \"service_worker\" and t.get(\"url\", \"\").startswith(\"chrome-extension://\") and t[\"url\"].endswith(\"/build/background.js\") for t in json.load(sys.stdin)))" 2>/dev/null || echo unknown)"
+want = \"chrome-extension://\" + sys.argv[1] + \"/build/background.js\"
+print(bool(sys.argv[1]) and any(t.get(\"type\") == \"service_worker\" and t.get(\"url\") == want for t in json.load(sys.stdin)))" "$ext_id" 2>/dev/null || echo unknown)"
 ')
 f() { printf '%s\n' "$FILES" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1; }
 STATUS=$(printf '%s\n' "$FILES" | grep '^{' | head -n1)
@@ -143,9 +149,9 @@ case "$(f browserbin)" in
     skip "the box's browser is branded Google Chrome ($(f browserbin)), which ignores --load-extension: the vault's extension needs Chromium or Chrome for Testing" ;;
   *)
     if [ "$(f browserext)" = "$EXT_DIR" ] && [ "$(f browsersw)" = True ]; then
-      ok "the box's browser ($(f browserbin)) runs with --load-extension=$EXT_DIR and the extension's worker is alive in it"
+      ok "the box's browser ($(f browserbin)) runs with --load-extension=$EXT_DIR and the vault extension's worker ($(f extid | cut -c1-8)…) is alive in it"
     else
-      not_ok "the box's browser ($(f browserbin)) has load-extension=$(f browserext) and extension worker=$(f browsersw)"
+      not_ok "the box's browser ($(f browserbin)) has load-extension=$(f browserext) and vault extension worker=$(f browsersw) (id $(f extid))"
     fi ;;
 esac
 if [ "$(printf '%s' "$STATUS" | jq -r '.cards' 2>/dev/null)" = false ]; then

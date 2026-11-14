@@ -152,6 +152,8 @@ export class PassStore {
       try {
         await copyFile(file, old, fsConstants.COPYFILE_EXCL);
         kept = true;
+        // On disk before anything is published: a rollback renames it back.
+        await syncPath(old);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
@@ -167,6 +169,9 @@ export class PassStore {
           if (kept) await rename(old, file);
           else await rm(file, { force: true });
           kept = false;
+          // rename and unlink are atomic, not durable: the folder is synced so
+          // a power cut cannot bring the refused save back.
+          await syncPath(dir).catch(() => undefined);
           const { git, genv } = gitEnv(env, this.opts.storeDir);
           await this.exec([git, "-C", dir, "reset", "-q", "--", file], genv);
         } catch {
