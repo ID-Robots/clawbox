@@ -3495,6 +3495,16 @@ set_previous_build_aside() {
   # to compensate for it.
   case "$need"  in ''|*[!0-9]*) need="" ;; esac
   case "$avail" in ''|*[!0-9]*) avail="" ;; esac
+  # The framework cache is not a second copy: carry_build_cache MOVES it into the
+  # new build. Counted twice, its few hundred MB (the Turbopack cache on a board,
+  # TASK-2517) could tip a box with room for two builds into the arm below that
+  # deletes the only one it has. An unreadable size subtracts nothing.
+  local cache_kb=""
+  if [ -n "$need" ] && [ -d "$build_dir/cache" ] && [ ! -L "$build_dir/cache" ]; then
+    cache_kb="$(du -sk "$build_dir/cache" 2>/dev/null | awk '{print $1}')"
+    case "$cache_kb" in ''|*[!0-9]*) cache_kb="" ;; esac
+    if [ -n "$cache_kb" ] && [ "$cache_kb" -lt "$need" ]; then need=$((need - cache_kb)); fi
+  fi
   if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
     echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
     rm -rf "$build_dir"
