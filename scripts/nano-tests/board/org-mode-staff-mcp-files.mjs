@@ -51,7 +51,9 @@ const MEDIA_DIR = RUNTIME === "hermes" ? path.join(REPO, "data", "chat-media") :
 const DOC_DIR = path.join(MEDIA_DIR, "nano-mcp-docs");
 const OUTSIDE_DIR = path.join(HOME, "nano-mcp-outside");
 
-const say = (line) => console.log(`RESULT ${line}`);
+// One RESULT per line: text that came from a reply or a server can never
+// start a line of its own and fake a verdict.
+const say = (line) => console.log(`RESULT ${String(line).replace(/[\r\n\u2028\u2029]+/g, " ")}`);
 const note = (line) => console.log(`NOTE ${String(line).replace(/\s+/g, " ").slice(0, 900)}`);
 const ok = (line) => say(`ok - [${RUNTIME}] ${line}`);
 const fail = (line) => say(`not ok - [${RUNTIME}] ${line}`);
