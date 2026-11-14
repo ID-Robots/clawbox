@@ -2469,10 +2469,12 @@ describe("TASK-2533 second review pass", () => {
     await swap.whenSwapsSettled();
 
     expect(await statusOf(work.id)).toBe("limited");
+    // The escalated retry is sent, and only after Anthropic was asked about both held accounts.
     const run = events.indexOf("cron.run");
-    const firstAsk = events.findIndex((e) => e.startsWith("usage:"));
-    expect(firstAsk).toBeGreaterThan(-1);
-    expect(run === -1 || firstAsk < run).toBe(true);
+    expect(run).toBeGreaterThan(-1);
+    const asks = events.map((e, i) => (e.startsWith("usage:") ? i : -1)).filter((i) => i >= 0 && i < run);
+    expect(events.slice(0, run).filter((e) => e.startsWith("usage:")).sort()).toEqual(["usage:sk-ant-oat01-personal", "usage:sk-ant-oat01-work"]);
+    expect(asks).toHaveLength(2);
   });
 
   it("an unnamed throttle on a cron keeps its order: its retry is set for a minute later before Anthropic is asked about the accounts", async () => {
