@@ -58,6 +58,7 @@ vi.mock("@/lib/hermes-model-options", () => ({
 }));
 
 import { POST } from "@/app/setup-api/hermes/chat/route";
+import { resolveInMediaRoot } from "@/lib/harness/media-root";
 
 /** The shape the route validates a Hermes session id against. */
 const SESSION_ID = "20260917_101500_a1b2c3";
@@ -203,6 +204,37 @@ describe("a slash command typed into the Hermes chat", () => {
     await POST(post({ message: "/new", sessionId: SESSION_ID, imagePaths: ["/tmp/clawbox-chat/shot.png"] }));
     expect(clearMock).not.toHaveBeenCalled();
     expect(slashMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["/new", { imagePaths: ["/tmp/clawbox-chat/gone.png"] }],
+    ["/reset", { documentPaths: ["/tmp/clawbox-chat/gone.pdf"] }],
+    ["/new look at this", { imagePaths: ["/tmp/clawbox-chat/gone.png"] }],
+  ])("never hands %j to the slash worker when the file it named is gone from staging", async (message, files) => {
+    // The file cannot be read, so the turn ends up with none — and must still
+    // not become the one command the slash worker cannot run.
+    vi.mocked(resolveInMediaRoot).mockResolvedValue(null as unknown as string);
+    try {
+      const res = await POST(post({ message, sessionId: SESSION_ID, ...files }));
+      expect(slashMock).not.toHaveBeenCalled();
+      expect(clearMock).not.toHaveBeenCalled();
+      // A turn for the transports, like any other that named a file.
+      expect(openTurnMock).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(200);
+    } finally {
+      vi.mocked(resolveInMediaRoot).mockImplementation(async (p: string) => p);
+    }
+  });
+
+  it("still runs another command whose file is gone from staging, as before", async () => {
+    vi.mocked(resolveInMediaRoot).mockResolvedValue(null as unknown as string);
+    try {
+      slashMock.mockResolvedValue(slashResult("Session · gemma"));
+      await POST(post({ message: "/status", sessionId: SESSION_ID, imagePaths: ["/tmp/clawbox-chat/gone.png"] }));
+      expect(slashMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(resolveInMediaRoot).mockImplementation(async (p: string) => p);
+    }
   });
 
   it("carries the command's own text through, arguments included", async () => {

@@ -1628,7 +1628,13 @@ export async function POST(request: Request) {
     // attachment, the user turn above has already been recorded WITH its media,
     // and a branch that ran the command and dropped the file would show the owner
     // their screenshot in the transcript over an answer that never saw it.
-    if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
+    //
+    // Never `/new` or `/reset`: the slash worker cannot run them (see "/new and
+    // /reset" above, which answers every one that named no file). One that
+    // gets this far named a file — and is a turn for the transports like any
+    // other that does, also when none of its files could be read from staging
+    // and the lists above came out empty.
+    if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message) && !typedResetCommand(message)) {
       const ran = await runHermesSlashCommand({
         command: message.trim(),
         ...(staff ? { profile: staff.profile } : {}),
