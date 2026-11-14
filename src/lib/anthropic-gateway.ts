@@ -50,10 +50,11 @@
  *    taken out with core's own logout (no restart) — once an account that
  *    answers is in with its current token, else it stays (syncLocked) — and
  *    by that rule the session takes the order's lead on its next turn. When a
- *    renewal's window is about to stop the gateway, it goes out BEFORE the
- *    stop: a paste resets the CLI binding of every session on the profile it
- *    renews, and the fresh pick takes the session's own earlier pick while
- *    the store still holds that profile (the owner's box, 2026-11-14 20:05).
+ *    renewal's window has the gateway stopped, it goes out in that window,
+ *    before the gateway starts again: a paste resets the CLI binding of every
+ *    session on the profile it renews, and the fresh pick takes the session's
+ *    own earlier pick while the store still holds that profile (the owner's
+ *    box, 2026-11-14 20:05).
  *    It goes back in when it can answer: at once when it is the only one that can, else with the next
  *    window the pool opens anyway (a renewal) — never a gateway stop of its
  *    own while another answers. With none that can answer, the owner's own
@@ -769,36 +770,8 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       toPaste.push({ id, account: account.id, token });
     }
   }
-  // A window is about to stop the gateway: a LIMITED account goes out before
-  // the stop, through the gateway that is still up — by the test the logout
-  // after the window makes, read before it: an account that answers is in
-  // with the token the pass holds for it, or else the owner's own sign-in
-  // answers. Each paste gives the profile it renews a new credential, so a
-  // Claude CLI session bound to that profile starts again on its next turn
-  // (`reuse=invalidated:auth-epoch`). That fresh pick puts the session's own
-  // earlier automatic pick first while the store still holds that profile
-  // (`prependAuthProfilePin`, OpenClaw 2026.11.3). Logged out only after the
-  // window, a limited account was there for every turn in between. On the
-  // owner's box (2026-11-14 20:05) a chat's first turn after a renewal ran
-  // on a spent account.
-  const outBefore = new Set<string>();
-  if (toPaste.length > 0 && d.offline) {
-    const okHeld = pool.accounts.filter((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && ours.some((p) => p.profileId === poolProfileId(a.id)));
-    const answersBefore = okHeld.some((a) => {
-      const id = poolProfileId(a.id);
-      const held = ours.find((p) => p.profileId === id);
-      const token = tokens.get(id);
-      return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > now);
-    });
-    if (answersBefore || (okHeld.length === 0 && signInUsable)) {
-      for (const profile of ours) {
-        const account = pool.accounts.find((a) => poolProfileId(a.id) === profile.profileId);
-        if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "limited") continue;
-        if (await attempt(`taking ${profile.profileId} out before the gateway stops`, () => d.logout(profile.profileId, agent))) outBefore.add(profile.profileId);
-      }
-      if (outBefore.size > 0) console.error(`[anthropic-gateway] took ${outBefore.size} limited account(s) out before the gateway stops for the token paste(s): ${[...outBefore].join(", ")}`);
-    }
-  }
+  // The limited accounts a window takes out before the gateway starts again (pasteAll).
+  const outInWindow = new Set<string>();
   if (toPaste.length > 0) {
     const ends = toPaste.flatMap((p) => (p.token.expires === null ? [] : [p.token.expires]));
     // Without a window to share (`d.offline` absent) or an end among the
@@ -887,6 +860,37 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       if (renewed.length > 0) {
         console.error(`[anthropic-gateway] renewed ${renewed.length} more account(s) with the gateway stopped (${renewed.join(", ")}): one stop takes every account's token`);
       }
+      // Before the gateway starts again, a LIMITED account still held goes
+      // out — by the test the logout after the window makes (an account that
+      // answers is in with its current token, or else the owner's own sign-in
+      // answers), read from the store the pastes just wrote. Each paste gives
+      // the profile it renews a new credential, so a Claude CLI session bound
+      // to that profile starts again on its next turn
+      // (`reuse=invalidated:auth-epoch`), and that fresh pick puts the
+      // session's own earlier automatic pick first while the store still
+      // holds that profile (`prependAuthProfilePin`, OpenClaw 2026.11.3).
+      // Logged out only after the restart, a limited account was there for
+      // every turn in between: on the owner's box (2026-11-14 20:05) a chat's
+      // first turn after a renewal ran on a spent account. Rare (the
+      // watcher's minute takes a limited account out), and the gateway is
+      // stopped, so core's CLI does it.
+      const inWindow = d.read();
+      if (inWindow.kind !== "present") return;
+      const answersInWindow = wanted.some((a) => {
+        if (effectiveStatus(a, now) !== "ok") return false;
+        const held = inWindow.profiles.find((p) => p.profileId === poolProfileId(a.id));
+        const token = tokens.get(poolProfileId(a.id));
+        return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > Date.now());
+      });
+      const signInInWindow = !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && inWindow.profiles.some((p) => p.profileId === poolProfileId(a.id)))
+        && otherProfiles(inWindow).some((p) => isOwnSubscription(p, now));
+      if (!answersInWindow && !signInInWindow) return;
+      for (const profile of inWindow.profiles) {
+        const account = isPoolProfile(profile.profileId) ? pool.accounts.find((a) => poolProfileId(a.id) === profile.profileId) : undefined;
+        if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "limited") continue;
+        if (await attempt(`taking ${profile.profileId} out before the gateway starts again`, () => d.logout(profile.profileId, agent))) outInWindow.add(profile.profileId);
+      }
+      if (outInWindow.size > 0) console.error(`[anthropic-gateway] took ${outInWindow.size} limited account(s) out with the gateway stopped, before it starts again: ${[...outInWindow].join(", ")}`);
     };
     try {
       await (d.offline ? d.offline(pasteAll) : pasteAll());
@@ -923,11 +927,11 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   const signInNow = mid.kind === "present"
     && !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && mid.profiles.some((p) => p.profileId === poolProfileId(a.id)))
     && otherProfiles(mid).some((p) => isOwnSubscription(p, now));
-  // Those already out before the window are out for their limit too (one
-  // core still holds is asked again here, and owed if it stays).
-  const takenOut = new Set<string>(outBefore);
+  // Those the window already took out are out for their limit too (one core
+  // still holds is asked again here, and owed if it stays).
+  const takenOut = new Set<string>(outInWindow);
   const unwanted = ours.filter((p) => {
-    if (outBefore.has(p.profileId)) return mid.kind === "present" && mid.profiles.some((q) => q.profileId === p.profileId);
+    if (outInWindow.has(p.profileId)) return mid.kind === "present" && mid.profiles.some((q) => q.profileId === p.profileId);
     const account = pool.accounts.find((a) => poolProfileId(a.id) === p.profileId);
     if (account && account.kind === "oauth" && effectiveStatus(account, now) === "limited") {
       const out = answersNow || signInNow;

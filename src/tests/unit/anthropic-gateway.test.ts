@@ -2796,7 +2796,7 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
     expect(await statusOf(turn.profileId)).toBe("ok");
   });
 
-  it("R4b — with the limit recorded just before the renewal's window, the limited account is out before the gateway stops: no turn after the restart lands on it", async () => {
+  it("R4b — with the limit recorded just before the renewal's window, the limited account is out before the gateway starts again: no turn after the restart lands on it", async () => {
     const core = fakeCore();
     const ids = await ownersBox(core);
     core.sessions.set("direct", { override: p(ids[3]), cli: { profileId: p(ids[0]), fingerprint: fp(core.profiles.get(p(ids[0]))?.secret as string) } });
@@ -2818,10 +2818,32 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
     expect(await statusOf(turn.profileId)).toBe("ok");
     expect(heldAtRestart).not.toContain(p(ids[3]));
     expect(heldAtRestart).not.toContain(p(ids[4]));
-    // Through the gateway that was still up, not inside the window.
-    expect(core.logouts).toEqual(expect.arrayContaining([p(ids[3]), p(ids[4])]));
-    expect(core.logoutsWhileStopped).toEqual([]);
+    // With the gateway stopped, before it started again (core's CLI does it offline).
+    expect(core.logoutsWhileStopped).toEqual(expect.arrayContaining([p(ids[3]), p(ids[4])]));
     // ...and the order still leads with the account that answers.
     expect(core.order?.[0]).toBe(p(ids[0]));
+  });
+
+  it("R4c — the same when the account being renewed is the only one that answers in the gateway: before the stop it still holds its old token (seen on a lab board)", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    core.orderKeepsOthers = true;
+    const alpha = await pool.addOAuthAccount({ label: "Alpha Max", email: email(0), tokens: oauth("sk-ant-oat01-alpha") });
+    const delta = await pool.addOAuthAccount({ label: "Delta Max", email: email(3), tokens: oauth("sk-ant-oat01-delta") });
+    await gw.keepGatewayMirror();
+    // Delta reaches its limit, and the owner signs Alpha in again right after: one pass sees both.
+    await pool.markLimited(delta.id, Date.now() + 2 * H, "session", { source: "owner" });
+    await pool.replaceCredential(alpha.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-alpha-v2"), email: email(0) });
+    let heldAtRestart: string[] | null = null;
+    core.afterWindow = () => {
+      heldAtRestart ??= [...core.profiles.keys()];
+    };
+    await gw.syncGatewayNow();
+
+    expect(core.profiles.get(p(alpha.id))?.secret).toBe("sk-ant-oat01-alpha-v2");
+    expect(heldAtRestart).not.toBeNull();
+    expect(heldAtRestart).not.toContain(p(delta.id));
+    expect(core.profiles.has(p(delta.id))).toBe(false);
+    expect(core.order?.[0]).toBe(p(alpha.id));
   });
 });
