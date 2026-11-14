@@ -10,7 +10,7 @@ import crypto from "crypto";
  * UI, so once the setup wizard finishes the middleware gates everything
  * under `/setup-api/*` on the user's session cookie. openclaw runs as a
  * separate process with no cookie, so without this carve-out every chat
- * turn against a llamacpp/ollama model gets 401'd by middleware.ts and
+ * turn against a llamacpp/ollama model gets 401'd by proxy.ts and
  * trips an "auth issue" cooldown on the openclaw side.
  *
  * The fix is service-to-service auth: middleware lets the proxy paths

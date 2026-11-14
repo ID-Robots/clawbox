@@ -1,5 +1,5 @@
 /**
- * TASK-1014 / CodeQL alert 330 (js/file-system-race, middleware.ts:57).
+ * TASK-1014 / CodeQL alert 330 (js/file-system-race, proxy.ts:57).
  *
  * `readConfigCached` decides, per request, whether the first-boot bootstrap
  * window is open, whether a session cookie is still in generation, and whether
@@ -24,8 +24,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-describe("middleware config snapshot", () => {
-  let middleware: typeof import("@/middleware").middleware;
+describe("proxy config snapshot", () => {
+  let proxy: typeof import("@/proxy").proxy;
   let tmpRoot: string;
 
   const configPath = () => path.join(tmpRoot, "data", "config.json");
@@ -45,7 +45,7 @@ describe("middleware config snapshot", () => {
    * `setup_complete` / `password_configured`.
    */
   async function wizardIsPublic(): Promise<boolean> {
-    const res = await middleware(request("/setup"));
+    const res = await proxy(request("/setup"));
     return !res.headers.get("location");
   }
 
@@ -56,7 +56,7 @@ describe("middleware config snapshot", () => {
     process.env.SESSION_SECRET = "test-secret";
     delete process.env.PORTAL_URL;
     delete process.env.CLAWBOX_TEST_MODE;
-    middleware = (await import("@/middleware")).middleware;
+    proxy = (await import("@/proxy")).proxy;
   });
 
   afterEach(() => {

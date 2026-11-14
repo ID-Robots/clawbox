@@ -124,8 +124,8 @@ describe("assets declared to the browser are reachable without a session", () =>
   });
 
   async function get(pathname: string, method = "GET") {
-    const mod = await import("@/middleware");
-    return mod.middleware(
+    const mod = await import("@/proxy");
+    return mod.proxy(
       new NextRequest(new URL(`http://localhost${pathname}`), { method }),
     );
   }
@@ -161,7 +161,7 @@ describe("assets declared to the browser are reachable without a session", () =>
   });
 
   it("admits the exact path only — never a case-folded or trailing-slash lookalike", async () => {
-    // middleware.ts decides on the RAW pathname because the ROUTER routes the
+    // proxy.ts decides on the RAW pathname because the ROUTER routes the
     // raw string: a lower-cased match would admit /ICON-192.PNG, which matches
     // no file in public/ and falls through to the gateway catch-all — served,
     // unauthenticated, with the SPA shell. That bypass has been shipped twice

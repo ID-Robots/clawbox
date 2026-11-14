@@ -124,6 +124,8 @@ git_retryable_failure() {
     *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
     *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
     *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+    # git_with_retry's low-speed abort on a stalled transfer.
+    *"Operation too slow"*) return 0 ;;
   esac
   return 1
 }
@@ -145,7 +147,9 @@ fetch_with_retry() {
     ''|*[!0-9]*) echo "[force-update] CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
   esac
   while :; do
-    if out="$(run_as_clawbox "$GIT fetch origin" 2>&1)"; then
+    # A stalled transfer ends and is retried rather than waited on (TASK-2517;
+    # install.sh's git_with_retry carries the full reason).
+    if out="$(run_as_clawbox "$GIT -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch origin" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 0
     fi

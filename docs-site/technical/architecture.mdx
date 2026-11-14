@@ -99,8 +99,8 @@ Three cgroup v2 memory guards ship as `50-clawbox-memory.conf` drop-ins, written
 ## Request routing (port 80)
 
 1. **`production-server.js`** wraps the Next.js standalone server. On boot it seeds secrets from `data/` into env (`SESSION_SECRET`, MCP + local-AI tokens) and attaches a **WebSocket upgrade proxy**: `/terminal-ws` → port 3006, `/novnc-ws` → port 6080, everything else → gateway 18789. On Hermes that fallback target is closed, so only the two named routes carry traffic.
-2. **Next.js rewrites** proxy `/api/*`, `/assets/*`, and any path no ClawBox route claims → the gateway. These are compiled at build time on every edition; on Hermes `src/middleware.ts` and the catch-all route run first and return **404** for them.
-3. **`src/middleware.ts`** enforces, in order: captive-portal probe redirects → public-path allowlist (`/login`, `/setup`, …) → pre-setup bypass (until `setup_complete`) → MCP bearer bypass → **session cookie** check (else redirect to `/login`).
+2. **Next.js rewrites** proxy `/api/*`, `/assets/*`, and any path no ClawBox route claims → the gateway. These are compiled at build time on every edition; on Hermes `src/proxy.ts` and the catch-all route run first and return **404** for them.
+3. **`src/proxy.ts`** enforces, in order: captive-portal probe redirects → public-path allowlist (`/login`, `/setup`, …) → pre-setup bypass (until `setup_complete`) → MCP bearer bypass → **session cookie** check (else redirect to `/login`).
 4. **`/` (desktop)** — after setup, the root serves a Chrome-OS-style desktop (window manager, taskbar, built-in apps). The setup wizard lives at `/setup`.
 5. **Gateway HTML** (OpenClaw / dual) — when the OpenClaw Control UI is served, `gateway-proxy.ts` injects a ClawBox nav bar and the gateway auth token so the SPA connects without manual token entry. On Hermes, chat is an ordinary HTTP route (`/setup-api/hermes/chat`) instead of a gateway WebSocket.
 
@@ -108,7 +108,7 @@ Three cgroup v2 memory guards ship as `50-clawbox-memory.conf` drop-ins, written
 
 <Steps>
   <Step title="Power on — AP mode (first boot / unconfigured)">
-    `clawbox-ap` raises the **ClawBox-Setup** hotspot at `10.42.0.1` (falls back to `10.43.0.1` on subnet collision). dnsmasq forwards DNS **upstream** (8.8.8.8 / 8.8.4.4 / 1.1.1.1) and only maps `clawbox.local` to the AP — there is no DNS hijack, and the legacy port-80 DNAT rule is deleted on every AP start. `src/middleware.ts` answers OS captive-portal probe *paths* that reach the box, but nothing forces them there, so the owner browses to `http://10.42.0.1`.
+    `clawbox-ap` raises the **ClawBox-Setup** hotspot at `10.42.0.1` (falls back to `10.43.0.1` on subnet collision). dnsmasq forwards DNS **upstream** (8.8.8.8 / 8.8.4.4 / 1.1.1.1) and only maps `clawbox.local` to the AP — there is no DNS hijack, and the legacy port-80 DNAT rule is deleted on every AP start. `src/proxy.ts` answers OS captive-portal probe *paths* that reach the box, but nothing forces them there, so the owner browses to `http://10.42.0.1`.
   </Step>
   <Step title="Setup wizard">
     Wi-Fi → (on a box shipped with `CLAWBOX_EDITION=unselected` only: **Choose your assistant**, which locks the edition and removes the other harness) → update → password (skipped when one is already set) → AI provider → Telegram (optional, skippable). The update step is unconditional, not optional. State persists in `data/config.json` (`setup_complete`, `password_configured`). Only the owner can complete setup: `setup/complete` refuses every other signed-in user and the agent's own bearer.

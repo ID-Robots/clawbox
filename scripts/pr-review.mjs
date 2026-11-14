@@ -43,7 +43,7 @@ const DOCS_ONLY_RE = /^(docs-site\/|docs\/|\.github\/|scripts\/(issue-triage|pr-
 // Security-sensitive paths (attention flag, rendered as ℹ️ note, not ⚠️).
 // config/ is deliberately narrowed to root-privilege files — the whole dir
 // would flag every routine openclaw-target.txt version bump.
-const SENSITIVE_RE = /^(install(-x64)?\.sh|scripts\/(gateway-pre-start|start-ap|force-update|root-update-step|launch-browser|recover|check-sudoers-coverage)\.sh|\.github\/workflows\/|src\/middleware\.ts|src\/lib\/(auth|chpasswd|mcp-token|local-ai-token|login-rate-limit|rate-limit|oauth-utils|oauth-config|root-steps)\.ts|src\/app\/login-api\/|src\/app\/setup-api\/system\/credentials\/|production-server\.js|config\/(.*sudoers.*|49-|clawbox-root-.*|.*\.(service|rules|pkla)))/;
+const SENSITIVE_RE = /^(install(-x64)?\.sh|scripts\/(gateway-pre-start|start-ap|force-update|root-update-step|launch-browser|recover|check-sudoers-coverage)\.sh|\.github\/workflows\/|src\/proxy\.ts|src\/lib\/(auth|chpasswd|mcp-token|local-ai-token|login-rate-limit|rate-limit|oauth-utils|oauth-config|root-steps)\.ts|src\/app\/login-api\/|src\/app\/setup-api\/system\/credentials\/|production-server\.js|config\/(.*sudoers.*|49-|clawbox-root-.*|.*\.(service|rules|pkla)))/;
 // Keep in sync with AREA_LABELS in scripts/lib/triage-output.mjs (the issue
 // bot's `area` enum) — both bots must emit the same `area: X` label taxonomy.
 const AREA_RULES = [

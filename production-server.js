@@ -143,7 +143,7 @@ function resolveUpgradeTarget(reqUrl) {
 // Current session generation and ClawBox users, read from data/config.json
 // (mtime-cached), so WS upgrades honor the same password-change revocation —
 // and, since TASK-1256, the same removed-user revocation — the Next.js
-// middleware enforces (src/middleware.ts). Without this, a revoked cookie would
+// middleware enforces (src/proxy.ts). Without this, a revoked cookie would
 // still be accepted at the /terminal-ws (root shell) and /novnc-ws gates until
 // natural expiry. Defaults to generation 0 and no users on any read error.
 const CONFIG_JSON_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "config.json");
@@ -182,7 +182,7 @@ function readSessionConfig() {
 }
 
 // Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
-// src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
+// src/proxy.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
 // base64url payload carries { exp, gen, u?, sv? }) — and say WHO it speaks for
 // (scripts/session-cookie.js, TASK-1256), and when it runs out. Mirrored in CJS
 // because upgrades bypass Next.js. Fails closed when the secret is absent.
@@ -421,7 +421,7 @@ if (!process.env.CLAWBOX_TERMINAL_TOKEN) {
 // runs as a stdio subprocess of openclaw and has no session cookie, so
 // without this every tool call from a Codex / Claude agent gets 307'd
 // to /login (POSTs surface as 405, GETs receive the login HTML page).
-// Seeded here so middleware.ts can resolve the same value via env on
+// Seeded here so proxy.ts can resolve the same value via env on
 // the very first request, before src/lib/mcp-token.ts would lazily mint
 // one. gateway-pre-start.sh reads the same file to inject the value
 // into the MCP server's env when registering it with openclaw.
@@ -440,7 +440,7 @@ try {
   // can fail on its own (a root-owned token, a read-only data/); with it inside
   // this try and above this line, an EPERM threw past the assignment and
   // CLAWBOX_MCP_TOKEN was never set — so a permissions hiccup discarded a token
-  // that had just been read successfully, and middleware.ts lost the very
+  // that had just been read successfully, and proxy.ts lost the very
   // first-request resolution this block exists to provide. On the Hermes SKU
   // clawbox-gateway.service is masked, so gateway-pre-start.sh's replacement
   // never runs and nothing else repairs it. TASK-657.
