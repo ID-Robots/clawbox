@@ -76,6 +76,20 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   readConfig: vi.fn(async () => h.config),
   readConfigStrict: vi.fn(async () => h.config),
   restartGateway: vi.fn(async () => { h.restarts += 1; }),
+  // openclaw.json's `auth.order.<provider>` (TASK-2533: kept equal to the stored order).
+  runOpenclawConfigSet: vi.fn(async (args: string[]) => {
+    const [key, value] = args;
+    const m = /^auth\.order\.(.+)$/.exec(key);
+    if (!m) throw new Error(`unexpected config set: ${key}`);
+    const auth = h.config.auth as { order?: Record<string, unknown> };
+    auth.order = { ...(auth.order ?? {}), [m[1]]: JSON.parse(value) };
+  }),
+  runOpenclawConfigUnset: vi.fn(async (key: string) => {
+    const m = /^auth\.order\.(.+)$/.exec(key);
+    if (!m) throw new Error(`unexpected config unset: ${key}`);
+    const auth = h.config.auth as { order?: Record<string, unknown> };
+    if (auth.order) delete auth.order[m[1]];
+  }),
   spawnOpenclawCli: vi.fn(async (args: string[], options: { stdinData?: string } = {}) => fakeCli(args, options.stdinData)),
 }));
 
@@ -290,6 +304,8 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
     // The token travelled on stdin, never on a command line.
     expect(h.cli.flat().join(" ")).not.toContain("sk-ant-oat01");
     expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: work.id, label: "Work Max" });
+    // openclaw.json's order says the same as the stored one (TASK-2533).
+    expect((h.config.auth as { order?: Record<string, unknown> }).order?.anthropic).toEqual(storedOrder());
   });
 
   it("records a limit core rotated off as the pool's own, until Anthropic's reset, and moves the order — no restart", async () => {

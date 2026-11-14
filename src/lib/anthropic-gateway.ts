@@ -100,7 +100,7 @@
 
 import { logoutOpenclawAuthProfiles, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
@@ -110,6 +110,7 @@ import {
   markLimited,
   onLimitReset,
   probeAccountCredential,
+  readAccountUsage,
   readPoolState,
   setGatewayMirror,
   type AnthropicAccount,
@@ -122,6 +123,7 @@ import { fetchAnthropicUsage, type AnthropicUsageReading } from "@/lib/anthropic
 import { readGatewayProviderAuth, type GatewayProviderAuthRead, type ProfileFailureState, type ProviderAuthProfile } from "@/lib/openclaw-auth-store";
 import { registerSwapConsumer, reportAnthropicFailure, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
 import { verifyAnthropicKey } from "@/lib/coding-anthropic";
+import { bindCronsToTarget, splitModelRef, type CronBindingRecords, type CronBindingResult } from "@/lib/anthropic-cron-binding";
 
 const PROVIDER = "anthropic";
 const POOL_PROFILE_PREFIX = "anthropic:clawbox-";
@@ -156,11 +158,15 @@ export interface GatewayDeps {
   logout: (profileId: string, agent: readonly string[]) => Promise<void>;
   /** Core's stored order for Anthropic; an empty list clears it. */
   order: (profileIds: readonly string[], agent: readonly string[]) => Promise<void>;
-  /** Drop openclaw.json's `auth.order.anthropic` — only ever one the pool's own pastes created. */
+  /** Drop openclaw.json's `auth.order.anthropic` — only ever one the pool wrote or its own pastes created. */
   unsetConfigOrder: () => Promise<void>;
+  /** Write openclaw.json's `auth.order.anthropic` (hot-reloaded by the gateway: no restart). */
+  setConfigOrder?: (profileIds: readonly string[]) => Promise<void>;
   /** Anthropic's usage windows for one account. Null: could not be asked. */
   usage: (access: string) => Promise<AnthropicUsageReading | null>;
   call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /** What the box adopted for each automation (src/lib/anthropic-cron-binding.ts), kept in the config store. */
+  cronBindings?: { read: () => Promise<CronBindingRecords>; write: (records: CronBindingRecords) => Promise<void> };
 }
 
 /** A Jetson CLI cold start is 5-14 s; a busy one is given room. */
@@ -172,12 +178,34 @@ export interface ChatConfig {
   onAnthropic: boolean;
   /** There is a CONFIG `auth.order.anthropic`. */
   configOrder: boolean;
+  /** That order's ids (null: none); absent when the reader does not say. */
+  configOrderIds?: string[] | null;
   /**
    * The `--agent` arguments every `models auth` verb needs to write the store
    * this module reads — the `main` agent's — or null when the CLI's agent is
    * not `main` (a roster without it), which this module does not write.
    */
   agent: string[] | null;
+  /**
+   * The `main` agent's default model without any `@profile` — what an
+   * automation with no model of its own runs on — or null when none is set.
+   */
+  model?: string | null;
+}
+
+/** The `main` agent's default model as openclaw.json sets it: its own entry's, else the defaults'. */
+function mainModelOf(config: Record<string, unknown>): string | null {
+  const primaryOf = (v: unknown): string | null => {
+    const raw = typeof v === "string" ? v : v && typeof v === "object" ? (v as { primary?: unknown }).primary : undefined;
+    return typeof raw === "string" && raw.trim() ? splitModelRef(raw.trim()).base : null;
+  };
+  const agents = config.agents && typeof config.agents === "object" ? (config.agents as Record<string, unknown>) : {};
+  const entries = agents.entries && typeof agents.entries === "object" ? (agents.entries as Record<string, unknown>) : {};
+  const fromEntry = entries.main && typeof entries.main === "object" ? primaryOf((entries.main as { model?: unknown }).model) : null;
+  const listed = Array.isArray(agents.list) ? agents.list.find((a) => a && typeof a === "object" && (a as { id?: unknown }).id === "main") : undefined;
+  const fromList = listed ? primaryOf((listed as { model?: unknown }).model) : null;
+  const defaults = agents.defaults && typeof agents.defaults === "object" ? (agents.defaults as { model?: unknown }).model : undefined;
+  return fromEntry ?? fromList ?? primaryOf(defaults);
 }
 
 /**
@@ -223,7 +251,11 @@ const defaultDeps: GatewayDeps = {
       return {
         onAnthropic: typeof primary === "string" && primary.trim().toLowerCase().startsWith(`${PROVIDER}/`),
         configOrder: !!order && typeof order === "object" && Object.hasOwn(order, PROVIDER),
+        configOrderIds: order && typeof order === "object" && Array.isArray(order[PROVIDER])
+          ? (order[PROVIDER] as unknown[]).filter((id): id is string => typeof id === "string")
+          : null,
         agent: agentArgsOf(config.agents),
+        model: mainModelOf(config as Record<string, unknown>),
       };
     } catch {
       return null;
@@ -253,10 +285,18 @@ const defaultDeps: GatewayDeps = {
   },
   order: (profileIds, agent) => setOpenclawAuthOrder(PROVIDER, profileIds.length > 0 ? [...profileIds] : null, agentIdOf(agent)),
   unsetConfigOrder: () => runOpenclawConfigUnset(`auth.order.${PROVIDER}`),
+  setConfigOrder: (profileIds) => runOpenclawConfigSet([`auth.order.${PROVIDER}`, JSON.stringify([...profileIds]), "--strict-json"]),
   usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
   // time rather than paid for with a CLI start-up every minute.
   call: (method, params) => gatewayWsCall(method, params, { timeoutMs: 10_000 }),
+  cronBindings: {
+    read: async () => {
+      const raw = await configGet(CRON_BINDINGS_KEY);
+      return raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as CronBindingRecords) : {};
+    },
+    write: (records) => configSet(CRON_BINDINGS_KEY, Object.keys(records).length > 0 ? records : undefined),
+  },
 };
 
 interface GatewayRuntime {
@@ -291,6 +331,8 @@ interface GatewayRuntime {
    * again) would otherwise renew every other account each time.
    */
   earlyRenewedAt: Map<string, number>;
+  /** When the watcher last asked Anthropic about the account the gateway leads with. */
+  leadUsageAt: number;
 }
 
 function runtime(): GatewayRuntime {
@@ -306,6 +348,7 @@ function runtime(): GatewayRuntime {
     keeperFailures: 0,
     keeperFailedAt: 0,
     earlyRenewedAt: new Map(),
+    leadUsageAt: 0,
   }));
 }
 
@@ -313,6 +356,11 @@ const deps = () => runtime().deps;
 
 const KEEPER_MS = 10 * 60_000;
 const WATCH_MS = 60_000;
+/**
+ * How often the watcher asks Anthropic about the account the gateway leads
+ * with — the pool's own reading life (ROOM_TTL_MS in anthropic-accounts.ts).
+ */
+const LEAD_USAGE_MS = 10 * 60_000;
 /**
  * Tokens that end within this of each other are taken as ending together: the
  * pool renews them in one pass or the next few (a window that failed and was
@@ -350,6 +398,8 @@ const MAX_KEEPER_BACKOFF_MS = 2 * 60 * 60_000;
 const UNREAD_LIMIT_MIN_MS = 5 * 60_000;
 /** Which of the Anthropic orders the pool wrote, so taking the pool out undoes exactly those (config store). */
 const ORDER_MARKER_KEY = "anthropic_gateway_order";
+/** Which account the box gave each automation (config store, src/lib/anthropic-cron-binding.ts). */
+const CRON_BINDINGS_KEY = "anthropic_cron_bindings";
 
 function outcome(status: SwapConsumerOutcome["status"], code: string, count: number | null = null): SwapConsumerOutcome {
   return { status, code, count };
@@ -459,7 +509,20 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   const ours = before.kind === "present" ? before.profiles.filter((p) => isPoolProfile(p.profileId)) : [];
   const pool = await readPoolState();
   const now = Date.now();
-  const wanted = pool.accounts.filter((a) => a.kind === "oauth" && (effectiveStatus(a, now) === "ok" || effectiveStatus(a, now) === "limited"));
+  // A LIMITED account is out of the gateway altogether while another can
+  // answer (TASK-2533): out of the order was not enough on OpenClaw 2026.11.3,
+  // whose Claude CLI runs keep a session on the account its CLI session was
+  // bound to whatever the order says, unless that profile is gone
+  // (`selectCliExecutionAuthProfile`: "Preserve the session account unless the
+  // user selects another or it was removed") — and that version records no
+  // cooldown for a CLI limit, so nothing else moves them. With its profile
+  // out, such a session moves to the order's lead on its next turn. The
+  // account is pasted back when it can answer again: its reset costs one
+  // offline window, shared with any renewal due then. Only once the gateway
+  // HOLDS an account that can answer: with none held (none can answer, or the
+  // one that can is not in yet), the limited ones stay in, as before (THE ORDER).
+  const answersHeld = pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && ours.some((p) => p.profileId === poolProfileId(a.id) && !p.fenced && p.fingerprint !== null));
+  const wanted = pool.accounts.filter((a) => a.kind === "oauth" && (effectiveStatus(a, now) === "ok" || (!answersHeld && effectiveStatus(a, now) === "limited")));
   const chat = await d.chat();
   // Unknown is not "off": a config that could not be read must not take the
   // chat's accounts away.
@@ -666,7 +729,36 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   const orderLanded = leadsWith(final.order, order);
   if (!orderLanded) owed.push("order");
 
-  if ((orderLanded || orderWritten) && !marker.stored) await writeOrderMarker({ ...marker, stored: true });
+  if ((orderLanded || orderWritten) && !marker.stored) {
+    marker.stored = true;
+    await writeOrderMarker(marker);
+  }
+
+  // openclaw.json's order says the same (TASK-2533). On OpenClaw 2026.11.3
+  // not every path reads the STORED order: an automation's account was
+  // captured from openclaw.json's `auth.order.anthropic` — which each
+  // `paste-token` beside a sign-in of another mode rewrites to lead with the
+  // profile it pasted, so the LAST account pasted, whatever the pool's order —
+  // or, with none, from the profiles' registration order. Kept equal to the
+  // stored order (hot-reloaded: no restart), every path picks the same
+  // account. Only while the reader says what is there (`configOrderIds`).
+  if (chat.configOrderIds !== undefined && d.setConfigOrder) {
+    const wantConfig = orderLanded && final.order ? [...final.order] : order;
+    const current = (await d.chat())?.configOrderIds;
+    const same = Array.isArray(current) && current.length === wantConfig.length && current.every((id, i) => id === wantConfig[i]);
+    if (wantConfig.length > 0 && current !== undefined && !same) {
+      const setConfig = d.setConfigOrder;
+      if (await attempt("openclaw.json's account order", () => setConfig(wantConfig))) {
+        // One the pool created is the pool's to take out again (takeOut).
+        if (current === null && !marker.config) {
+          marker.config = true;
+          await writeOrderMarker(marker);
+        }
+      } else {
+        owed.push("config order");
+      }
+    }
+  }
 
   // The account the gateway must lead with: the active one, when the gateway
   // can hold it; else the first it holds (an API key or the Terminal sign-in
@@ -773,14 +865,20 @@ export async function applyGatewaySwap(ctx: SwapContext): Promise<SwapConsumerOu
     // Waited behind another writer: a target that is no longer the active
     // account is history; the newer move is queued behind this one.
     if (ctx.change.toId !== null && (await readPoolState()).activeId !== ctx.change.toId) return outcome("skipped", "superseded");
-    return syncLocked();
+    const result = await syncLocked();
+    await bindCronsLocked();
+    return result;
   });
 }
 
 /** Bring the gateway in line with the pool now — after the owner changed it. Never throws. */
 export async function syncGatewayNow(): Promise<SwapConsumerOutcome> {
   try {
-    return await runtime().lock(() => syncLocked());
+    return await runtime().lock(async () => {
+      const result = await syncLocked();
+      await bindCronsLocked();
+      return result;
+    });
   } catch (err) {
     console.error("[anthropic-gateway] could not bring the gateway in line with the pool:", err instanceof Error ? err.message : err);
     return outcome("failed", "error");
@@ -972,7 +1070,10 @@ async function recordLimit(account: AnthropicAccount, seen: { limitKind: Anthrop
 export function noteGatewayCooldowns(now: number = Date.now()): Promise<number> {
   return runtime().lock(async () => {
     const acted = await noteCooldownsLocked(now);
-    if (acted > 0) await syncLocked();
+    if (acted > 0) {
+      await syncLocked();
+      await bindCronsLocked();
+    }
     return acted;
   });
 }
@@ -1000,6 +1101,7 @@ export function keepGatewayMirror(): Promise<KeeperResult> {
     const state = runtime();
     if (state.keeperFailures >= 2 && now - state.keeperFailedAt < Math.min(KEEPER_MS * 2 ** (state.keeperFailures - 1), MAX_KEEPER_BACKOFF_MS)) return "failed";
     const result = await syncLocked();
+    await bindCronsLocked();
     const failing = result.status === "failed" || result.code === "order_owed";
     state.keeperFailures = failing ? state.keeperFailures + 1 : 0;
     state.keeperFailedAt = failing ? now : 0;
@@ -1008,6 +1110,73 @@ export function keepGatewayMirror(): Promise<KeeperResult> {
     if (result.status === "ok") return "fresh";
     return result.count ? "synced" : "idle";
   });
+}
+
+// ── the automations ─────────────────────────────────────────────────────────
+
+/**
+ * Every automation that runs on Anthropic bound to the profile core's stored
+ * order leads with — the account that can answer — after a move, a renewal's
+ * paste, or a job the box has not adopted yet (src/lib/anthropic-cron-binding.ts).
+ * Under the gateway lock, so it never reads the order halfway through a pass.
+ * Only while the pool is in the gateway: with none of its accounts there, the
+ * automations' accounts are the owner's business. Never throws; null when
+ * there was nothing to bind to.
+ */
+async function bindCronsLocked(): Promise<CronBindingResult | null> {
+  try {
+    const d = deps();
+    if (d.absent() || !d.cronBindings) return null;
+    const store = d.read();
+    if (store.kind !== "present" || !store.profiles.some((p) => isPoolProfile(p.profileId))) return null;
+    const usable = (id: string) => store.profiles.find((p) => p.profileId === id && !p.fenced && p.fingerprint !== null);
+    const leadId = (store.order ?? []).find((id) => usable(id));
+    const lead = leadId ? usable(leadId) : undefined;
+    if (!lead) return null;
+    const chat = await d.chat();
+    if (!chat || !chat.onAnthropic || chat.agent === null) return null;
+    return await bindCronsToTarget(
+      { call: d.call, readRecords: d.cronBindings.read, writeRecords: d.cronBindings.write },
+      {
+        target: { profileId: lead.profileId, authorization: lead.authorization ?? lead.fingerprint },
+        defaultModel: chat.model ?? null,
+        isPoolProfile,
+      },
+    );
+  } catch (err) {
+    console.error("[anthropic-gateway] could not give the automations the account the gateway leads with:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Anthropic's own word on the account the gateway leads with, every
+ * LEAD_USAGE_MS (TASK-2533). OpenClaw 2026.11.3 records no cooldown when a
+ * Claude CLI run hits a five-hour or weekly limit, so core's failure state —
+ * what noteGatewayCooldowns reads — never says it, and a channel turn or an
+ * automation run on a spent account told the pool nothing. The pool's own
+ * usage reading records a spent window as the account's limit until its
+ * reset and moves the active account off it (readAccountUsage), and the
+ * gateway follows that move like any other. Never throws.
+ */
+export async function lookAtLeadUsage(now: number = Date.now()): Promise<void> {
+  const state = runtime();
+  if (deps().absent() || now - state.leadUsageAt < LEAD_USAGE_MS) return;
+  try {
+    const pool = await readPoolState();
+    const lead = pool.gateway?.accountId ?? null;
+    const account = lead ? pool.accounts.find((a) => a.id === lead) : undefined;
+    if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "ok") return;
+    state.leadUsageAt = now;
+    await readAccountUsage(account.id, LEAD_USAGE_MS);
+  } catch (err) {
+    console.error("[anthropic-gateway] could not ask Anthropic about the account the gateway leads with:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** The watcher's look at the automations: a job made since, or an adoption a restarting gateway refused. */
+export function bindGatewayCrons(): Promise<CronBindingResult | null> {
+  return runtime().lock(() => bindCronsLocked());
 }
 
 // ── the failures ────────────────────────────────────────────────────────────
@@ -1192,7 +1361,9 @@ export function startGatewaySwap(): void {
   if (!state.watcher) {
     state.watcher = setInterval(() => void guarded(async () => {
       await noteGatewayCooldowns();
+      await lookAtLeadUsage();
       await scanGatewayCrons();
+      await bindGatewayCrons();
     }), WATCH_MS);
     state.watcher.unref?.();
   }
@@ -1227,4 +1398,5 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.keeperFailures = 0;
   state.keeperFailedAt = 0;
   state.earlyRenewedAt.clear();
+  state.leadUsageAt = 0;
 }

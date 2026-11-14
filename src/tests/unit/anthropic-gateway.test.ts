@@ -86,15 +86,39 @@ function fakeCore() {
     windowOpen: false,
     /** How long one paste takes — a CLI start-up, on a clock the test has faked. */
     pasteTakesMs: 0,
+    /**
+     * Core's authorization lifetime per profile (OpenClaw 2026.11.3): a new one
+     * on every write that is not core's own refresh — every paste.
+     */
+    lifetimes: new Map<string, string>(),
+    /** Automations with core's hidden inference binding (TASK-2533). */
+    crons: new Map<string, FakeCron>(),
+    /** The `main` agent's default model, what a model-less automation runs on. */
+    chatModel: "anthropic/claude-opus-5-5",
+    /** The chat reader says what openclaw.json's order is (the production reader does). */
+    tellsConfigOrder: false,
+    configWrites: [] as string[][],
+    /** `cron.update` calls core refuses, by step value (`null` is a clear). */
+    refuseCronUpdate: new Set<string | null>(),
   };
   offlineWindows = 0;
   gw._setGatewayDepsForTests({
     absent: () => false,
-    chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null, agent: core.agent }),
+    chat: async () => (core.chatOnClaude === null ? null : {
+      onAnthropic: core.chatOnClaude,
+      configOrder: core.configOrder !== null,
+      agent: core.agent,
+      model: core.chatModel,
+      ...(core.tellsConfigOrder ? { configOrderIds: core.configOrder ? [...core.configOrder] : null } : {}),
+    }),
+    setConfigOrder: async (ids) => {
+      core.configWrites.push([...ids]);
+      core.configOrder = [...ids];
+    },
     read: () => core.readable
       ? {
         kind: "present",
-        profiles: [...core.profiles].map(([profileId, p]) => ({ profileId, type: p.type, fingerprint: fp(p.secret), refreshFingerprint: null, expires: p.expires, fenced: false, fence: null })),
+        profiles: [...core.profiles].map(([profileId, p]) => ({ profileId, type: p.type, fingerprint: fp(p.secret), refreshFingerprint: null, expires: p.expires, fenced: false, fence: null, authorization: core.lifetimes.get(profileId) ?? null })),
         order: core.order ? [...core.order] : null,
         failures: core.failures,
       }
@@ -118,6 +142,8 @@ function fakeCore() {
       if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
       core.pastes.push({ profileId, ...token });
       core.profiles.set(profileId, { type: "token", secret: token.access, expires: token.expires });
+      // Explicit upsert is replacement: a new authorization lifetime.
+      core.lifetimes.set(profileId, crypto.randomUUID());
       // applyAuthProfileConfig: beside a sign-in of another mode the paste
       // starts (or leads) a CONFIG order.
       if (core.configOrder) core.configOrder = [profileId, ...core.configOrder.filter((id) => id !== profileId)];
@@ -127,6 +153,7 @@ function fakeCore() {
     logout: async (profileId) => {
       core.logouts.push(profileId);
       core.profiles.delete(profileId);
+      core.lifetimes.delete(profileId);
       if (core.order) core.order = core.order.filter((id) => id !== profileId);
       if (core.configOrder) core.configOrder = core.configOrder.filter((id) => id !== profileId);
     },
@@ -142,11 +169,74 @@ function fakeCore() {
     usage: async (access) => core.usage.get(access) ?? null,
     call: async (method, params) => {
       core.calls.push({ method, params });
-      if (method === "cron.list") return { jobs: core.cronJobs };
+      if (method === "cron.list") return { jobs: [...core.cronJobs, ...[...core.crons.values()].map(publicCron)] };
+      if (method === "cron.update") return cronUpdate(core, params);
       return { ok: true };
     },
   });
   return core;
+}
+
+/** One automation as core 2026.11.3 keeps it: its binding is never in `cron.list`. */
+interface FakeCron {
+  id: string;
+  agentId?: string;
+  sessionTarget: string;
+  enabled: boolean;
+  payload: { kind: string; message: string; model?: string };
+  binding: { profileId: string; lifetime: string } | null;
+  revision: number;
+  state: { lastStatus?: string; lastError?: string; lastRunAtMs?: number };
+}
+
+function publicCron(job: FakeCron): Record<string, unknown> {
+  const { binding: _hidden, revision, ...rest } = job;
+  return { ...structuredClone(rest), configRevision: `rev-${revision}` };
+}
+
+/**
+ * `cron.update` as core 2026.11.3 answers it: only a `model@profile` captures
+ * a binding (the profile's CURRENT lifetime), `model: null` deletes the model
+ * and keeps the binding it holds.
+ */
+function cronUpdate(core: ReturnType<typeof fakeCore>, params: Record<string, unknown>): Record<string, unknown> {
+  const job = core.crons.get(String(params.id));
+  if (!job) throw new Error(`unknown cron job id: ${String(params.id)}`);
+  const model = ((params.patch as { payload?: { model?: string | null } }).payload ?? {}).model;
+  if (core.refuseCronUpdate.has(model ?? null)) throw new Error("cron.update: the scheduler is busy");
+  if (typeof model === "string") {
+    const at = model.lastIndexOf("@");
+    if (at > 0) {
+      const profileId = model.slice(at + 1);
+      if (!core.profiles.has(profileId)) throw new Error("The selected automation account is unavailable.");
+      if (!core.lifetimes.has(profileId)) core.lifetimes.set(profileId, crypto.randomUUID());
+      job.binding = { profileId, lifetime: core.lifetimes.get(profileId) as string };
+    }
+    job.payload.model = model;
+  } else if (model === null) {
+    delete job.payload.model;
+  }
+  job.revision += 1;
+  return { ok: true, job: publicCron(job) };
+}
+
+/** A scheduled run as core 2026.11.3 admits it: the recorded account, that one only. Answers the profile it ran on. */
+function runCron(core: ReturnType<typeof fakeCore>, id: string, now = Date.now()): string {
+  const job = core.crons.get(id) as FakeCron;
+  const fail = (text: string) => {
+    job.state = { lastStatus: "error", lastError: text, lastRunAtMs: now };
+    return text;
+  };
+  if (!job.binding) return fail("Automation has no recorded inference account. Explicitly select its account with a model@profile update before running it.");
+  if (core.lifetimes.get(job.binding.profileId) !== job.binding.lifetime) return fail("Automation inference account was replaced. Explicitly select an authorized account again.");
+  job.state = { lastStatus: "ok", lastRunAtMs: now };
+  return job.binding.profileId;
+}
+
+function addCron(core: ReturnType<typeof fakeCore>, job: Partial<FakeCron> & { id: string }): FakeCron {
+  const full: FakeCron = { sessionTarget: "isolated", enabled: true, payload: { kind: "agentTurn", message: "Summarise the inbox" }, binding: null, revision: 1, state: {}, ...job };
+  core.crons.set(full.id, full);
+  return full;
 }
 
 const oauth = (access: string, expiresIn = 8 * H) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + expiresIn });
@@ -255,7 +345,8 @@ describe("the pool in the gateway", () => {
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
     const view = await pool.describePool();
     expect(view.gateway).toMatchObject({ following: true, accountId: personal.id, label: "Personal Max" });
-    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched", count: 2 });
+    // Work is out of the gateway while Personal answers (TASK-2533): one held.
+    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched", count: 1 });
 
     // The owner puts Work first again once it is back.
     await pool.clearLimit(work.id);
@@ -647,7 +738,11 @@ describe("a limited account and the sessions core pinned to it", () => {
   // account left in the order, even last, kept answering the sessions pinned
   // to it with the provider's limit text whenever core's own backoff lapsed.
   // Left out of the order, core drops that pin on the session's next turn.
-  it("leaves a limited account out of the order while another can answer, and keeps its profile, renewed, for the reset", async () => {
+  it("takes a limited account out of the gateway while another can answer — a Claude CLI session bound to it moves only then — and pastes it back at the reset", async () => {
+    // TASK-2533: on OpenClaw 2026.11.3 a Claude CLI run keeps its session on
+    // the account its CLI session was bound to whatever the order says,
+    // unless that profile is gone; and core records no cooldown for a CLI
+    // limit. Out of the order alone, those sessions stayed on the spent account.
     const core = fakeCore();
     gw.startGatewaySwap();
     const { work, personal } = await twoClaudeAccounts();
@@ -656,18 +751,21 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "chat" });
     await swap.whenSwapsSettled();
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
-    // Out of the order, not out of the store: nothing to paste back at the reset.
-    expect(core.logouts).toEqual([]);
-    expect(core.profiles.has(p(work.id))).toBe(true);
-    // A token the pool renews meanwhile still goes in.
+    // Out of the store, by core's own logout (no restart).
+    expect(core.logouts).toEqual([p(work.id)]);
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    // A token the pool renews meanwhile is not pasted for nothing.
+    const windows = offlineWindows;
     await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
     await gw.keepGatewayMirror();
-    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    expect(offlineWindows).toBe(windows);
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
 
-    // Back (here by the owner's clear): in again, after the active account.
+    // Back (here by the owner's clear): pasted in again, its current token, after the active account.
     await pool.clearLimit(work.id);
     await gw.syncGatewayNow();
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
     expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
   });
 
@@ -810,7 +908,8 @@ describe("what the move needs, and what can wait for the keeper", () => {
 
     expect(core.order?.[0]).toBe(p(personal.id));
     const view = await pool.describePool();
-    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched_partly", count: 3 });
+    // Work, limited, is out while Personal answers (TASK-2533): two held.
+    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched_partly", count: 2 });
     expect(retried).toHaveBeenCalledTimes(1);
     expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
     // The keeper finishes the third account's write.
@@ -1307,5 +1406,201 @@ describe("the owner's switch: use these accounts for the chat too", () => {
     expect(await gw.putChatOnPool(setModel)).toEqual({ ok: false, code: "model_not_set", error: "the config store could not be written", status: 500 });
     expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
     expect((await pool.describePool()).gateway.following).toBe(false);
+  });
+});
+
+describe("automations follow the pool across a swap and a renewal (TASK-2533, OpenClaw 2026.11.3)", () => {
+  // Since 2026.11.3 every isolated agent-turn automation runs on its RECORDED
+  // inference account — one profile and that profile's authorization
+  // lifetime — and on no other. The pool's renewals are `paste-token` writes,
+  // a new lifetime each, and a swap moves only the order.
+  it("binds a model-less automation to the account the order leads with, and it keeps inheriting the agent's default model", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    expect(runCron(core, "inbox")).toMatch(/no recorded inference account/);
+
+    await gw.keepGatewayMirror();
+
+    const job = core.crons.get("inbox") as FakeCron;
+    expect(job.binding?.profileId).toBe(p(work.id));
+    // Bound, and no model of its own left behind: it still follows the agent default.
+    expect(job.payload.model).toBeUndefined();
+    expect(core.calls.filter((c) => c.method === "cron.update").map((c) => (c.params.patch as { payload: { model: unknown } }).payload.model))
+      .toEqual([`anthropic/claude-opus-5-5@${p(work.id)}`, null]);
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    // A pass with nothing changed updates nothing.
+    const updates = core.calls.filter((c) => c.method === "cron.update").length;
+    await gw.bindGatewayCrons();
+    await gw.keepGatewayMirror();
+    expect(core.calls.filter((c) => c.method === "cron.update").length).toBe(updates);
+  });
+
+  it("keeps running across a token renewal: the paste's new lifetime is adopted again before the next run", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    const before = core.lifetimes.get(p(work.id));
+
+    // The pool renews Work's token; the keeper pastes it in.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await gw.keepGatewayMirror();
+
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.lifetimes.get(p(work.id))).not.toBe(before);
+    expect((core.crons.get("inbox") as FakeCron).binding).toEqual({ profileId: p(work.id), lifetime: core.lifetimes.get(p(work.id)) });
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+  });
+
+  it("follows a swap to the account that can answer — a model-less job, a job with its own Claude model, and a job pinned to a pool account — and leaves the owner's choices alone", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inherits" });
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    // Re-pinned by hand on 14.11 to one pool account: it must not stay there.
+    addCron(core, { id: "pinned", payload: { kind: "agentTurn", message: "m", model: `anthropic/claude-sonnet-5-5@${p(work.id)}` } });
+    // The owner's own account for this job, another provider, the chat's own turn, another agent.
+    addCron(core, { id: "owners", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-opus-5-5@anthropic:default" } });
+    addCron(core, { id: "other-provider", payload: { kind: "agentTurn", message: "m", model: "openai/gpt-5.5" } });
+    addCron(core, { id: "main-session", sessionTarget: "main", payload: { kind: "systemEvent", message: "m" } });
+    addCron(core, { id: "research", agentId: "research" });
+    await gw.keepGatewayMirror();
+    for (const id of ["inherits", "own-model", "pinned"]) expect(runCron(core, id)).toBe(p(work.id));
+
+    // Work hits its weekly limit; the pool moves to Personal.
+    await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "cron" });
+    await swap.whenSwapsSettled();
+
+    expect(core.order?.[0]).toBe(p(personal.id));
+    for (const id of ["inherits", "own-model", "pinned"]) expect(runCron(core, id)).toBe(p(personal.id));
+    expect((core.crons.get("inherits") as FakeCron).payload.model).toBeUndefined();
+    expect((core.crons.get("own-model") as FakeCron).payload.model).toBe(`anthropic/claude-sonnet-5-5@${p(personal.id)}`);
+    expect((core.crons.get("pinned") as FakeCron).payload.model).toBe(`anthropic/claude-sonnet-5-5@${p(personal.id)}`);
+    const touched = new Set(core.calls.filter((c) => c.method === "cron.update").map((c) => c.params.id));
+    for (const id of ["owners", "other-provider", "main-session", "research"]) expect(touched.has(id)).toBe(false);
+    expect((core.crons.get("owners") as FakeCron).payload.model).toBe("anthropic/claude-opus-5-5@anthropic:default");
+
+    // Work back: Personal still leads (it is active), so nothing moves again.
+    const updates = core.calls.filter((c) => c.method === "cron.update").length;
+    await pool.clearLimit(work.id);
+    await gw.syncGatewayNow();
+    expect(core.calls.filter((c) => c.method === "cron.update").length).toBe(updates);
+  });
+
+  it("moves its automations onto the owner's own sign-in when every pool account is limited, and back onto the pool at a reset", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect(core.order?.[0]).toBe("anthropic:default");
+    expect(runCron(core, "own-model")).toBe("anthropic:default");
+
+    // The box put it on the sign-in, so it is still the box's to move back.
+    await pool.clearLimit(personal.id);
+    await gw.syncGatewayNow();
+    expect(runCron(core, "own-model")).toBe(p(personal.id));
+  });
+
+  it("runs once more a run lost to its account, right after adopting it — once", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    // The run that failed before the box looked (the update to 2026.11.3).
+    runCron(core, "inbox");
+    await gw.keepGatewayMirror();
+    expect(core.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "inbox", mode: "force" } }]);
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    await gw.bindGatewayCrons();
+    expect(core.calls.filter((c) => c.method === "cron.run").length).toBe(1);
+  });
+
+  it("finishes a model-less job's clear on the next pass when core did not take it — the job is never left pinned to a model it did not choose", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    core.refuseCronUpdate.add(null);
+    await gw.keepGatewayMirror();
+    expect((core.crons.get("inbox") as FakeCron).payload.model).toBe(`anthropic/claude-opus-5-5@${p(work.id)}`);
+    core.refuseCronUpdate.clear();
+    await gw.bindGatewayCrons();
+    const job = core.crons.get("inbox") as FakeCron;
+    expect(job.payload.model).toBeUndefined();
+    expect(job.binding?.profileId).toBe(p(work.id));
+  });
+
+  it("adopts a job the chat made since, bound to whatever its session ran on, on the watcher's next look", async () => {
+    const core = fakeCore();
+    const { personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Created in a chat session pinned to Personal: core bound it there.
+    const job = addCron(core, { id: "new" });
+    job.binding = { profileId: p(personal.id), lifetime: core.lifetimes.get(p(personal.id)) as string };
+    await gw.bindGatewayCrons();
+    expect(job.binding?.profileId).toBe(core.order?.[0]);
+  });
+
+  it("keeps openclaw.json's order equal to the stored one: after the pastes its head is the active account, not the last one pasted", async () => {
+    // On the box the config order led with the LAST account pasted
+    // (paste-token beside a sign-in of another mode), and automations were
+    // bound by it instead of by the pool's stored order.
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    const accounts = [];
+    for (const name of ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]) {
+      accounts.push(await pool.addOAuthAccount({ label: `${name} Max`, email: `${name.toLowerCase()}@example.com`, tokens: oauth(`sk-ant-oat01-${name.toLowerCase()}`) }));
+    }
+    await gw.keepGatewayMirror();
+    const active = (await pool.readPoolState()).activeId as string;
+    expect(core.order?.[0]).toBe(p(active));
+    expect(core.configOrder).toEqual(core.order);
+    expect(core.configOrder?.[0]).toBe(p(active));
+
+    // A renewal's paste puts the pasted account at the config head again; the pass puts it back.
+    await pool.replaceCredential(accounts[4].id, { kind: "oauth", tokens: oauth("sk-ant-oat01-echo-v2"), email: "echo@example.com" });
+    await gw.keepGatewayMirror();
+    expect(core.configOrder?.[0]).toBe(p(active));
+    expect(core.configOrder).toEqual(core.order);
+
+    // Taken out with the pool, as the pool created it.
+    core.chatOnClaude = false;
+    await gw.syncGatewayNow();
+    expect(core.configOrder).toBeNull();
+  });
+
+  it("asks Anthropic about the account the gateway leads with, and moves off it when its window is spent — a Claude CLI limit leaves core no cooldown to read", async () => {
+    fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const resetsAt = Date.now() + 2 * H;
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/api/oauth/usage")) {
+        const token = ((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+        asked.push(token);
+        const body = token.includes("work")
+          ? { five_hour: { utilization: 100, resets_at: new Date(resetsAt).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
+          : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("{}", { status: 404 });
+    }));
+    await gw.lookAtLeadUsage();
+    await swap.whenSwapsSettled();
+    expect(asked).toContain("sk-ant-oat01-work");
+    const state = await pool.readPoolState();
+    expect(state.accounts.find((a) => a.id === work.id)?.status).toBe("limited");
+    expect(state.activeId).toBe(personal.id);
+    // Not asked again inside its reading life.
+    const n = asked.length;
+    await gw.lookAtLeadUsage();
+    expect(asked.length).toBe(n);
   });
 });
