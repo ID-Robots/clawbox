@@ -21,9 +21,18 @@
  * The text is the CALLER's fixed template. Nothing a model wrote and nothing
  * the assistant read belongs in it — email-notify.ts's rule: a notice is
  * ClawBox speaking to the owner, not a channel for anyone else.
+ *
+ * WHO IS TOLD. By default the first {@link MAX_TELEGRAM_RECIPIENTS} approved
+ * users, in the harness's own order. A caller may hand in the owner's pick
+ * instead (`recipients`, TASK-2543 — the scheduled-job alerts' "Telegram
+ * recipients" in Settings → Harness): then only the picked people who are
+ * STILL approved are told, an empty pick tells nobody, and the harness's order
+ * no longer decides anything. Approval stays the gate either way — a pick can
+ * narrow who is told, never reach someone the bot does not talk to.
  */
 
-import { getActiveHarness } from "@/lib/harness";
+import { get as configGet } from "@/lib/config-store";
+import { getActiveHarness, type Harness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
@@ -31,18 +40,145 @@ import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner
 
 /** Telegram's own limit is 4096; the templates never get near it. */
 const MAX_TELEGRAM_CHARS = 1_000;
-/** Approved senders are the household, not a mailing list. */
-const MAX_TELEGRAM_RECIPIENTS = 5;
+/** Approved senders are the household, not a mailing list: the default fan-out. */
+export const MAX_TELEGRAM_RECIPIENTS = 5;
+/**
+ * The most people an owner's pick may name. Each send is awaited in turn and a
+ * Settings read can be waiting on the check that sends, so the bound is still
+ * a household's, only larger than the default's.
+ */
+export const MAX_PICKED_TELEGRAM_RECIPIENTS = 20;
 const CHAT_ID_RE = /^-?\d{1,20}$/;
 
 /**
- * Send `message` to the owner's approved Telegram users. `tag` names the
- * caller in the log (`[coding-agent] …`), so "no notice arrived" can be traced
- * to the feature that meant to send it. Resolves when every send has been
- * tried; rejects only on a fault outside the sends themselves.
+ * The display names ClawBox remembers for approved senders, by id — written by
+ * /setup-api/telegram/pairing (its `APPROVED_NAMES_KEY`) when the owner
+ * approves someone, because OpenClaw's allowlist is bare ids (Hermes' own store
+ * carries a name). Read-only here.
  */
-export async function notifyOwnerTelegram(message: string, tag: string): Promise<void> {
+const TELEGRAM_APPROVED_NAMES_KEY = "telegram_approved_names";
+
+/** A value that can address a Telegram chat: digits, optionally negative. */
+export function isTelegramChatId(value: unknown): value is string {
+  return typeof value === "string" && CHAT_ID_RE.test(value);
+}
+
+/**
+ * Who a notice goes to, out of the approved users' ids (in the harness's
+ * order). `picked` null or undefined is the default: the first
+ * {@link MAX_TELEGRAM_RECIPIENTS}. A pick keeps only the approved ids it names
+ * — an id no longer approved is skipped, an empty pick is nobody. Pure.
+ */
+export function pickTelegramRecipients(
+  approved: readonly string[],
+  picked?: readonly string[] | null,
+): string[] {
+  const ids = [...new Set(approved.filter(isTelegramChatId))];
+  if (picked == null) return ids.slice(0, MAX_TELEGRAM_RECIPIENTS);
+  const wanted = new Set(picked);
+  return ids.filter((id) => wanted.has(id)).slice(0, MAX_PICKED_TELEGRAM_RECIPIENTS);
+}
+
+export interface OwnerTelegramUser {
+  /** The Telegram user id — the DM chat id a notice is sent to. */
+  id: string;
+  /** Display name where one is known (Hermes' store, or the name remembered at approval). */
+  name?: string;
+}
+
+/** The remembered display names; an unreadable or damaged map is none. */
+export async function readApprovedTelegramNames(): Promise<Record<string, string>> {
+  let raw: unknown;
+  try {
+    raw = await configGet(TELEGRAM_APPROVED_NAMES_KEY);
+  } catch {
+    return {};
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [id, name] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof name === "string" && name.trim()) out[id] = name.trim();
+  }
+  return out;
+}
+
+/**
+ * Everyone the active harness's bot may send a notice to — the people a pick
+ * is made from. The SAME ids {@link notifyOwnerTelegram} fans out over (on
+ * OpenClaw, the allowlist of the account it takes the bot from), shape-checked
+ * the same way, so the list the owner ticks in is the list the send obeys.
+ */
+export async function readOwnerTelegramUsers(): Promise<{ runtime: Harness; users: OwnerTelegramUser[] }> {
+  const runtime = await getActiveHarness();
+  const names = await readApprovedTelegramNames();
+  const seen = new Set<string>();
+  const users: OwnerTelegramUser[] = [];
+  const add = (id: string, name: string | undefined) => {
+    if (!isTelegramChatId(id) || seen.has(id)) return;
+    seen.add(id);
+    const shown = name ?? (Object.hasOwn(names, id) ? names[id] : undefined);
+    users.push(shown ? { id, name: shown } : { id });
+  };
+  if (runtime === "hermes") {
+    for (const user of await readHermesApprovedUsers()) add(user.id, user.name);
+  } else {
+    const { account } = await readActiveTelegramBot("openclaw");
+    for (const id of await readTelegramAllowFrom(account)) add(id, undefined);
+  }
+  return { runtime, users };
+}
+
+export interface OwnerTelegramOptions {
+  /**
+   * The owner's pick of who is told, by Telegram id; null or absent for the
+   * default. See {@link pickTelegramRecipients}.
+   */
+  recipients?: readonly string[] | null;
+}
+
+/**
+ * The ids this send goes to, logged the way support reads it: a pick that
+ * leaves nobody says why, and a picked id that is no longer approved is named
+ * as skipped rather than silently dropped.
+ */
+function recipientsFor(
+  approved: readonly string[],
+  picked: readonly string[] | null | undefined,
+  tag: string,
+  nobodyApproved: string,
+): string[] {
+  const ids = pickTelegramRecipients(approved, picked);
+  if (picked == null) {
+    if (ids.length === 0) console.info(`[${tag}] ${nobodyApproved}; notice not sent`);
+    return ids;
+  }
+  const approvedSet = new Set(approved);
+  const stale = [...new Set(picked)].filter((id) => !approvedSet.has(id));
+  if (stale.length > 0) {
+    console.info(`[${tag}] picked Telegram recipients no longer approved, skipped: ${stale.join(", ")}`);
+  }
+  if (ids.length === 0) {
+    console.info(picked.length === 0
+      ? `[${tag}] the owner picked nobody to receive this notice on Telegram; notice not sent`
+      : `[${tag}] none of the picked Telegram recipients is approved on this device; notice not sent`);
+  }
+  return ids;
+}
+
+/**
+ * Send `message` to the owner's approved Telegram users — or, with
+ * `options.recipients`, to the owner's pick of them. `tag` names the caller in
+ * the log (`[coding-agent] …`), so "no notice arrived" can be traced to the
+ * feature that meant to send it. Resolves when every send has been tried;
+ * rejects only on a fault outside the sends themselves.
+ */
+export async function notifyOwnerTelegram(
+  message: string,
+  tag: string,
+  options: OwnerTelegramOptions = {},
+): Promise<void> {
   const text = message.slice(0, MAX_TELEGRAM_CHARS);
+  const picked = options.recipients;
   // WHICH EDITION FIRST, because the two have different credentials — and the
   // credential is the whole reason this branch exists.
   const harness = await getActiveHarness();
@@ -62,18 +198,18 @@ export async function notifyOwnerTelegram(message: string, tag: string): Promise
     // directories, so a key that cannot address anyone is possible — counting
     // it would report five delivery FAILURES for messages nothing attempted,
     // which is the ambiguity the log line right below exists to remove.
-    const users = (await readHermesApprovedUsers())
-      .filter((user) => CHAT_ID_RE.test(user.id))
-      .slice(0, MAX_TELEGRAM_RECIPIENTS);
-    if (users.length === 0) {
-      // "No notice arrived" and "no notice was sent" are different problems.
-      // A silent return made them the same one to whoever went looking.
-      console.info(`[${tag}] no approved Telegram users on this device; notice not sent`);
-      return;
-    }
-    for (const user of users) {
-      const ok = await notifyHermesTelegramUser(user.id, text);
-      if (!ok) console.error(`[${tag}] telegram notice to ${user.id} was not delivered`);
+    // "No notice arrived" and "no notice was sent" are different problems. A
+    // silent return made them the same one to whoever went looking.
+    const ids = recipientsFor(
+      (await readHermesApprovedUsers()).map((user) => user.id),
+      picked,
+      tag,
+      "no approved Telegram users on this device",
+    );
+    for (const id of ids) {
+      const ok = await notifyHermesTelegramUser(id, text);
+      if (ok) console.info(`[${tag}] telegram notice sent to ${id}`);
+      else console.error(`[${tag}] telegram notice to ${id} was not delivered`);
     }
     return;
   }
@@ -110,17 +246,17 @@ export async function notifyOwnerTelegram(message: string, tag: string): Promise
     console.error(`[${tag}] telegram bot token is not a valid token; notice not sent`);
     return;
   }
-  const ids = (await readTelegramAllowFrom(account))
-    .filter((id) => CHAT_ID_RE.test(id))
-    .slice(0, MAX_TELEGRAM_RECIPIENTS);
-  if (ids.length === 0) {
-    console.info(`[${tag}] no approved Telegram senders on this device; notice not sent`);
-    return;
-  }
+  const ids = recipientsFor(
+    await readTelegramAllowFrom(account),
+    picked,
+    tag,
+    "no approved Telegram senders on this device",
+  );
   for (const id of ids) {
     // The token guard, the request and its timeout are the shared sender's:
     // this leg and the email approval question post to the same bot.
     const ok = await sendTelegramBotMessage(token, id, text);
-    if (!ok) console.error(`[${tag}] telegram notice to ${id} was not delivered`);
+    if (ok) console.info(`[${tag}] telegram notice sent to ${id}`);
+    else console.error(`[${tag}] telegram notice to ${id} was not delivered`);
   }
 }

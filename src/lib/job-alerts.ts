@@ -7,7 +7,9 @@
  * own record of its jobs (src/lib/job-alerts-sources.ts — OpenClaw's
  * `cron.list`, Hermes' `cron/jobs.json`), judges each job, and tells the owner
  * on the two paths the box already has: the desktop notice ring and Telegram
- * (src/lib/owner-telegram.ts, the coding agent's fan-out).
+ * (src/lib/owner-telegram.ts, the coding agent's fan-out) — on Telegram to the
+ * approved users the owner picked in Settings, the first five when there is no
+ * pick ({@link JOB_ALERT_RECIPIENTS_KEY}).
  *
  * WHAT IS A PROBLEM ({@link judgeJob})
  *   stopped   switched off after its last run failed (OpenClaw's auto-disable
@@ -40,13 +42,21 @@
 
 import { promises as fs } from "fs";
 import path from "./runtime-path";
-import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import { DATA_DIR, get as configGet, getKnown as configGetKnown, set as configSet } from "@/lib/config-store";
 import { notifyOwner } from "@/lib/email-notify";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { readJobs, type JobSource, type WatchedJob } from "@/lib/job-alerts-sources";
 import { OPEN_JOB_ALERTS_SETTINGS } from "@/lib/notify-action";
-import { notifyOwnerTelegram } from "@/lib/owner-telegram";
+import {
+  isTelegramChatId,
+  MAX_PICKED_TELEGRAM_RECIPIENTS,
+  MAX_TELEGRAM_RECIPIENTS,
+  notifyOwnerTelegram,
+  pickTelegramRecipients,
+  readOwnerTelegramUsers,
+  type OwnerTelegramUser,
+} from "@/lib/owner-telegram";
 import { isPreferenceLanguage, PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";
 import { processStore } from "@/lib/process-store";
 
@@ -97,6 +107,89 @@ export async function jobAlertsOff(): Promise<"env" | "pref" | null> {
 
 export async function setJobAlertsEnabled(enabled: boolean): Promise<void> {
   await configSet(`${PREFERENCE_KEY_PREFIX}${JOB_ALERTS_PREF}`, enabled);
+}
+
+// ── Who is told on Telegram (TASK-2543) ─────────────────────────────────────
+
+/**
+ * The owner's pick of who receives these alerts on Telegram: a list of the
+ * bot's approved users' ids, or absent for the default — the first five
+ * approved users, which is what every box did before there was a pick.
+ *
+ * A plain config key and NOT a `pref:ui_*` preference like the switch: the
+ * preferences route (and the assistant's `preferences_set`) can write those,
+ * and who is told about the assistant's own jobs is the owner's to decide —
+ * only the owner-only /setup-api/job-alerts writes this.
+ */
+export const JOB_ALERT_RECIPIENTS_KEY = "job_alerts_telegram_recipients";
+
+/** A pick as the route accepts it: null (back to the default) or a bounded list of chat ids. */
+export function isRecipientPick(value: unknown): value is string[] | null {
+  if (value === null) return true;
+  return Array.isArray(value)
+    && value.length <= MAX_PICKED_TELEGRAM_RECIPIENTS
+    && value.every(isTelegramChatId);
+}
+
+function normalizePick(ids: readonly unknown[]): string[] {
+  return [...new Set(ids.filter(isTelegramChatId))].slice(0, MAX_PICKED_TELEGRAM_RECIPIENTS);
+}
+
+export interface RecipientPick {
+  /** The owner's pick, or null: never picked — the default. */
+  picked: string[] | null;
+  /**
+   * False when the stored pick could not be read (an unreadable store, or a
+   * value that is not a list). Then nobody is told on Telegram: guessing the
+   * default could reach exactly the people the owner took off.
+   */
+  known: boolean;
+}
+
+export async function readRecipientPick(): Promise<RecipientPick> {
+  let read: { value: unknown; known: boolean };
+  try {
+    read = await configGetKnown(JOB_ALERT_RECIPIENTS_KEY);
+  } catch {
+    return { picked: null, known: false };
+  }
+  if (!read.known) return { picked: null, known: false };
+  if (read.value === undefined || read.value === null) return { picked: null, known: true };
+  if (!Array.isArray(read.value)) return { picked: null, known: false };
+  return { picked: normalizePick(read.value), known: true };
+}
+
+/** Store the owner's pick; null forgets it, back to the default. */
+export async function setJobAlertRecipients(picked: readonly string[] | null): Promise<void> {
+  await configSet(JOB_ALERT_RECIPIENTS_KEY, picked === null ? undefined : normalizePick(picked));
+}
+
+/** What the card's "Telegram recipients" draws (GET|POST /setup-api/job-alerts `recipients`). */
+export interface JobAlertRecipients {
+  runtime: Harness;
+  picked: string[] | null;
+  known: boolean;
+  /** Everyone the active harness's bot may tell, in the harness's order. */
+  approved: OwnerTelegramUser[];
+  /** Who the next alert goes to on Telegram: the pick's still-approved ids, or the default's. */
+  effective: string[];
+  /** How many the default tells, and how many a pick may name — for the card's words. */
+  defaultCount: number;
+  maxPicked: number;
+}
+
+export async function readJobAlertRecipients(): Promise<JobAlertRecipients> {
+  const pick = await readRecipientPick();
+  const { runtime, users } = await readOwnerTelegramUsers();
+  return {
+    runtime,
+    picked: pick.picked,
+    known: pick.known,
+    approved: users,
+    effective: pick.known ? pickTelegramRecipients(users.map((u) => u.id), pick.picked) : [],
+    defaultCount: MAX_TELEGRAM_RECIPIENTS,
+    maxPicked: MAX_PICKED_TELEGRAM_RECIPIENTS,
+  };
 }
 
 // ── Judging one job ─────────────────────────────────────────────────────────
@@ -361,6 +454,11 @@ export function buildRecoveryText(items: NoticeItem[], t: Translate): string {
  * Both legs, best-effort. The desktop notice carries the button into Settings
  * → Harness, scrolled to the card that lists the jobs; Telegram has no button, so its
  * text says where to look instead.
+ *
+ * Telegram goes to the owner's pick ({@link JOB_ALERT_RECIPIENTS_KEY}) when
+ * there is one, else to the default fan-out. Failures and recoveries alike:
+ * both are this alert, and a recovery reaching someone who never heard of the
+ * failure would be the same leak.
  */
 async function deliver(text: string, t: Translate): Promise<void> {
   const telegramText = `${text} ${t("jobAlerts.notice.where", { section: t("settings.harness") })}`;
@@ -372,8 +470,14 @@ async function deliver(text: string, t: Translate): Promise<void> {
   } catch (err) {
     console.error("[job-alerts] desktop notice failed:", err instanceof Error ? err.message : err);
   }
+  const pick = await readRecipientPick();
+  if (!pick.known) {
+    console.error("[job-alerts] the Telegram recipients could not be read; telegram notice not sent");
+    return;
+  }
+  console.log(`[job-alerts] telegram recipients: ${pick.picked === null ? "default" : `picked (${pick.picked.length})`}`);
   try {
-    await notifyOwnerTelegram(telegramText, "job-alerts");
+    await notifyOwnerTelegram(telegramText, "job-alerts", { recipients: pick.picked });
   } catch (err) {
     console.error("[job-alerts] telegram notice failed:", err instanceof Error ? err.message : err);
   }
