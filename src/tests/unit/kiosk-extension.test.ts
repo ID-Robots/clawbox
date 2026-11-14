@@ -104,6 +104,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.7", files: "d01d07ff6c8d48b466a3ccbdb1c8d65d2570f4f8f1531152afffe69017bf5156" },
   // A kept indicator (the owner's box names) is dropped with the list and never handed out past its session.
   { version: "1.6.8", files: "e57e1294e0b35c6a4b920c1fcb72a2c94752c7bf8c9f54c91c6d69592429b526" },
+  // …and one whose send was still out when the list was forgotten is not kept at all.
+  { version: "1.6.9", files: "877dfd45df8b313ba0db1f93754d1c7e6ed679144859fd8c9c1502222d8b9542" },
 ];
 
 /**

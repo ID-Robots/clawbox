@@ -862,6 +862,23 @@ describe("background.js: switching linked ClawBoxes", () => {
     await vi.advanceTimersByTimeAsync(6_000);
     expect(await e.call({ type: "pendingIndicator" }, tab)).toBeNull();
 
+    // Forgotten while the send to the loading tab is still out: nothing is kept when it fails.
+    const s = loadWorker([DESK], { stored: list, listening: [1] });
+    const send = s.chrome.tabs.sendMessage.getMockImplementation()!;
+    let fail!: () => void;
+    s.chrome.tabs.sendMessage.mockImplementation(async (id: number, msg: { type: string }) => {
+      if (msg.type !== "boxIndicator" || id === 1) return send(id, msg);
+      await new Promise<void>((resolve) => { fail = resolve; });
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    });
+    const sending = s.call({ type: "switchBox", slot: 3 });
+    await vi.waitFor(() => expect(fail).toBeTypeOf("function"));
+    expect(await s.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    fail();
+    await sending;
+    expect(s.session.linkedBoxIndicators ?? {}).toEqual({});
+    expect(await s.call({ type: "pendingIndicator" }, s.active()!)).toBeNull();
+
     // Inside both, it is handed over as it was drawn — nothing of the bookkeeping with it.
     const ok = loadWorker([DESK], { stored: list, listening: [1] });
     await ok.call({ type: "switchBox", slot: 3 });

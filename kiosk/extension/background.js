@@ -329,15 +329,18 @@ function rememberBoxTab(origin, tabId) {
 // every kept one (forgetBoxes).
 async function indicate(tabId, indicator, validUntil) {
   if (tabId == null) return;
+  // Taken before the send: a list forgotten while it is out is not outlived by what it keeps.
+  const rev = revocations;
+  const until = Number.isFinite(validUntil) ? validUntil : null;
   try {
     await chrome.tabs.sendMessage(tabId, indicator);
   } catch {
     const now = Date.now();
-    const rev = revocations;
     await sessionUpdate(PENDING_KEY, (pending) => {
       // Only what is still fresh: a tab that never loaded leaves nothing behind.
       const kept = Object.fromEntries(Object.entries(pending).filter(([, ind]) => ind && now - (ind.at || 0) <= PENDING_TTL_MS));
-      kept[String(tabId)] = { ...indicator, at: now, rev, validUntil: Number.isFinite(validUntil) ? validUntil : null };
+      // Forgotten, or the session ended, since the send began: nothing of it is kept.
+      if (rev === revocations && (until === null || until > Date.now())) kept[String(tabId)] = { ...indicator, at: now, rev, validUntil: until };
       return kept;
     });
   }
