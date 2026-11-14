@@ -302,6 +302,62 @@ describe("the named tunnel follows the account off the box", () => {
     expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
   });
 
+  it("a failed restart is not reported as a revoke, and every later pass retries it until the old tunnel is gone", async () => {
+    const MODE = path.join(CF_DIR, "tunnel.mode");
+    await storeCredential();
+    // run-tunnel.sh marks the named tunnel it serves.
+    await fs.writeFile(MODE, "named\n");
+    await configStore.set("clawai_token", undefined);
+    cloudflaredState.startTunnelService.mockRejectedValueOnce(new Error("sudo: a password is required"));
+    try {
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+      // The credential still goes: the next start must not serve it.
+      await expect(fs.stat(CRED)).rejects.toThrow();
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
+
+      // The next heartbeat finds the old tunnel still running on it and retries.
+      await beat("https://after-unlink.trycloudflare.com");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(2);
+
+      // Once the unit runs the quick tunnel, nothing is restarted again.
+      await fs.writeFile(MODE, "quick\n");
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(2);
+
+      // A retry that goes through is reported as the revoke.
+      await fs.writeFile(MODE, "named\n");
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(true);
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(3);
+    } finally {
+      await fs.rm(MODE, { force: true });
+    }
+  });
+
+  it("a stopped tunnel needs no restart: the revoke holds, and a stale mode file on a stopped unit is left alone", async () => {
+    const MODE = path.join(CF_DIR, "tunnel.mode");
+    await storeCredential();
+    await configStore.set("clawai_token", undefined);
+    cloudflaredState.getTunnelServiceState.mockResolvedValue("inactive");
+    try {
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(true);
+      await fs.writeFile(MODE, "named\n");
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+      expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(MODE, { force: true });
+    }
+  });
+
+  it("a unit whose state cannot be read is neither restarted nor reported revoked", async () => {
+    await storeCredential();
+    await configStore.set("clawai_token", undefined);
+    cloudflaredState.getTunnelServiceState.mockResolvedValue("unknown");
+    expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+    await expect(fs.stat(CRED)).rejects.toThrow();
+    expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+  });
+
   // Root ignores the folder's mode, so the unlink cannot be refused there.
   it.skipIf(process.getuid?.() === 0)("does not report a revoke when the credential could not be removed", async () => {
     await storeCredential();

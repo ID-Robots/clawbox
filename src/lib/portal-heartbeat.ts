@@ -11,6 +11,7 @@ import {
   isRefusedToken,
   isValidTunnelToken,
   readNamedTunnelCredential,
+  tunnelModePath,
   writeNamedTunnelCredential,
 } from "./named-tunnel";
 
@@ -138,8 +139,9 @@ async function storeHoldsNoAccountToken(): Promise<boolean> {
  * provisioned for that account must not go on serving its hostname. Revokes it
  * and drops the tunnel back to the quick one (only restarting a tunnel that is
  * running). A box still holding either token keeps its tunnel: the hostname is
- * the device's under that account. Never throws. True only when a credential
- * was on file and has been removed.
+ * the device's under that account. Never throws. True only when the named
+ * tunnel is gone: its credential removed and no tunnel left serving on it (a
+ * failed restart is reported false and retried by the next pass).
  *
  * Called by the unlink at once (`/setup-api/ai-models/subscription-link`), and
  * by every heartbeat that finds no account token, which covers a sign-out.
@@ -147,8 +149,14 @@ async function storeHoldsNoAccountToken(): Promise<boolean> {
 export async function revokeNamedTunnelWithoutAccount(reason: string): Promise<boolean> {
   try {
     if (!(await storeHoldsNoAccountToken())) return false;
-    if (!(await readNamedTunnelCredential())) return false;
-    return await revokeNamedTunnel(reason);
+    if (await readNamedTunnelCredential()) return await revokeNamedTunnel(reason);
+    // Nothing on file — but an earlier pass may have removed it and then
+    // failed to restart the tunnel, which leaves the old cloudflared serving
+    // the hostname on the token it was started with. Every later pass retries
+    // that restart until the named tunnel is no longer running.
+    if (!(await staleNamedTunnelRunning())) return false;
+    console.warn(`[portal-heartbeat] the named tunnel still runs without its credential (${reason}); restarting it`);
+    return await restartTunnelIfRunning("named tunnel revoked, retried");
   } catch (err) {
     console.warn("[portal-heartbeat] could not revoke the named tunnel:", err instanceof Error ? err.message : err);
     return false;
@@ -229,31 +237,55 @@ async function pushNow(tunnelUrl: string): Promise<void> {
 /**
  * Restart clawbox-tunnel so run-tunnel.sh re-reads the credential — but only
  * while it is running. A box whose owner switched Remote Access off must not
- * have it switched back on by a heartbeat.
+ * have it switched back on by a heartbeat. True when no tunnel runs on the old
+ * credential any more: the unit is stopped, or its restart went through.
  */
-async function restartTunnelIfRunning(reason: string): Promise<void> {
+async function restartTunnelIfRunning(reason: string): Promise<boolean> {
   try {
     const state = await getTunnelServiceState();
-    if (state !== "active" && state !== "activating") return;
+    if (state === "inactive" || state === "failed") return true;
+    // Not known to be stopped, and not known to be running: nothing is
+    // restarted, and nothing is claimed.
+    if (state !== "active" && state !== "activating") return false;
     const { bootPersisted, bootPersistWarning } = await startTunnelService();
     console.log(`[portal-heartbeat] restarted the tunnel: ${reason}`);
     if (!bootPersisted) console.warn(`[portal-heartbeat] ${bootPersistWarning}`);
+    return true;
   } catch (err) {
     console.warn("[portal-heartbeat] tunnel restart failed:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
 /**
+ * A named tunnel still running on a credential that is no longer on file.
+ * run-tunnel.sh writes `named` to tunnel.mode while it serves one and removes
+ * the file when it exits, so this survives a restart of this process too.
+ */
+async function staleNamedTunnelRunning(): Promise<boolean> {
+  let mode: string;
+  try {
+    mode = (await fs.readFile(tunnelModePath(), "utf-8")).trim();
+  } catch {
+    return false;
+  }
+  if (mode !== "named") return false;
+  if (await readNamedTunnelCredential()) return false;
+  const state = await getTunnelServiceState();
+  return state === "active" || state === "activating";
+}
+
+/**
  * Forget the named tunnel and drop back to the quick one. True only when the
- * credential was on disk and is now gone: a file that could not be removed is
- * still served, so it is not reported as revoked.
+ * credential was on disk, is now gone, and no tunnel still runs on it: a file
+ * that could not be removed is still served, and so is one whose tunnel could
+ * not be restarted, so neither is reported as revoked.
  */
 async function revokeNamedTunnel(reason: string): Promise<boolean> {
   hostnameMismatch = false;
   if (!(await clearNamedTunnelCredential())) return false;
   console.warn(`[portal-heartbeat] named tunnel credential removed (${reason}); back to the quick tunnel`);
-  await restartTunnelIfRunning("named tunnel revoked");
-  return true;
+  return restartTunnelIfRunning("named tunnel revoked");
 }
 
 /**
