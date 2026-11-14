@@ -796,6 +796,7 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
         if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "limited") continue;
         if (await attempt(`taking ${profile.profileId} out before the gateway stops`, () => d.logout(profile.profileId, agent))) outBefore.add(profile.profileId);
       }
+      if (outBefore.size > 0) console.error(`[anthropic-gateway] took ${outBefore.size} limited account(s) out before the gateway stops for the token paste(s): ${[...outBefore].join(", ")}`);
     }
   }
   if (toPaste.length > 0) {

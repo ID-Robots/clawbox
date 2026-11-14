@@ -63,6 +63,8 @@ function fakeCore() {
     readable: true,
     pastes: [] as { profileId: string; access: string; expires: number | null }[],
     logouts: [] as string[],
+    /** Logouts made while an offline window had the gateway stopped. */
+    logoutsWhileStopped: [] as string[],
     orders: [] as string[][],
     calls: [] as { method: string; params: Record<string, unknown> }[],
     cronJobs: [] as unknown[],
@@ -181,6 +183,7 @@ function fakeCore() {
     },
     logout: async (profileId) => {
       core.logouts.push(profileId);
+      if (core.windowOpen) core.logoutsWhileStopped.push(profileId);
       core.profiles.delete(profileId);
       core.lifetimes.delete(profileId);
       if (core.order) core.order = core.order.filter((id) => id !== profileId);
@@ -2774,6 +2777,9 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
     expect(await statusOf(turn.profileId)).toBe("ok");
     expect(heldAtRestart).not.toContain(p(ids[3]));
     expect(heldAtRestart).not.toContain(p(ids[4]));
+    // Through the gateway that was still up, not inside the window.
+    expect(core.logouts).toEqual(expect.arrayContaining([p(ids[3]), p(ids[4])]));
+    expect(core.logoutsWhileStopped).toEqual([]);
     // ...and the order still leads with the account that answers.
     expect(core.order?.[0]).toBe(p(ids[0]));
   });
