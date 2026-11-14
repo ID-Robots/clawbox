@@ -22,7 +22,7 @@ describe("AuditLog", () => {
     const dir = tempDir();
     const log = new AuditLog(dir);
     log.record({ actor: "agent", action: "list" });
-    log.record({ actor: "owner", action: "save", name: "shop.example.com/me" });
+    log.record({ actor: "ui", action: "save", name: "shop.example.com/me" });
     const file = join(dir, "audit.jsonl");
     expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(2);
     expect(statSync(file).mode & 0o777).toBe(0o600);
@@ -54,7 +54,7 @@ describe("AuditLog", () => {
     expect(statSync(`${file}.1`).mode & 0o777).toBe(0o600);
     const fresh = readFileSync(file, "utf8").trim().split("\n");
     expect(fresh).toHaveLength(1);
-    expect(JSON.parse(fresh[0]).action).toBe("new");
+    expect(JSON.parse(fresh[0] ?? "{}").action).toBe("new");
     expect(log.recent().map((r) => r.action)).toEqual(["new"]);
   });
 
