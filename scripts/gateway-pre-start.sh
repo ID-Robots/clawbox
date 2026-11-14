@@ -5587,11 +5587,15 @@ if changed:
     # write and OSError on ENOSPC, and it sat outside the `try` that existed
     # to contain exactly those.
     tmp_path = None
+    # Whether the config itself landed: the bookkeeping after it is inside the
+    # same `try`, and its failure is not a failed config write.
+    cfg_written = False
     try:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
+        cfg_written = True
         print("  Updated gateway config")
         # Read through globals(): the block is also run on its own (tests).
         if globals().get("_clawbox_tts_held_to_remove"):
@@ -5602,12 +5606,20 @@ if changed:
         _record_memory_rebuild(_memory_index_changes)
         _record_keyword_only_rebuild()
     except Exception as exc:
-        if tmp_path is not None:
+        if tmp_path is not None and not cfg_written:
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
-        if globals().get("_clawbox_lock_applied"):
+        if cfg_written:
+            # The config is on disk, lock and all; only the rebuild bookkeeping
+            # after it failed. That never stops a start.
+            print(
+                "  WARN: the gateway config was written but its follow-up bookkeeping failed (%s: %s)"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+        elif globals().get("_clawbox_lock_applied"):
             # The one exception to "carry on" above: under the local-only AI
             # lock (TASK-2501) this start took a cloud leg out (a voice, a
             # transcription row, audio auto-detection) and the config on disk
@@ -5623,11 +5635,12 @@ if changed:
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(
-            "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
-            % (type(exc).__name__, exc),
-            file=sys.stderr,
-        )
+        else:
+            print(
+                "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
 else:
     print("  Gateway config already correct, skipping write")
     # It changes nothing in the config, so it needs no write to land first.

@@ -119,8 +119,8 @@ export function readSttEndpointKey(baseUrl: string): string | null {
 export function writeSttEndpointKey(key: string, baseUrl: string): void {
   const safeKey = parseApiKey(key);
   if (!safeKey) throw new Error("invalid speech server key");
-  const safeBaseUrl = normalizeSttEndpointUrl(baseUrl);
-  if (!safeBaseUrl || safeBaseUrl !== baseUrl) throw new Error("invalid speech server address");
+  const safeBaseUrl = savedBaseUrlShape(baseUrl);
+  if (!safeBaseUrl) throw new Error("invalid speech server address");
   const target = keyPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
@@ -192,6 +192,26 @@ function parseModel(raw: unknown): string | null {
   const model = raw.trim();
   if (!model || model.length > STT_ENDPOINT_LIMITS.modelMax || /[\u0000-\u001f\u007f]/.test(model)) return null;
   return model;
+}
+
+/**
+ * A base URL in the shape {@link normalizeSttEndpointUrl} saves — one line,
+ * http(s), no credentials, query or fragment, no trailing slash, and an address
+ * literal only on the owner's network — checked WITHOUT normalising it again
+ * (a second pass is not guaranteed to agree near the length limit), or null.
+ */
+function savedBaseUrlShape(raw: string): string | null {
+  if (typeof raw !== "string" || !raw || raw.endsWith("/") || /[\u0000-\u001f\u007f\s]/.test(raw)) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) return null;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (!host || (net.isIP(host) && !isLanAddress(host))) return null;
+  return raw;
 }
 
 /** A key as the owner may give it: trimmed, one line, no whitespace, at most `apiKeyMax`. Empty or invalid → null. */

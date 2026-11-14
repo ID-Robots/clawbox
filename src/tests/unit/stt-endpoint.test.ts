@@ -11,6 +11,7 @@ import {
   endpointHostRefusal,
   isLanAddress,
   normalizeSttEndpointUrl,
+  STT_ENDPOINT_LIMITS,
   probeSttEndpoint,
   readSttEndpointKey,
   sttEndpointFromValue,
@@ -205,10 +206,16 @@ describe("the key file", () => {
       expect(() => writeSttEndpointKey(key, RECORD.baseUrl)).toThrow(/invalid speech server key/);
     }
     // An address the route would never have saved: public, not normalised, not http(s).
-    for (const url of ["http://8.8.8.8/v1", `${RECORD.baseUrl}/`, "file:///etc/passwd", "http://user:pw@127.0.0.1:8000/v1"]) {
+    for (const url of ["", "http://8.8.8.8/v1", `${RECORD.baseUrl}/`, `${RECORD.baseUrl}?x=1`, `${RECORD.baseUrl}#f`, `${RECORD.baseUrl}\n`, "file:///etc/passwd", "http://user:pw@127.0.0.1:8000/v1"]) {
       expect(() => writeSttEndpointKey("k-123", url)).toThrow(/invalid speech server address/);
     }
     expect(fs.existsSync(file)).toBe(false);
+    // Whatever the route saved is accepted as it is, never normalised again:
+    // a percent-encoded path may be longer than the limit the raw input met.
+    const saved = normalizeSttEndpointUrl(`http://127.0.0.1:8000/${"ä".repeat(400)}`);
+    expect(saved && saved.length).toBeGreaterThan(STT_ENDPOINT_LIMITS.baseUrlMax);
+    writeSttEndpointKey("k-123", saved as string);
+    expect(readSttEndpointKey(saved as string)).toBe("k-123");
     // Surrounding whitespace is trimmed off, as the route does.
     writeSttEndpointKey("  k-123\n", RECORD.baseUrl);
     expect(JSON.parse(fs.readFileSync(file, "utf-8"))).toEqual({ v: 1, for: RECORD.baseUrl, key: "k-123" });
