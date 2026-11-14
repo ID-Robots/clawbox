@@ -191,17 +191,27 @@ export class CardCatalog {
       card.label = label || defaultLabel(card.number);
 
       let name = source ?? (await this.freeName(cardNameFor(card.label)));
+      let movedFrom: string | null = null;
       if (source && input.label !== undefined) {
         const wanted = cardNameFor(card.label);
         if (wanted !== source) {
           name = await this.freeName(wanted, source);
           if (name !== source) {
             await this.store.move(source, name);
+            movedFrom = source;
             this.cache.delete(source);
           }
         }
       }
-      await this.store.insert(name, serializeCard(card));
+      try {
+        await this.store.insert(name, serializeCard(card));
+      } catch (err) {
+        // The relabel and the update are one save: a failed update puts the
+        // card back under its old name.
+        if (movedFrom) await this.store.move(name, movedFrom).catch(() => undefined);
+        this.cache.delete(name);
+        throw err;
+      }
       this.cache.delete(name);
       return { name, created: !source, meta: cardMetaOf(name, card, now, now) };
     });

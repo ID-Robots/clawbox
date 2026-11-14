@@ -143,35 +143,56 @@ export class Catalog {
       const password = input.password === undefined || input.password === "" ? undefined : validatePassword(input.password);
 
       let source = name;
+      let movedFrom: string | null = null;
       if (opts.renameFrom && opts.renameFrom !== name) {
         // Checked before anything moves: a failed save must leave the entry where it was.
         if (opts.mustBeNew) throw new ValidationError("a new entry cannot be renamed from another");
         const from = validateLoginName(opts.renameFrom);
         if (await this.store.exists(name)) throw new ValidationError("an entry with the new name already exists");
         await this.store.move(from, name);
+        movedFrom = from;
         this.cache.delete(from);
         source = name;
       }
-
-      const exists = await this.store.exists(source);
-      if (exists && opts.mustBeNew) throw new ValidationError("entry already exists");
-      let entry: ParsedEntry;
-      if (exists) {
-        entry = await this.read(source);
-        if (password !== undefined) entry.password = password;
-        if (input.login !== undefined) entry.login = login;
-        if (input.url !== undefined) entry.url = url;
-        if (input.note !== undefined) entry.note = note;
-        if (input.clearTwofa) entry.twofa = "";
-        else if (twofa) entry.twofa = twofa;
-      } else {
-        if (password === undefined) throw new ValidationError("password is required for a new entry");
-        entry = { password, login, url, twofa, note, extra: [] };
+      try {
+        return await this.write(name, source, opts, { password, login, url, note, twofa, input });
+      } catch (err) {
+        // A rename and its update are one save: if the update fails, the entry
+        // goes back under its old name, where the app will retry it.
+        if (movedFrom) {
+          await this.store.move(name, movedFrom).catch(() => undefined);
+          this.cache.delete(name);
+        }
+        throw err;
       }
-      await this.store.insert(name, serializeEntry(entry));
-      this.cache.delete(name);
-      return { name, created: !exists };
     });
+  }
+
+  private async write(
+    name: string,
+    source: string,
+    opts: { mustBeNew?: boolean },
+    v: { password: string | undefined; login: string; url: string; note: string; twofa: string; input: SaveInput },
+  ): Promise<SaveOutcome> {
+    const { password, login, url, note, twofa, input } = v;
+    const exists = await this.store.exists(source);
+    if (exists && opts.mustBeNew) throw new ValidationError("entry already exists");
+    let entry: ParsedEntry;
+    if (exists) {
+      entry = await this.read(source);
+      if (password !== undefined) entry.password = password;
+      if (input.login !== undefined) entry.login = login;
+      if (input.url !== undefined) entry.url = url;
+      if (input.note !== undefined) entry.note = note;
+      if (input.clearTwofa) entry.twofa = "";
+      else if (twofa) entry.twofa = twofa;
+    } else {
+      if (password === undefined) throw new ValidationError("password is required for a new entry");
+      entry = { password, login, url, twofa, note, extra: [] };
+    }
+    await this.store.insert(name, serializeEntry(entry));
+    this.cache.delete(name);
+    return { name, created: !exists };
   }
 
   remove(name: string): Promise<void> {

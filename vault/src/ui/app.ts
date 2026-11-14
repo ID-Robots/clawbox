@@ -869,10 +869,14 @@ $("gate-form").addEventListener("submit", (ev) => void submitGate(ev));
 for (const b of document.querySelectorAll<HTMLButtonElement>(".nav-item")) {
   b.addEventListener("click", () => showView(b.dataset.view as View));
 }
-$("btn-lock").addEventListener("click", async () => {
-  await api("ui/lock", { body: {} }).catch(() => undefined);
+$("btn-lock").addEventListener("click", () => {
+  // The request leaves with the current bearer (api() reads the session before
+  // its first await); the screen locks at once, not when the service answers,
+  // so a slow or hanging request never keeps a secret on screen.
+  const locking = api("ui/lock", { body: {} });
   stopPairingTimer();
   lockScreen("Locked.");
+  void locking.catch(() => undefined);
 });
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 $("search").addEventListener("input", () => {

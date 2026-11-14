@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
+import { CardCatalog } from "../src/server/cards";
 import { Catalog } from "../src/server/catalog";
 import { PassError, PassStore } from "../src/server/pass";
 import { createTempStore, gitLog, PASS_BIN, passShow, passShowExitCode, type TempStore } from "./helpers/tempstore";
@@ -104,6 +105,29 @@ describe("catalog on the temp store", () => {
     expect((await catalog.read("github.com/alice-renamed")).password).toBe("gh-pass-1");
     await catalog.remove("github.com/alice-renamed");
     await expect(catalog.remove("github.com/alice-renamed")).rejects.toBeInstanceOf(PassError);
+  });
+
+  test("a rename whose update fails leaves the entry, and a card, under the old name", async () => {
+    // The real store, except that every save is refused after the move.
+    const refusing = Object.create(pass) as PassStore;
+    refusing.insert = async () => {
+      throw new PassError("pass insert failed (exit 2)", "failed");
+    };
+    await catalog.save({ name: "rename.example.com/ops", login: "ops", password: "Rename-Secret-1" });
+    const failing = new Catalog(refusing);
+    await expect(failing.save({ name: "rename.example.com/ops2", login: "ops2" }, { renameFrom: "rename.example.com/ops" })).rejects.toMatchObject({ code: "failed" });
+    expect(await pass.exists("rename.example.com/ops")).toBe(true);
+    expect(await pass.exists("rename.example.com/ops2")).toBe(false);
+    expect((await catalog.read("rename.example.com/ops")).login).toBe("ops");
+    await catalog.remove("rename.example.com/ops");
+
+    const cards = new CardCatalog(pass, catalog);
+    const saved = await cards.save({ number: "4242424242424242", exp: "12/34", label: "Old label" });
+    const failingCards = new CardCatalog(refusing, catalog);
+    await expect(failingCards.save({ label: "New label" }, { name: saved.name })).rejects.toMatchObject({ code: "failed" });
+    expect(await pass.exists(saved.name)).toBe(true);
+    expect((await pass.list({ under: saved.name.split("/")[0] })).filter((n) => /new/i.test(n))).toEqual([]);
+    await cards.remove(saved.name);
   });
 });
 

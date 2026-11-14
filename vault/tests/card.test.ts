@@ -61,6 +61,16 @@ describe("entry format", () => {
     expect(serializeCard(card)).toContain("note: two");
   });
 
+  test("a cleared field takes its duplicate lines with it; unknown lines stay", () => {
+    const card = parseCard(`${VISA}\ncvv: 123\ncvv: 456\npin-hint: ask finance\n`);
+    expect(card.extra).toEqual(["cvv: 456", "pin-hint: ask finance"]);
+    card.cvv = "";
+    const text = serializeCard(card);
+    expect(text).not.toContain("cvv");
+    expect(parseCard(text).cvv).toBe("");
+    expect(text).toContain("pin-hint: ask finance");
+  });
+
   test("names live under cards/ and slug the label", () => {
     expect(cardNameFor("Company Visa")).toBe("cards/company-visa");
     expect(cardNameFor("  Фирмена карта  ")).toBe("cards/фирмена-карта");
@@ -134,6 +144,9 @@ describe("Luhn, brand, expiry, CVV", () => {
     expect(isExpired("09/26", NOW)).toBe(true);
     expect(() => validateExpiry("09/26", NOW)).toThrow("expired");
     expect(() => validateExpiry("12/99", NOW)).toThrow("too far");
+    // A four-digit year is judged as given, not after it is cut to two digits.
+    expect(() => validateExpiry("12/1999", NOW)).toThrow("expired");
+    expect(() => validateExpiry("12/2099", NOW)).toThrow("too far");
     expect(() => validateExpiry("", NOW)).toThrow(ValidationError);
   });
 

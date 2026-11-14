@@ -99,7 +99,13 @@ export function serializeCard(card: ParsedCard): string {
   if (card.cvv) lines.push(`cvv: ${card.cvv}`);
   if (card.label) lines.push(`label: ${card.label}`);
   if (card.note) lines.push(`note: ${card.note}`);
-  lines.push(...card.extra);
+  // A duplicate of a known field stays while that field has a value (the first
+  // line wins on reading); once the field is cleared it goes too, or the next
+  // read would bring the cleared value back from it. Unknown lines stay.
+  lines.push(...card.extra.filter((line) => {
+    const key = FIELD_KEYS[/^([A-Za-z0-9]+):/.exec(line)?.[1]?.toLowerCase() ?? ""];
+    return !key || card[key] !== "";
+  }));
   return lines.join("\n") + "\n";
 }
 
@@ -247,10 +253,13 @@ export function validateExpiry(value: unknown, now: Date = new Date()): string {
   if (typeof value !== "string" || !value.trim()) throw new ValidationError("expiry is required (MM/YY)");
   const e = parseExpiry(value);
   if (!e) throw new ValidationError("expiry must be MM/YY");
-  const exp = formatExpiry(e);
-  if (isExpired(exp, now)) throw new ValidationError("the card has expired");
-  if (e.year > now.getFullYear() + MAX_YEARS_AHEAD) throw new ValidationError("expiry is too far in the future");
-  return exp;
+  // Checked on the year as given: "12/1999" is expired, not December 2099 once
+  // formatting has cut it to two digits.
+  const y = now.getFullYear();
+  const mo = now.getMonth() + 1;
+  if (e.year < y || (e.year === y && e.month < mo)) throw new ValidationError("the card has expired");
+  if (e.year > y + MAX_YEARS_AHEAD) throw new ValidationError("expiry is too far in the future");
+  return formatExpiry(e);
 }
 
 /** Optional: "" when absent. 4 digits for American Express, 3 for the others. */
