@@ -249,6 +249,48 @@ describe("Settings → Linked ClawBoxes", () => {
     expect(server.boxes.map((b) => b.name)).toEqual(["Laptop", "NAS"]);
   });
 
+  it("a read still on its way when a save lands never puts the older list back", async () => {
+    server.boxes = [{ name: "Laptop", url: "https://laptop.example.com/" }];
+    const viaServer = globalThis.fetch;
+    let step = 0;
+    let releaseRetry: () => void = () => {};
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const isGet = url === LINKED_BOXES_URL && (!init || !init.method || init.method === "GET");
+      const isPut = url === LINKED_BOXES_URL && init?.method === "PUT";
+      if (isPut && step === 1) {
+        // The first save is kept by the box, but its answer cannot be read…
+        step = 2;
+        server.boxes = (JSON.parse(String(init!.body)) as { boxes: Box[] }).boxes;
+        return new Response("not json", { status: 200 });
+      }
+      if (isGet && step === 2) {
+        // …and the read after it fails, so Settings offers Try again.
+        step = 3;
+        return new Response("{}", { status: 500 });
+      }
+      if (isGet && step === 3) {
+        // Try again answers late, with the list as it was before the next save.
+        step = 4;
+        const stale = JSON.stringify({ self: { name: "mainbox" }, boxes: server.boxes, max: 8 });
+        await new Promise<void>((r) => { releaseRetry = r; });
+        return new Response(stale, { status: 200 });
+      }
+      return (viaServer as (u: string, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    render(<LinkedBoxesPanel />);
+    await screen.findByTestId("linked-boxes-row-2");
+    step = 1;
+    await addBox("NAS", "http://nas.example.net");
+    fireEvent.click(await screen.findByText(tx("settings.linkedBoxes.retry")));
+    await waitFor(() => expect(step).toBe(4));
+    // A save lands while that read is still on its way.
+    await addBox("Mac", "https://mac.example.com");
+    await waitFor(() => expect(within(screen.getByTestId("linked-boxes-row-4")).getByText("Mac")).toBeInTheDocument());
+    releaseRetry();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(within(screen.getByTestId("linked-boxes-row-4")).getByText("Mac")).toBeInTheDocument();
+  });
+
   it("takes no typing while a save is on its way", async () => {
     let finish: (r: Response) => void = () => {};
     const ok = globalThis.fetch;

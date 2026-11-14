@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import StatusMessage from "./StatusMessage";
 import { useT } from "@/lib/i18n";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -97,14 +97,21 @@ export default function LinkedBoxesPanel() {
   const ownAddresses = useOwnAddresses();
   const hereOrigin = typeof window !== "undefined" ? window.location.origin : "";
 
+  // Every read and every save takes the next number; a read's answer is drawn
+  // only while its number is still the newest, so a read that was on its way
+  // when a save (or a newer read) started can never put an older list back.
+  const generation = useRef(0);
+
   const load = useCallback(async () => {
+    const mine = ++generation.current;
     try {
       const res = await fetch(LINKED_BOXES_URL, { cache: "no-store" });
       if (!res.ok) throw new Error(String(res.status));
       const body = (await res.json()) as { self?: { name?: unknown }; boxes?: unknown };
+      if (mine !== generation.current) return;
       setList({ selfName: normalizeBoxName(body?.self?.name) ?? "ClawBox", boxes: parseLinkedBoxesRead(body?.boxes) });
     } catch {
-      setLoadFailed(true);
+      if (mine === generation.current) setLoadFailed(true);
     }
   }, []);
 
@@ -115,6 +122,7 @@ export default function LinkedBoxesPanel() {
   const save = useCallback(async (next: LinkedBox[]): Promise<boolean> => {
     if (!list) return false;
     const before = list;
+    generation.current += 1;
     setSaving(true);
     setError(null);
     setList({ ...list, boxes: next });
