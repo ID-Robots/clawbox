@@ -267,7 +267,7 @@ export function isSlashCommandMessage(text: string): boolean {
   return /^\/[A-Za-z][\w-]*$/.test(first);
 }
 
-/** What the Hermes chat answers a typed `/new` or `/reset` with, once the fresh session is the conversation's. */
+/** What the Hermes chat route answers a typed `/new` or `/reset` with, once it has started the conversation's fresh session. */
 export const FRESH_SESSION_NOTICE = "New session started.";
 
 /** A typed `/new` or `/reset`: the command, and the message that followed it ("" for the bare command). */
@@ -292,9 +292,10 @@ const SOFT_RESET_RE = /^soft(?:\s|$)/i;
  *    import TypeScript; `chat-slash-commands.test.ts` runs one table through
  *    both) and runs the reset itself;
  *  - Hermes leaves it to its CLIENT — its own TUI opens the new session — so
- *    the `slash.exec` worker never answers it. `HermesAdapter.sendTurn` is
- *    that client here, and the chat route answers the command itself
- *    (`FRESH_SESSION_NOTICE`).
+ *    the `slash.exec` worker never answers it. The chat is that client here:
+ *    the chat route starts the fresh session and answers the command itself
+ *    (`FRESH_SESSION_NOTICE`, `freshSession`), and `HermesAdapter` forgets the
+ *    session the conversation was on.
  *
  * Read as the OpenClaw core reads the start of a message: the bare word, the
  * word and a message after white space (a new line included), or the

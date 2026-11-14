@@ -21,6 +21,7 @@ const openTurnMock = vi.hoisted(() => vi.fn());
 const spawnMock = vi.hoisted(() => vi.fn());
 const appendMock = vi.hoisted(() => vi.fn());
 const readTurnMock = vi.hoisted(() => vi.fn());
+const clearMock = vi.hoisted(() => vi.fn());
 
 // PARTIAL: `withSessionModelNote` is the route's own wording of a session-only
 // model switch and is exactly what two of the cases below assert, so it stays
@@ -34,7 +35,7 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
   openDashboardTurn: openTurnMock,
 }));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
-vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
+vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock, clearTranscript: clearMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
   withHermesStateHome: (_home: unknown, fn: () => unknown) => fn(),
   readHermesTurn: readTurnMock,
@@ -109,6 +110,8 @@ beforeEach(() => {
   spawnMock.mockReset();
   appendMock.mockReset();
   appendMock.mockResolvedValue(true);
+  clearMock.mockReset();
+  clearMock.mockResolvedValue(undefined);
   readTurnMock.mockReset();
   readTurnMock.mockResolvedValue(null);
 });
@@ -140,41 +143,66 @@ describe("a slash command typed into the Hermes chat", () => {
 
   // TASK-2520: Hermes leaves "start a new session" to its client, so its slash
   // worker never answers /new: 45 seconds, then "slash worker timed out", and
-  // nothing reset. The chat's adapter starts the fresh session and then sends
-  // the bare command with no session to resume; the route answers that itself.
-  it.each(["/new", "/reset", "/NEW"])("answers a typed %j that resumes no session itself, and never hands it to the slash worker", async (message) => {
-    const res = await POST(post({ message }, true));
+  // nothing reset. The route starts the fresh session itself.
+  it.each([
+    ["/new", {}],
+    ["/reset", {}],
+    ["/NEW", {}],
+    ["/new", { sessionId: SESSION_ID }],
+    ["/reset", { sessionId: SESSION_ID, sessionKey: "desktop-0123456789ab" }],
+  ])("starts a fresh session for a typed %j %j itself, and never hands it to the slash worker", async (message, extra) => {
+    const key = (extra as { sessionKey?: string }).sessionKey ?? "desktop";
+    const res = await POST(post({ message, ...extra }, true));
 
     expect(slashMock).not.toHaveBeenCalled();
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
     expect(res.status).toBe(200);
-    // No session id: the next turn opens the fresh one.
-    expect(await res.json()).toEqual({ text: "New session started.", harness: "hermes" });
-    // The question and the answer are in the transcript, like any command's.
-    const recorded = appendMock.mock.calls.map(([record]) => record as { role: string; text: string });
-    expect(recorded.map((r) => [r.role, r.text])).toEqual([["user", message], ["assistant", "New session started."]]);
+    // No session id, and the word that tells the caller to drop the one it holds.
+    expect(await res.json()).toEqual({ text: "New session started.", harness: "hermes", freshSession: true });
+    // The conversation's stored transcript is cleared, then the command and its
+    // answer are written into it, like any command's.
+    expect(clearMock.mock.calls).toEqual([[key]]);
+    expect(appendMock.mock.calls.map(([record, k]) => [(record as { role: string }).role, (record as { text: string }).text, k])).toEqual([
+      ["user", message, key],
+      ["assistant", "New session started.", key],
+    ]);
+    expect(clearMock.mock.invocationCallOrder[0]).toBeLessThan(appendMock.mock.invocationCallOrder[0]);
   });
 
-  it("answers it under the caller's own transcript key", async () => {
-    await POST(post({ message: "/new", sessionKey: "desktop-0123456789ab" }));
-    expect(appendMock.mock.calls.map(([, key]) => key)).toEqual(["desktop-0123456789ab", "desktop-0123456789ab"]);
+  it("starts the fresh session for a typed /new with a message after it, and leaves the message to the caller's next turn", async () => {
+    const res = await POST(post({ message: "/new what is on my calendar?", sessionId: SESSION_ID }));
+
+    expect(await res.json()).toEqual({ text: "New session started.", harness: "hermes", freshSession: true });
+    expect(clearMock).toHaveBeenCalledTimes(1);
+    // Nothing recorded and nothing run: the message arrives as a turn of its own.
+    expect(appendMock).not.toHaveBeenCalled();
+    expect(slashMock).not.toHaveBeenCalled();
+    expect(openTurnMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["/new", { sessionId: SESSION_ID }],
-    ["/reset", { sessionId: SESSION_ID }],
-    ["/new holiday plans", {}],
-    ["/reset soft", {}],
-    ["/newer", {}],
-  ])("leaves %j %j to Hermes: not a fresh session the chat already started", async (message, extra) => {
-    // A command that names a session to resume did not come from a chat that
-    // started a fresh one; words after it are Hermes' to read.
+  it("answers a failure to clear the transcript as a failure, with nothing recorded", async () => {
+    clearMock.mockRejectedValue(new Error("disk full"));
+    const res = await POST(post({ message: "/new", sessionId: SESSION_ID }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "disk full" });
+    expect(appendMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["/reset soft", "/newer", "/new-chat"])("leaves %j to Hermes: it is not a fresh session", async (message) => {
     slashMock.mockResolvedValue(slashResult("as Hermes answered"));
-    const res = await POST(post({ message, ...extra }));
+    const res = await POST(post({ message, sessionId: SESSION_ID }));
+    expect(clearMock).not.toHaveBeenCalled();
     expect(slashMock).toHaveBeenCalledTimes(1);
-    expect(slashMock.mock.calls[0][0].command).toBe(message);
+    expect(slashMock.mock.calls[0][0]).toMatchObject({ command: message, sessionId: SESSION_ID });
     expect((await res.json()).text).toBe("as Hermes answered");
+  });
+
+  it("leaves a /new that carries a picture alone: the conversation is not cleared", async () => {
+    await POST(post({ message: "/new", sessionId: SESSION_ID, imagePaths: ["/tmp/clawbox-chat/shot.png"] }));
+    expect(clearMock).not.toHaveBeenCalled();
+    expect(slashMock).not.toHaveBeenCalled();
   });
 
   it("carries the command's own text through, arguments included", async () => {

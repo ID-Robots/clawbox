@@ -41,7 +41,7 @@ import {
   readCurrentFromCli,
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
-import { appendTranscript } from "@/lib/harness/transcript-store";
+import { appendTranscript, clearTranscript } from "@/lib/harness/transcript-store";
 import {
   beginLiveTurn,
   liveTurnResponse,
@@ -354,6 +354,12 @@ interface TurnPayload {
   reasoning?: string;
   toolCalls?: readonly unknown[];
   sessionId?: string;
+  /**
+   * Set on the answer to a typed `/new` or `/reset`: the conversation has no
+   * session any more, and the next turn opens one. A caller that threads
+   * `sessionId` drops the one it holds.
+   */
+  freshSession?: true;
   /**
    * The model that actually served this turn, and its provider.
    *
@@ -1441,6 +1447,46 @@ export async function POST(request: Request) {
     }
   }
 
+  // ── /new and /reset (TASK-2520) ─────────────────────────────────────────
+  //
+  // The one command `slash.exec` cannot run: Hermes leaves "start a new
+  // session" to its client (its own TUI opens the session), so the slash
+  // worker sat on it until it gave up — 45 seconds, then "slash worker timed
+  // out", and the conversation exactly where it was, for the owner and every
+  // other user alike. This chat is the client here, and starting its fresh
+  // session is what the new-chat control already does in three requests: the
+  // conversation's running turn stopped, its stored transcript cleared, the
+  // Hermes session id forgotten. A typed command does the same in this one —
+  // here, AFTER everything above has had its say (a member of staff's `/reset`
+  // or `/new <anything>` was refused before anything of theirs was cleared) —
+  // and `freshSession` tells the caller to drop the id it threads.
+  //
+  // Words after the command are the first message of the fresh conversation,
+  // as on the OpenClaw edition; the chat sends them as a turn of their own
+  // once this has answered (`HermesAdapter.sendTurn`), so nothing is recorded
+  // for them here. The bare command is recorded with its answer, like any
+  // other command's output. A turn carrying a file is left alone: no command
+  // is read off one below either.
+  const carriesFile = (Array.isArray(body.imagePaths) && body.imagePaths.length > 0)
+    || (Array.isArray(body.documentPaths) && body.documentPaths.length > 0);
+  const fresh = carriesFile ? null : typedResetCommand(message);
+  if (fresh) {
+    await stopLiveTurns(sessionKey);
+    try {
+      await clearTranscript(sessionKey);
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Could not start a new session" },
+        { status: 500 },
+      );
+    }
+    if (!fresh.tail) {
+      await appendTranscript({ role: "user", text: message, timestamp: Date.now() }, sessionKey);
+      await appendTranscript({ role: "assistant", text: FRESH_SESSION_NOTICE, timestamp: Date.now() }, sessionKey);
+    }
+    return NextResponse.json({ text: FRESH_SESSION_NOTICE, harness: "hermes", freshSession: true } satisfies TurnPayload);
+  }
+
   // A message starting with "-" gets a leading space so hermes reads it as the
   // prompt value (the UI shows ClawBox's own copy of the message, not this one).
   const safeMessage = message.startsWith("-") ? ` ${message}` : message;
@@ -1583,29 +1629,6 @@ export async function POST(request: Request) {
     // and a branch that ran the command and dropped the file would show the owner
     // their screenshot in the transcript over an answer that never saw it.
     if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
-      // ── /new and /reset (TASK-2520) ─────────────────────────────────────
-      //
-      // The one command `slash.exec` cannot run: Hermes leaves "start a new
-      // session" to its client (its own TUI opens the session), so the slash
-      // worker sat on it until it gave up — 45 seconds, then "slash worker
-      // timed out", and the conversation exactly where it was, for the owner
-      // and every other user alike. The chat is the client here: its adapter
-      // has already started the fresh session before the command arrives
-      // (`HermesAdapter.sendTurn` — the running turn stopped, the transcript
-      // cleared, the session id forgotten), so the turn resumes nothing and
-      // all that is left is to say so. Answered and recorded like any other
-      // command's output, so a re-read of the transcript shows the same.
-      //
-      // Only that shape: a bare command that resumes no session. One that
-      // names a session to resume did not come from a chat that started a
-      // fresh one, and saying "new session" over it would be false — it goes
-      // to Hermes as before.
-      if (!rawSessionId && typedResetCommand(message)?.tail === "") {
-        await appendTranscript({ role: "assistant", text: FRESH_SESSION_NOTICE, timestamp: Date.now() }, sessionKey);
-        const answered = { text: FRESH_SESSION_NOTICE, harness: "hermes" } satisfies TurnPayload;
-        live.emit("done", answered);
-        return NextResponse.json(answered);
-      }
       const ran = await runHermesSlashCommand({
         command: message.trim(),
         ...(staff ? { profile: staff.profile } : {}),
