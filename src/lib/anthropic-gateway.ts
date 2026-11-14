@@ -542,15 +542,22 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
       const held = tokens.get(id);
       return !!held && held.expires !== null && held.expires < renewBefore;
     };
+    /** Inside the pool's renewal margin (an account read as it is may be: nothing renewed it). */
+    const due = (id: string): boolean => {
+      const held = tokens.get(id);
+      return !!held && held.expires !== null && held.expires - now < OAUTH_REFRESH_MARGIN_MS;
+    };
     const pasteAll = async () => {
       const paste = async (id: string, account: string, token: { access: string; expires: number | null }): Promise<boolean> => {
         const landed = await attempt(`account ${account}'s token`, () => d.paste(id, token, agent));
         if (landed) pasted += 1;
         return landed;
       };
-      // What is owed as it stands first: the freshest token is among these.
+      // What is owed and goes in as it stands first — the freshest token is
+      // one of these. An owed token that is behind or due is renewed below,
+      // and pasted once.
       for (const { id, account, token } of toPaste) {
-        if (!behind(id)) await paste(id, account, token);
+        if (!behind(id) && !due(id)) await paste(id, account, token);
       }
       // A token renewed in this window that core then did not take: that
       // account is off the chat until a later pass, and nothing more is
@@ -563,12 +570,19 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
       for (const account of wanted) {
         const id = poolProfileId(account.id);
         const held = tokens.get(id);
-        if (!held || held.expires === null || !behind(id)) continue;
+        if (!held || held.expires === null) continue;
+        // `behind` picks the accounts to bring forward; one that is DUE is
+        // renewed here whether it is behind or not. It was read as it is, so
+        // nothing else renews it: beside an owed token that itself ends soon
+        // (and so sets no end to be behind of), or one with no end at all, it
+        // would be passed over on every pass and run out.
+        const isDue = due(id);
+        if (!behind(id) && !isDue) continue;
+        // Owed: it goes in as it stands when it is not renewed here.
         let token = toPaste.find((p) => p.id === id)?.token ?? null;
         let fresh = false;
         // Inside its margin the pool renews it whoever asks; ahead of it, once
         // a margin at most, whatever keeps the window opening.
-        const due = held.expires - now < OAUTH_REFRESH_MARGIN_MS;
         const lately = now - (runtime().earlyRenewedAt.get(account.id) ?? Number.NEGATIVE_INFINITY) < OAUTH_REFRESH_MARGIN_MS;
         // ...and never before this window has written a token: a window that
         // cannot write (the store busy, a gateway that did not stay stopped)
@@ -576,7 +590,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
         // pass, until the gateway held a refused token for each of them. A
         // due account is renewed either way, as it always was.
         const ahead = !lately && pasted > 0;
-        if (!lost && (due || ahead) && renewalMs < WINDOW_RENEWAL_BUDGET_MS) {
+        if (!lost && (isDue || ahead) && renewalMs < WINDOW_RENEWAL_BUDGET_MS) {
           // The same token back: no grant to renew with, or Anthropic could
           // not be asked. It stays as it is and comes due on its own.
           const asked = Date.now();
@@ -587,7 +601,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
             tokens.set(id, { fingerprint, expires: answer.expires });
             token = answer;
             fresh = true;
-            if (!due) runtime().earlyRenewedAt.set(account.id, now);
+            if (!isDue) runtime().earlyRenewedAt.set(account.id, now);
             renewed.push(account.id);
           }
         }
