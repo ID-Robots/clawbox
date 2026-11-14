@@ -132,7 +132,7 @@ import {
   type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
-import { DEFAULT_LIMIT_MS, effectiveStatus, type AnthropicLimitKind } from "@/lib/anthropic-limit";
+import { classifyAnthropicFailure, DEFAULT_LIMIT_MS, effectiveStatus, type AnthropicLimitKind } from "@/lib/anthropic-limit";
 import { fetchAnthropicUsage, type AnthropicUsageReading } from "@/lib/anthropic-usage";
 import { readGatewayProviderAuth, type GatewayProviderAuthRead, type ProfileFailureState, type ProviderAuthProfile } from "@/lib/openclaw-auth-store";
 import { registerSwapConsumer, reportAnthropicFailure, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
@@ -1672,6 +1672,7 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
   // once — 2026.11.3 records no cooldown for a Claude CLI limit.
   const bindings = await (d.cronBindings?.read() ?? Promise.resolve({} as CronBindingRecords)).catch(() => ({} as CronBindingRecords));
   let heldRead = false;
+  let unnamed = false;
   for (const job of parseCronJobs(payload)) {
     if (job.lastRunAtMs === null || job.lastRunAtMs <= since) continue;
     newest = Math.max(newest, job.lastRunAtMs);
@@ -1685,10 +1686,16 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     const boundAccount = bound && isPoolProfile(bound) ? pool.accounts.find((a) => poolProfileId(a.id) === bound) ?? null : null;
     // A limit no account can be named for: Anthropic's word on every held
     // account first (once a scan), so a spent active account is the pool's
-    // limit — and the swap under way — before the retry below can be sent.
-    if (!boundAccount && !heldRead) {
-      heldRead = true;
-      await readHeldUsageNow();
+    // limit — and the swap under way — before the retry below can be sent. A
+    // bare rate limit (a throttle, as the swap reads it) keeps its retry a
+    // minute later on the same account, so its ask comes after the report.
+    if (!boundAccount) {
+      unnamed = true;
+      const throttle = classifyAnthropicFailure(job.lastError, now, { transientRate: true })?.type === "throttled";
+      if (!throttle && !heldRead) {
+        heldRead = true;
+        await readHeldUsageNow();
+      }
     }
     const on = heldRead ? (await readPoolState()).activeId : pool.activeId;
     const result = await reportAnthropicFailure({
@@ -1714,6 +1721,7 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     if (result.handled) reported += 1;
   }
   state.cronWatermark = newest;
+  if (unnamed && !heldRead) await readHeldUsageNow();
   return reported;
 }
 

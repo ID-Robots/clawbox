@@ -2378,10 +2378,35 @@ describe("TASK-2533 second review pass", () => {
     await swap.whenSwapsSettled();
 
     expect(await statusOf(work.id)).toBe("limited");
-    const firstAsk = events.findIndex((e) => e.startsWith("usage:"));
-    expect(firstAsk).toBeGreaterThanOrEqual(0);
+    // Every held account was asked, and only then the run was sent again.
     const run = events.indexOf("cron.run");
-    expect(run === -1 || firstAsk < run).toBe(true);
+    expect(run).toBeGreaterThan(-1);
+    const asks = events.map((e, i) => (e.startsWith("usage:") ? i : -1)).filter((i) => i >= 0);
+    expect(asks).toHaveLength(2);
+    expect(asks.every((i) => i < run)).toBe(true);
+  });
+
+  it("an unnamed throttle on a cron keeps its order: its retry is set for a minute later before Anthropic is asked about the accounts", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const events: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/oauth/usage")) events.push("usage");
+      return new Response("{\"error\":\"rate_limited\"}", { status: 429 });
+    }));
+    const said = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).includes("a bare rate limit")) events.push("throttle");
+    });
+    core.cronJobs.push({ id: "foreign", state: { lastStatus: "error", lastError: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}", lastRunAtMs: Date.now() } });
+
+    await gw.scanGatewayCrons();
+    said.mockRestore();
+
+    const throttle = events.indexOf("throttle");
+    expect(throttle).toBeGreaterThan(-1);
+    expect(events.indexOf("usage")).toBeGreaterThan(throttle);
   });
 
   it("the minute's back-off holds back only what it already tried: an account limited since is out at once", async () => {
