@@ -1079,7 +1079,7 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
 
   it("removes the held file only after the gateway config write has landed", () => {
     const script = readFileSync(SCRIPT, "utf-8");
-    const write = script.indexOf('os.replace(tmp_path, cfg_path)\n        print("  Updated gateway config")');
+    const write = script.indexOf('os.replace(tmp_path, cfg_path)\n        cfg_written = True\n        print("  Updated gateway config")');
     const unlink = script.indexOf('os.unlink(globals()["_clawbox_tts_held_to_remove"])');
     expect(write).toBeGreaterThan(0);
     expect(unlink).toBeGreaterThan(write);
@@ -1124,6 +1124,30 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
     } finally {
       chmodSync(ro, 0o700);
     }
+  });
+
+  it("starts a locked box whose config landed even when the bookkeeping after the write fails", () => {
+    const block = slice("if changed:\n    # Atomic write", "    # It changes nothing in the config, so it needs no write to land first.");
+    const cfgPath = path.join(dir, "openclaw.json");
+    writeFileSync(cfgPath, "{}");
+    const run = spawnSync("python3", ["-c", [
+      "import json, os, sys, tempfile",
+      "cfg = {'messages': {}, 'written': True}",
+      "changed = True",
+      `cfg_path = ${JSON.stringify(cfgPath)}`,
+      "_clawbox_tts_held_to_remove = None",
+      "_clawbox_lock_applied = True",
+      "def _record_memory_rebuild(_x): raise TypeError('damaged rebuild record')",
+      "def _record_keyword_only_rebuild(): pass",
+      "_memory_index_changes = None",
+      block,
+      "print('STARTS')",
+    ].join("\n")], { encoding: "utf-8" });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("STARTS");
+    expect(run.stderr).toMatch(/was written but its follow-up bookkeeping failed/);
+    expect(run.stderr).not.toMatch(/not started on the old config|could not write the gateway config/);
+    expect(JSON.parse(readFileSync(cfgPath, "utf-8"))).toEqual({ messages: {}, written: true });
   });
 
   it("fails closed when the lock withdrew only ClawBox's own voice and the config write fails", () => {
